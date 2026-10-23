@@ -1073,8 +1073,8 @@ pub enum ProofStage {
     /// Before a tail's manifest decodes, and before each retained entry's
     /// evidence is validated.
     Validation,
-    /// Around the scratch state's reconstruction, before each contribution's
-    /// bytes load, and again before they apply.
+    /// Before the merge starts, before each contribution's bytes load, and
+    /// again before they apply.
     Merge,
     /// Around the merged state's projection and its encoding.
     Projection,

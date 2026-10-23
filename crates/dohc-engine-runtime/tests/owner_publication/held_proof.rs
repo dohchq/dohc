@@ -1186,7 +1186,10 @@ async fn a_dead_actors_reader_keeps_its_store_fenced() {
         ..
     } = w;
     drop(store);
-    owner.close().await.unwrap();
+    // Its worker is gone, so closing the owner reaches no actor; the owner
+    // still retires its token as it drops.
+    let closed = owner.close().await;
+    assert!(matches!(closed, Err(RuntimeError::ActorUnavailable)), "{closed:?}");
     let db = engine_db_path(&root).unwrap();
     for what in ["evicting the dead actor", "while it drains"] {
         let refused = supervisor.open(&db, 2).map(drop);
@@ -1291,7 +1294,8 @@ async fn an_idle_store_proves_again_after_a_proof_gave_way() {
 /// Opus's r2c-3c-6 finding 1: a hold whose contribution artifact passes its
 /// cap still answers current, with the preservation, Markdown included, it
 /// answers within the cap, and names no artifact, which it says is too
-/// large. Only the artifact is refused.
+/// large. Only the artifact is refused. Opus's r2c-3c-8 finding 4: its merged
+/// list's commitment is the one the artifact within the cap names.
 #[tokio::test]
 async fn an_artifact_past_its_cap_leaves_the_preservation_answering() {
     let (w, desktop, _client) = held_for_a_queued_fold().await;
@@ -1299,7 +1303,10 @@ async fn an_artifact_past_its_cap_leaves_the_preservation_answering() {
         .await
         .unwrap()
         .expect("held");
-    assert!(matches!(within.contributions, Some(dohc_engine_sync::HeldContributions::Artifact(_))));
+    let Some(dohc_engine_sync::HeldContributions::Artifact(artifact)) = &within.contributions else {
+        panic!("an artifact within its cap: {:?}", within.contributions)
+    };
+    let merged = artifact.merged.clone();
     w.actor.held_proofs().set_artifact_cap(1);
     let past = answered(inspection(&w, &CancellationToken::new()))
         .await
@@ -1308,7 +1315,7 @@ async fn an_artifact_past_its_cap_leaves_the_preservation_answering() {
     assert_eq!(past.status, HeldBindingStatus::Current);
     assert!(past.preservation.is_some());
     assert_eq!(past.preservation, within.preservation, "the preservation, Markdown included");
-    assert_eq!(past.contributions, Some(dohc_engine_sync::HeldContributions::TooLarge));
+    assert_eq!(past.contributions, Some(dohc_engine_sync::HeldContributions::TooLarge { merged }));
     desktop.close().await;
     w.close().await;
 }

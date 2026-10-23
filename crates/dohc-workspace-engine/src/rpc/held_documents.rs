@@ -16,7 +16,6 @@ use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::parse;
 use crate::rpc::workspace::OpenWorkspace;
 use crate::rpc::workspace::validate_workspace_param;
-use dohc_engine_collab::live_update_application::ContributionArtifact;
 use dohc_engine_collab::live_update_application::ContributionLocator;
 use dohc_engine_collab::live_update_application::Preservation;
 use dohc_engine_collab::live_update_application::PreservationFinding;
@@ -382,7 +381,7 @@ fn inspection_outline(inspected: &HeldDocumentInspection) -> (Value, bool) {
                 .as_ref()
                 .map(|preserved| preserved.markdown.as_str());
             let outside = markdown.map_or(0, json_string_encoded_len) > MAX_INBAND_CONTENT_BYTES;
-            (preservation_outline(preservation, contributions.artifact(), !outside), outside)
+            (preservation_outline(preservation, contributions, !outside), outside)
         }
         _ => (Value::Null, false),
     };
@@ -392,15 +391,16 @@ fn inspection_outline(inspected: &HeldDocumentInspection) -> (Value, bool) {
     (result, outside)
 }
 
-/// `preservation`'s outline, naming its contribution artifact by its digest,
-/// length and merged commitment; with none, too large to stream, it names
-/// none of them and says so.
+/// `preservation`'s outline, naming its merged list by its commitment and
+/// its contribution artifact by its digest and length; with no artifact,
+/// too large to stream, it names neither of those two and says so.
 fn preservation_outline(
     preservation: &Preservation,
-    contributions: Option<&ContributionArtifact>,
+    contributions: &HeldContributions,
     inband: bool,
 ) -> Value {
     let preserved = preservation.preserved.as_ref();
+    let (artifact, merged) = (contributions.artifact(), contributions.merged());
     let mut reasons: Vec<_> = preservation
         .findings
         .iter()
@@ -419,13 +419,10 @@ fn preservation_outline(
                 "examples": [],
             }))
             .collect::<Vec<_>>(),
-        "mergedContributions": contributions.map(|artifact| json!({
-            "count": artifact.merged.count,
-            "digest": artifact.merged.digest,
-        })),
-        "contributionsSha256": contributions.map(|artifact| artifact.sha256.as_str()),
-        "contributionsByteLength": contributions.map(|artifact| artifact.bytes.len()),
-        "contributionsTooLarge": contributions.is_none(),
+        "mergedContributions": {"count": merged.count, "digest": merged.digest},
+        "contributionsSha256": artifact.map(|artifact| artifact.sha256.as_str()),
+        "contributionsByteLength": artifact.map(|artifact| artifact.bytes.len()),
+        "contributionsTooLarge": artifact.is_none(),
         "markdown": preserved.filter(|_| inband).map(|preserved| preserved.markdown.as_str()),
         "markdownSha256": preserved
             .map(|preserved| dohc_engine_storage::hex_sha256(preserved.markdown.as_bytes())),
@@ -445,6 +442,7 @@ fn example_json(found: &PreservationFinding) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dohc_engine_collab::live_update_application::ContributionArtifact;
     use dohc_engine_collab::live_update_application::IncomingCoordinate;
     use dohc_engine_collab::live_update_application::PreservationReason;
     use dohc_engine_collab::live_update_application::PreservationStatus;
@@ -1103,10 +1101,13 @@ mod tests {
     /// Opus's r2c-3c-6 finding 1: an inspection whose artifact would pass
     /// what one blob streams still answers its preservation, outline and
     /// Markdown alike, and names no artifact, saying it is too large. Its
-    /// Markdown streams; its contributions stream nothing.
+    /// Markdown streams; its contributions stream nothing. Opus's r2c-3c-8
+    /// finding 4: its merged list's commitment still answers.
     #[test]
     fn an_artifact_too_large_to_stream_leaves_the_preservation_answering() {
         let markdown = "# Plan\n".repeat(10_000);
+        let merged: Vec<_> = (0..3).map(contribution).collect();
+        let committed = UnprovenCommitment::of_listed(&merged);
         let bound = binding("object", "docs/object.md", ProtectedTails::Invalid);
         let inspected = HeldDocumentInspection {
             document: held_by(&bound),
@@ -1115,13 +1116,13 @@ mod tests {
                 status: PreservationStatus::Complete,
                 findings: Vec::new(),
                 covered: Vec::new(),
-                merged: Vec::new(),
+                merged,
                 preserved: Some(PreservedState {
                     markdown: markdown.clone(),
                     full_state: Vec::new(),
                 }),
             }),
-            contributions: Some(HeldContributions::TooLarge),
+            contributions: Some(HeldContributions::TooLarge { merged: committed.clone() }),
         };
         let (answer, outside) = inspection_answer(7, &inspected, HELD_RESPONSE_BYTE_BUDGET).unwrap();
         assert!(outside, "the text streams");
@@ -1129,7 +1130,8 @@ mod tests {
         assert_eq!(answer["status"], "current");
         assert_eq!(preservation["status"], "complete");
         assert_eq!(preservation["contributionsTooLarge"], true);
-        for absent in ["mergedContributions", "contributionsSha256", "contributionsByteLength"] {
+        assert_eq!(preservation["mergedContributions"], json!({"count": 3, "digest": committed.digest}));
+        for absent in ["contributionsSha256", "contributionsByteLength"] {
             assert_eq!(preservation[absent], Value::Null, "{absent}");
         }
         assert_eq!(preservation["markdownSha256"], dohc_engine_storage::hex_sha256(markdown.as_bytes()));

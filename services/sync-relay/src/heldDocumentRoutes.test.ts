@@ -36,8 +36,9 @@ const preserved: HeldDocumentInspection = {...held, status: "current", resolutio
   reasons: [], mergedContributions: {count: 0, digest: "e".repeat(64)}, contributionsSha256: sha256(contributions),
   contributionsByteLength: contributions.length, contributionsTooLarge: false, markdown, markdownSha256: sha256(markdown),
   markdownByteLength: Buffer.byteLength(markdown), inbandLimitBytes: 48 * 1024}};
-// The same preservation, its artifact past what the engine streams: only the artifact is refused.
-const tooLarge: HeldDocumentInspection = {...preserved, preservation: {...preserved.preservation!, mergedContributions: null,
+// The same preservation, its artifact past what the engine streams: only the artifact is refused, and its
+// merged commitment still answers.
+const tooLarge: HeldDocumentInspection = {...preserved, preservation: {...preserved.preservation!,
   contributionsSha256: null, contributionsByteLength: null, contributionsTooLarge: true}};
 const markdownPath = `${scope.workspaceId}/held-documents/${held.objectId}/markdown` +
   `?bindingDigest=${held.bindingDigest}&sha256=${sha256(markdown)}`;
@@ -356,7 +357,8 @@ describe("held document routes", () => {
     expect(await refused.json()).toMatchObject({code: "payload_too_large"});
     const details = await f.get(`${scope.workspaceId}/held-documents/${held.objectId}`);
     expect(details.status).toBe(200);
-    expect((await details.json()).preservation).toMatchObject({status: "complete", contributionsTooLarge: true, contributionsSha256: null});
+    expect((await details.json()).preservation).toMatchObject({status: "complete", contributionsTooLarge: true, contributionsSha256: null,
+      mergedContributions: tooLarge.preservation!.mergedContributions});
     const text = await f.get(markdownPath);
     expect(text.status).toBe(200);
     expect(await text.text()).toBe(markdown);

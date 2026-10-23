@@ -73,7 +73,20 @@ pub struct ActivationAdoption {
 /// The current activation and its adoption, which a current one always has.
 pub type CurrentActivation = (OwnerActivation, ActivationAdoption);
 
+#[cfg(test)]
+thread_local! {
+    static ACTIVATION_READS_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many activations the calling thread read whole.
+#[cfg(test)]
+pub(crate) fn activation_reads_on_this_thread() -> u64 {
+    ACTIVATION_READS_HERE.with(std::cell::Cell::get)
+}
+
 fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OwnerActivation> {
+    #[cfg(test)]
+    ACTIVATION_READS_HERE.with(|reads| reads.set(reads.get() + 1));
     let evidence_digest: Option<String> = row.get(7)?;
     let adoption = match evidence_digest {
         None => None,

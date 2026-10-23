@@ -138,6 +138,8 @@ pub(super) fn released_window(
     key: &DocKey,
     lineage: &str,
 ) -> Result<Vec<(String, String)>, ApplicationError> {
+    #[cfg(test)]
+    WINDOW_READS_HERE.with(|reads| reads.set(reads.get() + 1));
     if owner_activations::current_activation(conn, None, key, lineage)?.is_some() {
         return Ok(Vec::new());
     }
@@ -158,6 +160,17 @@ pub(super) fn released_window(
         tails.push((namespace, tail));
     }
     Ok(tails)
+}
+
+#[cfg(test)]
+thread_local! {
+    static WINDOW_READS_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many released windows the calling thread read.
+#[cfg(test)]
+pub(super) fn released_window_reads_on_this_thread() -> u64 {
+    WINDOW_READS_HERE.with(std::cell::Cell::get)
 }
 
 /// Decide, before capture records `text` at `path`, what it may do with the

@@ -1,10 +1,11 @@
 //! Whether a held document's state, merged with every piece of retained work
 //! its hold names, contains all of that work: the one check inspection and
 //! resolution share. It reads the store and writes nothing. Each contribution
-//! applies to scratch state loaded from the lineage the binding names, the
-//! head's or an archived one; the canonical state stays as it is.
+//! applies to the proof's own copy of the state of the lineage the binding
+//! names, the head's or an archived one, loaded for it alone.
 use super::*;
 use crate::ContentKind;
+use std::mem::size_of;
 
 /// The most memory a Y.Doc holds for each byte of the encoded state and
 /// updates applied to it, its items, branches and indexes included: an
@@ -12,13 +13,28 @@ use crate::ContentKind;
 /// honest.
 const YDOC_BYTES_PER_ENCODED_BYTE: u64 = 24;
 
+/// What loading a lineage holds for each stored byte beside the state it
+/// builds: the blob it applies, and the full-state encoding its digest
+/// hashes.
+const LOADING_BYTES_PER_STORED_BYTE: u64 = 2;
+
 /// What one journal row a lineage's load lists holds: its sequence and
 /// blob digest.
 const LOADED_ROW_BYTES: u64 = 128;
 
-/// What one contribution adds to a merge's lists beyond its bytes: its
-/// place in the merged list and any finding, with room for each to double.
-const CONTRIBUTION_SLOT_BYTES: u64 = 2048;
+/// What applying a contribution holds for each of its bytes beside what it
+/// adds to the state: its bytes as they load, and the update they decode to
+/// when it waits on another.
+const APPLYING_BYTES_PER_UPDATE_BYTE: u64 = 4;
+
+/// What a contribution waiting on another keeps of its update for each of
+/// its bytes: where each client's insertions end, and what it deletes.
+const INTEGRATION_BYTES_PER_UPDATE_BYTE: u64 = 8;
+
+/// What projecting the merged state holds for each encoded byte: the
+/// document checking its Markdown source rebuilds, the projection, that
+/// source and the merged full state.
+const PROJECTION_BYTES_PER_ENCODED_BYTE: u64 = YDOC_BYTES_PER_ENCODED_BYTE + 4;
 
 /// What [`inspect_held`] found for a binding.
 #[derive(Debug)]
@@ -140,7 +156,6 @@ impl Preservation {
     /// merged lists with every entry's text, and the preserved Markdown and
     /// state.
     pub fn retained_bytes(&self) -> usize {
-        use std::mem::size_of;
         let findings = self.findings.capacity() * size_of::<PreservationFinding>()
             + self
                 .findings
@@ -172,7 +187,7 @@ impl Preservation {
 
 impl ContributionLocator {
     /// The bytes its text keeps.
-    fn text_bytes(&self) -> usize {
+    pub(super) fn text_bytes(&self) -> usize {
         match self {
             Self::Carried {
                 delivery_id,
@@ -213,6 +228,31 @@ impl RetainedContribution {
             }
         }
     }
+
+    /// The bytes of its text, which its canonical JSON holds at least.
+    pub(super) fn text_len(&self) -> usize {
+        match self {
+            Self::Carried {
+                delivery_id,
+                update_digest,
+                authors,
+                ..
+            } => delivery_id.len() + update_digest.len() + authors.json().len(),
+            Self::Outbox {
+                outbox_id,
+                delivery_id,
+                update_digest,
+                authors,
+                ..
+            } => outbox_id.len() + delivery_id.len() + update_digest.len() + authors.json().len(),
+        }
+    }
+
+    /// What it keeps as one entry of a list: its text, and its place with
+    /// room for the list to double.
+    fn kept_bytes(&self) -> u64 {
+        u64::try_from(self.text_bytes() + 2 * size_of::<Self>()).unwrap_or(u64::MAX)
+    }
 }
 
 /// A contribution's stored bytes, as found by the digest that names them.
@@ -238,10 +278,19 @@ impl RetainedContribution {
 /// so an archived hold is inspected against its archive, never the head.
 /// Tails are validated afresh on `conn`, with nothing kept; run it inside
 /// one transaction, or on the store's only writer, so every read agrees.
-/// `stop` ends it, cancelled, at its next check. What it works with is
-/// reserved of `stop`'s memory before it is allocated, from the stored
-/// sizes of what it reads: the lineage's state before it loads, each tail's
-/// evidence before it is validated, and the merge as it grows.
+/// `stop` ends it, cancelled, at its next check.
+///
+/// What it works with is reserved of `stop`'s memory before it is
+/// allocated, from the stored sizes of what it reads, and what it only
+/// works with is given back once it is done, so a proof holds the most one
+/// moment needs, not the sum of its stages. With S the stored bytes of the
+/// lineage's state in R rows, B its full state, b each contribution's
+/// bytes, M = B + Σb, the window's lists W and each tail's kept work K, it
+/// keeps 24·(S + Σb) for the state, W + ΣK, and each merged or waiting
+/// contribution's text and place, and reserves beside that at most the
+/// largest of: loading the state, 2·S + 128·R; validating one tail, as
+/// `window_work` reserves it; applying one contribution, 4·b + 2·M; and
+/// projecting, 28·M.
 pub fn inspect_held(
     conn: &Connection,
     binding: &ReleasedLineageBinding,
@@ -253,13 +302,12 @@ pub fn inspect_held(
         object_id: binding.object_id.clone(),
     };
     let lineage = binding.lineage_claim_id.as_str();
+    // What the inspection keeps until it ends: the lineage's state, the
+    // window's lists and each tail's work.
     let mut working = stop.working();
-    if working.limited() {
-        working.grow(lineage_workload(conn, &doc, lineage)?)?;
-    }
-    let (state, digest) = match lineage_state(conn, &doc, lineage, stop)? {
+    let (state, digest) = match load_lineage(conn, &doc, lineage, stop, &mut working)? {
         None => return Ok(HeldInspection::Stale),
-        Some(LineageState::Read(canonical, kind, digest)) => (Some((canonical, kind)), digest),
+        Some(LineageState::Read(state, digest)) => (Some(state), digest),
         // A head whose journal does not load has no digest to compare; the
         // rest of the binding must still stand for the finding to be its own.
         Some(LineageState::Corrupt(digest)) => {
@@ -319,7 +367,7 @@ pub fn inspect_held(
             None,
         )),
     }
-    let Some((canonical, kind)) = state else {
+    let Some(state) = state else {
         findings.push(finding(PreservationReason::ContradictoryEvidence, None, None));
         return Ok(HeldInspection::Current(concluded(
             findings,
@@ -329,8 +377,7 @@ pub fn inspect_held(
         )));
     };
     preserve(
-        &canonical,
-        kind,
+        state,
         findings,
         readable,
         stop,
@@ -340,12 +387,65 @@ pub fn inspect_held(
     .map(HeldInspection::Current)
 }
 
-/// What loading `lineage`'s state holds at most, from the stored lengths of
-/// the blobs it loads, read before any loads: the head's latest snapshot and
-/// the journal rows after it, listed, or the full state an archive keeps.
-/// Each blob loads, applies to the state, and the state is hashed as its
-/// full state.
-fn lineage_workload(conn: &Connection, doc: &DocKey, lineage: &str) -> Result<u64, ApplicationError> {
+/// The state `doc`'s `lineage` keeps merged with `work`, as [`inspect_held`]
+/// merges it and with its memory reserved alike, with no window read or
+/// validated: for measuring what a proof holds. None when the document holds
+/// no such lineage or its state does not load.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn preserve_lineage(
+    conn: &Connection,
+    doc: &DocKey,
+    lineage: &str,
+    work: Vec<(String, Vec<RetainedContribution>)>,
+    stop: Stop<'_>,
+) -> Result<Option<Preservation>, ApplicationError> {
+    let mut working = stop.working();
+    let Some(LineageState::Read(state, _)) = load_lineage(conn, doc, lineage, stop, &mut working)?
+    else {
+        return Ok(None);
+    };
+    preserve(
+        state,
+        Vec::new(),
+        work,
+        stop,
+        |digest| stored_length(conn, digest),
+        |digest| stored_source(conn, digest),
+    )
+    .map(Some)
+}
+
+/// [`lineage_state`], with what the state keeps reserved in `working` and
+/// what loading it holds besides reserved until it loaded, both from the
+/// stored lengths of its blobs before any loads.
+fn load_lineage(
+    conn: &Connection,
+    doc: &DocKey,
+    lineage: &str,
+    stop: Stop<'_>,
+    working: &mut Work<'_>,
+) -> Result<Option<LineageState>, ApplicationError> {
+    let mut loading = stop.working();
+    if working.limited() {
+        let (rows, bytes) = lineage_workload(conn, doc, lineage)?;
+        working.grow(bytes.saturating_mul(YDOC_BYTES_PER_ENCODED_BYTE))?;
+        loading.grow(
+            rows.saturating_mul(LOADED_ROW_BYTES)
+                .saturating_add(bytes.saturating_mul(LOADING_BYTES_PER_STORED_BYTE)),
+        )?;
+    }
+    lineage_state(conn, doc, lineage, stop)
+}
+
+/// How many blobs loading `lineage`'s state reads and their stored length,
+/// read before any loads: the head's latest snapshot and the journal rows
+/// after it, or the full state an archive keeps.
+fn lineage_workload(
+    conn: &Connection,
+    doc: &DocKey,
+    lineage: &str,
+) -> Result<(u64, u64), ApplicationError> {
     let head = durable::read_marker_in(conn, doc)?
         .is_some_and(|marker| marker.lineage_claim_id.as_deref() == Some(lineage));
     let (rows, bytes): (i64, Option<i64>) = if head {
@@ -380,14 +480,7 @@ fn lineage_workload(conn: &Connection, doc: &DocKey, lineage: &str) -> Result<u6
         )
         .map_err(read_sql)?
     };
-    Ok(unsigned(rows)
-        .saturating_mul(LOADED_ROW_BYTES)
-        .saturating_add(unsigned(bytes.unwrap_or(0)).saturating_mul(YDOC_BYTES_PER_ENCODED_BYTE + 2)))
-}
-
-/// A stored count or length, which is never negative.
-fn unsigned(value: i64) -> u64 {
-    u64::try_from(value).unwrap_or(0)
+    Ok((unsigned(rows), unsigned(bytes.unwrap_or(0))))
 }
 
 /// The length of the bytes stored under `digest`, without loading them; 0
@@ -414,14 +507,29 @@ fn finding(
     }
 }
 
+/// What a finding about `contribution` of `namespace` keeps at most: their
+/// text, and its place with room for the findings to double.
+fn finding_bytes(namespace: &str, contribution: &RetainedContribution) -> u64 {
+    u64::try_from(namespace.len() + contribution.text_bytes() + 2 * size_of::<PreservationFinding>())
+        .unwrap_or(u64::MAX)
+}
+
 /// What [`lineage_state`] found of a lineage.
 enum LineageState {
-    /// Its state, content kind, and the digest a binding names it by.
-    Read(Ydoc, ContentKind, String),
+    /// Its state, and the digest a binding names it by.
+    Read(Loaded, String),
     /// Its stored state does not load: the head's journal, or an archive's
     /// bytes, are missing, mismatched or malformed. An archive still names
     /// its digest.
     Corrupt(Option<String>),
+}
+
+/// A lineage's state as a proof loaded it: a copy of its own, which the
+/// merge changes, with its content kind and the length of its full state.
+struct Loaded {
+    state: Ydoc,
+    kind: ContentKind,
+    full_state: u64,
 }
 
 /// Whether `error` says stored state is corrupt, rather than unreadable.
@@ -458,9 +566,16 @@ fn lineage_state(
                 Err(error) => return Err(error),
             };
             stop.check(ProofStage::Replay)?;
-            let digest = hex_sha256(&head.encode_full_state());
+            let full_state = head.encode_full_state();
+            let digest = hex_sha256(&full_state);
+            let loaded = Loaded {
+                state: head,
+                kind: marker.content_kind,
+                full_state: u64::try_from(full_state.len()).unwrap_or(u64::MAX),
+            };
+            drop(full_state);
             stop.check(ProofStage::Replay)?;
-            return Ok(Some(LineageState::Read(head, marker.content_kind, digest)));
+            return Ok(Some(LineageState::Read(loaded, digest)));
         }
     }
     let archived: Option<(String, String)> = conn
@@ -486,7 +601,12 @@ fn lineage_state(
         Err(error) => return Err(error.into()),
     }
     stop.check(ProofStage::Replay)?;
-    Ok(Some(LineageState::Read(state, ContentKind::parse(&kind)?, digest)))
+    let loaded = Loaded {
+        state,
+        kind: ContentKind::parse(&kind)?,
+        full_state: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+    };
+    Ok(Some(LineageState::Read(loaded, digest)))
 }
 
 /// The bytes stored under `digest`, which must hash to it.
@@ -552,12 +672,11 @@ impl Integration {
 }
 
 /// Merge every contribution of `work`, each tail's in its canonical order,
-/// into scratch state loaded from `canonical`, loading each one's bytes by
-/// its digest as it comes. Every contribution is loaded and checked, however
-/// many share bytes. `canonical` is never changed. Preservation is complete
-/// only when nothing in `findings` or found here holds it back and the
-/// canonical and the final merged state hold nothing pending; an
-/// intermediate application may wait on a later one.
+/// into the lineage's `loaded` state, loading each one's bytes by its digest
+/// as it comes. Every contribution is loaded and checked, however many share
+/// bytes. Preservation is complete only when nothing in `findings` or found
+/// here holds it back and the loaded and the final merged state hold nothing
+/// pending; an intermediate application may wait on a later one.
 ///
 /// Two contradictions stay out of reach. A contribution that reuses a
 /// client and clock the merged state already holds, with other content,
@@ -567,23 +686,29 @@ impl Integration {
 /// other: each tail's work is validated alone, and both apply, so neither
 /// one's work is lost from the merge.
 ///
-/// `stop` is checked around the scratch state's reconstruction, before each
-/// contribution loads and again before it applies, and around the merged
-/// state's projection and encoding. What the merge works with is reserved of
-/// its memory before it is allocated: the scratch state once the encoding it
-/// rebuilds from has its length, each contribution by the `length` of its
-/// bytes before they `load`, and the projection by everything merged.
+/// `stop` is checked before the merge starts, before each contribution
+/// loads and again before it applies, and around the merged state's
+/// projection and encoding. What the merge works with is reserved of its
+/// memory before it is allocated, and what it only works with is given back
+/// once done: what each contribution adds to the state, from the `length`
+/// of its bytes before they `load`, and its place in the merged or waiting
+/// list before it takes it, stay reserved; what applying it holds besides,
+/// and the projection, are given back.
 fn preserve(
-    canonical: &Ydoc,
-    kind: ContentKind,
+    loaded: Loaded,
     mut findings: Vec<PreservationFinding>,
     work: Vec<(String, Vec<RetainedContribution>)>,
     stop: Stop<'_>,
     mut length: impl FnMut(&str) -> Result<u64, ApplicationError>,
     mut load: impl FnMut(&str) -> Result<Source, ApplicationError>,
 ) -> Result<Preservation, ApplicationError> {
-    // A full-state encoding drops what the canonical state holds pending.
-    if canonical.has_pending_dependencies() {
+    let Loaded {
+        state,
+        kind,
+        full_state,
+    } = loaded;
+    // A full-state encoding drops what the loaded state holds pending.
+    if state.has_pending_dependencies() {
         findings.push(finding(
             PreservationReason::PendingHeadDependencies,
             None,
@@ -592,16 +717,12 @@ fn preserve(
         return Ok(concluded(findings, work, Vec::new(), None));
     }
     stop.check(ProofStage::Merge)?;
-    let base = canonical.encode_full_state();
-    let mut merging = u64::try_from(base.len()).unwrap_or(u64::MAX);
-    // The scratch state, and the state vector and delete set read of it
-    // before and after each application.
+    // The encoded bytes the merged state holds: the lineage's full state,
+    // then each contribution's.
+    let mut merging = full_state;
+    // What the merge keeps until it ends: what each contribution adds to the
+    // state, the merged and waiting lists, and the findings it makes.
     let mut working = stop.working();
-    working.grow(merging.saturating_mul(YDOC_BYTES_PER_ENCODED_BYTE + 2))?;
-    stop.check(ProofStage::Merge)?;
-    let scratch = Ydoc::wire();
-    scratch.apply(&base)?;
-    drop(base);
     let mut merged = Vec::new();
     // Contributions whose application left part of them parked, with what
     // each integrates: one counts as merged once the merge holds all of it,
@@ -610,56 +731,72 @@ fn preserve(
     for (namespace, contributions) in &work {
         for contribution in contributions {
             stop.check(ProofStage::Merge)?;
-            // Its bytes, what they add to the scratch state, to the state
-            // vector and delete set read of it and to what waits on them,
-            // and its place in the lists.
-            let bytes = length(contribution.update_digest())?;
-            working.grow(
-                bytes
-                    .saturating_mul(YDOC_BYTES_PER_ENCODED_BYTE + 4)
-                    .saturating_add(CONTRIBUTION_SLOT_BYTES),
+            let stored = length(contribution.update_digest())?;
+            working.grow(stored.saturating_mul(YDOC_BYTES_PER_ENCODED_BYTE))?;
+            merging = merging.saturating_add(stored);
+            // Its bytes as they load and decode, and the state vector and
+            // delete set read of the state before and after it applies, each
+            // no larger than the state's encoding: given back once it merged.
+            let mut applying = stop.working();
+            applying.grow(
+                stored
+                    .saturating_mul(APPLYING_BYTES_PER_UPDATE_BYTE)
+                    .saturating_add(merging.saturating_mul(2)),
             )?;
-            merging = merging.saturating_add(bytes);
             let held_back = |reason| finding(reason, Some(namespace.as_str()), Some(contribution));
+            let found = finding_bytes(namespace, contribution);
             let bytes = match load(contribution.update_digest())? {
                 Source::Bytes(bytes) => bytes,
                 Source::Missing => {
+                    working.grow(found)?;
                     findings.push(held_back(PreservationReason::SourceMissing));
                     continue;
                 }
                 Source::Mismatched => {
+                    working.grow(found)?;
                     findings.push(held_back(PreservationReason::DigestMismatch));
                     continue;
                 }
             };
             stop.check(ProofStage::Merge)?;
-            let before = integrated(&scratch);
-            if scratch.apply(&bytes).is_err() {
+            let before = integrated(&state);
+            if state.apply(&bytes).is_err() {
+                working.grow(found)?;
                 findings.push(held_back(PreservationReason::MalformedUpdate));
                 continue;
             }
-            if integrated(&scratch) != before {
+            if integrated(&state) != before {
+                working.grow(contribution.kept_bytes())?;
                 merged.push(contribution.clone());
-                // What this one added may be what an earlier one waited on.
+                // What this one added may be what an earlier one waited on;
+                // each waiting one reserved its place in the merged list.
                 if !waiting.is_empty() {
-                    let (vector, deleted) = (scratch.state_vector(), scratch.delete_set());
+                    let (vector, deleted) = (state.state_vector(), state.delete_set());
                     let (held, still): (Vec<_>, Vec<_>) = waiting
                         .drain(..)
                         .partition(|(_, integration)| integration.within(&vector, &deleted));
                     merged.extend(held.into_iter().map(|(contribution, _)| contribution));
                     waiting = still;
                 }
-            } else if scratch.has_pending_dependencies() {
+            } else if state.has_pending_dependencies() {
                 // It added nothing: either the merge held it already, or it
                 // is parked, alone or beside an identical earlier one.
                 let integration = Integration::of(&bytes)?;
-                if !integration.within(&scratch.state_vector(), &scratch.delete_set()) {
+                if !integration.within(&state.state_vector(), &state.delete_set()) {
+                    // Its places in the waiting list, and the lists that
+                    // list splits into, and in the merged list.
+                    working.grow(
+                        contribution
+                            .kept_bytes()
+                            .saturating_add(4 * size_of::<(RetainedContribution, Integration)>() as u64)
+                            .saturating_add(stored.saturating_mul(INTEGRATION_BYTES_PER_UPDATE_BYTE)),
+                    )?;
                     waiting.push((contribution.clone(), integration));
                 }
             }
         }
     }
-    if scratch.has_pending_dependencies() {
+    if state.has_pending_dependencies() {
         findings.push(finding(
             PreservationReason::PendingContributionDependencies,
             None,
@@ -670,19 +807,20 @@ fn preserve(
     merged.dedup();
     let complete = findings.is_empty();
     let preserved = if complete {
-        // The projection, its Markdown source and the document checking
-        // that source rebuilds, and the merged full state.
-        working.grow(merging.saturating_mul(YDOC_BYTES_PER_ENCODED_BYTE + 4))?;
+        // Given back once the preservation keeps what it made, which its
+        // proof reserves as what its result keeps.
+        let mut projecting = stop.working();
+        projecting.grow(merging.saturating_mul(PROJECTION_BYTES_PER_ENCODED_BYTE))?;
         stop.check(ProofStage::Projection)?;
-        let projection = scratch.project(kind)?.content;
+        let projection = state.project(kind)?.content;
         let markdown = match kind {
-            ContentKind::Richdoc => scratch
+            ContentKind::Richdoc => state
                 .preserved_markdown_source(&projection)
                 .unwrap_or(projection),
             ContentKind::Plaintext | ContentKind::Scene => projection,
         };
         stop.check(ProofStage::Projection)?;
-        let full_state = scratch.encode_full_state();
+        let full_state = state.encode_full_state();
         stop.check(ProofStage::Projection)?;
         Some(PreservedState {
             markdown,
@@ -744,14 +882,38 @@ mod tests {
         (canonical, first, second, third)
     }
 
+    /// `state`, a rich document, as a proof loads it.
+    fn loaded(state: Ydoc) -> Loaded {
+        let full_state = state.encode_full_state().len() as u64;
+        Loaded {
+            state,
+            kind: ContentKind::Richdoc,
+            full_state,
+        }
+    }
+
+    /// A copy of `canonical` as a proof loads it.
+    fn copied(canonical: &Ydoc) -> Loaded {
+        let state = Ydoc::wire();
+        state.apply(&canonical.encode_full_state()).unwrap();
+        loaded(state)
+    }
+
     fn preserved(
         canonical: &Ydoc,
         work: Vec<RetainedContribution>,
         stored: &HashMap<String, Vec<u8>>,
     ) -> Preservation {
+        preserved_from(copied(canonical), work, stored)
+    }
+
+    fn preserved_from(
+        loaded: Loaded,
+        work: Vec<RetainedContribution>,
+        stored: &HashMap<String, Vec<u8>>,
+    ) -> Preservation {
         preserve(
-            canonical,
-            ContentKind::Richdoc,
+            loaded,
             Vec::new(),
             vec![("namespace".to_owned(), work)],
             Stop::NEVER,
@@ -780,22 +942,20 @@ mod tests {
 
     /// Plan r3, containment: work the canonical state already holds merges
     /// nothing and preserves; work only an outbox holds merges, appears in
-    /// the copy and the merged state, and is named. The canonical state is
-    /// byte-for-byte what it was.
+    /// the copy and the merged state, and is named. The merge works on the
+    /// copy of the state its proof loaded; inspection never writes the store.
     #[test]
     fn merged_state_contains_every_contribution_and_names_what_it_added() {
         let (canonical, first, _, third) = edits();
         let integrated = Ydoc::wire();
         integrated.apply(&canonical.encode_full_state()).unwrap();
         integrated.apply(&third).unwrap();
-        let before = integrated.encode_full_state();
         let contained = preserved(&integrated, vec![outbox(1, &third)], &stored(&[&third]));
         assert_eq!(contained.status, PreservationStatus::Complete);
         assert!(contained.merged.is_empty(), "already integrated: {:?}", contained.merged);
         // Work the state already held is still covered, with its authors,
         // for the copy to credit.
         assert_eq!(contained.covered, [("namespace".to_owned(), vec![outbox(1, &third)])]);
-        assert_eq!(integrated.encode_full_state(), before, "the canonical state is unchanged");
 
         let outbox_only = preserved(&integrated, vec![outbox(1, &third), outbox(2, &first)], &stored(&[&third, &first]));
         assert_eq!(outbox_only.status, PreservationStatus::Complete);
@@ -805,8 +965,6 @@ mod tests {
         let pinned = Ydoc::wire();
         pinned.apply(&kept.full_state).unwrap();
         assert!(pinned.project(ContentKind::Richdoc).unwrap().content.contains("First"));
-        assert_eq!(integrated.encode_full_state(), before, "the canonical state is unchanged");
-        assert!(!integrated.project(ContentKind::Richdoc).unwrap().content.contains("First"));
     }
 
     /// Plan r3: an earlier contribution may wait on a later one, and both
@@ -873,7 +1031,7 @@ mod tests {
         parked.apply(&canonical.encode_full_state()).unwrap();
         parked.apply(&second).unwrap();
         assert!(parked.has_pending_dependencies());
-        let pending = preserved(&parked, vec![outbox(1, &first)], &stored(&[&first]));
+        let pending = preserved_from(loaded(parked), vec![outbox(1, &first)], &stored(&[&first]));
         assert_eq!(pending.status, PreservationStatus::PendingDependencies);
         assert_eq!(reasons(&pending), [PreservationReason::PendingHeadDependencies]);
         assert_eq!(pending.preserved, None);
@@ -933,12 +1091,17 @@ mod tests {
     }
 
     /// Sol's r2c-3c-6 finding 2: a merge reserves what it works with of a
-    /// real proof's memory before it allocates it. With room for all of it,
-    /// it preserves, and what it keeps fits what it reserved. With room for
-    /// less than the scratch state, it refuses before rebuilding it; with
-    /// room for the scratch state alone, before it loads a contribution.
-    /// Either way the proof is too large, and nothing reserved ever passes
-    /// its memory.
+    /// real proof's memory before it allocates it. Opus's r2c-3c-8 findings 2
+    /// and 3: what applying a contribution holds is given back before the
+    /// projection reserves its own, and the merged list's copy is reserved
+    /// before it is made. With room for all of it, it preserves, and the most
+    /// it reserved is exactly what the state gained, the copy and the
+    /// projection: never applying and projecting at once. With room for less,
+    /// it refuses, too large, before it loads the contribution when the
+    /// state's growth or its application does not fit, and before it
+    /// projects when the projection does not. These counts and the exact
+    /// peak are the evidence; a peak at or under the room never fails, as
+    /// the budget refuses past it.
     #[test]
     fn a_merge_reserves_what_it_works_with_before_it_allocates_it() {
         let canonical = Ydoc::wire();
@@ -952,9 +1115,12 @@ mod tests {
         writer.apply(&canonical.encode_full_state()).unwrap();
         let added = writer.richdoc_append_paragraph(&"Added work. ".repeat(1_000));
         let stored = stored(&[&added]);
-        let scratch = canonical.encode_full_state().len() as u64 * (YDOC_BYTES_PER_ENCODED_BYTE + 2);
-        let contribution =
-            added.len() as u64 * (YDOC_BYTES_PER_ENCODED_BYTE + 4) + CONTRIBUTION_SLOT_BYTES;
+        let (full, bytes) = (copied(&canonical).full_state, added.len() as u64);
+        let growth = bytes * YDOC_BYTES_PER_ENCODED_BYTE;
+        let applying = bytes * APPLYING_BYTES_PER_UPDATE_BYTE + 2 * (full + bytes);
+        let copy = outbox(1, &added).kept_bytes();
+        let projection = (full + bytes) * PROJECTION_BYTES_PER_ENCODED_BYTE;
+        assert!(projection > applying);
         let directory = dohc_test_scratch::ScratchDir::new().unwrap();
         let store = dohc_engine_storage::EngineStore::open(&directory.path().join("engine.db"), 1).unwrap();
         // What the merge answers within `capacity`, whether its proof
@@ -969,8 +1135,7 @@ mod tests {
             let (mut answer, mut loads) = (None, 0);
             run.prove(|job| {
                 let preserved = preserve(
-                    &canonical,
-                    ContentKind::Richdoc,
+                    copied(&canonical),
                     Vec::new(),
                     vec![("namespace".to_owned(), vec![outbox(1, &added)])],
                     job.stop(),
@@ -990,21 +1155,122 @@ mod tests {
         let (preserved, stopped, loads, _, peak) = merged(1 << 30);
         let preserved = preserved.expect("room for all of it");
         assert_eq!((preserved.status, stopped, loads), (PreservationStatus::Complete, None, 1));
-        assert!(
-            peak >= scratch + contribution + preserved.retained_bytes() as u64,
-            "what it keeps fits what it reserved: {peak}"
-        );
+        assert_eq!(preserved.merged, [outbox(1, &added)]);
+        assert_eq!(peak, growth + copy + projection, "the projection, not beside the application");
 
-        for (room, what, passed) in [
-            (scratch - 1, "the scratch state", 1),
-            (scratch + contribution - 1, "a contribution", 3),
+        for (room, what, (loaded, passed)) in [
+            (growth - 1, "the state's growth", (0, 2)),
+            (growth + applying - 1, "its application", (0, 2)),
+            (growth + applying + copy - 1, "the merged list's copy", (1, 3)),
+            (growth + copy + projection - 1, "the projection", (1, 3)),
         ] {
-            let (preserved, stopped, loads, checks, peak) = merged(room);
+            let (preserved, stopped, loads, checks, _) = merged(room);
             assert!(matches!(preserved, Err(ApplicationError::Cancelled)), "{what}: {preserved:?}");
             assert_eq!(stopped, Some(ProofStop::TooLarge), "{what}");
-            assert_eq!((loads, checks), (0, passed), "{what}: refused before it was allocated");
-            assert!(peak <= room, "{what}: {peak} reserved within {room}");
+            assert_eq!((loads, checks), (loaded, passed), "{what}: refused before it was allocated");
         }
+    }
+
+    /// Opus's r2c-3c-8 check 1: under the default limit, a lineage merged
+    /// with 50,000 small contributions proves alone. Every one merges, the
+    /// preservation is complete with its Markdown, and its artifact, naming
+    /// every one, encodes within its cap. What the window and validation of
+    /// such a hold reserve is pinned where they run.
+    #[test]
+    fn fifty_thousand_contributions_prove_alone_under_the_default_limit() {
+        use dohc_engine_domain::VersionedTextStore;
+        let directory = dohc_test_scratch::ScratchDir::new().unwrap();
+        let mut store = dohc_engine_storage::EngineStore::open(&directory.path().join("engine.db"), 1).unwrap();
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("workspace", "main", 0, &dohc_engine_storage::NoFaults)
+            .unwrap();
+        let canonical = Ydoc::wire();
+        let _ = canonical.richdoc_append_paragraph("Kept");
+        durable::claim_base(
+            &mut store,
+            &key,
+            ContentKind::Richdoc,
+            &canonical.encode_full_state(),
+            &dohc_engine_storage::NoFaults,
+            2,
+        )
+        .unwrap();
+        let lineage = store
+            .read_with(|conn| durable::read_marker_in(conn, &key))
+            .unwrap()
+            .and_then(|marker| marker.lineage_claim_id)
+            .expect("a claimed lineage");
+        let writer = Ydoc::wire();
+        writer.apply(&canonical.encode_full_state()).unwrap();
+        let updates: Vec<Vec<u8>> = (0..50_000)
+            .map(|index| writer.richdoc_append_paragraph(&format!("Item {index}")))
+            .collect();
+        store
+            .write_with(&dohc_engine_storage::NoFaults, |tx| {
+                for update in &updates {
+                    dohc_engine_storage::put_binary_blob_with_sha(tx, update, &hex_sha256(update))?;
+                }
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .unwrap();
+        let covered: Vec<_> = updates
+            .iter()
+            .enumerate()
+            .map(|(index, update)| outbox(index as i64 + 1, update))
+            .collect();
+        let binding = ReleasedLineageBinding {
+            workspace_id: "workspace".into(),
+            main_version_id: "main".into(),
+            object_id: "object".into(),
+            lineage_claim_id: lineage.clone(),
+            current_path: Some("owner.md".into()),
+            restore_generation: Some(0),
+            incoming: IncomingCoordinate {
+                relay_namespace: Some("namespace".into()),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                origin_id: "desktop".into(),
+                origin_seq: 0,
+                relay_seq: 1,
+            },
+            head_digest: hex_sha256(&canonical.encode_full_state()),
+            tails: Arc::new(ProtectedTails::Listed(vec![ProtectedTail {
+                namespace: "namespace".into(),
+                activation_id: "activation".into(),
+                release: None,
+                coverage: RetainedCoverage::Unproven(UnprovenCommitment::of(covered.clone()).unwrap()),
+            }])),
+        };
+        let proofs: HeldProofs<(), ()> = HeldProofs::new(HeldProofLimit::default());
+        proofs.set_proof_deadline(std::time::Duration::from_secs(3_600));
+        let HeldProofAdmission::Started(run, _wait) = proofs.admit(&store, "workspace", ()).unwrap() else {
+            panic!("a free workspace starts its proof")
+        };
+        let mut answer = None;
+        run.prove(|job| {
+            let stop = job.stop();
+            let preserved = store
+                .read_with(|conn| {
+                    preserve_lineage(conn, &key, &lineage, vec![("namespace".into(), covered.clone())], stop)
+                })
+                .map(|preservation| preservation.expect("the lineage loads"));
+            let artifact = preserved.as_ref().ok().map(|preservation| {
+                stop.reserve(preservation.retained_bytes())
+                    .and_then(|()| ContributionArtifact::of(&binding, preservation, stop))
+            });
+            answer = Some((preserved, artifact, job.stopped()));
+            ((), 0)
+        });
+        let (preserved, artifact, stopped) = answer.expect("the proof ran");
+        assert_eq!(stopped, None, "it fits alone");
+        let preserved = preserved.unwrap();
+        assert_eq!(preserved.status, PreservationStatus::Complete, "{:?}", preserved.findings);
+        assert_eq!(preserved.merged, covered, "every one merged");
+        let markdown = &preserved.preserved.as_ref().expect("its Markdown").markdown;
+        assert!(markdown.contains("Item 0") && markdown.contains("Item 49999"));
+        let artifact = artifact.expect("encoded").unwrap().expect("within its cap");
+        assert_eq!(artifact.merged, UnprovenCommitment::of_listed(&covered));
     }
 
     /// Findings the caller brings, such as a tail whose evidence does not
@@ -1013,8 +1279,7 @@ mod tests {
     fn evidence_the_caller_found_invalid_never_preserves() {
         let (canonical, first, _, _) = edits();
         let invalid = preserve(
-            &canonical,
-            ContentKind::Richdoc,
+            copied(&canonical),
             vec![finding(PreservationReason::ContradictoryEvidence, Some("other"), None)],
             vec![("namespace".to_owned(), vec![outbox(1, &first)])],
             Stop::NEVER,

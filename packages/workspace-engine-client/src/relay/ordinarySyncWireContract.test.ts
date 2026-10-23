@@ -223,9 +223,9 @@ const complete = { status: "complete", reasons: [], mergedContributions: listedA
 const inspected = { ...held, status: "current", preservation: complete, resolution: null };
 // What no merged contributions commit to.
 const nothingMerged = emptyArtifact.mergedContributions;
-// Complete preservation whose artifact is past what one blob streams.
-const tooLarge = { ...complete, mergedContributions: null, contributionsSha256: null, contributionsByteLength: null,
-  contributionsTooLarge: true };
+// Complete preservation whose artifact is past what one blob streams: its
+// merged commitment still answers.
+const tooLarge = { ...complete, contributionsSha256: null, contributionsByteLength: null, contributionsTooLarge: true };
 
 describe("held document inspection contract", () => {
   it("keeps a page of held document summaries, and refuses one that claims more with nothing listed", () => {
@@ -248,10 +248,14 @@ describe("held document inspection contract", () => {
     expect(decodeHostedSyncResult("sync.heldDocument", null)).toBeNull();
   });
 
-  it("keeps preservation and its text whose artifact is too large, naming no artifact", () => {
-    expect(decodeHostedSyncResult("sync.heldDocument", { ...inspected, preservation: tooLarge })?.preservation).toEqual(tooLarge);
+  it("keeps preservation, its text and its merged commitment whose artifact is too large, naming no artifact", () => {
+    const decodedTooLarge = decodeHostedSyncResult("sync.heldDocument", { ...inspected, preservation: tooLarge })?.preservation;
+    expect(decodedTooLarge).toEqual(tooLarge);
+    expect(decodedTooLarge?.mergedContributions).toEqual(listedArtifact.mergedContributions);
     const streamed = { ...tooLarge, markdown: null };
     expect(decodeHostedSyncResult("sync.heldDocument", { ...inspected, preservation: streamed })?.preservation).toEqual(streamed);
+    const contained = { ...tooLarge, mergedContributions: nothingMerged };
+    expect(decodeHostedSyncResult("sync.heldDocument", { ...inspected, preservation: contained })?.preservation).toEqual(contained);
   });
 
   // One reason with its total, and the examples listed of it.
@@ -345,7 +349,9 @@ describe("held document inspection contract", () => {
     ["no artifact digest, not too large", { preservation: { ...complete, contributionsSha256: null } }],
     ["no artifact length, not too large", { preservation: { ...complete, contributionsByteLength: null } }],
     ["an artifact too large to name, named", { preservation: { ...complete, contributionsTooLarge: true } }],
-    ["a too-large artifact's merged commitment", { preservation: { ...tooLarge, mergedContributions: nothingMerged } }],
+    ["a too-large artifact with no merged commitment", { preservation: { ...tooLarge, mergedContributions: null } }],
+    ["a too-large artifact's merged work under the empty list's digest",
+      { preservation: { ...tooLarge, mergedContributions: { ...nothingMerged, count: 1 } } }],
     ["a too-large artifact's digest", { preservation: { ...tooLarge, contributionsSha256: listedArtifact.sha256 } }],
     ["a too-large artifact's length", { preservation: { ...tooLarge, contributionsByteLength: artifactBytes.length } }],
     ["no word on whether the artifact is too large", { preservation: { ...complete, contributionsTooLarge: undefined } }],

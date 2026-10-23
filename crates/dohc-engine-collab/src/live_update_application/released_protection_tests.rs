@@ -1077,3 +1077,186 @@ fn a_window_that_does_not_read_protects_as_invalid() {
         assert!(binding.moved("owner.md"), "{case}");
     }
 }
+
+/// What a held proof's `read` of `f` answers within `capacity` bytes of
+/// proof memory, with what it saw on the way.
+struct WithinMemory<T> {
+    answer: Result<T, ApplicationError>,
+    stopped: Option<ProofStop>,
+    windows: u64,
+    activations: u64,
+    checks: u64,
+    peak: u64,
+}
+
+fn within_memory<T>(
+    f: &Fixture,
+    capacity: u64,
+    read: impl FnOnce(&rusqlite::Connection, Stop<'_>) -> Result<T, ApplicationError>,
+) -> WithinMemory<T> {
+    let limit = HeldProofLimit::new(1, capacity, 0);
+    let proofs: HeldProofs<(), ()> = HeldProofs::new(limit.clone());
+    proofs.set_proof_deadline(std::time::Duration::from_secs(3_600));
+    let HeldProofAdmission::Started(run, _wait) = proofs.admit(&f.store, "workspace", ()).unwrap() else {
+        panic!("a free workspace starts its proof")
+    };
+    let mut observed = None;
+    run.prove(|job| {
+        let windows = settled_base::released_window_reads_on_this_thread();
+        let activations = owner_activations::activation_reads_on_this_thread();
+        let answer = f.store.read_with(|conn| Ok::<_, ApplicationError>(read(conn, job.stop()))).unwrap();
+        observed = Some((
+            answer,
+            job.stopped(),
+            settled_base::released_window_reads_on_this_thread() - windows,
+            owner_activations::activation_reads_on_this_thread() - activations,
+        ));
+        ((), 0)
+    });
+    let (answer, stopped, windows, activations) = observed.expect("the proof ran");
+    WithinMemory { answer, stopped, windows, activations, checks: proofs.checks_passed(), peak: limit.peak_reserved_bytes() }
+}
+
+/// What reading the fixture's window holds, what reading the activation of
+/// each of `namespaces`' tails holds, and what validating each holds.
+fn window_workloads(f: &Fixture, namespaces: &[&str]) -> (u64, Vec<(u64, u64)>) {
+    let lineage = &f.binding.lineage_claim_id;
+    f.store
+        .read_with(|conn| {
+            let evidence = released_protection::lineage_evidence(conn, &f.key, lineage)?;
+            let tails = namespaces
+                .iter()
+                .map(|namespace| -> Result<(u64, u64), ApplicationError> {
+                    Ok((
+                        released_protection::activation_workload(conn, namespace, "adoption")?,
+                        evidence.tail_workload(conn, namespace, &f.key, lineage, "adoption")?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, ApplicationError>>()?;
+            Ok::<_, ApplicationError>((released_protection::window_workload(conn, &f.key, lineage)?, tails))
+        })
+        .unwrap()
+}
+
+/// The fixture's window as a held proof reads it.
+fn window_of(conn: &rusqlite::Connection, f: &Fixture, stop: Stop<'_>) -> Result<Option<released_protection::WindowWork>, ApplicationError> {
+    released_protection::window_work(conn, &f.key, &f.binding.lineage_claim_id, stop, &mut stop.working())
+}
+
+/// Sol's r2c-3c-8 finding 1: a held proof reserves what reading the
+/// released window holds, and each tail's activation and its validation,
+/// from stored lengths before it reads them. With room for less than the
+/// window it reads no window and no activation; with room for the window
+/// alone, no activation; with room for the window and the tail's
+/// activation, that activation and nothing its validation reads, an
+/// activation of its chain among them, and it passes no validation check.
+/// Each refusal is too large. These counts are the evidence.
+#[test]
+fn a_held_proof_reserves_the_window_and_each_activation_before_it_reads_them() {
+    let (f, _, _, _) = released_at_b();
+    let (window, tails) = window_workloads(&f, &["namespace"]);
+    let [(activation, validation)] = tails[..] else { unreachable!() };
+    for (room, what, read) in [
+        (window - 1, "the window", (0, 0, 0)),
+        (window + activation - 1, "the tail's activation", (1, 0, 0)),
+        (window + activation + validation - 1, "the tail's validation", (1, 1, 0)),
+    ] {
+        let within = within_memory(&f, room, |conn, stop| window_of(conn, &f, stop));
+        assert!(matches!(within.answer, Err(ApplicationError::Cancelled)), "{what}: {:?}", within.answer.map(|_| ()));
+        assert_eq!(within.stopped, Some(ProofStop::TooLarge), "{what}");
+        assert_eq!((within.windows, within.activations, within.checks), read, "{what}: refused before it read");
+    }
+    let within = within_memory(&f, window + activation + validation, |conn, stop| window_of(conn, &f, stop));
+    assert!(matches!(within.answer, Ok(Some(released_protection::WindowWork::Listed(_)))), "room for all of it");
+    assert_eq!(within.stopped, None);
+    assert!(within.activations > 1, "its validation read its chain's activations: {}", within.activations);
+}
+
+/// Opus's r2c-3c-8 finding 2: what reading and validating a tail holds is
+/// given back once its work is kept, so a window of three tails reserves at
+/// its peak the window, what the earlier tails kept and one tail's
+/// validation, never every tail's validation at once.
+#[test]
+fn a_window_of_many_tails_reserves_its_largest_tail_not_their_sum() {
+    let (mut f, _, _, _) = released_at_b();
+    write_unchecked(&mut f, "PRAGMA foreign_keys=OFF;
+        CREATE TEMP TABLE copied AS SELECT * FROM live_owner_activations WHERE activation_id='adoption';
+        UPDATE copied SET relay_database_namespace='other-1';
+        INSERT INTO live_owner_activations SELECT * FROM copied;
+        UPDATE copied SET relay_database_namespace='other-2';
+        INSERT INTO live_owner_activations SELECT * FROM copied");
+    let namespaces = ["namespace", "other-1", "other-2"];
+    let (window, tails) = window_workloads(&f, &namespaces);
+    let within = within_memory(&f, 1 << 40, |conn, stop| window_of(conn, &f, stop));
+    let Ok(Some(released_protection::WindowWork::Listed(listed))) = within.answer else {
+        panic!("three tails validate")
+    };
+    let named: Vec<&str> = listed.iter().map(|(tail, _)| tail.namespace.as_str()).collect();
+    assert_eq!(named, namespaces);
+    let kept: Vec<u64> = listed.iter().map(|(tail, work)| released_protection::tail_kept_bytes(tail, work)).collect();
+    let validations: Vec<u64> = tails.iter().map(|(activation, validation)| activation + validation).collect();
+    let peak = (0..namespaces.len())
+        .map(|nth| window + kept[..nth].iter().sum::<u64>() + validations[nth])
+        .chain([window + kept.iter().sum::<u64>()])
+        .max()
+        .unwrap();
+    assert_eq!(within.peak, peak, "the largest tail's validation, beside what the others kept");
+    assert!(within.peak < window + validations.iter().sum::<u64>(), "never their sum");
+}
+
+/// Opus's r2c-3c-8 check 1: under the default limit, a held document of
+/// more than 5 MiB of full state proves alone: current, its preservation
+/// complete with its Markdown, and its contribution artifact within its cap.
+#[test]
+fn a_held_document_of_five_mebibytes_proves_alone_under_the_default_limit() {
+    let (mut f, _, _, _) = released_at_b();
+    let grown = local_doc(&f);
+    let paragraph = "A paragraph someone wrote in their plan, long enough to be typical of one. ".repeat(8);
+    let mut markdown = grown.project(ContentKind::Richdoc).unwrap().content;
+    while markdown.len() < 11 << 19 {
+        markdown.push_str("\n\n");
+        markdown.push_str(paragraph.trim_end());
+    }
+    markdown.push_str("\n\nThe last paragraph.\n");
+    let update = grown.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown).unwrap();
+    let full_state = grown.encode_full_state().len();
+    assert!(full_state >= 5 << 20, "{full_state} bytes of full state");
+    f.store
+        .write_with(&NoFaults, |tx| {
+            let sha = hex_sha256(&update);
+            dohc_engine_storage::put_binary_blob_with_sha(tx, &update, &sha)?;
+            durable::append_row(tx, &f.key, &sha, None, None, false, 20)?;
+            Ok::<_, ApplicationError>(())
+        })
+        .unwrap();
+    let binding = protected(&f).expect("protected");
+    let proofs: HeldProofs<(), ()> = HeldProofs::new(HeldProofLimit::default());
+    proofs.set_proof_deadline(std::time::Duration::from_secs(3_600));
+    let HeldProofAdmission::Started(run, _wait) = proofs.admit(&f.store, "workspace", ()).unwrap() else {
+        panic!("a free workspace starts its proof")
+    };
+    let mut answer = None;
+    run.prove(|job| {
+        let stop = job.stop();
+        let inspected = f.store.read_with(|conn| inspect_held(conn, &binding, stop));
+        let artifact = match &inspected {
+            Ok(HeldInspection::Current(preservation)) => Some(
+                stop.reserve(preservation.retained_bytes())
+                    .and_then(|()| ContributionArtifact::of(&binding, preservation, stop)),
+            ),
+            _ => None,
+        };
+        answer = Some((inspected, artifact, job.stopped()));
+        ((), 0)
+    });
+    let (inspected, artifact, stopped) = answer.expect("the proof ran");
+    assert_eq!(stopped, None, "it fits alone");
+    let HeldInspection::Current(preservation) = inspected.unwrap() else {
+        panic!("the binding was just derived")
+    };
+    assert_eq!(preservation.status, PreservationStatus::Complete, "{:?}", preservation.findings);
+    let preserved = preservation.preserved.as_ref().expect("its Markdown");
+    assert!(preserved.markdown.contains("The last paragraph."));
+    assert!(preserved.full_state.len() >= 5 << 20);
+    assert!(matches!(artifact, Some(Ok(Some(_)))), "its artifact is within its cap");
+}

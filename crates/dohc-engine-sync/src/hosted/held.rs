@@ -10,7 +10,7 @@ use std::sync::Arc;
 use dohc_engine_collab::DocKey;
 use dohc_engine_collab::live_update_application::{
     self as live, Charged, ContributionArtifact, HeldInspection, HeldProofJob,
-    LineageCoordinates, Preservation, Work, inspect_held, store_identity,
+    LineageCoordinates, Preservation, UnprovenCommitment, Work, inspect_held, store_identity,
 };
 
 use super::*;
@@ -116,16 +116,25 @@ pub struct HeldDocumentInspection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeldContributions {
     Artifact(ContributionArtifact),
-    /// The artifact would pass what one blob streams. The preservation, and
+    /// The artifact would pass what one blob streams, so only its merged
+    /// list's commitment, hashed as a stream, answers. The preservation, and
     /// its Markdown, still answer.
-    TooLarge,
+    TooLarge { merged: UnprovenCommitment },
 }
 
 impl HeldContributions {
     pub fn artifact(&self) -> Option<&ContributionArtifact> {
         match self {
             Self::Artifact(artifact) => Some(artifact),
-            Self::TooLarge => None,
+            Self::TooLarge { .. } => None,
+        }
+    }
+
+    /// The merged list's commitment, whether or not its artifact streams.
+    pub fn merged(&self) -> &UnprovenCommitment {
+        match self {
+            Self::Artifact(artifact) => &artifact.merged,
+            Self::TooLarge { merged } => merged,
         }
     }
 }
@@ -308,8 +317,9 @@ impl HeldProof {
 /// is reserved of `job`'s memory before it is allocated, decoding the
 /// binding from its stored length first. What the preservation keeps is
 /// reserved before the artifact grows, and the artifact reserves its own as
-/// it grows; one past its cap leaves the inspection with none, and the rest
-/// still answers. The reader closes before this returns, however it
+/// it grows; one past its cap leaves the inspection with none but its
+/// merged list's commitment, and the rest still answers. The reader closes
+/// before this returns, however it
 /// returns. A reader that cannot open is a locked store, never corrupt
 /// evidence.
 pub fn prove_held_document(
@@ -363,7 +373,10 @@ pub fn prove_held_document(
                     .map_err(protection_failure)?
                 {
                     Some(artifact) => HeldContributions::Artifact(artifact),
-                    None => HeldContributions::TooLarge,
+                    None => HeldContributions::TooLarge {
+                        merged: UnprovenCommitment::of_merged(&preservation.merged, stop)
+                            .map_err(protection_failure)?,
+                    },
                 },
             )
         }

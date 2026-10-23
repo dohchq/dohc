@@ -25,6 +25,9 @@ pub use preservation::{
     inspect_held, HeldInspection, Preservation, PreservationFinding, PreservationReason,
     PreservationStatus, PreservedState,
 };
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use preservation::preserve_lineage;
 
 /// The synced update protection is decided for: the feed it arrived on and
 /// its coordinate there.
@@ -1402,7 +1405,7 @@ fn protected_tails(
 
 /// The protected tails of the released window, each with what its
 /// validation found.
-enum WindowWork {
+pub(super) enum WindowWork {
     /// In namespace order. A tail whose coverage is invalid names no work,
     /// only the contradictions that made it so, none when its evidence does
     /// not enumerate.
@@ -1412,19 +1415,36 @@ enum WindowWork {
 }
 
 /// [`protected_tails`], keeping the work each tail retains, until `stop`.
-/// What validating each tail holds is reserved in `working` before it runs.
-fn window_work(
+/// What it reads is reserved before it reads it, from stored lengths: the
+/// window's lists, and the lineage's current activation, in `working`,
+/// which also keeps each tail and its work once validated; and each tail's
+/// activation and validation in a reservation of their own, given back once
+/// that tail's work is kept. So it reserves at most the window, every
+/// tail's kept work and the largest tail's validation, never every tail's
+/// validation at once. The lineage's outbox evidence, which every tail's
+/// validation reads, is measured once.
+pub(super) fn window_work(
     conn: &Connection,
     doc: &DocKey,
     lineage: &str,
     stop: Stop<'_>,
     working: &mut Work<'_>,
 ) -> Result<Option<WindowWork>, ApplicationError> {
+    let evidence = if working.limited() {
+        working.grow(window_workload(conn, doc, lineage)?)?;
+        Some(lineage_evidence(conn, doc, lineage)?)
+    } else {
+        None
+    };
     let Some(window) = readable(super::settled_base::released_window(conn, doc, lineage))? else {
         return Ok(Some(WindowWork::Invalid));
     };
     let mut tails = Vec::new();
     for (namespace, activation_id) in window {
+        let mut validating = stop.working();
+        if validating.limited() {
+            validating.grow(activation_workload(conn, &namespace, &activation_id)?)?;
+        }
         let release = readable(super::retirement::released_binding(
             conn,
             &namespace,
@@ -1438,8 +1458,8 @@ fn window_work(
         });
         let unproven = match release {
             Some(_) => {
-                if working.limited() {
-                    working.grow(tail_workload(conn, &namespace, doc, lineage, &activation_id)?)?;
+                if let Some(evidence) = &evidence {
+                    validating.grow(evidence.tail_workload(conn, &namespace, doc, lineage, &activation_id)?)?;
                 }
                 readable(super::retirement::unproven_retained(
                     conn,
@@ -1469,69 +1489,236 @@ fn window_work(
             ),
             None => (RetainedCoverage::Invalid, TailWork::default()),
         };
-        tails.push((
-            ProtectedTail {
-                namespace,
-                activation_id,
-                release,
-                coverage,
-            },
-            work,
-        ));
+        let tail = ProtectedTail {
+            namespace,
+            activation_id,
+            release,
+            coverage,
+        };
+        let kept = tail_kept_bytes(&tail, &work);
+        drop(validating);
+        working.grow(kept)?;
+        tails.push((tail, work));
     }
     Ok((!tails.is_empty()).then_some(WindowWork::Listed(tails)))
 }
 
+/// What a validated tail and its work keep: their text and places, its
+/// contributions' and contradictions' included, and its namespace again
+/// where inspection names the work it reads. The window's reservation holds
+/// its namespace and activation as they are listed.
+pub(super) fn tail_kept_bytes(tail: &ProtectedTail, work: &TailWork) -> u64 {
+    use std::mem::size_of;
+    let contributions = work.contributions.capacity() * size_of::<RetainedContribution>()
+        + work
+            .contributions
+            .iter()
+            .map(RetainedContribution::text_bytes)
+            .sum::<usize>();
+    let contradictions = work.contradictions.capacity() * size_of::<PreservationFinding>()
+        + work
+            .contradictions
+            .iter()
+            .map(|found| {
+                found.namespace.as_ref().map_or(0, String::capacity)
+                    + found.contribution.as_ref().map_or(0, ContributionLocator::text_bytes)
+            })
+            .sum::<usize>();
+    let place = 2 * size_of::<(ProtectedTail, TailWork)>()
+        + tail.release.as_ref().map_or(0, |release| release.path.capacity())
+        + tail.namespace.len();
+    u64::try_from(contributions + contradictions + place).unwrap_or(u64::MAX)
+}
+
+/// A stored count or length, which is never negative.
+fn unsigned(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or(0)
+}
+
 /// The most memory validating a tail holds for each byte of the evidence it
-/// reads: that evidence decoded, the contributions and contradictions it
-/// keeps of it, and the lists they join, with room for each to double.
+/// holds read at once: that evidence decoded, and what it lists of it, with
+/// room for each list to double.
 const VALIDATION_BYTES_PER_STORED_BYTE: u64 = 8;
 
-/// What validating a tail holds for each entry or activation it reads,
-/// beyond that entry's bytes: its place in each list and set it joins.
+/// What validating a tail holds beyond the bytes it reads: the row it
+/// reads at a time, and the statements and sets it reads them with.
 const VALIDATED_ROW_BYTES: u64 = 1024;
 
-/// What validating the tail `tail` of `namespace` holds at most, from the
-/// stored sizes of what it reads, read before it reads any: its release's
-/// boundary and Carried manifest, every outbox entry of the lineage and
-/// every activation of the namespace, each read, decoded and kept once.
-fn tail_workload(
+/// What one name a window or chain lists holds beyond its text: its place
+/// in the list or set, with room for each to double.
+const LISTED_NAME_BYTES: u64 = 128;
+
+/// What a tail keeps of one outbox entry beyond the text it reads of it:
+/// its place in the tail's work with room to double, and its authors'
+/// canonical keys.
+const KEPT_ENTRY_BYTES: u64 = 2 * std::mem::size_of::<RetainedContribution>() as u64 + 256;
+
+/// The stored length of every text column of an activation's row that
+/// reading it whole keeps.
+const ACTIVATION_TEXT_SQL: &str = "coalesce(octet_length(relay_database_namespace),0)\
+    +coalesce(octet_length(activation_id),0)+coalesce(octet_length(binding_json),0)\
+    +coalesce(octet_length(source_moment_id),0)+coalesce(octet_length(source_digest),0)\
+    +coalesce(octet_length(host_coordinate_json),0)+coalesce(octet_length(evidence_digest),0)\
+    +coalesce(octet_length(coverage_digest),0)+coalesce(octet_length(terminal_receipt_json),0)\
+    +coalesce(octet_length(workspace_id),0)+coalesce(octet_length(main_version_id),0)\
+    +coalesce(octet_length(object_id),0)+coalesce(octet_length(lineage_claim_id),0)\
+    +coalesce(octet_length(predecessor_activation_id),0)";
+
+/// What reading one activation of `text` stored bytes and decoding its
+/// binding hold.
+fn activation_bytes(text: u64) -> u64 {
+    text.saturating_mul(VALIDATION_BYTES_PER_STORED_BYTE)
+        .saturating_add(VALIDATED_ROW_BYTES)
+}
+
+/// What reading the released window of `doc`'s `lineage` holds at most,
+/// from its activations' stored lengths, read before any is: each
+/// namespace and tail it lists, as listed and as each tail keeps them, and
+/// the lineage's current activation, read whole, when it has one.
+pub(super) fn window_workload(
     conn: &Connection,
-    namespace: &str,
     doc: &DocKey,
     lineage: &str,
-    tail: &str,
 ) -> Result<u64, ApplicationError> {
-    let (released, entries, entry_bytes, activations): (Option<i64>, i64, Option<i64>, i64) = conn
+    let (activations, names, current): (i64, i64, i64) = conn
+        .prepare_cached(&format!(
+            "SELECT count(*),
+               coalesce(sum(octet_length(relay_database_namespace)+octet_length(activation_id)),0),
+               coalesce(max(CASE WHEN released_at_ms IS NULL THEN {ACTIVATION_TEXT_SQL} END),0)
+             FROM live_owner_activations WHERE workspace_id=?1 AND main_version_id=?2
+             AND object_id=?3 AND lineage_claim_id=?4"
+        ))
+        .map_err(read_sql)?
+        .query_row(
+            params![doc.workspace_id, doc.version_id, doc.object_id, lineage],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(read_sql)?;
+    Ok(unsigned(names)
+        .saturating_mul(2)
+        .saturating_add(unsigned(activations).saturating_mul(2 * LISTED_NAME_BYTES))
+        .saturating_add(activation_bytes(unsigned(current))))
+}
+
+/// What reading the activation `activation_id` of `namespace` and decoding
+/// its binding hold, from its stored lengths, read before it is.
+pub(super) fn activation_workload(
+    conn: &Connection,
+    namespace: &str,
+    activation_id: &str,
+) -> Result<u64, ApplicationError> {
+    let text: Option<i64> = conn
+        .prepare_cached(&format!(
+            "SELECT {ACTIVATION_TEXT_SQL} FROM live_owner_activations
+             WHERE relay_database_namespace=?1 AND activation_id=?2"
+        ))
+        .map_err(read_sql)?
+        .query_row(params![namespace, activation_id], |row| row.get(0))
+        .optional()
+        .map_err(read_sql)?;
+    Ok(activation_bytes(unsigned(text.unwrap_or(0))))
+}
+
+/// What validating any tail of a lineage reads of its outbox evidence, from
+/// its entries' stored lengths: how many there are, the text a tail keeps
+/// of all of them at most, and the longest, which it reads and decodes
+/// alone.
+pub(super) struct LineageEvidence {
+    entries: u64,
+    kept_text: u64,
+    longest: u64,
+}
+
+/// The outbox evidence of `doc`'s `lineage`, measured once for every tail.
+pub(super) fn lineage_evidence(
+    conn: &Connection,
+    doc: &DocKey,
+    lineage: &str,
+) -> Result<LineageEvidence, ApplicationError> {
+    let (entries, kept_text, longest): (i64, i64, i64) = conn
         .prepare_cached(
-            "SELECT
-               (SELECT octet_length(released_boundary_json)+octet_length(carried_manifest_json)
-                FROM live_owner_activations WHERE relay_database_namespace=?1 AND activation_id=?2),
-               count(*),
-               sum(octet_length(e.outbox_id)+octet_length(e.append_key)+octet_length(e.delivery_id)
+            "SELECT count(*),
+               coalesce(sum(octet_length(e.outbox_id)+octet_length(e.delivery_id)
                  +octet_length(e.update_digest)+coalesce(octet_length(e.native_source_json),0)
+                 +coalesce(octet_length(e.agent_declaration_json),0)
+                 +coalesce(octet_length(e.automation_declaration_json),0)),0),
+               coalesce(max(octet_length(e.outbox_id)+octet_length(e.append_key)
+                 +octet_length(e.delivery_id)+octet_length(e.update_digest)
+                 +coalesce(octet_length(e.native_source_json),0)
                  +coalesce(octet_length(e.accepted_receipt_json),0)
                  +coalesce(octet_length(e.terminal_reason),0)
                  +coalesce(octet_length(e.agent_declaration_json),0)
-                 +coalesce(octet_length(e.automation_declaration_json),0)),
-               (SELECT count(*) FROM live_owner_activations WHERE relay_database_namespace=?1)
+                 +coalesce(octet_length(e.automation_declaration_json),0)),0)
              FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id
-             WHERE o.workspace_id=?3 AND o.main_version_id=?4 AND o.object_id=?5
-             AND o.lineage_claim_id=?6",
+             WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3
+             AND o.lineage_claim_id=?4",
         )
         .map_err(read_sql)?
         .query_row(
-            params![namespace, tail, doc.workspace_id, doc.version_id, doc.object_id, lineage],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            params![doc.workspace_id, doc.version_id, doc.object_id, lineage],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(read_sql)?;
-    let stored = |value: i64| u64::try_from(value).unwrap_or(0);
-    Ok(stored(released.unwrap_or(0))
-        .saturating_add(stored(entry_bytes.unwrap_or(0)))
-        .saturating_mul(VALIDATION_BYTES_PER_STORED_BYTE)
-        .saturating_add(
-            stored(entries)
-                .saturating_add(stored(activations))
-                .saturating_mul(VALIDATED_ROW_BYTES),
-        ))
+    Ok(LineageEvidence {
+        entries: unsigned(entries),
+        kept_text: unsigned(kept_text),
+        longest: unsigned(longest),
+    })
+}
+
+impl LineageEvidence {
+    /// What validating the tail `tail` of `namespace` holds at most beside
+    /// reading its activation, from stored lengths read before it reads
+    /// any: its release's boundary and Carried manifest, decoded and listed
+    /// while it runs; the lineage's entries one at a time, and what it keeps
+    /// of all of them; the namespace's activations and an adoption's
+    /// capture one at a time, and the identities of its chain.
+    pub(super) fn tail_workload(
+        &self,
+        conn: &Connection,
+        namespace: &str,
+        doc: &DocKey,
+        lineage: &str,
+        tail: &str,
+    ) -> Result<u64, ApplicationError> {
+        let (released, activations, identities, longest_activation, longest_capture): (
+            Option<i64>,
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = conn
+            .prepare_cached(&format!(
+                "SELECT
+                   (SELECT coalesce(octet_length(released_boundary_json),0)
+                      +coalesce(octet_length(carried_manifest_json),0)
+                    FROM live_owner_activations WHERE relay_database_namespace=?1 AND activation_id=?2),
+                   count(*),coalesce(sum(octet_length(activation_id)),0),
+                   coalesce(max({ACTIVATION_TEXT_SQL}),0),
+                   (SELECT coalesce(max(octet_length(descriptor_json)),0)
+                    FROM ydoc_owner_activation_sources WHERE relay_database_namespace=?1
+                    AND workspace_id=?3 AND version_id=?4 AND object_id=?5 AND lineage_claim_id=?6)
+                 FROM live_owner_activations WHERE relay_database_namespace=?1"
+            ))
+            .map_err(read_sql)?
+            .query_row(
+                params![namespace, tail, doc.workspace_id, doc.version_id, doc.object_id, lineage],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .map_err(read_sql)?;
+        let decoded = unsigned(released.unwrap_or(0))
+            .saturating_add(self.longest)
+            .saturating_add(unsigned(longest_activation))
+            .saturating_add(unsigned(longest_capture))
+            .saturating_mul(VALIDATION_BYTES_PER_STORED_BYTE);
+        let chain = unsigned(identities)
+            .saturating_add(unsigned(activations).saturating_mul(LISTED_NAME_BYTES));
+        let kept = self
+            .kept_text
+            .saturating_add(self.entries.saturating_mul(KEPT_ENTRY_BYTES));
+        Ok(decoded
+            .saturating_add(chain)
+            .saturating_add(kept)
+            .saturating_add(VALIDATED_ROW_BYTES))
+    }
 }

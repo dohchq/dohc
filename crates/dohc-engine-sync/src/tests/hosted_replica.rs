@@ -6497,8 +6497,9 @@ fn a_held_proofs_work_on_the_writer_stays_the_same_however_many_namespaces_it_ho
 
 /// Sol's r2c-3c-6 finding 2 and Opus's finding 3: a proof reserves what
 /// decoding its hold's binding holds, from the binding's stored length,
-/// before it reads it. Under a budget smaller than that, it decodes nothing,
-/// its callers hear it is too large, and nothing reserved passes the budget.
+/// before it reads it. Under a budget smaller than that, it decodes nothing
+/// and its callers hear it is too large. The decode count is the evidence:
+/// the budget never reserves past itself, so a peak within it shows nothing.
 #[test]
 fn a_proof_reserves_its_binding_before_it_decodes_it() {
     use dohc_engine_collab::live_update_application::{
@@ -6540,7 +6541,6 @@ fn a_proof_reserves_its_binding_before_it_decodes_it() {
     assert_eq!(cancelled, Some(true), "it stopped");
     assert_eq!(stopped, Some(ProofStop::TooLarge));
     assert_eq!(decodes, 0, "it decoded nothing");
-    assert!(limit.peak_reserved_bytes() <= budget);
 }
 
 /// Binding version 2 replaced version 1, which nothing reads: a hold that

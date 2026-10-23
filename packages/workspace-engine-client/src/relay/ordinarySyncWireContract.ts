@@ -147,8 +147,8 @@ const MAX_REASON_EXAMPLES = 8;
 // reason once, with how many findings gave it and where a few of them are.
 // The covered and merged work itself is in the contribution artifact, named
 // here by its SHA-256 and length; the merged list also by its commitment.
-// An artifact past what one blob streams is too large: none of the three is
-// named, and the rest still answers.
+// An artifact past what one blob streams is too large: neither its SHA-256
+// nor its length is named, and the merged commitment and the rest still answer.
 const Preservation = mutableStruct({
   status: PreservationStatus,
   reasons: Schema.mutable(Schema.Array(mutableStruct({
@@ -161,7 +161,7 @@ const Preservation = mutableStruct({
       contribution: Schema.NullOr(ContributionLocatorSchema),
     }))),
   }))),
-  mergedContributions: Schema.NullOr(mutableStruct({ count: Count, digest: Digest })),
+  mergedContributions: mutableStruct({ count: Count, digest: Digest }),
   contributionsSha256: Schema.NullOr(Digest),
   contributionsByteLength: Schema.NullOr(Count),
   contributionsTooLarge: Schema.Boolean,
@@ -312,10 +312,10 @@ const NOTHING_MERGED = mergedContributionsCommitment([]).digest;
 // current. Each reason appears once, in order, under its own status, with
 // its examples and omitted findings adding up to its total; the preservation
 // takes its worst reason's status, however few examples that reason lists.
-// The artifact, its length and the merged commitment are named exactly when
-// the artifact is not too large. The merged commitment is the canonical
-// empty one exactly when nothing merged, and only complete preservation
-// carries text, whose digest and length must name it.
+// The artifact and its length are named exactly when the artifact is not too
+// large; the merged commitment always is. The merged commitment is the
+// canonical empty one exactly when nothing merged, and only complete
+// preservation carries text, whose digest and length must name it.
 function checkHeldInspection(inspected: HeldDocumentInspection): void {
   const method = "sync.heldDocument";
   const preservation = inspected.preservation;
@@ -333,10 +333,10 @@ function checkHeldInspection(inspected: HeldDocumentInspection): void {
     worst = Math.max(worst, PRESERVATION_STATUSES.indexOf(found.status));
   });
   const { mergedContributions: merged, contributionsSha256: sha256, contributionsByteLength: byteLength } = preservation;
+  if ((merged.count === 0) !== (merged.digest === NOTHING_MERGED)) throw invalid();
   if (preservation.contributionsTooLarge) {
-    if (merged !== null || sha256 !== null || byteLength !== null) throw invalid();
-  } else if (merged === null || sha256 === null || byteLength === null ||
-    (merged.count === 0) !== (merged.digest === NOTHING_MERGED) || merged.digest === sha256 || byteLength < 1) {
+    if (sha256 !== null || byteLength !== null) throw invalid();
+  } else if (sha256 === null || byteLength === null || merged.digest === sha256 || byteLength < 1) {
     throw invalid();
   }
   const complete = preservation.status === "complete";
@@ -374,7 +374,7 @@ const CONTRIBUTIONS_KEYS = "binding,coveredContributions,mergedContributionIds,v
 export function decodeHeldContributions(bytes: Uint8Array, inspected: HeldDocumentInspection): HeldContributions {
   const preservation = inspected.preservation;
   const invalid = () => new ProtocolShapeError("held document contributions do not match their inspection");
-  if (inspected.status !== "current" || preservation === null || preservation.mergedContributions === null ||
+  if (inspected.status !== "current" || preservation === null || preservation.contributionsTooLarge ||
     bytes.length !== preservation.contributionsByteLength ||
     createHash("sha256").update(bytes).digest("hex") !== preservation.contributionsSha256) throw invalid();
   const committed = preservation.mergedContributions;

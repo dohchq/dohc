@@ -38,12 +38,56 @@ impl UnprovenCommitment {
     /// in [`Self::of`]'s encoding; none of them hash as the canonical empty
     /// array. What inspection names the merged list by.
     pub fn of_listed(contributions: &[RetainedContribution]) -> Self {
-        let mut out = String::new();
-        write_canonical(
-            &Value::Array(contributions.iter().map(contribution_value).collect()),
-            &mut out,
-        );
-        Self::committed(contributions.len(), &out)
+        match Self::streamed(contributions, || Ok::<(), std::convert::Infallible>(())) {
+            Ok(commitment) => commitment,
+            Err(never) => match never {},
+        }
+    }
+
+    /// [`Self::of_listed`] of a preservation's `merged` list, for an
+    /// inspection whose artifact is too large to encode: one contribution's
+    /// JSON held at a time, reserved through `stop` before it is written,
+    /// and `stop` checked every [`ARTIFACT_CHECK_EVERY`] contributions.
+    pub fn of_merged(
+        merged: &[RetainedContribution],
+        stop: Stop<'_>,
+    ) -> Result<Self, ApplicationError> {
+        let mut unit = stop.working();
+        if unit.limited() {
+            let longest = merged.iter().map(RetainedContribution::text_bytes).max();
+            unit.grow(json_bytes(longest.unwrap_or(0)))?;
+        }
+        Self::streamed(merged, || stop.check(ProofStage::Encoding))
+    }
+
+    /// The commitment to `contributions`, already in canonical order, each
+    /// written as canonical JSON in turn and hashed as it goes, so their
+    /// array is never held whole; `check` runs before every
+    /// [`ARTIFACT_CHECK_EVERY`] of them.
+    fn streamed<E>(
+        contributions: &[RetainedContribution],
+        mut check: impl FnMut() -> Result<(), E>,
+    ) -> Result<Self, E> {
+        let mut digest = Sha256::new();
+        digest.update(CONTRIBUTIONS_DOMAIN);
+        digest.update(b"[");
+        let mut unit = String::new();
+        for (index, contribution) in contributions.iter().enumerate() {
+            if index % ARTIFACT_CHECK_EVERY == 0 {
+                check()?;
+            }
+            unit.clear();
+            if index > 0 {
+                unit.push(',');
+            }
+            write_canonical(&contribution_value(contribution), &mut unit);
+            digest.update(unit.as_bytes());
+        }
+        digest.update(b"]");
+        Ok(Self {
+            count: contributions.len() as i64,
+            digest: dohc_engine_storage::hex(&digest.finalize()),
+        })
     }
 
     /// The commitment to `count` contributions whose canonical array is
@@ -100,9 +144,10 @@ impl ContributionArtifact {
     /// piece it writes before appending each reserved before it starts.
     /// None, with nothing allocated past it, once it would pass the cap
     /// [`Stop::artifact_cap`], [`MAX_ARTIFACT_BYTES`] for a proof that set
-    /// none; the proof goes on. `stop` is checked before it starts, every
-    /// [`ARTIFACT_CHECK_EVERY`] tails and contributions, and around each
-    /// hash.
+    /// none; the proof goes on. One whose contributions' text alone passes
+    /// the cap is none before anything is encoded or reserved. `stop` is
+    /// checked before it starts, every [`ARTIFACT_CHECK_EVERY`] tails and
+    /// contributions, and around each hash.
     pub fn of(
         binding: &ReleasedLineageBinding,
         preservation: &Preservation,
@@ -118,6 +163,9 @@ impl ContributionArtifact {
         stop: Stop<'_>,
         cap: usize,
     ) -> Result<Option<Self>, ApplicationError> {
+        if artifact_floor(preservation) > cap {
+            return Ok(None);
+        }
         stop.check(ProofStage::Encoding)?;
         let mut buffers = stop.working();
         if buffers.limited() {
@@ -242,14 +290,35 @@ fn buffer_bytes(binding: &ReleasedLineageBinding, preservation: &Preservation) -
         .max()
         .unwrap_or(0);
     [head, tail, value]
-        .iter()
-        .map(|text| {
-            u64::try_from(*text)
-                .unwrap_or(u64::MAX)
-                .saturating_mul(JSON_BYTES_PER_TEXT_BYTE)
-                .saturating_add(JSON_OVERHEAD_BYTES)
-        })
+        .into_iter()
+        .map(json_bytes)
         .fold(0, u64::saturating_add)
+}
+
+/// What encoding one value or piece of `text` bytes as canonical JSON holds.
+fn json_bytes(text: usize) -> u64 {
+    u64::try_from(text)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(JSON_BYTES_PER_TEXT_BYTE)
+        .saturating_add(JSON_OVERHEAD_BYTES)
+}
+
+/// The fewest bytes the artifact of `preservation` holds: the text of each
+/// covered and merged contribution and of each namespace, which JSON
+/// writes whole.
+fn artifact_floor(preservation: &Preservation) -> usize {
+    let listed = |contributions: &[RetainedContribution]| {
+        contributions
+            .iter()
+            .map(RetainedContribution::text_len)
+            .sum::<usize>()
+    };
+    preservation
+        .covered
+        .iter()
+        .map(|(namespace, contributions)| namespace.len() + listed(contributions))
+        .sum::<usize>()
+        + listed(&preservation.merged)
 }
 
 /// Text that never grows past its cap, its capacity included, and reserves
@@ -1421,5 +1490,56 @@ mod tests {
         let (encoded, stopped) = encoded.expect("the proof ran");
         assert!(matches!(encoded, Ok(None)), "{encoded:?}");
         assert_eq!(stopped, None, "the proof goes on");
+    }
+
+    /// Opus's r2c-3c-8 finding 5: an artifact whose contributions' text
+    /// alone passes its cap is too large before it encodes or reserves
+    /// anything; one whose text fits but whose JSON does not is encoded
+    /// until it passes. Finding 4: either way the merged list's commitment,
+    /// hashed as a stream, is the one a whole artifact names.
+    #[test]
+    fn an_artifact_whose_text_passes_its_cap_is_too_large_without_encoding() {
+        let binding = listed();
+        let preservation = Preservation {
+            status: PreservationStatus::Complete,
+            findings: Vec::new(),
+            covered: vec![("relay-a".to_owned(), carried_and_outbox())],
+            merged: carried_and_outbox(),
+            preserved: None,
+        };
+        let whole = ContributionArtifact::of(&binding, &preservation, Stop::NEVER)
+            .unwrap()
+            .expect("within its cap");
+        let floor = artifact_floor(&preservation);
+        assert!(floor < whole.bytes.len(), "{floor} against {}", whole.bytes.len());
+
+        let scratch = dohc_test_scratch::ScratchDir::new().unwrap();
+        let store = dohc_engine_storage::EngineStore::open(&scratch.path().join("engine.db"), 1).unwrap();
+        // What the artifact answers under `cap`, how many checks it passed,
+        // and the most its proof reserved.
+        let encoded = |cap: usize| {
+            let limit = HeldProofLimit::new(1, 1 << 30, 0);
+            let proofs: HeldProofs<(), ()> = HeldProofs::new(limit.clone());
+            proofs.set_artifact_cap(cap);
+            let HeldProofAdmission::Started(run, _wait) = proofs.admit(&store, "workspace", ()).unwrap() else {
+                panic!("a free workspace starts its proof")
+            };
+            let mut answer = None;
+            run.prove(|job| {
+                answer = Some(ContributionArtifact::of(&binding, &preservation, job.stop()));
+                ((), 0)
+            });
+            (answer.expect("the proof ran"), proofs.checks_passed(), limit.peak_reserved_bytes())
+        };
+        let (answer, checks, peak) = encoded(floor - 1);
+        assert!(matches!(answer, Ok(None)), "{answer:?}");
+        assert_eq!((checks, peak), (0, 0), "nothing encoded or reserved");
+        let (answer, checks, peak) = encoded(floor);
+        assert!(matches!(answer, Ok(None)), "{answer:?}");
+        assert!(checks > 0 && peak > 0, "encoded until it passed: {checks} checks, {peak} bytes");
+
+        let streamed = UnprovenCommitment::of_merged(&preservation.merged, Stop::NEVER).unwrap();
+        assert_eq!(streamed, whole.merged);
+        assert_eq!(UnprovenCommitment::of_listed(&preservation.merged), whole.merged);
     }
 }

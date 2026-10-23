@@ -63,7 +63,7 @@ pub use released_protection::{
 #[doc(hidden)]
 pub use released_protection::{
     binding_decodes_on_this_thread, lineage_protection_checks_on_this_thread,
-    on_released_tail_reader, released_head_loads_on_this_thread,
+    on_released_tail_reader, preserve_lineage, released_head_loads_on_this_thread,
     released_tail_commitments_on_this_thread,
     released_tail_scans, released_tail_scans_on_this_thread,
 };
