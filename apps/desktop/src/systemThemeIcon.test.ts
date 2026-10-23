@@ -1,7 +1,6 @@
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
-  applyDesktopIconToPlatform,
   resolveDesktopIconDirectory,
   resolveSystemThemeIconPath,
   systemThemeIconFileName,
@@ -28,35 +27,6 @@ describe("system theme app icon", () => {
         moduleDirectory: "dist/main",
       }),
     ).toBe(join("dist/main", "../../build"));
-  });
-
-  it.each(["win32", "linux"] as const)(
-    "updates every %s window icon",
-    (platform) => {
-      const firstWindow = { setIcon: vi.fn() };
-      const secondWindow = { setIcon: vi.fn() };
-
-      applyDesktopIconToPlatform({
-        platform,
-        iconPath: "icon-dark.png",
-        windows: [firstWindow, secondWindow],
-      });
-
-      expect(firstWindow.setIcon).toHaveBeenCalledWith("icon-dark.png");
-      expect(secondWindow.setIcon).toHaveBeenCalledWith("icon-dark.png");
-    },
-  );
-
-  it("leaves macOS to the package icon and never calls the unsupported window API", () => {
-    const window = { setIcon: vi.fn() };
-
-    applyDesktopIconToPlatform({
-      platform: "darwin",
-      iconPath: "icon-dark.png",
-      windows: [window],
-    });
-
-    expect(window.setIcon).not.toHaveBeenCalled();
   });
 
   it("falls back to the packaging icon when themed assets are unavailable", () => {
