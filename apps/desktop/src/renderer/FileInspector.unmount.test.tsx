@@ -11,6 +11,12 @@ import { resetOrphanedDrafts } from "./orphanedDrafts";
 import * as orphanedDraftsModule from "./orphanedDrafts";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import { getSharedLocalDocument } from "./sharedLocalDocument";
+
+// A note stays read-only until its lossy-note check answers and the engine
+// open that follows it settles.
+async function waitForEditable(): Promise<void> {
+  await waitFor(() => expect(screen.getByTestId("markdown-edit-toggle").hasAttribute("disabled")).toBe(false));
+}
 import { documentVersionKey } from "./documentVersionKey";
 import { lineSpanInText } from "./FileInspector.text-fixture";
 import {
@@ -155,6 +161,7 @@ describe("markdown editor unmount flush", () => {
     const user = userEvent.setup();
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
     await screen.findByTestId("view-markdown");
+    await waitForEditable();
     await user.click(screen.getByTestId("markdown-edit-toggle"));
     await typeInMarkdownEditor(
       user,
@@ -1327,6 +1334,7 @@ describe("markdown editor unmount flush", () => {
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     await screen.findByTestId("view-markdown");
+    await waitForEditable();
     // Properties render inline under the title now — no toggle to open.
     await screen.findByTestId("properties-panel");
     await user.clear(screen.getByDisplayValue("draft"));
@@ -5981,6 +5989,7 @@ describe("markdown editor unmount flush", () => {
     );
 
     await screen.findByTestId("view-markdown");
+    await waitForEditable();
     // Large docs open in read mode; properties still render inline (editable).
     await screen.findByTestId("properties-panel");
     await user.clear(screen.getByDisplayValue("draft"));

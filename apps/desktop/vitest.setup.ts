@@ -1,4 +1,4 @@
-import { vi } from "vitest";
+import { afterEach, vi } from "vitest";
 
 // jsdom implements no hit testing: document.elementFromPoint does not exist.
 //
@@ -92,3 +92,38 @@ vi.waitFor = (callback, options) =>
       ? options
       : { timeout: 10_000, ...options },
   );
+
+// jsdom has no Worker. Every opening note asks the note-check worker
+// (src/renderer/editor/lossyNote.ts) whether it is a lossy note, so renderer
+// tests answer that one worker in-thread with the same check. Any other
+// worker still fails to construct, as it does without this.
+if (typeof window !== "undefined" && typeof globalThis.Worker === "undefined") {
+  const { isLossyMarkdown, sessionVerdict } = await import("@dohc/ydoc-projection/lossy-markdown");
+  class NoteCheckWorker {
+    onmessage: ((event: { data: unknown }) => void) | null = null;
+    onerror: ((event: unknown) => void) | null = null;
+    #closed = false;
+    constructor(url: URL | string) {
+      if (!String(url).includes("lossyNote.worker")) {
+        throw new ReferenceError("Worker is not defined");
+      }
+    }
+    postMessage(data: { id: number; markdown?: string; state?: Uint8Array }): void {
+      void Promise.resolve().then(() => {
+        const answer = data.state ? sessionVerdict(data.state) : { lossy: isLossyMarkdown(data.markdown ?? "") };
+        if (!this.#closed) this.onmessage?.({ data: { id: data.id, ...answer } });
+      });
+    }
+    terminate(): void {
+      this.#closed = true;
+    }
+  }
+  Object.defineProperty(globalThis, "Worker", { configurable: true, writable: true, value: NoteCheckWorker });
+}
+// Tests reuse made-up content hashes for different text, and some stub the
+// worker, so no verdict or check outlives its test. A shared test worker keeps
+// the stub above across files, so every file resets after each test.
+if (typeof window !== "undefined") {
+  const { resetLossyNoteCheckForTests } = await import("./src/renderer/editor/lossyNote");
+  afterEach(() => resetLossyNoteCheckForTests());
+}
