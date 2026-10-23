@@ -1016,6 +1016,8 @@ it("credits each state of a lineage change only with its own lineage's rows", as
   add("ydoc.update","predecessor editor",{lineageClaimId:predecessor.lineageClaimId});
   f.save(f.view("predecessor",predecessor));
   // The successor's first pin starts at the predecessor's last cut, so it spans both lineages.
+  // Known gap (#2541): the late predecessor editor's edit may survive into the successor, but relay
+  // storage can't yet prove which resolution was installed or which side it kept, so no pin credits it.
   add("ydoc.update","late predecessor editor",{lineageClaimId:predecessor.lineageClaimId});
   add("ydoc.update","successor editor",{lineageClaimId:successor.lineageClaimId});
   add("ydoc.update","stale predecessor editor",{lineageClaimId:predecessor.lineageClaimId});
