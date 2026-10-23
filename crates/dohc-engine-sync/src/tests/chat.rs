@@ -1425,6 +1425,230 @@ fn another_computers_automation_message_applies_without_its_automation() {
     assert_eq!(replayed, ("automation".to_owned(), "Ana".to_owned()));
 }
 
+/// A link holder's post in the imported Group, as the relay writes it.
+fn link_message_payload(message_id: &str, body: &str) -> serde_json::Value {
+    json!({
+        "messageId": message_id,
+        "threadId": "thread-imported",
+        "authorKind": "link",
+        "authorDisplayName": "Guest",
+        "linkGrantId": "grant-1",
+        "linkPrincipalId": "principal-1",
+        "body": body,
+        "createdAtMs": 30,
+    })
+}
+
+/// A link message replays with its link grant, link principal and name
+/// snapshot, names no account, and reads back the same whether it applied
+/// at once or waited for its thread.
+#[test]
+fn a_link_message_replays_with_its_link_and_no_account() {
+    use dohc_engine_domain::{ChatActorKind, ChatMessageLinkAuthor, LinkedChatStore};
+
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let message = envelope(
+        "relay-link",
+        0,
+        "chat.message.append",
+        link_message_payload("link-message", "Hi @ice"),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &message, &NoFaults).expect("link message"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    let read = LinkedChatStore::new(&mut engine)
+        .get_message("ws", "link-message")
+        .expect("read the link message");
+    assert_eq!(read.author_kind, ChatActorKind::Link);
+    assert_eq!(read.author_display_name, "Guest");
+    assert_eq!(
+        (read.author_user_id.as_deref(), read.author_owner_display_name.as_deref()),
+        (None, None)
+    );
+    let link = Some(ChatMessageLinkAuthor {
+        grant_id: "grant-1".to_owned(),
+        principal_id: "principal-1".to_owned(),
+    });
+    assert_eq!(read.link_author, link);
+    let mention: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT author_kind FROM chat_mentions WHERE message_id = 'link-message' AND handle = 'ice'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("link mention");
+    assert_eq!(mention, "link");
+
+    let mut early = link_message_payload("early-link-message", "Early");
+    early["threadId"] = json!("late-thread");
+    apply_chat_envelope(
+        &mut engine,
+        &envelope("relay-link", 1, "chat.message.append", early),
+        &NoFaults,
+    )
+    .expect("parked link message");
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+    let thread = envelope(
+        "late-thread-peer",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "late-thread",
+            "title": "Late thread",
+            "createdAtMs": 20,
+            "channelSlug": "imported"
+        }),
+    );
+    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread");
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+    let replayed = LinkedChatStore::new(&mut engine)
+        .get_message("ws", "early-link-message")
+        .expect("read the replayed link message");
+    assert_eq!(
+        (replayed.author_kind, replayed.author_user_id, replayed.link_author),
+        (ChatActorKind::Link, None, link)
+    );
+}
+
+/// A link message names its link and nothing account-shaped, and stays
+/// within the link body cap; no other message names a link. Each refusal is
+/// recorded and acked, and the next op applies.
+#[test]
+fn a_link_message_with_an_account_or_without_its_link_is_refused() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let mut forged = Vec::new();
+    for (field, value) in [
+        ("authorUserId", json!("ana")),
+        ("authorOwnerDisplayName", json!("Ana")),
+        ("origin", json!("cli")),
+        ("chainDepth", json!(1)),
+        ("linkGrantId", json!(" grant-1")),
+        ("linkPrincipalId", json!("")),
+        ("authorKind", json!("human")),
+    ] {
+        let mut payload = link_message_payload("forged", "Hi");
+        payload[field] = value;
+        forged.push(payload);
+    }
+    for field in ["linkGrantId", "linkPrincipalId"] {
+        let mut payload = link_message_payload("forged", "Hi");
+        payload.as_object_mut().expect("payload").remove(field);
+        forged.push(payload);
+    }
+    forged.push(link_message_payload(
+        "forged",
+        &"a".repeat(dohc_engine_domain::chats::MAX_LINK_MESSAGE_BODY_BYTES + 1),
+    ));
+    let next = forged.len() as i64;
+    for (seq, payload) in forged.into_iter().enumerate() {
+        let op = envelope("relay-link", seq as i64, "chat.message.append", payload);
+        assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
+    }
+    let stored: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_messages WHERE message_id = 'forged'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("forged count");
+    assert_eq!(stored, 0);
+    let at_cap = envelope(
+        "relay-link",
+        next,
+        "chat.message.append",
+        link_message_payload(
+            "at-cap",
+            &"a".repeat(dohc_engine_domain::chats::MAX_LINK_MESSAGE_BODY_BYTES),
+        ),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &at_cap, &NoFaults).expect("link message at the cap"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+}
+
+/// A desktop that predates an author kind refuses its messages for good, the
+/// way this build refuses a kind newer than itself: the refusal is recorded
+/// and acked, nothing is stored, and the workspace's next op applies.
+#[test]
+fn a_message_from_an_unknown_author_kind_is_refused_and_the_workspace_continues() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let mut newer = link_message_payload("newer-kind", "Hi");
+    newer["authorKind"] = json!("future-kind");
+    let op = envelope("peer", 3, "chat.message.append", newer);
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
+    let (refusal, stored): ((String, String), i64) = engine
+        .read_with(|conn| {
+            Ok::<_, dohc_engine_storage::StorageError>((
+                conn.query_row(
+                    "SELECT op_kind, reason_message FROM replication_pending_refusals \
+                     WHERE origin_id = 'peer' AND origin_seq = 3",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_messages WHERE message_id = 'newer-kind'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
+            ))
+        })
+        .expect("refusal");
+    assert_eq!(
+        refusal,
+        (
+            "chat.message.append".to_owned(),
+            "chat message payload is invalid".to_owned()
+        )
+    );
+    assert_eq!(stored, 0);
+    let next = group_message("peer", 4, "after-newer", "thread-imported", "human", "Still here");
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &next, &NoFaults).expect("next op"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+}
+
+/// A link holder's post starts no Group automation, even one whose prefix it
+/// matches. A member's same post does.
+#[test]
+fn a_link_post_claims_no_group_automation() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    subscribe_imported_group(&mut engine);
+    let link = envelope(
+        "relay-link",
+        0,
+        "chat.message.append",
+        link_message_payload("link-task", "/task Buy tickets"),
+    );
+    assert!(applied_claims(apply_chat_envelope(&mut engine, &link, &NoFaults)).is_empty());
+    let member = group_message(
+        "peer",
+        3,
+        "member-task",
+        "thread-imported",
+        "human",
+        "/task Buy tickets",
+    );
+    assert_eq!(
+        applied_claims(apply_chat_envelope(&mut engine, &member, &NoFaults)).len(),
+        1
+    );
+}
+
 fn applied_claims(
     outcome: Result<ApplyOutcome<Vec<dohc_engine_domain::AutomationClaim>>, SyncError>,
 ) -> Vec<dohc_engine_domain::AutomationClaim> {

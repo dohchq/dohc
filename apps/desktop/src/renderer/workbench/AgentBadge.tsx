@@ -53,16 +53,16 @@ export function isOwnAuthor(
       author.authorOwnerDisplayName === yourName;
 }
 
-/** isOwnAuthor with this window's names, the same function until they change. */
+/** isOwnAuthor with this window's names, the same function until they change. A link holder is never you, whatever name they chose. */
 export function useIsOwnAuthor(): (
-  kind: "human" | "agent" | "automation",
+  kind: "human" | "agent" | "automation" | "link",
   author: AgentAuthor,
   viewerAuthorId: string | undefined,
 ) => boolean {
   const names = useContext(YourNamesContext);
   return useCallback(
     (kind, author, viewerAuthorId) =>
-      kind !== "automation" && isOwnAuthor(kind, author, viewerAuthorId, names),
+      (kind === "human" || kind === "agent") && isOwnAuthor(kind, author, viewerAuthorId, names),
     [names],
   );
 }

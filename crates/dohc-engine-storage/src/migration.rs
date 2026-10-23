@@ -3373,6 +3373,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
               WHERE release_blocked IS NOT NULL;",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 68,
+        id: "v2-chat-link-author",
+        sql: include_str!("chat_link_author.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// Documents whose file a `ydoc.open` found on disk while the version had no
@@ -4448,6 +4454,10 @@ mod tests {
                 "v2-retained-release-blocked",
                 "16b4bee68d7fde08b97ade0bd28c4969c185b73bb65bf54ceb6006bfeaee40ff",
             ),
+            (
+                "v2-chat-link-author",
+                "df66305d38c45f82758264505b913da8c3aa3e08ec72d03b1b9e54f73ded5c56",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -4664,7 +4674,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
             MigrationOutcome::Applied { newly_applied: 1 }
         );
         let rows = crate::materialize::retained_rows(&conn, 0).unwrap();
@@ -6267,6 +6277,139 @@ mod tests {
             [],
         )
         .expect("an automation mention");
+    }
+
+    /// Messages, mentions and pending dispatch discovery written before link
+    /// authors keep every row, and every chat trigger and view keeps its
+    /// definition. The rebuilt tables take a link message only with its grant
+    /// and link principal, and never with an account.
+    #[test]
+    fn chat_rows_from_before_link_authors_upgrade_unchanged() {
+        let dir = tempdir();
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let before = migration_index("v2-chat-link-author");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 67);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO chat_threads (workspace_id, thread_id, title, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', 'thread-1', '', 1, 1); \
+             INSERT INTO chat_messages \
+                 (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, \
+                  author_user_id, body, created_at_ms, automation_id, chain_depth, author_actor_key) \
+                 VALUES ('ws', 'thread-1', 0, 'message-1', 'human', 'Ice', 'user-ice', 'Hi @ana', 2, NULL, NULL, '{\"kind\":\"unknown\"}'), \
+                        ('ws', 'thread-1', 1, 'message-2', 'automation', 'Stamp', NULL, 'Done', 3, 'collection:Tasks#stamp', 1, NULL); \
+             INSERT INTO chat_mentions (workspace_id, thread_id, message_id, handle, author_kind, created_at_ms) \
+                 VALUES ('ws', 'thread-1', 'message-1', 'ana', 'human', 2); \
+             INSERT INTO chat_dispatch_local_discovery (workspace_id, message_id) VALUES ('ws', 'message-1');",
+        )
+        .unwrap();
+        let definitions = |conn: &Connection| -> Vec<(String, String)> {
+            conn.prepare("SELECT name, sql FROM sqlite_schema WHERE type IN ('trigger', 'view') ORDER BY name")
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let definitions_before = definitions(&conn);
+        assert!(
+            definitions_before
+                .iter()
+                .any(|(name, _)| name == "conversation_file_link_message_insert")
+        );
+        // DROP TABLE cascades only with foreign keys on, as every store opens.
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        assert_eq!(definitions(&conn), definitions_before);
+        let legacy: i64 = conn
+            .query_row("PRAGMA legacy_alter_table", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(legacy, 0, "the migration leaves renames in their normal mode");
+
+        type Row = (String, String, Option<String>, Option<String>, Option<String>, Option<String>);
+        let rows: Vec<Row> = conn
+            .prepare(
+                "SELECT message_id, author_kind, author_user_id, automation_id, author_actor_key, link_grant_id \
+                 FROM chat_messages ORDER BY message_order",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "message-1".into(),
+                    "human".into(),
+                    Some("user-ice".into()),
+                    None,
+                    Some(r#"{"kind":"unknown"}"#.into()),
+                    None
+                ),
+                (
+                    "message-2".into(),
+                    "automation".into(),
+                    None,
+                    Some("collection:Tasks#stamp".into()),
+                    None,
+                    None
+                ),
+            ]
+        );
+        let kept: (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM chat_mentions WHERE message_id = 'message-1' AND handle = 'ana'), \
+                        (SELECT COUNT(*) FROM chat_dispatch_local_discovery WHERE message_id = 'message-1')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(kept, (1, 1), "the mention and the pending discovery row survive");
+        let violations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(violations, 0);
+
+        let insert = |order: i64, kind: &str, user: Option<&str>, grant: Option<&str>, principal: Option<&str>| {
+            conn.execute(
+                "INSERT INTO chat_messages \
+                     (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, \
+                      author_user_id, body, created_at_ms, link_grant_id, link_principal_id) \
+                 VALUES ('ws', 'thread-1', ?1, ?2, ?3, 'Guest', ?4, 'Hello', 4, ?5, ?6)",
+                rusqlite::params![order, format!("message-{order}"), kind, user, grant, principal],
+            )
+        };
+        insert(10, "link", None, Some("grant-1"), Some("principal-1")).expect("a link message");
+        assert!(
+            insert(11, "link", Some("user-ice"), Some("grant-1"), Some("principal-1")).is_err(),
+            "a link message names no account"
+        );
+        assert!(
+            insert(12, "link", None, Some("grant-1"), None).is_err(),
+            "a link message names its link principal"
+        );
+        assert!(
+            insert(13, "link", None, None, None).is_err(),
+            "a link message names its grant"
+        );
+        assert!(
+            insert(14, "human", Some("user-ice"), Some("grant-1"), Some("principal-1")).is_err(),
+            "only link messages name a link"
+        );
+        conn.execute(
+            "INSERT INTO chat_mentions (workspace_id, thread_id, message_id, handle, author_kind, created_at_ms) \
+             VALUES ('ws', 'thread-1', 'message-10', 'ana', 'link', 4)",
+            [],
+        )
+        .expect("a link mention");
     }
 
     /// Plugin subscriptions and claims written before the automation facts

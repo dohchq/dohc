@@ -116,7 +116,8 @@ export function createChatLinksReader(deps: {
             threadId: row.threadId, messageId: row.messageId, mentionedAtMs: row.mentionedAtMs,
             author: {
               kind: author.authorKind, displayName: author.authorDisplayName, presentation,
-              ...(author.authorOwnerDisplayName === undefined ? {} : { ownerDisplayName: author.authorOwnerDisplayName }),
+              ...(author.authorKind === "link" || author.authorOwnerDisplayName === undefined
+                ? {} : { ownerDisplayName: author.authorOwnerDisplayName }),
             },
           });
         }

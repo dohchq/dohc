@@ -3,7 +3,7 @@ import { AgentBadge } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
 import { LegendList, type LegendListRef, type OnViewableItemsChanged } from "@legendapp/list/react";
 import { formatChatDay, formatChatTime, formatClock, formatClockDigits, sameChatDay } from "../time";
-import { AgentName, ChatAvatar } from "./ChatAvatar";
+import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
 import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
 import { ComposerSendButton } from "./ComposerSendButton";
 import { Ref } from "../ui/Ref";
@@ -776,6 +776,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                   </AgentName>
                 </span>
                 {isAgent ? <AgentBadge testIdPrefix={props.testIdPrefix} author={message} viewerAuthorId={props.reactionControls?.viewerAuthorId} presentation={message.presentation} /> : null}
+                {message.authorKind === "link" ? <LinkHolderMark testId={`${props.testIdPrefix}-message-link-holder`} /> : null}
                 {message.authorKind === "automation" ? (
                   <AutomationBadge
                     testIdPrefix={props.testIdPrefix}

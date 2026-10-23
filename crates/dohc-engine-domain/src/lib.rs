@@ -77,7 +77,8 @@ pub use chats::{
     ChannelThreadSummary, ChatActorKind, ChatAgentReadState, ChatAttachment, ChatBookmark,
     ChatBookmarkTransition, ChatChannel, ChatChannelKind, ChatChannelSummary, ChatChannelType,
     ChatDecision, ChatDecisionState, ChatFeedItem, ChatFeedPage, ChatFeedReadState, ChatFollow,
-    ChatMention, ChatMessage, ChatMessageAutomation, ChatMessagePage, ChatProjectionFileAccess,
+    ChatMention, ChatMessage, ChatMessageAutomation, ChatMessageLinkAuthor, ChatMessagePage,
+    ChatProjectionFileAccess,
     ChatReaction, ChatReactionState, ChatThread, ChatThreadLane, ChatThreadProjection,
     ChatThreadReadState, CreateFileThread, DispatchClaim, DispatchRecord, DispatchRecovery,
     FeedCoordinateResolution, FeedCursorValue, FollowState, FollowTargetKind,
@@ -97,6 +98,7 @@ pub use chats::{
     reaction_id_for, render_chat_thread_projection, replay_pending_chat_coordinates_for_change,
     replay_ready_pending_chat_coordinates, resolve_feed_coordinate, resolve_follow_target,
     resolve_thread_message, thread_has_message, validate_follow_target,
+    validate_replicated_link_author,
 };
 pub use collections::{
     AgentDeclaration, AutomationDeclaration, AutomationRunAttribution, COLLECTION_SCHEMA_FILENAME,

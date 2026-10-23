@@ -1885,8 +1885,9 @@ export const ChatFileReferenceInput = z.object({
 export type ChatFileReferenceInput = z.infer<typeof ChatFileReferenceInput>;
 
 // Messages and their authors as the renderer shows them. Only the automation
-// executor in main writes an automation's message; the renderer never sends one.
-const CHAT_MESSAGE_AUTHOR_KIND = z.enum(["human", "agent", "automation"]);
+// executor in main writes an automation's message, and only the relay writes a
+// link holder's; the renderer never sends either.
+const CHAT_MESSAGE_AUTHOR_KIND = z.enum(["human", "agent", "automation", "link"]);
 // Which automation wrote a message, when it ran on this computer, and
 // where its Collection is now: null once this computer no longer has it.
 const CHAT_MESSAGE_AUTOMATION = z.object({

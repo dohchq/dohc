@@ -80,6 +80,8 @@ pub const LINKED_CHAT_PROJECTION_KIND: &str = "thread";
 
 /// Message body byte cap (64 KiB UTF-8, `normalizeBody`).
 pub const MAX_MESSAGE_BODY_BYTES: usize = 64 * 1024;
+/// A link message's body byte cap, below the general one.
+pub const MAX_LINK_MESSAGE_BODY_BYTES: usize = 8_000;
 /// Thread title char cap (`normalizeThreadTitle`).
 const MAX_THREAD_TITLE_CHARS: usize = 200;
 /// Channel name char cap (`normalizeChannelName`).
@@ -214,12 +216,15 @@ pub struct ChannelGroup {
 
 /// A chat message author kind. An automation writes only through the
 /// automation executor, which names itself with [`ChatMessageAutomation`].
+/// A link holder writes only through the relay, which names the link with
+/// [`ChatMessageLinkAuthor`]; no write on this computer is a link message.
 /// Reactions stay human or agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatActorKind {
     Human,
     Agent,
     Automation,
+    Link,
 }
 
 impl ChatActorKind {
@@ -228,6 +233,7 @@ impl ChatActorKind {
             ChatActorKind::Human => "human",
             ChatActorKind::Agent => "agent",
             ChatActorKind::Automation => "automation",
+            ChatActorKind::Link => "link",
         }
     }
     fn from_db(raw: &str) -> Result<Self, DomainError> {
@@ -235,11 +241,21 @@ impl ChatActorKind {
             "human" => Ok(ChatActorKind::Human),
             "agent" => Ok(ChatActorKind::Agent),
             "automation" => Ok(ChatActorKind::Automation),
+            "link" => Ok(ChatActorKind::Link),
             _ => Err(DomainError::StateCorrupt {
                 reason: "chat message has an unknown author kind",
             }),
         }
     }
+}
+
+/// The share link a link holder posted through: the relay-minted link grant
+/// and link principal. The message's display name is the name the holder
+/// had set when the relay wrote it. A link message names no account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatMessageLinkAuthor {
+    pub grant_id: String,
+    pub principal_id: String,
 }
 
 /// A durable chat channel row.
@@ -339,6 +355,8 @@ pub struct ChatMessage {
     pub created_at_ms: i64,
     /// Set on a message this computer's automation wrote.
     pub automation: Option<ChatMessageAutomation>,
+    /// Set on, and only on, a link message.
+    pub link_author: Option<ChatMessageLinkAuthor>,
     /// Authoritative attachment hydration. This is always present, including
     /// as an empty vector, at the domain and RPC boundaries.
     pub attachments: Vec<ChatAttachment>,
@@ -607,6 +625,7 @@ pub struct ChannelOpeningMessage {
     pub created_at_ms: i64,
     /// Set when this computer's automation wrote the message.
     pub automation: Option<ChatMessageAutomation>,
+    pub link_author: Option<ChatMessageLinkAuthor>,
     pub body_snippet: String,
     pub reactions: Vec<ChatReaction>,
 }
@@ -1562,6 +1581,16 @@ pub fn normalize_agent_owner_name(
     }
 }
 
+/// Only the relay writes a link message, so no write on this computer is one.
+fn refuse_local_link_author(author_kind: ChatActorKind) -> Result<(), DomainError> {
+    if author_kind == ChatActorKind::Link {
+        return Err(DomainError::InvalidInput {
+            reason: "only the relay writes a link message",
+        });
+    }
+    Ok(())
+}
+
 /// An automation message must name its Collection automation and chain
 /// depth, and no other message may. The id is `collection:<collection id>#<id>`, and
 /// the depth is bounded like a record change's declared depth.
@@ -1613,6 +1642,43 @@ pub fn normalize_author_user_id(value: Option<&str>) -> Result<Option<String>, D
             }
             Ok(Some(normalized.to_owned()))
         }
+    }
+}
+
+/// A replicated message's link provenance. A link message names its grant and
+/// link principal, carries no account, owner, origin or chain depth, and stays
+/// within the link body cap; no other message names a link. Ids must already
+/// be in their stored form.
+pub fn validate_replicated_link_author(
+    author_kind: &str,
+    grant_id: Option<&str>,
+    principal_id: Option<&str>,
+    account_fields: bool,
+    body: &str,
+) -> Result<Option<ChatMessageLinkAuthor>, DomainError> {
+    let invalid = || DomainError::InvalidInput {
+        reason: "chat message link author is invalid",
+    };
+    let id = |value: &str| {
+        !value.is_empty()
+            && value.encode_utf16().count() <= MAX_AUTHOR_USER_ID_CHARS
+            && value.trim_matches(is_js_trim_ws) == value
+            && !has_projection_control_char(value)
+    };
+    match (author_kind == ChatActorKind::Link.as_str(), grant_id, principal_id) {
+        (false, None, None) => Ok(None),
+        (true, Some(grant_id), Some(principal_id))
+            if id(grant_id)
+                && id(principal_id)
+                && !account_fields
+                && body.len() <= MAX_LINK_MESSAGE_BODY_BYTES =>
+        {
+            Ok(Some(ChatMessageLinkAuthor {
+                grant_id: grant_id.to_owned(),
+                principal_id: principal_id.to_owned(),
+            }))
+        }
+        _ => Err(invalid()),
     }
 }
 
@@ -2493,6 +2559,7 @@ impl<'a> LinkedChatStore<'a> {
                 reason: "passive store cannot originate",
             });
         }
+        refuse_local_link_author(input.author_kind)?;
         non_empty(
             &input.workspace_id,
             "invalid-channel-name",
@@ -2782,6 +2849,7 @@ impl<'a> LinkedChatStore<'a> {
                 body: body_c.clone(),
                 created_at_ms: now,
                 automation: automation.clone(),
+                link_author: None,
                 attachments: message_attachments,
             };
             claims.extend(claim_group_message_in_tx(tx, &input.workspace_id, &group_message(&message, chain_depth))?);
@@ -2813,6 +2881,7 @@ impl<'a> LinkedChatStore<'a> {
                 reason: "passive store cannot originate",
             });
         }
+        refuse_local_link_author(input.author_kind)?;
         non_empty(
             &input.workspace_id,
             "invalid-channel-name",
@@ -3090,6 +3159,7 @@ impl<'a> LinkedChatStore<'a> {
                 body: body_c.clone(),
                 created_at_ms: now,
                 automation: automation.clone(),
+                link_author: None,
                 attachments: message_attachments,
             };
             claims.extend(claim_group_message_in_tx(tx, &input.workspace_id, &group_message(&message, chain_depth))?);
@@ -3434,7 +3504,8 @@ impl<'a> LinkedChatStore<'a> {
                     .prepare_cached(
                         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
                          author_display_name, author_user_id, parent_message_id, origin, body, \
-                         created_at_ms, author_owner_display_name, automation_id, chain_depth, author_actor_key \
+                         created_at_ms, author_owner_display_name, automation_id, chain_depth, author_actor_key, \
+                         link_grant_id, link_principal_id \
                          FROM chat_messages WHERE workspace_id = ?1 \
                            AND message_id IN (SELECT value FROM json_each(?2))",
                     )
@@ -3468,6 +3539,7 @@ impl<'a> LinkedChatStore<'a> {
                         author_user_id: message.author_user_id,
                         created_at_ms: message.created_at_ms,
                         automation: message.automation,
+                        link_author: message.link_author,
                     });
                 summaries.push(ChannelThreadSummary {
                     thread,
@@ -3855,7 +3927,7 @@ impl<'a> LinkedChatStore<'a> {
                 .prepare_cached(
                     "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
                      author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-                     automation_id, chain_depth, author_actor_key \
+                     automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id \
                      FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
                        AND message_order > ?3 ORDER BY message_order ASC LIMIT ?4",
                 )
@@ -4522,12 +4594,12 @@ impl<'a> LinkedChatStore<'a> {
                     None => None,
                 };
                 let mut matched_by = Vec::new();
-                // An automation is neither a person nor an agent, so only its
-                // Group or thread follows can match it.
+                // An automation and a link holder have no account to follow,
+                // so only their Group or thread follows can match them.
                 let author_kind = match message.author_kind {
                     ChatActorKind::Agent => Some(FollowTargetKind::Agent),
                     ChatActorKind::Human => Some(FollowTargetKind::Person),
-                    ChatActorKind::Automation => None,
+                    ChatActorKind::Automation | ChatActorKind::Link => None,
                 };
                 if let (Some(author_user_id), Some(kind)) = (&message.author_user_id, author_kind)
                     && active_follow_exists(
@@ -6926,7 +6998,7 @@ fn message_by_id(
     conn.query_row(
         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-         automation_id, chain_depth, author_actor_key \
+         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id \
          FROM chat_messages WHERE workspace_id = ?1 AND message_id = ?2",
         params![workspace_id, message_id],
         map_message_row,
@@ -6946,7 +7018,7 @@ fn first_message_for_thread(
     conn.query_row(
         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-         automation_id, chain_depth, author_actor_key \
+         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id \
          FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
          ORDER BY created_at_ms, message_id LIMIT 1",
         params![workspace_id, thread_id],
@@ -7155,10 +7227,20 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
     let automation_id: Option<String> = row.get(12)?;
     let chain_depth: Option<u32> = row.get(13)?;
     let author_actor_key: Option<String> = row.get(14)?;
+    let link_grant_id: Option<String> = row.get(15)?;
+    let link_principal_id: Option<String> = row.get(16)?;
     let automation = match (automation_id, chain_depth) {
         (Some(automation_id), Some(chain_depth)) => Some(ChatMessageAutomation {
             automation_id,
             chain_depth,
+        }),
+        _ => None,
+    };
+    // The table pairs both ids with the link kind.
+    let link_author = match (link_grant_id, link_principal_id) {
+        (Some(grant_id), Some(principal_id)) => Some(ChatMessageLinkAuthor {
+            grant_id,
+            principal_id,
         }),
         _ => None,
     };
@@ -7178,6 +7260,7 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
             body,
             created_at_ms,
             automation,
+            link_author,
             attachments: Vec::new(),
         }),
     )

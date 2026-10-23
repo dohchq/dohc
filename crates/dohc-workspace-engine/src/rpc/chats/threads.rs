@@ -273,7 +273,11 @@ fn channel_thread_summary_json(summary: &ChannelThreadSummary) -> Value {
                 author_actor_key: opening.author_actor_key.as_deref(),
                 origin: opening.origin.as_deref(),
                 id: &opening.message_id,
-                author: AuthorWire::new(opening.author_kind, &opening.author_display_name),
+                author: AuthorWire::new(
+                    opening.author_kind,
+                    &opening.author_display_name,
+                    opening.link_author.as_ref(),
+                ),
                 created_at_ms: opening.created_at_ms,
                 body_snippet: &opening.body_snippet,
                 reactions: opening.reactions.iter().map(ReactionWire::from).collect(),
@@ -727,6 +731,7 @@ mod tests {
                 automation_id: "collection:tasks#stamp".to_owned(),
                 chain_depth: 2,
             }),
+            link_author: None,
             body_snippet: "hello".to_owned(),
             reactions: Vec::new(),
         };
