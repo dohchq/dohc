@@ -94,6 +94,19 @@ describe("named browser chat authorization and replication", () => {
     expect(followed.messages).toContainEqual(message);
   });
 
+  it("leaves link posts to the recipient's desktop, which gets them with their link", async () => {
+    const f = await fixture();
+    const payload = {messageId: "link-message:1", threadId: "thread-team", body: "from a link", authorKind: "link",
+      authorDisplayName: "Owner", linkGrantId: "grant-link", linkPrincipalId: "principal", createdAtMs: 5};
+    f.storage.appendLogBatch({workspaceId, originId: "relay:share-link:principal",
+      ops: [{originSeq: 0, opKind: "chat.message.append", payloadJson: JSON.stringify(payload), recordedAtMs: 5}]});
+    const page = await json(await f.call(history));
+    expect(page.messages).toEqual([expect.objectContaining({messageId: "owner-second"}), expect.objectContaining({messageId: "owner-first"})]);
+    const log = await json(await f.handler(request("alice", `/sync/shares/${shareId}/log?since=0&limit=100&channelWireId=${channelWireId}`)));
+    expect((log.ops as Array<{payload: Record<string, unknown>}>).filter(op => op.payload.messageId === payload.messageId)
+      .map(op => op.payload)).toEqual([payload]);
+  });
+
   it("lets read-only recipients read and refuses writes at both relay entry points", async () => {
     const f = await fixture();
     expect((await f.call(history, "reader")).status).toBe(200);
@@ -120,6 +133,7 @@ describe("named browser chat authorization and replication", () => {
       [{channelWireId: "wire-private"}, 404, "not_found"],
       [{ops: []}, 403, "share_op_rejected"], [{reaction: "yes"}, 403, "share_op_rejected"],
       [{attachment: "object"}, 403, "share_op_rejected"], [{authorKind: "link"}, 400, "bad_request"],
+      [{linkGrantId: "grant-0"}, 403, "share_op_rejected"], [{linkPrincipalId: "principal"}, 403, "share_op_rejected"],
       [{authorKind: "human", authorDisplayName: "Owner"}, 403, "share_op_rejected"],
       [{authorKind: "human", authorOwnerDisplayName: "Owner"}, 403, "share_op_rejected"],
       [{authorKind: "agent", authorDisplayName: "Agent", authorOwnerDisplayName: "Owner"}, 403, "share_op_rejected"],

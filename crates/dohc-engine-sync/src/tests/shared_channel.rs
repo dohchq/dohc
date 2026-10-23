@@ -722,3 +722,125 @@ fn a_shared_channel_pull_reports_the_group_message_claims_it_applied() {
         }]
     );
 }
+
+/// A link post reaches a named recipient as the relay serves it on the
+/// Group lane: with its link and no account. It applies, and claims no
+/// automation even where a person's message would.
+#[test]
+fn a_shared_channel_link_post_applies_with_its_link_and_claims_nothing() {
+    let (_scratch, _path, mut engine) = open_store();
+    let client = RelaySyncClient::new(PagedShareRelay::new(
+        [
+            (
+                0,
+                SharedChannelResponse {
+                    own_origin_id: None,
+                    ops: vec![
+                        share_op(
+                            0,
+                            "chat.channel.create",
+                            json!({
+                                "channelId": "c-shared",
+                                "name": "Trip",
+                                "slug": "trip",
+                                "kind": "channel",
+                                "createdAtMs": 1,
+                                "wireId": "channel-wire"
+                            }),
+                        ),
+                        share_op(
+                            1,
+                            "chat.thread.create",
+                            json!({
+                                "threadId": "t-shared",
+                                "title": "Plans",
+                                "createdAtMs": 2,
+                                "channelWireId": "channel-wire"
+                            }),
+                        ),
+                    ],
+                    next_cursor: 2,
+                    has_more: false,
+                    push: None,
+                },
+            ),
+            (
+                2,
+                SharedChannelResponse {
+                    own_origin_id: None,
+                    ops: vec![share_op(
+                        2,
+                        "chat.message.append",
+                        json!({
+                            "messageId": "link-message:m-task",
+                            "threadId": "t-shared",
+                            "body": "/task Book",
+                            "authorKind": "link",
+                            "authorDisplayName": "Sam",
+                            "linkGrantId": "grant-1",
+                            "linkPrincipalId": "principal-1",
+                            "createdAtMs": 12
+                        }),
+                    )],
+                    next_cursor: 3,
+                    has_more: false,
+                    push: None,
+                },
+            ),
+        ],
+        [],
+    ));
+    client
+        .pull_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
+        .expect("the Group arrives");
+    let channel_id: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT channel_id FROM chat_threads WHERE thread_id = 't-shared'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("shared Group");
+    dohc_engine_domain::watch_automation_groups(
+        &mut engine,
+        "ws",
+        &dohc_engine_domain::AutomationGroupWatch {
+            generation: 0,
+            subscriptions: vec![dohc_engine_domain::AutomationGroupSubscription {
+                automation_id: "collection:object-tasks#task".to_owned(),
+                channel_id,
+                starts_with: Some("/task".to_owned()),
+            }],
+            relay: None,
+        },
+        3,
+        &NoFaults,
+    )
+    .expect("watch");
+
+    let pulled = client
+        .pull_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
+        .expect("the link post arrives");
+    assert_eq!((pulled.applied, pulled.refused), (1, 0));
+    assert!(client.take_automation_claims().is_empty());
+    let author: (String, Option<String>, Option<String>, Option<String>) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT author_kind, author_user_id, link_grant_id, link_principal_id \
+                 FROM chat_messages WHERE message_id = 'link-message:m-task'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+        })
+        .expect("link post");
+    assert_eq!(
+        author,
+        (
+            "link".to_owned(),
+            None,
+            Some("grant-1".to_owned()),
+            Some("principal-1".to_owned())
+        )
+    );
+}
