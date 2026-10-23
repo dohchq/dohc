@@ -230,15 +230,17 @@ export function createRelaySharesIpcHandlers<
     operation.assertCurrent();assertOriginalWorkspace(operation.workspace);
     return withOwnerLiveStopTransition(input.workspaceId,input.path,async (): Promise<StopOwnerLiveDocumentResult> => {
       // Stop again writes the file a finished release could not, from that release alone.
+      // A release the engine no longer holds keeps its edits for Save recovery copy.
       const unwritten=stop && dependencies.ownerLiveQuarantines(operation.workspace).find(row => row.path===input.path && row.recovery==="not-written");
       if (unwritten) {
         const released=await dependencies.retryOwnerLiveRelease(operation.workspace,unwritten.objectId);
         operation.assertCurrent();
-        return {keptEdits:released ? keptEditsOf(released) : "none"};
+        return {keptEdits:released ? keptEditsOf(released) : "kept"};
       }
       const local=stop ? await dependencies.ownerLiveStop(operation.workspace,"request",input.path) : undefined;
       operation.assertCurrent();
-      const quarantined=local!==undefined && dependencies.ownerLiveQuarantines(operation.workspace).some(row => row.objectId===local.document.objectId);
+      // Edits an earlier release could not write are not this Stop's to claim.
+      const quarantined=local!==undefined && dependencies.ownerLiveQuarantines(operation.workspace).some(row => row.objectId===local.document.objectId && row.recovery!=="cannot-write");
       if (stop && local && !local.retirementOwed) return {keptEdits:quarantined ? "kept" : "none"};
       let result: unknown;
       try {

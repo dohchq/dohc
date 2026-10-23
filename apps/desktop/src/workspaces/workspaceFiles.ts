@@ -23,6 +23,7 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   copyFile,
+  link,
   lstat,
   mkdir,
   open,
@@ -361,6 +362,7 @@ export async function createFile(
  * returning. It never replaces a file: an existing path refuses with EEXIST.
  * The bytes reach the final name only complete, through a link from an
  * ignored temporary sibling, so a crash never leaves a cut-off file there.
+ * A drive without hard links refuses: nothing is written to the final name.
  */
 export async function createDurableFile(rootPath: string, relativePath: string, text: string,
   operations: Pick<NonNullable<Parameters<typeof atomicCreateFile>[3]>, "open" | "link"> = {}): Promise<string> {
@@ -371,8 +373,12 @@ export async function createDurableFile(rootPath: string, relativePath: string, 
   const created: { directory?: string } = {};
   const target = await newFileTarget(rootPath, relativePath, validated.normalized, created);
   const temporary = join(dirname(target), `.dohc-write-${process.pid}-${randomUUID()}.tmp`);
-  // A drive without hard links gets a direct write, as other workspace creates do.
-  if (!await atomicCreateFile(target, text, 0o666, { ...operations, temporary, allowDirectWrite: true })) {
+  const publish = operations.link ?? link;
+  const linkWhole = (source: string, destination: string) => publish(source, destination).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "EEXIST") throw error;
+    throw new Error("This drive can't save a recovery copy safely, so dohc saved nothing. Your kept edits stay on this computer.", { cause: error });
+  });
+  if (!await atomicCreateFile(target, text, 0o666, { ...operations, link: linkWhole, temporary })) {
     throw Object.assign(new Error(`EEXIST: file already exists, ${relativePath}`), { code: "EEXIST" });
   }
   // The file's own folder is synced; each folder this create made needs its entry synced in its parent.

@@ -1849,6 +1849,11 @@ export function DesktopWorkspaceShell(props: {
           message:"dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.",details,retry:stopAgain,action:save,identity});
         continue;
       }
+      if (row.recovery==="cannot-write") {
+        reportShellFailure({title:`Live editing stopped for ${row.path}`,
+          message:"dohc kept your unsent edits, but can't finish writing them to your file. Save a recovery copy to get them back.",details,action:save,identity});
+        continue;
+      }
       if (row.recovery==="stopped-kept") {
         reportShellFailure({title:`Live editing stopped for ${row.path}`,
           message:"dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.",details,action:save,identity});

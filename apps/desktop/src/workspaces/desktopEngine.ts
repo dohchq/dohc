@@ -34,7 +34,7 @@ import type {OwnerKnownRefusals} from "./ownerYDocOutbox";
 import {relayUrlsMatch} from "./syncCode";
 import {readyOwnerDeliveryDocuments, startServerOwnerDelivery} from "./serverOwnerDelivery";
 import {readOwnerLiveQuarantines, readOwnerLiveQueue, retryOwnerLiveQuarantine, type OwnerLiveHeadCache, type OwnerLiveQuarantineRecord} from "./ownerLiveQuarantine";
-import type {UnwrittenReleases} from "./ownerLiveReleases";
+import {sameBinding, type UnwrittenReleases} from "./ownerLiveReleases";
 import type {LiveRecoveryFiles} from "./ownerLiveRecoveryCopy";
 import type {DocumentProjection} from "./documentProjection";
 import {createDurableFile} from "./workspaceFiles";
@@ -168,9 +168,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   const ownerQuarantineReads = new Map<string, number>();
   const ownerQuarantineAttempts = new Map<string, number>();
   const ownerQuarantineHeads = new Map<string, OwnerLiveHeadCache>();
-  const quarantineIncident = (row: OwnerLiveQuarantineRecord) => row.outboxId === null
-    ? `release:${row.binding.lineageClaimId}:${row.binding.restoreFenceGeneration}`
-    : `${row.outboxId}:${row.headDeliveryId}:${ownerQuarantineAttempts.get(row.outboxId) ?? 0}`;
+  const quarantineIncident = (row: OwnerLiveQuarantineRecord) => row.outboxId !== null
+    ? `${row.outboxId}:${row.headDeliveryId}:${ownerQuarantineAttempts.get(row.outboxId) ?? 0}`
+    : row.binding ? `release:${row.binding.lineageClaimId}:${row.binding.restoreFenceGeneration}` : `release:${row.objectId}`;
   // Returns its own rows, which the caller can trust even when a later read owns the cache.
   async function readOwnerQuarantinesInto(workspaceId: string, client: EngineClient, workspaceHandle: string): Promise<OwnerLiveQuarantineRecord[]> {
     const read = (ownerQuarantineReads.get(workspaceId) ?? 0) + 1;
@@ -190,20 +190,21 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
    * Releases a Stop's queue into the document. For refused edits, a recovery
    * package and a record are written first: once the release commits, the
    * queue is gone, and they keep the notice, its Try again and Save recovery
-   * copy until the file holds the edits.
+   * copy until the file holds the edits, or a recovery copy does.
    */
   async function releaseOwnerLiveStop(workspaceId: string, client: EngineClient, workspaceHandle: string,
     binding: LiveObjectBinding, acceptedCursor: number, signal?: AbortSignal) {
     const kept = (await readOwnerQuarantinesInto(workspaceId, client, workspaceHandle))
-      .find(row => row.objectId === binding.objectId && row.binding.lineageClaimId === binding.lineageClaimId);
+      .find(row => row.objectId === binding.objectId && row.outboxId !== null && row.binding.lineageClaimId === binding.lineageClaimId);
     if (kept?.outboxId) {
       const {liveRecoveryPackage} = await import("./ownerLiveRecoveryCopy");
-      const queue = await readOwnerLiveQueue(client, workspaceHandle, {...kept, outboxId: kept.outboxId});
-      await dependencies.ownerLiveReleases.put({workspaceId, objectId: binding.objectId, path: kept.path, reason: kept.reason, binding},
+      const queue = await readOwnerLiveQueue(client, workspaceHandle, kept);
+      await dependencies.ownerLiveReleases.put({workspaceId, objectId: binding.objectId, path: kept.path, reason: kept.reason, binding, retry: true},
         JSON.stringify(liveRecoveryPackage(queue, {path: kept.path, reason: kept.reason, storedOn: "this-computer"})));
     }
     const released = await client.ownerYDocRelease({id: 0, workspace: workspaceHandle, deadlineMs: 30_000}, binding, acceptedCursor, signal);
-    if (kept && (released.deferred || released.materialized)) await dependencies.ownerLiveReleases.remove(workspaceId, binding.objectId);
+    // A written file ends this binding's record; a deferred release leaves the edits in their queue.
+    if (released.materialized === true || (released.deferred && kept)) await dependencies.ownerLiveReleases.remove(workspaceId, binding.objectId, binding);
     return released;
   }
   function refreshOwnerLiveQuarantines(workspace: EngineWorkspace): Promise<void> {
@@ -768,20 +769,21 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     /**
      * Try again for a Stop whose release took refused edits but could not
      * write the file: settles that release again and never starts a new Stop.
-     * A release the engine no longer holds leaves nothing to write.
+     * When the engine no longer holds that release, nothing shows the file has
+     * the edits: the record and its package stay, offering only Save recovery copy.
      */
     async retryOwnerLiveRelease(workspace: EngineWorkspace, objectId: string) {
       return withEngineClient(workspace, async (client, handle) => {
         const releases = dependencies.ownerLiveReleases;
-        const release = (await releases.list(workspace.workspaceId)).find(row => row.objectId === objectId);
-        if (!release) throw new Error("This document changed. Open Live documents to check it.");
+        const binding = (await releases.list(workspace.workspaceId)).find(row => row.objectId === objectId && row.retry)?.binding;
+        if (!binding) throw new Error("This document changed. Open Live documents to check it.");
         try {
-          const released = await client.ownerYDocRelease({id: 0, workspace: handle, deadlineMs: 30_000}, release.binding, 0);
-          if (released.deferred || released.materialized) await releases.remove(workspace.workspaceId, objectId);
+          const released = await client.ownerYDocRelease({id: 0, workspace: handle, deadlineMs: 30_000}, binding, 0);
+          if (released.materialized === true) await releases.remove(workspace.workspaceId, objectId, binding);
           return released;
         } catch (error) {
           if (!(error instanceof EngineRequestError && error.message === "owner-stop-conflict")) throw error;
-          await releases.remove(workspace.workspaceId, objectId);
+          await releases.endRetry(workspace.workspaceId, objectId, binding);
           return undefined;
         } finally {
           await readQuarantinesAfterPass(workspace.workspaceId, client, handle);
@@ -792,28 +794,37 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
      * Save recovery copy: writes a document's kept edits next to its file, as
      * a lossless package and, when they rebuild the document, a readable copy.
      * The queue stays. It works while live editing is stopped, after a Stop
-     * took the edits but could not write the file, and for any size.
+     * took the edits but could not write the file, and for any size. Saving a
+     * Stop's stored package ends its record: the workspace now holds the edits.
      */
     async saveOwnerLiveRecoveryCopy(workspace: EngineWorkspace, path: string): Promise<LiveRecoveryFiles> {
       const recovery = await import("./ownerLiveRecoveryCopy");
-      const queued = await withEngineClient(workspace, async (client, handle) => {
+      const releases = dependencies.ownerLiveReleases;
+      const records = await releases.list(workspace.workspaceId);
+      const read = await withEngineClient(workspace, async (client, handle) => {
         const row = (await readOwnerLiveQuarantines(client, handle)).find(candidate => candidate.path === path && candidate.outboxId !== null);
-        return row?.outboxId ? recovery.liveRecoveryPackage(await readOwnerLiveQueue(client, handle, {...row, outboxId: row.outboxId}),
-          {path: row.path, reason: row.reason, storedOn: "this-computer"}) : null;
+        // An earlier release's record goes first: the document's queue hides its row.
+        const record = records.find(candidate => candidate.path === path) ?? records.find(candidate => candidate.objectId === row?.objectId);
+        if (record && !(row?.outboxId && record.retry && sameBinding(record.binding, row.binding))) return {record};
+        return row?.outboxId ? {queued: recovery.liveRecoveryPackage(await readOwnerLiveQueue(client, handle, row),
+          {path: row.path, reason: row.reason, storedOn: "this-computer"})} : {};
       });
-      let saved = queued;
+      let saved = read.queued;
       if (!saved) {
-        const releases = dependencies.ownerLiveReleases;
-        const release = (await releases.list(workspace.workspaceId)).find(row => row.path === path);
-        const text = release ? await releases.recovery(workspace.workspaceId, release.objectId) : null;
+        const text = read.record ? await releases.recovery(workspace.workspaceId, read.record.objectId) : null;
         if (text === null) throw new Error("dohc has no kept edits for this file. Open Live documents to check it.");
         saved = recovery.parseLiveRecoveryPackage(text);
       }
-      return recovery.saveLiveRecoveryCopy(saved, {
+      const files = await recovery.saveLiveRecoveryCopy(saved, {
         create: (relative, text) => createDurableFile(workspace.rootPath, relative, text),
         exists: relative => lstat(join(workspace.rootPath, relative)).then(() => true,
           (error: NodeJS.ErrnoException) => {if (error.code === "ENOENT") return false; throw error;}),
       }, dependencies.documentProjection);
+      if (!read.queued && read.record) {
+        await releases.remove(workspace.workspaceId, read.record.objectId, read.record.binding);
+        await refreshOwnerLiveQuarantines(workspace).catch(error => console.error("[desktop] owner live quarantine read failed:", error));
+      }
+      return files;
     },
     clearOwnerLiveStopFailure(workspaceId:string,target:{objectId:string}|{path:string}) {
       const failures=ownerStopFailures.get(workspaceId);if (!failures) return;

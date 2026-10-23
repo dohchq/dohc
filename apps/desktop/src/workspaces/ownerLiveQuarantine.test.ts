@@ -59,15 +59,19 @@ it("tells a waiting Stop from a finished one, and ignores a Stop for another ver
   ]);
 });
 
-it("keeps a release that could not write the file only while its queue is gone", async () => {
+it("keeps a release that could not write the file only while its queue is gone, with Try again only while it offers one", async () => {
   head("q", "invalid-update");
   const client = {sendRequest: vi.fn(), ownerYDocStopList: vi.fn(async () => []),
     ownerYDocListDrafts: vi.fn(async () => ({drafts: [draft("q", "quarantined")], next: null}))} as unknown as EngineClient;
-  const unwritten = [{workspaceId: "workspace", objectId: "q", path: "q.md", reason: "invalid-update", binding: binding("q")},
-    {workspaceId: "workspace", objectId: "gone", path: "gone.md", reason: "capacity-refused", binding: binding("gone")}];
+  const unwritten = [{workspaceId: "workspace", objectId: "q", path: "q.md", reason: "invalid-update", binding: binding("q"), retry: true},
+    {workspaceId: "workspace", objectId: "gone", path: "gone.md", reason: "capacity-refused", binding: binding("gone"), retry: true},
+    {workspaceId: "workspace", objectId: "ended", path: "ended.md", reason: "capacity-refused", binding: binding("ended"), retry: false},
+    {workspaceId: "workspace", objectId: "damaged", path: "damaged.md", reason: "unreadable-record", binding: null, retry: false}];
   expect(await readOwnerLiveQuarantines(client, "handle", {unwritten})).toEqual([
     record("q", "paused"),
     {objectId: "gone", path: "gone.md", reason: "capacity-refused", outboxId: null, binding: binding("gone"), headDeliveryId: null, recovery: "not-written"},
+    {objectId: "ended", path: "ended.md", reason: "capacity-refused", outboxId: null, binding: binding("ended"), headDeliveryId: null, recovery: "cannot-write"},
+    {objectId: "damaged", path: "damaged.md", reason: "unreadable-record", outboxId: null, binding: null, headDeliveryId: null, recovery: "cannot-write"},
   ]);
 });
 

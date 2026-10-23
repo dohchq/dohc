@@ -1197,7 +1197,8 @@ const deleteRetainedCopiesResultSchema = z.discriminatedUnion("ok", [
 // Live documents whose edits the server refused for good, as this computer
 // keeps them. `recovery` is paused while they wait for the owner, retrying
 // while Try again waits for the server, stopping while a Stop waits for it,
-// and stopped-kept or not-written after a Stop kept them.
+// stopped-kept or not-written after a Stop kept them, and cannot-write once
+// only a recovery copy can return them.
 const liveKeptEditsResultSchema = z.discriminatedUnion("ok", [
   z.object({
     ok: z.literal(true),
@@ -1205,7 +1206,7 @@ const liveKeptEditsResultSchema = z.discriminatedUnion("ok", [
       path: z.string().min(1),
       reason: z.string().min(1),
       incident: keptEditsIncidentSchema,
-      recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written"]),
+      recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write"]),
     }).strict()),
   }).strict(),
   rawFailureSchema,

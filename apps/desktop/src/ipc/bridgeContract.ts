@@ -425,7 +425,8 @@ export const OwnerLiveQuarantine = z.object({
   // delivery. stopping: a Stop waits for the server to stop live editing.
   // stopped-kept: a Stop finished but kept the queue. not-written: a Stop took
   // the edits into the document but could not write them to the file.
-  recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written"]),
+  // cannot-write: as not-written, but dohc can only save a recovery copy.
+  recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write"]),
 }).strict();
 export type OwnerLiveQuarantine = z.infer<typeof OwnerLiveQuarantine>;
 export const RetryOwnerLiveQuarantinePayload = WorkspaceIdPayload.extend({
