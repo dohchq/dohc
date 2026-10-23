@@ -1205,6 +1205,10 @@ export class LiveCommittedDeliveryStore {
         FROM ${LIVE_RESTORE_PROPOSALS} WHERE relay_database_namespace=? AND operation_id=?`).get(this.#history.namespace,lookup.operationId);
       integrity(row && row.workspace_id === lookup.workspaceId && row.proposal_sha256 === saved.proposalDigest &&
         row.candidate_sha256 === saved.candidateDigest && row.recorded_at_ms === saved.recordedAtMs && row.bytes === saved.bytes.byteLength);
+      // The length matched above, so this comparison reads no more than the bytes validation already charged.
+      const stored = this.#storage.db.prepare(`SELECT proposal_bytes=? AS proposal_matches FROM ${LIVE_RESTORE_PROPOSALS}
+        WHERE relay_database_namespace=? AND operation_id=?`).get(saved.bytes, this.#history.namespace, lookup.operationId);
+      integrity(stored?.proposal_matches === 1);
     };
     const {capture, assertCurrentInTransaction} = this.#captureStopRestoreProposal({...lookup, host, ...budget}, decoded.receiptJson,
       decoded.bytes.nativeSourceBytes, proposalCurrent);

@@ -993,6 +993,28 @@ it('releases the lease of a capture the pass deadline aborted during validation 
     expect(f.raw.prepare('SELECT * FROM sync_relay_service_activations').all()).toEqual([])
   }finally{f.close()}
 })
+it('releases the lease of a capture whose validation worker exited before the next pass pulls',async()=>{
+  const f=fixture();try{
+    const order:string[]=[],send=vi.fn(async()=>{order.push('release');return {result:{released:true}}})
+    let validations=0
+    const validate:OrdinaryActivationValidator=async()=>{
+      if(validations++===0)throw new Error('Live validation worker exited.')
+      return {kind:'retry',reason:'admission-unavailable'}
+    }
+    const capture=vi.fn(async()=>{order.push('capture');return f.capture})
+    const d=activationDriver(f,capture,send,undefined,undefined,{validateActivation:validate})
+    d.pull.mockImplementation(async()=>{order.push('pull');return {hasMore:false}})
+    const signal=new AbortController().signal
+    await expect(d.driver.activate(d.target,signal)).rejects.toThrow('Live validation worker exited.')
+    expect(signal.aborted).toBe(false)
+    expect(order).toEqual(['pull','capture'])
+    expect(await d.driver.activate(d.target,new AbortController().signal)).toEqual({kind:'pending',reason:'Live validation is busy.'})
+    expect(order).toEqual(['pull','capture','release','pull','capture','release'])
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({method:'liveApplication.releaseOwnerActivation',
+      params:{activationId:f.capture.activationId,sessionId:'real-session'}}),expect.any(AbortSignal))
+    expect(f.raw.prepare('SELECT * FROM sync_relay_service_activations').all()).toEqual([])
+  }finally{f.close()}
+})
 // A write can land between validation and the transaction without moving the relay cursor.
 it('refuses a capture as stale when its history changes after validation',async()=>{
   const f=fixture();try{
@@ -1011,9 +1033,11 @@ it('refuses a capture as stale when its history changes after validation',async(
 // A retained activation the read found can go before the transaction; its capture's history was never read or validated.
 it('refuses a capture as stale when the retained activation it read is gone by the transaction',async()=>{
   const f=fixture();try{
-    await f.prepare()
-    const documents=f.raw.prepare('SELECT * FROM sync_relay_live_documents').all(),control=f.storage.getLiveHostControl()
     const read=vi.spyOn(f.storage,'getBlob')
+    await f.prepare()
+    expect(read).toHaveBeenCalled()
+    read.mockClear()
+    const documents=f.raw.prepare('SELECT * FROM sync_relay_live_documents').all(),control=f.storage.getLiveHostControl()
     const validate:OrdinaryActivationValidator=async work=>{
       expect(work.cut).toBeUndefined()
       f.raw.exec('DELETE FROM sync_relay_service_activations')

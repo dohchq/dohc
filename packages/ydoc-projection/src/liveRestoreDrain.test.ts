@@ -383,6 +383,21 @@ it.each(restorePaths.flatMap(path => evidenceChanges.map(([name, make, change]) 
     } finally {f.close();}
   });
 
+it.each(restorePaths.filter(path => path !== "record"))("refuses %s when its stored proposal is rewritten at the same length during validation", async path => {
+  const f = contentProposalFixture();
+  try {
+    addArtifact(f, presentArtifact, 0);
+    const call = await restorePath(f, path);
+    let changed: ReturnType<typeof proposalRows> | undefined;
+    await expect(call(validatingWhile(() => {
+      f.raw.exec(`UPDATE ${proposalTable} SET proposal_bytes=zeroblob(length(proposal_bytes))`); changed = proposalRows(f);
+    }, answeredArtifacts))).rejects.toThrow("Relay evidence changed during validation.");
+    expect(proposalRows(f)).toEqual(changed);
+    f.raw.prepare(`UPDATE ${proposalTable} SET proposal_bytes=?`).run(f.encoded);
+    await expect(call(validatingWhile(() => {}, answeredArtifacts))).resolves.not.toBeNull();
+  } finally {f.close();}
+});
+
 it.each(["removed", "added"] as const)("refuses point completion when an answered artifact is %s during validation", async change => {
   const f = contentProposalFixture();
   try {
@@ -2118,14 +2133,15 @@ it.each(["proposal","admission"])("rejects a same-length source rewrite by anoth
     expect(changed).toBeDefined();expect(lifecycleRows(f)).toEqual(changed);
   }finally{f.close();}
 });
-// Proposal writers may re-read and hash this restore's bounded evidence to prove it unchanged; ACKs read none.
-it("keeps every restore writer free of proposal bytes and lifecycle ACKs free of journal blob reads, byte comparisons and byte hashes",async ()=>{
+// Proposal writers may re-read and hash this restore's bounded evidence to prove it unchanged, and compare the stored proposal in SQL; ACKs read none.
+it("keeps restore writers to one stored-proposal comparison and lifecycle ACKs free of journal blob reads, byte comparisons and byte hashes",async ()=>{
   const f=contentProposalFixture("owner","device",true),tx=f.context.tx.bind(f.context),prepare=f.context.db.prepare.bind(f.context.db),compare=Buffer.compare;
-  const prototype=Object.getPrototypeOf(createHash("sha256")),update=prototype.update;let writing=false,acknowledging=false;
+  const prototype=Object.getPrototypeOf(createHash("sha256")),update=prototype.update;let writing=false,acknowledging=false,compared=0;
   const txSpy=vi.spyOn(f.context,"tx").mockImplementation(run=>tx(()=>{writing=true;try{return run();}finally{writing=false;}}));
   const sqlSpy=vi.spyOn(f.context.db,"prepare").mockImplementation(sql=>{
     if(writing && acknowledging && /SELECT\s+\*\s+FROM sync_relay_live_update_journal\b/i.test(sql))throw Error("journal blobs in writer");
-    if(writing && /SELECT\s+proposal_bytes\b/i.test(sql))throw Error("proposal bytes in writer");
+    if(writing && /SELECT\s+proposal_bytes=\? AS proposal_matches\b/.test(sql))compared++;
+    else if(writing && /SELECT\s+proposal_bytes\b/i.test(sql))throw Error("proposal bytes in writer");
     return prepare(sql);
   });
   const compareSpy=vi.spyOn(Buffer,"compare").mockImplementation((a,b)=>{if(writing && acknowledging)throw Error("byte comparison in writer");return compare(a,b);});
@@ -2134,6 +2150,7 @@ it("keeps every restore writer free of proposal bytes and lifecycle ACKs free of
     const proposal=await f.store.recordStopRestoreProposal(f.input,f.encoded,restore,200);
     expect((await f.store.recordStopRestoreProposal(f.input,f.encoded,restore,200)).replayed).toBe(true);
     const admitted=await f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,restore,201);acknowledging=true;
+    expect(compared).toBe(1);
     const application={fence:admitted.preparation.fence,candidateDigest:admitted.candidateDigest,nativeSourceManifestDigest:admitted.nativeSourceManifestDigest,admitted:admitted.admitted,
       localHeadSequence:admitted.preparation.fence.localHeadSequence+1,hostCoordinate:{hostId:f.input.host.hostId,hostEpoch:f.input.host.hostEpoch,instanceId:"\\".repeat(1024),connectionId:"\\".repeat(1024)},recordedAtMs:202};
     const settlement={settlementId:"\\".repeat(512),previousCursor:0,terminalCursor:admitted.admitted.accepted.receipt.journalCursor,applicationCount:3,localYDocSequence:application.localHeadSequence,
