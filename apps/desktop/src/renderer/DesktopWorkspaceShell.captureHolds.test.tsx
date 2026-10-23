@@ -10,7 +10,7 @@ import type { CaptureFileHold, SyncStatusResult } from "../ipc/bridgeContract";
 const held = { workspaceId: WORKSPACE.workspaceId, sourceVersionId: "main", objectId: "held-object", path: "notes/held.md",
   observedSha256: "digest", observedSize: 4, reason: "ydoc-resolution-not-representable" as const,
   observedAtMs: 1, attemptCount: 1, retryRequested: false };
-const message = 'dohc did not record the outside edit to "notes/held.md". dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.';
+const message = 'dohc did not record the outside edit to "notes/held.md". The file has a nested list, a quote nested many levels deep, or Markdown dohc cannot take in from outside edits. The file on this computer still has the outside edit. Undo it, then make that change in dohc.';
 
 function fixture() {
   const bridge = makeBridge(Promise.resolve(null));
@@ -141,7 +141,7 @@ it.each([{ staleFiles: [] }, { staleFiles: [held] }])("ignores a stale status co
   const other = { ...held, workspaceId: OTHER_WORKSPACE.workspaceId, path: "other.md" };
   f.set([other]);
   view.rerender(<DesktopWorkspaceShell workspace={OTHER_WORKSPACE} workspaces={[WORKSPACE, OTHER_WORKSPACE]} {...shellBootstrapProps(f.bridge)} onSwitchWorkspace={() => {}} />);
-  await screen.findByText('dohc did not record the outside edit to "other.md". dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.');
+  await screen.findByText('dohc did not record the outside edit to "other.md". The file has a nested list, a quote nested many levels deep, or Markdown dohc cannot take in from outside edits. The file on this computer still has the outside edit. Undo it, then make that change in dohc.');
   const current = await f.bridge.getSyncStatus();
   await act(async () => stale.resolve({ ...current, heldFiles: staleFiles }));
   expect(screen.queryByText(message)).toBeNull();

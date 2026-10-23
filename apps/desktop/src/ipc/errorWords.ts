@@ -449,8 +449,12 @@ export function outsideVersionWaitingMessage(path: string): string {
   return `dohc could not open the new version of "${path}". History has not recorded it yet.`;
 }
 
+// Capture holds every refused outside edit with one reason, so these words
+// name each form it refuses. Undoing the edit lets capture record the file again.
+export const CAPTURE_HELD_WORDS = "The file has a nested list, a quote nested many levels deep, or Markdown dohc cannot take in from outside edits. The file on this computer still has the outside edit. Undo it, then make that change in dohc.";
+
 export function captureHeldLiveMessage(path: string): string {
-  return `dohc cannot open "${path}" for live editing. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.`;
+  return `dohc cannot open "${path}" for live editing. ${CAPTURE_HELD_WORDS}`;
 }
 
 /** Access and connection failures can hide a changed grant behind an IPC error. */

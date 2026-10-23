@@ -102,7 +102,7 @@ describe("engine-mode export with no mounted serializer", () => {
     const bridge = engineBridge(DOC_MARKDOWN, { captureHeld: true });
     vi.stubGlobal("dohcDesktop", bridge);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
-    expect(await screen.findByText('dohc cannot open "a.md" for live editing. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.')).toBeTruthy();
+    expect(await screen.findByText('dohc cannot open "a.md" for live editing. The file has a nested list, a quote nested many levels deep, or Markdown dohc cannot take in from outside edits. The file on this computer still has the outside edit. Undo it, then make that change in dohc.')).toBeTruthy();
     expect(screen.queryByTestId("markdown-source-toggle")).toBeNull();
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
     expect(bridge.applyEngineYDocUpdate).not.toHaveBeenCalled();
