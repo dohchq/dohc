@@ -16,15 +16,18 @@ beforeEach(() => {
 });
 afterEach(async () => {await act(async () => root.unmount()); container.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals();});
 
-function server(options: {access?: "read-only" | "read-write"; channel?: boolean; profileName?: string; post?: (body: Record<string, unknown>) => Response} = {}) {
+const unavailable = () => jsonResponse({ok: false, error: "This link can't be reached right now. Try again in a moment.", code: "link_unavailable"}, 503);
+
+function server(options: {access?: "read-only" | "read-write"; profileName?: string; channels?: (attempt: number) => Promise<Response> | undefined;
+  post?: (body: Record<string, unknown>, attempt: number) => Response | undefined} = {}) {
+  let channelReads = 0;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), "https://viewer.test"), signal = init?.signal ?? new AbortController().signal;
-    if (url.pathname === "/api/view/chat/channels") return options.channel === false ? jsonResponse({ok: false, error: "not found"}, 404)
-      : jsonResponse({shareId: "share", profileName: options.profileName ?? null,
-        channels: [{channelWireId: "wire", name: "Team", access: options.access ?? "read-write"}]});
+    if (url.pathname === "/api/view/chat/channels") return await options.channels?.(channelReads++) ?? jsonResponse({shareId: "share",
+      profileName: options.profileName ?? null, channels: [{channelWireId: "wire", name: "Team", access: options.access ?? "read-write"}]});
     if (init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>; posts.push({headers: new Headers(init.headers), body});
-      return options.post?.(body) ?? jsonResponse({shareId: "share", channelWireId: "wire",
+      return options.post?.(body, posts.length - 1) ?? jsonResponse({shareId: "share", channelWireId: "wire",
         message: message(9, String(body.body), typeof body.claimedName === "string" ? body.claimedName : "Anonymous", "link")});
     }
     if (url.searchParams.has("since")) return new Promise<Response>((_resolve, reject) => {
@@ -38,7 +41,10 @@ const text = () => container.textContent ?? "";
 const composer = () => container.querySelector<HTMLTextAreaElement>('textarea[name="body"]');
 const nameField = () => container.querySelector<HTMLInputElement>('input[name="claimedName"]');
 const send = () => [...container.querySelectorAll("button")].find(node => node.textContent === "Send")!;
-async function render() {await act(async () => root.render(<LinkChannelPanel session="session-a" fallback={<p>Discussion</p>}/>));}
+const tryAgain = () => [...container.querySelectorAll("button")].find(node => node.textContent === "Try again");
+async function render(channelWireId: string | null = "wire") {
+  await act(async () => root.render(<LinkChannelPanel session="session-a" channelWireId={channelWireId} fallback={<p>Discussion</p>}/>));
+}
 async function opened() {await settle(() => text().includes("Welcome"));}
 
 it("posts from a read-write link with the name it sets once, and marks the post as a link holder's", async () => {
@@ -51,25 +57,43 @@ it("posts from a read-write link with the name it sets once, and marks the post 
   const posted = [...container.querySelectorAll<HTMLElement>(".chat-message")].at(-1);
   expect(posted?.dataset.authorKind).toBe("link");
   expect(posted?.querySelector('[role="img"]')?.getAttribute("aria-label")).toBe("Link holder");
-  // The name is set; the next post sends none.
+  // The name is set; it shows in place of the field, and the next post sends none.
   expect(nameField()).toBeNull();
+  expect(text()).toContain("Posting as Sam");
   setControlValue(composer()!, "And again"); await act(async () => send().click()); await settle(() => posts.length === 2 && composer()?.value === "");
   expect(posts[1]?.body).not.toHaveProperty("claimedName");
 });
 
-it("asks for no name when this browser set one on an earlier visit", async () => {
+it("shows the name this browser set on an earlier visit, with no field to change it", async () => {
   server({profileName: "Sam"}); await render(); await opened();
   expect(nameField()).toBeNull();
+  expect(text()).toContain("Posting as Sam");
   setControlValue(composer()!, "Back again"); await act(async () => send().click()); await settle(() => composer()?.value === "");
   expect(posts[0]?.body).not.toHaveProperty("claimedName");
 });
 
-it("says why the relay refused a post, in words", async () => {
-  const error = "The owner paused posts from share links. Try again later.";
-  server({post: () => jsonResponse({ok: false, code: "link_discussion_paused", error}, 403)});
+it("keeps the draft when a post's answer is lost, and its Try again sends the same post", async () => {
+  server({post: (_body, attempt) => attempt === 0 ? unavailable() : undefined});
+  await render(); await opened(); setControlValue(composer()!, "Count me in"); await act(async () => send().click());
+  await settle(() => text().includes("dohc could not confirm that your message was sent. Try again. It will not post twice."));
+  expect(composer()?.value).toBe("Count me in");
+  expect(container.querySelector(".chat-channel")).not.toBeNull();
+  await act(async () => tryAgain()!.click()); await settle(() => composer()?.value === "");
+  expect(posts.map(post => post.body.idempotencyKey)).toEqual([posts[0]?.body.idempotencyKey, posts[0]?.body.idempotencyKey]);
+});
+
+it("says why the relay refused a post, in words, and offers Try again only for a pause", async () => {
+  const paused = "The owner paused posts from share links. Try again later.";
+  const blocked = "The owner stopped this link holder from posting. Ask the owner to allow your posts again.";
+  server({post: (_body, attempt) => attempt === 0 ? jsonResponse({ok: false, code: "link_discussion_paused", error: paused}, 403)
+    : jsonResponse({ok: false, code: "link_discussion_blocked", error: blocked}, 403)});
   await render(); await opened(); setControlValue(composer()!, "Hi"); await act(async () => send().click());
-  await settle(() => text().includes(error));
+  await settle(() => text().includes(paused));
   expect(composer()?.value).toBe("Hi");
+  expect(tryAgain()).toBeDefined();
+  await act(async () => tryAgain()!.click()); await settle(() => text().includes(blocked));
+  expect(composer()?.value).toBe("Hi");
+  expect(tryAgain()).toBeUndefined();
 });
 
 it("holds a post until a name that is too long is shortened", async () => {
@@ -101,8 +125,26 @@ it("ends the channel when a revoked link's post is refused", async () => {
   expect(container.querySelector(".chat-channel")).toBeNull();
 });
 
-it("shows the link's other panel when the link has no channel", async () => {
-  server({channel: false}); await render();
-  await settle(() => text() === "Discussion");
-  expect(container.querySelector(".link-channel")).toBeNull();
+it("shows the link's other panel at once when the share's answer names no channel", async () => {
+  server(); await render(null);
+  expect(text()).toBe("Discussion");
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it("keeps the channel's place while it loads and through a failed read, then opens it after Try again", async () => {
+  let answer: (response: Response) => void = () => {};
+  server({channels: attempt => attempt === 0 ? new Promise<Response>(resolve => {answer = resolve;}) : undefined});
+  await render();
+  expect(text()).toContain("Loading messages…");
+  await act(async () => answer(unavailable()));
+  await settle(() => text().includes("Messages didn't load."));
+  expect(text()).not.toContain("Discussion");
+  await act(async () => tryAgain()!.click()); await opened();
+  expect(container.querySelector("h2")?.textContent).toBe("Team");
+});
+
+it("ends the channel when the link no longer opens it", async () => {
+  server({channels: async () => jsonResponse({ok: false, error: "not found"}, 404)}); await render();
+  await settle(() => text().includes("This link no longer opens this channel. Ask the owner for a new link."));
+  expect(text()).not.toContain("Discussion");
 });

@@ -33,8 +33,8 @@ afterEach(async () => {
 
 type LoggedOp = { originId: string; opKind: string; payload: Record<string, unknown> };
 
-async function stack() {
-  const storage = await testStorage();
+async function stack(options: Parameters<typeof testStorage>[0] = {}) {
+  const storage = await testStorage(options);
   storage.claimWorkspace({ workspaceId: WORKSPACE, ownerUserId: OWNER, createdAtMs: 1 });
   storage.appendLogBatch({ workspaceId: WORKSPACE, originId: "owner", ops: sequenced([
     chatChannelCreate(CHANNEL, { name: "Team", type: "both", folderPath: "team" }),
@@ -51,12 +51,22 @@ async function stack() {
   expect(shared.status, await shared.clone().text()).toBe(200);
   const shareId = String(((await shared.json()) as { shareId: string }).shareId);
   const relayPaths: string[] = [];
+  // "METHOD /path" of relay calls whose next answer is lost after the relay made it:
+  // before its response arrives, or with its body broken.
+  const lost = new Map<string, "connection" | "body">();
   const app = createShareWebApplication({
     relayUrl: "http://relay.test", publicRelayUrl: "https://relay.test", relayExchangeKey: RELAY_EXCHANGE_KEY,
     publicHosts: new Set([HOST]), publicEditRelease: { version: 1 }, linkLive: { publicOrigin: ORIGIN, ...liveLimits },
-    fetchRelay: (incoming) => {
-      relayPaths.push(new URL(incoming.url).pathname);
-      return relay(incoming);
+    fetchRelay: async (incoming) => {
+      const path = new URL(incoming.url).pathname, call = `${incoming.method} ${path}`, loss = lost.get(call);
+      relayPaths.push(path);
+      lost.delete(call);
+      const answered = await relay(incoming);
+      if (!loss) return answered;
+      await answered.body?.cancel();
+      if (loss === "connection") throw new TypeError("connection reset");
+      return new Response(new ReadableStream({ start: (controller) => controller.error(new TypeError("connection reset")) }),
+        { status: answered.status, headers: answered.headers });
     },
   });
   const send = (path: string, init: RequestInit = {}) => {
@@ -78,7 +88,7 @@ async function stack() {
     const page = (await (await relay(request(OWNER, `/sync/${WORKSPACE}/log?since=0`))).json()) as { ops: LoggedOp[] };
     return page.ops.filter((op) => op.opKind === "chat.message.append" && op.originId.startsWith("relay:share-link:"));
   };
-  return { send, link, revoke, linkPosts, relayPaths, handle: app.handle };
+  return { send, link, revoke, linkPosts, relayPaths, handle: app.handle, lost, storage, shareId };
 }
 
 type Stack = Awaited<ReturnType<typeof stack>>;
@@ -91,6 +101,7 @@ async function browser(s: Stack, secret: string) {
   const cookie = exchanged.headers.getSetCookie().map((value) => value.split(";", 1)[0]!).join("; ");
   const headers = { origin: ORIGIN, "sec-fetch-site": "same-origin", "x-dohc-link-session": session, cookie };
   return {
+    meta: () => s.send("/api/view/meta", { headers }),
     read: (path: string) => s.send(`/api/view/chat/${path}`, { headers }),
     post: (body: Record<string, unknown>, changed: Record<string, string | null> = {}) => {
       const sent = new Headers({ ...headers, "content-type": "application/json" });
@@ -193,7 +204,10 @@ it("lets an agent with only a read-write link read the channel and post, with th
   const s = await stack();
   const link = await s.link("read-write");
   const mcp = await agent(s, link.secret);
-  expect((await mcp.listTools()).tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(["dohc_read_channel", "dohc_post_channel"]));
+  const tools = (await mcp.listTools()).tools.map((tool) => tool.name);
+  expect(tools).toEqual(expect.arrayContaining(["dohc_read_channel", "dohc_post_channel"]));
+  // The conversation the viewer shows for this link: the channel, in place of the share discussion.
+  expect(tools.filter((name) => name.includes("discussion"))).toEqual([]);
   // The share's own answer names its channel; listing tools asks the relay nothing more.
   expect(s.relayPaths).not.toContain("/sync/link/chat/channels");
   const read = (await mcp.callTool({ name: "dohc_read_channel", arguments: {} })).structuredContent as { messages: unknown[]; nextCursor: number };
@@ -215,6 +229,75 @@ it("lets an agent with only a read-write link read the channel and post, with th
   expect(renamed.isError).toBe(true);
   expect(renamed.structuredContent).toEqual({ ok: false, code: "link_name_already_set",
     error: "This link holder already has a name. Post with that name, or with none." });
+});
+
+it("answers a post whose answer was lost as retryable, and its retry with the same key posts once", async () => {
+  const s = await stack();
+  const b = await browser(s, (await s.link("read-write")).secret);
+  s.lost.set("POST /sync/link/chat/messages", "body");
+  const lost = await b.post({ body: "Count me in", idempotencyKey: "post-1" });
+  expect(lost.status).toBe(503);
+  expect(await lost.json()).toMatchObject({ ok: false, code: "link_unavailable" });
+  expect(await s.linkPosts()).toHaveLength(1);
+  const retried = await b.post({ body: "Count me in", idempotencyKey: "post-1" });
+  expect(retried.status).toBe(200);
+  const { message } = (await retried.json()) as { message: { messageId: string } };
+  expect((await s.linkPosts()).map((op) => op.payload.messageId)).toEqual([message.messageId]);
+
+  // An agent hears that the post may have landed, and that the same key is safe.
+  const mcp = await agent(s, (await s.link("read-write")).secret);
+  const post = { name: "dohc_post_channel", arguments: { body: "On it", idempotencyKey: "agent-1" } };
+  s.lost.set("POST /sync/link/chat/messages", "connection");
+  const unknown = await mcp.callTool(post);
+  expect(unknown.isError).toBe(true);
+  expect(unknown.structuredContent).toEqual({ ok: false, code: "link_unavailable",
+    error: "dohc could not confirm this post, so it may have posted. Send it again with the same idempotencyKey and fields; it posts only once." });
+  expect(await s.linkPosts()).toHaveLength(2);
+  expect((await mcp.callTool(post)).isError).toBeFalsy();
+  expect(await s.linkPosts()).toHaveLength(2);
+});
+
+it("answers a lost share answer as retryable, so neither a browser nor an agent loses the channel", async () => {
+  const s = await stack();
+  const link = await s.link("read-write");
+  const b = await browser(s, link.secret);
+  s.lost.set("GET /sync/link/share", "connection");
+  const lost = await b.meta();
+  expect(lost.status).toBe(503);
+  expect(await lost.json()).toMatchObject({ ok: false, code: "link_unavailable" });
+  expect(await (await b.meta()).json()).toMatchObject({ channel: { channelWireId: CHANNEL, access: "read-write" } });
+
+  // An agent's request fails as a whole instead of listing tools without the channel's,
+  // whether the answer is lost before it arrives or partway through.
+  const mcp = await agent(s, link.secret);
+  for (const loss of ["connection", "body"] as const) {
+    s.lost.set("GET /sync/link/share", loss);
+    await expect(mcp.listTools(), loss).rejects.toThrow(/"code":"link_unavailable"/u);
+    expect((await mcp.listTools()).tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(["dohc_read_channel", "dohc_post_channel"]));
+  }
+});
+
+it("says what to do when the link's messages run out, or the owner blocks or pauses posts", async () => {
+  const s = await stack({ discussionLifetimeMessageLimit: 1 });
+  const refusal = async (response: Response) => ({ status: response.status, body: await response.json() });
+  const link = await s.link("read-write");
+  const first = await browser(s, link.secret), second = await browser(s, link.secret);
+  expect((await first.post({ body: "One", idempotencyKey: "post-1" })).status).toBe(200);
+  expect(await refusal(await first.post({ body: "Two", idempotencyKey: "post-2" }))).toEqual({ status: 413, body: { ok: false,
+    code: "discussion_limit_reached", error: "This link has reached its message limit. Ask the owner if you need to post more." } });
+
+  const other = await s.link("read-write");
+  const blocked = await browser(s, other.secret);
+  expect((await blocked.post({ body: "One", idempotencyKey: "post-1" })).status).toBe(200);
+  const principalId = String((await s.linkPosts()).find((op) => op.payload.linkGrantId === other.grantId)?.payload.linkPrincipalId);
+  expect(s.storage.setLinkPrincipalBlocked({ shareId: s.shareId, workspaceId: WORKSPACE, principalId, actorUserId: OWNER, blockedAtMs: Date.now() })).toBe(true);
+  expect(await refusal(await blocked.post({ body: "Two", idempotencyKey: "post-2" }))).toEqual({ status: 403, body: { ok: false,
+    code: "link_discussion_blocked", error: "The owner stopped this link holder from posting. Ask the owner to allow your posts again." } });
+
+  // A pause reads as temporary.
+  expect(s.storage.setShareLinkWritesPaused({ shareId: s.shareId, workspaceId: WORKSPACE, actorUserId: OWNER, pausedAtMs: Date.now() })).toBe(true);
+  expect(await refusal(await second.post({ body: "Hi", idempotencyKey: "post-1" }))).toEqual({ status: 403, body: { ok: false,
+    code: "link_discussion_paused", error: "The owner paused posts from share links. Try again later." } });
 });
 
 it("gives an agent with a read-only link the channel to read and no tool to post", async () => {

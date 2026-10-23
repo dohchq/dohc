@@ -768,20 +768,26 @@ fn a_shared_channel_link_post_applies_with_its_link_and_claims_nothing() {
                 2,
                 SharedChannelResponse {
                     own_origin_id: None,
-                    ops: vec![share_op(
-                        2,
-                        "chat.message.append",
-                        json!({
-                            "messageId": "link-message:m-task",
-                            "threadId": "t-shared",
-                            "body": "/task Book",
-                            "authorKind": "link",
-                            "authorDisplayName": "Sam",
-                            "linkGrantId": "grant-1",
-                            "linkPrincipalId": "principal-1",
-                            "createdAtMs": 12
-                        }),
-                    )],
+                    ops: vec![ShareReplicationEnvelope {
+                        origin_id: format!(
+                            "{}principal-1",
+                            dohc_engine_domain::chats::LINK_ORIGIN_PREFIX
+                        ),
+                        ..share_op(
+                            0,
+                            "chat.message.append",
+                            json!({
+                                "messageId": "link-message:m-task",
+                                "threadId": "t-shared",
+                                "body": "/task Book",
+                                "authorKind": "link",
+                                "authorDisplayName": "Sam",
+                                "linkGrantId": "grant-1",
+                                "linkPrincipalId": "principal-1",
+                                "createdAtMs": 12
+                            }),
+                        )
+                    }],
                     next_cursor: 3,
                     has_more: false,
                     push: None,

@@ -415,7 +415,10 @@ function viewMeta(value: unknown): ViewMeta | null {
   ) {
     return null;
   }
+  const channel = record.channel as Record<string, unknown> | null | undefined;
+  if (channel !== undefined && (!channel || typeof channel !== "object" || typeof channel.channelWireId !== "string")) return null;
   return {
+    ...(channel ? { channel: { channelWireId: channel.channelWireId as string } } : {}),
     access,
     subjectName: normalizeShareLabel(record.subjectName),
     effectiveSelector: {
@@ -1399,6 +1402,7 @@ export function App() {
         {/* A Group share's conversation is its channel; any other share's is its discussion. */}
         <LinkChannelPanel
           session={state.session}
+          channelWireId={state.meta.channel?.channelWireId ?? null}
           fallback={<CommentsPanel
             access={state.meta.access}
             session={state.session}

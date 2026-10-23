@@ -76,7 +76,7 @@ export function ChannelView({client, name, onEnded, composerField, holdSend = fa
   const [older, setOlder] = useState<"idle" | "loading" | "failed">("idle");
   const [following, setFollowing] = useState<"live" | "delayed" | "stopped">("live"), [unseen, setUnseen] = useState(0);
   const [access, setAccess] = useState(client.access), [draft, setDraft] = useState("");
-  const [posting, setPosting] = useState(false), [postError, setPostError] = useState<string | null>(null);
+  const [posting, setPosting] = useState(false), [postError, setPostError] = useState<{text: string; retry: boolean} | null>(null);
   const mounted = useRef<AbortController | null>(null), follower = useRef<AbortController | null>(null);
   const messagesRef = useRef<NamedChatMessage[]>([]), cursorRef = useRef<number | null>(null);
   const intent = useRef<{id: string; body: string} | null>(null), postingRef = useRef(false), olderRef = useRef(false);
@@ -213,8 +213,10 @@ export function ChannelView({client, name, onEnded, composerField, holdSend = fa
         intent.current = null; setAccess("read-only"); return;
       }
       if (status === 409) intent.current = null;
-      const refusal = error instanceof NamedChatError ? error.reason : null;
-      setPostError(status === 0 || status >= 500 ? POST_UNKNOWN : refusal ?? (status === 429 ? POST_BUSY : POST_REFUSED));
+      const refusal = error instanceof NamedChatError ? error.reason : null, code = error instanceof NamedChatError ? error.code : null;
+      // A lost answer, a busy server or a pause can pass. Any other refusal in words says what to do instead of trying again.
+      const retry = status === 0 || status >= 500 || status === 429 || refusal === null || code === "link_discussion_paused";
+      setPostError({text: status === 0 || status >= 500 ? POST_UNKNOWN : refusal ?? (status === 429 ? POST_BUSY : POST_REFUSED), retry});
     } finally {if (!controller.signal.aborted) {postingRef.current = false; setPosting(false);}}
   };
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -223,7 +225,7 @@ export function ChannelView({client, name, onEnded, composerField, holdSend = fa
     event.preventDefault(); void send();
   };
 
-  const status = posting ? "Sending…" : tooLong ? "This message is too long. Shorten it before sending." : postError ?? "";
+  const status = posting ? "Sending…" : tooLong ? "This message is too long. Shorten it before sending." : postError?.text ?? "";
   return <section className="chat-channel" aria-label={name ?? "Shared channel"}>
     <div className="chat-messages">
       <div className="chat-scroller" ref={scroller} onScroll={scrolled} role="log" aria-label="Messages" tabIndex={0}>
@@ -255,7 +257,7 @@ export function ChannelView({client, name, onEnded, composerField, holdSend = fa
         <button type="submit" className="handoff-button primary" disabled={posting || body === null || holdSend}>{posting ? "Sending" : "Send"}</button>
       </div>
       <div className="chat-composer-status"><p id="chat-composer-status" role="status" aria-atomic="true">{status}</p>
-        {postError && !posting && <button type="button" className="handoff-button secondary" onClick={() => void send()}>Try again</button>}</div>
+        {postError?.retry && !posting && <button type="button" className="handoff-button secondary" onClick={() => void send()}>Try again</button>}</div>
     </form>}
   </section>;
 }

@@ -3,7 +3,7 @@ import * as z from "zod/v4";
 import { createSharedAutomationControls } from "./automationControls";
 import { readBoundedJson } from "@dohc/service-http";
 import {LINK_REFUSALS, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
-import {relayLinkRefusal} from "./linkRefusal";
+import {relayLinkRefusal, unavailableLinkRefusal} from "./linkRefusal";
 import { asRecord } from "@dohc/workspace-core/records";
 import { normalizeShareDiscussionBody, normalizeShareDiscussionDisplayName } from "@dohc/security-contract/share-discussion";
 import { remoteLiveDocument } from "./remoteLiveDocument";
@@ -47,6 +47,8 @@ const discussionPostSchema = z.object({
 const linkChannelSchema = z.object({channelWireId: z.string(), access: z.enum(["read-only", "read-write"])});
 type LinkChannel = z.infer<typeof linkChannelSchema>;
 const LINK_CHAT_BODY_BYTES = 8_000;
+const CHANNEL_POST_UNKNOWN = "dohc could not confirm this post, so it may have posted. " +
+  "Send it again with the same idempotencyKey and fields; it posts only once.";
 const channelPostSchema = z.object({
   body: z.string().describe("Nonempty text, at most 8,000 UTF-8 bytes after line endings become LF and trailing space is trimmed.")
     .refine(value => {const body = value.replace(/\r\n?/gu, "\n").trimEnd(); return body.length > 0 && Buffer.byteLength(body) <= LINK_CHAT_BODY_BYTES;},
@@ -187,13 +189,14 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>, 
       catch {return text({ok: true, source: "settled", encoding: "base64", content: bytes.toString("base64")});}
     } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
   });
-  server.registerTool("dohc_read_discussion", {
+  // A Group link's conversation is the Group's channel, as in the viewer; any other link's is the share's discussion.
+  if (!channel) server.registerTool("dohc_read_discussion", {
     description: "Read the discussion attached to this shared link.", inputSchema: z.object({ cursor: z.string().optional(), limit: z.number().int().positive().max(100).optional() }),
   }, async ({ cursor, limit }) => {
     try { const query = new URLSearchParams(); if (cursor) query.set("cursor", cursor); if (limit) query.set("limit", String(limit)); return text(await jsonResponse(await options.request(`/api/view/discussion?${query}`))); }
     catch (e) { return error(e instanceof Error ? e.message : String(e)); }
   });
-  if (metadata.access === "comment" || metadata.access === "edit") server.registerTool("dohc_post_discussion", {
+  if (!channel && (metadata.access === "comment" || metadata.access === "edit")) server.registerTool("dohc_post_discussion", {
     description: "Post a discussion message to this shared link when its permissions allow comments.",
     inputSchema: discussionPostSchema,
   }, async ({ body, idempotencyKey, claimedName }) => {
@@ -220,11 +223,17 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>, 
       description: "Post in the Group channel this link shares, as this link's holder. The owner sees the post marked as from a link holder.",
       inputSchema: channelPostSchema,
     }, async ({body, idempotencyKey, threadId, claimedName}) => {
+      // A post whose answer was lost may have landed; its key makes a retry safe.
+      const unknown = text({ok: false, code: "link_unavailable", error: CHANNEL_POST_UNKNOWN});
+      let response: Response;
       try {
-        const response = await options.request("/api/view/chat/messages", {method: "POST", body: JSON.stringify({...coordinates, body, idempotencyKey,
+        response = await options.request("/api/view/chat/messages", {method: "POST", body: JSON.stringify({...coordinates, body, idempotencyKey,
           ...(threadId === undefined ? {} : {threadId}), ...(claimedName === undefined ? {} : {claimedName})})});
+      } catch {return unknown;}
+      if (response.status === 503) {await response.body?.cancel().catch(() => {}); return unknown;}
+      try {
         // A refusal the agent can act on arrives as a sentence.
-        if (!response.ok && response.status !== 404 && response.status !== 503) {
+        if (!response.ok && response.status !== 404) {
           const refusal = asRecord(await readBoundedJson(response.clone(), 4096, options.signal).catch(() => null));
           if (typeof refusal?.code === "string" && typeof refusal.error === "string") return text({ok: false, code: refusal.code, error: refusal.error});
         }
@@ -274,7 +283,10 @@ export async function serveRemoteMcp(request: Request, options: RemoteOptions): 
     await metadataResponse.body?.cancel().catch(() => {});
     return {body: result.body, status: result.status, headers: result.headers};
   }
-  const metadata = await json(metadataResponse, options.signal) as Record<string, unknown>;
+  // The share's answer names the tools, so one lost mid-body fails the request instead of dropping any.
+  let metadata: Record<string, unknown>;
+  try {metadata = await json(metadataResponse, options.signal) as Record<string, unknown>;}
+  catch {const result = unavailableLinkRefusal(); return {body: result.body, status: result.status, headers: result.headers};}
   if (metadata.ok !== true) throw new Error("Share is unavailable.");
   // Only a Group share's link has a channel.
   const channel = metadata.channel === undefined ? null : linkChannelSchema.parse(metadata.channel);

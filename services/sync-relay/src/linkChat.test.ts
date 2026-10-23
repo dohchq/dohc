@@ -160,8 +160,10 @@ describe("link chat on a Group share", () => {
     expect(channels.status).toBe(200);
     expect(channels.headers.get("cache-control")).toBe("private, no-store");
     expect(await json(channels)).toEqual({ shareId: f.shareId, profileName: null, channels: [{ channelWireId, name: "Team", access }] });
-    // A Group link's share answer names its channel, so an agent needs no second call to find it.
+    // A Group link's share answer names its channel, so an agent needs no second call to find it,
+    // and so does its files' answer, which the viewer opens with.
     expect(await json(await f.h(linkRequest(capability, "/sync/link/share")))).toMatchObject({ channel: { channelWireId, access } });
+    expect(await json(await f.h(linkRequest(capability, "/sync/link/current")))).toMatchObject({ channel: { channelWireId, access } });
 
     const page = await json(await readChat(f, capability, history));
     expect(page.messages).toEqual([
@@ -410,6 +412,7 @@ describe("link chat on a Group share", () => {
     const fileCapability = String((await json(await exchange(f, linkSecret(fileLink.url)))).capabilityToken);
     for (const path of ["channels", history]) expect((await readChat(f, fileCapability, path)).status, path).toBe(404);
     expect(await json(await f.h(linkRequest(fileCapability, "/sync/link/share")))).not.toHaveProperty("channel");
+    expect(await json(await f.h(linkRequest(fileCapability, "/sync/link/current")))).not.toHaveProperty("channel");
     expect(authorizeLinkChatAction({ storage: f.storage, grantId: String(fileLink.grantId), action: "read" })).toEqual({ ok: false, reason: "gauntlet" });
   });
 });

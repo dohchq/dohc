@@ -1425,6 +1425,9 @@ fn another_computers_automation_message_applies_without_its_automation() {
     assert_eq!(replayed, ("automation".to_owned(), "Ana".to_owned()));
 }
 
+/// The relay's origin for `link_message_payload`'s link principal.
+const LINK_ORIGIN: &str = "relay:share-link:principal-1";
+
 /// A link holder's post in the imported Group, as the relay writes it.
 fn link_message_payload(message_id: &str, body: &str) -> serde_json::Value {
     json!({
@@ -1449,17 +1452,17 @@ fn a_link_message_replays_with_its_link_and_no_account() {
     let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "peer");
     let message = envelope(
-        "relay-link",
+        LINK_ORIGIN,
         0,
         "chat.message.append",
-        link_message_payload("link-message", "Hi @ice"),
+        link_message_payload("link-message:hi", "Hi @ice"),
     );
     assert_eq!(
         apply_chat_envelope(&mut engine, &message, &NoFaults).expect("link message"),
         ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
     let read = LinkedChatStore::new(&mut engine)
-        .get_message("ws", "link-message")
+        .get_message("ws", "link-message:hi")
         .expect("read the link message");
     assert_eq!(read.author_kind, ChatActorKind::Link);
     assert_eq!(read.author_display_name, "Guest");
@@ -1475,7 +1478,7 @@ fn a_link_message_replays_with_its_link_and_no_account() {
     let mention: String = engine
         .read_with(|conn| {
             conn.query_row(
-                "SELECT author_kind FROM chat_mentions WHERE message_id = 'link-message' AND handle = 'ice'",
+                "SELECT author_kind FROM chat_mentions WHERE message_id = 'link-message:hi' AND handle = 'ice'",
                 [],
                 |row| row.get(0),
             )
@@ -1484,11 +1487,11 @@ fn a_link_message_replays_with_its_link_and_no_account() {
         .expect("link mention");
     assert_eq!(mention, "link");
 
-    let mut early = link_message_payload("early-link-message", "Early");
+    let mut early = link_message_payload("link-message:early", "Early");
     early["threadId"] = json!("late-thread");
     apply_chat_envelope(
         &mut engine,
-        &envelope("relay-link", 1, "chat.message.append", early),
+        &envelope(LINK_ORIGIN, 1, "chat.message.append", early),
         &NoFaults,
     )
     .expect("parked link message");
@@ -1507,7 +1510,7 @@ fn a_link_message_replays_with_its_link_and_no_account() {
     apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread");
     assert_eq!(pending_chat_coordinate_count(&engine), 0);
     let replayed = LinkedChatStore::new(&mut engine)
-        .get_message("ws", "early-link-message")
+        .get_message("ws", "link-message:early")
         .expect("read the replayed link message");
     assert_eq!(
         (replayed.author_kind, replayed.author_user_id, replayed.link_author),
@@ -1515,8 +1518,9 @@ fn a_link_message_replays_with_its_link_and_no_account() {
     );
 }
 
-/// A link message names its link and nothing account-shaped, and stays
-/// within the link body cap; no other message names a link. Each refusal is
+/// A link message names its link and nothing account-shaped, stays within
+/// the link body cap, uses the link message id prefix and comes from its link
+/// principal's relay origin; no other message names a link. Each refusal is
 /// recorded and acked, and the next op applies.
 #[test]
 fn a_link_message_with_an_account_or_without_its_link_is_refused() {
@@ -1530,30 +1534,42 @@ fn a_link_message_with_an_account_or_without_its_link_is_refused() {
         ("chainDepth", json!(1)),
         ("linkGrantId", json!(" grant-1")),
         ("linkPrincipalId", json!("")),
+        ("linkPrincipalId", json!("principal-2")),
         ("authorKind", json!("human")),
+        ("messageId", json!("forged")),
     ] {
-        let mut payload = link_message_payload("forged", "Hi");
+        let mut payload = link_message_payload("link-message:forged", "Hi");
         payload[field] = value;
         forged.push(payload);
     }
     for field in ["linkGrantId", "linkPrincipalId"] {
-        let mut payload = link_message_payload("forged", "Hi");
+        let mut payload = link_message_payload("link-message:forged", "Hi");
         payload.as_object_mut().expect("payload").remove(field);
         forged.push(payload);
     }
     forged.push(link_message_payload(
-        "forged",
+        "link-message:forged",
         &"a".repeat(dohc_engine_domain::chats::MAX_LINK_MESSAGE_BODY_BYTES + 1),
     ));
     let next = forged.len() as i64;
     for (seq, payload) in forged.into_iter().enumerate() {
-        let op = envelope("relay-link", seq as i64, "chat.message.append", payload);
+        let op = envelope(LINK_ORIGIN, seq as i64, "chat.message.append", payload);
+        assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
+    }
+    // The relay's post itself, from any origin but its link principal's.
+    for origin in ["relay-link", "relay:share-link:principal-2", "relay:share-link:"] {
+        let op = envelope(
+            origin,
+            0,
+            "chat.message.append",
+            link_message_payload("link-message:forged", "Hi"),
+        );
         assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
     }
     let stored: i64 = engine
         .read_with(|conn| {
             conn.query_row(
-                "SELECT COUNT(*) FROM chat_messages WHERE message_id = 'forged'",
+                "SELECT COUNT(*) FROM chat_messages WHERE message_id IN ('forged', 'link-message:forged')",
                 [],
                 |row| row.get(0),
             )
@@ -1562,11 +1578,11 @@ fn a_link_message_with_an_account_or_without_its_link_is_refused() {
         .expect("forged count");
     assert_eq!(stored, 0);
     let at_cap = envelope(
-        "relay-link",
+        LINK_ORIGIN,
         next,
         "chat.message.append",
         link_message_payload(
-            "at-cap",
+            "link-message:at-cap",
             &"a".repeat(dohc_engine_domain::chats::MAX_LINK_MESSAGE_BODY_BYTES),
         ),
     );
@@ -1593,7 +1609,7 @@ fn a_message_that_takes_a_link_message_id_is_refused() {
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
 
     let post = envelope(
-        "relay-link",
+        LINK_ORIGIN,
         0,
         "chat.message.append",
         link_message_payload(&id, "Hi"),
@@ -1620,7 +1636,7 @@ fn a_message_that_takes_a_link_message_id_is_refused() {
 /// link post's own thread and message still apply when they arrive.
 #[test]
 fn a_thread_that_takes_a_link_thread_id_is_refused() {
-    use dohc_engine_domain::chats::{LINK_ORIGIN_PREFIX, LINK_THREAD_ID_PREFIX};
+    use dohc_engine_domain::chats::LINK_THREAD_ID_PREFIX;
 
     let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "peer");
@@ -1653,10 +1669,9 @@ fn a_thread_that_takes_a_link_thread_id_is_refused() {
     };
     assert!(threads(&engine).is_empty());
 
-    let origin = format!("{LINK_ORIGIN_PREFIX}principal-1");
     apply_chat_envelope(
         &mut engine,
-        &envelope(&origin, 0, "chat.thread.create", thread("")),
+        &envelope(LINK_ORIGIN, 0, "chat.thread.create", thread("")),
         &NoFaults,
     )
     .expect("link thread");
@@ -1665,7 +1680,7 @@ fn a_thread_that_takes_a_link_thread_id_is_refused() {
     assert_eq!(
         apply_chat_envelope(
             &mut engine,
-            &envelope(&origin, 1, "chat.message.append", post),
+            &envelope(LINK_ORIGIN, 1, "chat.message.append", post),
             &NoFaults
         )
         .expect("link post"),
@@ -1738,10 +1753,10 @@ fn a_link_post_claims_no_group_automation() {
     imported_chat_fixture(&mut engine, "peer");
     subscribe_imported_group(&mut engine);
     let link = envelope(
-        "relay-link",
+        LINK_ORIGIN,
         0,
         "chat.message.append",
-        link_message_payload("link-task", "/task Buy tickets"),
+        link_message_payload("link-message:task", "/task Buy tickets"),
     );
     assert!(applied_claims(apply_chat_envelope(&mut engine, &link, &NoFaults)).is_empty());
     let member = group_message(

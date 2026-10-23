@@ -1439,10 +1439,17 @@ describe("share-web relay call", () => {
     },
     { name: "discussion activity", path: "/api/view/discussion/activity?since=0&hold=0&limit=100" },
     { name: "meta", path: "/api/view/meta" },
+    { name: "chat channels", path: "/api/view/chat/channels" },
     { name: "current", path: "/api/view/current" },
     { name: "log", path: "/api/view/log?since=0&hold=0&current=true" },
     { name: "blob", path: `/api/view/blob/${blobSha}` },
   ];
+  // A lost or unreadable answer to these says nothing about the link, so it is retryable.
+  // Meta streams its body, so only a lost connection shows there.
+  const retryable = new Map<string, ReadonlySet<number | string>>([
+    ["meta", new Set(["network error"])],
+    ["chat channels", new Set(["401, oversized body", "401, body fails", "network error"])],
+  ]);
 
   // The fake relay answers exchange and refresh itself; `relay` answers the route's call.
   async function linkSession(
@@ -1512,7 +1519,8 @@ describe("share-web relay call", () => {
   ];
 
   it.each(routes)("maps every relay answer for $name through one refusal map", async (target) => {
-    for (const outcome of outcomes) {
+    for (const listed of outcomes) {
+      const outcome = retryable.get(target.name)?.has(listed.relay) ? { ...listed, status: 503 } : listed;
       const state = await linkSession(async () => {
         switch (outcome.relay) {
           case "network error":
@@ -1580,10 +1588,9 @@ describe("share-web relay call", () => {
       await vi.advanceTimersByTimeAsync(1);
       expect(state.calls[0]!.signal.aborted).toBe(true);
       const timedOut = await stalled;
-      expect({ status: timedOut.status, body: await timedOut.text() }).toEqual({
-        status: 404,
-        body: shareWebRefusalBody,
-      });
+      expect({ status: timedOut.status, body: await timedOut.text() }).toEqual(retryable.has(target.name)
+        ? { status: 503, body: JSON.stringify(linkRefusalBody("link_unavailable")) }
+        : { status: 404, body: shareWebRefusalBody });
 
       started = nextStart();
       const browser = new AbortController();
@@ -1591,7 +1598,7 @@ describe("share-web relay call", () => {
       await started;
       browser.abort();
       expect(state.calls[1]!.signal.aborted).toBe(true);
-      expect((await abandoned).status).toBe(404);
+      expect((await abandoned).status).toBe(retryable.has(target.name) ? 503 : 404);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
@@ -1633,6 +1640,7 @@ describe("share-web relay call", () => {
     "discussion activity": 404,
     discussion: 404,
     "discussion append": 404,
+    "chat channels": 404,
   };
 
   it.each(routes.flatMap((target) => [
@@ -1656,7 +1664,7 @@ describe("share-web relay call", () => {
 
     const answer = await pending;
     expect(answer.status).toBe(
-      supersededStatus[target.name] ?? (target.settle === "answers" ? 200 : 404),
+      supersededStatus[target.name] ?? (target.settle === "answers" ? 200 : retryable.has(target.name) ? 503 : 404),
     );
     expect(answer.headers.has("set-cookie")).toBe(false);
     await answer.body?.cancel();

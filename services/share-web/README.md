@@ -32,11 +32,12 @@ The share page advertises `/api/mcp` through its HTTP `Link` header. That endpoi
 3. Connect the MCP client to `/mcp` with `Authorization: Bearer <bearer>` from the exchange response.
 4. Keep and reuse the bearer for that agent. Each exchange creates a separate link identity.
 
-The agent can list files, read settled content, and read the share discussion.
-Comment and Edit links also expose discussion posting. The relay checks the grant again for every action.
-A link on a Group share also reads the Group's channel with `dohc_read_channel`.
+The agent can list files and read settled content. It sees the same conversation as a person with the link in the viewer.
+On a Group share that is the Group's channel, read with `dohc_read_channel`.
 A read-write link also gets `dohc_post_channel`, which posts there as its link holder; the owner sees the post marked as from a link holder.
-The relay still refuses a post from a read-only link, and a refusal arrives as a sentence the agent can act on.
+On any other share it is the share discussion, which Comment and Edit links can also post to.
+The relay checks the grant again for every action, and a refusal arrives as a sentence the agent can act on.
+If a post's answer is lost, the tool says the post may have landed. Send it again with the same `idempotencyKey`; it posts once.
 Live document tools require the existing Public Edit release and live-link configuration described below.
 They support existing `.md` documents on main while the document host is online.
 The edit tool replaces one exact text occurrence inside a single formatting run. It preserves unrelated document content and frontmatter.

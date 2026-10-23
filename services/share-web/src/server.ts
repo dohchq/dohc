@@ -111,6 +111,11 @@ interface RelayCall {
   buffered?: boolean;
   /** Refuses when the session changed before the call answered. */
   ifSessionChanged?: boolean;
+  /**
+   * Answers a lost or unreadable relay answer as 503 `link_unavailable`, not as
+   * a refusal: a write may have landed, and a read's failure says nothing about the link.
+   */
+  retryable?: boolean;
   /** Answers a relay 200. `holdSlot` keeps the limiter slot until its release runs. */
   ok?(relayResponse: Response, holdSlot: () => () => void, signal: AbortSignal): Response | Promise<Response>;
   /** Translates a relay refusal, or returns null for the generic refusal. */
@@ -602,12 +607,12 @@ async function linkChatPostInput(request: Request): Promise<string | null> {
 // words. Only the relay's code passes, never its own words.
 const LINK_CHAT_REFUSALS: Readonly<Record<string, { status: number; error: string }>> = {
   bad_request: { status: 400, error: "dohc could not post this message. Check its thread and text, then try again." },
-  link_discussion_blocked: { status: 403, error: "The owner stopped this link holder from posting." },
+  link_discussion_blocked: { status: 403, error: "The owner stopped this link holder from posting. Ask the owner to allow your posts again." },
   link_discussion_paused: { status: 403, error: "The owner paused posts from share links. Try again later." },
   conflict: { status: 409, error: "This message's key was already used for a different message. Send it as a new message." },
   link_name_already_set: { status: 409, error: "This link holder already has a name. Post with that name, or with none." },
-  discussion_limit_reached: { status: 413, error: "This link has reached its message limit." },
-  quota_exceeded: { status: 413, error: "The owner's workspace is full, so this message can't be posted." },
+  discussion_limit_reached: { status: 413, error: "This link has reached its message limit. Ask the owner if you need to post more." },
+  quota_exceeded: { status: 413, error: "The owner's workspace is full. Ask the owner to free space, then send this message again." },
   payload_too_large: { status: 413, error: "This message is too long. Shorten it, then send it again." },
 };
 
@@ -1273,7 +1278,7 @@ export function createShareWebApplication({
       await relayResponse.body?.cancel().catch(() => undefined);
       return answer(refused());
     } catch {
-      return superseded() ?? answer(call.path === "/sync/link/collection-writes"
+      return superseded() ?? answer(call.retryable
         ? jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}) : refused());
     } finally {
       bounded.dispose();
@@ -1559,6 +1564,7 @@ export function createShareWebApplication({
       const probe = await callRelay(request, authenticated, {
         path: "/sync/link/share",
         buffered: true,
+        retryable: true,
         ok: async (relayResponse) => {
           const meta = asRecord(await relayResponse.json().catch(() => null));
           writable = meta?.access === "edit" && asRecord(meta.effectiveSelector)?.versionId === null;
@@ -1594,6 +1600,7 @@ export function createShareWebApplication({
           headers: { "x-dohc-link-profile-secret": profileSecret, "content-type": "application/json" },
           body,
           buffered: true,
+          retryable: true,
           timeoutMs: COLLECTION_WRITE_TIMEOUT_MS,
           ok: acceptedCollectionWrite,
           refusal: collectionWriteRefusal,
@@ -1616,7 +1623,7 @@ export function createShareWebApplication({
         const read = linkChatReadPath(request, channels);
         if (!read) return refused();
         return await callRelay(request, authenticated, {
-          path: read.path, holdMs: read.holdMs, buffered: true, ifSessionChanged: true,
+          path: read.path, holdMs: read.holdMs, buffered: true, ifSessionChanged: true, retryable: true,
           // The channel answer names this profile's name, once set.
           ...(channels && profileSecret ? { headers: { "x-dohc-link-profile-secret": profileSecret } } : {}),
           ...(read.holdMs > 0 ? { limiter: activityHoldLimiter } : {}),
@@ -1644,6 +1651,7 @@ export function createShareWebApplication({
         body,
         buffered: true,
         ifSessionChanged: true,
+        retryable: true,
         refusal: linkChatRefusal,
       });
     }
@@ -1713,7 +1721,8 @@ export function createShareWebApplication({
       const authenticated = readSession(request);
       if (!authenticated || request.method !== "GET") return refused();
       if (pathname === "/api/view/meta") {
-        return await callRelay(request, authenticated, { path: "/sync/link/share" });
+        // The share's answer says whether the link has a channel, so a lost one is retryable.
+        return await callRelay(request, authenticated, { path: "/sync/link/share", retryable: true });
       }
       if (pathname === "/api/view/current") {
         const collectionPath = new URL(request.url).searchParams.get("collectionPath");

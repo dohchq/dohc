@@ -4367,9 +4367,13 @@ describe("App", () => {
 
   it("shows a Group link's channel in place of the share discussion", async () => {
     const file: SharedFile = { path: "team/plan.md", blobSha256: "6".repeat(64), contentKind: "text" };
-    const viewMeta: ViewMeta = { ...DEFAULT_META, access: "view", effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "view" } };
+    // The files' answer names the link's channel, so the viewer never opens the share discussion.
+    const viewMeta: ViewMeta = { ...DEFAULT_META, access: "view", effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "view" },
+      channel: { channelWireId: "wire" } };
+    const paths: string[] = [];
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
+      paths.push(path);
       if (path === "/api/view/current") return currentPage([file], 1, 0, viewMeta);
       if (path === "/api/view/log?since=1&limit=500&current=true") return logOpsPage([], 1);
       if (path === "/api/view/meta") return jsonResponse(viewMeta);
@@ -4399,6 +4403,7 @@ describe("App", () => {
     expect(container.querySelector('.link-channel textarea[name="body"]')).toBeNull();
     expect(container.querySelector(".link-channel")?.textContent).toContain("You can read this channel but not post.");
     expect(container.querySelector(".comments-panel:not(.link-channel)")).toBeNull();
+    expect(paths.filter(path => path.startsWith("/api/view/discussion"))).toEqual([]);
   });
 
   it("applies narrowed View access from activity and ignores stale Comment metadata", async () => {

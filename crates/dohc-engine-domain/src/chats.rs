@@ -1656,10 +1656,12 @@ pub fn normalize_author_user_id(value: Option<&str>) -> Result<Option<String>, D
 }
 
 /// A replicated message's link provenance. A link message names its grant and
-/// link principal, carries no account, owner, origin or chain depth, and stays
-/// within the link body cap; no other message names a link or uses the link
-/// message id prefix. Ids must already be in their stored form.
+/// link principal, carries no account, owner, origin or chain depth, stays
+/// within the link body cap, uses the link message id prefix, and comes from
+/// its link principal's relay origin, as the relay writes it. No other message
+/// names a link or uses the prefix. Ids must already be in their stored form.
 pub fn validate_replicated_link_author(
+    origin_id: &str,
     message_id: &str,
     author_kind: &str,
     grant_id: Option<&str>,
@@ -1682,7 +1684,9 @@ pub fn validate_replicated_link_author(
             if id(grant_id)
                 && id(principal_id)
                 && !account_fields
-                && body.len() <= MAX_LINK_MESSAGE_BODY_BYTES =>
+                && body.len() <= MAX_LINK_MESSAGE_BODY_BYTES
+                && message_id.starts_with(LINK_MESSAGE_ID_PREFIX)
+                && origin_id.strip_prefix(LINK_ORIGIN_PREFIX) == Some(principal_id) =>
         {
             Ok(Some(ChatMessageLinkAuthor {
                 grant_id: grant_id.to_owned(),

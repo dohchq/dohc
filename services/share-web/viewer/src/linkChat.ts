@@ -41,16 +41,14 @@ function cursor(value: unknown): number {
   return Number(value);
 }
 
-/** The link's Group channel, or null when the link is not on a Group share. */
-export async function openLinkChannel(session: string, signal: AbortSignal): Promise<LinkChannel | null> {
-  let value: Record<string, unknown>;
-  try {value = await linkChatRequest(session, "/api/view/chat/channels", signal);}
-  catch (error) {if (error instanceof NamedChatError && error.status === 404) return null; throw error;}
+/** The Group channel the share's answer named for this link; any failure throws. */
+export async function openLinkChannel(session: string, channelWireId: string, signal: AbortSignal): Promise<LinkChannel> {
+  const value = await linkChatRequest(session, "/api/view/chat/channels", signal);
   const channel: unknown = Array.isArray(value.channels) && value.channels.length === 1 ? value.channels[0] : null;
-  if (typeof value.shareId !== "string" || !record(channel) || typeof channel.channelWireId !== "string" ||
+  if (typeof value.shareId !== "string" || !record(channel) || channel.channelWireId !== channelWireId ||
       (channel.access !== "read-only" && channel.access !== "read-write") ||
       (value.profileName !== null && typeof value.profileName !== "string")) throw invalid();
-  return {shareId: value.shareId, channelWireId: channel.channelWireId, name: normalizeShareLabel(channel.name), access: channel.access,
+  return {shareId: value.shareId, channelWireId, name: normalizeShareLabel(channel.name), access: channel.access,
     profileName: value.profileName};
 }
 
