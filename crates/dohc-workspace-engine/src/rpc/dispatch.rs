@@ -27,6 +27,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
         || matches!(
             method,
             "files.resolve"
+                | "documents.keepRetainedVersion"
                 | "capture.reconcile"
                 | "capture.retryHeld"
                 | "capture.importRecovery"
@@ -433,6 +434,14 @@ impl EngineService {
             }
             "sync.heldDocuments" => {
                 Box::pin(self.sync_held_documents(&ctx, request.workspace, request.params)).await?
+            }
+            "documents.keepRetainedVersion" => {
+                Box::pin(self.documents_keep_retained_version(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                ))
+                .await?
             }
             "keys.upload" => {
                 Box::pin(self.keys_upload(&ctx, request.workspace, request.params)).await?
@@ -1157,6 +1166,12 @@ impl EngineService {
                     "received shares do not host live applications",
                 ));
             }
+            if method == "documents.keepRetainedVersion" {
+                return Err(WireError::new(
+                    ErrorCode::Forbidden,
+                    "received shares do not keep retained versions",
+                ));
+            }
         }
         if read_only
             && !matches!(
@@ -1548,6 +1563,7 @@ mod tests {
             "conflicts.list",
             "conflicts.open",
             "conflicts.resolve",
+            "documents.keepRetainedVersion",
             "engine.ping",
             "history.page",
             "keptCopies.list",

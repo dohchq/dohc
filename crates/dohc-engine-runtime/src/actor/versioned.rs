@@ -23,8 +23,8 @@ use dohc_engine_domain::{
     insert_text_conflict_if_absent, rollback_compensating_moment_id, write_text_in_tx,
 };
 use dohc_engine_storage::{
-    EngineStore, FaultAction, FaultInjector, FaultPoint, JobStatus, Preimage, StorageError,
-    TxnOutcome, hex_sha256,
+    EngineStore, FaultAction, FaultInjector, FaultPoint, JobStatus, NoFaults, Preimage,
+    StorageError, TxnOutcome, hex_sha256,
 };
 use dohc_engine_sync::{
     ApplyDisposition, ApplyOutcome, ConflictApplyResult, ReplicationEnvelope,
@@ -256,6 +256,46 @@ impl ActorHandle {
                     materialized,
                     materialize_outcome,
                 })
+            })
+        })
+        .await
+    }
+
+    /// Keep the version a hosted replica holds for a released chain as an
+    /// ordinary copy, or answer the attempt that already stands for its
+    /// binding. A copy created now is written to disk after it commits; one
+    /// that cannot be yet reaches disk with the next replay.
+    pub async fn keep_retained_version(
+        &self,
+        workspace_id: String,
+        input: dohc_engine_sync::KeepRetainedVersion,
+        root: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+    ) -> Result<dohc_engine_sync::KeptRetainedVersion, RuntimeError> {
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                let kept = match dohc_engine_sync::keep_retained_version(
+                    store,
+                    &workspace_id,
+                    &input,
+                    &NoFaults,
+                )? {
+                    TxnOutcome::Committed(kept) => kept,
+                    TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+                };
+                if kept.created {
+                    materialize_expected_job(
+                        store,
+                        &root,
+                        &workspace_id,
+                        &format!("sync-mat_{}", kept.recovery_moment_id),
+                        self_writes.as_ref(),
+                        input.now_ms,
+                        &NoFaults,
+                        None,
+                    );
+                }
+                Ok(kept)
             })
         })
         .await

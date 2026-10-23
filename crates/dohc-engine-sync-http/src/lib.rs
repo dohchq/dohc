@@ -1060,6 +1060,7 @@ impl RelayTransport for HttpRelayTransport {
         Ok(PushResponse {
             settlement_refusals: wire.settlement_refusals,
             hosted_refusals: wire.hosted_refusals,
+            redundant_recoveries: wire.redundant_recoveries,
             accepted: wire.accepted,
             inserted: wire.inserted,
             skipped: wire.skipped,
@@ -1234,6 +1235,7 @@ impl HttpRelayTransport {
         Ok(PushResponse {
             settlement_refusals: wire.settlement_refusals,
             hosted_refusals: wire.hosted_refusals,
+            redundant_recoveries: wire.redundant_recoveries,
             accepted: wire.accepted,
             inserted: wire.inserted,
             skipped: wire.skipped,
@@ -1647,6 +1649,9 @@ struct WirePushResponse {
     /// Only the hosted log refuses ops one at a time. Sync validates which push may carry them.
     #[serde(default, rename = "refusals")]
     hosted_refusals: Vec<dohc_engine_sync::HostedPushRefusal>,
+    /// Only the owner's log names copies another device published first.
+    #[serde(default)]
+    redundant_recoveries: Vec<dohc_engine_sync::RedundantRecovery>,
     accepted: usize,
     inserted: usize,
     skipped: usize,

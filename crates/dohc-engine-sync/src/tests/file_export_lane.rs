@@ -1462,6 +1462,7 @@ impl RelayTransport for RecordingRelay {
         Ok(PushResponse {
             settlement_refusals: Vec::new(),
             hosted_refusals: Vec::new(),
+            redundant_recoveries: Vec::new(),
             accepted,
             inserted: accepted,
             skipped: 0,

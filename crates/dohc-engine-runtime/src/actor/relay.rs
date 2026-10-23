@@ -865,6 +865,7 @@ mod deferred_relay_tests {
                 RelayIoRequest::Push(request) => RelayIoResponse::Push(PushResponse {
                     settlement_refusals: Vec::new(),
                     hosted_refusals: Vec::new(),
+                    redundant_recoveries: Vec::new(),
                     accepted: request.ops.len(),
                     inserted: request.ops.len(),
                     skipped: 0,
@@ -1028,6 +1029,7 @@ mod deferred_relay_tests {
                             RelayIoResponse::Push(PushResponse {
                                 settlement_refusals: Vec::new(),
                                 hosted_refusals: Vec::new(),
+                                redundant_recoveries: Vec::new(),
                                 accepted: 0,
                                 inserted: 0,
                                 skipped: 0,
@@ -1091,6 +1093,7 @@ mod deferred_relay_tests {
                                             RelayIoResponse::Push(PushResponse {
                                                 settlement_refusals: Vec::new(),
                                                 hosted_refusals: Vec::new(),
+                                                redundant_recoveries: Vec::new(),
                                                 accepted: 2,
                                                 inserted: 1,
                                                 skipped: 1,
@@ -1332,6 +1335,7 @@ mod deferred_relay_tests {
             Ok(RelayIoResponse::Push(PushResponse {
                 settlement_refusals: Vec::new(),
                 hosted_refusals: Vec::new(),
+                redundant_recoveries: Vec::new(),
                 accepted: request.ops.len(),
                 inserted: request.ops.len(),
                 skipped: 0,
@@ -1344,6 +1348,7 @@ mod deferred_relay_tests {
             PushResponse {
                 settlement_refusals: Vec::new(),
                 hosted_refusals: Vec::new(),
+                redundant_recoveries: Vec::new(),
                 accepted: dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH,
                 inserted: dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH,
                 skipped: 0,

@@ -150,7 +150,12 @@ pub use ydoc_origination::{
     BaseOrigination, SharingDeclined, lineage_originated_here, originate_appended_ydoc_base_in_tx,
     originate_ydoc_base_in_tx, ydoc_update_payload,
 };
-pub use ydoc_recovery::{YdocRecoveryMaterialization, repair_conflicted_ydoc_recoveries};
+pub use ydoc_recovery::{
+    CopyPublication, CopyPublicationState, CopyResolutionOutcome, KeepRetainedVersion,
+    KeptRetainedVersion, RELEASED_COPY_MOMENT_PREFIX, RedundantRecovery,
+    YdocRecoveryMaterialization,
+    keep_retained_version, repair_conflicted_ydoc_recoveries,
+};
 
 pub use dohc_engine_collab::WriterDocCache;
 pub use dohc_engine_storage::{FaultInjector, FaultPoint, NoFaults};

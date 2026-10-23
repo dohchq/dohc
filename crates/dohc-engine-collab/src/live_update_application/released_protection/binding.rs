@@ -48,6 +48,37 @@ impl RetainedContribution {
     pub fn to_json(&self) -> Value {
         contribution_value(self)
     }
+
+    /// The contribution `value` names, or none unless it has exactly
+    /// [`Self::to_json`]'s keys with wire-range integers.
+    pub fn from_json(value: &Value) -> Option<Self> {
+        match value.get("kind")?.as_str()? {
+            "carried" => {
+                let [delivery_id, journal_cursor, _, update_digest] = fields(
+                    value,
+                    ["deliveryId", "journalCursor", "kind", "updateDigest"],
+                )?;
+                Some(Self::Carried {
+                    delivery_id: text(delivery_id)?,
+                    update_digest: text(update_digest)?,
+                    journal_cursor: integer(journal_cursor, 0)?,
+                })
+            }
+            "outbox" => {
+                let [delivery_id, _, outbox_id, sequence, update_digest] = fields(
+                    value,
+                    ["deliveryId", "kind", "outboxId", "sequence", "updateDigest"],
+                )?;
+                Some(Self::Outbox {
+                    outbox_id: text(outbox_id)?,
+                    sequence: integer(sequence, 0)?,
+                    delivery_id: text(delivery_id)?,
+                    update_digest: text(update_digest)?,
+                })
+            }
+            _ => None,
+        }
+    }
 }
 
 impl ReleasedLineageBinding {
@@ -71,6 +102,12 @@ impl ReleasedLineageBinding {
     pub fn from_canonical_json(text: &str) -> Option<Self> {
         let binding = Self::from_value(&serde_json::from_str(text).ok()?)?;
         (binding.canonical_json() == text).then_some(binding)
+    }
+
+    /// The binding a parsed JSON value names, or none unless it has exactly
+    /// [`Self::to_json`]'s keys, explicit nulls and wire-range integers.
+    pub fn from_json(value: &Value) -> Option<Self> {
+        Self::from_value(value)
     }
 
     /// The binding as a JSON value with the canonical JSON's keys and values.
@@ -592,6 +629,30 @@ mod tests {
                 "{} is refused",
                 vector["name"]
             );
+        }
+    }
+
+    /// A parsed binding or contribution reads back only in its exact shape:
+    /// a copy request carries both as JSON values, not canonical text.
+    #[test]
+    fn parsed_values_read_back_only_in_their_exact_shape() {
+        let binding = listed();
+        assert_eq!(ReleasedLineageBinding::from_json(&binding.to_json()), Some(binding.clone()));
+        let mut extra = binding.to_json();
+        extra["extra"] = Value::Bool(true);
+        assert_eq!(ReleasedLineageBinding::from_json(&extra), None);
+        let mut dropped = binding.to_json();
+        dropped["incoming"].as_object_mut().unwrap().remove("relayNamespace");
+        assert_eq!(ReleasedLineageBinding::from_json(&dropped), None);
+        for contribution in carried_and_outbox() {
+            let value = contribution.to_json();
+            assert_eq!(RetainedContribution::from_json(&value), Some(contribution));
+            let mut extra = value.clone();
+            extra["extra"] = Value::Bool(true);
+            assert_eq!(RetainedContribution::from_json(&extra), None);
+            let mut kind = value;
+            kind["kind"] = Value::String("other".into());
+            assert_eq!(RetainedContribution::from_json(&kind), None);
         }
     }
 

@@ -30,6 +30,7 @@ import type {StopRestoreLookup} from "./storage/liveRestoreOperation.js";
 import {parseLiveRestoreConfig, LiveRestorePreparation, type LiveRestoreConfig} from "./liveRestorePreparation.js";
 import {parseServiceHostedReplicationConfig, ServiceHostedReplication} from "./serviceHostedReplication.js";
 import {decodeHostedSyncResult} from "@dohc/workspace-engine-client/relay-wire";
+import {withStreamedMarkdown} from "./heldDocumentRoutes";
 import type {ServiceActivationReplica} from "./serviceActivationDriver";
 interface ServiceLiveHostConfig {
   readonly version: 1;
@@ -605,19 +606,26 @@ export async function startServiceLiveHost(options: {
     };
     // A held-document read asks the engine for a workspace this daemon replicates,
     // and answers only while this registration and that attachment still stand.
-    // It writes nothing, so it takes no turn and no pass waits on it.
+    // It writes nothing, so it takes no turn and no pass waits on it. `streamed`
+    // takes the blob the engine sends before its answer.
     const heldRead = async <M extends "sync.heldDocuments" | "sync.heldDocument">(workspaceId: string, method: M,
-      params: Record<string, JsonValue>, callerSignal?: AbortSignal) => {
+      params: Record<string, JsonValue>, callerSignal?: AbortSignal, streamed?: (bytes: Uint8Array) => void) => {
       check();
       const attached = attachments.get(workspaceId);
       if (!attached) return null;
       return withLiveHostSignal(signal, callerSignal, async joined => {
-        const response = await client.sendRequest({id: nextRequestId(), method, workspace: attached.handle,
-          params: {workspaceId, ...params}, deadlineMs: config.client.requestDeadlineMs}, joined);
-        joined.throwIfAborted();
-        check();
-        if (attachments.get(workspaceId) !== attached) throw new Error("Hosted replica changed while it was read.");
-        return decodeHostedSyncResult(method, response.result);
+        const id = nextRequestId();
+        const stop = streamed ? client.onBlob(blob => {if (blob.requestId === id) streamed(blob.bytes);}) : () => {};
+        try {
+          const response = await client.sendRequest({id, method, workspace: attached.handle,
+            params: {workspaceId, ...params}, deadlineMs: config.client.requestDeadlineMs}, joined);
+          joined.throwIfAborted();
+          check();
+          if (attachments.get(workspaceId) !== attached) throw new Error("Hosted replica changed while it was read.");
+          return decodeHostedSyncResult(method, response.result);
+        } finally {
+          stop();
+        }
       });
     };
     // Restore work takes a turn, so no idle unload runs beside it. A step that
@@ -920,9 +928,14 @@ export async function startServiceLiveHost(options: {
         return heldRead(workspaceId, "sync.heldDocuments",
           {...(page.afterObjectId === undefined ? {} : {afterObjectId: page.afterObjectId}), limit: page.limit}, callerSignal);
       },
-      /** One held document, whether its binding stands, and what that binding preserves. Null when nothing is held there. */
+      /**
+       * One held document, whether its binding stands, and what that binding preserves, with
+       * its whole Markdown however long. Null when nothing is held there.
+       */
       async heldDocument(workspaceId: string, objectId: string, callerSignal?: AbortSignal) {
-        return heldRead(workspaceId, "sync.heldDocument", {objectId}, callerSignal);
+        let streamed: Uint8Array | undefined;
+        const inspected = await heldRead(workspaceId, "sync.heldDocument", {objectId}, callerSignal, bytes => {streamed = bytes;});
+        return inspected && withStreamedMarkdown(inspected, streamed);
       },
       get restoreConfigured() { return restore !== undefined; },
       async prepareRestore(value: StopRestoreLookup, callerSignal?: AbortSignal) {

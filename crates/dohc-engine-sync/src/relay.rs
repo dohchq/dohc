@@ -57,6 +57,9 @@ pub struct PushResponse {
     pub settlement_refusals: Vec<SettlementPublicationRefusal>,
     /// Ops the scoped feed refused one at a time. Only a hosted push has any.
     pub hosted_refusals: Vec<HostedPushRefusal>,
+    /// Copies of retained work another device had already published. Only
+    /// the owner's log names any.
+    pub redundant_recoveries: Vec<crate::RedundantRecovery>,
     pub accepted: usize,
     pub inserted: usize,
     pub skipped: usize,
@@ -1780,6 +1783,18 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         return Err(RelayError::OriginDiverged);
                     }
                     if crashes(faults, FaultPoint::SyncAfterPushBeforeCursorPersist) {
+                        return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
+                    }
+                    if !response.redundant_recoveries.is_empty()
+                        && let TxnOutcome::Crashed { .. } =
+                            crate::ydoc_recovery::record_redundant_publication(
+                                store,
+                                workspace_id,
+                                &response.redundant_recoveries,
+                                faults,
+                            )
+                            .map_err(local)?
+                    {
                         return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
                     }
                     match crate::cursor::write_pushed_seq_with_refusals(
@@ -5243,6 +5258,11 @@ fn validate_push_response(
 ) -> Result<(), RelayError> {
     crate::settlement_publication::validate_push_refusals(&response.settlement_refusals, batch)?;
     crate::hosted::validate_push_refusals(response, batch, hosted)?;
+    crate::ydoc_recovery::validate_redundant_recoveries(
+        &response.redundant_recoveries,
+        batch,
+        hosted,
+    )?;
     let last = batch
         .last()
         .map(|op| op.origin_seq)
@@ -5271,6 +5291,7 @@ pub(crate) fn validate_share_push_response(
     if push.accepted != batch_len
         || push.inserted.checked_add(push.skipped) != Some(push.accepted)
         || !push.hosted_refusals.is_empty()
+        || !push.redundant_recoveries.is_empty()
     {
         return Err(RelayError::InvalidResponse);
     }
@@ -5280,6 +5301,7 @@ pub(crate) fn validate_share_push_response(
 pub(crate) fn validate_probe_response(response: &PushResponse) -> Result<(), RelayError> {
     if !response.settlement_refusals.is_empty()
         || !response.hosted_refusals.is_empty()
+        || !response.redundant_recoveries.is_empty()
         || response.accepted != 0
         || response.inserted != 0
         || response.skipped != 0

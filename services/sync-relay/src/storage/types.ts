@@ -133,6 +133,16 @@ export interface AppendLogBatchResult {
   skipped: number;
   currentMaxOriginSeq: number;
   settlementRefusals?: {originId:string;originSeq:number;momentId:string;settlementId:string;reason:string}[];
+  // Copies of retained work this batch published again, each with the creation the log accepted first.
+  redundantRecoveries?: RedundantRecovery[];
+}
+
+export interface RedundantRecovery {
+  originSeq: number;
+  recoveryMomentId: string;
+  acceptedOriginId: string;
+  acceptedOriginSeq: number;
+  acceptedRelaySeq: number;
 }
 
 export interface FetchLogPageResult {
@@ -841,6 +851,9 @@ export interface SyncRelayStorage {
     // Runs after the guard, under the same lock, with the ops at coordinates
     // the log does not hold yet. It may refuse an op or mark it departed.
     admit?: (ops: SyncRelayLogInput[]) => void;
+    // The owner's publication lane: a copy of retained work another device
+    // already published keeps its coordinate and changes nothing else.
+    classifyRedundantRecoveries?: boolean;
   }): AppendLogBatchResult;
   fetchLogPage(input: {
     workspaceId: string;

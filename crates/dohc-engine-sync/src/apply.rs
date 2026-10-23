@@ -627,6 +627,7 @@ fn redelivered<T>(
         return Ok(Admission::Refused(refusal));
     }
     crate::live_audit::refresh_confirmed_application_in_tx(tx, envelope)?;
+    crate::ydoc_recovery::record_released_copy_echo_in_tx(tx, envelope)?;
     Ok(Admission::Skipped)
 }
 

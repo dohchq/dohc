@@ -968,6 +968,7 @@ impl RelayTransport for HostedFeed {
         let mut response = PushResponse {
             settlement_refusals: Vec::new(),
             hosted_refusals,
+            redundant_recoveries: Vec::new(),
             accepted,
             inserted,
             skipped: accepted - inserted,
@@ -2746,6 +2747,7 @@ fn a_push_response_refuses_only_its_own_batch_and_only_for_a_hosted_push() {
             .into_iter()
             .collect(),
         hosted_refusals,
+        redundant_recoveries: Vec::new(),
         accepted: 2,
         inserted: 2,
         skipped: 0,

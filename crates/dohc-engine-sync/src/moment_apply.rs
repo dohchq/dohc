@@ -690,6 +690,42 @@ fn apply_moment_append(
         )
         .map_err(SyncError::corrupt)?;
     if duplicate {
+        // Another of the owner's devices created the same copy of retained
+        // work. Its creation is a receipt of this one: nothing applies again,
+        // and later local changes to the copy stay.
+        let creation = crate::ydoc_recovery::ReceivedCreation {
+            moment_id: &payload.moment_id,
+            version_id: &payload.version_id,
+            object_id: &payload.object_id,
+            operation: &payload.operation,
+            before_present: &payload.before_present,
+            after_content_kind: payload.payload_after_content_kind.as_deref(),
+            after_blob_sha256: &payload.payload_after_blob_sha256,
+            after_byte_length: payload.payload_after_byte_length,
+            correlation_id: payload.metadata.correlation_id.as_deref(),
+            has_authors: payload.authors.is_some(),
+        };
+        if crate::ydoc_recovery::equivalent_released_copy_in_tx(
+            tx,
+            &envelope.workspace_id,
+            &creation,
+        )? {
+            if let Some(relay_seq) = envelope.relay_seq {
+                crate::ydoc_recovery::record_released_copy_acceptance_in_tx(
+                    tx,
+                    &envelope.workspace_id,
+                    &payload.moment_id,
+                    &envelope.origin_id,
+                    envelope.origin_seq,
+                    relay_seq,
+                )?;
+            }
+            return Ok(MomentApplyResult {
+                conflicts_opened: 0,
+                materialization_changes: Vec::new(),
+                record_facts: None,
+            });
+        }
         return Err(SyncError::InvalidInput {
             reason: "replicated plaintext moment id collides with existing history",
         });

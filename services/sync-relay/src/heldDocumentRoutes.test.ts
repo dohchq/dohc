@@ -1,9 +1,11 @@
+import {createHash} from "node:crypto";
 import {afterEach, describe, expect, it, vi} from "vitest";
 import {UnauthorizedError} from "@dohc/workspace-auth/session";
 import {fixture as ticketFixture, scope} from "./liveTickets.test-helper";
 import {createSyncRelayHandler} from "./server";
 import {releasedLineageBindingDigest, type ReleasedLineageBinding} from "@dohc/workspace-engine-client/relay-wire";
-import {MAX_HELD_DOCUMENTS_PAGE, type HeldDocumentHost, type HeldDocumentInspection, type HeldDocumentsPage} from "./heldDocumentRoutes";
+import {MAX_HELD_DOCUMENTS_PAGE, withStreamedMarkdown, type HeldDocumentHost, type HeldDocumentInspection,
+  type HeldDocumentsPage} from "./heldDocumentRoutes";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {for (const close of cleanups.splice(0).reverse()) await close();});
@@ -18,6 +20,14 @@ const held: HeldDocumentsPage["documents"][number] = {objectId: binding.objectId
   bindingDigest: releasedLineageBindingDigest(binding), continuation: "frozen", bindingStale: false};
 const page: HeldDocumentsPage = {documents: [held], hasMore: false};
 const inspection: HeldDocumentInspection = {...held, status: "stale", preservation: null, resolution: null};
+const sha256 = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+// Preserved text past the engine's in-band limit, as the session host answers it whole.
+const markdown = "# Plan\n\n" + "Kept paragraph with ünïcode.\n\n".repeat(4096);
+const preserved: HeldDocumentInspection = {...held, status: "current", resolution: null, preservation: {status: "complete",
+  reasons: [], mergedContributionIds: [], markdown, markdownSha256: sha256(markdown),
+  markdownByteLength: Buffer.byteLength(markdown), inbandLimitBytes: 48 * 1024}};
+const markdownPath = `${scope.workspaceId}/held-documents/${held.objectId}/markdown` +
+  `?bindingDigest=${held.bindingDigest}&sha256=${sha256(markdown)}`;
 
 // Each bearer names one account: the owner, a named Edit recipient, a View
 // recipient, and the owner of another workspace.
@@ -75,7 +85,7 @@ describe("held document routes", () => {
     ["an unknown credential", {authorization: "Bearer forged"}, new UnauthorizedError().statusCode],
   ])("refuse %s as they refuse elsewhere, naming nothing, and never ask the host", async (_case, headers, status) => {
     const host = fakeHost(), f = await relay(host);
-    for (const path of [`${scope.workspaceId}/held-documents`, `${scope.workspaceId}/held-documents/${held.objectId}`]) {
+    for (const path of [`${scope.workspaceId}/held-documents`, `${scope.workspaceId}/held-documents/${held.objectId}`, markdownPath]) {
       const refused = await f.get(path, headers);
       expect(refused.status).toBe(status);
       expect(JSON.stringify(await refused.json())).not.toContain(held.objectId);
@@ -140,6 +150,98 @@ describe("held document routes", () => {
   it("are read only", async () => {
     const host = fakeHost(), f = await relay(host);
     expect((await f.get(`${scope.workspaceId}/held-documents`, {authorization: "Bearer owner"}, "POST")).status).toBe(405);
+    expect((await f.get(markdownPath, {authorization: "Bearer owner"}, "POST")).status).toBe(405);
     expect(host.calls).toEqual([]);
+  });
+
+  it("answer preserved text past the in-band limit whole from its own route, and leave it out of the details", async () => {
+    const host = fakeHost({heldDocument: async () => preserved}), f = await relay(host);
+    const details = await f.get(`${scope.workspaceId}/held-documents/${held.objectId}`);
+    expect(details.status).toBe(200);
+    const body = await details.json() as HeldDocumentInspection;
+    expect(body.preservation).toMatchObject({markdown: null, markdownSha256: sha256(markdown), markdownByteLength: Buffer.byteLength(markdown)});
+
+    const text = await f.get(markdownPath);
+    expect(text.status).toBe(200);
+    expect(text.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+    expect(text.headers.get("cache-control")).toBe("private, no-store");
+    const bytes = new Uint8Array(await text.arrayBuffer());
+    expect(sha256(bytes)).toBe(sha256(markdown));
+    expect(new TextDecoder().decode(bytes)).toBe(markdown);
+  });
+
+  it("keep preserved text within the in-band limit in the details", async () => {
+    const short = "# Plan\n\nKept.\n";
+    const inband: HeldDocumentInspection = {...preserved, preservation: {...preserved.preservation!, markdown: short,
+      markdownSha256: sha256(short), markdownByteLength: Buffer.byteLength(short)}};
+    const f = await relay(fakeHost({heldDocument: async () => inband}));
+    expect(((await (await f.get(`${scope.workspaceId}/held-documents/${held.objectId}`)).json()) as HeldDocumentInspection)
+      .preservation?.markdown).toBe(short);
+  });
+
+  it.each([
+    ["another binding", {bindingDigest: "e".repeat(64)}],
+    ["other text", {sha256: "e".repeat(64)}],
+  ])("answer no text inspected under %s, as a missing document", async (_case, query) => {
+    const f = await relay(fakeHost({heldDocument: async () => preserved}));
+    const params = new URLSearchParams({bindingDigest: held.bindingDigest, sha256: sha256(markdown), ...query});
+    const refused = await f.get(`${scope.workspaceId}/held-documents/${held.objectId}/markdown?${params}`);
+    expect(refused.status).toBe(404);
+  });
+
+  it("answer no text for a stale binding or an incomplete preservation", async () => {
+    const stale = await relay(fakeHost({heldDocument: async () => inspection}));
+    expect((await stale.get(markdownPath)).status).toBe(404);
+    const incomplete: HeldDocumentInspection = {...preserved, preservation: {...preserved.preservation!, status: "missing-evidence",
+      reasons: [{reason: "source-missing", status: "missing-evidence", namespace: "relay", contribution: null}],
+      markdown: null, markdownSha256: null, markdownByteLength: null}};
+    const missing = await relay(fakeHost({heldDocument: async () => incomplete}));
+    expect((await missing.get(markdownPath)).status).toBe(404);
+  });
+
+  it.each([
+    "", "?bindingDigest=" + "a".repeat(64), `?sha256=${"a".repeat(64)}`,
+    `?bindingDigest=${"A".repeat(64)}&sha256=${"a".repeat(64)}`,
+    `?bindingDigest=${"a".repeat(64)}&sha256=${"a".repeat(64)}&other=1`,
+    `?bindingDigest=${"a".repeat(64)}&bindingDigest=${"a".repeat(64)}&sha256=${"a".repeat(64)}`,
+  ])("refuse a bad Markdown query, %s, before asking the host", async query => {
+    const host = fakeHost(), f = await relay(host);
+    expect((await f.get(`${scope.workspaceId}/held-documents/${held.objectId}/markdown${query}`)).status).toBe(400);
+    expect(host.calls).toEqual([]);
+  });
+
+  it("recheck ownership after the host's read before answering text", async () => {
+    let release!: () => void, began!: () => void;
+    const answered = new Promise<void>(resolve => {release = resolve;});
+    const asked = new Promise<void>(resolve => {began = resolve;});
+    const f = await relay(fakeHost({heldDocument: async () => {began(); await answered; return preserved;}}));
+    const transferred = f.get(markdownPath);
+    await asked;
+    f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='owner-2' WHERE workspace_id=?").run(scope.workspaceId);
+    release();
+    const refused = await transferred;
+    expect(refused.status).toBe(404);
+    expect(await refused.text()).not.toContain("Kept paragraph");
+  });
+});
+
+describe("streamed held document Markdown", () => {
+  const streamedOut: HeldDocumentInspection = {...preserved, preservation: {...preserved.preservation!, markdown: null}};
+
+  it("restores the text the engine streamed in place of the in-band text", () => {
+    expect(withStreamedMarkdown(streamedOut, Buffer.from(markdown))).toEqual(preserved);
+  });
+
+  it("refuses a stream that is missing or not the text the result names", () => {
+    expect(() => withStreamedMarkdown(streamedOut, undefined)).toThrow();
+    expect(() => withStreamedMarkdown(streamedOut, Buffer.from(markdown + "x"))).toThrow();
+    const swapped = Buffer.from(markdown);
+    swapped[swapped.length - 1] = 0x21;
+    expect(() => withStreamedMarkdown(streamedOut, swapped)).toThrow();
+  });
+
+  it("leaves inspections without streamed text as they are", () => {
+    expect(withStreamedMarkdown(inspection, undefined)).toBe(inspection);
+    expect(withStreamedMarkdown(preserved, undefined)).toBe(preserved);
   });
 });

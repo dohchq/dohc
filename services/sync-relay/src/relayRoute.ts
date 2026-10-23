@@ -271,6 +271,9 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
   if (parts[2] === "held-documents") {
     if (parts.length === 3) return {route: "held-documents", workspaceId};
     if (parts.length === 4) return {route: "held-documents", workspaceId, objectId: parseString(parts[3], "objectId", MAX_HELD_OBJECT_ID_CHARS)};
+    if (parts.length === 5 && parts[4] === "markdown") {
+      return {route: "held-documents", workspaceId, objectId: parseString(parts[3], "objectId", MAX_HELD_OBJECT_ID_CHARS), markdown: true};
+    }
     throw notFound();
   }
   if (parts[2] === "live-restores") {

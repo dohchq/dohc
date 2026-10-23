@@ -150,7 +150,7 @@ export function createWorkspaceReplicationRoutes(
         workspaceId: route.workspaceId,
         originId,
         ops,
-        ...(route.serviceHost ? {admit: route.serviceHost.admit} : {}),
+        ...(route.serviceHost ? {admit: route.serviceHost.admit} : {classifyRedundantRecoveries: true}),
         // Identity claim/verification rides the append's BEGIN IMMEDIATE
         // transaction. A gap/conflict/quota/blob failure later in append
         // rolls back a first-adopt claim together with the batch.
@@ -178,6 +178,7 @@ export function createWorkspaceReplicationRoutes(
         skipped: result.skipped,
         currentMaxOriginSeq: result.currentMaxOriginSeq,
         ...(result.settlementRefusals ? {settlementRefusals:result.settlementRefusals} : {}),
+        ...(result.redundantRecoveries ? {redundantRecoveries: result.redundantRecoveries} : {}),
         ...(refusals.length ? {refusals} : {}),
       });
     }
