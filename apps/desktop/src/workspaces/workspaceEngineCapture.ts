@@ -97,6 +97,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { isInside } from "../security/pathContainment";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { createFile } from "./workspaceFiles";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "./workspaceTextLimits";
 import {
   type ActiveAgentRun,
 } from "../agents/activeAgentRun";
@@ -2730,6 +2731,9 @@ export function createWorkspaceEngineCapture(
             ...(input.contentKind
               ? { contentKind: input.contentKind }
               : {}),
+            // A note the WYSIWYG editor opens can seed past the in-band cap.
+            // A larger one keeps its read preview and edits its file directly.
+            largeSeed: { workspaceId, maxBytes: WYSIWYG_MARKDOWN_THRESHOLD_BYTES },
             onRemoteUpdate: (update) => {
               if (current !== opened || canonicalDoc === null) {
                 if (!opening.installed) opening.updates.push(update);

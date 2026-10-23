@@ -13,6 +13,7 @@ import {
   type ApplyLocalUpdateOptions,
   type YdocResyncNeededError,
   type EngineTransport,
+  type LargeSeedReading,
   type YdocAdapterSession,
 } from "./ydocLiveAdapter";
 import type {
@@ -80,6 +81,8 @@ export interface EngineYdocProviderSessionOptions {
   // Forwarded to the adapter: false when the caller already holds the
   // document's canonical state and will replay it into this generation.
   seedAbsentLineage?: boolean;
+  // Forwarded to the adapter: reads a seed past the in-band cap as a blob.
+  largeSeed?: LargeSeedReading;
   onRemoteUpdate: (update: Uint8Array) => void;
   onRemoteApplyError?: (error: RemoteYdocApplyError) => void;
   onLocalEditError?: (error: unknown) => void;
@@ -196,6 +199,7 @@ export async function openEngineYdocProviderSession(
       ...(options.seedAbsentLineage !== undefined
         ? { seedAbsentLineage: options.seedAbsentLineage }
         : {}),
+      ...(options.largeSeed ? { largeSeed: options.largeSeed } : {}),
     });
   } catch (error) {
     if (ownsAdapter) adapter.dispose();
