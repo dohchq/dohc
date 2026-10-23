@@ -34,6 +34,8 @@ import type { LocalDatasetAgent } from "../workspaces/localDatasetHost";
 import type { WorkspaceAuthorityOperation } from "../workspaces/workspaceAuthorityOwner";
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { captureRefusal } from "../workspaces/engineCaptureGate";
+import { assertOriginalWorkspace } from "../ipc/ownerRelayShareHandler";
+import type { OwnerLiveQuarantine, SaveOwnerLiveRecoveryCopyResult } from "../ipc/bridgeContract";
 import {
   runCollectionRecordCreation,
   setCollectionRecordFields,
@@ -67,6 +69,12 @@ interface DesktopCliServerDependencies<State> {
   links: ReturnType<typeof import("../workspaces/workspaceLinks").createWorkspaceLinksReader>;
   stopWorkspaceSync?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<import("@dohc/cli/protocol").CliResultByVerb["stopSync"]>;
   shareCopy?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
+  /** The desktop engine's refused live edits, and its Save recovery copy and Try again for them. */
+  ownerLiveRecovery?: {
+    keptEdits(workspaceId: string): readonly OwnerLiveQuarantine[];
+    save(workspace: RegistryEntry, path: string): Promise<SaveOwnerLiveRecoveryCopyResult>;
+    retry(workspace: RegistryEntry, objectId: string, incident: string): Promise<void>;
+  };
   access?(workspaceId: string): NonNullable<CliWorkspaceContext["access"]>;
   recordSuccess?: CliServerOptions["recordSuccess"];
   serverAccount?: CliServerOptions["serverAccount"];
@@ -222,6 +230,19 @@ export function createDesktopCliServer<State>(
       });
       return finish();
     };
+    // Save recovery copy and Try again under the admission the window's IPC
+    // uses: this attachment, the original workspace, and main's own record of
+    // the kept edits, found by path. The caller names nothing else.
+    const ownerLiveRecovery = dependencies.ownerLiveRecovery;
+    const withOwnerLiveRecovery = <Result>(work: (workspace: RegistryEntry) => Promise<Result>) =>
+      withPhysicalWorkspaceOperation(workspace.workspaceId, async operation => {
+        operation.assertCurrent();
+        if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
+        assertOriginalWorkspace(operation.workspace);
+        const result = await work(operation.workspace);
+        operation.assertCurrent();
+        return result;
+      });
     const operationHistory = createOperationHistory(work => withEngineAdapter(workspace, work));
     const withHistoryOperation = <T>(work: (operation: WorkspaceAuthorityOperation<RegistryEntry, State>) => Promise<T>) =>
       withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
@@ -431,6 +452,18 @@ export function createDesktopCliServer<State>(
               list: () => capture.listRetainedCopies(),
               delete: (copies) => capture.deleteRetainedCopies(copies),
             },
+            ...(ownerLiveRecovery ? {
+              keptEdits: {
+                list: () => withOwnerLiveRecovery(async current =>
+                  ownerLiveRecovery.keptEdits(current.workspaceId).map(({ path, reason, incident, recovery }) => ({ path, reason, incident, recovery }))),
+                saveRecoveryCopy: (path: string) => withOwnerLiveRecovery(current => ownerLiveRecovery.save(current, path)),
+                retry: (path: string, incident: string) => withOwnerLiveRecovery(async current => {
+                  const kept = ownerLiveRecovery.keptEdits(current.workspaceId).find(row => row.path === path);
+                  if (!kept) throw new Error(`dohc has no kept edits for ${path}. List kept edits again to check it.`);
+                  await ownerLiveRecovery.retry(current, kept.objectId, incident);
+                }),
+              },
+            } : {}),
           }),
       filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),
       listMoments: async ({ limit, objectId }) => {

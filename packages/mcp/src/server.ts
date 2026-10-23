@@ -63,6 +63,8 @@ import {
   readDocument,
   readWorkspaceFile,
   saveKeptCopy,
+  saveRecoveryCopy,
+  retryKeptEdits,
   listRetainedCopies,
   deleteRetainedCopies,
   searchWorkspaceFiles,
@@ -158,7 +160,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
 
   register(
     "dohc_workspace_status",
-    { description: "Report whether this workspace is local-only or cloud-synced.", inputSchema: {} },
+    { description: "Report whether this workspace is local-only or cloud-synced. In the owning workspace, also list live documents whose edits the server refused, as keptEdits.", inputSchema: {} },
     async () => text(await workspaceStatus(ctx)),
   );
 
@@ -220,6 +222,26 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: { id: z.number().int() },
     },
     async (args) => text(await saveKeptCopy(ctx, args)),
+  );
+
+  register(
+    "dohc_save_recovery_copy",
+    {
+      description:
+        "Save a live document's kept edits next to the document. Kept edits are edits the server refused, which dohc keeps on this computer; dohc_workspace_status lists them as `keptEdits`. dohc writes a recovery package with every kept edit, and a readable Markdown copy when it can read the edits as a document. `copyPath` is null when it cannot. The kept edits stay on this computer. Owner workspace only.",
+      inputSchema: { path: z.string().min(1).max(4096) },
+    },
+    async (args) => text(await saveRecoveryCopy(ctx, args)),
+  );
+
+  register(
+    "dohc_retry_kept_edits",
+    {
+      description:
+        "Send a live document's kept edits to the server once more, as Try again does in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Only a document whose `recovery` is `paused` can try again. Then read dohc_workspace_status: `retrying` until the server answers, `paused` with a new `incident` if it refuses again. Owner workspace only.",
+      inputSchema: { path: z.string().min(1).max(4096), incident: z.string().min(1).max(1024) },
+    },
+    async (args) => text(await retryKeptEdits(ctx, args)),
   );
 
   register(

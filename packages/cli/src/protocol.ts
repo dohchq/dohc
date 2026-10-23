@@ -212,6 +212,16 @@ const deleteRetainedCopiesArgsSchema = z
   })
   .strict();
 
+// Edits the server refused for good that this computer keeps for a live
+// document, found by the document's path. Try again names the refusal it
+// answers, so a newer refusal is read before it is retried.
+const liveKeptEditsArgsSchema = z.object(argsBase).strict();
+const saveRecoveryCopyArgsSchema = z.object({ ...argsBase, path: documentPathArg }).strict();
+const keptEditsIncidentSchema = z.string().min(1).max(1024);
+const retryKeptEditsArgsSchema = z
+  .object({ ...argsBase, path: documentPathArg, incident: keptEditsIncidentSchema })
+  .strict();
+
 const documentEditArgsSchema = z
   .object({
     ...argsBase,
@@ -482,6 +492,9 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("retainedCopies"), args: retainedCopiesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("deleteRetainedCopies"), args: deleteRetainedCopiesArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("liveKeptEdits"), args: liveKeptEditsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("saveRecoveryCopy"), args: saveRecoveryCopyArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("retryKeptEdits"), args: retryKeptEditsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileChatStart"), args: fileChatStartArgsSchema }).strict(),
@@ -558,6 +571,9 @@ export const CLI_CAPABILITIES = {
   saveKeptCopy: ["file.kept.save"],
   retainedCopies: ["file.retained.list"],
   deleteRetainedCopies: ["file.retained.delete"],
+  liveKeptEdits: ["workspace.status"],
+  saveRecoveryCopy: ["share.live.document.recovery.save"],
+  retryKeptEdits: ["share.live.document.retry"],
   documentEdit: ["document.edit"],
   documentCreate: ["document.create"],
   fileChatStart: ["file.chat.start"],
@@ -1178,6 +1194,38 @@ const deleteRetainedCopiesResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 
+// Live documents whose edits the server refused for good, as this computer
+// keeps them. `recovery` is paused while they wait for the owner, retrying
+// while Try again waits for the server, stopping while a Stop waits for it,
+// and stopped-kept or not-written after a Stop kept them.
+const liveKeptEditsResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    keptEdits: z.array(z.object({
+      path: z.string().min(1),
+      reason: z.string().min(1),
+      incident: keptEditsIncidentSchema,
+      recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written"]),
+    }).strict()),
+  }).strict(),
+  rawFailureSchema,
+]);
+// The package always holds every kept edit. `copyPath` is null when dohc
+// could not read the edits as a document. Both sit in `folder`.
+const saveRecoveryCopyResultSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    copyPath: z.string().min(1).nullable(),
+    packagePath: z.string().min(1),
+    folder: z.string().min(1),
+  }).strict(),
+  rawFailureSchema,
+]);
+const retryKeptEditsResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string().min(1) }).strict(),
+  rawFailureSchema,
+]);
+
 // What an automation run did, as this computer's run history keeps it:
 // a field it wrote, a record it added, a field someone else had changed
 // since the run planned it (kept as they left it), a record it could no
@@ -1472,6 +1520,9 @@ export const cliResultSchemas = {
   saveKeptCopy: saveKeptCopyResultSchema,
   retainedCopies: retainedCopiesResultSchema,
   deleteRetainedCopies: deleteRetainedCopiesResultSchema,
+  liveKeptEdits: liveKeptEditsResultSchema,
+  saveRecoveryCopy: saveRecoveryCopyResultSchema,
+  retryKeptEdits: retryKeptEditsResultSchema,
   documentEdit: documentEditResultSchema,
   documentCreate: documentCreateResultSchema,
   fileChatStart: fileChatStartResultSchema,

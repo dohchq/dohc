@@ -90,6 +90,15 @@
     "deleteRetainedCopies": [
       "file.retained.delete"
     ],
+    "liveKeptEdits": [
+      "workspace.status"
+    ],
+    "saveRecoveryCopy": [
+      "share.live.document.recovery.save"
+    ],
+    "retryKeptEdits": [
+      "share.live.document.retry"
+    ],
     "documentEdit": [
       "document.edit"
     ],
@@ -219,6 +228,9 @@
     "document create": "document.create",
     "document chats": "file.chats.list",
     "document comment": "file.chat.start",
+    "document kept-edits": "workspace.status",
+    "document save-recovery-copy": "share.live.document.recovery.save",
+    "document retry-kept-edits": "share.live.document.retry",
     "chat groups": "group.list",
     "chat threads": "chat.threads.list",
     "chat inbox": "chat.inbox.read",

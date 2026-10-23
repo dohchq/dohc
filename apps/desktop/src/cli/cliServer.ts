@@ -97,6 +97,7 @@ import {
   dirname,
   isAbsolute,
   join,
+  posix,
   relative,
   resolve,
   sep,
@@ -244,6 +245,15 @@ export interface CliKeptCopiesPort {
   save(id: number): Promise<KeptCopySaveResult>;
 }
 
+// Live documents whose edits the server refused, which dohc keeps on this
+// computer, and the two steps the desktop's Notices row offers for them:
+// Save recovery copy and Try again. Paths are workspace-relative.
+export interface CliKeptEditsPort {
+  list(): Promise<Extract<CliResultByVerb["liveKeptEdits"], { ok: true }>["keptEdits"]>;
+  saveRecoveryCopy(path: string): Promise<{ copyPath: string | null; packagePath: string }>;
+  retry(path: string, incident: string): Promise<void>;
+}
+
 // Old file copies kept on a drive that cannot tell dohc whether a program
 // still has one open, and the step that deletes listed ones. The desktop's
 // Notices row offers the same step after the same warning.
@@ -335,6 +345,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   // Absent in a shared view, which keeps no copies of its own.
   keptCopies?: CliKeptCopiesPort;
   retainedCopies?: CliRetainedCopiesPort;
+  keptEdits?: CliKeptEditsPort;
   automations?: CliAutomationsPort;
   buttons?: CliButtonsPort;
 }
@@ -755,6 +766,13 @@ function retainedCopiesUnavailable() {
   return {
     ok: false as const,
     reason: "Old file copies are kept only in the owning workspace. Open it to continue.",
+  };
+}
+
+function keptEditsUnavailable() {
+  return {
+    ok: false as const,
+    reason: "Kept edits are kept only in the original workspace. Open it to continue.",
   };
 }
 
@@ -2151,7 +2169,7 @@ async function callerPaths(context: CliWorkspaceContext, cwd: string) {
       return path;
     },
     result(value: unknown, changeSnapshots = false): unknown {
-      const paths = new Set(["fromPath", "toPath", "path", "recordPath", "collectionPath", "datasetPath", "savedPath", "appRoot", "pathHint", "linkedPathHint", "schemaPath", "operationsPath"]);
+      const paths = new Set(["fromPath", "toPath", "path", "recordPath", "collectionPath", "datasetPath", "savedPath", "appRoot", "pathHint", "linkedPathHint", "schemaPath", "operationsPath", "copyPath", "packagePath", "folder"]);
       const lists = new Set(["paths", "sourcePaths", "created", "written", "deleted", "withoutHistory"]);
       const data = new Set(["values", "fields", "kept", "input", "result", "definitions", "value", "previous", "next", "sortValues", "validation", "reasons", "default", "before", "after", "key", "recordId", "planned", "current", "undo"]);
       if (changeSnapshots) { data.delete("before"); data.delete("after"); }
@@ -2206,7 +2224,7 @@ async function dispatch(
     const rebased = { ...request, args: { ...request.args, ref: { ...ref, path: paths.rebase(ref.path, "read") } } };
     return dispatchWorkspace(rebased, context, options, completion);
   }
-  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
+  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
     return dispatchWorkspace(request, context, options, completion);
@@ -2255,6 +2273,12 @@ async function dispatch(
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "read") } };
         break;
       case "documentEdit":
+        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
+        break;
+      case "saveRecoveryCopy":
+        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
+        break;
+      case "retryKeptEdits":
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
         break;
       case "documentCreate":
@@ -2972,6 +2996,39 @@ async function dispatchWorkspace(
         return { ok: true as const, ...(await retainedCopies.delete(request.args.copies)) };
       } catch (error) {
         return mcpFailure(error, "failed to delete old file copies");
+      }
+    }
+
+    case "liveKeptEdits": {
+      const keptEdits = context.keptEdits;
+      if (!keptEdits || context.readOnly) return keptEditsUnavailable();
+      try {
+        return { ok: true as const, keptEdits: await keptEdits.list() };
+      } catch (error) {
+        return mcpFailure(error, "failed to list kept edits");
+      }
+    }
+
+    case "saveRecoveryCopy": {
+      const keptEdits = context.keptEdits;
+      if (!keptEdits || context.readOnly) return keptEditsUnavailable();
+      try {
+        const saved = await keptEdits.saveRecoveryCopy(request.args.path);
+        await notifyWrite(options, context);
+        return { ok: true as const, copyPath: saved.copyPath, packagePath: saved.packagePath, folder: posix.dirname(saved.packagePath) };
+      } catch (error) {
+        return pathFreeFailure(error, `dohc could not save a recovery copy of ${request.args.path}.`);
+      }
+    }
+
+    case "retryKeptEdits": {
+      const keptEdits = context.keptEdits;
+      if (!keptEdits || context.readOnly) return keptEditsUnavailable();
+      try {
+        await keptEdits.retry(request.args.path, request.args.incident);
+        return { ok: true as const, path: request.args.path };
+      } catch (error) {
+        return mcpFailure(error, `failed to try again for ${request.args.path}`);
       }
     }
 

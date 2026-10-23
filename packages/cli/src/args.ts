@@ -33,7 +33,9 @@ type CliCommandBody =
   | { verb: "accessObject"; ref: AccessObjectRef; cursor?: string }
   | { verb: "accessRefresh" }
   | { verb: "accessSharing"; lane: "granted" | "received"; cursor?: string }
-  | { verb: "documentRead" | "fileChats"; path: string }
+  | { verb: "documentRead" | "fileChats" | "saveRecoveryCopy"; path: string }
+  | { verb: "liveKeptEdits" }
+  | { verb: "retryKeptEdits"; path: string; incident: string }
   | { verb: "fileChatStart"; path: string; title: string; body: string; stdin: boolean; agent?: string; requestId?: string; runId?: string }
   | { verb: "documentEdit" | "documentCreate"; path: string; text: string; stdin: boolean; find?: string; agent?: string; requestId?: string }
   | { verb: "dataset"; request: DatasetRequest }
@@ -323,6 +325,36 @@ const DOCUMENT_VERBS = {
       return { verb: "fileChatStart", path, title, body: text ?? "", stdin: body === "-",
         ...(agent === undefined ? {} : { agent }), ...(requestId === undefined ? {} : { requestId }),
         ...(runId === undefined ? {} : { runId }) };
+    },
+  },
+  "kept-edits": {
+    capabilityId: "workspace.status",
+    summary: "List live documents whose edits the server refused. dohc keeps those edits on this computer.",
+    operands: "",
+    notes: ["A recovery of paused means the edits wait for you. Save a recovery copy, or try again. A new refusal changes the incident."],
+    parse: input => {
+      noExtraArgs(input.operands, "document kept-edits");
+      return { verb: "liveKeptEdits" };
+    },
+  },
+  "save-recovery-copy": {
+    capabilityId: "share.live.document.recovery.save",
+    summary: "Save a document's kept edits next to it. The edits stay kept on this computer.",
+    operands: "<path>",
+    notes: ["dohc writes a recovery package with every kept edit, and a readable copy when it can read the edits as a document."],
+    parse: input => ({ verb: "saveRecoveryCopy", path: parsePath(input, "document save-recovery-copy") }),
+  },
+  "retry-kept-edits": {
+    capabilityId: "share.live.document.retry",
+    summary: "Send a document's kept edits to the server once more.",
+    operands: "<path> <incident>",
+    notes: ["Take the incident from kept-edits. Only a document whose recovery is paused can try again.",
+      "Run kept-edits again to follow it: retrying until the server answers, paused with a new incident if it refuses again."],
+    parse: input => {
+      const [path, incident, ...extra] = input.operands;
+      if (!path || !incident) fail("retry-kept-edits requires a path and an incident");
+      noExtraArgs(extra, "document retry-kept-edits");
+      return { verb: "retryKeptEdits", path, incident };
     },
   },
 } satisfies Record<string, CliVerbSpec>;
@@ -1120,7 +1152,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     },
   },
   document: {
-    summary: "Read, edit, and create live Markdown documents. List and start chats on tracked files.",
+    summary: "Read, edit, and create live Markdown documents. List and start chats on tracked files. Recover edits the server refused.",
     notes: ["Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP.",
       "A refusal exits with status 1 and prints its reason to stderr, including with --json."],
     verbs: DOCUMENT_VERBS,
