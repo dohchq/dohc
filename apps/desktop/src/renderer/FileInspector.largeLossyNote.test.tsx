@@ -8,8 +8,16 @@ import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { isLossyMarkdown } from "@dohc/ydoc-projection/lossy-markdown";
 import { FileInspector } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLimits";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import { settleAfterUnmount } from "./FileInspector.draft-fixture";
+
+// These tests need a note past the WYSIWYG limit, not the limit itself. A
+// small limit keeps their notes small, so opening one stays fast on a busy host.
+vi.mock("../workspaces/workspaceTextLimits", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../workspaces/workspaceTextLimits")>()),
+  WYSIWYG_MARKDOWN_THRESHOLD_BYTES: 64 * 1024,
+}));
 
 setupFileInspectorTests();
 
@@ -40,7 +48,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-// Past read mode's 64 KiB, with a raw HTML block near the top.
+// Past read mode's size, with a raw HTML block near the top.
 const FILLER = Array.from({ length: 1200 }, (_, index) => `Paragraph ${index + 1} of plain text, long enough to fill the note.`).join("\n\n");
 const LARGE_LOSSY = `# Notes\n\n<details>\n<summary>More</summary>\n\nHidden.\n</details>\n\n${FILLER}\n`;
 
@@ -81,7 +89,7 @@ async function expectWaiting() {
 
 describe("a note past read mode's size", () => {
   it("with no engine record opens for source editing with no check", async () => {
-    expect(LARGE_LOSSY.length).toBeGreaterThan(64 * 1024);
+    expect(LARGE_LOSSY.length).toBeGreaterThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
     const bridge = bridgeFor(LARGE_LOSSY, "no-record");
     const user = userEvent.setup();
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
