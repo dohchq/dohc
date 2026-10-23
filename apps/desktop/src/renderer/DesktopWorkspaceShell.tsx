@@ -1821,14 +1821,16 @@ export function DesktopWorkspaceShell(props: {
     if (captureDecidedFor!==workspaceId || syncStatus===null) return;
     if (shownQuarantines.current.workspaceId!==workspaceId) shownQuarantines.current={workspaceId,shown:new Map()};
     const shown=shownQuarantines.current.shown;
-    const identityOf=(objectId:string) => `owner-live-quarantine:${workspaceId}:${objectId}`;
+    // An earlier Stop's edits keep their own row beside the document's current queue.
+    const identityOf=(row:{objectId:string;recovery:string}) =>
+      `owner-live-quarantine:${workspaceId}:${row.objectId}${row.recovery==="not-written" || row.recovery==="cannot-write" ? ":release" : ""}`;
     const rows=syncStatus.ownerLiveQuarantines ?? [];
-    const listed=new Set(rows.map(row => identityOf(row.objectId)));
+    const listed=new Set(rows.map(identityOf));
     for (const identity of [...shown.keys()]) {
       if (!listed.has(identity)) {shown.delete(identity);clearIdentity(identity);}
     }
     for (const row of rows) {
-      const identity=identityOf(row.objectId), incident=`${row.recovery}\n${row.incident}`;
+      const identity=identityOf(row), incident=`${row.recovery}\n${row.incident}`;
       if (shown.get(identity)===incident) continue;
       shown.set(identity,incident);
       const onServer=row.storedOn==="server";
@@ -1845,14 +1847,15 @@ export function DesktopWorkspaceShell(props: {
               reportShellError(`dohc could not stop live editing for ${row.path}.`,error,stopAgain,undefined,identity);
             });
       };
+      // An earlier Stop's edits: the document may be live again, so the row names only the edits.
       if (row.recovery==="not-written") {
-        reportShellFailure({title:`Live editing stopped for ${row.path}`,
-          message:"dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.",details,retry:stopAgain,action:save,identity});
+        reportShellFailure({title:`Edits not written to ${row.path}`,
+          message:"When live editing stopped, dohc kept your unsent edits but could not write them to your file. Save a recovery copy to get them back.",details,retry:stopAgain,action:save,identity});
         continue;
       }
       if (row.recovery==="cannot-write") {
-        reportShellFailure({title:`Live editing stopped for ${row.path}`,
-          message:"dohc kept your unsent edits, but can't finish writing them to your file. Save a recovery copy to get them back.",details,action:save,identity});
+        reportShellFailure({title:`Edits not written to ${row.path}`,
+          message:"When live editing stopped, dohc kept your unsent edits but can't finish writing them to your file. Save a recovery copy to get them back.",details,action:save,identity});
         continue;
       }
       if (row.recovery==="stopped-kept") {
@@ -1877,10 +1880,10 @@ export function DesktopWorkspaceShell(props: {
           reportShellError(`dohc could not try again to send your edits to ${row.path}.`,error,retry,undefined,identity);
         });
       };
-      // The server keeps them, and the owner's recovery copy is here: nothing is at risk, so the row stays quiet.
+      // The server keeps them, and the owner saved a recovery copy, maybe on another computer: the row stays quiet.
       if (row.recovery==="copied") {
         reportShellFailure({title:`Live editing paused for ${row.path}`,tone:"warning",quiet:true,
-          message:"The server could not accept your edits. dohc kept them on the server. Your recovery copy is on this computer.",
+          message:"The server could not accept your edits. A recovery copy of them is saved, so the server may now release them.",
           details,retry,action:save,identity});
         continue;
       }
@@ -2472,9 +2475,11 @@ export function DesktopWorkspaceShell(props: {
         const opened = saved.copyPath ?? saved.packagePath;
         const slash = saved.packagePath.lastIndexOf("/");
         const folder = slash < 0 ? "the workspace folder" : saved.packagePath.slice(0, slash);
+        const kept = saved.keptEdits === "copied" ? " The server may now release your kept edits."
+          : saved.keptEdits === "kept" ? ` Your kept edits stay ${saved.storedOn === "server" ? "on the server" : "on this computer"}.` : "";
         showSuccessNotice(saved.copyPath
-          ? `Saved a recovery copy of ${path} in ${folder}. Your kept edits stay ${saved.storedOn === "server" ? "on the server" : "on this computer"}.`
-          : `Saved your kept edits for ${path} as a recovery package in ${folder}. dohc could not make a readable copy.`,
+          ? `Saved a recovery copy of ${path} in ${folder}.${kept}`
+          : `Saved your kept edits for ${path} as a recovery package in ${folder}. dohc could not make a readable copy.${kept}`,
         undefined, undefined, { label: "Open", run: () => { if (workspaceIdRef.current === id) openFile(opened); } });
       }, (error: unknown) => {
         if (workspaceIdRef.current !== id) return;

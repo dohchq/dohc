@@ -12,42 +12,60 @@ import {atomicWriteFile} from "../atomicReplaceFile";
  * the queue is gone, so only this record says the file still needs them, and
  * the recovery package saved before the release still holds them.
  *
- * `retry` is false once the engine no longer holds that release, or when the
- * record could not be read whole: then only Save recovery copy remains.
+ * `headDeliveryId` names the refused queue the package came from: a rebuilt
+ * queue, even under the same binding, has another. `retry` is false once the
+ * engine no longer holds that release, or when the record could not be read
+ * whole: then only Save recovery copy remains. Only Save, or a release that
+ * wrote the file while the engine still held it, ends a record.
  */
-export type UnwrittenRelease = {workspaceId: string; objectId: string; path: string; reason: string; binding: LiveObjectBinding | null; retry: boolean};
+export type UnwrittenRelease = {workspaceId: string; objectId: string; path: string; reason: string;
+  binding: LiveObjectBinding | null; headDeliveryId: string | null; retry: boolean};
+type ReleaseIdentity = Pick<UnwrittenRelease, "binding" | "headDeliveryId">;
 
 export interface UnwrittenReleases {
   list(workspaceId: string): Promise<UnwrittenRelease[]>;
   /**
    * Writes the queue's recovery package, then the record. Refuses while the
-   * document keeps a record of another release, so its package stays.
+   * document keeps a record of another release or another queue, so its package stays.
    */
-  put(release: UnwrittenRelease, recovery: string): Promise<void>;
+  put(release: UnwrittenRelease & {binding: LiveObjectBinding; headDeliveryId: string}, recovery: string): Promise<void>;
   /** The recovery package saved before the release. */
   recovery(workspaceId: string, objectId: string): Promise<string | null>;
   /** The engine no longer holds this release: keep the record and its package, without Try again. */
   endRetry(workspaceId: string, objectId: string, binding: LiveObjectBinding): Promise<void>;
-  /** Removes the document's record only while it is still the record of this binding. */
-  remove(workspaceId: string, objectId: string, binding: LiveObjectBinding | null): Promise<void>;
+  /** The release of this binding wrote the file: ends its record while the engine still held that release. */
+  written(workspaceId: string, objectId: string, binding: LiveObjectBinding): Promise<void>;
+  /** Removes the document's record only while it is still the record of this binding and queue. */
+  remove(workspaceId: string, objectId: string, record: ReleaseIdentity): Promise<void>;
 }
 
 export const sameBinding = (a: LiveObjectBinding | null, b: LiveObjectBinding | null) =>
   a === null || b === null ? a === b : JSON.stringify(parseLiveObjectBinding(a)) === JSON.stringify(parseLiveObjectBinding(b));
+const sameRelease = (row: ReleaseIdentity, record: ReleaseIdentity) =>
+  row.headDeliveryId === record.headDeliveryId && sameBinding(row.binding, record.binding);
+
+/** The record a package of this release and queue must not replace: one of another release, or one the engine no longer holds. */
+export const keptEarlierRelease = (records: readonly UnwrittenRelease[], release: Pick<UnwrittenRelease, "workspaceId" | "objectId"> & ReleaseIdentity) =>
+  records.find(row => row.workspaceId === release.workspaceId && row.objectId === release.objectId && !(row.retry && sameRelease(row, release)));
+export const keptEarlierError = (path: string) =>
+  new Error(`dohc still keeps earlier edits for ${path} that it could not write to the file. Save a recovery copy of ${path} first.`);
 
 const UnwrittenReleaseRow = z.object({
   workspaceId: z.string().min(1), objectId: z.string().min(1), path: z.string().min(1), reason: z.string().min(1),
-  binding: z.unknown().transform(value => value === null ? null : parseLiveObjectBinding(value)), retry: z.boolean(),
-}).strict().refine(row => row.binding !== null || !row.retry);
+  binding: z.unknown().transform(value => value === null ? null : parseLiveObjectBinding(value)),
+  headDeliveryId: z.string().min(1).nullable(), retry: z.boolean(),
+}).strict().refine(row => (row.binding !== null && row.headDeliveryId !== null) || !row.retry);
 // What a damaged row still says: enough to find and save its stored package.
-const KeptReleaseRow = z.object({workspaceId: z.string().min(1), objectId: z.string().min(1), path: z.string().min(1), reason: z.unknown()});
+const KeptReleaseRow = z.object({workspaceId: z.string().min(1), objectId: z.string().min(1), path: z.string().min(1),
+  reason: z.unknown().optional(), headDeliveryId: z.unknown().optional()});
 
 function parseRow(value: unknown): {row: UnwrittenRelease; whole: boolean} | null {
   try {return {row: UnwrittenReleaseRow.parse(value), whole: true};} catch {/* Read what it still says. */}
   const kept = KeptReleaseRow.safeParse(value);
   if (!kept.success) return null;
-  const {workspaceId, objectId, path, reason} = kept.data;
-  return {row: {workspaceId, objectId, path, reason: typeof reason === "string" && reason ? reason : "unreadable-record", binding: null, retry: false}, whole: false};
+  const {workspaceId, objectId, path, reason, headDeliveryId} = kept.data;
+  return {row: {workspaceId, objectId, path, reason: typeof reason === "string" && reason ? reason : "unreadable-record", binding: null,
+    headDeliveryId: typeof headDeliveryId === "string" && headDeliveryId ? headDeliveryId : null, retry: false}, whole: false};
 }
 
 /** One file on this computer, written durably, so the notice survives a restart. */
@@ -89,6 +107,11 @@ export function createUnwrittenReleases(filePath: () => string): UnwrittenReleas
     return next;
   };
   const isRecord = (row: UnwrittenRelease, workspaceId: string, objectId: string) => row.workspaceId === workspaceId && row.objectId === objectId;
+  // The record is the notice; a package left behind holds nothing the file still needs.
+  const ended = (workspaceId: string, objectId: string, keep: (row: UnwrittenRelease) => boolean) =>
+    change(current => current.filter(row => !isRecord(row, workspaceId, objectId) || keep(row)),
+      undefined, () => rm(recoveryPath(workspaceId, objectId), {force: true})
+        .catch((error: unknown) => console.error("[desktop] could not remove a written live recovery package:", error)));
   return {
     async list(workspaceId) {
       await queue;
@@ -96,10 +119,8 @@ export function createUnwrittenReleases(filePath: () => string): UnwrittenReleas
     },
     put: (release, recovery) => change(current => [...current.filter(row => !isRecord(row, release.workspaceId, release.objectId)), release],
       async current => {
-        const earlier = current.find(row => isRecord(row, release.workspaceId, release.objectId));
-        if (earlier && !(earlier.retry && sameBinding(earlier.binding, release.binding))) {
-          throw new Error(`dohc still keeps earlier edits for ${earlier.path} that it could not write to the file. Save a recovery copy of ${earlier.path} first.`);
-        }
+        const earlier = keptEarlierRelease(current, release);
+        if (earlier) throw keptEarlierError(earlier.path);
         await atomicWriteFile(recoveryPath(release.workspaceId, release.objectId), recovery);
       }),
     async recovery(workspaceId, objectId) {
@@ -108,9 +129,7 @@ export function createUnwrittenReleases(filePath: () => string): UnwrittenReleas
     },
     endRetry: (workspaceId, objectId, binding) => change(current => current.map(row =>
       isRecord(row, workspaceId, objectId) && row.retry && sameBinding(row.binding, binding) ? {...row, retry: false} : row)),
-    // The record is the notice; a package left behind holds nothing the file still needs.
-    remove: (workspaceId, objectId, binding) => change(current => current.filter(row => !isRecord(row, workspaceId, objectId) || !sameBinding(row.binding, binding)),
-      undefined, () => rm(recoveryPath(workspaceId, objectId), {force: true})
-        .catch((error: unknown) => console.error("[desktop] could not remove a written live recovery package:", error))),
+    written: (workspaceId, objectId, binding) => ended(workspaceId, objectId, row => !row.retry || !sameBinding(row.binding, binding)),
+    remove: (workspaceId, objectId, record) => ended(workspaceId, objectId, row => !sameRelease(row, record)),
   };
 }

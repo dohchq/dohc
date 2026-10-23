@@ -246,12 +246,14 @@ export interface CliKeptCopiesPort {
 }
 
 // Live documents whose edits the server refused, which dohc keeps on this
-// computer or on the server, and the two steps the desktop's Notices row
-// offers for them: Save recovery copy and Try again. Paths are workspace-relative.
+// computer or on the server, and the steps the desktop's Notices row offers
+// for them: Save recovery copy, Try again, and a Stop run again for a Stop
+// that kept them. Paths are workspace-relative.
 export interface CliKeptEditsPort {
   list(): Promise<Extract<CliResultByVerb["liveKeptEdits"], { ok: true }>["keptEdits"]>;
-  saveRecoveryCopy(path: string): Promise<{ copyPath: string | null; packagePath: string; storedOn: "this-computer" | "server" }>;
+  saveRecoveryCopy(path: string): Promise<Omit<Extract<CliResultByVerb["saveRecoveryCopy"], { ok: true }>, "ok" | "folder">>;
   retry(path: string, incident: string): Promise<void>;
+  stopAgain(path: string, incident: string): Promise<Pick<Extract<CliResultByVerb["stopAgain"], { ok: true }>, "keptEdits">>;
 }
 
 // Old file copies kept on a drive that cannot tell dohc whether a program
@@ -2224,7 +2226,7 @@ async function dispatch(
     const rebased = { ...request, args: { ...request.args, ref: { ...ref, path: paths.rebase(ref.path, "read") } } };
     return dispatchWorkspace(rebased, context, options, completion);
   }
-  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
+  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
     return dispatchWorkspace(request, context, options, completion);
@@ -2237,7 +2239,7 @@ async function dispatch(
     throw error;
   }
   // A received share's folder resolves to its owner's workspace; the owner's kept edits stay the owner's.
-  if (paths.shared && (request.verb === "liveKeptEdits" || request.verb === "saveRecoveryCopy" || request.verb === "retryKeptEdits")) return keptEditsUnavailable();
+  if (paths.shared && (request.verb === "liveKeptEdits" || request.verb === "saveRecoveryCopy" || request.verb === "retryKeptEdits" || request.verb === "stopAgain")) return keptEditsUnavailable();
   let rebased: CliRequest;
   try {
     validateRequestPathSpellings(request);
@@ -2281,6 +2283,7 @@ async function dispatch(
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
         break;
       case "retryKeptEdits":
+      case "stopAgain":
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
         break;
       case "documentCreate":
@@ -3017,7 +3020,7 @@ async function dispatchWorkspace(
       try {
         const saved = await keptEdits.saveRecoveryCopy(request.args.path);
         await notifyWrite(options, context);
-        return { ok: true as const, copyPath: saved.copyPath, packagePath: saved.packagePath, folder: posix.dirname(saved.packagePath), storedOn: saved.storedOn };
+        return { ok: true as const, copyPath: saved.copyPath, packagePath: saved.packagePath, folder: posix.dirname(saved.packagePath), storedOn: saved.storedOn, keptEdits: saved.keptEdits };
       } catch (error) {
         return pathFreeFailure(error, `dohc could not save a recovery copy of ${request.args.path}.`);
       }
@@ -3031,6 +3034,18 @@ async function dispatchWorkspace(
         return { ok: true as const, path: request.args.path };
       } catch (error) {
         return mcpFailure(error, `failed to try again for ${request.args.path}`);
+      }
+    }
+
+    case "stopAgain": {
+      const keptEdits = context.keptEdits;
+      if (!keptEdits || context.readOnly) return keptEditsUnavailable();
+      try {
+        const stopped = await keptEdits.stopAgain(request.args.path, request.args.incident);
+        await notifyWrite(options, context);
+        return { ok: true as const, path: request.args.path, keptEdits: stopped.keptEdits };
+      } catch (error) {
+        return mcpFailure(error, `failed to stop live editing again for ${request.args.path}`);
       }
     }
 

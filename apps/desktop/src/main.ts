@@ -386,7 +386,7 @@ import { createServerAccountDeletion } from "./workspaces/serverAccountDeletion"
 import { registerServerAccountIpc } from "./ipc/serverAccountIpc";
 import { insecureLoopbackServersForTests } from "./workspaces/cloudConfiguration";
 import { createJoinedWorkspaceRunner } from "./workspaces/createJoinedWorkspace";
-import { createRelaySharesIpcHandlers } from "./ipc/relaySharesIpc";
+import { createOwnerLiveDocumentActions, createRelaySharesIpcHandlers, type OwnerLiveDocumentActionDependencies } from "./ipc/relaySharesIpc";
 import { requireCredentials } from "./workspaces/credentialScopedOperation";
 import { createExactMountOperationRunner } from "./workspaces/exactMountOperation";
 import { CredentialSessionCache } from "./workspaces/credentialSessionCache";
@@ -4886,6 +4886,7 @@ const chatWrites = createChatWrites({
 
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
+let ownerLiveStopAgainForCli: ((operation: DesktopWorkspaceOperation, path: string) => Promise<import("./ipc/bridgeContract").StopOwnerLiveDocumentResult>) | undefined;
 const shareCopyReader = createShareCopyReader<RegistryEntry>({
   remoteForWorkspace, currentCredentialGeneration: () => credentialCacheGeneration,
   relayJson: (credentials, path) => relayShareJsonWithCredentials(credentials, path),
@@ -4925,6 +4926,10 @@ const { startDesktopCliServer } = createDesktopCliServer({
     keptEdits: workspaceId => desktopEngine.ownerLiveQuarantines(workspaceId),
     save: (workspace, path) => desktopEngine.saveOwnerLiveRecoveryCopy(workspace, path),
     retry: (workspace, objectId, incident) => desktopEngine.retryOwnerLiveQuarantine(workspace, objectId, incident),
+    stopAgain: (operation, path) => {
+      if (!ownerLiveStopAgainForCli) throw new Error("Live editing is not ready. Try again.");
+      return ownerLiveStopAgainForCli(operation, path);
+    },
   },
   access: workspaceId => accessCliQueries(accessOwner, work => withPhysicalWorkspaceOperation(workspaceId, work)),
   recordSuccess: invocation => usageStore?.recordSuccess(invocation),
@@ -6535,25 +6540,11 @@ function registerIpcHandlers(): void {
     openWorkspaceActivity, completeWorkspaceJoinBootstrap, desktopMarks,
   });
 
-  const relayShareHandlers = createRelaySharesIpcHandlers<
-    WebContents,
-    IpcMainInvokeEvent,
-    DesktopRendererWorkspaceOperation["workspace"],
-    DesktopRendererWorkspaceOperation
-  >({
+  // The window's Stop and Resume, and an agent's Stop again, use these alike.
+  const ownerLiveDocumentDependencies: OwnerLiveDocumentActionDependencies<DesktopWorkspaceOperation["workspace"]> = {
     remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,
-    currentCredentials: () => cachedCredentials,
-    warmCredentialCache,
-    relayShareJson,
     relayShareJsonWithCredentials,
-    relayShareErrorCopy,
-    relayShareDiscussionActivityPolls,
-    listOwnerLiveStops: workspace => requireEngineSessions().run(workspace, async session => {
-      const client = desktopEngine.daemon?.currentClient();
-      if (!(client instanceof EngineClient)) throw new Error("dohc could not read live editing. Restart dohc and try again.");
-      return client.ownerYDocStopList({id:0,workspace:session.workspace,deadlineMs:30_000});
-    }),
     ownerLiveStop: async (workspace,action,path,binding,acceptedCursor) => {
       let result: Awaited<ReturnType<EngineClient["ownerYDocStopRequest"]>> | undefined;
       try {
@@ -6580,8 +6571,29 @@ function registerIpcHandlers(): void {
       return result;
     },
     ownerLiveQuarantines: workspace => desktopEngine.ownerLiveQuarantines(workspace.workspaceId),
-    retryOwnerLiveQuarantine: (workspace,objectId,incident) => desktopEngine.retryOwnerLiveQuarantine(workspace,objectId,incident),
     retryOwnerLiveRelease: (workspace,objectId) => desktopEngine.retryOwnerLiveRelease(workspace,objectId),
+  };
+  const agentOwnerLiveDocuments = createOwnerLiveDocumentActions<DesktopWorkspaceOperation["workspace"], DesktopWorkspaceOperation>(ownerLiveDocumentDependencies);
+  ownerLiveStopAgainForCli = (operation, path) => engineYDocSessionIpc.withLiveEditingChange(operation.workspace.attachmentId, path,
+    () => agentOwnerLiveDocuments.stop({workspaceId: operation.workspace.workspaceId, path}, operation));
+  const relayShareHandlers = createRelaySharesIpcHandlers<
+    WebContents,
+    IpcMainInvokeEvent,
+    DesktopRendererWorkspaceOperation["workspace"],
+    DesktopRendererWorkspaceOperation
+  >({
+    ...ownerLiveDocumentDependencies,
+    currentCredentials: () => cachedCredentials,
+    warmCredentialCache,
+    relayShareJson,
+    relayShareErrorCopy,
+    relayShareDiscussionActivityPolls,
+    listOwnerLiveStops: workspace => requireEngineSessions().run(workspace, async session => {
+      const client = desktopEngine.daemon?.currentClient();
+      if (!(client instanceof EngineClient)) throw new Error("dohc could not read live editing. Restart dohc and try again.");
+      return client.ownerYDocStopList({id:0,workspace:session.workspace,deadlineMs:30_000});
+    }),
+    retryOwnerLiveQuarantine: (workspace,objectId,incident) => desktopEngine.retryOwnerLiveQuarantine(workspace,objectId,incident),
     saveOwnerLiveRecoveryCopy: (workspace,path) => desktopEngine.saveOwnerLiveRecoveryCopy(workspace,path),
     sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); invalidateHistoryLabels(workspaceId); shareRosters.sharesChanged(workspaceId); },
     reconcileReceivedShares,

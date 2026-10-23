@@ -505,6 +505,12 @@ fn advance_generation_in_tx(
     if changed != 1 {
         return Err(OwnerOutboxError::ParentMismatch);
     }
+    // Old-generation work can build on accepted updates only the old checkpoint
+    // holds, so each queue still waiting keeps it, and its blob stays referenced.
+    tx.execute(
+        "UPDATE owner_ydoc_outboxes SET kept_checkpoint_digest=?6 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND pending_bytes>0",
+        params![old.workspace_id,old.main_version_id,old.object_id,old.lineage_claim_id,old.restore_fence_generation,previous.checkpoint_digest],
+    ).map_err(write_sql)?;
     if previous.checkpoint_digest != checkpoint_digest {
         delete_binary_blob_if_unreferenced(tx, &previous.checkpoint_digest)?;
     }

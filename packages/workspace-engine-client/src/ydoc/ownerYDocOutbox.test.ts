@@ -526,6 +526,10 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     await expect(betweenPages.client.readRecovery("outbox-1")).rejects.toBeInstanceOf(OwnerYDocOutboxReadChangedError);
     const sinceHeader = cursorReader([...pages(bound, 5), ...checkpointPages(successor)]);
     await expect(sinceHeader.client.readRecovery("outbox-1")).rejects.toBeInstanceOf(OwnerYDocOutboxReadChangedError);
+    // A header read over several pages names the checkpoint's digest, so an acceptance changes it too.
+    const [header] = pages(bound, 5), advanced = {...bound, checkpointDigest: sha(successor)};
+    const duringHeader = cursorReader([header!, ...pages(advanced, 5).slice(1), ...checkpointPages(successor)]);
+    await expect(duringHeader.client.readRecovery("outbox-1")).rejects.toBeInstanceOf(OwnerYDocOutboxReadChangedError);
     const presenceOnly = {...bound, checkpointDigest: "present"};
     const malformed = cursorReader([...pages(presenceOnly, 5), ...checkpointPages(checkpoint)]);
     await expect(malformed.client.readRecovery("outbox-1")).rejects.toThrow("checkpointDigest must be a SHA-256 digest.");
