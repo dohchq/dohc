@@ -412,14 +412,42 @@ export const RetryCloudSyncPayload = WorkspaceIdPayload.extend({
 });
 export type RetryCloudSyncPayload = z.infer<typeof RetryCloudSyncPayload>;
 
+// One document whose owner edits the server refused for good. The edits wait
+// in a queue on this computer until the owner tries again or stops live
+// editing. `incident` changes with each refusal, so a repeated refusal is news.
+export const OwnerLiveQuarantine = z.object({
+  objectId: z.string().min(1).max(512),
+  path: SAFE_RELATIVE_PATH,
+  reason: z.string().min(1).max(128),
+  storedOn: z.literal("this-computer"),
+  incident: z.string().min(1).max(1024),
+  // paused: waiting for the owner. retrying: the owner's Try again waits for
+  // delivery. stopped-kept: a Stop kept the edits but could not write them to the file.
+  recovery: z.enum(["paused", "retrying", "stopped-kept"]),
+}).strict();
+export type OwnerLiveQuarantine = z.infer<typeof OwnerLiveQuarantine>;
+export const RetryOwnerLiveQuarantinePayload = WorkspaceIdPayload.extend({
+  objectId: OwnerLiveQuarantine.shape.objectId,
+  incident: OwnerLiveQuarantine.shape.incident,
+}).strict();
+export type RetryOwnerLiveQuarantinePayload = z.infer<typeof RetryOwnerLiveQuarantinePayload>;
+
 export const OwnerLiveDocument = z.object({
   path: SAFE_RELATIVE_PATH,
   status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
   reason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted"]).optional(),
   canResume: z.boolean(),
   deferredStop: z.object({unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean()}).strict().optional(),
+  // The server refused this document's edits for good, and this computer keeps them.
+  quarantine: OwnerLiveQuarantine.shape.recovery.optional(),
 }).strict();
 export type OwnerLiveDocument = z.infer<typeof OwnerLiveDocument>;
+// What a Stop did with edits the server refused: wrote them into the file,
+// or kept them on this computer because it could not.
+export const StopOwnerLiveDocumentResult = z.object({
+  keptEdits: z.enum(["none", "recovered", "kept"]),
+}).strict();
+export type StopOwnerLiveDocumentResult = z.infer<typeof StopOwnerLiveDocumentResult>;
 export const ListOwnerLiveDocumentsPayload = WorkspaceIdPayload.extend({
   retiredAfter: SAFE_RELATIVE_PATH.optional(),
 }).strict();
@@ -1336,6 +1364,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
   ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "restart-required"]).optional(),
   ownerLiveStopFailures: z.array(z.object({path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
+  ownerLiveQuarantines: z.array(OwnerLiveQuarantine).max(256).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
   // A shared view can have canonical file state that has not yet
   // reached its local folder. The producer bounds each path sample while the

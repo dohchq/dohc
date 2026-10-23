@@ -19,7 +19,7 @@ import {
   DismissShareSkipsPayload,
   ListOwnerLiveDocumentsPayload, OwnerLiveDocumentsResult,
   ListOwnerLiveRefusalsPayload, OwnerLiveRefusalsResult,
-  OwnerLiveDocumentActionPayload,
+  OwnerLiveDocumentActionPayload, StopOwnerLiveDocumentResult, RetryOwnerLiveQuarantinePayload,
   ListRelaySharesResult, GetRelayReceivedSharePayload, GetRelayReceivedShareResult,
   RevokeRelaySharePayload, RevokeRelayShareResult, UndoRelaySharePayload, UndoRelayShareResult,
   PollRelayShareDiscussionActivityPayload, PollRelayShareDiscussionActivityResult,
@@ -212,13 +212,20 @@ export const relayShareOperations = {
     capabilityId: "share.live.document.stop", channel: "desktop:stop-owner-live-document",
     scope: "workspace", guard: "active-workspace",
     inactiveMessage: "Live editing stopped because this window changed workspaces.",
-    payload: OwnerLiveDocumentActionPayload,
+    payload: OwnerLiveDocumentActionPayload, result: StopOwnerLiveDocumentResult,
   },
   resumeOwnerLiveDocument: {
     capabilityId: "share.live.document.resume", channel: "desktop:resume-owner-live-document",
     scope: "workspace", guard: "active-workspace",
     inactiveMessage: "Live editing stopped because this window changed workspaces.",
     payload: OwnerLiveDocumentActionPayload,
+  },
+  // The owner's Try again for one document whose edits the server refused.
+  retryOwnerLiveQuarantine: {
+    capabilityId: "share.live.document.retry", channel: "desktop:retry-owner-live-quarantine",
+    scope: "workspace", guard: "active-workspace",
+    inactiveMessage: "Live editing stopped because this window changed workspaces.",
+    payload: RetryOwnerLiveQuarantinePayload,
   },
   createRelayShare: {
     capabilityId: "share.create", channel: "desktop:create-relay-share",

@@ -8,6 +8,7 @@ import {
   LiveDocumentsDialog,
   type LiveDocumentPage,
   type LiveDocumentRow,
+  type LiveDocumentStopResult,
   type LiveRefusalPage,
   type LiveRefusalRow,
 } from "./LiveDocumentsDialog";
@@ -37,7 +38,8 @@ function refusalPage(
 function harness() {
   return {
     load: vi.fn((workspaceId: string, retiredAfter?: string) => Promise.resolve(page([]))),
-    stop: vi.fn((workspaceId: string, path: string) => Promise.resolve()),
+    stop: vi.fn((workspaceId: string, path: string): Promise<LiveDocumentStopResult> => Promise.resolve({ keptEdits: "none" })),
+    onStopped: vi.fn((path: string, keptEdits: "recovered" | "kept") => {}),
     resume: vi.fn((workspaceId: string, path: string) => Promise.resolve()),
     loadRefusals: vi.fn((workspaceId: string, after?: string) =>
       Promise.resolve(refusalPage([])),
@@ -486,7 +488,7 @@ describe("LiveDocumentsDialog", () => {
   it("blocks a second action while one is running", async () => {
     const h = harness();
     h.load.mockResolvedValueOnce(page([row("docs/a.md")]));
-    const stopping = deferred();
+    const stopping = deferred<LiveDocumentStopResult>();
     h.stop.mockReturnValueOnce(stopping.promise);
     const user = userEvent.setup();
     render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
@@ -510,7 +512,7 @@ describe("LiveDocumentsDialog", () => {
     expect(h.stop).toHaveBeenCalledTimes(1);
     expect(h.load).toHaveBeenCalledTimes(1);
     await act(async () => {
-      stopping.resolve();
+      stopping.resolve({ keptEdits: "none" });
       await stopping.promise;
     });
     expect(h.load).toHaveBeenCalledTimes(2);
@@ -541,7 +543,7 @@ describe("LiveDocumentsDialog", () => {
   it("drops a mutation that finished after the workspace changed", async () => {
     const h = harness();
     h.load.mockResolvedValue(page([row("docs/a.md")]));
-    const stopping = deferred();
+    const stopping = deferred<LiveDocumentStopResult>();
     h.stop.mockReturnValueOnce(stopping.promise);
     const user = userEvent.setup();
     const view = render(<LiveDocumentsDialog workspaceId="ws-a" {...h} />);
@@ -550,11 +552,13 @@ describe("LiveDocumentsDialog", () => {
     await user.click(screen.getByRole("button", { name: "Stop live editing for docs/a.md" }));
     view.rerender(<LiveDocumentsDialog workspaceId="ws-b" {...h} />);
     await act(async () => {
-      stopping.resolve();
+      stopping.resolve({ keptEdits: "recovered" });
       await stopping.promise;
     });
 
     expect(h.stop).toHaveBeenCalledWith("ws-a", "docs/a.md");
+    // Workspace A's Stop never reports into workspace B.
+    expect(h.onStopped).not.toHaveBeenCalled();
     expect(h.load).toHaveBeenCalledTimes(2);
     expect(h.load).toHaveBeenNthCalledWith(2, "ws-b", undefined);
   });
@@ -1014,6 +1018,67 @@ describe("LiveDocumentsDialog", () => {
 
       expect(staleRetry()).toBe(false);
       expect(h.loadRefusals).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("edits the server refused", () => {
+    it("reveals the asked-for row with its Stop and says where Stop puts the kept edits", async () => {
+      const h = harness();
+      h.load.mockResolvedValue(page([row("docs/other.md"), row("docs/a.md", { quarantine: "paused" })]));
+      render(<LiveDocumentsDialog workspaceId="ws" reveal="docs/a.md" {...h} />);
+      const stop = await screen.findByRole("button", { name: "Stop live editing for docs/a.md" });
+      await vi.waitFor(() => expect(document.activeElement).toBe(stop));
+      const revealed = screen.getByTestId("live-document-row-docs/a.md");
+      expect(revealed.getAttribute("aria-current")).toBe("true");
+      expect(screen.getByTestId("live-document-row-docs/other.md").getAttribute("aria-current")).toBeNull();
+      expect(within(revealed).getByText("Paused")).toBeTruthy();
+      expect(revealed.textContent).toContain(
+        "The server could not accept your edits. dohc kept them on this computer. Stop live editing writes them into your file.",
+      );
+    });
+
+    it.each(["recovered", "kept"] as const)("reports a Stop that %s the refused edits only after it answers", async (keptEdits) => {
+      const h = harness();
+      h.load.mockResolvedValue(page([row("docs/a.md", { quarantine: "paused" })]));
+      const stopping = deferred<LiveDocumentStopResult>();
+      h.stop.mockReturnValueOnce(stopping.promise);
+      render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+      await userEvent.setup().click(await screen.findByRole("button", { name: "Stop live editing for docs/a.md" }));
+      expect(h.onStopped).not.toHaveBeenCalled();
+      await act(async () => {
+        stopping.resolve({ keptEdits });
+        await stopping.promise;
+      });
+      expect(h.onStopped).toHaveBeenCalledExactlyOnceWith("docs/a.md", keptEdits);
+    });
+
+    it("tells nothing for a Stop that had no refused edits, or that failed", async () => {
+      const h = harness();
+      h.load.mockResolvedValue(page([row("docs/a.md"), row("docs/b.md", { quarantine: "paused" })]));
+      h.stop.mockRejectedValueOnce(new Error("release failed"));
+      const user = userEvent.setup();
+      render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+      await user.click(await screen.findByRole("button", { name: "Stop live editing for docs/b.md" }));
+      await vi.waitFor(() => expect(h.onError).toHaveBeenCalledOnce());
+      await user.click(await screen.findByRole("button", { name: "Stop live editing for docs/a.md" }));
+      await vi.waitFor(() => expect(h.stop).toHaveBeenCalledTimes(2));
+      // The refused Stop keeps the list; the finished one reads it again.
+      await vi.waitFor(() => expect(h.load).toHaveBeenCalledTimes(2));
+      expect(h.onStopped).not.toHaveBeenCalled();
+    });
+
+    it("keeps a Stop that could not write the edits truthful, and keeps Resume", async () => {
+      const h = harness();
+      h.load.mockResolvedValue(page([row("docs/a.md", { status: "retired", canResume: true, quarantine: "stopped-kept",
+        deferredStop: { unsentEdits: 2, editable: false } })]));
+      render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+      const kept = await screen.findByTestId("live-document-row-docs/a.md");
+      expect(kept.textContent).toContain(
+        "Live editing stopped. dohc kept your unsent edits, but could not write them to your file. Resume live editing, then try again.",
+      );
+      expect(kept.textContent).not.toContain("written");
+      expect(kept.textContent).not.toContain("unsent edits remain");
+      expect(actions("docs/a.md")).toEqual(["Resume live editing"]);
     });
   });
 });

@@ -203,6 +203,41 @@ it.each<LiveJournalValidation>([
   expect(f.receipts).toHaveLength(1);
 });
 
+// The real validator, with a stricter budget such as a relay upgrade brings,
+// refuses history the journal already admitted. That is never the owner's fault.
+it("does not quarantine the owner's head when the real validator refuses the admitted history", async () => {
+  const f = fixture(), peer = new Y.Doc();
+  let admitted: Uint8Array;
+  try {
+    Y.applyUpdate(peer, f.relay.input.baselineBytes);
+    const before = Y.encodeStateVector(peer);
+    for (let index = 0; index < 64; index++) peer.getMap("frontmatter").set(`admitted${index}`, index);
+    admitted = Y.encodeStateAsUpdate(peer, before);
+  } finally {peer.destroy();}
+  expect(f.relay.storage.commitLiveUpdateJournal(f.relay.capture(admitted, "admitted-row")).result.kind).toBe("accepted");
+  const read = f.relay.storage.readLiveUpdateJournalCut({document: f.document});
+  if (read.kind !== "cut") throw new Error("The journal has no cut.");
+  const call = {document: read.cut.document,currentPath: read.cut.currentPath,checkpoint: read.cut.checkpoint.bytes,
+    suffix: read.cut.suffix.map(row => row.bytes),candidate: f.update};
+  let stricter: ReturnType<typeof createLiveMarkdownJournalValidator> | undefined;
+  for (let limit = 1; limit < 5_000 && !stricter; limit++) {
+    const candidate = createLiveMarkdownJournalValidator({...policy, maxStructVisits: limit});
+    const result = candidate(call);
+    if (result.kind === "refused" && result.source === "admitted-cut") stricter = candidate;
+  }
+  if (!stricter) throw new Error("No budget refuses only the admitted history.");
+  const strict = stricter;
+  const validate = vi.fn<OwnerOutboxAdmission["validate"]>(({retainStateUpdate: _retainStateUpdate, ...input}) => strict(input));
+  await expect(f.run(validate)).rejects.toThrow();
+  expect(validate.mock.results[0]!.value).toEqual({kind: "refused",reason: "capacity-refused",source: "admitted-cut"});
+  expect(f.quarantines).toEqual([]); expect(f.native.state).toBe("active");
+  expect(f.relay.journalRows().journal).toMatchObject([{delivery_id: "admitted-row"}]);
+  expect(f.pending).toEqual([f.entry]); expect(f.receipts).toEqual([]); expect(f.applyThrough).not.toHaveBeenCalled();
+  // The relay's own budget admits the same head on the next pass.
+  expect(await f.run()).toEqual({admittedEntries: 1,hasMore: false});
+  expect(f.receipts).toMatchObject([{deliveryId: f.entry.deliveryId}]);
+});
+
 it("keeps a quarantined head and its bytes through a relay restart and upgrade, without probing it", async () => {
   const f = fixture(doc => doc.getMap("meta").set("schemaVersion", 2));
   expect(await f.run()).toEqual({admittedEntries: 0,hasMore: false});

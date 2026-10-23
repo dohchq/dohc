@@ -51,6 +51,8 @@ import type {
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
   OwnerLiveDocumentActionPayload,
+  RetryOwnerLiveQuarantinePayload,
+  StopOwnerLiveDocumentResult,
   OwnerLiveDocumentsResult,
   OwnerLiveRefusalsResult,
   RetryOwnerLiveSharePayload,
@@ -380,7 +382,10 @@ function makeBaseBridge(
       async (_payload: RetryOwnerLiveSharePayload): Promise<void> => undefined,
     ),
     stopOwnerLiveDocument: vi.fn(
-      async (_payload: OwnerLiveDocumentActionPayload): Promise<void> => undefined,
+      async (_payload: OwnerLiveDocumentActionPayload): Promise<StopOwnerLiveDocumentResult> => ({ keptEdits: "none" }),
+    ),
+    retryOwnerLiveQuarantine: vi.fn(
+      async (_payload: RetryOwnerLiveQuarantinePayload): Promise<void> => undefined,
     ),
     resumeOwnerLiveDocument: vi.fn(
       async (_payload: OwnerLiveDocumentActionPayload): Promise<void> => undefined,
