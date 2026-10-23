@@ -4,7 +4,7 @@ dohc is a local-first workspace for people and their agents. It brings files, do
 
 The ambition is a work suite you can reshape with your own agents. dohc supplies sync, sharing, permissions, and history. You own the work.
 
-[Download a build](https://github.com/dohchq/dohc/releases) or [run it from source](#run-it-from-source).
+[Download a nightly build](https://github.com/dohchq/dohc/releases) or [run it from source](#run-it-from-source).
 
 ## Why this exists
 
@@ -28,7 +28,7 @@ Apps can use approved Collection data through the operations their owner grants.
 
 ## Where it is today
 
-dohc is pre-launch and under active development. We are in the process of proving these workflow benefits with users. Expect missing pieces, rough edges, and breaking changes.
+dohc is an early alpha. Each download is the newest nightly build, and it updates itself. We are still proving these workflow benefits with users. Expect missing pieces, rough edges, and breaking changes. Read the known issues pinned at the top of the issue list before you start. Saving a note can rewrite Markdown that dohc doesn't keep yet, so try dohc on a copy of a notes folder.
 
 The desktop app currently includes:
 
