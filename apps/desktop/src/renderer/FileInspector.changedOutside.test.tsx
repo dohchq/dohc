@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { createHash } from "node:crypto";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as Y from "yjs";
-import { markdownToYDoc } from "@dohc/ydoc-projection";
+import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { saveProblem } from "@dohc/workspace-contracts/save-state";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
@@ -25,6 +26,9 @@ const engine = vi.hoisted(() => ({
   // When set, a session the inspector keeps closed reads as closed, as with
   // the real hook.
   closedWhenDisabled: false,
+  // When set, every open inspector gets the session whatever its own retry
+  // key, as panes sharing one engine lease do.
+  sharedLease: false,
 }));
 const retryKeys = engine.retryKeys;
 vi.mock("./collab/useEngineDoc", async () => {
@@ -40,7 +44,7 @@ vi.mock("./collab/useEngineDoc", async () => {
       if (engine.closedWhenDisabled && input.enabled === false) {
         return { ...state, available: false, opening: false, doc: null, changedOutside: null };
       }
-      return (input.retryKey ?? 0) === engine.boundRetryKey
+      return engine.sharedLease || (input.retryKey ?? 0) === engine.boundRetryKey
         ? state
         : { ...state, available: false, opening: true, doc: null, changedOutside: null };
     },
@@ -108,6 +112,7 @@ describe("FileInspector when an open note changed outside dohc", () => {
     retryKeys.length = 0;
     engine.boundRetryKey = 0;
     engine.closedWhenDisabled = false;
+    engine.sharedLease = false;
     vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
     vi.stubGlobal("dohcDesktop", makeBridge());
   });
@@ -279,4 +284,53 @@ describe("FileInspector when an open note changed outside dohc", () => {
     await screen.findByTestId("lossy-note-notice");
     expect(document.querySelector('[data-testid="markdown-editor"][contenteditable="true"]')).toBeNull();
   });
+
+  // Panes on one note share its engine session, so one pane's reload hands
+  // every pane the new bytes. Edit anyway covers only the bytes it confirmed.
+  it("asks for Edit anyway again in another pane when one pane reloads a large lossy note", async () => {
+    const filler = "A paragraph that makes this note larger than read mode's limit.\n\n".repeat(1_100);
+    const versionA = `# Readme\n\n<details>\n\nVersion A.\n</details>\n\n${filler}`;
+    const versionB = `# Readme\n\n<details>\n\nVersion B, from another app.\n</details>\n\n${filler}`;
+    let disk = { text: versionA, contentHash: "a".repeat(64) };
+    const bridge = makeBridge();
+    vi.mocked(bridge.readWorkspaceText).mockImplementation(async () => ({ ...disk, truncated: false }));
+    vi.stubGlobal("dohcDesktop", bridge);
+    engine.closedWhenDisabled = true;
+    engine.sharedLease = true;
+    engine.state = engineState(seededFrom(versionA, "a".repeat(64)), null);
+    render(
+      <>
+        <div data-testid="pane-1"><FileInspector workspaceId="ws-1" path="a.md" /></div>
+        <div data-testid="pane-2"><FileInspector workspaceId="ws-1" path="a.md" /></div>
+      </>,
+    );
+    const pane1 = within(screen.getByTestId("pane-1"));
+    const pane2 = within(screen.getByTestId("pane-2"));
+    for (const pane of [pane1, pane2]) {
+      fireEvent.click(await pane.findByTestId("lossy-note-edit-anyway"));
+      fireEvent.click(screen.getByTestId("lossy-note-edit-anyway-confirm"));
+    }
+    await waitFor(() => expect(pane2.queryByTestId("lossy-note-notice")).toBeNull());
+
+    // Another app writes version B over unsaved text, and pane 1 reloads it
+    // into the session both panes share.
+    disk = { text: versionB, contentHash: "b".repeat(64) };
+    setEngine(engineState(seededFrom(versionA, "a".repeat(64)), "unsaved"));
+    fireEvent.click(await pane1.findByRole("button", { name: "Reload" }));
+    setEngine(engineState(seededFrom(versionB, "b".repeat(64)), null));
+
+    await pane2.findByTestId("lossy-note-notice");
+    expect(screen.getByTestId("pane-2").querySelector('[contenteditable="true"]')).toBeNull();
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+  });
 });
+
+// A session the engine seeded from `markdown`, which records it as its source
+// under the content hash its read gave.
+function seededFrom(markdown: string, contentHash: string): Y.Doc {
+  const doc = markdownToYDoc(markdown);
+  doc.getMap("meta").set("dohcMarkdownSource", markdown);
+  doc.getMap("meta").set("dohcMarkdownSourceSha256", contentHash);
+  doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", createHash("sha256").update(yDocToMarkdown(doc)).digest("hex"));
+  return doc;
+}

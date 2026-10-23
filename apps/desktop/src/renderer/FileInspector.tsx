@@ -500,17 +500,20 @@ export const FileInspector = memo(function FileInspector(
     contentHash,
     readSeq,
   });
-  // "Edit anyway" lasts for this open: the person accepted that saving
-  // rewrites the parts dohc can't show.
-  const [editAnyway, setEditAnyway] = useState<string | null>(null);
-  const editingAnyway = editAnyway === lossyOpen;
+  // "Edit anyway" lasts for this open and covers the bytes the person
+  // accepted saving would rewrite: the session seeded from them records them
+  // as its source. A session that records another source, as when another
+  // pane reloads a change made outside dohc into the shared session, needs
+  // its own check and consent.
+  const [editAnyway, setEditAnyway] = useState<{ open: string; source: string | null } | null>(null);
+  const consented = editAnyway?.open === lossyOpen;
   // A session that binds a different note from the one checked, as when the
   // file changed before the open, closes once its own check says lossy. It
   // stays closed until a read brings other bytes; the session that then
   // opens is checked in turn.
   const [sessionLossy, setSessionLossy] = useState<{ open: string; hash: string | null } | null>(null);
   const sessionRefused = sessionLossy?.open === lossyOpen && (contentHash === null || sessionLossy.hash === contentHash);
-  const allowed = editingAnyway ? "clear" : sessionRefused ? "lossy" : checked.state;
+  const allowed = consented ? "clear" : sessionRefused ? "lossy" : checked.state;
   const engine = useEngineDoc({
     workspaceId: props.workspaceId,
     path: props.path,
@@ -527,6 +530,11 @@ export const FileInspector = memo(function FileInspector(
     accessEnded: props.accessEnded,
   });
   useEffect(() => setBound(engine.available), [engine.available]);
+  const boundSource = engine.doc?.getMap("meta").get("dohcMarkdownSourceSha256");
+  const editingAnyway = consented && (typeof boundSource !== "string" || boundSource === editAnyway.source);
+  useEffect(() => {
+    if (consented && !editingAnyway) setEditAnyway(null);
+  }, [consented, editingAnyway]);
   const session = useBoundNoteCheck({
     open: lossyOpen,
     // Edit anyway already accepted what saving does.
@@ -836,7 +844,7 @@ export const FileInspector = memo(function FileInspector(
             onOpenRecordHistory={props.onOpenRecordHistory}
             engine={engine}
             lossyNote={lossyNote}
-            onEditAnyway={() => setEditAnyway(lossyOpen)}
+            onEditAnyway={() => setEditAnyway({ open: lossyOpen, source: contentHash })}
             onRetryEngineOpen={retryEngineOpen}
             onReloadChangedOutside={reloadChangedOutside}
             writesRefusedRef={writesRefusedRef}
