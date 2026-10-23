@@ -300,6 +300,9 @@ export function MarkdownView(props: {
   // Owned by the inspector, like the open itself. Required: the notice must
   // never render without its retry, and the one caller always passes it.
   onRetryEngineOpen: () => void;
+  // Reopen the note after a change outside dohc. Unlike a retry, it opens the
+  // new bytes as a new note: the inspector reads and checks them again.
+  onReloadChangedOutside: () => void;
   // Set by the inspector during every render for its live write refusal,
   // including a pending switch reread. Read by every write guard beside
   // `readOnlyRef`, because an engine refusal can arrive in the commit that
@@ -751,7 +754,7 @@ export function MarkdownView(props: {
   // main lets the disk version stand, keeping any unsaved text in History.
   // A document with nothing unsaved reopens by itself, never over edits main
   // has not confirmed; otherwise the notice asks the person.
-  const { onRetryEngineOpen, onButtonError } = props;
+  const { onReloadChangedOutside, onButtonError } = props;
   const [reloading, setReloading] = useState(false);
   const [reloadedItself, setReloadedItself] = useState(false);
   // The content a reload replaced. A reopened note with other content took
@@ -764,8 +767,8 @@ export function MarkdownView(props: {
   const reloadChangedOutside = useCallback(() => {
     replacedText.current = noteContent(engineDocRef.current) ?? replacedText.current;
     setReloading(true);
-    onRetryEngineOpen();
-  }, [onRetryEngineOpen]);
+    onReloadChangedOutside();
+  }, [onReloadChangedOutside]);
   const reloadsItself = engine.changedOutside === "saved" && !reloadedItself;
   useEffect(() => {
     if (!reloadsItself) return;

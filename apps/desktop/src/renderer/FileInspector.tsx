@@ -464,6 +464,15 @@ export const FileInspector = memo(function FileInspector(
   const retryEngineOpen = useCallback(() => {
     setEngineRetryNonce((nonce) => nonce + 1);
   }, []);
+  // A reload after a change outside dohc opens new bytes, so it is a new open
+  // for the lossy-note check: it reads the file again, checks it, and asks
+  // for Edit anyway again. A retry of the same open keeps both.
+  const [reloads, setReloads] = useState(0);
+  const reloadChangedOutside = useCallback(() => {
+    setReloads((count) => count + 1);
+    refreshAfterConflict();
+    retryEngineOpen();
+  }, [refreshAfterConflict, retryEngineOpen]);
   // A note opens an engine session only once its bytes are known not to be a
   // lossy note. Until then, and for a lossy note, the view shows the file's
   // text read-only, and the engine sees the note as closed. A failed read
@@ -473,9 +482,10 @@ export const FileInspector = memo(function FileInspector(
   useEffect(() => {
     if (checksLossyNote) warmLossyNoteCheck();
   }, [checksLossyNote]);
-  // One open of one version: a switch, or a reload that bumps the version
-  // key, checks its own read, and asks for Edit anyway again.
-  const lossyOpen = key;
+  // One open of one version: a switch, a reload that bumps the version key,
+  // or a reload after a change outside dohc checks its own read, and asks for
+  // Edit anyway again.
+  const lossyOpen = `${key}\u0000${reloads}`;
   // A note past read mode's size with no engine record gets no session and
   // edits as source, which writes what is typed. So its open goes first, and
   // only a session that binds waits for the check.
@@ -828,6 +838,7 @@ export const FileInspector = memo(function FileInspector(
             lossyNote={lossyNote}
             onEditAnyway={() => setEditAnyway(lossyOpen)}
             onRetryEngineOpen={retryEngineOpen}
+            onReloadChangedOutside={reloadChangedOutside}
             writesRefusedRef={writesRefusedRef}
             localBuffer={localBuffer}
           />

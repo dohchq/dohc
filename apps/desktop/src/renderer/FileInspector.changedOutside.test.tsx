@@ -22,6 +22,9 @@ const engine = vi.hoisted(() => ({
   listeners: new Set<() => void>(),
   retryKeys: [] as number[],
   boundRetryKey: 0,
+  // When set, a session the inspector keeps closed reads as closed, as with
+  // the real hook.
+  closedWhenDisabled: false,
 }));
 const retryKeys = engine.retryKeys;
 vi.mock("./collab/useEngineDoc", async () => {
@@ -34,6 +37,9 @@ vi.mock("./collab/useEngineDoc", async () => {
     useEngineDoc: (input: EngineDocInput) => {
       if (engine.retryKeys.at(-1) !== input.retryKey) engine.retryKeys.push(input.retryKey ?? 0);
       const state = useSyncExternalStore(subscribe, () => engine.state);
+      if (engine.closedWhenDisabled && input.enabled === false) {
+        return { ...state, available: false, opening: false, doc: null, changedOutside: null };
+      }
       return (input.retryKey ?? 0) === engine.boundRetryKey
         ? state
         : { ...state, available: false, opening: true, doc: null, changedOutside: null };
@@ -101,6 +107,7 @@ describe("FileInspector when an open note changed outside dohc", () => {
   beforeEach(() => {
     retryKeys.length = 0;
     engine.boundRetryKey = 0;
+    engine.closedWhenDisabled = false;
     vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
     vi.stubGlobal("dohcDesktop", makeBridge());
   });
@@ -244,5 +251,32 @@ describe("FileInspector when an open note changed outside dohc", () => {
     expect(document.activeElement).toBe(reload);
     fireEvent.click(reload);
     await waitFor(() => expect(retryKeys).toEqual([0, 1]));
+  });
+
+  // Edit anyway covers the bytes the person confirmed. A lossy note (CONTEXT.md)
+  // that another app replaces reloads as a new open, checked again.
+  it.each(["saved", "unsaved"] as const)("asks for Edit anyway again when an outside write reloads a lossy note (%s)", async (state) => {
+    const versionA = "# Readme\n\n<details>\n\nVersion A.\n</details>\n";
+    const versionB = "# Readme\n\n<details>\n\nVersion B, from another app.\n</details>\n";
+    let disk = { text: versionA, contentHash: "a".repeat(64) };
+    const bridge = makeBridge();
+    vi.mocked(bridge.readWorkspaceText).mockImplementation(async () => ({ ...disk, truncated: false }));
+    vi.stubGlobal("dohcDesktop", bridge);
+    engine.closedWhenDisabled = true;
+    engine.state = engineState(markdownToYDoc(versionA), null);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    fireEvent.click(await screen.findByTestId("lossy-note-edit-anyway"));
+    fireEvent.click(screen.getByTestId("lossy-note-edit-anyway-confirm"));
+    await waitFor(() => expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("true"));
+
+    // Another app writes version B, and the note reloads.
+    disk = { text: versionB, contentHash: "b".repeat(64) };
+    setEngine(engineState(markdownToYDoc(versionA), state));
+    if (state === "unsaved") fireEvent.click(await screen.findByRole("button", { name: "Reload" }));
+    await waitFor(() => expect(retryKeys).toEqual([0, 1]));
+    setEngine(engineState(markdownToYDoc(versionB), null));
+
+    await screen.findByTestId("lossy-note-notice");
+    expect(document.querySelector('[data-testid="markdown-editor"][contenteditable="true"]')).toBeNull();
   });
 });
