@@ -374,7 +374,7 @@ export async function startServiceLiveHost(options: {
     const pull = async (attached: HostedAttachment, joined: AbortSignal) => {
       const number = ++attached.pulls, workspaceId = attached.hosted.connection.workspaceId;
       const result = await attached.hosted.pull(joined, page => {
-        if (!page.adoptedScope) activation?.hold(workspaceId, page.held, page.heldWindow);
+        if (!page.adoptedScope) activation?.hold(workspaceId, page.held, page.heldWindow, page.newlyHeld);
       });
       attached.confirmed = number;
       return result;
@@ -485,7 +485,7 @@ export async function startServiceLiveHost(options: {
       if (required !== undefined) {
         if (attached.confirmed < required) return PARKING;
         parking.delete(key);
-        if (attached.hosted.departed?.has(row.objectId) === false) {forget(key); return undefined;}
+        if (attached.hosted.departed(row.objectId) === false) {forget(key); return undefined;}
       }
       const publish = async (operation: AbortSignal) => (await attached.hosted.publish(operation)).hasMore ? "Hosted publication has more pages." : undefined;
       if (authorityLost(row)) {
@@ -744,7 +744,7 @@ export async function startServiceLiveHost(options: {
     const drained = (workspaceId: string) => {
       const attached = attachments.get(workspaceId);
       return !!attached && ![...hosted.values()].some(row => row.target.workspaceId === workspaceId) && attached.confirmed === attached.pulls &&
-        attached.hosted.departed?.size === 0 && [...attached.announced.values()].every(required => required <= attached.confirmed);
+        attached.hosted.departedNone && [...attached.announced.values()].every(required => required <= attached.confirmed);
     };
     if(config.activation){
       activation=new ServiceActivationDriver({trustedAccount:options.trustedAccount,storage,history,client,host:coordinate,workspaces:attachments,config:config.activation,
@@ -790,8 +790,11 @@ export async function startServiceLiveHost(options: {
           }
         });
         // Every ready workspace pushes, then pulls. One with no documents still pulls, so its replica retires what left.
+        // One that is not ready still pulls while its held list is cut, so a document held past where it stopped,
+        // perhaps the one holding readiness back, is named within a few passes.
         for(const [workspaceId,attached] of [...attachments]){
           if(activation!.workspaceReady(workspaceId))await step(async()=>{await attached.hosted.push(passSignal);await pull(attached,passSignal);});
+          else if(attached.hosted.heldSweepUnfinished)await step(()=>pull(attached,passSignal));
         }
         // A diverged replica runs nothing more. Its workspace detaches for good, and its store stays.
         // It counts as diverged before the detach, which a lost reply or an exiting engine can fail.
@@ -870,7 +873,7 @@ export async function startServiceLiveHost(options: {
       retains(document: {workspaceId: string; objectId: string}): boolean {
         const attached = attachments.get(document.workspaceId), required = attached?.announced.get(document.objectId);
         return hostedKey(document) !== undefined || !attached || required === undefined || attached.confirmed < required ||
-          attached.hosted.departed?.has(document.objectId) !== false;
+          attached.hosted.departed(document.objectId) !== false;
       },
       /**
        * Whether its replica has had its chance to retire the departed

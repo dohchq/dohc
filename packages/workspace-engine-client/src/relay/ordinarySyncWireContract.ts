@@ -165,9 +165,17 @@ const Preservation = mutableStruct({
 
 // A session host's hosted replica. A pass that adopted a new scope has no
 // cursor; a commit can stand while the retirement after it failed, and while
-// its departed documents could not be read (null). A pass lists the documents
-// it holds after the pull's `heldAfter`, in object ID order, through its
-// `heldThrough`, the last listed, or to the last of them when that is null.
+// its departed documents could not be read (null). Each answer fits the
+// engine's control budget, so each list may stop early:
+// - A pass lists the documents it holds after the pull's `heldAfter`, in
+//   object ID order, through its `heldThrough`, the last listed, or to the
+//   last of them when that is null.
+// - `newlyHeld` names documents the pass moved from ready to held, wherever
+//   they fall; it may leave some out, which `held` names in turn.
+// - Departed documents are in object ID order. With `departedOmitted` above
+//   zero, the list says nothing past the last one it names.
+// - The other counts say how many changed paths, refusals and declined
+//   shares the pass reports beyond those listed; the engine keeps them all.
 const HostedSyncResultSchemas = {
   "sync.createHostedReplica": mutableStruct({ hosted: Schema.Literal(true) }),
   "sync.pullHosted": mutableStruct({
@@ -179,11 +187,16 @@ const HostedSyncResultSchemas = {
     hasMore: Schema.Boolean,
     pendingCursor: Schema.NullOr(mutableStruct({ kind: Schema.Literal("hosted"), token: Text })),
     changedPaths: Schema.mutable(Schema.Array(ChangedPath)),
+    changedPathsOmitted: Count,
     refusals: Schema.mutable(Schema.Array(Refusal)),
+    refusalsOmitted: Count,
     sharingDeclined: Schema.mutable(Schema.Array(SharingDeclined)),
+    sharingDeclinedOmitted: Count,
     held: Schema.mutable(Schema.Array(HostedHold)),
     heldThrough: Schema.NullOr(Text),
+    newlyHeld: Schema.mutable(Schema.Array(HostedHold)),
     departed: Departed,
+    departedOmitted: Count,
   }),
   "sync.materializePendingCursor": OrdinarySyncResultSchemas["sync.materializePendingCursor"],
   "sync.commitCursor": mutableStruct({
@@ -191,6 +204,7 @@ const HostedSyncResultSchemas = {
     hasMore: Schema.Boolean,
     retirement: Schema.NullOr(RetirementError),
     departed: Schema.NullOr(Departed),
+    departedOmitted: Count,
     sharingDeclined: Schema.mutable(Schema.Array(SharingDeclined)),
   }),
   "sync.push": OrdinarySyncResultSchemas["sync.push"],
@@ -224,9 +238,16 @@ export function decodeHostedSyncResult<M extends HostedSyncMethod>(
   if (method === "sync.pullHosted") {
     const pass = result as HostedSyncMethodResultMap["sync.pullHosted"];
     // A list that stops early stops at the last document it lists.
-    if (pass.held.some((hold, index) => index > 0 && compareObjectIds(pass.held[index - 1]!.objectId, hold.objectId) >= 0) ||
+    if (!ascending(pass.held.map(hold => hold.objectId)) || !ascending(pass.newlyHeld.map(hold => hold.objectId)) ||
       (pass.heldThrough !== null && pass.heldThrough !== pass.held.at(-1)?.objectId)) {
       throw new ProtocolShapeError(`hosted ${method} result: held documents do not match where their list stops`);
+    }
+    if (!ascending(pass.departed)) throw new ProtocolShapeError(`hosted ${method} result: departed documents are out of order`);
+  } else if (method === "sync.commitCursor") {
+    const commit = result as HostedSyncMethodResultMap["sync.commitCursor"];
+    // Unread, nothing of it was left out.
+    if (commit.departed === null ? commit.departedOmitted !== 0 : !ascending(commit.departed)) {
+      throw new ProtocolShapeError(`hosted ${method} result: departed documents do not match what they omit`);
     }
   } else if (method === "sync.heldDocuments") {
     const page = result as HostedSyncMethodResultMap["sync.heldDocuments"];
@@ -243,6 +264,18 @@ export function decodeHostedSyncResult<M extends HostedSyncMethod>(
 
 // The engine orders object IDs by their UTF-8 bytes.
 const compareObjectIds = (a: string, b: string) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
+const ascending = (ids: readonly string[]) => ids.every((id, index) => index === 0 || compareObjectIds(ids[index - 1]!, id) < 0);
+
+/**
+ * Whether an answer's departed list names the document as departed: false
+ * when it does not, and undefined past the last one a list that left some
+ * out names, where it says nothing.
+ */
+export function hostedDeparted(departed: { readonly listed: readonly string[]; readonly omitted: number }, objectId: string): boolean | undefined {
+  if (departed.listed.includes(objectId)) return true;
+  const last = departed.listed.at(-1);
+  return departed.omitted > 0 && (last === undefined || compareObjectIds(objectId, last) > 0) ? undefined : false;
+}
 
 /** Where a pass's held list runs: after `after`, from the first when undefined, through `through`, or to the last when null. */
 export type HostedHeldWindow = { readonly after: string | undefined; readonly through: string | null };

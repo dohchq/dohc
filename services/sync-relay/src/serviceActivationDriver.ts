@@ -125,13 +125,16 @@ export class ServiceActivationDriver {
    * succeeds. Until then they do not hold back their workspace's pulls,
    * which bring what they wait for. `holds` is every document the pass left
    * held within `window`, so one there it no longer holds for released
-   * retained work is free of that hold. Past the window nothing changes.
+   * retained work is free of that hold. Past the window, only the documents
+   * in `newlyHeld`, which the pass moved from ready to held, become held at
+   * once; that list frees nothing.
    */
-  hold(workspaceId:string,holds:readonly ServiceHostedHold[],window:HostedHeldWindow){
+  hold(workspaceId:string,holds:readonly ServiceHostedHold[],window:HostedHeldWindow,newlyHeld:readonly ServiceHostedHold[]){
     for(const [key,objectId] of this.#objects){
-      if(JSON.parse(key)[0]!==workspaceId || !hostedHeldWindowCovers(window,objectId))continue;
-      const hold=holds.find(row=>row.objectId===objectId);
-      if(hold?.reason!=="released-lineage-unsettled" && this.#blocked.get(key)?.reason==="released-lineage-unsettled")this.#blocked.delete(key);
+      if(JSON.parse(key)[0]!==workspaceId)continue;
+      const covered=hostedHeldWindowCovers(window,objectId);
+      const hold=(covered?holds:newlyHeld).find(row=>row.objectId===objectId);
+      if(covered && hold?.reason!=="released-lineage-unsettled" && this.#blocked.get(key)?.reason==="released-lineage-unsettled")this.#blocked.delete(key);
       if(!hold)continue;
       this.#completedTargets.delete(key);this.#dormant.delete(key);this.#held.set(key,hold.reason);
       // A fresh binding replaces the one held before; that resolves nothing.

@@ -68,9 +68,8 @@ enum HeldStream {
 /// The longest object ID a request names.
 const MAX_OBJECT_ID_BYTES: usize = 512;
 
-/// The most a serialized control response that lists held documents holds:
-/// a held-document answer, below the relay's 256 KiB metadata limit, or a
-/// hosted pull.
+/// The most a serialized held-document answer holds, below the relay's
+/// 256 KiB metadata limit, and a hosted pull or commit.
 pub(super) const HELD_RESPONSE_BYTE_BUDGET: usize = 240 * 1024;
 
 /// The most findings an answer lists for one reason; its total counts all.
