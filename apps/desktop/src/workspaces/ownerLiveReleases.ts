@@ -3,7 +3,7 @@ import {constants} from "node:fs";
 import {copyFile, readFile, rm} from "node:fs/promises";
 import {dirname, join} from "node:path";
 import {z} from "zod";
-import {parseLiveObjectBinding, type LiveObjectBinding} from "@dohc/workspace-engine-client";
+import {parseLiveObjectBinding, type LiveObjectBinding, type OwnerYDocOutboxRecovery} from "@dohc/workspace-engine-client";
 import {atomicWriteFile} from "../atomicReplaceFile";
 
 /**
@@ -12,60 +12,84 @@ import {atomicWriteFile} from "../atomicReplaceFile";
  * the queue is gone, so only this record says the file still needs them, and
  * the recovery package saved before the release still holds them.
  *
- * `headDeliveryId` names the refused queue the package came from: a rebuilt
- * queue, even under the same binding, has another. `retry` is false once the
- * engine no longer holds that release, or when the record could not be read
- * whole: then only Save recovery copy remains. Only Save, or a release that
- * wrote the file while the engine still held it, ends a record.
+ * `headDeliveryId` names the refused queue the package came from, and
+ * `snapshot` its whole contents: a queue rebuilt under the same binding, or
+ * restored from an earlier engine state with the same head but other edits,
+ * is another. `retry` is false once the engine no longer holds that release,
+ * or when the record could not be read whole: then only Save recovery copy
+ * remains. Only Save, or a release that wrote the file while the engine still
+ * held it, ends a record.
  */
 export type UnwrittenRelease = {workspaceId: string; objectId: string; path: string; reason: string;
-  binding: LiveObjectBinding | null; headDeliveryId: string | null; retry: boolean};
-type ReleaseIdentity = Pick<UnwrittenRelease, "binding" | "headDeliveryId">;
+  binding: LiveObjectBinding | null; headDeliveryId: string | null; snapshot: string | null; retry: boolean};
+type QueueIdentity = Pick<UnwrittenRelease, "binding" | "headDeliveryId">;
+type ReleaseIdentity = QueueIdentity & Pick<UnwrittenRelease, "snapshot">;
 
 export interface UnwrittenReleases {
   list(workspaceId: string): Promise<UnwrittenRelease[]>;
   /**
    * Writes the queue's recovery package, then the record. Refuses while the
-   * document keeps a record of another release or another queue, so its package stays.
+   * document keeps a record of another release or other edits, so its package stays.
    */
-  put(release: UnwrittenRelease & {binding: LiveObjectBinding; headDeliveryId: string}, recovery: string): Promise<void>;
+  put(release: UnwrittenRelease & {binding: LiveObjectBinding; headDeliveryId: string; snapshot: string}, recovery: string): Promise<void>;
   /** The recovery package saved before the release. */
   recovery(workspaceId: string, objectId: string): Promise<string | null>;
   /** The engine no longer holds this release: keep the record and its package, without Try again. */
   endRetry(workspaceId: string, objectId: string, binding: LiveObjectBinding): Promise<void>;
   /** The release of this binding wrote the file: ends its record while the engine still held that release. */
   written(workspaceId: string, objectId: string, binding: LiveObjectBinding): Promise<void>;
-  /** Removes the document's record only while it is still the record of this binding and queue. */
+  /** Removes the document's record only while it is still the record of this binding, queue and edits. */
   remove(workspaceId: string, objectId: string, record: ReleaseIdentity): Promise<void>;
 }
 
 export const sameBinding = (a: LiveObjectBinding | null, b: LiveObjectBinding | null) =>
   a === null || b === null ? a === b : JSON.stringify(parseLiveObjectBinding(a)) === JSON.stringify(parseLiveObjectBinding(b));
-const sameRelease = (row: ReleaseIdentity, record: ReleaseIdentity) =>
+const sameQueue = (row: QueueIdentity, record: QueueIdentity) =>
   row.headDeliveryId === record.headDeliveryId && sameBinding(row.binding, record.binding);
+/** Whether a record's stored package holds exactly this queue's edits. */
+export const sameRelease = (row: ReleaseIdentity, record: ReleaseIdentity) => row.snapshot === record.snapshot && sameQueue(row, record);
 
-/** The record a package of this release and queue must not replace: one of another release, or one the engine no longer holds. */
-export const keptEarlierRelease = (records: readonly UnwrittenRelease[], release: Pick<UnwrittenRelease, "workspaceId" | "objectId"> & ReleaseIdentity) =>
-  records.find(row => row.workspaceId === release.workspaceId && row.objectId === release.objectId && !(row.retry && sameRelease(row, release)));
+/**
+ * What a refused queue holds, as one digest: its binding, base, accepted
+ * checkpoint and every pending update with its recorded author. When it was
+ * read or saved is not part of it.
+ */
+export function recoverySnapshot(queue: OwnerYDocOutboxRecovery): string {
+  const checkpoint = queue.checkpoint === null ? null : createHash("sha256").update(queue.checkpoint).digest("hex");
+  return createHash("sha256").update(JSON.stringify([queue.outboxId, parseLiveObjectBinding(queue.binding), queue.baseUpdateDigest, checkpoint,
+    queue.entries.map(({update: _update, ...entry}) => entry)])).digest("hex");
+}
+
+/**
+ * The record a package of this release must not replace: one of another
+ * release or queue, one the engine no longer holds, or one whose package
+ * holds other edits. Before the queue is read, pass no snapshot: only the
+ * first two can show.
+ */
+export const keptEarlierRelease = (records: readonly UnwrittenRelease[],
+  release: Pick<UnwrittenRelease, "workspaceId" | "objectId"> & QueueIdentity & {snapshot?: string}) =>
+  records.find(row => row.workspaceId === release.workspaceId && row.objectId === release.objectId &&
+    !(row.retry && sameQueue(row, release) && (release.snapshot === undefined || row.snapshot === release.snapshot)));
 export const keptEarlierError = (path: string) =>
   new Error(`dohc still keeps earlier edits for ${path} that it could not write to the file. Save a recovery copy of ${path} first.`);
 
 const UnwrittenReleaseRow = z.object({
   workspaceId: z.string().min(1), objectId: z.string().min(1), path: z.string().min(1), reason: z.string().min(1),
   binding: z.unknown().transform(value => value === null ? null : parseLiveObjectBinding(value)),
-  headDeliveryId: z.string().min(1).nullable(), retry: z.boolean(),
-}).strict().refine(row => (row.binding !== null && row.headDeliveryId !== null) || !row.retry);
+  headDeliveryId: z.string().min(1).nullable(), snapshot: z.string().regex(/^[0-9a-f]{64}$/).nullable(), retry: z.boolean(),
+}).strict().refine(row => (row.binding !== null && row.headDeliveryId !== null && row.snapshot !== null) || !row.retry);
 // What a damaged row still says: enough to find and save its stored package.
 const KeptReleaseRow = z.object({workspaceId: z.string().min(1), objectId: z.string().min(1), path: z.string().min(1),
-  reason: z.unknown().optional(), headDeliveryId: z.unknown().optional()});
+  reason: z.unknown().optional(), headDeliveryId: z.unknown().optional(), snapshot: z.unknown().optional()});
 
 function parseRow(value: unknown): {row: UnwrittenRelease; whole: boolean} | null {
   try {return {row: UnwrittenReleaseRow.parse(value), whole: true};} catch {/* Read what it still says. */}
   const kept = KeptReleaseRow.safeParse(value);
   if (!kept.success) return null;
-  const {workspaceId, objectId, path, reason, headDeliveryId} = kept.data;
-  return {row: {workspaceId, objectId, path, reason: typeof reason === "string" && reason ? reason : "unreadable-record", binding: null,
-    headDeliveryId: typeof headDeliveryId === "string" && headDeliveryId ? headDeliveryId : null, retry: false}, whole: false};
+  const {workspaceId, objectId, path, reason, headDeliveryId, snapshot} = kept.data;
+  const text = (field: unknown) => typeof field === "string" && field ? field : null;
+  return {row: {workspaceId, objectId, path, reason: text(reason) ?? "unreadable-record", binding: null,
+    headDeliveryId: text(headDeliveryId), snapshot: text(snapshot), retry: false}, whole: false};
 }
 
 /** One file on this computer, written durably, so the notice survives a restart. */

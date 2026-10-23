@@ -20,7 +20,7 @@ import type { RegistryEntry } from "./registryStore";
 import { deferred } from "../testing/deferred";
 import { createTestScratch } from "./testTemp";
 import { localStateDir } from "./workspaceLocalState";
-import { createUnwrittenReleases, type UnwrittenRelease, type UnwrittenReleases } from "./ownerLiveReleases";
+import { createUnwrittenReleases, recoverySnapshot, type UnwrittenRelease, type UnwrittenReleases } from "./ownerLiveReleases";
 import { directDocumentProjection } from "./documentProjection";
 import { createHash } from "node:crypto";
 import { readFile, rm } from "node:fs/promises";
@@ -262,21 +262,35 @@ const releaseConflict = (request: Request): Response => {
   throw new EngineRequestError(request.id, {code: "INVALID_PARAMS", message: "owner-stop-conflict", retry: "no"});
 };
 const stopMethods = (methods: string[]) => methods.filter(method => method.startsWith("ydoc.ownerStop.") && method !== "ydoc.ownerStop.list");
+// The engine lists a Stop only while it waits, owes the server a retirement, or deferred its release.
+const listedStop = (stop: {state: string; retirementOwed: boolean; deferred?: unknown}) => stop.state === "requested" || stop.retirementOwed || stop.deferred !== undefined;
+/** The refused queue a restore can repeat with fewer edits: its binding and head stay, its second edit goes. */
+function twoEditQueue(binding: LiveObjectBinding) {
+  const {queue, update} = recoveryQueue(binding);
+  const doc = new Y.Doc(); Y.applyUpdate(doc, queue.checkpoint); Y.applyUpdate(doc, update);
+  const before = Y.encodeStateVector(doc); doc.getMap("frontmatter").set("reviewer", "kept too");
+  const second = Y.encodeStateAsUpdate(doc, before); doc.destroy();
+  return {first: queue, both: {...queue, pendingBytes: queue.pendingBytes + second.byteLength, entries: [...queue.entries,
+    {sequence: 3, appendKey: "append-2", deliveryId: "delivery-2", updateDigest: digest(second), update: second, byteLength: second.byteLength, createdAtMs: 2}]}};
+}
 /**
  * A Stop's record of refused edits it could not write, from queue "outbox"
  * at head "delivery", with its stored package, in a real file. The engine's
- * reader is stood in for as it lists them: hidden only behind that queue.
- * Each launch is a new desktop process on the same records.
+ * reader is stood in for as it lists them: hidden only behind that queue
+ * while it holds the same edits. Each launch is a new desktop process on the
+ * same records.
  */
-async function keptRelease(path = "notes/plan.md") {
+async function keptRelease(path = "notes/plan.md", stored: ReturnType<typeof recoveryQueue>["queue"] = recoveryQueue(keptBinding).queue) {
   const rootPath = await createTestScratch("dohc-unwritten-");
   const file = join(await createTestScratch("dohc-unwritten-state-"), "owner-live-releases.json");
   const {liveRecoveryPackage} = await import("./ownerLiveRecoveryCopy");
-  await createUnwrittenReleases(() => file).put({workspaceId: "owner", objectId: "object", path, reason: "invalid-update", binding: keptBinding, headDeliveryId: "delivery", retry: true},
-    JSON.stringify(liveRecoveryPackage(recoveryQueue(keptBinding).queue, {path, reason: "invalid-update", storedOn: "this-computer"})));
-  const engine = {queues: [] as OwnerLiveQuarantineRecord[], stops: [] as (typeof releasedStop)[], release: releaseConflict as (request: Request) => Response};
+  await createUnwrittenReleases(() => file).put({workspaceId: "owner", objectId: "object", path, reason: "invalid-update", binding: keptBinding, headDeliveryId: "delivery",
+    snapshot: recoverySnapshot(stored), retry: true}, JSON.stringify(liveRecoveryPackage(stored, {path, reason: "invalid-update", storedOn: "this-computer"})));
+  const engine = {queues: [] as OwnerLiveQuarantineRecord[], snapshots: new Map<string, string>(), stops: [] as (typeof releasedStop)[],
+    release: releaseConflict as (request: Request) => Response};
   quarantineMock.read.mockImplementation(async (_client, _handle, options?: {unwritten?: UnwrittenRelease[]}) => [...engine.queues,
-    ...(options?.unwritten ?? []).filter(release => !engine.queues.some(row => row.objectId === release.objectId && row.headDeliveryId === release.headDeliveryId))
+    ...(options?.unwritten ?? []).filter(release => !engine.queues.some(row => row.objectId === release.objectId && row.headDeliveryId === release.headDeliveryId &&
+      row.outboxId !== null && engine.snapshots.get(row.outboxId) === release.snapshot))
       .map(release => ({objectId: release.objectId, path: release.path, reason: release.reason, outboxId: null, binding: release.binding,
         headDeliveryId: release.headDeliveryId, recovery: release.retry ? "not-written" : "cannot-write"}))]);
   const launch = async () => {
@@ -285,9 +299,13 @@ async function keptRelease(path = "notes/plan.md") {
     const methods: string[] = [];
     f.client.respond = async request => {
       methods.push(request.method);
-      if (request.method === "ydoc.ownerStop.clear") return {id: request.id, result: {stops: []}};
+      if (request.method === "ydoc.ownerStop.clear") {
+        const path = (request.params as {path: string}).path, cleared = engine.stops.filter(stop => stop.document.currentPath === path);
+        engine.stops = engine.stops.filter(stop => !cleared.includes(stop));
+        return {id: request.id, result: {stops: cleared}};
+      }
       if (request.method === "ydoc.ownerStop.release") return engine.release(request);
-      return {id: request.id, result: request.method === "workspace.open" ? {workspace: "workspace-handle"} : request.method === "ydoc.ownerStop.list" ? {stops: engine.stops}
+      return {id: request.id, result: request.method === "workspace.open" ? {workspace: "workspace-handle"} : request.method === "ydoc.ownerStop.list" ? {stops: engine.stops.filter(listedStop)}
         : request.method === "workspace.close" ? {closed: true} : request.method === "engine.ping" ? {ok: true} : null};
     };
     await f.engine.start();
@@ -1147,7 +1165,7 @@ describe("server owner peer lifecycle", () => {
       currentPath: "notes/plan.md", selectorPaths: ["notes/plan.md"], restoreFenceGeneration: 1};
     const rootPath = await createTestScratch("dohc-quarantine-stop-restart-");
     const file = join(await createTestScratch("dohc-unwritten-releases-"), "owner-live-releases.json");
-    if (recovery === "not-written") await createUnwrittenReleases(() => file).put({workspaceId: "owner", objectId: "object", path: "notes/plan.md", reason: "invalid-update", binding, headDeliveryId: "delivery", retry: true}, "{}");
+    if (recovery === "not-written") await createUnwrittenReleases(() => file).put({workspaceId: "owner", objectId: "object", path: "notes/plan.md", reason: "invalid-update", binding, headDeliveryId: "delivery", snapshot: "5".repeat(64), retry: true}, "{}");
     quarantineMock.read.mockImplementation(async (_client, _handle, options: {unwritten?: unknown[]}) => recovery === "stopping"
       ? [{objectId: "object", path: "notes/plan.md", reason: "invalid-update", outboxId: "outbox", binding, headDeliveryId: "delivery", recovery}]
       : (options.unwritten ?? []).map(() => ({objectId: "object", path: "notes/plan.md", reason: "invalid-update", outboxId: null, binding, headDeliveryId: null, recovery})));
@@ -1345,6 +1363,79 @@ describe("server owner peer lifecycle", () => {
       expect(JSON.parse(await readFile(join(kept.rootPath, second.packagePath), "utf8"))).toMatchObject({outboxId: "rebuilt-outbox"});
       expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{recovery: "paused"}]);
     } finally {await f.close(); quarantineMock.read.mockReset(); quarantineMock.queue.mockReset();}
+  });
+
+  // Restoring an earlier engine state repeats the binding and the head with
+  // fewer edits behind them. The stored package holds the edits the restored
+  // queue lacks: a Stop cannot replace it, the list shows both, and Save writes it first.
+  it("keeps the stored package when a restored queue repeats its binding and head with fewer edits", async () => {
+    const {both, first} = twoEditQueue(keptBinding);
+    const kept = await keptRelease("notes/plan.md", both);
+    kept.engine.queues = [{objectId: "object", path: "notes/plan.md", reason: "invalid-update", outboxId: "outbox", binding: keptBinding,
+      headDeliveryId: "delivery", recovery: "paused"}];
+    kept.engine.snapshots.set("outbox", recoverySnapshot(first));
+    quarantineMock.queue.mockResolvedValue(first);
+    const {f, workspace, methods} = await kept.launch();
+    const updates = (text: string) => (JSON.parse(text) as {updates: unknown[]}).updates.length;
+    try {
+      expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{recovery: "paused"}, {recovery: "not-written"}]);
+      await expect(f.engine.releaseOwnerLiveStop(workspace, keptBinding, 0)).rejects.toThrow("Save a recovery copy of notes/plan.md first.");
+      expect(stopMethods(methods)).toEqual([]);
+      expect(updates((await kept.records().recovery("owner", "object"))!)).toBe(2);
+      const saved = await f.engine.saveOwnerLiveRecoveryCopy(workspace, "notes/plan.md");
+      expect(saved.keptEdits).toBe("ended");
+      expect(updates(await readFile(join(kept.rootPath, saved.packagePath), "utf8"))).toBe(2);
+      const queued = await f.engine.saveOwnerLiveRecoveryCopy(workspace, "notes/plan.md");
+      expect(queued.keptEdits).toBe("kept");
+      expect(updates(await readFile(join(kept.rootPath, queued.packagePath), "utf8"))).toBe(1);
+    } finally {await f.close(); quarantineMock.read.mockReset(); quarantineMock.queue.mockReset();}
+  });
+
+  // Save from a row writes what that row shows, so its result and toast name what was exported.
+  it("saves exactly the kept edits a row's incident names", async () => {
+    const kept = await keptRelease();
+    kept.engine.queues = [{objectId: "object", path: "notes/plan.md", reason: "invalid-update", outboxId: "rebuilt-outbox", binding: keptBinding,
+      headDeliveryId: "rebuilt-delivery", recovery: "paused"}];
+    quarantineMock.queue.mockResolvedValue({...recoveryQueue(keptBinding).queue, outboxId: "rebuilt-outbox"});
+    const {f, workspace} = await kept.launch();
+    const outboxOf = async (packagePath: string) => (JSON.parse(await readFile(join(kept.rootPath, packagePath), "utf8")) as {outboxId: string}).outboxId;
+    try {
+      const [queueRow, recordRow] = f.engine.ownerLiveQuarantines("owner");
+      expect([queueRow?.incident, recordRow?.incident]).toEqual(["rebuilt-outbox:rebuilt-delivery:0", `release:${"a".repeat(64)}:1`]);
+      const queued = await f.engine.saveOwnerLiveRecoveryCopy(workspace, "notes/plan.md", queueRow!.incident);
+      expect(queued.keptEdits).toBe("kept");
+      expect(await outboxOf(queued.packagePath)).toBe("rebuilt-outbox");
+      expect(await kept.records().list("owner")).toHaveLength(1);
+      for (const stale of ["rebuilt-outbox:rebuilt-delivery:9", "server:rebuilt-outbox:1"]) {
+        await expect(f.engine.saveOwnerLiveRecoveryCopy(workspace, "notes/plan.md", stale)).rejects.toThrow("This document changed.");
+      }
+      const record = await f.engine.saveOwnerLiveRecoveryCopy(workspace, "notes/plan.md", recordRow!.incident);
+      expect(record.keptEdits).toBe("ended");
+      expect(await outboxOf(record.packagePath)).toBe("outbox");
+      expect(await kept.records().list("owner")).toEqual([]);
+      await expect(f.engine.saveOwnerLiveRecoveryCopy(workspace, "notes/plan.md", recordRow!.incident)).rejects.toThrow("This document changed.");
+    } finally {await f.close(); quarantineMock.read.mockReset(); quarantineMock.queue.mockReset();}
+  });
+
+  // After an owner restore, the earlier generation's refused queue stays
+  // listed beside the current one. A release takes only the current one, so
+  // only its edits are packaged.
+  it("packages only the refused queue of the generation a release takes", async () => {
+    const {f, credentials, binding, workspace} = await quarantinedOwner([]);
+    const row = (outboxId: string, restoreFenceGeneration: number) => ({objectId: "object", path: "notes/plan.md", reason: "invalid-update", outboxId,
+      binding: {...binding, restoreFenceGeneration}, headDeliveryId: `${outboxId}-delivery`, recovery: "paused"});
+    quarantineMock.read.mockResolvedValue([row("earlier-outbox", 0), row("outbox", 1)]);
+    quarantineMock.queue.mockResolvedValue(recoveryQueue(binding).queue);
+    f.client.respond = async request => ({id: request.id, result: request.method === "ydoc.ownerStop.release"
+      ? {stops: [{...releasedStop, binding, materialized: false}]}
+      : request.method === "workspace.open" ? {workspace: "workspace-handle"} : request.method === "ydoc.ownerStop.list" ? {stops: []}
+        : request.method === "engine.ping" ? {ok: true} : null});
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await f.engine.releaseOwnerLiveStop(await workspace(), binding, 0);
+      expect(quarantineMock.queue).toHaveBeenCalledExactlyOnceWith(expect.any(EngineClient), "workspace-handle", expect.objectContaining({outboxId: "outbox"}));
+      expect(f.unwritten).toMatchObject([{headDeliveryId: "outbox-delivery"}]);
+    } finally {credentials.abort(); await f.close(); quarantineMock.read.mockReset(); quarantineMock.queue.mockReset();}
   });
 
   // Nothing is left to protect, and the record would refuse every later Stop of the document.

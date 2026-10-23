@@ -197,7 +197,8 @@ describe("edits the server refused", () => {
     renderShell(bridge);
     const user = userEvent.setup();
     await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", {name: "Save recovery copy"}));
-    expect(bridge.saveOwnerLiveRecoveryCopy).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId, path: "notes/plan.md"});
+    // The row names the kept edits it shows, so Save writes those.
+    expect(bridge.saveOwnerLiveRecoveryCopy).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId, path: "notes/plan.md", incident: quarantine.incident});
     await act(async () => { saving.resolve({copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "this-computer", keptEdits: "kept"}); await saving.promise; });
     expect(await screen.findByText("Saved a recovery copy of notes/plan.md in notes. Your kept edits stay on this computer.")).toBeTruthy();
     expect(screen.getByRole("button", {name: "Open"})).toBeTruthy();
@@ -299,7 +300,9 @@ describe("edits the server refused", () => {
     await waitFor(() => expect(bridge.getSyncStatus.mock.calls.length).toBeGreaterThan(reads));
     expect(screen.getAllByText("Edits not written to notes/plan.md")).toHaveLength(1);
     await userEvent.setup().click(within(toast).getByRole("button", {name: "Try again"}));
-    expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId, path: "notes/plan.md"});
+    // Try again acts on the row's own document only.
+    expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId, path: "notes/plan.md",
+      again: {objectId: "object-1", recovery: "not-written"}});
     expect(await screen.findByText(RECOVERED)).toBeTruthy();
     act(() => bridge.emitWorkspaceActivity());
     await waitFor(() => expect(screen.queryByText("Edits not written to notes/plan.md")).toBeNull());
@@ -352,7 +355,8 @@ describe("edits the server refused", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
     expect(screen.queryByText(/Live editing stopped/)).toBeNull();
     await user.click(within(row).getByRole("button", {name: "Try again"}));
-    await waitFor(() => expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledWith({workspaceId: WORKSPACE.workspaceId, path: "notes/plan.md"}));
+    await waitFor(() => expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledWith({workspaceId: WORKSPACE.workspaceId, path: "notes/plan.md",
+      again: {objectId: "object-1", recovery: "stopping"}}));
     // Reconciliation released it in the background and wrote the file: nothing is left to say.
     status = SYNC_STATUS;
     const reads = bridge.getSyncStatus.mock.calls.length;

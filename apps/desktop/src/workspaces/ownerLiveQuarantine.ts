@@ -1,7 +1,7 @@
 import {OwnerYDocOutbox, OwnerYDocOutboxReadChangedError, type JsonValue, type LiveObjectBinding, type OwnerYDocOutboxRecovery} from "@dohc/workspace-engine-client";
 import type {EngineClient, OwnerYDocDraftDescriptor} from "@dohc/workspace-engine-client/daemon";
 import {z} from "zod";
-import type {UnwrittenRelease} from "./ownerLiveReleases";
+import {recoverySnapshot, type UnwrittenRelease} from "./ownerLiveReleases";
 
 const ServerKeptEdits = z.object({
   objectId: z.string().min(1).max(512), path: z.string().min(1).max(4096), outboxId: z.string().min(1).max(512),
@@ -101,10 +101,13 @@ export type OwnerLiveQuarantineRecord = {objectId: string; path: string; reason:
 });
 
 type HeadFacts = {state: string; reason: string | null; binding: LiveObjectBinding; headDeliveryId: string | null; retryDeliveryId: string | null};
-/** What each queue's head said, by draft revision and size, so an unchanged queue is not read again. */
-export type OwnerLiveHeadCache = Map<string, {key: string; facts: HeadFacts}>;
+/**
+ * What each queue's head said, by draft revision and size, so an unchanged
+ * queue is not read again; and its whole snapshot, once a record needed it.
+ */
+export type OwnerLiveHeadCache = Map<string, {key: string; facts: HeadFacts; snapshot?: string}>;
 
-const sameGeneration = (a: LiveObjectBinding, b: LiveObjectBinding) =>
+export const sameGeneration = (a: LiveObjectBinding, b: LiveObjectBinding) =>
   a.lineageClaimId === b.lineageClaimId && a.restoreFenceGeneration === b.restoreFenceGeneration;
 
 /** Reads every refused owner queue in one workspace from the engine's durable state. */
@@ -115,11 +118,12 @@ export async function readOwnerLiveQuarantines(client: EngineClient, workspace: 
   const request = () => ({id: 0, workspace, deadlineMs: 30_000});
   const outbox = new OwnerYDocOutbox({sendRequest: request => client.sendRequest(request, signal)}, workspace);
   const found: OwnerLiveQuarantineRecord[] = [];
-  const listed = new Set<string>();
+  const listed = new Map<string, string>();
   // A queue's head never changes without a new draft revision or size, except
   // for a Try again grant, which is never cached. The base is never needed.
   const readFacts = async (draft: OwnerYDocDraftDescriptor & {outboxId: string}): Promise<HeadFacts> => {
     const key = `${draft.revision}:${draft.pendingBytes}`, cached = heads?.get(draft.outboxId);
+    listed.set(draft.outboxId, key);
     if (cached?.key === key) return cached.facts;
     const head = await outbox.readDeliveryHead(draft.outboxId, draft.binding)
       .catch((error: unknown) => {if (error instanceof TypeError) return outbox.readHead(draft.outboxId); throw error;});
@@ -138,7 +142,6 @@ export async function readOwnerLiveQuarantines(client: EngineClient, workspace: 
       const page = await client.ownerYDocListDrafts(request(), {after, limit: 64}, signal);
       for (const draft of page.drafts) {
         if (draft.state !== "quarantined" || draft.outboxId === null) continue;
-        listed.add(draft.outboxId);
         const head = await readFacts({...draft, outboxId: draft.outboxId});
         if (head.state !== "quarantined" || head.headDeliveryId === null || head.reason === null || BINDING_QUARANTINES.has(head.reason)) continue;
         const stop = stopFor(head.binding);
@@ -150,15 +153,27 @@ export async function readOwnerLiveQuarantines(client: EngineClient, workspace: 
       }
       after = page.next;
     } while (after !== null);
+    for (const id of heads?.keys() ?? []) if (!listed.has(id)) heads!.delete(id);
+    // A queue is read whole only when a record may have come from it, and once per draft revision and size.
+    const snapshotOf = async (outboxId: string) => {
+      const cached = heads?.get(outboxId), current = cached?.key === listed.get(outboxId) ? cached : undefined;
+      if (current?.snapshot !== undefined) return current.snapshot;
+      const snapshot = recoverySnapshot(await outbox.readRecovery(outboxId));
+      if (current) current.snapshot = snapshot;
+      return snapshot;
+    };
+    // While the queue a record came from remains, its row speaks for both. A
+    // later queue, even under the same binding and head, holding other edits
+    // leaves the record its own row.
+    const queues = [...found];
+    for (const release of options.unwritten ?? []) {
+      const queue = release.snapshot === null ? undefined
+        : queues.find(row => row.objectId === release.objectId && row.headDeliveryId === release.headDeliveryId);
+      if (queue?.outboxId && await snapshotOf(queue.outboxId) === release.snapshot) continue;
+      found.push({objectId: release.objectId, path: release.path, reason: release.reason, outboxId: null,
+        binding: release.binding, headDeliveryId: release.headDeliveryId, recovery: release.retry ? "not-written" : "cannot-write"});
+    }
   } finally {outbox.dispose();}
-  for (const id of heads?.keys() ?? []) if (!listed.has(id)) heads!.delete(id);
-  // While the queue a record came from remains, its row speaks for both. A
-  // later queue, even under the same binding, leaves the record its own row.
-  for (const release of options.unwritten ?? []) {
-    if (found.some(row => row.objectId === release.objectId && row.headDeliveryId === release.headDeliveryId)) continue;
-    found.push({objectId: release.objectId, path: release.path, reason: release.reason, outboxId: null,
-      binding: release.binding, headDeliveryId: release.headDeliveryId, recovery: release.retry ? "not-written" : "cannot-write"});
-  }
   return found;
 }
 

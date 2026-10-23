@@ -216,7 +216,7 @@ impl ActorHandle {
             };
             let outcome=store.write_with(faults.as_ref(),|tx|match action.as_str() {
                 "request"=>release::request_in_tx(tx,&key,now_ms).map(|row|vec![row]),
-                "clear"=>release::clear_in_tx(tx,&key).map(|()|vec![]),
+                "clear"=>release::clear_in_tx(tx,&key).map(|cleared|cleared.into_iter().collect()),
                 "retired"=>release::retired_in_tx(tx,&key,now_ms).map(|()|vec![]),
                 "release"=>{
                     let b=binding.as_ref().ok_or(OwnerOutboxError::StopConflict)?;

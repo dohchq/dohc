@@ -112,8 +112,10 @@ function buildCliRequest(
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, lane: command.lane, cursor: command.cursor } };
     case "fileChats":
     case "documentRead":
-    case "saveRecoveryCopy":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, path: command.path } };
+    case "saveRecoveryCopy":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, path: command.path,
+        ...(command.incident === undefined ? {} : { incident: command.incident }) } };
     case "liveKeptEdits":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor } };
     case "retryKeptEdits":

@@ -3383,7 +3383,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: "v2-owner-outbox-retry",
         sql: "ALTER TABLE owner_ydoc_outboxes ADD COLUMN retry_delivery_id TEXT \
               CHECK (retry_delivery_id IS NULL OR (state = 'quarantined' AND length(retry_delivery_id) > 0)); \
-              ALTER TABLE owner_ydoc_outboxes ADD COLUMN kept_checkpoint_digest TEXT REFERENCES binary_blobs(sha256); \
+              ALTER TABLE owner_ydoc_outboxes ADD COLUMN kept_checkpoint_digest TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT; \
               CREATE TABLE owner_ydoc_outbox_refusals ( \
               outbox_id TEXT NOT NULL REFERENCES owner_ydoc_outboxes(outbox_id) ON DELETE CASCADE, \
               delivery_id TEXT NOT NULL CHECK (length(delivery_id) > 0), \
@@ -4468,7 +4468,7 @@ mod tests {
             ),
             (
                 "v2-owner-outbox-retry",
-                "7ca6be040d2d8ded7b40fe1b622d30b1638f2bb1c2b9bf59081ce13a53f946bc",
+                "6297a5c253c0080fc95450855893ee303184937d82bf3f62ab5afed0c39e5ada",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
