@@ -29,7 +29,8 @@ vi.mock("./desktopOwnerHost", () => ({ readDesktopOwnerHostConfig: ownerHostMock
 
 const ownerDeliveryMock = vi.hoisted(() => ({read: vi.fn(), start: vi.fn(), pass: vi.fn()}));
 vi.mock("./desktopOwnerDelivery", () => ({readDesktopOwnerDeliveryConfig: ownerDeliveryMock.read, startDesktopOwnerDelivery: ownerDeliveryMock.start}));
-vi.mock("./nativeOwnerDelivery", () => ({runNativeOwnerDeliveryPass: ownerDeliveryMock.pass}));
+vi.mock("./nativeOwnerDelivery", async () => ({runNativeOwnerDeliveryPass: ownerDeliveryMock.pass,
+  OwnerKnownRefusals: (await vi.importActual<typeof import("./ownerYDocOutbox")>("./ownerYDocOutbox")).OwnerKnownRefusals}));
 // Stands in for the engine's durable owner queues, which outlive every desktop process.
 const quarantineMock = vi.hoisted(() => ({read: vi.fn(), retry: vi.fn(), queue: vi.fn()}));
 vi.mock("./ownerLiveQuarantine", () => ({readOwnerLiveQuarantines: quarantineMock.read, retryOwnerLiveQuarantine: quarantineMock.retry,
