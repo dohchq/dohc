@@ -1,4 +1,8 @@
-import { SecretFileStoreError } from "../workspaces/workspaceDataKey";
+import { installWorkspaceDataKey, SECRET_KEY_RELATIVE_PATH } from "../workspaces/workspaceDataKey";
+import { mkdir } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { atomicCreateFile } from "../atomicReplaceFile";
+import { createTestScratch } from "../workspaces/testTemp";
 import { ownActorPresentation } from "../workspaces/actorPresentation";
 import { describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
@@ -10,6 +14,8 @@ import { syncPauseFor } from "../workspaces/syncPauseFor";
 import { createWorkspaceSyncStop } from "../workspaces/stopWorkspaceSync";
 import { enrollWorkspaceKeyEnvelope } from "../workspaces/workspaceKeyEnvelopeEnrollment";
 import { registerCloudIpcHandlers } from "./cloudIpc";
+import { ipcWireError } from "./errorWords";
+import { ipcErrorMessage } from "../renderer/ipcError";
 import { workspaceSyncOperations, type SyncStatusResult } from "./bridgeContract";
 import { createWorkspaceRootApproval } from "./workspaceRegistryIpc";
 import { CredentialSessionCache } from "../workspaces/credentialSessionCache";
@@ -24,6 +30,11 @@ import { workspaceWriteRefusal } from "../workspaces/shareWriteGate";
 import { chatShareSessionKey } from "../mainChatIpcHandlers";
 import { buildSyncCode } from "../workspaces/syncCode";
 import { deferred } from "../testing/deferred";
+
+vi.mock("../atomicReplaceFile", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../atomicReplaceFile")>();
+  return { ...actual, atomicCreateFile: vi.fn(actual.atomicCreateFile) };
+});
 
 const credentials: CloudCredentials = {
   serverUrl: "https://account.example.test", relayUrl: "https://relay.example.test",
@@ -226,15 +237,25 @@ async function harness() {
 describe("registered cloud handlers", () => {
   it.each(["enable", "join"] as const)("preserves the unsupported-drive key refusal during %s", async action => {
     const h = await harness();
-    const error = new SecretFileStoreError("key-install-unsupported",
-      "This drive can't store the workspace's secret key safely. Move the workspace to an NTFS, APFS or ext4 drive, then try again.");
-    h.installDataKey.mockRejectedValueOnce(error);
+    const root = await createTestScratch("dohc-key-cloud-words-");
+    await mkdir(dirname(join(root, SECRET_KEY_RELATIVE_PATH)), { recursive: true });
+    vi.mocked(atomicCreateFile).mockRejectedValueOnce(
+      Object.assign(new Error("link failed"), { code: "ENOTSUP", syscall: "link" }),
+    );
+    h.installDataKey.mockImplementation((_root, key) => installWorkspaceDataKey(root, key));
     h.enroll.mockImplementationOnce(input => input.installDataKey(Buffer.alloc(32, 7)));
     h.bootstrap.mockImplementationOnce(input => input.installDataKey(Buffer.alloc(32, 7)));
     const result = action === "enable"
       ? h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing" })
       : h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload);
-    await expect(result).rejects.toBe(error);
+    const expected = action === "enable"
+      ? "This drive can't store the workspace's secret key safely. Move the workspace to an NTFS, APFS or ext4 drive, then try again."
+      : `This drive can't store the workspace's secret key safely. Files remain in ${h.joinPayload.rootPath}. Choose an empty folder on an NTFS, APFS or ext4 drive to try again.`;
+    const failure = await result.catch(error => error);
+    expect(failure).toMatchObject({ message: expected });
+    const channel = action === "enable" ? CHANNELS.cloudEnableSync : CHANNELS.cloudJoinWorkspace;
+    const received = new Error(`Error invoking remote method '${channel}': ${String(ipcWireError(failure))}`);
+    expect(ipcErrorMessage(received, "Couldn't sync the workspace.")).toBe(expected);
     expect(h.installDataKey).toHaveBeenCalledOnce();
     expect(h.enable).not.toHaveBeenCalled();
     if (action === "join") {

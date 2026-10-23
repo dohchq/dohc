@@ -422,7 +422,7 @@ export function registerCloudIpcHandlers<
         `dohc could not close the failed download. Files remain in ${rootPath}. Restart dohc. If this folder appears in the workspace list, choose Forget from its menu before joining again. Forget keeps the folder. Then choose another empty folder.`,
       failure: (error) => {
         if (error instanceof SecretFileStoreError && error.code === "key-install-unsupported") {
-          return error;
+          return new Error(`This drive can't store the workspace's secret key safely. Files remain in ${rootPath}. Choose an empty folder on an NTFS, APFS or ext4 drive to try again.`);
         }
         if (
           error instanceof Error &&
