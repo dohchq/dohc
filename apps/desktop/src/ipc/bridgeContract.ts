@@ -440,11 +440,14 @@ export const SaveOwnerLiveRecoveryCopyPayload = WorkspaceIdPayload.extend({path:
 export type SaveOwnerLiveRecoveryCopyPayload = z.infer<typeof SaveOwnerLiveRecoveryCopyPayload>;
 // The readable copy is null when the kept edits could not be read as a document;
 // the package next to it always holds their original bytes. `storedOn` is
-// where the kept edits stay after the save.
+// where the kept edits came from. kept: they stay there. copied: the server
+// heard of the copy and may now release them. ended: a Stop's stored edits,
+// which dohc no longer keeps.
 export const SaveOwnerLiveRecoveryCopyResult = z.object({
   copyPath: SAFE_RELATIVE_PATH.nullable(),
   packagePath: SAFE_RELATIVE_PATH,
   storedOn: OwnerLiveQuarantine.shape.storedOn,
+  keptEdits: z.enum(["kept", "copied", "ended"]),
 }).strict();
 export type SaveOwnerLiveRecoveryCopyResult = z.infer<typeof SaveOwnerLiveRecoveryCopyResult>;
 

@@ -1106,7 +1106,7 @@ pub fn read_pending_page(
                 header["firstEntryCursor"] = serde_json::to_value(next_entry(0)?)
                     .map_err(|_| OwnerOutboxError::Corrupt)?;
                 // Outside the snapshot: acceptances advance it while the queue waits.
-                header["checkpointDigest"] = accepted_checkpoint_in(&tx, &parent.binding)?
+                header["checkpointDigest"] = accepted_checkpoint_in(&tx, outbox_id, &parent.binding)?
                     .map(|(digest, _)| digest)
                     .into();
                 let bytes = page_json(&header)?;
@@ -1120,7 +1120,7 @@ pub fn read_pending_page(
             Checkpoint => {
                 // Outside the snapshot, so a checkpoint that moved on, or that this
                 // queue's binding no longer holds, changes the read instead of failing it.
-                let Some((digest, length)) = accepted_checkpoint_in(&tx, &parent.binding)?
+                let Some((digest, length)) = accepted_checkpoint_in(&tx, outbox_id, &parent.binding)?
                     .filter(|(_, length)| cursor.offset < *length)
                 else {
                     return Ok(OwnerOutboxPageResult::ReadChanged);
@@ -1226,10 +1226,13 @@ fn slice_header(
 }
 
 /// The digest and length of the accepted state this queue's pending entries
-/// build on, while this computer still holds the queue's own binding. A later
-/// restore generation's checkpoint need not contain them, so it is never offered.
+/// build on: the lineage's checkpoint while it is still of the queue's restore
+/// generation, which a rename does not change, or else the one the queue kept
+/// when a later generation replaced it. A later generation's checkpoint need
+/// not contain them, so it is never offered.
 fn accepted_checkpoint_in(
     conn: &Connection,
+    outbox_id: &str,
     binding: &LiveObjectBinding,
 ) -> Result<Option<(String, i64)>, OwnerOutboxError> {
     let row: Option<(String, String)> = conn
@@ -1240,14 +1243,32 @@ fn accepted_checkpoint_in(
         )
         .optional()
         .map_err(read_sql)?;
-    let Some((digest, held)) = row else {
-        return Ok(None);
+    let current = match row {
+        Some((digest, held)) => {
+            let held: LiveObjectBinding =
+                serde_json::from_str(&held).map_err(|_| OwnerOutboxError::Corrupt)?;
+            (held.restore_fence_generation == binding.restore_fence_generation).then_some(digest)
+        }
+        None => None,
     };
-    let held: LiveObjectBinding =
-        serde_json::from_str(&held).map_err(|_| OwnerOutboxError::Corrupt)?;
-    if held != *binding {
-        return Ok(None);
-    }
+    let digest = match current {
+        Some(digest) => digest,
+        None => {
+            let kept: Option<String> = conn
+                .query_row(
+                    "SELECT kept_checkpoint_digest FROM owner_ydoc_outboxes WHERE outbox_id=?1",
+                    [outbox_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(read_sql)?
+                .flatten();
+            let Some(digest) = kept else {
+                return Ok(None);
+            };
+            digest
+        }
+    };
     let length: i64 = conn
         .query_row(
             "SELECT byte_length FROM binary_blobs WHERE sha256=?1",

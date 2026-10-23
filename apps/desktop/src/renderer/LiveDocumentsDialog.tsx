@@ -151,7 +151,8 @@ function statusLabel(row: LiveDocumentRow): string {
   if (row.quarantine === "paused" || row.quarantine === "copied") return "Paused";
   if (row.quarantine === "retrying") return "Trying again";
   if (row.quarantine === "stopping") return "Stopping";
-  if (row.quarantine === "stopped-kept" || row.quarantine === "not-written" || row.quarantine === "cannot-write") return "Stopped";
+  if (row.quarantine === "stopped-kept") return "Stopped";
+  // not-written and cannot-write keep an earlier Stop's edits; the session says whether the document is live now.
   if (row.reason === "document-unavailable") return "File moved or removed";
   if (row.reason === "workspace-changed") return "Workspace changed";
   if (row.reason === "session-host-refused") return "Stopped by the server";
@@ -203,7 +204,7 @@ function quarantineNote(row: LiveDocumentRow): string | null {
     case "paused":
       return `The server could not accept your edits. dohc kept them ${row.storedOn === "server" ? "on the server" : "on this computer"}. Save a recovery copy to get them back.`;
     case "copied":
-      return "The server could not accept your edits. dohc kept them on the server. Your recovery copy is on this computer.";
+      return "The server could not accept your edits. A recovery copy of them is saved, so the server may now release them.";
     case "retrying":
       return "dohc is sending your kept edits to the server once more.";
     case "stopping":
@@ -211,9 +212,9 @@ function quarantineNote(row: LiveDocumentRow): string | null {
     case "stopped-kept":
       return "Live editing stopped. dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.";
     case "not-written":
-      return "Live editing stopped. dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.";
+      return "When live editing stopped, dohc kept your unsent edits but could not write them to your file. Save a recovery copy to get them back.";
     case "cannot-write":
-      return "Live editing stopped. dohc kept your unsent edits, but can't finish writing them to your file. Save a recovery copy to get them back.";
+      return "When live editing stopped, dohc kept your unsent edits but can't finish writing them to your file. Save a recovery copy to get them back.";
     default:
       return null;
   }

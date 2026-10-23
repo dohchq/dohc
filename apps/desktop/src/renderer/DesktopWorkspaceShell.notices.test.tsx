@@ -198,7 +198,7 @@ describe("edits the server refused", () => {
     const user = userEvent.setup();
     await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", {name: "Save recovery copy"}));
     expect(bridge.saveOwnerLiveRecoveryCopy).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId, path: "notes/plan.md"});
-    await act(async () => { saving.resolve({copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "this-computer"}); await saving.promise; });
+    await act(async () => { saving.resolve({copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "this-computer", keptEdits: "kept"}); await saving.promise; });
     expect(await screen.findByText("Saved a recovery copy of notes/plan.md in notes. Your kept edits stay on this computer.")).toBeTruthy();
     expect(screen.getByRole("button", {name: "Open"})).toBeTruthy();
     // The edits stay queued, so the notice that holds them stays too.
@@ -212,13 +212,13 @@ describe("edits the server refused", () => {
     bridge.getSyncStatus = vi.fn(async () => quarantined(quarantine));
     bridge.saveOwnerLiveRecoveryCopy = vi.fn()
       .mockRejectedValueOnce(new Error("dohc could not find a free name for the recovery copy. Rename older recovery copies, then try again."))
-      .mockResolvedValueOnce({copyPath: null, packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "this-computer"});
+      .mockResolvedValueOnce({copyPath: null, packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "this-computer", keptEdits: "kept"});
     renderShell(bridge);
     const user = userEvent.setup();
     await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", {name: "Save recovery copy"}));
     const failed = await screen.findByText(/^dohc could not save a recovery copy of notes\/plan\.md\. dohc could not find a free name/);
     await user.click(within(failed.closest<HTMLElement>("[data-testid='workspace-shell-error']")!).getByRole("button", {name: "Try again"}));
-    expect(await screen.findByText("Saved your kept edits for notes/plan.md as a recovery package in notes. dohc could not make a readable copy.")).toBeTruthy();
+    expect(await screen.findByText("Saved your kept edits for notes/plan.md as a recovery package in notes. dohc could not make a readable copy. Your kept edits stay on this computer.")).toBeTruthy();
     expect(bridge.saveOwnerLiveRecoveryCopy).toHaveBeenCalledTimes(2);
   });
 
@@ -233,20 +233,20 @@ describe("edits the server refused", () => {
     await user.click(save);
     await user.click(save);
     expect(bridge.saveOwnerLiveRecoveryCopy).toHaveBeenCalledOnce();
-    await act(async () => { saving.resolve({copyPath: "plan (recovered).md", packagePath: "plan (recovered).dohc-recovery.json", storedOn: "this-computer"}); await saving.promise; });
+    await act(async () => { saving.resolve({copyPath: "plan (recovered).md", packagePath: "plan (recovered).dohc-recovery.json", storedOn: "this-computer", keptEdits: "kept"}); await saving.promise; });
     expect(await screen.findByText("Saved a recovery copy of plan.md in the workspace folder. Your kept edits stay on this computer.")).toBeTruthy();
   });
 
   // A document the server hosts keeps its refused edits on the server. Until
   // the owner's recovery copy is saved, the notice says so, and it stays.
-  it("says dohc kept them on the server until a recovery copy is saved, then quietly that the copy is here", async () => {
+  it("says dohc kept them on the server until a recovery copy is saved, then quietly that the server may release them", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const server = {...quarantine, storedOn: "server" as const, incident: "server:outbox:1"};
     let status = quarantined(server);
     bridge.getSyncStatus = vi.fn(async () => status);
     bridge.saveOwnerLiveRecoveryCopy = vi.fn(async () => {
       status = quarantined({...server, recovery: "copied"});
-      return {copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "server" as const};
+      return {copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "server" as const, keptEdits: "copied" as const};
     });
     renderShell(bridge);
     const toast = await screen.findByTestId("workspace-shell-error");
@@ -255,11 +255,12 @@ describe("edits the server refused", () => {
     expect(within(toast).queryByText(BODY)).toBeNull();
     const user = userEvent.setup();
     await user.click(within(toast).getByRole("button", {name: "Save recovery copy"}));
-    expect(await screen.findByText("Saved a recovery copy of notes/plan.md in notes. Your kept edits stay on the server.")).toBeTruthy();
+    expect(await screen.findByText("Saved a recovery copy of notes/plan.md in notes. The server may now release your kept edits.")).toBeTruthy();
     act(() => bridge.emitWorkspaceActivity());
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notices = await screen.findByTestId("notice-center");
-    const copied = "The server could not accept your edits. dohc kept them on the server. Your recovery copy is on this computer.";
+    // Another of the owner's computers may have saved it, so the row names no computer.
+    const copied = "The server could not accept your edits. A recovery copy of them is saved, so the server may now release them.";
     expect(await within(notices).findByText(copied)).toBeTruthy();
     expect(within(notices).queryByText("The server could not accept your edits. dohc kept them on the server. Save a recovery copy to get them back.")).toBeNull();
     // Try again still names the server's refusal.
@@ -275,20 +276,32 @@ describe("edits the server refused", () => {
     bridge.stopOwnerLiveDocument = vi.fn(async () => {status = SYNC_STATUS; return {keptEdits: "recovered" as const};});
     renderShell(bridge);
     const toast = await screen.findByTestId("workspace-shell-error");
-    expect(within(toast).getByText("Live editing stopped for notes/plan.md")).toBeTruthy();
-    expect(within(toast).getByText("dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.")).toBeTruthy();
+    // The document may be live again, so the row names the edits, not the document's state.
+    expect(within(toast).getByText("Edits not written to notes/plan.md")).toBeTruthy();
+    expect(within(toast).getByText("When live editing stopped, dohc kept your unsent edits but could not write them to your file. Save a recovery copy to get them back.")).toBeTruthy();
     expect(within(toast).getByRole("button", {name: "Save recovery copy"})).toBeTruthy();
     expect(screen.queryByText(RECOVERED)).toBeNull();
     // The same incident read again adds nothing.
     const reads = bridge.getSyncStatus.mock.calls.length;
     act(() => bridge.emitWorkspaceActivity());
     await waitFor(() => expect(bridge.getSyncStatus.mock.calls.length).toBeGreaterThan(reads));
-    expect(screen.getAllByText("Live editing stopped for notes/plan.md")).toHaveLength(1);
+    expect(screen.getAllByText("Edits not written to notes/plan.md")).toHaveLength(1);
     await userEvent.setup().click(within(toast).getByRole("button", {name: "Try again"}));
     expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId, path: "notes/plan.md"});
     expect(await screen.findByText(RECOVERED)).toBeTruthy();
     act(() => bridge.emitWorkspaceActivity());
-    await waitFor(() => expect(screen.queryByText("Live editing stopped for notes/plan.md")).toBeNull());
+    await waitFor(() => expect(screen.queryByText("Edits not written to notes/plan.md")).toBeNull());
+  });
+
+  // A rebuilt queue and an earlier Stop's edits for one document each keep their own row.
+  it("keeps an earlier Stop's edits in their own row beside the document's current queue", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(async () => quarantined(quarantine, {...quarantine, incident: "release:lineage:0", recovery: "not-written"}));
+    renderShell(bridge);
+    await userEvent.setup().click(await screen.findByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(await within(notices).findByText("Edits not written to notes/plan.md")).toBeTruthy();
+    expect(within(notices).getByText(TITLE)).toBeTruthy();
   });
 
   // Try again found no release left: the row stays, offering only the copy, until a saved copy ends it.
@@ -298,18 +311,19 @@ describe("edits the server refused", () => {
     bridge.getSyncStatus = vi.fn(async () => status);
     bridge.saveOwnerLiveRecoveryCopy = vi.fn(async () => {
       status = SYNC_STATUS;
-      return {copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "this-computer" as const};
+      return {copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "this-computer" as const, keptEdits: "ended" as const};
     });
     renderShell(bridge);
     const toast = await screen.findByTestId("workspace-shell-error");
-    expect(within(toast).getByText("Live editing stopped for notes/plan.md")).toBeTruthy();
-    expect(within(toast).getByText("dohc kept your unsent edits, but can't finish writing them to your file. Save a recovery copy to get them back.")).toBeTruthy();
+    expect(within(toast).getByText("Edits not written to notes/plan.md")).toBeTruthy();
+    expect(within(toast).getByText("When live editing stopped, dohc kept your unsent edits but can't finish writing them to your file. Save a recovery copy to get them back.")).toBeTruthy();
     expect(within(toast).queryByRole("button", {name: "Try again"})).toBeNull();
     await userEvent.setup().click(within(toast).getByRole("button", {name: "Save recovery copy"}));
-    expect(await screen.findByText("Saved a recovery copy of notes/plan.md in notes. Your kept edits stay on this computer.")).toBeTruthy();
+    // dohc no longer keeps them: the copy holds them now.
+    expect(await screen.findByText("Saved a recovery copy of notes/plan.md in notes.")).toBeTruthy();
     expect(bridge.stopOwnerLiveDocument).not.toHaveBeenCalled();
     act(() => bridge.emitWorkspaceActivity());
-    await waitFor(() => expect(screen.queryByText("Live editing stopped for notes/plan.md")).toBeNull());
+    await waitFor(() => expect(screen.queryByText("Edits not written to notes/plan.md")).toBeNull());
   });
 
   // A Stop recorded on this computer whose server call failed: it waits, it is not stopped.

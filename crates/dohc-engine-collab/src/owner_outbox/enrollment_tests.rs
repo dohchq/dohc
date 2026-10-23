@@ -941,7 +941,7 @@ fn a_checkpoint_that_changes_between_pages_changes_the_read() {
 }
 
 #[test]
-fn a_queue_of_an_earlier_restore_generation_never_reads_its_successors_checkpoint() {
+fn a_queue_of_an_earlier_restore_generation_reads_its_own_checkpoint_never_its_successors() {
     use super::super::{
         read_pending_page, OwnerOutboxPageResult, OwnerOutboxReadCursor, OwnerOutboxReadPart,
     };
@@ -964,25 +964,149 @@ fn a_queue_of_an_earlier_restore_generation_never_reads_its_successors_checkpoin
         let raw: serde_json::Value = serde_json::from_slice(&page.bytes).unwrap();
         (page.cursor.snapshot, raw)
     };
-    assert!(header(&store).1["checkpointDigest"].is_string());
+    let own: String = store
+        .read_with(|conn| {
+            conn.query_row("SELECT checkpoint_digest FROM ydoc_owner_bindings", [], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(header(&store).1["checkpointDigest"], serde_json::json!(own));
     let next = next_generation(&observed);
-    let input = successor_input(&store, &next, host);
+    let input = successor_input(&store, &next, host.clone());
     enroll(&mut store, &input, &observed.limits).unwrap();
-    // The older queue still waits; the successor's checkpoint need not hold what it builds on.
+    // The older queue still waits and keeps the checkpoint it builds on; the successor's need not hold it.
     let (snapshot, raw) = header(&store);
     assert_eq!(raw["binding"], serde_json::to_value(&observed.binding).unwrap());
     assert!(raw["pendingEntryCount"].as_i64().unwrap() >= 1);
-    assert_eq!(raw["checkpointDigest"], serde_json::Value::Null);
-    let checkpoint = OwnerOutboxReadCursor {
+    assert_eq!(raw["checkpointDigest"], serde_json::json!(own));
+    assert_ne!(own, hex_sha256(&host));
+    let mut cursor = Some(OwnerOutboxReadCursor {
         snapshot,
         part: OwnerOutboxReadPart::Checkpoint,
         sequence: 0,
         offset: 0,
+    });
+    let mut bytes = Vec::new();
+    while let Some(at) = cursor {
+        let OwnerOutboxPageResult::Page(page) =
+            read_pending_page(&store, "workspace", &outbox_id, Some(at), 7).unwrap()
+        else {
+            panic!("a kept checkpoint never changes")
+        };
+        assert_eq!(page.digest, own);
+        bytes.extend(page.bytes);
+        cursor = page.next_cursor;
+    }
+    assert_eq!(hex_sha256(&bytes), own);
+}
+
+// An edit that builds on one the server accepted, still waiting when a later
+// restore generation replaces the accepted checkpoint. Its base and its own
+// bytes cannot rebuild it; with the checkpoint its queue kept, its recovery
+// copy can.
+#[test]
+fn work_on_an_accepted_prefix_rebuilds_from_its_queue_alone_after_a_generation_advance() {
+    use super::super::{
+        read_pending_page, OwnerOutboxPageResult, OwnerOutboxReadCursor, OwnerOutboxReadPart,
     };
-    assert!(matches!(
-        read_pending_page(&store, "workspace", &outbox_id, Some(checkpoint), 4096).unwrap(),
-        OwnerOutboxPageResult::ReadChanged
-    ));
+    let (_dir, mut store, observed, checkpoint) = fixture();
+    let first = input(&store, &observed, checkpoint.clone());
+    enroll(&mut store, &first, &observed.limits).unwrap();
+    let edited = Ydoc::wire();
+    edited.apply(&checkpoint).unwrap();
+    let accepted = edited.richdoc_append_paragraph("accepted prefix");
+    accept_field_frame(&mut store, &observed.binding, accepted);
+    let dependent = edited.richdoc_append_paragraph("unsent on the accepted prefix");
+    let revision = store
+        .read_with(|conn| super::super::draft::read_observed_in(conn, &observed.binding))
+        .unwrap()
+        .unwrap()
+        .revision;
+    store
+        .write_with(&NoFaults, |tx| {
+            super::super::draft::append_draft_in_tx(
+                tx,
+                "workspace",
+                &observed.binding,
+                revision,
+                "dependent".into(),
+                dependent.clone(),
+                13,
+            )
+        })
+        .unwrap();
+    let outbox_id: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outbox_id FROM owner_ydoc_outbox_entries WHERE append_key='dependent'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    let host = Ydoc::wire();
+    host.apply(&checkpoint).unwrap();
+    host.richdoc_append_paragraph("restored on the host");
+    let restored = successor_input(&store, &next_generation(&observed), bounded(&host).unwrap());
+    enroll(&mut store, &restored, &observed.limits).unwrap();
+    // Read every part as a recovery copy does: the queue, then its checkpoint.
+    let read = |cursor: Option<OwnerOutboxReadCursor>| {
+        match read_pending_page(&store, "workspace", &outbox_id, cursor, 4096).unwrap() {
+            OwnerOutboxPageResult::Page(page) => page,
+            OwnerOutboxPageResult::ReadChanged => panic!("nothing changed during the read"),
+        }
+    };
+    let header = read(None);
+    let snapshot = header.cursor.snapshot.clone();
+    let mut parts: Vec<(OwnerOutboxReadPart, Vec<u8>)> = Vec::new();
+    let mut cursor = header.next_cursor;
+    while let Some(at) = cursor {
+        let page = read(Some(at));
+        cursor = page.next_cursor;
+        // A later page of the same part continues it.
+        if page.cursor.offset > 0 {
+            parts.last_mut().unwrap().1.extend(page.bytes);
+        } else {
+            parts.push((page.cursor.part, page.bytes));
+        }
+    }
+    let part = |wanted: OwnerOutboxReadPart| {
+        parts
+            .iter()
+            .find(|(part, _)| *part == wanted)
+            .map(|(_, bytes)| bytes.clone())
+            .unwrap()
+    };
+    let (base, update) = (part(OwnerOutboxReadPart::Base), part(OwnerOutboxReadPart::Update));
+    assert_eq!(update, dependent);
+    let mut kept = Vec::new();
+    let mut cursor = Some(OwnerOutboxReadCursor {
+        snapshot,
+        part: OwnerOutboxReadPart::Checkpoint,
+        sequence: 0,
+        offset: 0,
+    });
+    while let Some(at) = cursor {
+        let page = read(Some(at));
+        kept.extend(page.bytes);
+        cursor = page.next_cursor;
+    }
+    let without = Ydoc::wire();
+    without.apply(&base).unwrap();
+    without.apply(&update).unwrap();
+    assert!(
+        without.has_pending_dependencies(),
+        "the unsent edit builds on the accepted prefix"
+    );
+    let rebuilt = Ydoc::wire();
+    rebuilt.apply(&base).unwrap();
+    rebuilt.apply(&kept).unwrap();
+    rebuilt.apply(&update).unwrap();
+    assert!(!rebuilt.has_pending_dependencies());
+    let text = rebuilt.project(crate::ContentKind::Richdoc).unwrap().content;
+    assert!(text.contains("accepted prefix") && text.contains("unsent on the accepted prefix"));
+    assert!(!text.contains("restored on the host"));
 }
 
 #[test]

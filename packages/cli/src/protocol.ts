@@ -213,14 +213,15 @@ const deleteRetainedCopiesArgsSchema = z
   .strict();
 
 // Edits the server refused for good that this computer keeps for a live
-// document, found by the document's path. Try again names the refusal it
-// answers, so a newer refusal is read before it is retried.
+// document, found by the document's path. Try again and Stop again name the
+// refusal they answer, so a newer one is read before either runs.
 const liveKeptEditsArgsSchema = z.object(argsBase).strict();
 const saveRecoveryCopyArgsSchema = z.object({ ...argsBase, path: documentPathArg }).strict();
 const keptEditsIncidentSchema = z.string().min(1).max(1024);
 const retryKeptEditsArgsSchema = z
   .object({ ...argsBase, path: documentPathArg, incident: keptEditsIncidentSchema })
   .strict();
+const stopAgainArgsSchema = retryKeptEditsArgsSchema;
 
 const documentEditArgsSchema = z
   .object({
@@ -495,6 +496,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("liveKeptEdits"), args: liveKeptEditsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("saveRecoveryCopy"), args: saveRecoveryCopyArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("retryKeptEdits"), args: retryKeptEditsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("stopAgain"), args: stopAgainArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileChatStart"), args: fileChatStartArgsSchema }).strict(),
@@ -574,6 +576,7 @@ export const CLI_CAPABILITIES = {
   liveKeptEdits: ["workspace.status"],
   saveRecoveryCopy: ["share.live.document.recovery.save"],
   retryKeptEdits: ["share.live.document.retry"],
+  stopAgain: ["share.live.document.stop"],
   documentEdit: ["document.edit"],
   documentCreate: ["document.create"],
   fileChatStart: ["file.chat.start"],
@@ -1200,7 +1203,7 @@ const deleteRetainedCopiesResultSchema = z.discriminatedUnion("ok", [
 // while Try again waits for the server, stopping while a Stop waits for it,
 // stopped-kept or not-written after a Stop kept them, cannot-write once only
 // a recovery copy can return them, and copied once a recovery copy of edits
-// the server keeps is on this computer.
+// the server keeps is saved, maybe by another of the owner's computers.
 const keptEditsStoredOnSchema = z.enum(["this-computer", "server"]);
 const liveKeptEditsResultSchema = z.discriminatedUnion("ok", [
   z.object({
@@ -1216,8 +1219,10 @@ const liveKeptEditsResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 // The package always holds every kept edit. `copyPath` is null when dohc
-// could not read the edits as a document. Both sit in `folder`. The kept
-// edits stay where `storedOn` says.
+// could not read the edits as a document. Both sit in `folder`. The edits
+// came from where `storedOn` says. `keptEdits` is kept while they stay there,
+// copied once the server may release them, and ended once dohc no longer
+// keeps a Stop's edits it could not write.
 const saveRecoveryCopyResultSchema = z.discriminatedUnion("ok", [
   z.object({
     ok: z.literal(true),
@@ -1225,11 +1230,18 @@ const saveRecoveryCopyResultSchema = z.discriminatedUnion("ok", [
     packagePath: z.string().min(1),
     folder: z.string().min(1),
     storedOn: keptEditsStoredOnSchema,
+    keptEdits: z.enum(["kept", "copied", "ended"]),
   }).strict(),
   rawFailureSchema,
 ]);
 const retryKeptEditsResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), path: z.string().min(1) }).strict(),
+  rawFailureSchema,
+]);
+// What the Stop did with the kept edits: wrote them into the file, still
+// keeps them, or kept none.
+const stopAgainResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string().min(1), keptEdits: z.enum(["none", "recovered", "kept"]) }).strict(),
   rawFailureSchema,
 ]);
 
@@ -1530,6 +1542,7 @@ export const cliResultSchemas = {
   liveKeptEdits: liveKeptEditsResultSchema,
   saveRecoveryCopy: saveRecoveryCopyResultSchema,
   retryKeptEdits: retryKeptEditsResultSchema,
+  stopAgain: stopAgainResultSchema,
   documentEdit: documentEditResultSchema,
   documentCreate: documentCreateResultSchema,
   fileChatStart: fileChatStartResultSchema,

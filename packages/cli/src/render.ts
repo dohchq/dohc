@@ -344,6 +344,12 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     }
     case "retryKeptEdits":
       return `Trying again for ${lineSafe((result as Extract<CliResultByVerb["retryKeptEdits"], { ok: true }>).path)}`;
+    case "stopAgain": {
+      const stopped = result as Extract<CliResultByVerb["stopAgain"], { ok: true }>;
+      return stopped.keptEdits === "recovered" ? `Stopped live editing for ${lineSafe(stopped.path)}. dohc wrote your kept edits into the file.`
+        : stopped.keptEdits === "kept" ? `dohc still keeps the edits for ${lineSafe(stopped.path)}. Run kept-edits to check them.`
+        : `Stopped live editing for ${lineSafe(stopped.path)}`;
+    }
     case "groups":
       return renderGroups(result as CliResultByVerb["groups"]);
     case "threads":

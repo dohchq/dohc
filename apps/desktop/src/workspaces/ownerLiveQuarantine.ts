@@ -40,10 +40,10 @@ export type OwnerLiveQuarantineRecord = {objectId: string; path: string; reason:
   headDeliveryId: string;
   recovery: Exclude<OwnerLiveRecovery, "not-written" | "cannot-write">;
 } | {
-  /** A Stop took the edits into the document; its record keeps the release's binding when it could read it. */
+  /** A Stop took the edits into the document; its record keeps the release's binding and queue head when it could read them. */
   outboxId: null;
   binding: LiveObjectBinding | null;
-  headDeliveryId: null;
+  headDeliveryId: string | null;
   recovery: "not-written" | "cannot-write";
 });
 
@@ -99,11 +99,12 @@ export async function readOwnerLiveQuarantines(client: EngineClient, workspace: 
     } while (after !== null);
   } finally {outbox.dispose();}
   for (const id of heads?.keys() ?? []) if (!listed.has(id)) heads!.delete(id);
-  // While the document has a queue, its row speaks for the document.
+  // While the queue a record came from remains, its row speaks for both. A
+  // later queue, even under the same binding, leaves the record its own row.
   for (const release of options.unwritten ?? []) {
-    if (found.some(row => row.objectId === release.objectId)) continue;
+    if (found.some(row => row.objectId === release.objectId && row.headDeliveryId === release.headDeliveryId)) continue;
     found.push({objectId: release.objectId, path: release.path, reason: release.reason, outboxId: null,
-      binding: release.binding, headDeliveryId: null, recovery: release.retry ? "not-written" : "cannot-write"});
+      binding: release.binding, headDeliveryId: release.headDeliveryId, recovery: release.retry ? "not-written" : "cannot-write"});
   }
   return found;
 }

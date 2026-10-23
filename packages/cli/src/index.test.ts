@@ -29,25 +29,31 @@ it("stops sync through main without a caller-supplied workspace or identity", as
   expect((await executeCli({ argv: ["sync", "stop", "other-workspace"], env: {}, request })).exitCode).toBe(1);
 });
 
-it("lists, saves, and tries again kept edits with only the caller's path and incident", async () => {
+it("lists, saves, tries again and stops again kept edits with only the caller's path and incident", async () => {
   const kept = { ok: true, keptEdits: [{ path: "plan.md", reason: "invalid-update", storedOn: "server", incident: "outbox:delivery:0", recovery: "paused" }] };
   const request = vi.fn<(request: CliRequestWithoutToken) => Promise<unknown>>(async ({ verb }) =>
     verb === "liveKeptEdits" ? kept
-      : verb === "saveRecoveryCopy" ? { ok: true, copyPath: null, packagePath: "plan (recovered).dohc-recovery.json", folder: ".", storedOn: "server" }
-        : { ok: true, path: "plan.md" });
+      : verb === "saveRecoveryCopy" ? { ok: true, copyPath: null, packagePath: "plan (recovered).dohc-recovery.json", folder: ".", storedOn: "server", keptEdits: "copied" }
+        : verb === "stopAgain" ? { ok: true, path: "plan.md", keptEdits: "recovered" }
+          : { ok: true, path: "plan.md" });
   expect(await executeCli({ argv: ["document", "kept-edits"], cwd: "/workspace", env: {}, request }))
     .toEqual({ exitCode: 0, stdout: "plan.md · server · paused · outbox:delivery:0\n", stderr: "" });
   expect(await executeCli({ argv: ["document", "save-recovery-copy", "plan.md"], cwd: "/workspace", env: {}, request }))
     .toEqual({ exitCode: 0, stdout: "Saved plan (recovered).dohc-recovery.json\ndohc could not make a readable copy.\n", stderr: "" });
   expect(await executeCli({ argv: ["document", "retry-kept-edits", "plan.md", "outbox:delivery:0"], cwd: "/workspace", env: {}, request }))
     .toEqual({ exitCode: 0, stdout: "Trying again for plan.md\n", stderr: "" });
+  expect(await executeCli({ argv: ["document", "stop-again", "plan.md", "release:a:0"], cwd: "/workspace", env: {}, request }))
+    .toEqual({ exitCode: 0, stdout: "Stopped live editing for plan.md. dohc wrote your kept edits into the file.\n", stderr: "" });
   expect(request.mock.calls.map(([sent]) => [sent.verb, sent.args])).toEqual([
     ["liveKeptEdits", { cwd: WORKSPACE, actor: "agent" }],
     ["saveRecoveryCopy", { cwd: WORKSPACE, actor: "agent", path: "plan.md" }],
     ["retryKeptEdits", { cwd: WORKSPACE, actor: "agent", path: "plan.md", incident: "outbox:delivery:0" }],
+    ["stopAgain", { cwd: WORKSPACE, actor: "agent", path: "plan.md", incident: "release:a:0" }],
   ]);
   expect(await executeCli({ argv: ["document", "retry-kept-edits", "plan.md"], env: {}, request }))
     .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: retry-kept-edits requires a path and an incident\n" });
+  expect(await executeCli({ argv: ["document", "stop-again", "plan.md"], env: {}, request }))
+    .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: stop-again requires a path and an incident\n" });
   const refused = await executeCli({ argv: ["document", "save-recovery-copy", "plan.md", "--json"], env: {},
     request: async () => ({ ok: false, reason: "dohc has no kept edits for this file." }) });
   expect(refused).toEqual({ exitCode: 1, stdout: "", stderr: "dohc: dohc has no kept edits for this file.\n" });

@@ -74,6 +74,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_save_kept_copy: ["file.kept.save"],
   dohc_save_recovery_copy: ["share.live.document.recovery.save"],
   dohc_retry_kept_edits: ["share.live.document.retry"],
+  dohc_stop_again: ["share.live.document.stop"],
   dohc_list_retained_copies: ["file.retained.list"],
   dohc_delete_retained_copies: ["file.retained.delete"],
   dohc_chat_file_mentions: ["chat.read"],
@@ -2218,7 +2219,7 @@ export async function saveKeptCopy(ctx: ToolContext, args: { id: number }) {
 }
 
 // A live document's edits the server refused, which dohc keeps on this
-// computer. The desktop's Notices row offers these same two steps, and
+// computer. The desktop's Notices row offers these same steps, and
 // dohc_workspace_status lists the documents as keptEdits.
 export async function saveRecoveryCopy(ctx: ToolContext, args: { path: string }) {
   const resolved = await safeResolve(ctx, args.path, "write");
@@ -2230,6 +2231,12 @@ export async function retryKeptEdits(ctx: ToolContext, args: { path: string; inc
   const resolved = await safeResolve(ctx, args.path, "write");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   return requestCli(ctx, "retryKeptEdits", { path: resolved.normalized, incident: args.incident });
+}
+
+export async function stopAgain(ctx: ToolContext, args: { path: string; incident: string }) {
+  const resolved = await safeResolve(ctx, args.path, "write");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "stopAgain", { path: resolved.normalized, incident: args.incident });
 }
 
 // Old file copies kept on a drive that cannot tell dohc whether a program

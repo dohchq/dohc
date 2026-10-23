@@ -44,6 +44,7 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "document kept-edits": [],
   "document save-recovery-copy": ["Notes/a.md"],
   "document retry-kept-edits": ["Notes/a.md", "outbox:delivery:0"],
+  "document stop-again": ["Notes/a.md", "release:a:0"],
   "chat file-mentions": [],
   "chat links": ["general"],
   "chat groups": [], "chat threads": ["group"], "chat inbox": [], "chat show": ["thread"],

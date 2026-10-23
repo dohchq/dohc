@@ -59,18 +59,22 @@ it("tells a waiting Stop from a finished one, and ignores a Stop for another ver
   ]);
 });
 
-it("keeps a release that could not write the file only while its queue is gone, with Try again only while it offers one", async () => {
-  head("q", "invalid-update");
+it("keeps a release that could not write the file only while the queue it came from is gone, with Try again only while it offers one", async () => {
+  head("q", "invalid-update"); head("rebuilt", "invalid-update");
   const client = {sendRequest: vi.fn(), ownerYDocStopList: vi.fn(async () => []),
-    ownerYDocListDrafts: vi.fn(async () => ({drafts: [draft("q", "quarantined")], next: null}))} as unknown as EngineClient;
-  const unwritten = [{workspaceId: "workspace", objectId: "q", path: "q.md", reason: "invalid-update", binding: binding("q"), retry: true},
-    {workspaceId: "workspace", objectId: "gone", path: "gone.md", reason: "capacity-refused", binding: binding("gone"), retry: true},
-    {workspaceId: "workspace", objectId: "ended", path: "ended.md", reason: "capacity-refused", binding: binding("ended"), retry: false},
-    {workspaceId: "workspace", objectId: "damaged", path: "damaged.md", reason: "unreadable-record", binding: null, retry: false}];
+    ownerYDocListDrafts: vi.fn(async () => ({drafts: [draft("q", "quarantined"), draft("rebuilt", "quarantined")], next: null}))} as unknown as EngineClient;
+  const unwritten = [{workspaceId: "workspace", objectId: "q", path: "q.md", reason: "invalid-update", binding: binding("q"), headDeliveryId: "delivery-q", retry: true},
+    // An engine store reset rebuilt this document's queue under the identical binding.
+    {workspaceId: "workspace", objectId: "rebuilt", path: "rebuilt.md", reason: "invalid-update", binding: binding("rebuilt"), headDeliveryId: "delivery-before-reset", retry: true},
+    {workspaceId: "workspace", objectId: "gone", path: "gone.md", reason: "capacity-refused", binding: binding("gone"), headDeliveryId: "delivery-gone", retry: true},
+    {workspaceId: "workspace", objectId: "ended", path: "ended.md", reason: "capacity-refused", binding: binding("ended"), headDeliveryId: "delivery-ended", retry: false},
+    {workspaceId: "workspace", objectId: "damaged", path: "damaged.md", reason: "unreadable-record", binding: null, headDeliveryId: null, retry: false}];
   expect(await readOwnerLiveQuarantines(client, "handle", {unwritten})).toEqual([
     record("q", "paused"),
-    {objectId: "gone", path: "gone.md", reason: "capacity-refused", outboxId: null, binding: binding("gone"), headDeliveryId: null, recovery: "not-written"},
-    {objectId: "ended", path: "ended.md", reason: "capacity-refused", outboxId: null, binding: binding("ended"), headDeliveryId: null, recovery: "cannot-write"},
+    record("rebuilt", "paused"),
+    {objectId: "rebuilt", path: "rebuilt.md", reason: "invalid-update", outboxId: null, binding: binding("rebuilt"), headDeliveryId: "delivery-before-reset", recovery: "not-written"},
+    {objectId: "gone", path: "gone.md", reason: "capacity-refused", outboxId: null, binding: binding("gone"), headDeliveryId: "delivery-gone", recovery: "not-written"},
+    {objectId: "ended", path: "ended.md", reason: "capacity-refused", outboxId: null, binding: binding("ended"), headDeliveryId: "delivery-ended", recovery: "cannot-write"},
     {objectId: "damaged", path: "damaged.md", reason: "unreadable-record", outboxId: null, binding: null, headDeliveryId: null, recovery: "cannot-write"},
   ]);
 });

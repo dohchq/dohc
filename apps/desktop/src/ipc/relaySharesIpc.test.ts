@@ -89,7 +89,7 @@ function harness() {
   const localStops = vi.fn<Dependencies["listOwnerLiveStops"]>(async () => []);
   const ownerLiveQuarantines = vi.fn<Dependencies["ownerLiveQuarantines"]>(() => []);
   const retryOwnerLiveQuarantine = vi.fn<Dependencies["retryOwnerLiveQuarantine"]>(async () => undefined);
-  const saveOwnerLiveRecoveryCopy = vi.fn<Dependencies["saveOwnerLiveRecoveryCopy"]>(async () => ({copyPath: "notes/a (recovered).md", packagePath: "notes/a (recovered).dohc-recovery.json", storedOn: "this-computer"}));
+  const saveOwnerLiveRecoveryCopy = vi.fn<Dependencies["saveOwnerLiveRecoveryCopy"]>(async () => ({copyPath: "notes/a (recovered).md", packagePath: "notes/a (recovered).dohc-recovery.json", storedOn: "this-computer", keptEdits: "kept"}));
   const retryOwnerLiveRelease = vi.fn<Dependencies["retryOwnerLiveRelease"]>(async () => undefined);
   const ownerLiveStop=vi.fn<Dependencies["ownerLiveStop"]>(async (_workspace,action,path) => action==="clear" || action==="retired" ? undefined : ({state:action==="release" || !enrolled ? "released" : "requested",relayDatabaseNamespace:enrolled ? "relay" : "",retirementOwed:action!=="release",document:{mainVersionId:"main",objectId:"object",currentPath:path},binding:enrolled ? {workspaceId,mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),currentPath:path,selectorPaths:[path],restoreFenceGeneration:0} : null,
     ...(action==="release" ? {materialized:true} : {})}));
@@ -399,10 +399,20 @@ describe("owner live document enrollment", () => {
       expect(h.request.mock.calls.map(call => call[2]?.method)).toEqual(["DELETE"]);
     });
 
+    // Main lists the server's row beside a record that can only be saved, and this Stop does not claim the server's edits.
+    it("keeps the edits the server keeps beside a record that can only be saved", async () => {
+      const h = harness(); h.request.mockResolvedValue(retired);
+      h.ownerLiveQuarantines.mockReturnValue([{...quarantine, incident: "release:a:0", recovery: "cannot-write"},
+        {...quarantine, storedOn: "server", incident: "server:outbox:1"}]);
+      h.ownerLiveStop.mockImplementation(released());
+      await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "kept"});
+      expect(h.request.mock.calls.map(call => call[2]?.method)).toEqual(["DELETE"]);
+    });
+
     it("saves a recovery copy for the workspace's own path, and only there", async () => {
       const h = harness();
       await expect(h.invoke(relayShareOperations.saveOwnerLiveRecoveryCopy.channel, {workspaceId, path: "notes/a.md"}))
-        .resolves.toEqual({copyPath: "notes/a (recovered).md", packagePath: "notes/a (recovered).dohc-recovery.json", storedOn: "this-computer"});
+        .resolves.toEqual({copyPath: "notes/a (recovered).md", packagePath: "notes/a (recovered).dohc-recovery.json", storedOn: "this-computer", keptEdits: "kept"});
       expect(h.saveOwnerLiveRecoveryCopy).toHaveBeenCalledExactlyOnceWith(h.workspace, "notes/a.md");
       await expect(h.invoke(relayShareOperations.saveOwnerLiveRecoveryCopy.channel, {workspaceId: "other", path: "notes/a.md"})).rejects.toThrow();
       await expect(h.invoke(relayShareOperations.saveOwnerLiveRecoveryCopy.channel, {workspaceId, path: "../outside.md"})).rejects.toThrow();

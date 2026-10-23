@@ -3376,11 +3376,14 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     // The delivery a quarantined outbox's owner asked to try once more.
     // Acceptance or another refusal clears it. Every refusal recorded for the
     // pending head keeps its key, so writing any of them again changes nothing.
+    // A queue still waiting when a later restore generation replaces its
+    // accepted checkpoint keeps that checkpoint, which its edits may build on.
     Migration {
         ordinal: 68,
         id: "v2-owner-outbox-retry",
         sql: "ALTER TABLE owner_ydoc_outboxes ADD COLUMN retry_delivery_id TEXT \
               CHECK (retry_delivery_id IS NULL OR (state = 'quarantined' AND length(retry_delivery_id) > 0)); \
+              ALTER TABLE owner_ydoc_outboxes ADD COLUMN kept_checkpoint_digest TEXT REFERENCES binary_blobs(sha256); \
               CREATE TABLE owner_ydoc_outbox_refusals ( \
               outbox_id TEXT NOT NULL REFERENCES owner_ydoc_outboxes(outbox_id) ON DELETE CASCADE, \
               delivery_id TEXT NOT NULL CHECK (length(delivery_id) > 0), \
@@ -4465,7 +4468,7 @@ mod tests {
             ),
             (
                 "v2-owner-outbox-retry",
-                "57ea5685a38a07ff6ddf30bcf22fe8a867166d1687c8475a6c43f408052de363",
+                "7ca6be040d2d8ded7b40fe1b622d30b1638f2bb1c2b9bf59081ce13a53f946bc",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

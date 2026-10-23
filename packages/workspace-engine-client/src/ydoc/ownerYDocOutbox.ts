@@ -400,8 +400,9 @@ export class OwnerYDocOutbox {
         total ??= pageTotal;
         digest ??= pageDigest;
         if (pageTotal !== total || pageDigest !== digest) {
-          // The checkpoint sits outside the snapshot: an acceptance may advance it between pages.
-          if (part === "checkpoint") throw new OwnerYDocOutboxReadChangedError();
+          // The checkpoint sits outside the snapshot: an acceptance may advance
+          // it, and the header that names its digest, between pages.
+          if (part === "checkpoint" || part === "header") throw new OwnerYDocOutboxReadChangedError();
           throw new TypeError("Owner outbox part length or digest changed.");
         }
         const bytes = base64ToBytes(page.bytesBase64, "bytesBase64");
