@@ -21,8 +21,10 @@ export function isCodeMark(mark: { type: { name: string; spec?: { code?: boolean
  *  nodes, so its own mapping would move nothing. Unchanged blocks keep their
  *  node identity, so the comparison is a walk over blocks to the change, not
  *  a read of the note's text. `textblocks` are the blocks of `doc` the change
- *  touched, with their positions; `mapping` moves every position outside it.
- *  A plugin that decorates text rescans those blocks and maps the rest. */
+ *  touched, in document order with their positions, and every textblock
+ *  between the first and the last is among them. `mapping` moves every
+ *  position outside them. A plugin that decorates text rescans those blocks
+ *  and maps the rest. */
 export function documentChange(
   before: ProseMirrorNode,
   doc: ProseMirrorNode,

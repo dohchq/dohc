@@ -75,16 +75,14 @@ export function makeInlineAtomPlugin() {
       // rest of the note's atoms move with the edit.
       apply(tr, old) {
         if (!tr.docChanged) return old
-        const change = documentChange(tr.before, tr.doc)
-        let decorations = old.map(change.mapping, tr.doc)
-        for (const { node, pos } of change.textblocks) {
-          const from = pos + 1
-          const to = pos + node.nodeSize - 1
-          decorations = decorations
-            .remove(decorations.find(from, to))
-            .add(tr.doc, atomDecorations(textblockAtomRanges(node, from)))
-        }
+        const { textblocks, mapping } = documentChange(tr.before, tr.doc)
+        const decorations = old.map(mapping, tr.doc)
+        const first = textblocks[0]
+        const last = textblocks.at(-1)
+        if (!first || !last) return decorations
         return decorations
+          .remove(decorations.find(first.pos + 1, last.pos + last.node.nodeSize - 1))
+          .add(tr.doc, atomDecorations(textblocks.flatMap(({ node, pos }) => textblockAtomRanges(node, pos + 1))))
       },
     },
     props: {

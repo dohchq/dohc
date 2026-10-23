@@ -39,6 +39,17 @@ describe("documentChange", () => {
     ]);
   });
 
+  it("names every block of a paste", () => {
+    const state = longState();
+    const pos = positionOfChild(state, 10);
+    const pasted = ["a", "b", "c"].map((text) => paragraph(text));
+    const tr = state.tr.replaceWith(pos, positionOfChild(state, 12), pasted);
+
+    const change = documentChange(tr.before, tr.doc);
+    expect(change.textblocks.map(({ node }) => node.textContent)).toEqual(["a", "b", "c"]);
+    expect(change.textblocks[0]!.pos).toBe(pos);
+  });
+
   it("names a block whose marks changed and nothing else", () => {
     const state = longState();
     const pos = positionOfChild(state, 3);

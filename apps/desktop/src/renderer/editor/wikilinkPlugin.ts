@@ -129,8 +129,10 @@ export function mapWikilinkRanges(
   tr: Transaction,
 ): WikilinkRange[] {
   const { textblocks, mapping } = documentChange(tr.before, tr.doc)
-  const rescanned = (pos: number) =>
-    textblocks.some((block) => pos > block.pos && pos < block.pos + block.node.nodeSize)
+  const first = textblocks[0]?.pos ?? 0
+  const last = textblocks.at(-1)
+  const end = last ? last.pos + last.node.nodeSize : 0
+  const rescanned = (pos: number) => pos > first && pos < end
   const moved = ranges.flatMap((range) => {
     const from = mapping.map(range.from, 1)
     const to = mapping.map(range.to, -1)
