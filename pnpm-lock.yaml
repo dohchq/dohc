@@ -55,6 +55,7 @@ overrides:
 
 patchedDependencies:
   '@legendapp/list@3.3.11': 56c507d27b1a74272bcf6c9f183befb96d9f9a39d2f5d42018bb34db0f52e52b
+  '@tiptap/markdown@3.30.5': 7e6b8b0612136889d4cbdf43b6ea6dce4862a11b4d882e41b67774775dfe3b67
   app-builder-lib@26.15.3: 43a9677d5c0d33b767329d8638103ec8ed4bdc14cfe2a4dfc930b673f3081946
   electron-updater@6.8.9: 2ffc3c459ff957eceaa2fab7cd2d965a5841c6725f003550e9a7a35c639d201b
   prosemirror-view@1.42.2: ff50e393ba12e965d83fe14200353a218c5530b5741560ce8340528f678cdcb9
@@ -258,7 +259,7 @@ importers:
         version: 3.30.5(@tiptap/core@3.30.5(@tiptap/pm@3.30.5))(@tiptap/pm@3.30.5)
       '@tiptap/markdown':
         specifier: 3.30.5
-        version: 3.30.5(@tiptap/core@3.30.5(@tiptap/pm@3.30.5))(@tiptap/pm@3.30.5)
+        version: 3.30.5(patch_hash=7e6b8b0612136889d4cbdf43b6ea6dce4862a11b4d882e41b67774775dfe3b67)(@tiptap/core@3.30.5(@tiptap/pm@3.30.5))(@tiptap/pm@3.30.5)
       '@tiptap/react':
         specifier: 3.30.5
         version: 3.30.5(@floating-ui/dom@1.8.0)(@tiptap/core@3.30.5(@tiptap/pm@3.30.5))(@tiptap/pm@3.30.5)(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -885,7 +886,7 @@ importers:
         version: 3.30.5(@tiptap/core@3.30.5(@tiptap/pm@3.30.5))(@tiptap/pm@3.30.5)
       '@tiptap/markdown':
         specifier: 3.30.5
-        version: 3.30.5(@tiptap/core@3.30.5(@tiptap/pm@3.30.5))(@tiptap/pm@3.30.5)
+        version: 3.30.5(patch_hash=7e6b8b0612136889d4cbdf43b6ea6dce4862a11b4d882e41b67774775dfe3b67)(@tiptap/core@3.30.5(@tiptap/pm@3.30.5))(@tiptap/pm@3.30.5)
       '@tiptap/pm':
         specifier: 3.30.5
         version: 3.30.5
@@ -9280,7 +9281,7 @@ snapshots:
       '@tiptap/core': 3.30.5(@tiptap/pm@3.30.5)
       '@tiptap/pm': 3.30.5
 
-  '@tiptap/markdown@3.30.5(@tiptap/core@3.30.5(@tiptap/pm@3.30.5))(@tiptap/pm@3.30.5)':
+  '@tiptap/markdown@3.30.5(patch_hash=7e6b8b0612136889d4cbdf43b6ea6dce4862a11b4d882e41b67774775dfe3b67)(@tiptap/core@3.30.5(@tiptap/pm@3.30.5))(@tiptap/pm@3.30.5)':
     dependencies:
       '@tiptap/core': 3.30.5(@tiptap/pm@3.30.5)
       '@tiptap/pm': 3.30.5

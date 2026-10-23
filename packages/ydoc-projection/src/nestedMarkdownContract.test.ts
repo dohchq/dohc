@@ -1,15 +1,15 @@
 import { readFileSync } from 'node:fs'
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
 import { yXmlFragmentToProseMirrorRootNode } from 'y-prosemirror'
-import { marked } from 'marked'
+import { Lexer, marked } from 'marked'
 import { createHash } from 'node:crypto'
 import { MarkdownManager } from '@tiptap/markdown'
 import { StarterKit } from '@tiptap/starter-kit'
 import type { JSONContent } from '@tiptap/core'
 import { DohcTaskItem, dohcMarkdownExtensions, MarkdownListItem, MarkdownOrderedList, MarkdownTaskList } from './dohc-markdown-extensions.js'
 import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator } from './liveDocumentValidation.js'
-import { markdownToYDoc, yDocToMarkdown, serializeRichdocBody, parseRichdocMarkdown, getDohcProseMirrorSchema } from './import-export.js'
+import { markdownToYDoc, MarkdownNestingRefusal, yDocToMarkdown, serializeRichdocBody, parseRichdocMarkdown, getDohcProseMirrorSchema } from './import-export.js'
 
 const corpus = JSON.parse(readFileSync(new URL('../../../tools/rust-engine-program/nested-markdown-contract.json', import.meta.url), 'utf8')) as {
   cases: Array<{ name: string; source: string; canonical?: string; rereadCanonical?: string; sourceCanonical?: string; witnessSeed?: boolean; foldRefuse?: boolean; refuse?: boolean; projected?: boolean; rustBase64?: string; stableTree?: boolean; itemSpaces?: number; later?: boolean; interrupts?: boolean; inItem?: boolean; markedStart?: { type: string; attrs?: Record<string, string | null> }; markedText?: string }>
@@ -217,6 +217,96 @@ it.each(corpus.cases.filter(item => item.rereadCanonical))('pins the one-time ca
     expect(serializeRichdocBody(parseRichdocMarkdown(second, reading))).toBe(second)
   }
 })
+
+// The refusal a note gets, and whether marked lexed any of it first.
+function nestingRefusal(source: string, reading: 'source' | 'projection' = 'source'): { limit?: string; lexed: boolean } {
+  const lexed = vi.spyOn(Lexer.prototype, 'blockTokens')
+  try {
+    parseRichdocMarkdown(source, reading)
+    return { lexed: lexed.mock.calls.length > 0 }
+  } catch (error) {
+    if (!(error instanceof MarkdownNestingRefusal)) throw error
+    return { limit: error.limit, lexed: lexed.mock.calls.length > 0 }
+  } finally {
+    lexed.mockRestore()
+  }
+}
+const quoteDepth = (node: JSONContent): number =>
+  (node.type === 'blockquote' ? 1 : 0) + Math.max(0, ...(node.content ?? []).map(quoteDepth))
+
+// Each way a line can spell a quote, from its marker on.
+const QUOTES = ['> ', '>', '>\t', '   >', ' > ']
+it.each(QUOTES)('reads 120 quotes spelled %j and refuses 121 before marked lexes them', quote => {
+  expect(quoteDepth(parseRichdocMarkdown(`${quote.repeat(120)}a`))).toBe(120)
+  for (const source of [`${quote.repeat(121)}a`, `${quote.repeat(121)}`, `x\n\n${quote.repeat(121)}a\n\ny`]) {
+    expect(nestingRefusal(source)).toEqual({ limit: 'depth', lexed: false })
+  }
+})
+
+// Each container adds a quote or a list's two nodes, so 128 nested nodes is
+// the most a line's containers can open; the deepest node may sit at 128.
+const CONTAINERS: Array<[string, string, number]> = [
+  ['bullets', '- ', 2], ['bullets after tabs', '-\t', 2], ['ordered items', '1. ', 2], ['ordered items with `)`', '2) ', 2],
+  ['task items', '- [ ] ', 2], ['quoted items', '> - ', 3], ['bare quoted items', '>- ', 3], ['quoted tasks', '>\t- [x] ', 3],
+  ['items spaced to their text', '-    ', 2],
+]
+it.each(CONTAINERS)('lets marked read 128 nodes of %s and refuses 129 before it does', (_name, unit, nodes) => {
+  const at = (depth: number) => unit.repeat(Math.floor(depth / nodes)) + '> '.repeat(depth % nodes) + 'a'
+  expect(nestingRefusal(at(126))).toEqual({ lexed: true })
+  expect(nestingRefusal(at(128))).toEqual({ limit: 'depth', lexed: true })
+  expect(nestingRefusal(at(129))).toEqual({ limit: 'depth', lexed: false })
+})
+
+it('reads a node at depth 128 and refuses one at 129', () => {
+  expect(nestingRefusal(`${'- '.repeat(63)}> a`)).toEqual({ lexed: true })
+  expect(nestingRefusal(`${'- '.repeat(63)}> > a`)).toEqual({ limit: 'depth', lexed: true })
+})
+
+it.each([
+  ['quotes', '>'.repeat(200_000)],
+  ['spaced quotes', '> '.repeat(100_000)],
+  ['bullets', '- '.repeat(100_000)],
+  ['tasks', '- [ ] '.repeat(50_000)],
+  ['ordered items', '1. '.repeat(50_000)],
+  ['quotes and bullets', '> - '.repeat(50_000)],
+  ['bullets after quotes', `${'>'.repeat(60)}${'- '.repeat(40)}`],
+])('refuses %s nested past any depth before marked lexes them', (_name, prefix) => {
+  expect(nestingRefusal(`${prefix}a\n`)).toEqual({ limit: 'depth', lexed: false })
+})
+
+// Text marked reads literally, however many `>` or markers it holds.
+const DEEP = '>'.repeat(200)
+it.each([
+  ['a backtick fence', `\`\`\`\n${DEEP}\n\`\`\``],
+  ['a tilde fence', `~~~~\n${DEEP}\n~~~\n${DEEP}\n~~~~`],
+  ['a fence in a quote', `> \`\`\`\n> ${DEEP}\n> \`\`\``],
+  ['a fence behind bare quotes', `>>\`\`\`\n>>${DEEP}\n>>\`\`\``],
+  ['a fence in an item', `- \`\`\`\n  ${DEEP}\n  \`\`\``],
+  ['indented code', `    ${DEEP}\n    ${DEEP}`],
+  ['code inside an item', `-      ${DEEP}`],
+  ['a paragraph line', `a\n    ${DEEP}`],
+  ['an HTML comment', `<!--\n\n${DEEP}\n-->`],
+  ['an HTML block', `<div>\n${DEEP}\n</div>`],
+  ['display math', `$$\n${DEEP}\n$$`],
+  ['a definition title', `[x]: /u "\n${DEEP}\n"`],
+  ['a definition destination', `[x]:\n${DEEP}`],
+])('keeps the `>` in %s as text', (_name, source) => {
+  expect(nestingRefusal(source)).toEqual({ lexed: true })
+  expect(JSON.stringify(parseRichdocMarkdown(source))).toContain(DEEP)
+})
+
+// Depth 120 before a setext underline relexes each level's text for each
+// level, about 2,400 times the note's length.
+const RELEXED = `${'>'.repeat(120)} a\n===\n\n`.repeat(16)
+it('refuses a note whose lexing passes the budget in the source reading', () => {
+  expect(nestingRefusal(RELEXED)).toEqual({ limit: 'lexing', lexed: true })
+  expect(() => markdownToYDoc(RELEXED)).toThrow(/not representable/)
+})
+
+it('settles a live note past the lexing budget in the projection reading', () => {
+  expect(nestingRefusal(RELEXED, 'projection')).toEqual({ lexed: true })
+  expect(quoteDepth(parseRichdocMarkdown(RELEXED, 'projection'))).toBe(120)
+}, 60_000)
 
 it.each(corpus.cases.filter(item => item.name.startsWith('r26-')))('keeps round 26 boundaries for $name in projected reading', item => {
   const doc = markdownToYDoc(item.source, { reading: 'projection' })

@@ -1,0 +1,139 @@
+diff --git a/dist/index.cjs b/dist/index.cjs
+index a0a309ad97923b89310e2d898653f61789d4ce00..63499b9b66ddf6fe387bdca6ac2f332d144c666b 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -3,14 +3,18 @@ let _tiptap_core = require("@tiptap/core");
+ let marked = require("marked");
+ //#region src/utils.ts
+ /**
+-* Matches a run of two or more consecutive line breaks (a blank line) at the
+-* end of a string, allowing horizontal whitespace between the breaks.
++* Returns the trailing whitespace from its first line break when it holds two
++* or more line breaks (a blank line), or null. Equals matching
++* `/\n[^\S\n]*(?:\n[^\S\n]*)+$/`, which backtracks quadratically, in one pass.
+ *
+ * @example
+-* TRAILING_BLANK_LINES.test('paragraph\n  \n')
+-* // => true
++* findTrailingBlankLines('paragraph\n  \n')
++* // => '\n  \n'
+ */
+-const TRAILING_BLANK_LINES = /\n[^\S\n]*(?:\n[^\S\n]*)+$/;
++function findTrailingBlankLines(raw) {
++	const start = raw.indexOf("\n", raw.trimEnd().length);
++	return start >= 0 && raw.indexOf("\n", start + 1) >= 0 ? raw.slice(start) : null;
++}
+ /**
+ * Extracts blank lines absorbed into marked token `raw` back into explicit
+ * `space` tokens so they're handled uniformly by the reconstruction path.
+@@ -21,14 +25,14 @@ function extractAbsorbedBlankLines(tokens) {
+ 	return tokens.flatMap((token, index) => {
+ 		var _tokens;
+ 		if (token.type === "space" || ((_tokens = tokens[index + 1]) === null || _tokens === void 0 ? void 0 : _tokens.type) === "space") return [token];
+-		const trailingBlankLines = (token.raw || "").match(TRAILING_BLANK_LINES);
++		const trailingBlankLines = findTrailingBlankLines(token.raw || "");
+ 		if (!trailingBlankLines) return [token];
+ 		return [{
+ 			...token,
+-			raw: (token.raw || "").slice(0, -trailingBlankLines[0].length)
++			raw: (token.raw || "").slice(0, -trailingBlankLines.length)
+ 		}, {
+ 			type: "space",
+-			raw: trailingBlankLines[0]
++			raw: trailingBlankLines
+ 		}];
+ 	});
+ }
+diff --git a/dist/index.js b/dist/index.js
+index 63cde7682c0e24f01f6405606707322526d60448..f71c42f446cbc48d17a14a67de4e09404b22d44e 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -2,14 +2,18 @@ import { Extension, attrsEqual, callOrReturn, commands, decodeHtmlEntities, enco
+ import { marked } from "marked";
+ //#region src/utils.ts
+ /**
+-* Matches a run of two or more consecutive line breaks (a blank line) at the
+-* end of a string, allowing horizontal whitespace between the breaks.
++* Returns the trailing whitespace from its first line break when it holds two
++* or more line breaks (a blank line), or null. Equals matching
++* `/\n[^\S\n]*(?:\n[^\S\n]*)+$/`, which backtracks quadratically, in one pass.
+ *
+ * @example
+-* TRAILING_BLANK_LINES.test('paragraph\n  \n')
+-* // => true
++* findTrailingBlankLines('paragraph\n  \n')
++* // => '\n  \n'
+ */
+-const TRAILING_BLANK_LINES = /\n[^\S\n]*(?:\n[^\S\n]*)+$/;
++function findTrailingBlankLines(raw) {
++	const start = raw.indexOf("\n", raw.trimEnd().length);
++	return start >= 0 && raw.indexOf("\n", start + 1) >= 0 ? raw.slice(start) : null;
++}
+ /**
+ * Extracts blank lines absorbed into marked token `raw` back into explicit
+ * `space` tokens so they're handled uniformly by the reconstruction path.
+@@ -20,14 +24,14 @@ function extractAbsorbedBlankLines(tokens) {
+ 	return tokens.flatMap((token, index) => {
+ 		var _tokens;
+ 		if (token.type === "space" || ((_tokens = tokens[index + 1]) === null || _tokens === void 0 ? void 0 : _tokens.type) === "space") return [token];
+-		const trailingBlankLines = (token.raw || "").match(TRAILING_BLANK_LINES);
++		const trailingBlankLines = findTrailingBlankLines(token.raw || "");
+ 		if (!trailingBlankLines) return [token];
+ 		return [{
+ 			...token,
+-			raw: (token.raw || "").slice(0, -trailingBlankLines[0].length)
++			raw: (token.raw || "").slice(0, -trailingBlankLines.length)
+ 		}, {
+ 			type: "space",
+-			raw: trailingBlankLines[0]
++			raw: trailingBlankLines
+ 		}];
+ 	});
+ }
+diff --git a/src/utils.ts b/src/utils.ts
+index 7660780fb9d99cb6e3e7fd791df4b12e536382a6..844a312c4fb812ad8a2a7e343ae35885a0268244 100644
+--- a/src/utils.ts
++++ b/src/utils.ts
+@@ -5,14 +5,18 @@ import type { Fragment, Node } from '@tiptap/pm/model'
+ import type { ContentType } from './types.js'
+ 
+ /**
+- * Matches a run of two or more consecutive line breaks (a blank line) at the
+- * end of a string, allowing horizontal whitespace between the breaks.
++ * Returns the trailing whitespace from its first line break when it holds two
++ * or more line breaks (a blank line), or null. Equals matching
++ * `/\n[^\S\n]*(?:\n[^\S\n]*)+$/`, which backtracks quadratically, in one pass.
+  *
+  * @example
+- * TRAILING_BLANK_LINES.test('paragraph\n  \n')
+- * // => true
++ * findTrailingBlankLines('paragraph\n  \n')
++ * // => '\n  \n'
+  */
+-const TRAILING_BLANK_LINES = /\n[^\S\n]*(?:\n[^\S\n]*)+$/
++function findTrailingBlankLines(raw: string): string | null {
++  const start = raw.indexOf('\n', raw.trimEnd().length)
++  return start >= 0 && raw.indexOf('\n', start + 1) >= 0 ? raw.slice(start) : null
++}
+ 
+ /**
+  * Extracts blank lines absorbed into marked token `raw` back into explicit
+@@ -27,15 +31,15 @@ export function extractAbsorbedBlankLines(tokens: MarkdownToken[]): MarkdownToke
+       return [token]
+     }
+ 
+-    const trailingBlankLines = (token.raw || '').match(TRAILING_BLANK_LINES)
++    const trailingBlankLines = findTrailingBlankLines(token.raw || '')
+ 
+     if (!trailingBlankLines) {
+       return [token]
+     }
+ 
+     return [
+-      { ...token, raw: (token.raw || '').slice(0, -trailingBlankLines[0].length) },
+-      { type: 'space', raw: trailingBlankLines[0] } as MarkdownToken,
++      { ...token, raw: (token.raw || '').slice(0, -trailingBlankLines.length) },
++      { type: 'space', raw: trailingBlankLines } as MarkdownToken,
+     ]
+   })
+ }

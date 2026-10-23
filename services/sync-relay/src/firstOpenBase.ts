@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { FirstOpenBaseBound } from "@dohc/workspace-contracts/first-open";
+import { MarkdownNestingRefusal } from "@dohc/ydoc-projection";
 import {
   createLiveMarkdownRegistrationValidator,
   type OrderedLiveUpdateCutPolicy,
@@ -43,7 +44,8 @@ export type FirstOpenBaseResult =
       kind: "refused";
       /**
        * `source-mismatch`: the input is not the verified head. `unsupported-source`:
-       * the head is current, but the validator does not read its base back as it.
+       * the head is current, but its containers nest past the live document
+       * contract, or the validator does not read its base back as it.
        * `seed-worker-capacity`: building it ran the first-open worker out of
        * memory; the worker pool answers this, never the build itself.
        */
@@ -120,8 +122,9 @@ export function buildFirstOpenBase(
   let base: Uint8Array;
   try {
     base = encodeRichdocSeed(markdown, clientID);
-  } catch {
-    return invalid("seed-encoder");
+  } catch (error) {
+    // The file's own nesting, not the relay's seed.
+    return error instanceof MarkdownNestingRefusal ? refused("unsupported-source") : invalid("seed-encoder");
   }
   // Refused before anything decodes it, as is a base that leaves native no room.
   const room = firstOpenEncodingCap(base.byteLength, bounds);

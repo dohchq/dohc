@@ -5,9 +5,10 @@ import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
 import { dismissOrphanedDraft, isOrphanedDraftStored, useOrphanedDrafts } from "./orphanedDrafts";
 import { DismissDraftControls } from "./RecoveryList";
 import { Play, Share2 } from "lucide-react";
-import type { ComponentProps, ReactNode } from "react";
+import { useEffect, type ComponentProps, type ReactNode } from "react";
 import { bridge } from "./bridge";
 import type { EngineRemovalInProgress } from "./collab/useEngineDoc";
+import type { ReportButtonError } from "./collections/useAutomationButtons";
 import { DocumentMenu } from "./DocumentMenu";
 import { IconButton, SecondaryButton } from "./ui/controls";
 import { useTabRowActionsSlot } from "./workbench/tabRowActions";
@@ -231,6 +232,40 @@ export function OpenExternallyButton(props: { workspaceId: string; path: string 
     >
       Open externally
     </SecondaryButton>
+  );
+}
+
+// Why the rich-text editor does not open a note, as its toast and Notices row
+// read: its containers nest past the live document contract's limits, or
+// lexing them passes its budget.
+export const RICH_TEXT_REFUSED = {
+  depth: "This file is nested too deeply for rich-text editing. Open the source to reduce nesting.",
+  lexing: "This file has too much nested content for rich-text editing. Open the source to reduce nesting.",
+} as const;
+
+// In place of the editor, for a note it does not read as rich text: the
+// source, or the system's app for it. The file stays as it is.
+export function RichTextRefused(props: {
+  workspaceId: string;
+  path: string;
+  limit: keyof typeof RICH_TEXT_REFUSED;
+  onSource: () => void;
+  onReport?: ReportButtonError;
+}) {
+  const { workspaceId, path, limit, onReport } = props;
+  useEffect(() => {
+    onReport?.(RICH_TEXT_REFUSED[limit], null, null, `rich-text-refused:${workspaceId}:${path}`);
+  }, [workspaceId, path, limit, onReport]);
+  return (
+    <div
+      role="group"
+      aria-label={RICH_TEXT_REFUSED[limit]}
+      data-testid="rich-text-refused"
+      className="flex min-h-48 flex-1 items-center justify-center gap-2 px-6"
+    >
+      <SecondaryButton onClick={props.onSource}>Edit source</SecondaryButton>
+      <OpenExternallyButton workspaceId={workspaceId} path={path} />
+    </div>
   );
 }
 

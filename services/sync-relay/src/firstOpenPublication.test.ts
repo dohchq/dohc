@@ -665,6 +665,23 @@ it("refuses a valid base the validation policy cannot afford as too large, a fil
   }
 });
 
+// The note's own nesting decides the refusal, so it is no fault of the relay's
+// and sets no wait: the same bytes answer the same way at once.
+it.each([
+  ["nested past the contract", `${">".repeat(121)} a\n`],
+  ["past the lexing budget", `${">".repeat(120)} a\n===\n\n`.repeat(16)],
+])("refuses a note %s as unsupported, publishing nothing and setting no wait", async (_name, markdown) => {
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+  const f = await fixture({markdown});
+  for (const attempt of [1, 2]) {
+    expect(await f.open()).toMatchObject({kind: "refused", reason: "unsupported-source", cause: "relay-projection", recovery: "none"});
+    expect(f.builds).toHaveBeenCalledTimes(attempt);
+  }
+  expect(logged).toHaveBeenLastCalledWith("[sync-relay] first-open candidate invalid", "unsupported-source", f.source.sourceDigest);
+  expect(f.checks).not.toHaveBeenCalled();
+  nothingAppended(f);
+});
+
 // Yjs spreads a new element's children as call arguments, which overflowed a
 // main thread's stack past about 124,000 of them (a worker's, past 498,000).
 it("builds a seed for a paragraph with more hard breaks than Yjs can spread, and refuses it only by size", async () => {
@@ -800,6 +817,21 @@ it("answers what is left of a wait once its history read returns", async () => {
   expect(await f.open()).toMatchObject({kind: "unavailable", reason: "build-deadline", retryAfterMs: FIRST_OPEN_DEADLINE_WAIT_MS});
   f.afterRead(() => f.advance(FIRST_OPEN_DEADLINE_WAIT_MS / 4));
   expect(await f.open()).toMatchObject({kind: "unavailable", reason: "build-deadline", retryAfterMs: FIRST_OPEN_DEADLINE_WAIT_MS * 3 / 4});
+  expect(f.builds).toHaveBeenCalledTimes(1);
+});
+
+it("answers a wait in whole milliseconds on a clock that reads fractions", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const f = await fixture();
+  f.buildWith(async () => ({kind: "deadline"}));
+  f.advance(0.4);
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "build-deadline", retryAfterMs: FIRST_OPEN_DEADLINE_WAIT_MS});
+  for (const step of [0.3, FIRST_OPEN_DEADLINE_WAIT_MS - 1.5]) {
+    f.advance(step);
+    const outcome = await f.open();
+    const retryAfterMs = outcome.kind === "unavailable" && outcome.reason === "build-deadline" ? outcome.retryAfterMs : 0;
+    expect(Number.isSafeInteger(retryAfterMs) && retryAfterMs > 0, String(retryAfterMs)).toBe(true);
+  }
   expect(f.builds).toHaveBeenCalledTimes(1);
 });
 

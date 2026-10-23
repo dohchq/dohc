@@ -190,7 +190,6 @@ const MODELS: Array<[ReadModel, Array<RegExp | string>]> = [
   [{ reach: /&#?\d*/y, start: /&/g }, [/&(?:#(\d+)|(amp|lt|gt));/g]],
   [{ reach: /\| */y, start: /\|/g }, [/^\||\| *$/g]],
   [{ reach: /\s*/y, start: /\s/g }, [/\s+/g]],
-  [{ reach: /\s*/y, start: /\n/g }, [/\n[^\S\n]*(?:\n[^\S\n]*)+$/]],
   [{ reach: /\n*/y, start: /\n/g }, [/\n+$/u]],
   [{ reach: /\n[ \t]*\n?[ \t]*/y, start: /\n/g }, [/\n[ \t]*$/, /\n[ \t]*\n$/u, /\n[ \t]*\n[ \t]*$/]],
   [{ reach: /\n {0,3}(?:=*|-*) */y, start: /\n/g }, [/\n {0,3}(?:=+|-+) *(?:\n|$)/g, /\n {0,3}((?:=+|-+) *)(?=\n|$)/g]],

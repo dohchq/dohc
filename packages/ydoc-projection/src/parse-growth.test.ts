@@ -1,6 +1,5 @@
 import { expect, it } from 'vitest'
 import { Lexer } from 'marked'
-import type { JSONContent } from '@tiptap/core'
 import { parseRichdocMarkdown } from './import-export.js'
 import { IMPORTER_RULES, MODELLED, parseWork } from './parse-work.fixture.js'
 
@@ -73,6 +72,13 @@ const FIXED: Shape[] = [
     name: `${JSON.stringify(start)} then as many spaces`,
     text: repetitions => `${start}${' '.repeat(repetitions)}${end}`,
   })),
+  // White space Tiptap's blank-line search read again from each line break:
+  // no-break space lines in a quote and in a paragraph, and blank lines
+  // before an item's continuation.
+  ...[['> ', `${NO_BREAK_SPACE}\n`, '{'], ['a\n', `${NO_BREAK_SPACE}\n`, '{'], ['- a\n', '\n', '  b']].map(([start, unit, end]): Shape => ({
+    name: `${JSON.stringify(start)} then as many ${JSON.stringify(unit)} then ${JSON.stringify(end)}`,
+    text: repetitions => `${start}${unit!.repeat(repetitions)}${end}`,
+  })),
 ]
 const ALONE = UNITS.map(repeated)
 const WITH_LETTER = UNITS.map(unit => repeated(`${unit}a`))
@@ -91,36 +97,23 @@ function sample<T>(items: readonly T[], count: number, seed: number): T[] {
   return picked.slice(0, count)
 }
 
-const depth = (node: JSONContent): number => 1 + Math.max(0, ...(node.content ?? []).map(depth))
-
 // The sampled shapes each repetition of which opens a container inside the
-// last, and whose work grows faster than their length. marked reads a
-// container's text again for each container inside it, and the importer
-// refuses a note past a depth of 128 only once marked has read it all, so
-// their work grows as their depth times their length; inside a paragraph
-// that a setext underline ends, as the square of their depth times their
-// length. A stack overflow ends each before about 1,600 levels. `measured` is
-// the most each grew in one doubling when listed, which shifts slightly with
-// what the importer cached before; each may grow no faster than `bound`, a
-// doubling of each factor.
-const LEVELS = 'Each repetition opens a container in the last, which marked lexes again'
-const SETEXT = `${LEVELS}, and each level's paragraph reads to the underline again`
-const NESTING: ReadonlyArray<{ name: string; unit: string; measured: number; bound: number; reason: string; around?: (text: string) => string }> = [
-  { name: '">"', unit: '>', measured: 3.97, bound: 4, reason: LEVELS },
-  { name: '">\\t"', unit: '>\t', measured: 3.98, bound: 4, reason: LEVELS },
-  { name: '"- [ ] "', unit: '- [ ] ', measured: 3.97, bound: 4, reason: LEVELS },
-  { name: '"- [ ]  "', unit: '- [ ]  ', measured: 3.97, bound: 4, reason: LEVELS },
-  { name: '"- [ ] - [ ] "', unit: '- [ ] - [ ] ', measured: 3.87, bound: 4, reason: LEVELS },
-  { name: '"- [ ] >"', unit: '- [ ] >', measured: 3.92, bound: 4, reason: LEVELS },
-  { name: '"- [ ]  " then ";"', unit: '- [ ]  ', measured: 3.96, bound: 4, reason: LEVELS, around: text => `${text};` },
-  {
-    name: '"- [ ] - [ ] " then "<!-- dohc:table row-heights=1:8 -->\\n"', unit: '- [ ] - [ ] ', measured: 3.87, bound: 4, reason: LEVELS,
-    around: text => `${text}<!-- dohc:table row-heights=1:8 -->\n`,
-  },
-  { name: '"- [ ] \\t" then "&amp;"', unit: '- [ ] \t', measured: 3.96, bound: 4, reason: LEVELS, around: text => `${text}&amp;` },
-  { name: '">>" before a setext underline, then "}"', unit: '>>', measured: 7.89, bound: 8, reason: SETEXT, around: text => `${text}}\n===` },
+// last. marked would read a container's text again for each container inside
+// it, and inside a paragraph that a setext underline ends, again for each
+// level, so the importer refuses each past the contract's depth before marked
+// lexes it.
+const NESTING: ReadonlyArray<{ name: string; unit: string; around?: (text: string) => string }> = [
+  { name: '">"', unit: '>' },
+  { name: '">\\t"', unit: '>\t' },
+  { name: '"- [ ] "', unit: '- [ ] ' },
+  { name: '"- [ ]  "', unit: '- [ ]  ' },
+  { name: '"- [ ] - [ ] "', unit: '- [ ] - [ ] ' },
+  { name: '"- [ ] >"', unit: '- [ ] >' },
+  { name: '"- [ ]  " then ";"', unit: '- [ ]  ', around: text => `${text};` },
+  { name: '"- [ ] - [ ] " then "<!-- dohc:table row-heights=1:8 -->\\n"', unit: '- [ ] - [ ] ', around: text => `${text}<!-- dohc:table row-heights=1:8 -->\n` },
+  { name: '"- [ ] \\t" then "&amp;"', unit: '- [ ] \t', around: text => `${text}&amp;` },
+  { name: '">>" before a setext underline, then "}"', unit: '>>', around: text => `${text}}\n===` },
 ]
-const EXEMPT = new Set(NESTING.map(({ name }) => name))
 
 // The characters each size reads, whether any doubling grew by more than
 // 2.2 times, and the patterns it ran that the counter has no model for.
@@ -137,10 +130,9 @@ function growth(shape: Shape): { work: number[]; ratio: number; unmodelled: stri
   return { work, ratio, unmodelled: [...by.keys()].filter(key => key.startsWith('unmodelled ')) }
 }
 
-// Each shape no nesting exception names that grows faster than linearly or
-// runs an unmodelled pattern.
+// Each shape that grows faster than linearly or runs an unmodelled pattern.
 function grown(shapes: Shape[]): string[] {
-  return shapes.filter(shape => !EXEMPT.has(shape.name)).flatMap(shape => {
+  return shapes.flatMap(shape => {
     const { work, ratio, unmodelled } = growth(shape)
     return ratio > 2.2 || unmodelled.length ? [`${shape.name}: ${work.join(' -> ')} ${unmodelled.join(', ')}`.trimEnd()] : []
   })
@@ -167,7 +159,6 @@ const PLACED = sample(BASES, 400, 5).map((shape): Shape => {
     ? { name: `${JSON.stringify(container)} then ${shape.name} then ${JSON.stringify(closer)}`, text: repetitions => container + shape.text(repetitions) + closer }
     : { name: `${shape.name} ${beside}, then ${JSON.stringify(closer)}`, text: repetitions => neighbour(shape.text(repetitions) + closer) }
 })
-const SCHEDULED = [FIXED, SINGLES, SAMPLED_PAIRS, CLOSED, PLACED]
 
 it('reads each shape it once read quadratically in a linear amount of work', () => {
   expectLinear(FIXED)
@@ -189,23 +180,12 @@ it('reads them inside containers and beside blocks in a linear amount of work', 
   expectLinear(PLACED)
 }, SWEEP_MS)
 
-it('excepts only the listed shapes that nest, each no faster than its bound', () => {
-  const scheduled = new Map(SCHEDULED.flat().map(shape => [shape.name, shape]))
-  for (const { name, bound } of NESTING) {
-    const shape = scheduled.get(name)
-    expect(shape, name).toBeDefined()
-    // An error never makes a shape an exception: both depths parse.
-    expect(depth(parseRichdocMarkdown(shape!.text(16))), name).toBeGreaterThan(depth(parseRichdocMarkdown(shape!.text(8))))
-    expect(growth(shape!).ratio, name).toBeLessThanOrEqual(bound)
-  }
-}, SWEEP_MS)
-
-it('does not except a shape that nests unless the list names it', () => {
-  expect(grown([{ name: 'a shape the list does not name', text: repetitions => '>'.repeat(repetitions) }])).toHaveLength(1)
+it('reports a shape that grows faster than linearly', () => {
+  expect(grown([{ name: 'a quadratic shape', text: repetitions => 'a '.repeat(repetitions * repetitions / 64) }])).toHaveLength(1)
 })
 
-// Each exception's containers at a fixed depth, repeated, read linearly.
-it('reads the listed shapes at a fixed depth in a linear amount of work', () => {
+// Each such shape's containers at a fixed depth, repeated, read linearly.
+it('reads the shapes that nest at a fixed depth in a linear amount of work', () => {
   const fixed = NESTING.map(({ name, unit, around = text => text }): Shape => ({
     name: `${name} at a fixed depth`,
     text: repetitions => around(`${unit.repeat(8)}a\n`.repeat(repetitions)),
@@ -329,7 +309,6 @@ const CHECKS: Check[] = [
   check(/&(?:#(\d+)|(amp|lt|gt));/g, `&#${'1'.repeat(40)}x${END}`, 42, true),
   check(/^\||\| *$/g, `x|${SPACES}y${END}`, 40, true),
   check(/\s+/g, `a${SPACES}${A}${END}`, 41),
-  check(/\n[^\S\n]*(?:\n[^\S\n]*)+$/, `a\n${SPACES}x${END}`, 40, true),
   check(/\n+$/u, `a${'\n'.repeat(40)}x`, 40, true),
   ...[/\n[ \t]*$/, /\n[ \t]*\n$/u, /\n[ \t]*\n[ \t]*$/].map(pattern => check(pattern, `a\n${SPACES}x${END}`, 40, true)),
   ...[/\n {0,3}(?:=+|-+) *(?:\n|$)/g, /\n {0,3}((?:=+|-+) *)(?=\n|$)/g].map(pattern => check(pattern, `a\n${'='.repeat(40)}x`, 40, true)),

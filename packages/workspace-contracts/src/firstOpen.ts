@@ -40,7 +40,7 @@ export type FirstOpenTooLargeCode = (typeof FIRST_OPEN_TOO_LARGE_CODES)[number];
  * refused the candidate. `not-utf8`: the file is not UTF-8 text.
  * `relay-projection`: the relay's validator does not read the candidate back
  * as the file, or the file holds what the live schema cannot, such as a link
- * around inline code.
+ * around inline code or containers nested past the live document contract.
  */
 export const FIRST_OPEN_UNSUPPORTED_CAUSES = [...FIRST_OPEN_CANDIDATE_REFUSALS, "not-utf8", "relay-projection"] as const;
 export type FirstOpenUnsupportedCause = (typeof FIRST_OPEN_UNSUPPORTED_CAUSES)[number];

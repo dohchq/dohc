@@ -203,7 +203,7 @@ let writtenLinks: {
   tokens?: object
   length: number
   sentinels: WeakMap<object, number>
-} = { openers: new Set(), runs: new Map(), length: -1, sentinels: new WeakMap() }
+} = { openers: new Set(), runs: new Map(), tokens: undefined, length: -1, sentinels: new WeakMap() }
 // What the serializer writes as a reference: the ASCII punctuation a tag
 // span writes so, but `&`, `<`, and `>`, which are entities, and `\r` and
 // NBSP.
@@ -482,9 +482,17 @@ const URL_LINK = /^(?:(?:[hH][tT][tT][pP][sS]?|[fF][tT][pP]):\/\/|www\.)[a-zA-Z0
 const NOT_LOCAL_PART = /[^A-Za-z0-9._+-]/g
 const URL_DOMAIN = /[a-zA-Z0-9-_]+(?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+(?![-_])/y
 
+// Whether a tokenizer's rule is the marked rule whose source the importer
+// reads, remembering the last rule that was, since marked asks at each step.
+function markedRule(matches: (source: string) => boolean): (rule: RegExp) => boolean {
+  let known: RegExp | undefined
+  return rule => rule === known || (matches(rule.source) && (known = rule) === rule)
+}
+const isMarkedUrl = markedRule(source => source === MARKED_URL_RULE)
+
 function urlMayStart(tokenizer: Tokenizer, src: string): boolean {
   const read = readingInlineText(tokenizer.lexer)
-  if (tokenizer.rules.inline.url.source !== MARKED_URL_RULE || !read || read.step !== src.length || URL_LINK.test(src)) return true
+  if (!isMarkedUrl(tokenizer.rules.inline.url) || !read || read.step !== src.length || URL_LINK.test(src)) return true
   const from = read.text.length - src.length
   let found = read.localPart
   if (!found || found.from > from || (found.at >= 0 && found.at < from)) {
@@ -502,9 +510,10 @@ function urlMayStart(tokenizer: Tokenizer, src: string): boolean {
 // white space from the same place at every break, found once per text.
 const MARKED_BREAK_RULE = String.raw`^( {2,}|\\)\n(?!\s*$)`
 const BREAK = /( {2,}|\\)\n/y
+const isMarkedBreak = markedRule(source => source === MARKED_BREAK_RULE)
 
 function hardBreak(tokenizer: Tokenizer, src: string): Tokens.Br | undefined {
-  if (tokenizer.rules.inline.br.source !== MARKED_BREAK_RULE) return Tokenizer.prototype.br.call(tokenizer, src)
+  if (!isMarkedBreak(tokenizer.rules.inline.br)) return Tokenizer.prototype.br.call(tokenizer, src)
   // Only a space or a backslash starts a break.
   if (src[0] !== ' ' && src[0] !== '\\') return undefined
   const read = readingInlineText(tokenizer.lexer)
@@ -703,8 +712,12 @@ function mayClose(read: InlineText, rules: Rules, src: string): Closing {
 const DELIMITED = new Set(['em', 'strong', 'del'])
 const unopenedRules = new WeakMap<Rules, Rules>()
 let unopened: { tokenizer: Tokenizer; rules: Rules } | undefined
+// How many texts a scan of marked's has read in, still to count. With none,
+// and no rules to restore, only a step at a delimiter needs deciding.
+let scans = 0
 
 function skipUnclosed(lexer: Lexer, src: string, tokens: Token[]): void {
+  if (!unopened && !scans && src[0] !== '*' && src[0] !== '_' && src[0] !== '~') return
   reopen()
   const read = readingInlineText(lexer)
   if (!read) return
@@ -713,12 +726,16 @@ function skipUnclosed(lexer: Lexer, src: string, tokens: Token[]): void {
     const token = tokens.at(-1)
     read.scanned = (read.scanned ?? 0) + (token && DELIMITED.has(token.type) ? read.scanning - src.length : read.scanning)
     read.scanning = undefined
+    scans -= 1
   }
   const tokenizer = lexer.options.tokenizer
   if ((src[0] !== '*' && src[0] !== '_' && src[0] !== '~') || !tokenizer) return
   const { rules } = tokenizer
   const closing = mayClose(read, rules, src)
-  if (closing === 'scan') read.scanning = src.length
+  if (closing === 'scan') {
+    read.scanning = src.length
+    scans += 1
+  }
   if (closing !== 'none') return
   let skipping = unopenedRules.get(rules)
   if (!skipping) {
@@ -781,7 +798,8 @@ function codeMayClose(read: InlineText | undefined, src: string): boolean {
 }
 
 function tagMayClose(read: InlineText | undefined, src: string): boolean {
-  if (!read || read.step !== src.length || !src.startsWith('<')) return true
+  // Each opener in `TAG_ENDS` starts `<!` or `<?`.
+  if (!read || read.step !== src.length || src[0] !== '<' || (src[1] !== '!' && src[1] !== '?')) return true
   const tag = TAG_ENDS.find(({ opener }) => opener.test(src))
   return !tag || searchInlineText(read, src, tag.from, tag.end) >= 0
 }
@@ -824,6 +842,7 @@ function setextRule(rule: RegExp): SetextRule | null {
 // Once it finds no table in a block text, it checks those two lines first.
 const TABLE_RULE_START = String.raw`^ *([^\n ].*)\n {0,3}((?:\| *)?:?-+`
 const TABLE_DELIMITER_START = / {0,3}(?:\| *)?:?-/y
+const isMarkedTable = markedRule(source => source.startsWith(TABLE_RULE_START))
 // Its own search, so its answers stay apart from the first line's.
 const nextDelimiterEnd = nextCharacter('\n')
 
@@ -964,7 +983,7 @@ const markdownParser = new Marked({
 markdownParser.defaults.tokenizer = Object.assign(new Tokenizer(), {
   table(this: Tokenizer, src: string) {
     const read = steppedBlockText(this.lexer, src)
-    if (read && this.rules.block.table.source.startsWith(TABLE_RULE_START)) {
+    if (read && isMarkedTable(this.rules.block.table)) {
       const line = searchBlockText(read, src, 0, nextLine)
       TABLE_DELIMITER_START.lastIndex = line + 1
       if (line < 0 || !TABLE_DELIMITER_START.test(src)) return undefined
@@ -982,9 +1001,10 @@ markdownParser.defaults.tokenizer = Object.assign(new Tokenizer(), {
     const rule = read && setextRule(this.rules.block.lheading)
     if (read && rule) {
       const underline = searchBlockText(read, src, 1, rule.underline)
+      if (underline < 0) return undefined
       const interrupt = searchBlockText(read, src, 0, rule.interrupt)
       const blocker = searchBlockText(read, src, 0, rule.blocker)
-      if (underline < 0 || (interrupt >= 0 && interrupt < underline) || (blocker >= 0 && blocker < underline)) return undefined
+      if ((interrupt >= 0 && interrupt < underline) || (blocker >= 0 && blocker < underline)) return undefined
     }
     return Tokenizer.prototype.lheading.call(this, src)
   },
@@ -1044,12 +1064,17 @@ markdownParser.defaults.tokenizer = Object.assign(new Tokenizer(), {
 const unmaskedRules = new WeakMap<Rules, Rules>()
 let masking: { links: object | undefined; read: InlineText | undefined; tokenizer: Tokenizer; rules: Rules } | undefined
 
+// Each text asks, so the rules last asked for answer at once.
+let lastUnmasked: { rules: Rules; found: Rules } | undefined
+
 function unmasked(rules: Rules): Rules {
+  if (lastUnmasked?.rules === rules) return lastUnmasked.found
   let found = unmaskedRules.get(rules)
   if (!found) {
     found = { ...rules, inline: { ...rules.inline, reflinkSearch: NO_MATCH, anyPunctuation: NO_MATCH, blockSkip: NO_MATCH } }
     unmaskedRules.set(rules, found)
   }
+  lastUnmasked = { rules, found }
   return found
 }
 
@@ -1114,6 +1139,8 @@ class ContentTabLexer<ParserOutput = string, RendererOutput = string> extends Le
   blockTokens(src: string, tokens?: Token[], lastParagraphClipped?: boolean): Token[]
   blockTokens(src: string, tokens?: TokensList, lastParagraphClipped?: boolean): TokensList
   blockTokens(src: string, tokens: Token[] = [], lastParagraphClipped = false): Token[] {
+    lexing.read += src.length
+    if (lexing.read > lexing.budget) throw new MarkdownNestingRefusal('lexing')
     enterBlockText(this, src, tokens)
     try {
       return super.blockTokens(src, tokens, lastParagraphClipped)
@@ -1141,13 +1168,27 @@ function enterText<ParserOutput, RendererOutput>(lexer: Lexer<ParserOutput, Rend
   const tokenizer = lexer.options.tokenizer
   const rules = lexer.options.hooks === markdownParser.defaults.hooks ? tokenizer?.rules : undefined
   if (!tokenizer || !rules) return
+  // marked's masks change only a text with an escape, a bracket, a code span
+  // or a tag. Any other text is its own masked text, and marked's loops read
+  // it once.
+  if (!MASKED_CHARACTER.test(text)) {
+    readingInlineText(lexer)!.masked = text
+    return
+  }
   tokenizer.rules = unmasked(rules)
   masking = { links: lexer.tokens.links, read: readingInlineText(lexer), tokenizer, rules }
 }
+const MASKED_CHARACTER = /[\\[`<]/
 
 function leaveText<ParserOutput, RendererOutput>(lexer: Lexer<ParserOutput, RendererOutput>, tokens: Token[]): void {
   unmask()
   reopen()
+  // A scan the text's last step began counts nowhere.
+  const read = readingInlineText(lexer)
+  if (read?.scanning !== undefined) {
+    read.scanning = undefined
+    scans -= 1
+  }
   leaveInlineText(lexer, tokens)
 }
 
@@ -1259,6 +1300,212 @@ function yChildIndex(parent: ProseMirrorNode, index: number): number {
   return children
 }
 
+// The live document contract's limits: quotes inside quotes, and nodes inside
+// nodes, below the document's own.
+const MAX_QUOTE_DEPTH = 120
+const MAX_STRUCTURE_DEPTH = 128
+// How many times its own length, or 256 KiB if that is more, a note in the
+// source reading may give block lexing. marked lexes each container's text
+// again for each one inside it, and again for each lazy or setext
+// continuation, so this bounds the work depth adds within the limits.
+const LEXING_BUDGET = 16
+const LEXING_FLOOR = 256 * 1024
+
+/**
+ * A note the live document contract does not read as rich text, because its
+ * containers nest past the contract's limits (`depth`), or because lexing
+ * them would pass the lexing budget (`lexing`).
+ */
+export class MarkdownNestingRefusal extends Error {
+  constructor(readonly limit: 'depth' | 'lexing') {
+    super('Markdown is not representable by the live document contract')
+    this.name = 'MarkdownNestingRefusal'
+  }
+}
+
+// The block lexing the parse in progress has done and may do.
+let lexing = { read: 0, budget: Infinity }
+
+// The containers that open a line before its text, as marked reads them, and
+// where its text starts. A quote takes up to three spaces, `>` and one space
+// or tab. A list item takes up to three spaces, its marker and the spaces
+// after it, with marked's tab stops from its item's first line on, unless
+// more than four make its text indented code; a bullet's item also takes a
+// task box. A marker after only quotes, on a line that may continue a
+// paragraph, opens nothing unless it could interrupt one. A thematic break
+// ends the line's containers. Counting stops past either limit.
+function lineContainers(line: string, continues: boolean): { quotes: number; depth: number; text: string; at: number } {
+  let text = line.charCodeAt(line.length - 1) === 13 ? line.slice(0, -1) : line
+  let at = 0
+  let quotes = 0
+  let depth = 0
+  let listed = false
+  // Where the run of one character, besides white space, that ends the line
+  // starts, once a marker could start a thematic break.
+  let uniform = -1
+  while (quotes <= MAX_QUOTE_DEPTH && depth <= MAX_STRUCTURE_DEPTH) {
+    let start = at
+    while (start - at < 3 && text[start] === ' ') start += 1
+    const first = text[start]
+    if (first === '>') {
+      at = start + 1
+      if (text[at] === ' ' || text[at] === '\t') at += 1
+      quotes += 1
+      depth += 1
+      continue
+    }
+    let end = start
+    let ordered = ''
+    if (first === '-' || first === '+' || first === '*') {
+      if (first !== '+') {
+        if (uniform < 0) uniform = uniformEnd(text)
+        if (start >= uniform && thematicBreak(text, start)) break
+      }
+      end += 1
+    } else {
+      while (end - start < 9 && text[end]! >= '0' && text[end]! <= '9') end += 1
+      if (end === start || (text[end] !== '.' && text[end] !== ')')) break
+      ordered = text.slice(start, end)
+      end += 1
+    }
+    if (end < text.length && text[end] !== ' ' && text[end] !== '\t') break
+    if (!listed && text.includes('\t', end)) {
+      let expanded = ''
+      for (let index = end, column = end - at; index < text.length; index += 1) {
+        const width = text[index] === '\t' ? 4 - (column % 4) : 1
+        expanded += text[index] === '\t' ? ' '.repeat(width) : text[index]
+        column += width
+      }
+      text = text.slice(0, end) + expanded
+      uniform = -1
+    }
+    let content = end
+    while (text[content] === ' ') content += 1
+    const blank = content === text.length
+    if (!listed && continues && (blank || (ordered !== '' && ordered !== '1'))) break
+    depth += 2
+    listed = true
+    if (blank || content - end > 4) break
+    at = content
+    if (!ordered && text[at] === '[' && ' xX'.includes(text[at + 1] ?? '_') && text[at + 2] === ']' && text[at + 3] === ' ') {
+      let box = at + 3
+      while (text[box] === ' ') box += 1
+      if (box === text.length) break
+      at = box
+    }
+  }
+  return { quotes, depth, text, at }
+}
+
+// Where the run of the line's last character, with white space, starts.
+function uniformEnd(text: string): number {
+  let index = text.length - 1
+  while (index >= 0 && (text[index] === ' ' || text[index] === '\t')) index -= 1
+  const last = text[index]
+  while (index >= 0 && (text[index] === last || text[index] === ' ' || text[index] === '\t')) index -= 1
+  return index + 1
+}
+
+// Whether three of `start`'s character follow it, in a run of only them and
+// white space.
+function thematicBreak(text: string, start: number): boolean {
+  let count = 0
+  for (let index = start; index < text.length && count < 3; index += 1) if (text[index] === text[start]) count += 1
+  return count === 3
+}
+
+function blankFrom(text: string, at: number): boolean {
+  for (let index = at; index < text.length; index += 1) if (text[index] !== ' ' && text[index] !== '\t') return false
+  return true
+}
+
+// Whether a line that starts with `first` may open a container or a literal
+// region.
+function mayOpen(first: string | undefined): boolean {
+  return first === ' ' || first === '>' || first === '-' || first === '+' || first === '*' || first === '`' || first === '~'
+    || first === '<' || first === '$' || first === '[' || (first !== undefined && first >= '0' && first <= '9')
+}
+
+// What a line that opens a literal region needs to read each next line:
+// whether it is `inside` the region, its `last` line, or `outside` it.
+// Fences, HTML blocks, display math and definition titles hold text marked
+// never reads as containers. Each region here ends where marked's would, or
+// later.
+type LiteralRegion = (line: string) => 'inside' | 'last' | 'outside'
+
+function literalRegion(text: string, at: number): LiteralRegion | undefined {
+  let start = at
+  while (start - at < 3 && text[start] === ' ') start += 1
+  const first = text[start]
+  if (first === '`' || first === '~') {
+    let end = start
+    while (text[end] === first) end += 1
+    const length = end - start
+    if (length < 3) return undefined
+    return line => {
+      if (!line.includes(first)) return 'inside'
+      const { text, at } = lineContainers(line, false)
+      let open = at
+      while (open - at < 3 && text[open] === ' ') open += 1
+      let close = open
+      while (text[close] === first) close += 1
+      return close - open >= length && blankFrom(text, close) ? 'last' : 'inside'
+    }
+  }
+  if (first === '$' && text[start + 1] === '$') {
+    return text.includes('$$', start + 2) ? undefined : line => line.includes('$$') ? 'last' : 'inside'
+  }
+  if (first === '<') {
+    const opening = text.slice(start + 1, start + 12).toLowerCase()
+    const tag = ['script', 'pre', 'style', 'textarea'].find(name => opening.startsWith(name))
+    const end = opening.startsWith('!--') ? '-->' : opening.startsWith('?') ? '?>' : opening.startsWith('![cdata[') ? ']]>'
+      : opening.startsWith('!') ? '>' : tag ? `</${tag}` : undefined
+    if (end) {
+      return text.slice(start + 2).toLowerCase().includes(end) ? undefined
+        : line => line.toLowerCase().includes(end) ? 'last' : 'inside'
+    }
+    const name = opening[opening.startsWith('/') ? 1 : 0] ?? ''
+    return name >= 'a' && name <= 'z' ? line => {
+      const { text, at } = lineContainers(line, false)
+      return blankFrom(text, at) ? 'last' : 'inside'
+    } : undefined
+  }
+  if (first === '[') {
+    const colon = text.indexOf(']:', start)
+    if (colon < 0) return undefined
+    // The destination may follow on the next line, and the title on the
+    // line after the destination.
+    let title = ''
+    let lines = blankFrom(text, colon + 2) ? 2 : 1
+    const read = (line: string, from: number) => {
+      for (let index = from; index < line.length; index += 1) {
+        const character = line[index]
+        if (character === '\\') index += 1
+        else if (title) {
+          if (character === title) return true
+        } else if (character === '"' || character === "'") title = character
+        else if (character === '(') title = ')'
+      }
+      return false
+    }
+    if (read(text, colon + 2)) return undefined
+    return raw => {
+      const { text: line, at: from } = lineContainers(raw, false)
+      if (!title) {
+        let opener = from
+        while (line[opener] === ' ' || line[opener] === '\t') opener += 1
+        if (lines === 2) {
+          lines = 1
+          return read(line, opener) ? 'last' : 'inside'
+        }
+        if (line[opener] !== '"' && line[opener] !== "'" && line[opener] !== '(') return 'outside'
+      }
+      return read(line, from) ? 'last' : 'inside'
+    }
+  }
+  return undefined
+}
+
 // Admission is independent of canonical serialization. Code bodies are opaque;
 // blank lines end lazy continuation, but not an indented continuation block.
 function assertSupportedListMarkdown(markdown: string, preserveContentTabs?: (text: string) => string): string {
@@ -1278,7 +1525,20 @@ function assertSupportedListMarkdown(markdown: string, preserveContentTabs?: (te
     changed = true
   }
   const refuse = () => { throw new Error('Markdown is not representable by the live document contract') }
+  let literal: LiteralRegion | undefined
+  let continues = false
   for (let at = 0; at < lines.length; at += 1) {
+    // Refused before marked reads it, outside text it would hold literally.
+    const region = literal?.(lines[at]) ?? 'outside'
+    if (region !== 'inside') literal = undefined
+    if (region !== 'outside') continues = true
+    else if (!mayOpen(lines[at][0])) continues = lines[at] !== '' && lines[at] !== '\r'
+    else {
+      const opened = lineContainers(lines[at], continues)
+      if (opened.quotes > MAX_QUOTE_DEPTH || opened.depth > MAX_STRUCTURE_DEPTH) throw new MarkdownNestingRefusal('depth')
+      literal = literalRegion(opened.text, opened.at)
+      continues = !blankFrom(opened.text, opened.at)
+    }
     let line = lines[at].replace(/\r$/u, '')
     if (line.includes('\t')) line = line.replace(/^[ \t]*(?:(?:[-+*]|[0-9]{1,9}[.)])[ \t]+)?/u, prefix => {
       let column = 0
@@ -1325,7 +1585,6 @@ function assertSupportedListMarkdown(markdown: string, preserveContentTabs?: (te
       while (parents.length && indent < parents.at(-1)!.column) parents.pop()
     }
     const inList = parents.length > 0
-    if (quotes > 120) refuse()
     if (run) { fence = run; fenceInList = inList; blank = false; continue }
     if (!inList && rule) { blank = false; continue }
     if ((inList || marker)
@@ -1338,7 +1597,7 @@ function assertSupportedListMarkdown(markdown: string, preserveContentTabs?: (te
       let depth = quotes + (parents.length + 1) * 2
       body = body.trimStart()
       while (true) {
-        if (depth > 128) refuse()
+        if (depth > MAX_STRUCTURE_DEPTH) throw new MarkdownNestingRefusal('depth')
         if (body.startsWith('> ')) { body = body.slice(2); depth += 1; quoted = true; continue }
         const child = /^(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]+|$)/u.exec(body)
         if (!child) break
@@ -1439,6 +1698,7 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
   writtenLinks = {
     openers: writtenOpeners(prepared, entitySentinels),
     runs: new Map(),
+    tokens: undefined,
     length: -1,
     sentinels: new WeakMap(),
   }
@@ -1446,13 +1706,17 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
   try {
     // Include escaped and multiline labels, including definitions inside quotes.
     markdownListParseState.references = markdown.includes(']:')
+    // The projection reads only what the serializer writes, so a live note
+    // can always settle.
+    lexing = { read: 0, budget: reading === 'source' ? LEXING_BUDGET * Math.max(prepared.length, LEXING_FLOOR) : Infinity }
     parsed = (reading === 'projection' ? projectedMarkdownManager() : markdownManager).parse(prepared)
   } finally {
+    lexing = { read: 0, budget: Infinity }
     parseReferences = new Map()
     parseTabs = new Map()
     markdownListParseState.references = true
     rawHtmlMarkup = { lt: '<', gt: '>', used: false }
-    writtenLinks = { openers: new Set(), runs: new Map(), length: -1, sentinels: new WeakMap() }
+    writtenLinks = { openers: new Set(), runs: new Map(), tokens: undefined, length: -1, sentinels: new WeakMap() }
   }
   return ensureListItemParagraphs(
     entitySentinels.size || markup.used || projectionTabs.size
@@ -1467,7 +1731,7 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
 // paragraph was empty, so give such an item its paragraph back.
 function ensureListItemParagraphs(node: JSONContent, depth = -1, quoteDepth = 0): JSONContent {
   const quotes = quoteDepth + (node.type === 'blockquote' ? 1 : 0)
-  if (depth > 128 || quotes > 120) throw new Error('Markdown is not representable by the live document contract')
+  if (depth > MAX_STRUCTURE_DEPTH || quotes > MAX_QUOTE_DEPTH) throw new MarkdownNestingRefusal('depth')
   if (node.type === 'image' && node.attrs) node.attrs.src = sanitizeImageSrc(String(node.attrs.src ?? ''))
   const content = node.content
   if (!content) return node

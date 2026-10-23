@@ -48,28 +48,51 @@ export type InlineText = {
 const inlineTexts = new WeakMap<object, InlineText[]>()
 // marked hands an extension's tokenizer the tokens of the text it reads.
 const tokenTexts = new WeakMap<object, InlineText>()
+// marked asks about the text it reads at each step, so the last lexer to
+// enter or leave a text keeps the one it reads, and the last tokens given a
+// text keep theirs until they leave it.
+let lastLexer: object | undefined
+let lastRead: InlineText | undefined
+let lastTokens: object | undefined
+let lastTokenRead: InlineText | undefined
 
 export function enterInlineText(lexer: object, text: string, tokens: object): void {
-  const read: InlineText = { text, step: -1 }
+  // Every field from the start, so each text has one shape whatever it holds.
+  const read: InlineText = {
+    text, found: undefined, step: -1, searched: undefined, email: undefined, localPart: undefined, run: undefined,
+    blankEnd: undefined, masked: undefined, scanned: undefined, scanning: undefined,
+  }
   const texts = inlineTexts.get(lexer)
   if (texts) texts.push(read)
   else inlineTexts.set(lexer, [read])
   tokenTexts.set(tokens, read)
+  lastLexer = lexer
+  lastRead = lastTokenRead = read
+  lastTokens = tokens
 }
 
 export function leaveInlineText(lexer: object, tokens: object): void {
-  inlineTexts.get(lexer)?.pop()
+  const texts = inlineTexts.get(lexer)
+  texts?.pop()
   tokenTexts.delete(tokens)
+  lastLexer = lexer
+  lastRead = texts?.at(-1)
+  if (tokens === lastTokens) lastTokens = lastTokenRead = undefined
 }
 
 /** The text `lexer` is reading, when it records one. */
 export function readingInlineText(lexer: object | undefined): InlineText | undefined {
+  if (lexer === lastLexer) return lastRead
   return lexer ? inlineTexts.get(lexer)?.at(-1) : undefined
+}
+
+function tokenText(tokens: object): InlineText | undefined {
+  return tokens === lastTokens ? lastTokenRead : tokenTexts.get(tokens)
 }
 
 /** Records `rest`, the rest of the text whose `tokens` a tokenizer is given, as the lexer's current step. */
 export function stepInlineText(tokens: object, rest: string): void {
-  const read = tokenTexts.get(tokens)
+  const read = tokenText(tokens)
   if (read) read.step = rest.length
 }
 
@@ -129,10 +152,15 @@ export type RestSearch = (text: string, from: number) => number
 type Searched = Map<RestSearch, { from: number; at: number }>
 
 function searchFrom(text: string, searched: Searched, from: number, search: RestSearch): number {
-  let found = searched.get(search)
-  if (!found || found.from > from || (found.at >= 0 && found.at < from)) {
-    found = { from, at: search(text, from) }
-    searched.set(search, found)
+  const found = searched.get(search)
+  if (!found) {
+    const at = search(text, from)
+    searched.set(search, { from, at })
+    return at
+  }
+  if (found.from > from || (found.at >= 0 && found.at < from)) {
+    found.from = from
+    found.at = search(text, from)
   }
   return found.at
 }
@@ -145,7 +173,7 @@ export function searchInlineText(read: InlineText, src: string, from: number, se
 }
 
 function searchRest(src: string, tokens: object, from: number, search: RestSearch): number {
-  const read = tokenTexts.get(tokens)
+  const read = tokenText(tokens)
   return !read || read.text.length < src.length ? search(src, from) : searchInlineText(read, src, from, search)
 }
 
@@ -169,19 +197,44 @@ export type BlockText = {
 }
 const blockTexts = new WeakMap<object, BlockText[]>()
 const tokenBlockTexts = new WeakMap<object, BlockText>()
+// As for inline texts, the last lexer to enter or leave a block text keeps
+// the one it reads, and the last tokens given one keep theirs.
+let lastBlockLexer: object | undefined
+let lastBlock: BlockText | undefined
+let lastBlockTokens: object | undefined
+let lastTokenBlock: BlockText | undefined
 
 export function enterBlockText(lexer: object, text: string, tokens: Token[]): void {
-  const read: BlockText = { text, tokens }
+  const read: BlockText = { text, tokens, searched: undefined, rest: undefined, heads: undefined, tableRefused: undefined }
   const texts = blockTexts.get(lexer)
   if (texts) texts.push(read)
   else blockTexts.set(lexer, [read])
   tokenBlockTexts.set(tokens, read)
+  lastBlockLexer = lexer
+  lastBlock = lastTokenBlock = read
+  lastBlockTokens = tokens
 }
 
 export function leaveBlockText(lexer: object, tokens: Token[]): void {
-  const read = blockTexts.get(lexer)?.pop()
-  for (const [token, head] of read?.heads ?? []) token.raw = head.join('') + token.raw
-  if (tokenBlockTexts.get(tokens) === read) tokenBlockTexts.delete(tokens)
+  const texts = blockTexts.get(lexer)
+  const read = texts?.pop()
+  lastBlockLexer = lexer
+  lastBlock = texts?.at(-1)
+  if (read?.heads) for (const [token, head] of read.heads) token.raw = head.join('') + token.raw
+  if (tokenBlock(tokens) === read) {
+    tokenBlockTexts.delete(tokens)
+    if (tokens === lastBlockTokens) lastBlockTokens = lastTokenBlock = undefined
+  }
+}
+
+// The block text `lexer` reads.
+function readingBlockText(lexer: object | undefined): BlockText | undefined {
+  if (lexer === lastBlockLexer) return lastBlock
+  return lexer ? blockTexts.get(lexer)?.at(-1) : undefined
+}
+
+function tokenBlock(tokens: object): BlockText | undefined {
+  return tokens === lastBlockTokens ? lastTokenBlock : tokenBlockTexts.get(tokens)
 }
 
 // marked joins each piece of a cut paragraph onto the last with `raw +=`,
@@ -189,7 +242,7 @@ export function leaveBlockText(lexer: object, tokens: Token[]): void {
 // joined raw each time. Before each paragraph, the last one keeps only its
 // last character, and its block text holds the rest until it ends.
 export function shortenLastParagraph(lexer: object | undefined): void {
-  const read = lexer ? blockTexts.get(lexer)?.at(-1) : undefined
+  const read = readingBlockText(lexer)
   const last = read?.tokens.at(-1)
   if (!read || last?.type !== 'paragraph' || last.raw.length < 2) return
   const head = read.heads?.get(last)
@@ -200,13 +253,13 @@ export function shortenLastParagraph(lexer: object | undefined): void {
 
 /** Records `rest`, the rest of the text whose `tokens` a block tokenizer is given, as the lexer's current step. */
 export function stepBlockText(tokens: object, rest: string): void {
-  const read = tokenBlockTexts.get(tokens)
+  const read = tokenBlock(tokens)
   if (read) read.rest = rest
 }
 
 /** The block text `lexer` reads, when `src` is the rest at its current step. */
 export function steppedBlockText(lexer: object | undefined, src: string): BlockText | undefined {
-  const read = lexer ? blockTexts.get(lexer)?.at(-1) : undefined
+  const read = readingBlockText(lexer)
   return read?.rest === src ? read : undefined
 }
 
@@ -219,11 +272,14 @@ export function searchBlockText(read: BlockText, src: string, from: number, sear
 
 // marked asks where a block may start with the rest after the first
 // character of its step.
-function blockStartSearch(lexer: object | undefined, src: string): (from: number, search: RestSearch) => number {
-  const read = lexer ? blockTexts.get(lexer)?.at(-1) : undefined
-  return read?.rest?.length === src.length + 1
-    ? (from, search) => searchBlockText(read, src, from, search)
-    : (from, search) => search(src, from)
+function blockStartText(lexer: object | undefined, src: string): BlockText | undefined {
+  const read = readingBlockText(lexer)
+  return read?.rest?.length === src.length + 1 ? read : undefined
+}
+
+/** `search` from `from` in `src`, through `read` when it holds `src` as its rest. */
+function searchBlockRest(read: BlockText | undefined, src: string, from: number, search: RestSearch): number {
+  return read ? searchBlockText(read, src, from, search) : search(src, from)
 }
 
 // marked asks where a block may start only to cut the paragraph it is about
@@ -245,11 +301,12 @@ const paragraphEnd: RestSearch = (text, from) => {
 const mathBlockLine: RestSearch = (text, from) => text.indexOf('\n$$', from)
 
 function mathBlockStart(this: { lexer?: object }, src: string): number {
-  const search = blockStartSearch(this?.lexer, src)
   if (src.startsWith('$$')) return 0
-  const line = search(0, mathBlockLine)
-  const end = search(0, paragraphEnd)
-  return line < 0 || (end >= 0 && end < line) ? -1 : line === 0 ? 0 : line + 1
+  const read = blockStartText(this?.lexer, src)
+  const line = searchBlockRest(read, src, 0, mathBlockLine)
+  if (line < 0) return -1
+  const end = searchBlockRest(read, src, 0, paragraphEnd)
+  return end >= 0 && end < line ? -1 : line === 0 ? 0 : line + 1
 }
 
 // The newline before a line that starts a callout: up to three spaces, `>`,
@@ -267,13 +324,14 @@ const calloutLine: RestSearch = (text, from) => {
 }
 
 function calloutStart(this: { lexer?: object }, src: string): number {
-  const search = blockStartSearch(this?.lexer, src)
   let quote = 0
   while (quote < 3 && src[quote] === ' ') quote += 1
   if (src[quote] === '>' && (src.startsWith('[!', quote + 1) || (src.startsWith('[!', quote + 2) && /\s/u.test(src[quote + 1]!)))) return 0
-  const line = search(0, calloutLine)
-  const end = search(0, paragraphEnd)
-  return line < 0 || (end >= 0 && end < line) ? -1 : line === 0 ? 0 : line + 1
+  const read = blockStartText(this?.lexer, src)
+  const line = searchBlockRest(read, src, 0, calloutLine)
+  if (line < 0) return -1
+  const end = searchBlockRest(read, src, 0, paragraphEnd)
+  return end >= 0 && end < line ? -1 : line === 0 ? 0 : line + 1
 }
 
 // The first `]]` after a wikilink's `[[` that no backslash escapes. A run of
@@ -1468,11 +1526,12 @@ const nextPipe = nextCharacter('|')
 // probing ordinary blocks.
 function tableStart(this: { lexer?: object }, src: string): number {
   if (TABLE_ROW_HEIGHTS_RE.test(src)) return 0
-  const search = blockStartSearch(this?.lexer, src)
-  const newline = search(0, nextLine)
-  const pipe = search(0, nextPipe)
-  if (newline < 0 || pipe < 0 || pipe > newline) return -1
-  const second = search(newline + 1, nextLineAfter)
+  const read = blockStartText(this?.lexer, src)
+  const newline = searchBlockRest(read, src, 0, nextLine)
+  if (newline < 0) return -1
+  const pipe = searchBlockRest(read, src, 0, nextPipe)
+  if (pipe < 0 || pipe > newline) return -1
+  const second = searchBlockRest(read, src, newline + 1, nextLineAfter)
   const prefix = second < 0 ? src : src.slice(0, second)
   return (tableTokenizer.start as (source: string) => number)(prefix)
 }
@@ -1490,11 +1549,16 @@ function readTable(text: string): Tokens.Table | undefined {
   }
 }
 
+// Tiptap escapes only the pipes of a line that also holds a backtick.
+function escapedTablePipes(text: string): string {
+  return text.includes('`') ? preprocessTablePipes(text) : text
+}
+
 // The table marked's rule reads from `head`, the first two lines of a text,
 // as `leadingTable` would choose it. Whether it reads one depends only on
 // those lines, so a text whose first two lines are no table costs only them.
 function headTable(head: string): Tokens.Table | undefined {
-  const escaped = preprocessTablePipes(head)
+  const escaped = escapedTablePipes(head)
   return (escaped === head ? undefined : readTable(escaped)) ?? readTable(head)
 }
 
@@ -1521,7 +1585,7 @@ function leadingTable(
 ): { table: Tokens.Table; lines: string[]; source: string[] } | undefined {
   const own = tableReader.rules.block.table.exec(rest)?.[0].replace(/\n+$/u, '')
   if (own === undefined) return undefined
-  const escaped = preprocessTablePipes(own)
+  const escaped = escapedTablePipes(own)
   for (const text of escaped === own ? [own] : [escaped, own]) {
     const table = readTable(text)
     // The header, the delimiter, and each row take one line.
@@ -1562,9 +1626,14 @@ function leadingTableText(rest: string): { text: string; cut: boolean; cells: nu
   const { table, lines, source: raw } = read
   let cells = 0
   for (let row = 2; row < lines.length; row += 1) {
-    const texts = tableRowCells(lines[row]).map(cell => !!cell.trim())
-    if (texts.indexOf(true, table.header.length) >= 0) return { text: raw.slice(0, row).join('\n'), cut: true, cells }
-    cells = Math.max(cells, texts.lastIndexOf(true) + 1)
+    const rowCells = tableRowCells(lines[row])
+    let last = 0
+    for (let at = 0; at < rowCells.length; at += 1) {
+      if (!rowCells[at]!.trim()) continue
+      if (at >= table.header.length) return { text: raw.slice(0, row).join('\n'), cut: true, cells }
+      last = at + 1
+    }
+    cells = Math.max(cells, last)
   }
   return { text: raw.join('\n'), cut: false, cells }
 }
@@ -1581,14 +1650,20 @@ const tableProbes = new WeakMap<BlockText, { start: number; end: number; cells: 
 const TABLE_DELIMITER_RE = /^[ \t|:]*-[ \t|:-]*$/u
 // The second line of `src`, and where it ends.
 function secondLine(src: string, read: BlockText | undefined): { second: string; end: number } {
-  const search = (from: number, rest: RestSearch) => (
-    read && read.text.length >= src.length ? searchBlockText(read, src, from, rest) : rest(src, from)
-  )
-  const first = search(0, nextLine)
+  const holds = read && read.text.length >= src.length ? read : undefined
+  const first = searchBlockRest(holds, src, 0, nextLine)
   if (first < 0) return { second: '', end: src.length }
-  const second = search(first + 1, nextLineAfter)
+  const second = searchBlockRest(holds, src, first + 1, nextLineAfter)
   const end = second < 0 ? src.length : second
   return { second: src.slice(first + 1, end), end }
+}
+
+// Remembers a probe that read rows but returned nothing.
+function probedNoTable(read: BlockText | undefined, extent: { text: string; cells: number } | undefined, start: number): undefined {
+  if (read && extent && escapedTablePipes(extent.text) === extent.text) {
+    tableProbes.set(read, { start, end: start + extent.text.length, cells: extent.cells })
+  }
+  return undefined
 }
 
 export const DohcMarkdownTable = Table.extend({
@@ -1599,30 +1674,25 @@ export const DohcMarkdownTable = Table.extend({
       const annotation = TABLE_ROW_HEIGHTS_RE.exec(src)
       const prefix = annotation?.[0] ?? ''
       const rest = src.slice(prefix.length)
-      const read = annotation ? undefined : tokenBlockTexts.get(tokens)
+      const read = annotation ? undefined : tokenBlock(tokens)
       const { second, end } = secondLine(rest, read)
-      const start = read ? read.text.length - rest.length : -1
       // marked's table rule takes a delimiter row only with a pipe or colon,
       // and its first two lines decide whether it reads a table.
       const head = (annotation || TABLE_DELIMITER_RE.test(second)) && /[:|]/.test(second) ? headTable(rest.slice(0, end)) : undefined
+      if (!annotation && !head) return undefined
+      const start = read ? read.text.length - rest.length : -1
       const probed = read && tableProbes.get(read)
       if (probed && probed.start <= start && start + end <= probed.end && (!head || head.header.length >= probed.cells)) return undefined
       const extent = head ? leadingTableText(rest) : undefined
       if (!annotation && !extent?.cut) {
-        const none = () => {
-          if (read && extent && (!extent.text.includes('`') || preprocessTablePipes(extent.text) === extent.text)) {
-            tableProbes.set(read, { start, end: start + extent.text.length, cells: extent.cells })
-          }
-          return undefined
-        }
         // Tiptap's tokenizer reads a table only when its second line is a
         // delimiter row with a pipe, and here it reads only the table's own
         // lines. Given the text up to the next blank line, it would read every
         // line after the table too, and when a code span there holds a pipe,
         // count the line after the table as one of its own.
-        if (!extent || !second.includes('|')) return none()
+        if (!extent || !second.includes('|')) return probedNoTable(read, extent, start)
         const table = tableTokenizer.tokenize(extent.text, tokens, helpers)
-        if (!table?.raw) return none()
+        if (!table?.raw) return probedNoTable(read, extent, start)
         // The newline after the last row belongs to the table, as in marked.
         return { ...table, raw: table.raw + (rest[table.raw.length] === '\n' ? '\n' : '') }
       }

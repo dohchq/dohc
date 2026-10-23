@@ -5,6 +5,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import {
   afterEach,
@@ -17,6 +18,7 @@ import {
 import { linkQueryPage } from "../testing/linkQueryPage.fixture";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { FileInspector } from "./FileInspector";
+import { RICH_TEXT_REFUSED } from "./fileInspectorUi";
 
 // Collect the real lazy modules before hook and renderer assertion timers start.
 import "./markdown/IncrementalMarkdownDocument";
@@ -193,4 +195,36 @@ describe("FileInspector renders markdown through the shared component map", () =
     );
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
+
+  // The editor's parse refuses each before it renders, and nothing parses it
+  // again to show the way out.
+  it.each([
+    ["depth", `${">".repeat(121)} a\n`],
+    ["lexing", `${">".repeat(120)} a\n===\n\n`.repeat(16)],
+  ] as const)("keeps a note nested past the %s limit as it is and offers its source or the system's app", async (limit, text) => {
+    bridgeMock.readWorkspaceText.mockImplementation(async () => ({ text, truncated: false }));
+    try {
+      const reported = vi.fn();
+      render(<FileInspector workspaceId="ws-1" path="deep.md" onButtonError={reported} />);
+      const refused = await screen.findByTestId("rich-text-refused", undefined, { timeout: 15_000 });
+      expect(screen.queryByTestId("editor-crash-recovery")).toBeNull();
+      expect(reported).toHaveBeenCalledTimes(1);
+      expect(reported).toHaveBeenCalledWith(RICH_TEXT_REFUSED[limit], null, null, "rich-text-refused:ws-1:deep.md");
+
+      fireEvent.click(within(refused).getByRole("button", { name: "Open externally" }));
+      await waitFor(() => expect(bridgeMock.openFileExternally).toHaveBeenCalledWith({ workspaceId: "ws-1", relativePath: "deep.md" }));
+      fireEvent.click(within(refused).getByRole("button", { name: "Edit source" }));
+      const source = await screen.findByTestId("markdown-editor");
+      const content = await waitFor(() => {
+        const found = source.querySelector(".cm-content");
+        expect(found).not.toBeNull();
+        return found as HTMLElement;
+      });
+      expect(content.textContent).toContain(`${">".repeat(limit === "depth" ? 121 : 120)} a`);
+      expect(reported).toHaveBeenCalledTimes(1);
+      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+    } finally {
+      bridgeMock.readWorkspaceText.mockImplementation(async () => ({ text: TABLE_DOCUMENT, truncated: false }));
+    }
+  }, 30_000);
 });

@@ -229,7 +229,7 @@ export function createFirstOpenPublisher(options: {
       prepared = await step("history-unavailable", () => storage.prepareFirstOpen(source, signal));
       if (prepared.kind !== "prepared") return refusal(prepared);
       // The history read can outlast the wait, and then the source builds now.
-      const retryAfterMs = waitLeft();
+      const retryAfterMs = Math.ceil(waitLeft());
       if (retryAfterMs > 0) return answer({kind: "unavailable", reason: "build-deadline", retryAfterMs});
     }
     const bytes = storage.getBlob(workspaceId, head.sourceDigest);
@@ -250,7 +250,7 @@ export function createFirstOpenPublisher(options: {
       const previous = deadlineWaits.get(waitKey);
       const waitMs = previous ? Math.min(2 * previous.waitMs, FIRST_OPEN_DEADLINE_WAIT_CAP_MS) : FIRST_OPEN_DEADLINE_WAIT_MS;
       deadlineWaits.delete(waitKey);
-      deadlineWaits.set(waitKey, {waitMs, untilMs: nowMs() + waitMs});
+      deadlineWaits.set(waitKey, {waitMs, untilMs: Math.ceil(nowMs()) + waitMs});
       if (deadlineWaits.size > maxDeadlineWaits) deadlineWaits.delete(deadlineWaits.keys().next().value!);
       console.error("[sync-relay] first-open build passed its deadline", workspaceId, objectId, source.sourceDigest);
       return answer({kind: "unavailable", reason: "build-deadline", retryAfterMs: waitMs});

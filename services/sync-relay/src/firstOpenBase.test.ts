@@ -251,6 +251,16 @@ describe("first-open base", () => {
     } finally { projector.mockRestore(); }
   });
 
+  it("refuses a file nested past the live document contract, or past its lexing budget, as unsupported", () => {
+    const encode = vi.spyOn(richdocSeed, "encodeRichdocSeed");
+    try {
+      for (const markdown of [`${">".repeat(121)} a\n`, `${"- ".repeat(65)}a\n`, `${">".repeat(120)} a\n===\n\n`.repeat(16)]) {
+        expect(buildFirstOpenBase(policy, input(markdown))).toEqual({ kind: "refused", reason: "unsupported-source" });
+      }
+      expect(encode).toHaveBeenCalledTimes(3);
+    } finally { encode.mockRestore(); }
+  });
+
   it("refuses a base the live validator refuses, with the validator's reason", () => {
     expect(buildFirstOpenBase(policy, input("Body", { currentPath: "docs/a.txt" }))).toEqual({ kind: "refused", reason: "invalid-base", fault: "invalid-input" });
     // The live schema keeps no link around inline code.

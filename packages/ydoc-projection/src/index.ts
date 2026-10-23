@@ -14,6 +14,7 @@ export {
   getDohcYDocMeta,
   getDohcYDocPlainText,
   markdownToYDoc,
+  MarkdownNestingRefusal,
   parseRichdocMarkdown,
   plainTextToYDoc,
   serializeRichdocBody,

@@ -12,6 +12,7 @@ import {
   ViewActions,
   OrphanedDraftNotices,
   EngineRemovalInProgressNotice,
+  RichTextRefused,
 } from "./fileInspectorUi";
 import {
   DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
@@ -2262,6 +2263,15 @@ export function MarkdownView(props: {
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:local`}
+            refused={limit => (
+              <RichTextRefused
+                workspaceId={props.workspaceId}
+                path={props.path}
+                limit={limit}
+                onSource={() => switchMode("source")}
+                onReport={props.onButtonError}
+              />
+            )}
           >
             <LazyMarkdownEditor
               key={wysiwygResyncEpoch}
