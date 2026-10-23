@@ -23,7 +23,8 @@ export class SecretFileStoreError extends Error {
 function hardLinksUnsupported(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false;
   const { code, syscall } = error as NodeJS.ErrnoException;
-  // Match materialize.rs::hard_links_unsupported off Windows; Windows EPERM remains a permissions failure.
+  // libuv maps Windows ERROR_INVALID_FUNCTION (1) to EISDIR and ERROR_NOT_SUPPORTED (50) to ENOTSUP.
+  // Off Windows, match materialize.rs::hard_links_unsupported; Windows EPERM remains a permissions failure.
   return syscall === "link" && (
     code === "ENOTSUP" || code === "ENOSYS" ||
     (process.platform === "win32"
