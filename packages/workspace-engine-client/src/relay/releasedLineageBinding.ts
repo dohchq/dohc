@@ -30,6 +30,7 @@ export interface ReleasedLineageBinding {
   workspaceId: string;
   mainVersionId: string;
   objectId: string;
+  /** The lineage the held update would change: the head's, or an archived one. */
   lineageClaimId: string;
   currentPath: string | null;
   restoreGeneration: number | null;
@@ -41,6 +42,10 @@ export interface ReleasedLineageBinding {
     originSeq: number;
     relaySeq: number;
   };
+  /**
+   * The SHA-256 of the full state of the lineage `lineageClaimId` names, before
+   * the update: the head's, or the state an archived lineage keeps.
+   */
   headDigest: string;
   /** Every protected tail; null when the released window's evidence does not read. */
   tails: ProtectedTail[] | null;

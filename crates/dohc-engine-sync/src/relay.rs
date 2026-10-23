@@ -2800,7 +2800,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         // and the facts of rows it removes that applied to a head before
         // their lineage was archived reach it as drain reports. A document whose
         // archived lineage released tails protect holds for it. Each lineage
-        // is decided again here.
+        // is decided again here, and a hold the pass reported for one it
+        // frees is cleared.
         let archived = match crate::ydoc_apply::drain_inactive_ydoc_updates(
             store,
             crate::ydoc_apply::InactiveScope::Workspace(workspace_id),
@@ -2809,7 +2810,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             crate::ydoc_apply::InactiveReport::Durable,
             faults,
         ) {
-            Ok(drained) => drained.holds,
+            Ok(drained) => {
+                p.pass.clear_freed(&drained.cleared);
+                drained.holds
+            }
             Err(SyncError::ValidationPending(pending)) => {
                 return Ok(Applying::Suspended(pending, Box::new(progress)));
             }
@@ -2945,9 +2949,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         // Archived work queued before the op applies first, except of a
         // lineage an earlier op's drain found protected. A hold it leaves
         // stands in its document's row, which the pass reads when it settles
-        // that document.
+        // that document, and one the pass reported for a lineage it frees
+        // is cleared.
         if op.op_kind != "ydoc.update" || op.payload["isBaseState"] == true {
-            crate::ydoc_apply::drain_inactive_ydoc_updates(
+            let drained = crate::ydoc_apply::drain_inactive_ydoc_updates(
                 store,
                 crate::ydoc_apply::InactiveScope::Workspace(workspace_id),
                 &cache.released_tails(store),
@@ -2956,6 +2961,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 faults,
             )
             .map_err(local)?;
+            p.pass.clear_freed(&drained.cleared);
         }
         // Retained work replays under the feed it arrived on.
         let recorded = match &p.holding {
@@ -2965,24 +2971,28 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let relay_namespace = recorded.as_ref().map_or(relay_namespace, Option::as_deref);
         // A frozen drain hold stops its document's read before the next op
         // it has not retained, which stays in the feed. Nothing reruns the
-        // drain for it.
+        // drain for it. One of an archived lineage freezes only that lineage:
+        // ingress stops each of its updates, and the head's ops route on.
         // r1c-2: a dependency-drain hold still routes later ops, which queue
         // behind it unbounded until its bounded retention lands.
         let frozen = match (&p.holding, crate::hosted::hosted_document(op)) {
             (Holding::ByDocument { .. }, Some(object_id)) if recorded.is_none() => store
-                .read_with(|conn| {
-                    crate::hosted::queued_released_hold(conn, workspace_id, object_id)
+                .read_with(|conn| -> Result<Option<crate::HostedHold>, SyncError> {
+                    let hold = crate::hosted::queued_released_hold(conn, workspace_id, object_id)?;
+                    let Some(crate::HostedHold::ReleasedLineageUnsettled {
+                        binding,
+                        continuation: crate::ReleasedHoldContinuation::Frozen,
+                        ..
+                    }) = &hold
+                    else {
+                        return Ok(None);
+                    };
+                    if crate::ydoc_apply::names_archived_lineage(conn, binding)? {
+                        return Ok(None);
+                    }
+                    Ok(hold)
                 })
                 .map_err(local)?
-                .filter(|hold| {
-                    matches!(
-                        hold,
-                        crate::HostedHold::ReleasedLineageUnsettled {
-                            continuation: crate::ReleasedHoldContinuation::Frozen,
-                            ..
-                        }
-                    )
-                })
                 .map(|hold| (object_id.to_owned(), hold)),
             _ => None,
         };
@@ -5057,6 +5067,21 @@ impl AppliedPass {
                 None => self.drain_holds.remove(&object_id),
             };
         }
+    }
+
+    /// Clear each hold an earlier drain reported that names an archived
+    /// lineage `cleared` says a later one took every queued row of, by
+    /// object id. A hold of another lineage stands.
+    fn clear_freed(&mut self, cleared: &BTreeMap<String, BTreeSet<String>>) {
+        self.drain_holds.retain(|object_id, hold| {
+            !matches!(
+                hold,
+                crate::HostedHold::ReleasedLineageUnsettled { binding, .. }
+                    if cleared
+                        .get(object_id)
+                        .is_some_and(|lineages| lineages.contains(&binding.lineage_claim_id))
+            )
+        });
     }
 }
 

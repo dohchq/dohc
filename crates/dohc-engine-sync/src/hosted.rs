@@ -1390,6 +1390,28 @@ pub(crate) fn hold_unadmitted_in_tx(
     Ok(())
 }
 
+/// Hold the ready document `object_id` for queued work it owes that no
+/// binding can name, in the transaction that keeps that work queued. As
+/// with [`hold_unadmitted_in_tx`], its own read starts where the main feed
+/// is, and only [`completed_hold`] clears the hold, once nothing it owes is
+/// queued. A document that is not ready keeps the hold it has.
+pub(crate) fn hold_waiting_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<(), SyncError> {
+    tx.execute(
+        "UPDATE hosted_documents SET state='held',held_reason=?3,held_path=NULL,held_by=NULL, \
+           held_conflict_id=NULL,backfill_cursor=MAX(backfill_cursor, \
+             (SELECT main_cursor FROM hosted_replicas WHERE workspace_id=?1)) \
+         WHERE workspace_id=?1 AND object_id=?2 AND state='ready' \
+           AND scope_generation=(SELECT scope_generation FROM hosted_replicas WHERE workspace_id=?1)",
+        params![workspace_id, object_id, HostedHold::WorkWaiting.reason()],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
+}
+
 /// Hold the document `binding` names for released retained work, outside a
 /// cursor commit. A pass pending now read it in another state, so the same
 /// transaction counts a commit and that pass's commit no longer stands. A

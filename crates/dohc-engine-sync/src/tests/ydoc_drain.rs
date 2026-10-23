@@ -3569,6 +3569,13 @@ fn assert_parked_inactive_refusal(collision: bool, waiting: u8) {
         )
         .unwrap();
         assert_eq!(inactive.refusals.len(), 1, "{:?}", inactive.refusals);
+        // Opus's third finding on 6ded1a22a: the drain took the archived
+        // lineage's last queued row and left its document no hold, so a hold
+        // the pass reported for that lineage is cleared in the same pass.
+        let freed = std::collections::BTreeSet::from([old_sha.clone()]);
+        assert_eq!(inactive.cleared.get("inactive-refusal"), Some(&freed));
+        assert_eq!(inactive.cleared.len(), 1);
+        assert!(inactive.holds.is_empty());
         return;
     }
     let drained =

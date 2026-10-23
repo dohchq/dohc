@@ -10085,6 +10085,179 @@ async fn another_documents_open_and_close_drains_do_not_wait_on_an_archived_line
     w.close().await;
 }
 
+/// Sol's ruling on archived freezing, with Opus's fourth finding on
+/// 6ded1a22a: while a protected archived lineage holds its document, an
+/// update of the head's lineage applies and the archive keeps its state.
+/// The document stays held for the archived lineage, never ready. An update
+/// of the archived lineage still stops the document's read at its own
+/// coordinate, unacknowledged, under the binding the queued rows hold it
+/// with, so each pass commits that one hold, again after a restart.
+#[tokio::test]
+async fn the_heads_lineage_applies_while_an_archived_lineage_holds_its_document() {
+    let (mut w, desktop, client, queued, archive) = archived_window(2).await;
+    let rows = queued_feeds(&w.store);
+    let first = committed_pass(&mut w.store, &client);
+    assert!(
+        holds_archived(first.held.get("object"), &w.lineage, &archive, &queued[0]),
+        "{first:?}"
+    );
+    let hold = first.held["object"].clone();
+    let held = dohc_engine_sync::HostedDocumentStatus::Held(hold.clone());
+    assert_eq!(hosted_status(&w.store, "object"), held);
+
+    // The head's lineage is the one `archive_lineage` moved it to.
+    let head = hex_sha256(b"the winning lineage");
+    let (current, current_bytes) = safe_row(&[&w.native()], &head, "A paragraph of the head.");
+    let current = client.transport().serve(current, current_bytes);
+    let pass = hosted_pass(
+        &mut w.store,
+        &client,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+    );
+    assert!(journaled(&w.store, &current), "{pass:?}");
+    assert!(w.text().contains("A paragraph of the head."));
+    assert_eq!(pass.held.get("object"), Some(&hold), "{pass:?}");
+    assert!(pass_commit(&mut w.store, &client, &pass).committed);
+    assert_eq!(hosted_status(&w.store, "object"), held, "not ready");
+    assert_eq!(queued_feeds(&w.store), rows);
+    assert_eq!(archived_state(&w.store, &w.lineage), archive);
+    blobs_kept(&w.store, &queued);
+
+    let (archived, archived_bytes) = desktop
+        .append(&w.lineage, "A later archived paragraph.")
+        .await;
+    let archived = client.transport().serve(archived, archived_bytes);
+    for restarted in [false, true] {
+        if restarted {
+            w.store = EngineStore::open(&engine_db_path(&w.root).unwrap(), 0).unwrap();
+        }
+        let pass = hosted_pass(
+            &mut w.store,
+            &client,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+        );
+        let read = &pass.pending_cursor.as_ref().unwrap().reads["object"];
+        assert_eq!(
+            (read.cursor, read.stopped.as_ref()),
+            (archived.relay_seq.unwrap() - 1, Some(&hold)),
+            "restarted={restarted}: {pass:?}"
+        );
+        assert_eq!(pass.held.get("object"), Some(&hold));
+        assert!(!journaled(&w.store, &archived), "restarted={restarted}");
+        assert!(
+            pass_commit(&mut w.store, &client, &pass).committed,
+            "restarted={restarted}: the binding stands"
+        );
+        assert_eq!(hosted_status(&w.store, "object"), held);
+        assert_eq!(queued_feeds(&w.store), rows);
+        assert_eq!(archived_state(&w.store, &w.lineage), archive);
+    }
+    desktop.close().await;
+    w.close().await;
+}
+
+/// Sol's first two findings on 6ded1a22a, with Opus's second: a queued
+/// update of an archived lineage with no relay position, NULL or 0 as local
+/// and legacy rows may record, never stalls the workspace. Unprotected, it
+/// reaches the archive. Protected, it stays queued with its blob and the
+/// identity it recorded, and its document waits with no binding stored,
+/// through committed passes and a restart, while a neighbour's writes apply.
+/// Once nothing protects the lineage, the archive takes it.
+#[tokio::test]
+async fn archived_rows_with_no_relay_position_never_stall_the_workspace() {
+    let free = |w: &RetainedWindow| {
+        write_unchecked(
+            w,
+            &format!(
+                "DELETE FROM live_owner_activations WHERE lineage_claim_id='{}'",
+                w.lineage
+            ),
+        );
+    };
+    // Rows at one position have no relay order between them.
+    let sorted_feeds = |store: &EngineStore| {
+        let mut feeds = queued_feeds(store);
+        feeds.sort();
+        feeds
+    };
+    let waiting = dohc_engine_sync::HostedHold::WorkWaiting;
+    let held = dohc_engine_sync::HostedDocumentStatus::Held(waiting.clone());
+    let ready = dohc_engine_sync::HostedDocumentStatus::Ready;
+    for position in ["NULL", "0"] {
+        for protected in [true, false] {
+            let case = format!("relay_seq={position}, protected={protected}");
+            let (mut w, desktop, client, queued, archive) = archived_window(2).await;
+            execute(
+                &mut w.store,
+                &format!(
+                    "UPDATE ydoc_deferred_updates SET ingress_kind='legacy-unknown', \
+                     relay_namespace=NULL,replication_epoch=NULL,stream_identity=NULL, \
+                     relay_seq={position}"
+                ),
+            );
+            let rows = sorted_feeds(&w.store);
+            if !protected {
+                free(&w);
+            }
+            let mut text = "A neighbour.\n".to_owned();
+            let created = client
+                .transport()
+                .create("neighbour", NEIGHBOUR_PATH, &text);
+            let pass = committed_pass(&mut w.store, &client);
+            assert!(
+                journaled(&w.store, &created),
+                "{case}: the neighbour applied"
+            );
+            if protected {
+                assert_eq!(pass.held.get("object"), Some(&waiting), "{case}: {pass:?}");
+                assert_eq!(hosted_status(&w.store, "object"), held, "{case}");
+                for restarted in [false, true] {
+                    if restarted {
+                        w.store = EngineStore::open(&engine_db_path(&w.root).unwrap(), 0).unwrap();
+                    }
+                    assert_eq!(sorted_feeds(&w.store), rows, "{case}: rows and feeds stay");
+                    assert_eq!(archived_state(&w.store, &w.lineage), archive, "{case}");
+                    blobs_kept(&w.store, &queued);
+                    let next = format!("A neighbour, written again ({restarted}).\n");
+                    let edited = client
+                        .transport()
+                        .write("neighbour", NEIGHBOUR_PATH, Some(&text), &next);
+                    text = next;
+                    let again = committed_pass(&mut w.store, &client);
+                    assert!(
+                        journaled(&w.store, &edited),
+                        "{case}: the neighbour goes on"
+                    );
+                    assert_eq!(
+                        again.held.get("object"),
+                        Some(&waiting),
+                        "{case}: {again:?}"
+                    );
+                    assert_eq!(hosted_status(&w.store, "object"), held, "{case}");
+                }
+                assert_eq!(sorted_feeds(&w.store), rows, "{case}");
+                free(&w);
+                committed_pass(&mut w.store, &client);
+            }
+            assert_eq!(
+                queued_feeds(&w.store),
+                Vec::<String>::new(),
+                "{case}: the archive took them"
+            );
+            assert_ne!(archived_state(&w.store, &w.lineage), archive, "{case}");
+            for _ in 0..2 {
+                if hosted_status(&w.store, "object") == ready {
+                    break;
+                }
+                committed_pass(&mut w.store, &client);
+            }
+            assert_eq!(hosted_status(&w.store, "object"), ready, "{case}");
+            desktop.close().await;
+            w.close().await;
+        }
+    }
+}
+
 /// A binding names a relay position from 1, so a row the window would hold
 /// at relay position 0 has none: it waits unapplied and unacknowledged
 /// instead of holding with a binding no store could read back.
