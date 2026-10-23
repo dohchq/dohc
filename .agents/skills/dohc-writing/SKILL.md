@@ -6,23 +6,22 @@ description: >-
 
 # Writing for dohc
 
-dohc shares its name with the double overhead camshaft, and its site shows a Jaguar XK inline six.
-Write the way the engine makers of the 1950s and 1960s wrote about their work: formally, exactly, and without hype.
+Write in plain and simple language.
 
-David Ogilvy's Rolls-Royce advertisement is the model: "At 60 miles an hour the loudest noise in this new Rolls-Royce comes from the electric clock."
-Its headline makes the case with one measured fact.
+dohc's voice is tastefully formal.
+It takes the calm, exact tone of good 1960s product writing and says things the way people talk today.
 
 ## The voice
 
-- **Formal.** Write complete sentences. Prefer "do not" to "don't". Leave out slang, exclamation marks, and emoji.
-- **Exact.** Name the part, the number, and the unit. Use only numbers you measured or can cite.
-- **Quiet.** State what dohc does and let that fact carry the claim. Back a superlative with evidence, or cut it.
-- **Dry.** One understated line is welcome in a README or a PR body. Keep wit out of instructions and warnings.
+- **Plain.** Use everyday words and short sentences.
+- **Exact.** Name the thing, the number, and the unit. Use only numbers you measured or can cite.
+- **Understated.** Say what dohc does and let that fact make the claim. Back a superlative with evidence, or cut it.
+- **Tastefully formal.** Write complete sentences, and use contractions where they read naturally. A document may use slang, an exclamation mark, or an emoji once, if it fits. Keep them out of instructions, warnings, and commit messages.
 
-## Instructions read like a workshop manual
+## Instructions follow ASD-STE100
 
-Use ASD-STE100, the controlled English written for aircraft maintenance manuals.
-It applies to procedures, runbooks, skills, AGENTS.md, product invariants, and any step inside another document.
+ASD-STE100 is the controlled English of aircraft maintenance manuals.
+Use it for procedures, runbooks, skills, AGENTS.md, product invariants, and any step inside another document.
 
 - Write one instruction per sentence, in 20 words or fewer.
 - Put the condition first: "If you changed a crate, rebuild the engine."
@@ -56,13 +55,13 @@ For docs, specs, plans, PR bodies, and code comments, follow the six rules from 
 >
 > After: dohc keeps your work on your computer. It works without an account or a network connection.
 
+> Before: We are pleased to confirm that the installation process has been successfully completed.
+>
+> After: That's it. dohc is installed.
+
 > Before: Note that the engine binary may need to be rebuilt in cases where changes have been made to any of the crates.
 >
 > After: If you changed a crate, rebuild the engine with the rust-gate skill.
-
-> Before: This isn't just a refactor, it's a fundamental shift in how sync works, delivering robust, seamless collaboration.
->
-> After: Conflict resolution moves from the renderer to the engine. Two devices editing one document no longer race.
 
 ## Last pass
 
@@ -74,4 +73,4 @@ You are done when:
 
 - every fact, warning, command, and link from the source is still there;
 - every factual claim matches the code or a cited source, and proposed behavior reads as proposed;
-- the text sounds like a careful engineer describing work they are proud of.
+- a reader would call it plain and simple language.
