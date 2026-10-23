@@ -1315,7 +1315,7 @@ fn expected_relay_error(code: &str) -> RelayError {
         | "notice_list_full"
         | "restore-in-progress"
         | "stale" => RelayError::Conflict,
-        "collection_write_rate_limited" => RelayError::HttpStatus(429),
+        "collection_write_rate_limited" | "held_read_busy" => RelayError::HttpStatus(429),
         "discussion_limit_reached" => RelayError::QuotaExceeded,
         "discussion_rate_limited" => RelayError::DiscussionRateLimited,
         "epoch_superseded" => RelayError::EpochSuperseded,

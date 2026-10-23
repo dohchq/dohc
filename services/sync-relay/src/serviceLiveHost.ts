@@ -6,7 +6,7 @@ import {observeRelayWrites, type LiveHostChanges} from "./relayWriteChanges.js";
 import {parseNativeLiveSyncConfig} from "./liveSyncConfig.js";
 import {LiveDocumentWork} from "./liveDocumentWork.js";
 import {liveEditors} from "./liveEditors.js";
-import {queueLiveHostRequests} from "./liveHostRequests.js";
+import {heldReadLane, queueLiveHostRequests} from "./liveHostRequests.js";
 import {parseLiveObjectBinding, type LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -151,6 +151,8 @@ export function readServiceLiveHostConfig(configPath: string, keepWorkspace: (id
   });
 }
 
+// Held reads running at once, waiting, and sharing one engine request.
+const HELD_READS = {maxRunning: 2, maxQueued: 16, maxWaiters: 8} as const;
 const held = new WeakSet<SyncRelayStorage>();
 /**
  * An attached workspace's hosted replica. `pulls` counts the pulls started and
@@ -613,37 +615,41 @@ export async function startServiceLiveHost(options: {
     // A held-document read asks the engine for a workspace this daemon replicates,
     // and answers only while this registration and that attachment still stand.
     // One that ended during the read invalidates it, however the read ended.
-    // It writes nothing, so it takes no turn and no pass waits on it. `streamed`
-    // takes the blob the engine sends before its answer.
+    // It writes nothing, so it takes no turn and no pass waits on it. It runs in
+    // its own lane on the native client, beside ordinary requests, and an
+    // identical read joins one already running. With `stream`, `streamed` is the
+    // blob the engine sends before its answer.
+    const heldReads = heldReadLane({...HELD_READS, deadlineMs: config.client.requestDeadlineMs, signal});
     const heldRead = async <M extends "sync.heldDocuments" | "sync.heldDocument">(workspaceId: string, method: M,
-      params: Record<string, JsonValue>, callerSignal?: AbortSignal,
-      streamed?: (bytes: Uint8Array) => void): Promise<HostedSyncMethodResultMap[M] | HeldReadInvalidated | null> => {
+      params: Record<string, JsonValue>, stream: boolean, callerSignal?: AbortSignal,
+    ): Promise<{result: HostedSyncMethodResultMap[M]; streamed?: Uint8Array} | HeldReadInvalidated | null> => {
       available();
       if (!registrationStands()) return {invalidated: "registration"};
       const attached = attachments.get(workspaceId);
       if (!attached) return null;
       const ended = (): HeldReadInvalidated | undefined => !registrationStands() ? {invalidated: "registration"}
         : attachments.get(workspaceId) !== attached ? {invalidated: "attachment"} : undefined;
-      return withLiveHostSignal(signal, callerSignal, async joined => {
-        const id = nextRequestId();
-        const stop = streamed ? client.onBlob(blob => {if (blob.requestId === id) streamed(blob.bytes);}) : () => {};
-        try {
-          let response;
+      let read;
+      try {
+        read = await heldReads(workspaceId, JSON.stringify([attached.handle, method, params, stream]), callerSignal, async joined => {
+          const id = nextRequestId();
+          let streamed: Uint8Array | undefined;
+          const stop = stream ? native.onBlob(blob => {if (blob.requestId === id) streamed = blob.bytes;}) : () => {};
           try {
-            response = await client.sendRequest({id, method, workspace: attached.handle,
+            const response = await native.sendRequest({id, method, workspace: attached.handle,
               params: {workspaceId, ...params}, deadlineMs: config.client.requestDeadlineMs}, joined);
-            joined.throwIfAborted();
-            available();
-          } catch (error) {
-            const invalidated = ended();
-            if (invalidated) return invalidated;
-            throw error;
+            return {result: decodeHostedSyncResult(method, response.result), ...(streamed ? {streamed} : {})};
+          } finally {
+            stop();
           }
-          return ended() ?? decodeHostedSyncResult(method, response.result);
-        } finally {
-          stop();
-        }
-      });
+        });
+        available();
+      } catch (error) {
+        const invalidated = ended();
+        if (invalidated) return invalidated;
+        throw error;
+      }
+      return ended() ?? read;
     };
     // Restore work takes a turn, so no idle unload runs beside it. A step that
     // registers on a dormant document reloads it, and passes then settle it.
@@ -942,25 +948,25 @@ export async function startServiceLiveHost(options: {
        * workspace it does not replicate.
        */
       async heldDocuments(workspaceId: string, page: {afterObjectId?: string; limit: number}, callerSignal?: AbortSignal) {
-        return heldRead(workspaceId, "sync.heldDocuments",
-          {...(page.afterObjectId === undefined ? {} : {afterObjectId: page.afterObjectId}), limit: page.limit}, callerSignal);
+        const listed = await heldRead(workspaceId, "sync.heldDocuments",
+          {...(page.afterObjectId === undefined ? {} : {afterObjectId: page.afterObjectId}), limit: page.limit}, false, callerSignal);
+        return listed === null || "invalidated" in listed ? listed : listed.result;
       },
       /**
        * One held document, whether its binding stands, and what that binding preserves; with
        * `markdown`, its whole Markdown however long. Null when nothing is held there.
        */
       async heldDocument(workspaceId: string, objectId: string, read: {markdown: boolean}, callerSignal?: AbortSignal) {
-        let streamed: Uint8Array | undefined;
         const inspected = await heldRead(workspaceId, "sync.heldDocument", {objectId, ...(read.markdown ? {stream: "markdown"} : {})},
-          callerSignal, read.markdown ? bytes => {streamed = bytes;} : undefined);
-        return inspected === null || "invalidated" in inspected || !read.markdown ? inspected : withStreamedMarkdown(inspected, streamed);
+          read.markdown, callerSignal);
+        if (inspected === null || "invalidated" in inspected) return inspected;
+        return inspected.result === null || !read.markdown ? inspected.result : withStreamedMarkdown(inspected.result, inspected.streamed);
       },
       /** One held document with its contribution artifact, exactly the bytes its inspection names. */
       async heldContributions(workspaceId: string, objectId: string, callerSignal?: AbortSignal) {
-        let streamed: Uint8Array | undefined;
-        const inspected = await heldRead(workspaceId, "sync.heldDocument", {objectId, stream: "contributions"}, callerSignal,
-          bytes => {streamed = bytes;});
-        return inspected === null || "invalidated" in inspected ? inspected : withStreamedContributions(inspected, streamed);
+        const inspected = await heldRead(workspaceId, "sync.heldDocument", {objectId, stream: "contributions"}, true, callerSignal);
+        if (inspected === null || "invalidated" in inspected) return inspected;
+        return inspected.result === null ? null : withStreamedContributions(inspected.result, inspected.streamed);
       },
       get restoreConfigured() { return restore !== undefined; },
       async prepareRestore(value: StopRestoreLookup, callerSignal?: AbortSignal) {

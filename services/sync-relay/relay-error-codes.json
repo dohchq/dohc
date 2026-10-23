@@ -17,6 +17,7 @@
   { "code": "discussion_rate_limited", "status": 429 },
   { "code": "empty_selector", "status": 400 },
   { "code": "epoch_superseded", "status": 409 },
+  { "code": "held_read_busy", "status": 429 },
   { "code": "identity_not_recognized", "status": 409 },
   { "code": "identity_required", "status": 409 },
   { "code": "internal_error", "status": 500 },

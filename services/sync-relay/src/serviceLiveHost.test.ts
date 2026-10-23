@@ -861,6 +861,50 @@ it("answers a held-document read its detach or retired registration overtook as 
   await expect(read()).rejects.toMatchObject({code: "not_found"});
 });
 
+// Proves: held reads run in their own lane on the native client, so a held
+// read neither waits behind an ordinary engine request nor holds one back, and
+// its caller's signal ends the engine request it waits on.
+it("answers held reads beside ordinary engine requests, and cancels one on its caller's signal", async () => {
+  const o = await emptyServiceHost({frameChanges: true}), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const send = o.client().sendRequest, through = send.getMockImplementation()! as (...args: unknown[]) => ReturnType<typeof send>;
+  let engine: (signal: AbortSignal) => Promise<unknown> = async () => null;
+  send.mockImplementation(async (...args: unknown[]) => {
+    const request = args[0] as {id: number; method: string};
+    return request.method === "sync.heldDocument" ? {id: request.id, result: await engine(args[1] as AbortSignal)} as never : through(...args);
+  });
+
+  // An ordinary pull holds the only ordinary slot while a held read completes.
+  const pull = o.park("sync.pullHosted");
+  await pull.entered.promise;
+  let answered = false;
+  const beside = o.host.heldDocument("workspace", "object", {markdown: false}).then(value => {answered = true; return value;});
+  await vi.waitFor(() => expect(answered).toBe(true));
+  await expect(beside).resolves.toBeNull();
+  pull.release.resolve();
+
+  // A held read the engine is still answering leaves ordinary pulls running.
+  const asked = deferred<void>(), answer = deferred<void>();
+  engine = async () => {asked.resolve(); await answer.promise; return null;};
+  const reading = o.host.heldDocument("workspace", "object", {markdown: false});
+  await asked.promise;
+  await o.nextPull();
+  answer.resolve();
+  await expect(reading).resolves.toBeNull();
+
+  const entered = deferred<AbortSignal>(), caller = new AbortController();
+  engine = signal => {
+    entered.resolve(signal);
+    return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), {once: true}));
+  };
+  const cancelled = o.host.heldDocument("workspace", "object", {markdown: false}, caller.signal);
+  const engineSignal = await entered.promise;
+  const refused = expect(cancelled).rejects.toThrow("caller left");
+  caller.abort(new Error("caller left")); await refused;
+  expect(engineSignal.aborted).toBe(true);
+});
+
 // Proves: a workspace whose last document left stays attached until the
 // document unloaded and a later pull found nothing departed. Only then may it
 // detach, and its document is retained until that pull.

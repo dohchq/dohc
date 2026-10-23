@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { HeldDocumentInspection, HostedSyncMethodResultMap } from "@dohc/workspace-engine-client/relay-wire";
 import { badRequest, notFound, relayError } from "./errors";
+import { HeldReadBusyError } from "./liveHostRequests";
 import type { SyncRelayStorage } from "./storage";
 import { MAX_BLOB_BYTES, MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 
@@ -118,7 +119,21 @@ export function withStreamedContributions(inspected: HeldDocumentInspection, str
  * still name it.
  */
 export function createHeldDocumentRoutes(options: {storage: SyncRelayStorage; host(): HeldDocumentHost | undefined}) {
+  // One admitted read per owner and workspace. The host's read ends on the request's signal and its own deadline.
+  const admitted = new Set<string>();
   return async (request: Request, route: HeldDocumentRoute, ownerUserId: string) => {
+    const {storage} = options, slot = JSON.stringify([ownerUserId, route.workspaceId]);
+    if (admitted.has(slot)) {
+      // A caller who no longer owns the workspace learns nothing from a read still running.
+      if (!storage.workspaceIsOwnedBy(route.workspaceId, ownerUserId)) throw notFound();
+      throw relayError("held_read_busy");
+    }
+    admitted.add(slot);
+    try {return await respond(request, route, ownerUserId);}
+    finally {admitted.delete(slot);}
+  };
+
+  async function respond(request: Request, route: HeldDocumentRoute, ownerUserId: string) {
     const {storage} = options;
     if (!storage.workspaceIsOwnedBy(route.workspaceId, ownerUserId)) throw notFound();
     if (request.method !== "GET") throw relayError("method_not_allowed");
@@ -139,6 +154,7 @@ export function createHeldDocumentRoutes(options: {storage: SyncRelayStorage; ho
     } catch (error) {
       // A former owner, or a caller of a replaced host, learns nothing from how the read ended.
       if (!standing()) throw notFound();
+      if (error instanceof HeldReadBusyError) throw relayError("held_read_busy");
       throw error;
     }
     signal.throwIfAborted();
@@ -164,5 +180,5 @@ export function createHeldDocumentRoutes(options: {storage: SyncRelayStorage; ho
     const body = JSON.stringify(answered);
     if (Buffer.byteLength(body) > MAX_PAYLOAD_JSON_BYTES) throw relayError("payload_too_large", "Held document details exceed the metadata limit.");
     return new Response(body, {status: 200, headers: {...headers, "content-type": "application/json"}});
-  };
+  }
 }
