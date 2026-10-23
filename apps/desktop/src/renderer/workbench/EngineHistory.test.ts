@@ -61,8 +61,8 @@ describe("engineOriginLabel", () => {
   });
 
   it("names kept typing whether or not its notice is still open", () => {
-    expect(engineOriginLabel("capture-recovery")).toBe("Typing kept");
-    expect(engineOriginLabel("capture-recovery-cleared")).toBe("Typing kept");
+    expect(engineOriginLabel("capture-recovery")).toBe("Text kept");
+    expect(engineOriginLabel("capture-recovery-cleared")).toBe("Text kept");
   });
 });
 

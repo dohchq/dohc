@@ -4,7 +4,7 @@ dohc is a local-first workspace for people and their agents. It brings files, do
 
 The ambition is a work suite you can reshape with your own agents. dohc supplies sync, sharing, permissions, and history. You own the work.
 
-[Download a build](https://github.com/dohchq/dohc/releases) or [run it from source](#run-it-from-source).
+[Download the newest nightly build](https://github.com/dohchq/dohc/releases) or [run it from source](#run-it-from-source).
 
 ## Why this exists
 
@@ -22,13 +22,13 @@ dohc is agent agnostic. It does not provide an agent or prescribe how agents sho
 
 Workspace apps are web apps whose source lives in the workspace. Collaborators can inspect and edit the source with their own tools and agents. Apps receive only the workspace data and capabilities their owner exposes.
 
-Published apps can be opened through a share link by people who do not use dohc, subject to the owner's access settings. Publishing from the packaged desktop requires Windows x64 and a self-hosted server with app publishing enabled. It is disabled in the default server bundle; see the [self-hosting guide](docs/how-to/self-host.md).
+Published apps can be opened through a share link by people who do not use dohc, subject to the owner's access settings. Publishing from the packaged desktop requires Windows x64 or an Apple silicon Mac running macOS 13.5 or later, and a self-hosted server with app publishing enabled. It is disabled in the default server bundle; see the [self-hosting guide](docs/how-to/self-host.md).
 
-Apps can use approved Collection data through the operations their owner grants. Creating local Collection-backed apps currently requires the Windows x64 desktop build. See the [app backend guide](docs/how-to/app-backend.md) for data, sharing, and current limits, and the [desktop capability requirements](docs/reference/desktop-capabilities.md) for platform and service limits.
+Apps can use approved Collection data through the operations their owner grants. Creating local Collection-backed apps requires Windows x64 or an Apple silicon Mac running macOS 13.5 or later. See the [app backend guide](docs/how-to/app-backend.md) for data, sharing, and current limits, and the [desktop capability requirements](docs/reference/desktop-capabilities.md) for platform and service limits.
 
 ## Where it is today
 
-dohc is pre-launch and under active development. We are in the process of proving these workflow benefits with users. Expect missing pieces, rough edges, and breaking changes.
+dohc is an early alpha, released as nightly builds. Download the newest one from Releases, and dohc downloads each update automatically. On Windows and macOS, an update installs when you quit dohc. On Linux, select Restart when the update is ready, then approve the installation. We are still proving these workflow benefits with users. Expect missing pieces, rough edges, and breaking changes. Read the known issues pinned at the top of the issue list before you start. Saving a note can rewrite Markdown that dohc doesn't keep yet, so try dohc on a copy of a notes folder.
 
 The desktop app currently includes:
 

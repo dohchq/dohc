@@ -2,11 +2,18 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { Profiler } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Components } from "react-markdown";
+import Markdown, { type Components } from "react-markdown";
 import { bridge } from "../bridge";
-import { IncrementalMarkdownDocument } from "./IncrementalMarkdownDocument";
+import {
+  createMarkdownChunkRenderer,
+  IncrementalMarkdownDocument,
+} from "./IncrementalMarkdownDocument";
 
 vi.mock("../bridge", () => ({ bridge: vi.fn() }));
+vi.mock("react-markdown", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-markdown")>();
+  return { ...actual, default: vi.fn(actual.default) };
+});
 
 const MULTI_SLICE_HEADING_COUNT = 240;
 
@@ -367,5 +374,96 @@ describe("IncrementalMarkdownDocument", () => {
         heading.textContent?.startsWith("Other"),
       ),
     ).toBe(true);
+  });
+
+  it("mounts an unchanged chunk again without parsing it", () => {
+    const parses = vi.mocked(Markdown);
+    const components: Components = {};
+    const body = "# Remounted\n\n[FAQ](faq.md)";
+    const firstOpen = vi.fn();
+    const secondOpen = vi.fn();
+    parses.mockClear();
+
+    const first = render(
+      <IncrementalMarkdownDocument
+        body={body}
+        components={components}
+        onOpenWorkspaceLink={firstOpen}
+      />,
+    );
+    const html = first.container.innerHTML;
+    first.unmount();
+    const second = render(
+      <IncrementalMarkdownDocument
+        body={body}
+        components={components}
+        onOpenWorkspaceLink={secondOpen}
+      />,
+    );
+
+    expect(parses).toHaveBeenCalledOnce();
+    expect(second.container.innerHTML).toBe(html);
+    const click = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      detail: 1,
+    });
+    second.getByRole("link", { name: "FAQ" }).dispatchEvent(click);
+    expect(secondOpen).toHaveBeenCalledOnce();
+    expect(firstOpen).not.toHaveBeenCalled();
+  });
+
+  it("parses a chunk again when its text or components change", () => {
+    const parses = vi.mocked(Markdown);
+    const components: Components = {};
+    const marked: Components = {
+      p: ({ children }) => <p data-marked="">{children}</p>,
+    };
+    parses.mockClear();
+
+    const view = render(
+      <IncrementalMarkdownDocument body="Text before" components={components} />,
+    );
+    view.rerender(
+      <IncrementalMarkdownDocument body="Text after" components={components} />,
+    );
+    expect(parses).toHaveBeenCalledTimes(2);
+    expect(view.container.textContent).toBe("Text after");
+
+    view.rerender(
+      <IncrementalMarkdownDocument body="Text after" components={marked} />,
+    );
+    expect(parses).toHaveBeenCalledTimes(3);
+    expect(view.container.querySelector("[data-marked]")?.textContent).toBe(
+      "Text after",
+    );
+  });
+
+  it("evicts the least recently shown chunk past its bound", () => {
+    const parses = vi.mocked(Markdown);
+    const renderChunk = createMarkdownChunkRenderer(12);
+    const components: Components = {};
+    parses.mockClear();
+
+    const a = renderChunk("aaaa", components);
+    renderChunk("bbbb", components);
+    renderChunk("cccc", components);
+    expect(renderChunk("aaaa", components)).toBe(a);
+    expect(parses).toHaveBeenCalledTimes(3);
+
+    // Over the bound: "bbbb" is now the least recently shown.
+    renderChunk("dddd", components);
+    renderChunk("aaaa", components);
+    renderChunk("cccc", components);
+    expect(parses).toHaveBeenCalledTimes(4);
+    renderChunk("bbbb", components);
+    expect(parses).toHaveBeenCalledTimes(5);
+
+    // A chunk larger than the bound is never kept, and evicts nothing.
+    const long = "x".repeat(13);
+    renderChunk(long, components);
+    renderChunk(long, components);
+    renderChunk("aaaa", components);
+    expect(parses).toHaveBeenCalledTimes(7);
   });
 });
