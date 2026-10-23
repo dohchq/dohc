@@ -1,5 +1,6 @@
+import { DOCUMENT_END } from "../helpers/keys";
 import { expect, test, type Page } from "@playwright/test";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openLiveDaemonWorkspace } from "../helpers/daemonSeed";
@@ -34,7 +35,7 @@ function largeNote(): string {
   if (shape === "edit-beside-nested") return "# A long synced note\n\nStarts small, edited outside.\n\n- one\n  - two\n";
   const blocks: Record<string, (index: number) => string> = {
     paragraphs: (index) => `Plain paragraph ${index} with ordinary words that run on for a while so the line wraps.\n`,
-    bold: (index) => `Paragraph ${index} has **bold** words.\n`,
+    bold: (index) => `Paragraph ${index} has **bold** words and a [link](https://example.com/${index}).\n\n- an item with **bold** in it\n- an item with a [link](https://example.com/${index})\n`,
     link: (index) => `Paragraph ${index} has a [link](https://example.com/${index}) in it.\n`,
     headings: (index) => `## Section ${index}\n`,
     list: (index) => `- one item in ${index}\n- another item\n`,
@@ -173,6 +174,17 @@ test("opens a large note in a workspace that syncs", async () => {
     }
     await expect(page.getByTestId("markdown-editor")).toContainText(lastLine, { timeout: Number(process.env.LARGE_SYNC_SHOWN_MS ?? 180_000) });
     results.outsideWriteShownMs = Math.round(performance.now() - started);
+    results.editorHtmlHead = (await page.getByTestId("markdown-editor").innerHTML()).slice(0, 1500);
+    if (process.env.LARGE_SYNC_TYPE_AFTER === "1") {
+      await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved", { timeout: 60_000 });
+      const typed = "Typed in dohc after the outside edit.";
+      await page.getByTestId("markdown-editor").click();
+      await page.keyboard.press(DOCUMENT_END);
+      await page.keyboard.press("Enter");
+      await page.keyboard.insertText(typed);
+      await expect.poll(() => readFile(join(temp.rootPath, "notes/long.md"), "utf8"), { timeout: 60_000 }).toContain(typed);
+      results.fileAfterTyping = await readFile(join(temp.rootPath, "notes/long.md"), "utf8");
+    }
     await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved", { timeout: 180_000 });
     results.outsideWriteSettledMs = Math.round(performance.now() - started);
     let captured = await profile.stop();
