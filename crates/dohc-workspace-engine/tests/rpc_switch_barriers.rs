@@ -860,24 +860,9 @@ async fn cancelled_set_active_keeps_the_owned_fence_until_the_switch_finishes() 
             .is_cancelled()
     );
 
-    probe.observe_next_apply_gate_wait();
-    let flush_transport = Arc::clone(&transport);
-    let flush_handle = handle.clone();
-    let mut flushing = tokio::spawn(async move {
-        call(
-            &flush_transport,
-            &flush_handle,
-            4,
-            "capture.flush",
-            json!({}),
-        )
-        .await
-    });
-    bounded(
-        "live driver waiting behind detached fence",
-        probe.wait_until_apply_gate_waiting(),
-    )
-    .await;
+    // The driver may already be waiting at the gate, past its observation point.
+    // Poll the flush itself instead of waiting for another tick notification.
+    let mut flushing = Box::pin(call(&transport, &handle, 4, "capture.flush", json!({})));
     assert!(
         tokio::time::timeout(Duration::from_millis(100), &mut flushing)
             .await
@@ -886,9 +871,7 @@ async fn cancelled_set_active_keeps_the_owned_fence_until_the_switch_finishes() 
     );
 
     probe.release_version_commit();
-    bounded("capture after detached switch", flushing)
-        .await
-        .expect("flush task");
+    bounded("capture after detached switch", flushing).await;
     for id in 5..25 {
         let active = call(
             &transport,
@@ -1594,25 +1577,18 @@ async fn workspace_close_and_set_active_share_capture_then_session_lock_order() 
     )
     .await;
 
-    // Queue the real driver on the capture gate while setActive owns it. A
-    // session-first close would now hold session_ops and await this driver,
-    // while setActive awaits session_ops: the review's deadlock triangle.
-    probe.observe_next_apply_gate_wait();
-    let flush_transport = Arc::clone(&transport);
-    let flush_handle = handle.clone();
-    let flushing = tokio::spawn(async move {
-        flush_transport
-            .call(
-                RequestContext::unbounded(),
-                request(4, "capture.flush", Some(flush_handle), json!({})),
-            )
+    // Drive capture while setActive owns the gate. Its next gate notification
+    // may already have fired, so check the pending flush instead.
+    let mut flushing = Box::pin(transport.call(
+        RequestContext::unbounded(),
+        request(4, "capture.flush", Some(handle.clone()), json!({})),
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut flushing)
             .await
-    });
-    bounded(
-        "capture driver queued on apply gate",
-        probe.wait_until_apply_gate_waiting(),
-    )
-    .await;
+            .is_err(),
+        "capture must remain fenced while setActive owns the capture gate"
+    );
 
     probe.observe_next_apply_gate_wait();
     let close_transport = Arc::clone(&transport);
@@ -1644,9 +1620,7 @@ async fn workspace_close_and_set_active_share_capture_then_session_lock_order() 
         .await
         .expect("close task")
         .expect("close");
-    let _ = bounded("capture.flush task", flushing)
-        .await
-        .expect("flush task");
+    let _ = bounded("capture.flush", flushing).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
