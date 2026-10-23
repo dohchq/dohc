@@ -153,8 +153,8 @@ struct CaptureApplyProbeInner {
     commit_armed: std::sync::atomic::AtomicBool,
     commit_entered: tokio::sync::Semaphore,
     commit_release: tokio::sync::Semaphore,
-    gate_wait_armed: std::sync::atomic::AtomicBool,
-    gate_wait_entered: tokio::sync::Semaphore,
+    apply_gate_waiting: tokio::sync::watch::Sender<bool>,
+    close_gate_waiting: tokio::sync::watch::Sender<bool>,
     worker_armed: std::sync::atomic::AtomicBool,
     worker_entered: tokio::sync::Semaphore,
     worker_release: (Mutex<bool>, std::sync::Condvar),
@@ -193,8 +193,8 @@ impl Default for CaptureApplyProbeInner {
             commit_armed: std::sync::atomic::AtomicBool::new(false),
             commit_entered: tokio::sync::Semaphore::new(0),
             commit_release: tokio::sync::Semaphore::new(0),
-            gate_wait_armed: std::sync::atomic::AtomicBool::new(false),
-            gate_wait_entered: tokio::sync::Semaphore::new(0),
+            apply_gate_waiting: tokio::sync::watch::channel(false).0,
+            close_gate_waiting: tokio::sync::watch::channel(false).0,
             worker_armed: std::sync::atomic::AtomicBool::new(false),
             worker_entered: tokio::sync::Semaphore::new(0),
             worker_release: (Mutex::new(false), std::sync::Condvar::new()),
@@ -357,17 +357,34 @@ impl CaptureApplyProbe {
         self.inner.commit_release.add_permits(1);
     }
 
-    pub fn observe_next_apply_gate_wait(&self) {
-        self.inner.gate_wait_armed.store(true, Ordering::Release);
-    }
-
     pub async fn wait_until_apply_gate_waiting(&self) {
         self.inner
-            .gate_wait_entered
-            .acquire()
+            .apply_gate_waiting
+            .subscribe()
+            .wait_for(|waiting| *waiting)
             .await
-            .expect("capture apply probe remains open")
-            .forget();
+            .expect("capture apply probe remains open");
+    }
+
+    pub fn is_apply_gate_waiting(&self) -> bool {
+        *self.inner.apply_gate_waiting.borrow()
+    }
+
+    pub async fn wait_until_close_gate_waiting(&self) {
+        self.inner
+            .close_gate_waiting
+            .subscribe()
+            .wait_for(|waiting| *waiting)
+            .await
+            .expect("workspace close probe remains open");
+    }
+
+    fn observe_apply_gate_wait(&self) -> CaptureGateWait<'_> {
+        CaptureGateWait::new(&self.inner.apply_gate_waiting)
+    }
+
+    pub(crate) fn observe_close_gate_wait(&self) -> CaptureGateWait<'_> {
+        CaptureGateWait::new(&self.inner.close_gate_waiting)
     }
 
     /// Pause the next plain apply worker after it starts but before it calls
@@ -448,6 +465,24 @@ impl CaptureApplyProbe {
 
     pub fn layer_start_count(&self) -> u64 {
         self.inner.layer_start_count.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(feature = "harness")]
+pub(crate) struct CaptureGateWait<'a>(&'a tokio::sync::watch::Sender<bool>);
+
+#[cfg(feature = "harness")]
+impl<'a> CaptureGateWait<'a> {
+    fn new(waiting: &'a tokio::sync::watch::Sender<bool>) -> Self {
+        waiting.send_replace(true);
+        Self(waiting)
+    }
+}
+
+#[cfg(feature = "harness")]
+impl Drop for CaptureGateWait<'_> {
+    fn drop(&mut self) {
+        self.0.send_replace(false);
     }
 }
 
@@ -554,15 +589,6 @@ impl CaptureApplyProbe {
                     .await
                     .expect("version commit probe remains open")
                     .forget();
-            }
-        }
-    }
-
-    pub(crate) fn observe_gate_wait_if_armed(&self) {
-        #[cfg(feature = "harness")]
-        {
-            if self.inner.gate_wait_armed.swap(false, Ordering::AcqRel) {
-                self.inner.gate_wait_entered.add_permits(1);
             }
         }
     }
@@ -2246,6 +2272,11 @@ impl DriverEnv for RealEnv {
             self.status.snapshot().phase,
             CapturePhase::Starting | CapturePhase::Importing
         );
+        #[cfg(feature = "harness")]
+        let gate_wait = self
+            .apply_probe
+            .as_ref()
+            .map(CaptureApplyProbe::observe_apply_gate_wait);
         let _apply_guard = tokio::select! {
             biased;
             () = cancel.cancelled() => {
@@ -2255,6 +2286,8 @@ impl DriverEnv for RealEnv {
             },
             guard = self.apply_gate.lock() => guard,
         };
+        #[cfg(feature = "harness")]
+        drop(gate_wait);
         let _links_hold = self.actor.hold_link_drain();
         #[cfg(feature = "harness")]
         let actor_before = self
@@ -2493,14 +2526,18 @@ impl DriverEnv for RealEnv {
         // A write, or a recovery at open, fell back since the last tick; its
         // own rename is what woke this tick.
         self.announce_no_atomic_placement();
-        if let Some(probe) = &self.apply_probe {
-            probe.observe_gate_wait_if_armed();
-        }
+        #[cfg(feature = "harness")]
+        let gate_wait = self
+            .apply_probe
+            .as_ref()
+            .map(CaptureApplyProbe::observe_apply_gate_wait);
         let _apply_guard = tokio::select! {
             biased;
             () = cancel.cancelled() => return TickIo::Cancelled,
             guard = self.apply_gate.lock() => guard,
         };
+        #[cfg(feature = "harness")]
+        drop(gate_wait);
         let _links_hold = self.actor.hold_link_drain();
         if self.refresh_due(layer) {
             return TickIo::RefreshRequired;
