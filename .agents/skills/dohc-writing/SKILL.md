@@ -13,7 +13,7 @@ Use plain English, the names the code uses, and the facts that reader needs.
 
 Name the reader and what they will do after reading. If you cannot name both, do not write the document.
 
-Give each document one job: teach a newcomer, walk someone through a task, list facts to look up, or explain why something is the way it is.
+Give each document one job: tutorial, how-to guide, reference, or explanation.
 Link to the other jobs instead of mixing them in.
 
 ## Instructions follow ASD-STE100
@@ -49,8 +49,10 @@ Accuracy comes first. In instructions, break a rule only when following it would
 ## Use dohc's words
 
 [`CONTEXT.md`](../../../CONTEXT.md) lists dohc's terms.
-Use the word the code, the UI, and the neighboring docs already use, and repeat it instead of switching to a synonym.
-Several nouns mean different things in different layers, so check a term against the code before you say what it means.
+Use the word the code, the UI, and the neighboring docs already use.
+Repeat it instead of switching to a synonym.
+Several nouns mean different things in different layers.
+Check a term against the code before you say what it means.
 If the code has not settled a term, say so.
 
 Make each sentence read one way:
@@ -66,7 +68,7 @@ Skills, AGENTS.md, and prompts are instructions an agent runs. They also need th
 
 - Describe the process the agent should follow, not the result you hope for.
 - Give each rule its reason, so the agent can extend it to cases you did not write down.
-- State the behavior you want. Naming a banned behavior makes it more likely, so keep "never" for hard guardrails and pair it with what to do instead.
+- State the behavior you want. Naming a banned behavior makes it more likely. Keep "never" for hard guardrails, and pair it with what to do instead.
 - Delete each line the model would follow without being told.
 - Move material that only some tasks need into its own file. Link it with a line that says when to read it.
 - To test a line, run the skill with and without it and compare the results.
@@ -75,7 +77,7 @@ Skills, AGENTS.md, and prompts are instructions an agent runs. They also need th
 
 Find and fix these patterns, which models still produce:
 
-- Puffery and generic claims. Name the mechanism or the measured result.
+- Puffery and generic claims. Name the mechanism or the measured result. Cut a claim that would be just as true of another project.
 - A trailing "-ing" clause that claims a result, such as "ensuring security". State the actual guarantee.
 - "Not just X, but Y." State Y.
 - Groups of three made for rhythm. Use the natural number of items.
@@ -110,11 +112,10 @@ From a PR body:
 ## Before you finish
 
 When you revise, read the whole source first.
-Leave code, identifiers, commands, and quotations unchanged.
+Leave code, identifiers, commands, and attributed quotations unchanged.
 
 You are done when:
 
 - every fact, warning, command, and link from the source is still there;
-- every number and claim matches the code as it is now;
-- no sentence could appear unchanged in another project's docs;
+- every factual claim matches the code or a cited source, and proposed behavior reads as proposed;
 - the text keeps the author's voice and sounds like a person who knows the subject.

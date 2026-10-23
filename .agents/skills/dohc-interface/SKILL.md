@@ -51,7 +51,7 @@ The Controls section below covers the parts. This section covers the words insid
 
 The rule in one line: **say what is true, what changed, and what to do next.** In that order, in the fewest plain words that carry it.
 
-UI copy is almost entirely the **strict** register: the user acts on it and cannot ask a follow-up question.
+UI copy follows the `dohc-writing` instruction rules, because the user acts on it and cannot ask a follow-up question.
 
 ### The four moves
 
