@@ -21,7 +21,7 @@ import { DaemonRefusalError, OwnerYDocOutbox, openEngineYdocProviderSession, Ydo
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { collectionRecordWrites } from "@dohc/automation-executor/collection-record-edits";
 import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
-import { preparedAutomationStoreFolder } from "../testing/preparedLocalState";
+import { preparedAutomationStoreFolder, readersTrustLocalState } from "../testing/preparedLocalState";
 import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
 import { runCollectionAutomation } from "@dohc/automation-executor/collection-automation-run";
 import { undoCollectionAutomationRuns } from "../../../../packages/automation-executor/src/collectionAutomationUndo";
@@ -858,6 +858,8 @@ it.skipIf(engine.missing).each([
           createdAtMs: Date.now(), updatedAtMs: Date.now(),
           change: { kind: "button", authorOriginId: null, actorKind: "human", onBehalfOf: "local-person", sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 },
         };
+        // The run reads its progress as it would while the engine holds `.dohc/local`.
+        readersTrustLocalState();
         const store = createAutomationRunStore(preparedAutomationStoreFolder(rootA));
         const signal = new AbortController().signal;
         const edits = (signal: AbortSignal) => collectionRecordWrites(desktopRecordEditContext({

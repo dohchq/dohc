@@ -104,6 +104,9 @@ pub(crate) struct OpenWorkspace {
     /// before their first relay step until they are between pages, finish,
     /// or fail.
     pub(super) pulls_in_flight: std::sync::atomic::AtomicUsize,
+    /// What this binding's last open that writes prepared in `.dohc/local`.
+    /// On Windows it holds the folder until the binding closes.
+    local_state: Mutex<Option<root_binding::LocalState>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,6 +162,7 @@ impl OpenWorkspace {
             cursors_issued: Default::default(),
             collections_owed: Default::default(),
             pulls_in_flight: Default::default(),
+            local_state: Mutex::new(None),
         }
     }
 
@@ -247,6 +251,8 @@ impl Drop for EngineService {
 
         for (_, workspace) in &open {
             workspace.observation.close_synchronously();
+            // The open ends with the service, whatever task still holds the workspace.
+            lock(&workspace.local_state).take();
         }
         let sessions = Arc::clone(&self.sessions);
         let self_writes = self.self_writes.clone();
@@ -830,12 +836,14 @@ impl EngineService {
                 // unmarked folder in its place, while the binding is open, so
                 // this open prepares it again before it changes anything.
                 let local_root = root.clone();
-                let local_state_ready = tokio::task::spawn_blocking(move || {
+                let local_state = tokio::task::spawn_blocking(move || {
                     root_binding::prepare_local_state(&local_root)
                 })
                 .await
                 .map_err(|_| WireError::new(ErrorCode::Internal, "workspace open task failed"))?
                 .map_err(map_root_binding)?;
+                let local_state_ready = local_state.ready;
+                *lock(&open.local_state) = Some(local_state);
                 if let Some(author_json) = capture_author_json.clone() {
                     let _apply = tokio::select! {
                         biased;
@@ -926,13 +934,13 @@ impl EngineService {
         let mut opening = tokio::task::spawn_blocking(move || {
             // The marker precedes database creation. A crash leaves either a marker
             // and no schema, or a schema already bound to that marker.
-            let (root_token, local_state_ready) = match requested_mode {
+            let (root_token, local_state) = match requested_mode {
                 WorkspaceOpenMode::Full | WorkspaceOpenMode::Passive => {
                     let token = root_binding::write_new_root_binding(&binding_root)
                         .map_err(map_root_binding)?;
-                    let ready = root_binding::prepare_local_state(&binding_root)
+                    let local_state = root_binding::prepare_local_state(&binding_root)
                         .map_err(map_root_binding)?;
-                    (token, Some(ready))
+                    (token, Some(local_state))
                 }
                 WorkspaceOpenMode::ReadOnly => (
                     root_binding::read_root_binding(&binding_root)
@@ -990,9 +998,9 @@ impl EngineService {
             {
                 probe.pause_open_install_if_armed();
             }
-            Ok((opened, open_guard, local_state_ready))
+            Ok((opened, open_guard, local_state))
         });
-        let (actor_open, open_guard, local_state_ready) = tokio::select! {
+        let (actor_open, open_guard, local_state) = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
                 // Dropping the join handle detaches the blocking task. Its
@@ -1005,6 +1013,7 @@ impl EngineService {
             }
         };
         let (actor_open, bound) = actor_open.map_err(map_runtime)?;
+        let local_state_ready = local_state.as_ref().map(|local| local.ready);
         // The supervisor deduplicates by physical engine.db identity, including
         // root aliases and hard links. EngineService state (capture driver,
         // session registry, and version barriers) deliberately has one owner:
@@ -1332,6 +1341,7 @@ impl EngineService {
                 cursors_issued: Default::default(),
                 collections_owed: Default::default(),
                 pulls_in_flight: Default::default(),
+                local_state: Mutex::new(local_state),
             }),
         );
         if requested_mode == WorkspaceOpenMode::Full {
@@ -1463,11 +1473,14 @@ impl EngineService {
                 let _ = drain.await;
             }
             clear_suppression.0.clear_workspace(&clear_suppression.1);
-            tokio::task::spawn_blocking(move || match closing {
+            let finished = tokio::task::spawn_blocking(move || match closing {
                 Some(closing) => closing.finish(),
                 None => Ok(()),
             })
-            .await
+            .await;
+            // The open ends with the close, whatever task still holds the workspace.
+            lock(&removed.local_state).take();
+            finished
         });
         close_task
             .await
@@ -3398,9 +3411,9 @@ mod tests {
         close(read).await;
     }
 
-    /// While a binding is open, something outside dohc can remove
-    /// `.dohc/local` or put an unmarked folder in its place. A second open of
-    /// the live binding prepares it again and answers what it found.
+    /// While a binding is open, `.dohc/local` can change outside dohc, except
+    /// on Windows, where the open holds the folder. A second open of the live
+    /// binding prepares it again and answers what it found.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_second_open_of_a_live_workspace_prepares_its_local_folder_again() {
         let scratch = ScratchDir::new().expect("scratch");
@@ -3415,7 +3428,11 @@ mod tests {
             }
         };
         let opened = open().await.expect("open");
-        std::fs::remove_dir(&local).expect("remove local");
+        if cfg!(windows) {
+            assert!(std::fs::remove_dir(&local).is_err());
+        } else {
+            std::fs::remove_dir(&local).expect("remove local");
+        }
         assert_eq!(open().await.expect("second open"), opened);
         assert!(std::fs::symlink_metadata(&local).expect("local").is_dir());
         #[cfg(target_os = "macos")]
