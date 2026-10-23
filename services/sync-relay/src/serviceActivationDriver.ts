@@ -66,6 +66,8 @@ export interface ServiceActivationReplica {
   pull(signal:AbortSignal):Promise<{hasMore:boolean}>;
   publish(signal?:AbortSignal):Promise<{pushed:number;hasMore:boolean}>;
 }
+/** One activation pass's catch-up pull of each workspace, with the relay log head it started at. */
+export type ServiceCatchUp=Map<string,Promise<{head:number;hasMore:boolean}>>;
 
 export class ServiceActivationDriver {
   readonly #store;
@@ -129,27 +131,32 @@ export class ServiceActivationDriver {
    * in `newlyHeld`, which the pass moved from ready to held, become held at
    * once; that list frees nothing. While it may leave some out, every other
    * owner past the window is dropped too, and activates again on a later
-   * pass, where the engine refuses it if it is held.
+   * pass, where the engine refuses it if it is held. Returns how many owners
+   * it dropped that way.
    */
   hold(workspaceId:string,holds:readonly ServiceHostedHold[],window:HostedWindow,newlyHeld:ServiceHostedPullPage["newlyHeld"]){
+    let dropped=0;
     for(const [key,objectId] of this.#objects){
       if(JSON.parse(key)[0]!==workspaceId)continue;
       const covered=hostedWindowCovers(window,objectId);
       const hold=covered?holds.find(row=>row.objectId===objectId):newlyHeld.listed.find(row=>row.objectId===objectId);
       if(covered && hold?.reason!=="released-lineage-unsettled" && this.#blocked.get(key)?.reason==="released-lineage-unsettled")this.#blocked.delete(key);
       if(!hold){
-        if(!covered && !newlyHeld.complete)this.#drop(key);
+        if(!covered && !newlyHeld.complete && this.#drop(key))dropped++;
         continue;
       }
       this.#drop(key);this.#dormant.delete(key);this.#held.set(key,hold.reason);
       // A fresh binding replaces the one held before; that resolves nothing.
       if(hold.reason==="released-lineage-unsettled")this.#blocked.set(key,{reason:hold.reason,digest:hold.bindingDigest});
     }
+    return dropped;
   }
-  // Ends the target's readiness and its owner, if it has one.
+  // Ends the target's readiness and its owner, if it has one. Returns whether it had one.
   #drop(key:string){
     this.#completedTargets.delete(key);
-    for(const [document,owner] of this.#owners)if(owner.target===key){owner.completed=false;this.#owners.delete(document);}
+    let owned=false;
+    for(const [document,owner] of this.#owners)if(owner.target===key){owner.completed=false;this.#owners.delete(document);owned=true;}
+    return owned;
   }
   /** Why the target failed the one capture it gets while it cannot progress, if it did. Activation skips it. */
   blocked(target:ServiceActivationTarget):ServiceActivationBlock|undefined{
@@ -345,12 +352,13 @@ export class ServiceActivationDriver {
   /**
    * Activates the target and drains it. A target with no owner here first pulls
    * its workspace, which also tells this driver whether the engine holds it.
-   * Without `catchUp`, a retained activation resumes without that pull: its
+   * The targets of one pass share `catchUp`, so each workspace pulls once for all of them.
+   * Without it, a retained activation resumes without that pull: its
    * caller pulled already, or the document left the hosted set, and a pull
    * would adopt the scope it left, after which the engine no longer captures it.
    */
   async activate(target:ServiceActivationTarget,signal:AbortSignal,
-    settle?:(consumer:OwnerCommittedDelivery,document:LiveDocumentKey,signal:AbortSignal)=>Promise<unknown>,catchUp=true){
+    settle?:(consumer:OwnerCommittedDelivery,document:LiveDocumentKey,signal:AbortSignal)=>Promise<unknown>,catchUp?:ServiceCatchUp){
     const o=this.options,c=o.config,workspace=o.workspaces.get(target.workspaceId);
     if(!workspace)throw new Error("Service activation workspace is not attached.");
     const check=()=>{signal.throwIfAborted();o.assertCurrent();};
@@ -384,11 +392,19 @@ export class ServiceActivationDriver {
       if(owner)return fenced;
     }
     if(!owner){
-      // Read first: the pull brings every update up to here, so the capture has seen them all.
-      const update=this.#latestUpdate(target);
+      let update=this.#latestUpdate(target);
       if(catchUp || !saved){
-        const pulled=await workspace.replica.pull(signal);check();
+        let pulling=catchUp?.get(target.workspaceId);
+        if(!pulling){
+          // Read first: the pull brings every update through the head, so the capture has seen them all.
+          const head=o.storage.automationWorkspaceLogHead(target.workspaceId);
+          pulling=workspace.replica.pull(signal).then(({hasMore})=>({head,hasMore}));
+          catchUp?.set(target.workspaceId,pulling);
+        }
+        const pulled=await pulling;check();
         if(pulled.hasMore)return {kind:"pending" as const,reason:"Hosted replication has more pages."};
+        // An update after the head is one the capture may not have seen.
+        update=Math.min(this.#latestUpdate(target),pulled.head);
       }
       this.#loaded.add(key);
       let capture:NativeOwnerActivation;
