@@ -1,3 +1,4 @@
+import { SecretFileStoreError } from "../workspaces/workspaceDataKey";
 import { ownActorPresentation } from "../workspaces/actorPresentation";
 import { describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
@@ -115,6 +116,7 @@ async function harness() {
   const readSecrets = vi.fn<Dependencies["readWorkspaceSecretState"]>(async () => "none");
   const readDataKey = vi.fn<Dependencies["readWorkspaceDataKeyForEnrollment"]>(async () => null);
   const enroll = vi.fn<Dependencies["enrollWorkspaceKeyEnvelope"]>(async () => { steps.push("enroll"); });
+  const installDataKey = vi.fn<Dependencies["installWorkspaceDataKey"]>(async () => undefined);
   const bootstrap = vi.fn<Dependencies["bootstrapJoinedWorkspace"]>(async () => { steps.push("bootstrap"); });
   const probe = vi.fn<Dependencies["probeRelayWorkspace"]>(async () => {
     steps.push("probe");
@@ -199,7 +201,7 @@ async function harness() {
       if (refusal) throw new Error(refusal);
     },
     relayClientForWorkspace: bindRelay, enrollWorkspaceKeyEnvelope: enroll,
-    installWorkspaceDataKey: vi.fn(async () => undefined), setWorkspaceRemote: setRemote,
+    installWorkspaceDataKey: installDataKey, setWorkspaceRemote: setRemote,
     usableRoot: roots.usableRoot, readdir, mkdir, probeRelayWorkspace: probe,
     createJoinedWorkspace, bootstrapJoinedWorkspace: bootstrap,
     refreshNativeWorkspaceSurfaces: () => { steps.push("surfaces"); },
@@ -211,7 +213,7 @@ async function harness() {
   const joinPayload = { rootPath, syncCode: buildSyncCode({ workspaceId: "joined", relayUrl: credentials.relayUrl! }) };
   return {
     handlers, invoke, removeJoinedWorkspace, stopWorkspaceSync, stopOperation, preparePause, openActivity, downloadKeyEnvelope, uploadKeyEnvelope, joinPayload, roots, workspace, registry, authorities, cache, login,
-    stop, closeRelay, claim, readSecrets, readDataKey, enroll, bootstrap, probe, readdir, mkdir,
+    stop, closeRelay, claim, readSecrets, readDataKey, enroll, bootstrap, installDataKey, probe, readdir, mkdir,
     bindRelay, setRemote, enable, notify, changing, ready, createFolder, cleanup, steps, daemonStartup, disposed,
     retireRenderer: () => { rendererCurrent = false; },
     reopenRenderer: () => {
@@ -222,6 +224,25 @@ async function harness() {
 }
 
 describe("registered cloud handlers", () => {
+  it.each(["enable", "join"] as const)("preserves the unsupported-drive key refusal during %s", async action => {
+    const h = await harness();
+    const error = new SecretFileStoreError("key-install-unsupported",
+      "This drive can't store the workspace's secret key safely. Move the workspace to an NTFS, APFS or ext4 drive, then try again.");
+    h.installDataKey.mockRejectedValueOnce(error);
+    h.enroll.mockImplementationOnce(input => input.installDataKey(Buffer.alloc(32, 7)));
+    h.bootstrap.mockImplementationOnce(input => input.installDataKey(Buffer.alloc(32, 7)));
+    const result = action === "enable"
+      ? h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing" })
+      : h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload);
+    await expect(result).rejects.toBe(error);
+    expect(h.installDataKey).toHaveBeenCalledOnce();
+    expect(h.enable).not.toHaveBeenCalled();
+    if (action === "join") {
+      expect(h.cleanup).toHaveBeenCalledWith("joined");
+      expect(h.registry.has("joined")).toBe(false);
+    }
+  });
+
   it.each(["https://account.example.test?query=1", "https://account.example.test#fragment"])("keeps cloud status available with malformed account URL %s", async (serverUrl) => {
     const h = await harness();
     h.cache.set({ ...credentials, serverUrl });

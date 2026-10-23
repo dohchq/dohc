@@ -20,6 +20,17 @@ export class SecretFileStoreError extends Error {
   }
 }
 
+function hardLinksUnsupported(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const { code, syscall } = error as NodeJS.ErrnoException;
+  // libuv maps Windows ERROR_INVALID_FUNCTION (1) to EISDIR and
+  // ERROR_NOT_SUPPORTED (50) to ENOTSUP. EPERM is a permission failure.
+  return syscall === "link" && (
+    code === "ENOTSUP" || code === "ENOSYS" ||
+    (process.platform === "win32" && code === "EISDIR")
+  );
+}
+
 function keyFilePath(rootDir: string): string {
   return join(resolve(rootDir), SECRET_KEY_RELATIVE_PATH);
 }
@@ -165,7 +176,13 @@ export async function installWorkspaceDataKey(
   let created: boolean;
   try {
     created = await atomicCreateFile(path, payload, 0o600);
-  } catch {
+  } catch (error) {
+    if (hardLinksUnsupported(error)) {
+      throw new SecretFileStoreError(
+        "key-install-unsupported",
+        "This drive can't store the workspace's secret key safely. Move the workspace to an NTFS, APFS or ext4 drive, then try again.",
+      );
+    }
     throw new SecretFileStoreError(
       "key-corrupt",
       "The workspace secret key file could not be installed.",

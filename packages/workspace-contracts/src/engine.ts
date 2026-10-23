@@ -1467,6 +1467,7 @@ export type SecretFileStoreErrorCode =
   | "invalid-version"
   | "invalid-workspace"
   | "key-corrupt"
+  | "key-install-unsupported"
   | "moment-not-found"
   | "not-secret-path"
   | "state-corrupt";

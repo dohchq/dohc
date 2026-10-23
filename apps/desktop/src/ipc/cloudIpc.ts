@@ -27,7 +27,7 @@ import type { probeRelayWorkspace } from "../workspaces/relayWorkspaceProbe";
 import type { readWorkspaceSecretState, readWorkspaceDataKeyForEnrollment, WorkspaceSecretState } from "../workspaces/workspaceSecretEnrollmentState";
 import type { enrollWorkspaceKeyEnvelope } from "../workspaces/workspaceKeyEnvelopeEnrollment";
 import type { bootstrapJoinedWorkspace } from "../workspaces/workspaceJoinEnrollment";
-import type { installWorkspaceDataKey } from "../workspaces/workspaceDataKey";
+import { SecretFileStoreError, type installWorkspaceDataKey } from "../workspaces/workspaceDataKey";
 
 export function registerCloudIpcHandlers<
   Sender,
@@ -421,6 +421,9 @@ export function registerCloudIpcHandlers<
       cleanupFailureMessage:
         `dohc could not close the failed download. Files remain in ${rootPath}. Restart dohc. If this folder appears in the workspace list, choose Forget from its menu before joining again. Forget keeps the folder. Then choose another empty folder.`,
       failure: (error) => {
+        if (error instanceof SecretFileStoreError && error.code === "key-install-unsupported") {
+          return error;
+        }
         if (
           error instanceof Error &&
           /^(?:Passphrase required|Passphrase could not)\b/u.test(error.message)

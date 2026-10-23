@@ -1,3 +1,5 @@
+import { SecretFileStoreError } from "../workspaces/workspaceDataKey";
+import { ipcErrorMessage } from "../renderer/ipcError";
 import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 import { ServerCollectionsUnavailableError } from "../workspaces/remoteDataset";
 import { ReservedWorkspaceIdError } from "@dohc/workspace-core";
@@ -52,6 +54,16 @@ const engineCodes = [
 ].map((match) => match[1]!);
 
 describe("error words", () => {
+  it.each([
+    ["desktop:cloud-enable-sync", "dohc could not enable sync for this workspace."],
+    ["desktop:cloud-join-workspace", "Couldn't join the workspace."],
+  ])("keeps the key-install refusal unchanged across %s", (channel, prefix) => {
+    const sentence = "This drive can't store the workspace's secret key safely. Move the workspace to an NTFS, APFS or ext4 drive, then try again.";
+    const received = acrossIpc(new SecretFileStoreError("key-install-unsupported", sentence), channel);
+    expect(readError(received).words).toBe(sentence);
+    expect(ipcErrorMessage(received, prefix)).toBe(sentence);
+  });
+
   it.each([
     ["chat-mention-access-changed", "Chat access changed. Try again."],
     ["chat-mention-version-changed", "It changed while dohc was working on it. Try again."],
