@@ -14,6 +14,7 @@ import {
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
   markdownToYDoc,
+  MarkdownNestingRefusal,
   writeBodyFragment,
   yDocToMarkdown,
 } from './import-export.js'
@@ -408,7 +409,7 @@ function projectAndFinalize(
     if (topology.kind !== 'compatible') refuse('invalid-schema')
     projectedMarkdown = validatePublicState(cut.document, topology, unverifiedSource, engineReader)
   } catch (error) {
-    if (engineReader && !(error instanceof Refusal)) throw error
+    if (engineReader && !(error instanceof Refusal) && !(error instanceof MarkdownNestingRefusal)) throw error
     pending = error instanceof Refusal ? error.reason : 'invalid-schema'
   }
   finally {
@@ -779,7 +780,9 @@ function validatePublicState(
   if (source.kind === 'invalid' || source.kind === 'import-failed'
     || (source.kind === 'unverified' && unverifiedSource === 'refuse')) refuse('invalid-schema')
   if (!zeroStructSeed) {
-    const reimported = markdownToYDoc(projectedMarkdown)
+    // The serializer's own output, which the lexing budget for files does not
+    // bound.
+    const reimported = markdownToYDoc(projectedMarkdown, { reading: 'projection' })
     try {
       if (!semanticEqual(frontmatterSnapshot, getDohcYDocFrontmatter(reimported))) refuse('invalid-schema')
       const withoutSources = (values: Record<string, unknown>) => {

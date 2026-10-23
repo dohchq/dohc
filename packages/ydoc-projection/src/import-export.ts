@@ -1141,10 +1141,13 @@ class ContentTabLexer<ParserOutput = string, RendererOutput = string> extends Le
   blockTokens(src: string, tokens: Token[] = [], lastParagraphClipped = false): Token[] {
     lexing.read += src.length
     if (lexing.read > lexing.budget) throw new MarkdownNestingRefusal('lexing')
+    if (lexing.depth === MAX_LEXING_DEPTH) throw new MarkdownNestingRefusal('depth')
+    lexing.depth += 1
     enterBlockText(this, src, tokens)
     try {
       return super.blockTokens(src, tokens, lastParagraphClipped)
     } finally {
+      lexing.depth -= 1
       leaveBlockText(this, tokens)
     }
   }
@@ -1310,6 +1313,11 @@ const MAX_STRUCTURE_DEPTH = 128
 // continuation, so this bounds the work depth adds within the limits.
 const LEXING_BUDGET = 16
 const LEXING_FLOOR = 256 * 1024
+// Block lexing nested this deep reads text inside a node deeper than the
+// limit: the top level and a table's own text each add a level no node does.
+// The preflight refuses such notes first; this keeps any it misses off the
+// end of the stack.
+const MAX_LEXING_DEPTH = MAX_STRUCTURE_DEPTH + 2
 
 /**
  * A note the live document contract does not read as rich text, because its
@@ -1323,8 +1331,9 @@ export class MarkdownNestingRefusal extends Error {
   }
 }
 
-// The block lexing the parse in progress has done and may do.
-let lexing = { read: 0, budget: Infinity }
+// The block lexing the parse in progress has done and may do, and how deeply
+// it nests now.
+let lexing = { read: 0, budget: Infinity, depth: 0 }
 
 // The containers that open a line before its text, as marked reads them, and
 // where its text starts. A quote takes up to three spaces, `>` and one space
@@ -1333,9 +1342,11 @@ let lexing = { read: 0, budget: Infinity }
 // more than four make its text indented code; a bullet's item also takes a
 // task box. A marker after only quotes, on a line that may continue a
 // paragraph, opens nothing unless it could interrupt one. A thematic break
-// ends the line's containers. Counting stops past either limit.
-function lineContainers(line: string, continues: boolean): { quotes: number; depth: number; text: string; at: number } {
-  let text = line.charCodeAt(line.length - 1) === 13 ? line.slice(0, -1) : line
+// ends the line's containers. Counting stops past either limit. `containers`
+// gets each container in order: a quote as -1 less the spaces before its `>`,
+// and an item as the width of its marker and the spaces after it.
+function lineContainers(line: string, continues: boolean, containers?: number[]): LineContainers {
+  let text = line
   let at = 0
   let quotes = 0
   let depth = 0
@@ -1348,6 +1359,7 @@ function lineContainers(line: string, continues: boolean): { quotes: number; dep
     while (start - at < 3 && text[start] === ' ') start += 1
     const first = text[start]
     if (first === '>') {
+      containers?.push(at - start - 1)
       at = start + 1
       if (text[at] === ' ' || text[at] === '\t') at += 1
       quotes += 1
@@ -1386,6 +1398,7 @@ function lineContainers(line: string, continues: boolean): { quotes: number; dep
     depth += 2
     listed = true
     if (blank || content - end > 4) break
+    containers?.push(content - at)
     at = content
     if (!ordered && text[at] === '[' && ' xX'.includes(text[at + 1] ?? '_') && text[at + 2] === ']' && text[at + 3] === ' ') {
       let box = at + 3
@@ -1396,6 +1409,7 @@ function lineContainers(line: string, continues: boolean): { quotes: number; dep
   }
   return { quotes, depth, text, at }
 }
+type LineContainers = { quotes: number; depth: number; text: string; at: number }
 
 // Where the run of the line's last character, with white space, starts.
 function uniformEnd(text: string): number {
@@ -1426,93 +1440,226 @@ function mayOpen(first: string | undefined): boolean {
     || first === '<' || first === '$' || first === '[' || (first !== undefined && first >= '0' && first <= '9')
 }
 
-// What a line that opens a literal region needs to read each next line:
-// whether it is `inside` the region, its `last` line, or `outside` it.
-// Fences, HTML blocks, display math and definition titles hold text marked
-// never reads as containers. Each region here ends where marked's would, or
-// later.
-type LiteralRegion = (line: string) => 'inside' | 'last' | 'outside'
+// A literal region a line opened: the containers each later line keeps, as
+// `lineContainers` lists them, and whether a line's text within them is the
+// region's last. A fence or an HTML block holds text marked never reads as
+// containers, until its closing line or the end of the containers it opened
+// in.
+type LiteralRegion = { containers: number[]; ends: (text: string) => boolean }
 
-function literalRegion(text: string, at: number): LiteralRegion | undefined {
+// What a line opens at its text: a literal region, the index of the last line
+// of a display math block or a definition that runs past it, or nothing. Each
+// opens only where marked's own rule reads one. When the line `continues` a
+// paragraph and opens no item, only a fence or an HTML block that may
+// interrupt the paragraph opens. An item an earlier line opened may hold the
+// line and end before the region would, so while one may be `listed`, a region
+// opens only where that item would have ended.
+function literalRegion(lines: string[], index: number, opened: LineContainers, continues: boolean, listed: boolean): LiteralRegion | number | undefined {
+  const { text, at } = opened
   let start = at
   while (start - at < 3 && text[start] === ' ') start += 1
   const first = text[start]
+  if (first !== '`' && first !== '~' && first !== '<' && first !== '$' && first !== '[') return undefined
+  // marked expanded tabs before the text.
+  if (text !== lines[index]) return undefined
+  const containers: number[] = []
+  lineContainers(text, continues, containers)
+  if (listed && (start > at || containers.some(container => container < -1))) return undefined
+  const paragraph = continues && opened.depth === opened.quotes
   if (first === '`' || first === '~') {
     let end = start
     while (text[end] === first) end += 1
-    const length = end - start
-    if (length < 3) return undefined
-    return line => {
-      if (!line.includes(first)) return 'inside'
-      const { text, at } = lineContainers(line, false)
-      let open = at
-      while (open - at < 3 && text[open] === ' ') open += 1
-      let close = open
-      while (text[close] === first) close += 1
-      return close - open >= length && blankFrom(text, close) ? 'last' : 'inside'
-    }
+    if (end - start < 3 || (first === '`' && text.includes('`', end))) return undefined
+    const run = text.slice(start, end)
+    return { containers, ends: line => fenceCloses(line, run) }
   }
-  if (first === '$' && text[start + 1] === '$') {
-    return text.includes('$$', start + 2) ? undefined : line => line.includes('$$') ? 'last' : 'inside'
-  }
+  if (paragraph && listed) return undefined
   if (first === '<') {
-    const opening = text.slice(start + 1, start + 12).toLowerCase()
-    const tag = ['script', 'pre', 'style', 'textarea'].find(name => opening.startsWith(name))
-    const end = opening.startsWith('!--') ? '-->' : opening.startsWith('?') ? '?>' : opening.startsWith('![cdata[') ? ']]>'
-      : opening.startsWith('!') ? '>' : tag ? `</${tag}` : undefined
-    if (end) {
-      return text.slice(start + 2).toLowerCase().includes(end) ? undefined
-        : line => line.toLowerCase().includes(end) ? 'last' : 'inside'
-    }
-    const name = opening[opening.startsWith('/') ? 1 : 0] ?? ''
-    return name >= 'a' && name <= 'z' ? line => {
-      const { text, at } = lineContainers(line, false)
-      return blankFrom(text, at) ? 'last' : 'inside'
-    } : undefined
+    const open = text.slice(start)
+    const html = literalProbe.rules.block.html.exec(`${open}\n`)
+    if (!html) return undefined
+    const [, name, comment, block] = html
+    if (paragraph && !name && comment === undefined && !block) return undefined
+    const [end, from] = name ? [`</${name.toLowerCase()}>`, name.length + 1]
+      : comment !== undefined ? ['-->', 4]
+      : open.startsWith('<?') ? ['?>', 2]
+      : /^<!\[CDATA\[/iu.test(open) ? [']]>', 9]
+      : open.startsWith('<!') ? ['>', 2]
+      : ['', 0]
+    if (!end) return { containers, ends: line => blankFrom(line, 0) }
+    if ((name ? open.toLowerCase() : open).includes(end, from) || (comment !== undefined && (open[4] === '>' || open.startsWith('->', 4)))) return undefined
+    return { containers, ends: name ? line => line.toLowerCase().includes(end) : line => line.includes(end) }
   }
-  if (first === '[') {
-    const colon = text.indexOf(']:', start)
-    if (colon < 0) return undefined
-    // The destination may follow on the next line, and the title on the
-    // line after the destination.
-    let title = ''
-    let lines = blankFrom(text, colon + 2) ? 2 : 1
-    const read = (line: string, from: number) => {
-      for (let index = from; index < line.length; index += 1) {
-        const character = line[index]
-        if (character === '\\') index += 1
-        else if (title) {
-          if (character === title) return true
-        } else if (character === '"' || character === "'") title = character
-        else if (character === '(') title = ')'
-      }
-      return false
-    }
-    if (read(text, colon + 2)) return undefined
-    return raw => {
-      const { text: line, at: from } = lineContainers(raw, false)
-      if (!title) {
-        let opener = from
-        while (line[opener] === ' ' || line[opener] === '\t') opener += 1
-        if (lines === 2) {
-          lines = 1
-          return read(line, opener) ? 'last' : 'inside'
-        }
-        if (line[opener] !== '"' && line[opener] !== "'" && line[opener] !== '(') return 'outside'
-      }
-      return read(line, from) ? 'last' : 'inside'
+  if (paragraph) return undefined
+  const following = (line: number) => index + line < lines.length ? within(lines[index + line], containers) : undefined
+  if (first === '$') {
+    // A math block opens with `$$` at its line's text and ends at the next
+    // `$$`, which must end its line.
+    if (start > at || text[start + 1] !== '$' || text.includes('$$', start + 2)) return undefined
+    for (let line = 1; ; line += 1) {
+      const inner = following(line)
+      if (inner === undefined) return undefined
+      const close = inner.indexOf('$$')
+      if (close >= 0) return close + 2 === inner.length ? index + line : undefined
     }
   }
-  return undefined
+  const end = definitionEnd(text, start, following)
+  return end ? index + end : undefined
+}
+
+// The text a line holds within `containers`, or undefined once it leaves
+// them. A quote needs its `>`; an item holds a blank line, or one indented to
+// its text.
+function within(line: string, containers: readonly number[]): string | undefined {
+  let text = line
+  for (const container of containers) {
+    let at = 0
+    if (container < 0) {
+      while (at < 3 && text[at] === ' ') at += 1
+      if (text[at] !== '>') return undefined
+      at += text[at + 1] === ' ' || text[at + 1] === '\t' ? 2 : 1
+    } else {
+      while (at < container && text[at] === ' ') at += 1
+      if (at < container && !blankFrom(text, at)) return undefined
+    }
+    text = text.slice(at)
+  }
+  return text
+}
+
+// Whether a line closes a fence its opener's `run` opened: up to three
+// spaces, the run, more fence characters and spaces.
+function fenceCloses(text: string, run: string): boolean {
+  if (!text.includes(run)) return false
+  let close = 0
+  while (close < 3 && text[close] === ' ') close += 1
+  if (!text.startsWith(run, close)) return false
+  close += run.length
+  while (text[close] === '`' || text[close] === '~') close += 1
+  while (text[close] === ' ') close += 1
+  return close === text.length
+}
+
+// The line a definition starting at `start` ends on, counted from its first,
+// as marked's rule reads it. `following` reads a later line within the
+// definition's containers. Where marked could read a longer definition than
+// this finds, this reads a shorter one or none.
+function definitionEnd(text: string, start: number, following: (line: number) => string | undefined): number | undefined {
+  // A label on the first line, with more than white space in it.
+  let at = start + 1
+  let label = false
+  for (; text[at] !== ']'; at += 1) {
+    const character = text[at]
+    if (character === undefined || character === '[') return undefined
+    if (character.trim()) label = true
+    if (character === '\\') at += 1
+  }
+  if (!label || text[at + 1] !== ':') return undefined
+  let line = 0
+  let rest = text
+  at += 2
+  while (rest[at] === ' ') at += 1
+  if (at === rest.length) {
+    const destination = following(1)
+    if (destination === undefined) return undefined
+    line = 1
+    rest = destination
+    at = 0
+    while (rest[at] === ' ' || rest[at] === '\t') at += 1
+  }
+  if (rest[at] === '<') {
+    at = rest.indexOf('>', at) + 1
+    if (at === 0) return undefined
+  } else {
+    if (!rest[at]?.trim()) return undefined
+    while (rest[at]?.trim()) at += 1
+  }
+  // A title follows a space, or starts the next line.
+  let spaces = at
+  while (rest[spaces] === ' ') spaces += 1
+  if (spaces < rest.length) return spaces > at ? titleEnd(rest, spaces, line, following) : undefined
+  const next = following(line + 1)
+  let title = 0
+  while (next?.[title] === ' ' || next?.[title] === '\t') title += 1
+  return (next === undefined ? undefined : titleEnd(next, title, line + 1, following)) ?? (line || undefined)
+}
+
+// The line a definition's title starting at `at` on `line` closes on, with
+// only spaces after it.
+function titleEnd(text: string, at: number, line: number, following: (line: number) => string | undefined): number | undefined {
+  const opener = text[at]
+  if (opener !== '"' && opener !== "'" && opener !== '(') return undefined
+  const closer = opener === '(' ? ')' : opener
+  let from = at + 1
+  for (;;) {
+    for (let index = from; index < text.length; index += 1) {
+      const character = text[index]
+      if (opener === '(' && character === '(') return undefined
+      // marked's title may hold a `"` right after a backslash.
+      if (character !== closer || (closer === '"' && text[index - 1] === '\\')) continue
+      let end = index + 1
+      while (text[end] === ' ') end += 1
+      return end === text.length ? line : undefined
+    }
+    const next = following(line + 1)
+    // A single-quoted title holds no blank line.
+    if (next === undefined || (opener === "'" && next === '')) return undefined
+    line += 1
+    text = next
+    from = 0
+  }
+}
+
+// Refused before marked reads it, outside text it would hold literally.
+function assertNestingWithinLimits(markdown: string, lines: string[]): void {
+  // marked reads a lone `\r` as a line break too.
+  if (markdown.includes('\r')) lines = markdown.split(/\r\n?|\n/u)
+  let literal: LiteralRegion | undefined
+  let continues = false
+  // Whether an item an earlier line opened may hold this line. A line at
+  // column 0 after a blank line ends every item, and so does a fence there.
+  let listed = false
+  let blank = true
+  for (let at = 0; at < lines.length; at += 1) {
+    const line = lines[at]
+    const first = line[0]
+    if (first !== undefined && first !== ' ' && first !== '\t' && (blank || line.startsWith('```') || line.startsWith('~~~'))) listed = false
+    blank = blankFrom(line, 0)
+    if (literal) {
+      const text = within(line, literal.containers)
+      if (text !== undefined) {
+        if (literal.ends(text)) literal = undefined
+        continues = true
+        continue
+      }
+      literal = undefined
+    }
+    if (!mayOpen(first)) {
+      continues = !blank
+      continue
+    }
+    const opened = lineContainers(line, continues)
+    if (opened.quotes > MAX_QUOTE_DEPTH || opened.depth > MAX_STRUCTURE_DEPTH) throw new MarkdownNestingRefusal('depth')
+    const region = literalRegion(lines, at, opened, continues, listed)
+    listed ||= opened.depth > opened.quotes
+    continues = !blankFrom(opened.text, opened.at)
+    if (typeof region === 'number') {
+      at = region
+      blank = false
+      continues = true
+    } else literal = region
+  }
 }
 
 // Admission is independent of canonical serialization. Code bodies are opaque;
 // blank lines end lazy continuation, but not an indented continuation block.
 function assertSupportedListMarkdown(markdown: string, preserveContentTabs?: (text: string) => string): string {
   // Flat items beginning with ordinary text cannot introduce child blocks.
-  if (/^(?:(?:[-+*]|[0-9]{1,9}[.)]) (?:\[[ xX]\] )?[A-Za-z][^\n\t]*(?:\n|$))+(?:\n[A-Za-z][^\n\t]*\n?)?$/u.test(markdown)) return markdown
+  // marked reads a lone `\r` as a line break, which can start another block.
+  if (!markdown.includes('\r') && /^(?:(?:[-+*]|[0-9]{1,9}[.)]) (?:\[[ xX]\] )?[A-Za-z][^\n\t]*(?:\n|$))+(?:\n[A-Za-z][^\n\t]*\n?)?$/u.test(markdown)) return markdown
   const parents: Array<{ indent: number; column: number; content?: number }> = []
   const lines = markdown.split('\n')
+  assertNestingWithinLimits(markdown, lines)
   let changed = false
   let blank = false
   let open: { indent: number; column: number } | undefined
@@ -1525,20 +1672,7 @@ function assertSupportedListMarkdown(markdown: string, preserveContentTabs?: (te
     changed = true
   }
   const refuse = () => { throw new Error('Markdown is not representable by the live document contract') }
-  let literal: LiteralRegion | undefined
-  let continues = false
   for (let at = 0; at < lines.length; at += 1) {
-    // Refused before marked reads it, outside text it would hold literally.
-    const region = literal?.(lines[at]) ?? 'outside'
-    if (region !== 'inside') literal = undefined
-    if (region !== 'outside') continues = true
-    else if (!mayOpen(lines[at][0])) continues = lines[at] !== '' && lines[at] !== '\r'
-    else {
-      const opened = lineContainers(lines[at], continues)
-      if (opened.quotes > MAX_QUOTE_DEPTH || opened.depth > MAX_STRUCTURE_DEPTH) throw new MarkdownNestingRefusal('depth')
-      literal = literalRegion(opened.text, opened.at)
-      continues = !blankFrom(opened.text, opened.at)
-    }
     let line = lines[at].replace(/\r$/u, '')
     if (line.includes('\t')) line = line.replace(/^[ \t]*(?:(?:[-+*]|[0-9]{1,9}[.)])[ \t]+)?/u, prefix => {
       let column = 0
@@ -1708,10 +1842,10 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
     markdownListParseState.references = markdown.includes(']:')
     // The projection reads only what the serializer writes, so a live note
     // can always settle.
-    lexing = { read: 0, budget: reading === 'source' ? LEXING_BUDGET * Math.max(prepared.length, LEXING_FLOOR) : Infinity }
+    lexing = { read: 0, budget: reading === 'source' ? LEXING_BUDGET * Math.max(prepared.length, LEXING_FLOOR) : Infinity, depth: 0 }
     parsed = (reading === 'projection' ? projectedMarkdownManager() : markdownManager).parse(prepared)
   } finally {
-    lexing = { read: 0, budget: Infinity }
+    lexing = { read: 0, budget: Infinity, depth: 0 }
     parseReferences = new Map()
     parseTabs = new Map()
     markdownListParseState.references = true

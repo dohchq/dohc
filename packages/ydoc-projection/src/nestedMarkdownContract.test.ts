@@ -9,7 +9,7 @@ import { StarterKit } from '@tiptap/starter-kit'
 import type { JSONContent } from '@tiptap/core'
 import { DohcTaskItem, dohcMarkdownExtensions, MarkdownListItem, MarkdownOrderedList, MarkdownTaskList } from './dohc-markdown-extensions.js'
 import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator } from './liveDocumentValidation.js'
-import { markdownToYDoc, MarkdownNestingRefusal, yDocToMarkdown, serializeRichdocBody, parseRichdocMarkdown, getDohcProseMirrorSchema } from './import-export.js'
+import { markdownToYDoc, MarkdownNestingRefusal, yDocToMarkdown, serializeRichdocBody, parseRichdocMarkdown, getDohcProseMirrorSchema, writeBodyFragment } from './import-export.js'
 
 const corpus = JSON.parse(readFileSync(new URL('../../../tools/rust-engine-program/nested-markdown-contract.json', import.meta.url), 'utf8')) as {
   cases: Array<{ name: string; source: string; canonical?: string; rereadCanonical?: string; sourceCanonical?: string; witnessSeed?: boolean; foldRefuse?: boolean; refuse?: boolean; projected?: boolean; rustBase64?: string; stableTree?: boolean; itemSpaces?: number; later?: boolean; interrupts?: boolean; inItem?: boolean; markedStart?: { type: string; attrs?: Record<string, string | null> }; markedText?: string }>
@@ -295,6 +295,42 @@ it.each([
   expect(JSON.stringify(parseRichdocMarkdown(source))).toContain(DEEP)
 })
 
+// Text close to a literal region that marked reads as none, so the quotes
+// after it would overflow the stack.
+const DEEPER = `${'>'.repeat(2048)} a`
+it.each([
+  ['an incomplete HTML tag', '<a\n'],
+  ['a backtick fence whose info holds a backtick', '```a`b\n'],
+  ['unclosed display math', '$$\n'],
+  ['an unclosed definition title', '[x]: /u "\n'],
+  ['a fence in an item that has ended', '- ```\n  x\n'],
+  ['a lone carriage return', 'a\r'],
+])('refuses quotes after %s before marked lexes them', (_name, head) => {
+  for (const reading of ['source', 'projection'] as const) {
+    expect(nestingRefusal(head + DEEPER, reading)).toEqual({ limit: 'depth', lexed: false })
+  }
+})
+
+// A fence ends only on a line with its opener's containers.
+const CODE = `${'>'.repeat(123)} q`
+it.each([
+  ['a tilde fence', '   ~~~+<b>>[!WARN]\n> > ~~~\n'],
+  ['a backtick fence', '```*a*<!DOCTYPE x>é ü\\\n> > ```\n'],
+  ['a fence that ends an item holding an HTML block', '- [ ] <? x\n~~~\n?>\n'],
+])('keeps quotes in %s as code', (_name, head) => {
+  expect(nestingRefusal(head + CODE)).toEqual({ lexed: true })
+  expect(JSON.stringify(parseRichdocMarkdown(head + CODE))).toContain(CODE)
+})
+
+// An earlier line's item holds these quotes, which the preflight does not
+// read; marked's lexing still stops at the limit.
+it.each([
+  ['a tab', '- a\n\t'],
+  ['indentation', '- a\n  - b\n      '],
+])('refuses quotes an item holds after %s while marked lexes them', (_name, head) => {
+  expect(nestingRefusal(head + DEEPER)).toEqual({ limit: 'depth', lexed: true })
+})
+
 // Depth 120 before a setext underline relexes each level's text for each
 // level, about 2,400 times the note's length.
 const RELEXED = `${'>'.repeat(120)} a\n===\n\n`.repeat(16)
@@ -307,6 +343,38 @@ it('settles a live note past the lexing budget in the projection reading', () =>
   expect(nestingRefusal(RELEXED, 'projection')).toEqual({ lexed: true })
   expect(quoteDepth(parseRichdocMarkdown(RELEXED, 'projection'))).toBe(120)
 }, 60_000)
+
+// A live note the serializer writes deep within the limits, whose lexing in
+// the source reading passes the budget.
+function quotedNote(quotes: number, bytes: number): Y.Doc {
+  const prefix = '> '.repeat(quotes)
+  const paragraph = `${prefix}${'word '.repeat(60)}end`
+  const source = Array.from({ length: Math.ceil(bytes / paragraph.length) }, () => paragraph).join(`\n${prefix.trimEnd()}\n`)
+  expect(nestingRefusal(source)).toEqual({ limit: 'lexing', lexed: true })
+  return markdownToYDoc(source, { reading: 'projection' })
+}
+it.each([[120, 80_000], [30, 200_000]])('validates an edit to a note quoted %i deep in %i bytes', (quotes, bytes) => {
+  const doc = quotedNote(quotes, bytes)
+  try {
+    const checkpoint = Y.encodeStateAsUpdate(doc)
+    expect(journal({ document, currentPath: 'notes/deep.md', checkpoint, suffix: [], candidate: new Uint8Array([0, 0]) }))
+      .toMatchObject({ kind: 'accepted' })
+  } finally { doc.destroy() }
+})
+
+it('refuses an edit to a note quoted past the limit in either journal', () => {
+  let node: JSONContent = { type: 'paragraph', content: [{ type: 'text', text: 'a' }] }
+  for (let quotes = 0; quotes < 121; quotes += 1) node = { type: 'blockquote', content: [node] }
+  const doc = markdownToYDoc('a')
+  try {
+    const body = doc.getXmlFragment('body')
+    doc.transact(() => body.delete(0, body.length))
+    writeBodyFragment({ type: 'doc', content: [node] }, body)
+    const input = { document, currentPath: 'notes/deep.md', checkpoint: Y.encodeStateAsUpdate(doc), suffix: [], candidate: new Uint8Array([0, 0]) }
+    expect(journal(input)).toMatchObject({ kind: 'refused', reason: 'invalid-schema' })
+    expect(createLiveMarkdownJournalValidator(policy, true)(input)).toMatchObject({ kind: 'refused', reason: 'invalid-schema' })
+  } finally { doc.destroy() }
+})
 
 it.each(corpus.cases.filter(item => item.name.startsWith('r26-')))('keeps round 26 boundaries for $name in projected reading', item => {
   const doc = markdownToYDoc(item.source, { reading: 'projection' })

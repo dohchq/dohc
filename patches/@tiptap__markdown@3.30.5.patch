@@ -1,5 +1,5 @@
 diff --git a/dist/index.cjs b/dist/index.cjs
-index a0a309ad97923b89310e2d898653f61789d4ce00..63499b9b66ddf6fe387bdca6ac2f332d144c666b 100644
+index a0a309ad97923b89310e2d898653f61789d4ce00..9d5e4c378c56671dc6292c2d12954e1e42aee7a5 100644
 --- a/dist/index.cjs
 +++ b/dist/index.cjs
 @@ -3,14 +3,18 @@ let _tiptap_core = require("@tiptap/core");
@@ -44,8 +44,15 @@ index a0a309ad97923b89310e2d898653f61789d4ce00..63499b9b66ddf6fe387bdca6ac2f332d
  		}];
  	});
  }
+@@ -1406,5 +1410,3 @@ exports.findMarksToOpen = findMarksToOpen;
+ exports.isTaskItem = isTaskItem;
+ exports.reopenMarksAfterNode = reopenMarksAfterNode;
+ exports.wrapInMarkdownBlock = wrapInMarkdownBlock;
+-
+-//# sourceMappingURL=index.cjs.map
+\ No newline at end of file
 diff --git a/dist/index.js b/dist/index.js
-index 63cde7682c0e24f01f6405606707322526d60448..f71c42f446cbc48d17a14a67de4e09404b22d44e 100644
+index 63cde7682c0e24f01f6405606707322526d60448..c42672dbad6c955451b8ee314b4768586e5f8cbe 100644
 --- a/dist/index.js
 +++ b/dist/index.js
 @@ -2,14 +2,18 @@ import { Extension, attrsEqual, callOrReturn, commands, decodeHtmlEntities, enco
@@ -90,6 +97,13 @@ index 63cde7682c0e24f01f6405606707322526d60448..f71c42f446cbc48d17a14a67de4e0940
  		}];
  	});
  }
+@@ -1395,5 +1399,3 @@ const Markdown = Extension.create({
+ });
+ //#endregion
+ export { Markdown, MarkdownManager, assumeContentType, closeMarksBeforeNode, extractAbsorbedBlankLines, findMarksToClose, findMarksToCloseAtEnd, findMarksToOpen, isTaskItem, reopenMarksAfterNode, wrapInMarkdownBlock };
+-
+-//# sourceMappingURL=index.js.map
+\ No newline at end of file
 diff --git a/src/utils.ts b/src/utils.ts
 index 7660780fb9d99cb6e3e7fd791df4b12e536382a6..844a312c4fb812ad8a2a7e343ae35885a0268244 100644
 --- a/src/utils.ts

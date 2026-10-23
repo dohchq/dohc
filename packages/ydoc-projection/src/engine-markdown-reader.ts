@@ -4,7 +4,7 @@ import * as Y from 'yjs'
 import {readMarkdownSourceWitness} from './artifact-markdown.js'
 import {sameFrontmatterValue, FRONTMATTER_SOURCE_META_KEY, MARKDOWN_CRLF_META_KEY} from './frontmatter.js'
 import {recordFrontmatterSourceItems, writeFrontmatterMap} from './frontmatter-map.js'
-import {DOHC_SCHEMA_VERSION, getDohcProseMirrorSchema, getDohcYDocFrontmatter, markdownToYDoc, yDocToMarkdown} from './import-export.js'
+import {DOHC_SCHEMA_VERSION, getDohcProseMirrorSchema, getDohcYDocFrontmatter, markdownToYDoc, MarkdownNestingRefusal, yDocToMarkdown} from './import-export.js'
 import {createLiveMarkdownJournalValidator, isProseMirrorSchemaError, type LiveMarkdownRegistrationInput} from './liveDocumentValidation.js'
 import type {OrderedLiveUpdateCutPolicy} from './orderedLiveUpdateCut.js'
 
@@ -67,6 +67,8 @@ function compareReadings(actual: Y.Doc, imported: Y.Doc): void {
     && sameFrontmatterValue(getDohcYDocFrontmatter(actual), getDohcYDocFrontmatter(imported)), 'reading-mismatch')
 }
 function refused(error: unknown): Refused {
+  // A source nested past the live document contract's limits has no reading.
+  if (error instanceof MarkdownNestingRefusal) return {kind: 'refused', reason: 'invalid-schema'}
   if (!(error instanceof Refusal)) throw error
   return {kind: 'refused', reason: error.reason}
 }

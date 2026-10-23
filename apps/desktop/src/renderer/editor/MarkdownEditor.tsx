@@ -18,7 +18,7 @@ import {
   type Editor,
   type JSONContent,
 } from "@tiptap/core";
-import { parseRichdocMarkdown, serializeRichdocBody } from "@dohc/ydoc-projection";
+import { MarkdownNestingRefusal, parseRichdocMarkdown, serializeRichdocBody } from "@dohc/ydoc-projection";
 import {
   DohcMarkdownTable,
   DohcTaskItem,
@@ -554,6 +554,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     // the editor moves focus to the row.
     const [urlOffer, setUrlOffer] = useState<UrlPasteOfferState | null>(null);
     const urlOfferRowRef = useRef<HTMLDivElement>(null);
+    // A note the open editor is handed that the live document contract does
+    // not read as rich text. It reaches the editor's error boundary from
+    // render, as a note refused while the editor is built does.
+    const [refusal, setRefusal] = useState<MarkdownNestingRefusal | null>(null);
+    if (refusal) throw refusal;
     const onFocusRef = useRef(onFocus);
     onFocusRef.current = onFocus;
     // The shell's error hook, for a code block's copy the clipboard refused.
@@ -1182,11 +1187,19 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         },
         replaceMarkdown(markdown) {
           if (!editor || collabActive) return;
+          let content: JSONContent | string;
+          try {
+            content = markdownContent(markdown);
+          } catch (error) {
+            if (!(error instanceof MarkdownNestingRefusal)) throw error;
+            setRefusal(error);
+            return;
+          }
           const documentBefore = editor.state.doc;
           const selection = editor.state.selection.getBookmark();
           editor
             .chain()
-            .setContent(markdownContent(markdown), {
+            .setContent(content, {
               emitUpdate: false,
             })
             .command(({ tr }) => {

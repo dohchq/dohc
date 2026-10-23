@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -19,6 +20,9 @@ import { linkQueryPage } from "../testing/linkQueryPage.fixture";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { FileInspector } from "./FileInspector";
 import { RICH_TEXT_REFUSED } from "./fileInspectorUi";
+import { documentVersionKey } from "./documentVersionKey";
+import { codeEditorText } from "./FileInspector.editor-fixture";
+import { getSharedLocalDocument, resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
 
 // Collect the real lazy modules before hook and renderer assertion timers start.
 import "./markdown/IncrementalMarkdownDocument";
@@ -225,6 +229,49 @@ describe("FileInspector renders markdown through the shared component map", () =
       expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
     } finally {
       bridgeMock.readWorkspaceText.mockImplementation(async () => ({ text: TABLE_DOCUMENT, truncated: false }));
+    }
+  }, 30_000);
+
+  // Another pane's draft reaches the open editor when that pane publishes it,
+  // or when this editor takes focus and brings it in.
+  const DEEP_NOTES = {
+    depth: `${">".repeat(121)} a\n`,
+    lexing: `${">".repeat(120)} a\n===\n\n`.repeat(16),
+  } as const;
+  it.each([
+    ["depth", "published"],
+    ["lexing", "published"],
+    ["depth", "brought in on focus"],
+    ["lexing", "brought in on focus"],
+  ] as const)("keeps a note past the %s limit that another pane's draft hands the open editor (%s)", async (limit, arrival) => {
+    bridgeMock.readWorkspaceText.mockImplementation(async () => ({ text: "Before\n", truncated: false }));
+    try {
+      const reported = vi.fn();
+      render(<FileInspector workspaceId="ws-1" path="open.md" onButtonError={reported} />);
+      const editor = await screen.findByTestId("markdown-editor", undefined, { timeout: 15_000 });
+      await waitFor(() => expect(editor.textContent).toContain("Before"));
+      const buffer = getSharedLocalDocument(documentVersionKey("ws-1", "open.md", undefined));
+      const pane = {};
+      const text = DEEP_NOTES[limit];
+      if (arrival === "published") {
+        act(() => buffer.publishDraft(text, pane));
+      } else {
+        act(() => buffer.setPendingDraft({ source: pane, materialize: () => text }));
+        fireEvent.focus(editor);
+      }
+
+      const refused = await screen.findByTestId("rich-text-refused");
+      expect(screen.queryByTestId("editor-crash-recovery")).toBeNull();
+      expect(reported).toHaveBeenCalledTimes(1);
+      expect(reported).toHaveBeenCalledWith(RICH_TEXT_REFUSED[limit], null, null, "rich-text-refused:ws-1:open.md");
+      fireEvent.click(within(refused).getByRole("button", { name: "Edit source" }));
+      const source = await screen.findByTestId("markdown-editor");
+      await waitFor(() => expect(codeEditorText(source)).toBe(text));
+      expect(reported).toHaveBeenCalledTimes(1);
+      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+    } finally {
+      bridgeMock.readWorkspaceText.mockImplementation(async () => ({ text: TABLE_DOCUMENT, truncated: false }));
+      resetSharedLocalDocumentsForTests();
     }
   }, 30_000);
 });
