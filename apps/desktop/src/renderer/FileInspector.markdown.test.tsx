@@ -212,7 +212,7 @@ describe("FileInspector renders markdown through the shared component map", () =
       render(<FileInspector workspaceId="ws-1" path="deep.md" onButtonError={reported} />);
       const refused = await screen.findByTestId("rich-text-refused", undefined, { timeout: 15_000 });
       expect(screen.queryByTestId("editor-crash-recovery")).toBeNull();
-      expect(reported).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(reported).toHaveBeenCalledTimes(1));
       expect(reported).toHaveBeenCalledWith(RICH_TEXT_REFUSED[limit], null, null, "rich-text-refused:ws-1:deep.md");
 
       fireEvent.click(within(refused).getByRole("button", { name: "Open externally" }));
@@ -262,7 +262,7 @@ describe("FileInspector renders markdown through the shared component map", () =
 
       const refused = await screen.findByTestId("rich-text-refused");
       expect(screen.queryByTestId("editor-crash-recovery")).toBeNull();
-      expect(reported).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(reported).toHaveBeenCalledTimes(1));
       expect(reported).toHaveBeenCalledWith(RICH_TEXT_REFUSED[limit], null, null, "rich-text-refused:ws-1:open.md");
       fireEvent.click(within(refused).getByRole("button", { name: "Edit source" }));
       const source = await screen.findByTestId("markdown-editor");

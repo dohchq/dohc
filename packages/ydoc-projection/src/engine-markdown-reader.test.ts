@@ -250,8 +250,12 @@ it('refuses schema check failures in the reader and its strict journal', () => {
   } finally {doc.destroy()}
 })
 
-// Past the depth limit, and past the lexing budget within it.
-it.each([`${'>'.repeat(121)} a`, `${'>'.repeat(120)} a\n===\n\n`.repeat(16)])('refuses a source nested past the contract instead of failing', source => {
+// Past the depth limit, past the lexing budget within it, and emphasis nested
+// past the lexer's depth.
+it.each([
+  `${'>'.repeat(121)} a`, `${'>'.repeat(120)} a\n===\n\n`.repeat(16),
+  `${'**x '.repeat(2048)}y${' x**'.repeat(2048)}`, `${'~~x '.repeat(2048)}y${' x~~'.repeat(2048)}`,
+])('refuses a source nested past the contract instead of failing', source => {
   const doc = markdownToYDoc('Earlier')
   try {
     bind(doc, 'Earlier')

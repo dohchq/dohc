@@ -304,6 +304,9 @@ it.each([
   ['unclosed display math', '$$\n'],
   ['an unclosed definition title', '[x]: /u "\n'],
   ['a fence in an item that has ended', '- ```\n  x\n'],
+  ['a fence in an item the next line ends', '- a\n  ```\n  x\n'],
+  ['a fence in an item with no text that the next line ends', '-\n  ```\n  x\n'],
+  ['a paragraph after an HTML block closed on its line', '<?a?> b\n<? x\n'],
   ['a lone carriage return', 'a\r'],
 ])('refuses quotes after %s before marked lexes them', (_name, head) => {
   for (const reading of ['source', 'projection'] as const) {
@@ -320,6 +323,68 @@ it.each([
 ])('keeps quotes in %s as code', (_name, head) => {
   expect(nestingRefusal(head + CODE)).toEqual({ lexed: true })
   expect(JSON.stringify(parseRichdocMarkdown(head + CODE))).toContain(CODE)
+})
+
+// An item an earlier line opened holds these regions, or ended where they
+// open.
+it.each([
+  ['a fence on an item\'s next line', `- a\n  \`\`\`\n  ${CODE}\n  \`\`\``],
+  ['a fence in a quoted item', `> - a\n>   \`\`\`\n>   ${CODE}\n>   \`\`\``],
+  ['a fence in an item with no text', `-\n  \`\`\`\n  ${CODE}\n  \`\`\``],
+  ['an HTML block in an item', `- a\n  <div>\n  ${CODE}\n  </div>`],
+  ['an HTML comment in an item', `- a\n\n  <!--\n  ${CODE}\n  -->`],
+  ['display math in an item', `- a\n\n  $$\n  ${CODE}\n  $$`],
+  ['a fence that ends an item', `2) a\n ~~~a~~~\n${CODE}`],
+  ['an HTML block after an item has ended', `- b\n\n <![CDATA[x\n${CODE}`],
+])('keeps quotes in %s as code in both readings and live', (_name, source) => {
+  for (const reading of ['source', 'projection'] as const) {
+    expect(nestingRefusal(source, reading)).toEqual({ lexed: true })
+    expect(JSON.stringify(parseRichdocMarkdown(source, reading))).toContain(CODE)
+  }
+  const doc = markdownToYDoc(source)
+  try {
+    expect(journal({ document, currentPath: 'notes/code.md', checkpoint: Y.encodeStateAsUpdate(doc), suffix: [], candidate: new Uint8Array([0, 0]) }))
+      .toMatchObject({ kind: 'accepted' })
+  } finally { doc.destroy() }
+})
+
+// A region's last line leaves no paragraph for the next line to continue.
+it.each([
+  ['a closed fence', '```\n```\n<? x\n'],
+  ['an HTML block a blank line ends', '<x-y>\n\n<? x\n'],
+  ['an HTML block closed on its line', '<?a?>\n<? x\n'],
+])('keeps quotes after %s as code', (_name, head) => {
+  expect(nestingRefusal(head + CODE)).toEqual({ lexed: true })
+  expect(JSON.stringify(parseRichdocMarkdown(head + CODE))).toContain(CODE)
+})
+
+// Each level of emphasis or strikethrough lexes its text again.
+const nested = (depth: number, open: (level: number) => string, close: (level: number) => string) =>
+  Array.from({ length: depth }, (_, level) => open(level)).join('') + 'y'
+  + Array.from({ length: depth }, (_, level) => close(depth - 1 - level)).join('')
+const STRONG = (depth: number) => nested(depth, () => '**x ', () => ' x**')
+it.each([
+  ['strong emphasis', STRONG(2048)],
+  ['emphasis', nested(2048, () => '*x ', () => ' x*')],
+  ['alternating emphasis', nested(2048, level => `${level % 2 ? '_' : '*'}x `, level => ` x${level % 2 ? '_' : '*'}`)],
+  ['strikethrough', nested(2048, () => '~~x ', () => ' x~~')],
+])('refuses %s nested 2,048 deep in both readings', (_name, source) => {
+  for (const reading of ['source', 'projection'] as const) {
+    expect(nestingRefusal(source, reading)).toEqual({ limit: 'depth', lexed: true })
+  }
+})
+
+it('reads link brackets nested 2,048 deep, which marked nests only a few levels', () => {
+  for (const reading of ['source', 'projection'] as const) {
+    expect(nestingRefusal(nested(2048, () => '[*', () => '*](u)'), reading)).toEqual({ lexed: true })
+  }
+})
+
+it('reads strong emphasis 120 deep through 64 KB', () => {
+  const source = Array.from({ length: Math.ceil(65_536 / STRONG(120).length) }, () => STRONG(120)).join('\n\n')
+  for (const reading of ['source', 'projection'] as const) {
+    expect(nestingRefusal(source, reading)).toEqual({ lexed: true })
+  }
 })
 
 // An earlier line's item holds these quotes, which the preflight does not

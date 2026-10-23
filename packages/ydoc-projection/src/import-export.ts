@@ -1152,12 +1152,16 @@ class ContentTabLexer<ParserOutput = string, RendererOutput = string> extends Le
     }
   }
 
+  // Emphasis, strikethrough and links lex their text through here again.
   inlineTokens(src: string, tokens: Token[] = []): Token[] {
+    if (lexing.inline === MAX_LEXING_DEPTH) throw new MarkdownNestingRefusal('depth')
+    lexing.inline += 1
     const text = parseTabs.size ? restoreParseSentinels(src, parseTabs) : src
     enterText(this, text, tokens)
     try {
       return super.inlineTokens(text, tokens)
     } finally {
+      lexing.inline -= 1
       leaveText(this, tokens)
     }
   }
@@ -1316,7 +1320,8 @@ const LEXING_FLOOR = 256 * 1024
 // Block lexing nested this deep reads text inside a node deeper than the
 // limit: the top level and a table's own text each add a level no node does.
 // The preflight refuses such notes first; this keeps any it misses off the
-// end of the stack.
+// end of the stack. Inline lexing stops at the same depth: marks do not nest
+// as nodes, so the serializer never writes emphasis that deep.
 const MAX_LEXING_DEPTH = MAX_STRUCTURE_DEPTH + 2
 
 /**
@@ -1332,8 +1337,8 @@ export class MarkdownNestingRefusal extends Error {
 }
 
 // The block lexing the parse in progress has done and may do, and how deeply
-// it nests now.
-let lexing = { read: 0, budget: Infinity, depth: 0 }
+// block and inline lexing each nest now.
+let lexing = { read: 0, budget: Infinity, depth: 0, inline: 0 }
 
 // The containers that open a line before its text, as marked reads them, and
 // where its text starts. A quote takes up to three spaces, `>` and one space
@@ -1344,7 +1349,8 @@ let lexing = { read: 0, budget: Infinity, depth: 0 }
 // paragraph, opens nothing unless it could interrupt one. A thematic break
 // ends the line's containers. Counting stops past either limit. `containers`
 // gets each container in order: a quote as -1 less the spaces before its `>`,
-// and an item as the width of its marker and the spaces after it.
+// and an item as the width of its marker and the spaces after it, or one
+// space if its text is blank or indented code.
 function lineContainers(line: string, continues: boolean, containers?: number[]): LineContainers {
   let text = line
   let at = 0
@@ -1397,7 +1403,10 @@ function lineContainers(line: string, continues: boolean, containers?: number[])
     if (!listed && continues && (blank || (ordered !== '' && ordered !== '1'))) break
     depth += 2
     listed = true
-    if (blank || content - end > 4) break
+    if (blank || content - end > 4) {
+      containers?.push(end + 1 - at)
+      break
+    }
     containers?.push(content - at)
     at = content
     if (!ordered && text[at] === '[' && ' xX'.includes(text[at + 1] ?? '_') && text[at + 2] === ']' && text[at + 3] === ' ') {
@@ -1441,56 +1450,72 @@ function mayOpen(first: string | undefined): boolean {
 }
 
 // A literal region a line opened: the containers each later line keeps, as
-// `lineContainers` lists them, and whether a line's text within them is the
-// region's last. A fence or an HTML block holds text marked never reads as
-// containers, until its closing line or the end of the containers it opened
-// in.
-type LiteralRegion = { containers: number[]; ends: (text: string) => boolean }
+// `lineContainers` lists them, and where a line's text within them ends the
+// region, or -1 while it goes on. A fence or an HTML block holds text marked
+// never reads as containers, until its closing line or the end of the
+// containers it opened in.
+type LiteralRegion = { containers: number[]; ends: (text: string) => number }
+
+// What a line's text follows: another block, a paragraph it may continue, or
+// a paragraph an item it is not indented into may hold it in lazily.
+type Follows = 'block' | 'paragraph' | 'lazy'
+// The HTML that ends an item a line is not indented into, by marked's rule.
+const ITEM_ENDING_HTML = literalProbe.rules.other.htmlBeginRegex(1)
 
 // What a line opens at its text: a literal region, the index of the last line
-// of a display math block or a definition that runs past it, or nothing. Each
-// opens only where marked's own rule reads one. When the line `continues` a
-// paragraph and opens no item, only a fence or an HTML block that may
-// interrupt the paragraph opens. An item an earlier line opened may hold the
-// line and end before the region would, so while one may be `listed`, a region
-// opens only where that item would have ended.
-function literalRegion(lines: string[], index: number, opened: LineContainers, continues: boolean, listed: boolean): LiteralRegion | number | undefined {
+// of a display math block, a definition, or an HTML block closed on its own
+// line with no paragraph after it, or nothing. Each opens only where marked's
+// own rule reads one. `rest` is the line's text within the containers earlier
+// lines opened, `opened` reads the containers it opens itself, and
+// `containers` lists both. After a paragraph, only a fence or an HTML block
+// that may interrupt it opens. Where an item may hold the line lazily, only
+// what marked's item rule ends the item for opens: a fence, or an HTML block
+// that starts with a tag name and a later `>`, or with `<!--`.
+function literalRegion(lines: string[], index: number, rest: string, opened: LineContainers, containers: number[], follows: Follows): LiteralRegion | number | undefined {
   const { text, at } = opened
   let start = at
   while (start - at < 3 && text[start] === ' ') start += 1
   const first = text[start]
   if (first !== '`' && first !== '~' && first !== '<' && first !== '$' && first !== '[') return undefined
   // marked expanded tabs before the text.
-  if (text !== lines[index]) return undefined
-  const containers: number[] = []
-  lineContainers(text, continues, containers)
-  if (listed && (start > at || containers.some(container => container < -1))) return undefined
-  const paragraph = continues && opened.depth === opened.quotes
+  if (text !== rest) return undefined
   if (first === '`' || first === '~') {
     let end = start
     while (text[end] === first) end += 1
     if (end - start < 3 || (first === '`' && text.includes('`', end))) return undefined
     const run = text.slice(start, end)
-    return { containers, ends: line => fenceCloses(line, run) }
+    return { containers, ends: line => fenceCloses(line, run) ? line.length : -1 }
   }
-  if (paragraph && listed) return undefined
   if (first === '<') {
     const open = text.slice(start)
+    if (follows === 'lazy' && !ITEM_ENDING_HTML.test(open)) return undefined
     const html = literalProbe.rules.block.html.exec(`${open}\n`)
     if (!html) return undefined
     const [, name, comment, block] = html
-    if (paragraph && !name && comment === undefined && !block) return undefined
+    if (follows === 'paragraph' && !name && comment === undefined && !block) return undefined
     const [end, from] = name ? [`</${name.toLowerCase()}>`, name.length + 1]
       : comment !== undefined ? ['-->', 4]
       : open.startsWith('<?') ? ['?>', 2]
       : /^<!\[CDATA\[/iu.test(open) ? [']]>', 9]
       : open.startsWith('<!') ? ['>', 2]
       : ['', 0]
-    if (!end) return { containers, ends: line => blankFrom(line, 0) }
-    if ((name ? open.toLowerCase() : open).includes(end, from) || (comment !== undefined && (open[4] === '>' || open.startsWith('->', 4)))) return undefined
-    return { containers, ends: name ? line => line.toLowerCase().includes(end) : line => line.includes(end) }
+    if (!end) return { containers, ends: line => blankFrom(line, 0) ? line.length : -1 }
+    // A tag's or a comment's block takes the rest of its closing line; text
+    // after any other closer starts a paragraph.
+    const whole = !!name || comment !== undefined
+    const close = (name ? open.toLowerCase() : open).indexOf(end, from)
+    if (close >= 0 || (comment !== undefined && (open[4] === '>' || open.startsWith('->', 4)))) {
+      return whole || blankFrom(open, close + end.length) ? index : undefined
+    }
+    return {
+      containers,
+      ends: line => {
+        const close = (name ? line.toLowerCase() : line).indexOf(end)
+        return close < 0 ? -1 : whole ? line.length : close + end.length
+      },
+    }
   }
-  if (paragraph) return undefined
+  if (follows !== 'block') return undefined
   const following = (line: number) => index + line < lines.length ? within(lines[index + line], containers) : undefined
   if (first === '$') {
     // A math block opens with `$$` at its line's text and ends at the next
@@ -1507,24 +1532,26 @@ function literalRegion(lines: string[], index: number, opened: LineContainers, c
   return end ? index + end : undefined
 }
 
-// The text a line holds within `containers`, or undefined once it leaves
-// them. A quote needs its `>`; an item holds a blank line, or one indented to
-// its text.
-function within(line: string, containers: readonly number[]): string | undefined {
-  let text = line
-  for (const container of containers) {
-    let at = 0
-    if (container < 0) {
-      while (at < 3 && text[at] === ' ') at += 1
-      if (text[at] !== '>') return undefined
-      at += text[at + 1] === ' ' || text[at + 1] === '\t' ? 2 : 1
-    } else {
-      while (at < container && text[at] === ' ') at += 1
-      if (at < container && !blankFrom(text, at)) return undefined
-    }
-    text = text.slice(at)
-  }
+// The text a line holds within the first `count` of `containers`, or
+// undefined once it leaves them. A quote needs its `>`; an item holds a blank
+// line, or one indented to its text.
+function within(line: string, containers: readonly number[], count = containers.length): string | undefined {
+  let text: string | undefined = line
+  for (let index = 0; index < count && text !== undefined; index += 1) text = inside(text, containers[index])
   return text
+}
+
+function inside(text: string, container: number): string | undefined {
+  let at = 0
+  if (container < 0) {
+    while (at < 3 && text[at] === ' ') at += 1
+    if (text[at] !== '>') return undefined
+    at += text[at + 1] === ' ' || text[at + 1] === '\t' ? 2 : 1
+  } else {
+    while (at < container && text[at] === ' ') at += 1
+    if (at < container && !blankFrom(text, at)) return undefined
+  }
+  return text.slice(at)
 }
 
 // Whether a line closes a fence its opener's `run` opened: up to three
@@ -1616,37 +1643,58 @@ function assertNestingWithinLimits(markdown: string, lines: string[]): void {
   if (markdown.includes('\r')) lines = markdown.split(/\r\n?|\n/u)
   let literal: LiteralRegion | undefined
   let continues = false
-  // Whether an item an earlier line opened may hold this line. A line at
-  // column 0 after a blank line ends every item, and so does a fence there.
-  let listed = false
-  let blank = true
+  // The containers earlier lines opened that may hold this line, as
+  // `lineContainers` lists them.
+  let held: number[] = []
   for (let at = 0; at < lines.length; at += 1) {
     const line = lines[at]
-    const first = line[0]
-    if (first !== undefined && first !== ' ' && first !== '\t' && (blank || line.startsWith('```') || line.startsWith('~~~'))) listed = false
-    blank = blankFrom(line, 0)
     if (literal) {
       const text = within(line, literal.containers)
       if (text !== undefined) {
-        if (literal.ends(text)) literal = undefined
-        continues = true
+        const end = literal.ends(text)
+        if (end >= 0) literal = undefined
+        continues = end < 0 || !blankFrom(text, end)
         continue
       }
       literal = undefined
     }
-    if (!mayOpen(first)) {
+    const blank = blankFrom(line, 0)
+    const first = line[0]
+    if (!held.length && !mayOpen(first)) {
       continues = !blank
       continue
     }
-    const opened = lineContainers(line, continues)
-    if (opened.quotes > MAX_QUOTE_DEPTH || opened.depth > MAX_STRUCTURE_DEPTH) throw new MarkdownNestingRefusal('depth')
-    const region = literalRegion(lines, at, opened, continues, listed)
-    listed ||= opened.depth > opened.quotes
-    continues = !blankFrom(opened.text, opened.at)
+    // The line's text within the containers that hold it. An item the line
+    // leaves ends after a blank line, or where the line opens a block;
+    // otherwise it may hold the line lazily, and still holds the next.
+    let kept = 0
+    let rest = line
+    for (; kept < held.length; kept += 1) {
+      const text = inside(rest, held[kept])
+      if (text === undefined) break
+      rest = text
+    }
+    const item = kept < held.length && held[kept] >= 0
+    const fresh = item && blankFrom(within(lines[at - 1], held, kept) ?? '.', 0)
+    // Those containers, then the ones the line opens.
+    const containers = held.slice(0, kept)
+    let region: LiteralRegion | number | undefined
+    if (mayOpen(first)) {
+      const opened = lineContainers(line, continues, held.length ? undefined : containers)
+      if (opened.quotes > MAX_QUOTE_DEPTH || opened.depth > MAX_STRUCTURE_DEPTH) throw new MarkdownNestingRefusal('depth')
+      const inner = held.length ? lineContainers(rest, continues && !item, containers) : opened
+      const follows: Follows = item ? fresh || containers.length > kept ? 'block' : 'lazy'
+        : continues && inner.depth === inner.quotes ? 'paragraph' : 'block'
+      region = literalRegion(lines, at, rest, inner, containers, follows)
+      continues = !blankFrom(opened.text, opened.at)
+    } else continues = !blank
+    const opens = containers.length > kept
+    if (kept < held.length ? blank || fresh || opens || region !== undefined : opens) {
+      held = containers.length > MAX_LEXING_DEPTH ? containers.slice(0, MAX_LEXING_DEPTH) : containers
+    }
     if (typeof region === 'number') {
       at = region
-      blank = false
-      continues = true
+      continues = false
     } else literal = region
   }
 }
@@ -1842,10 +1890,10 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
     markdownListParseState.references = markdown.includes(']:')
     // The projection reads only what the serializer writes, so a live note
     // can always settle.
-    lexing = { read: 0, budget: reading === 'source' ? LEXING_BUDGET * Math.max(prepared.length, LEXING_FLOOR) : Infinity, depth: 0 }
+    lexing = { read: 0, budget: reading === 'source' ? LEXING_BUDGET * Math.max(prepared.length, LEXING_FLOOR) : Infinity, depth: 0, inline: 0 }
     parsed = (reading === 'projection' ? projectedMarkdownManager() : markdownManager).parse(prepared)
   } finally {
-    lexing = { read: 0, budget: Infinity, depth: 0 }
+    lexing = { read: 0, budget: Infinity, depth: 0, inline: 0 }
     parseReferences = new Map()
     parseTabs = new Map()
     markdownListParseState.references = true

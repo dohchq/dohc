@@ -300,12 +300,12 @@ it.each([
   expect(large, `searched characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
 })
 
-// Each level of nested emphasis takes the stack deeper, and a note nested past
-// what it holds fails to open. In a fresh process the importer read 1,700
-// levels of either before it read delimiter runs itself, and still does.
+// Each level of nested emphasis lexes its text again, so the importer reads
+// 120 levels and refuses a note nested past the lexer's depth (see
+// nestedMarkdownContract.test.ts).
 it.each([
-  ['emphasis', 1_600, '*', 'italic'],
-  ['strikethrough', 1_600, '~~', 'strike'],
+  ['emphasis', 120, '*', 'italic'],
+  ['strikethrough', 120, '~~', 'strike'],
 ])('reads %s nested %i levels deep', (_name, depth, delimiter, mark) => {
   const paragraph = parseRichdocMarkdown(`${`${delimiter}a `.repeat(depth)}b${` a${delimiter}`.repeat(depth)}`).content?.[0]
   expect(paragraph?.content?.map(node => node.text).join('')).toBe(`${'a '.repeat(depth)}b${' a'.repeat(depth)}`)
