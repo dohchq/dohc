@@ -17,7 +17,7 @@ import { deferred } from "../testing/deferred";
 import { resumeWorkspaceLinkRewrites } from "./workspaceLinkRewrites";
 import { listMoveRecoveries, readMoveRecovery } from "./workspaceMoveRecovery";
 import { openedLocalState } from "../testing/preparedLocalState";
-import { readLocalStateFrom } from "./workspaceLocalState";
+import { existingLocalStateFolder, readLocalStateFrom } from "./workspaceLocalState";
 
 vi.mock("node:fs/promises", async original => {
   const actual = await original<typeof import("node:fs/promises")>();
@@ -253,6 +253,28 @@ it("does not enumerate a record linked to a valid record outside the trash", asy
   }
   expect(await listMoveRecoveries(f.rootPath)).toEqual([]);
   expect(JSON.parse(await readFile(outside, "utf8"))).toHaveProperty("operationId", moved.operationId);
+  f.retirement.abort();
+});
+
+it("does not enumerate or resume move records when local trash is unusable", async () => {
+  const rewrite = vi.fn<NonNullable<OperationHistory["rewriteHistoryLinks"]>>(async () => linkReceipt);
+  const f = await fixture(); await f.write("old.md");
+  const moved = await f.moveAsAgent("old.md", "new.md");
+  const record = await readMoveRecovery(f.rootPath, moved.operationId!);
+  if (!record || "noUndo" in record) throw new Error("missing file record");
+  record.links = {state: "updating"}; record.linkRewrite = {requestId: "original-key", author: agent};
+  await recovery.saveRecoveryRecord(f.operation.workspace, record, "move");
+  expect(await listMoveRecoveries(f.rootPath)).toEqual([moved.operationId]);
+  const trash = join(f.rootPath, ".dohc/local/trash"), saved = join(f.rootPath, "saved-trash");
+  await rename(trash, saved);
+  await filesystem.symlink(saved, trash, "junction");
+  expect(await existingLocalStateFolder(f.rootPath, "trash")).toBe("unusable");
+  expect(await listMoveRecoveries(f.rootPath)).toEqual([]);
+  const exclusive = vi.spyOn(assets, "withExclusiveWorkspaceOperation");
+  await resumeWorkspaceLinkRewrites(f.operation.workspace, {workspaceId: "move-test", signal: f.retirement.signal, history: {rewriteHistoryLinks: rewrite}});
+  await nextTurn();
+  expect(exclusive).not.toHaveBeenCalled();
+  expect(rewrite).not.toHaveBeenCalled();
   f.retirement.abort();
 });
 
