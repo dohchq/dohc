@@ -657,8 +657,11 @@ impl EngineService {
             .await
             .map_err(map_runtime)?
             .map_err(map_owner_outbox)?;
+        // A released row says whether its settlement wrote the file, so the
+        // desktop claims recovered edits only when they reached it.
+        let mut materialized = vec![false; rows.len()];
         if action == "release" {
-            for row in &rows {
+            for (index, row) in rows.iter().enumerate() {
                 if row.deferred.is_some() {
                     continue;
                 }
@@ -714,16 +717,26 @@ impl EngineService {
                         None,
                     )
                     .await
-                    .map_err(map_runtime)?;
+                    .map_err(map_runtime)?
+                    .settled();
                 if settled
-                    .settled()
+                    .as_ref()
                     .is_some_and(|s| s.collection_reconcile_required)
                 {
                     open.request_collection_reconcile();
                 }
+                materialized[index] = settled.is_some_and(|s| s.materialized);
             }
         }
-        Ok(json!({"stops":rows}))
+        let mut stops = json!(rows);
+        if action == "release"
+            && let Some(values) = stops.as_array_mut()
+        {
+            for (value, materialized) in values.iter_mut().zip(materialized) {
+                value["materialized"] = json!(materialized);
+            }
+        }
+        Ok(json!({"stops":stops}))
     }
 
     pub(super) async fn owner_ydoc_outbox_append(

@@ -255,5 +255,6 @@
   "dataset.holder.keep",
   "file.retained.list",
   "file.retained.delete",
-  "share.live.document.retry"
+  "share.live.document.retry",
+  "share.live.document.recovery.save"
 ]

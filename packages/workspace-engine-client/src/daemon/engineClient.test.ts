@@ -90,7 +90,7 @@ describe("private owner delivery transport", () => {
   });
   it.each(["valid", "negative", "extra", "unretired", "requested", "unbound"])("checks the deferred Stop contract: %s", async scenario => {
     const peer=new FakePeerConnection(),transport=client(peer);peer.acknowledge();await transport.ready();
-    const row={...stopTarget,state:scenario==="requested" ? "requested" : "released",retirementOwed:scenario==="unretired",
+    const row={...stopTarget,state:scenario==="requested" ? "requested" : "released",retirementOwed:scenario==="unretired",materialized:false,
       ...(scenario==="unbound" ? {binding:null,relayDatabaseNamespace:""} : {}),
       deferred:{unsentEdits:scenario==="negative" ? -1 : 65,editable:false,...(scenario==="extra" ? {secret:"no"} : {})}};
     peer.onEnvelope=e=>{if (e.type==="request") peer.send({type:"response",id:e.id,result:{stops:[row]}});};
@@ -106,19 +106,20 @@ describe("private owner delivery transport", () => {
       const action = e.method.split(".").at(-1);
       expect(e.method).toBe(`ydoc.ownerStop.${action}`);
       expect(e.params).toEqual(action === "release" ? {binding: target.binding,acceptedCursor:0} : action === "list" ? {} : {path: "a.md"});
-      peer.send({type: "response", id: e.id, result: {stops: action === "clear" ? [] : [{...stopTarget, state: action === "release" ? "released" : "requested"}]}});
+      peer.send({type: "response", id: e.id, result: {stops: action === "clear" ? [] : [{...stopTarget, ...(action === "release" ? {state: "released", materialized: true} : {state: "requested"})}]}});
     };
     try {
       expect((await transport.ownerYDocStopRequest(request, "a.md")).state).toBe("requested");
-      expect((await transport.ownerYDocRelease(request, target.binding, 0)).state).toBe("released");
+      expect(await transport.ownerYDocRelease(request, target.binding, 0)).toMatchObject({state: "released", materialized: true});
       expect(await transport.ownerYDocStopList(request)).toEqual([{...stopTarget, state: "requested"}]);
       await transport.ownerYDocStopClear(request, "a.md");
     } finally {transport.close();}
   });
-  it.each(["binding", "state", "extra", "namespace"])("rejects an invalid Stop release response: %s", async scenario => {
+  it.each(["binding", "state", "extra", "namespace", "unmaterialized", "materialized text"])("rejects an invalid Stop release response: %s", async scenario => {
     const peer = new FakePeerConnection(), transport = client(peer);
     peer.acknowledge(); await transport.ready();
-    const row = {...stopTarget, state: "released", ...(scenario === "binding" ? {binding: {...stopTarget.binding, restoreFenceGeneration: 1}} : scenario === "state" ? {state: "requested"} : scenario === "extra" ? {extra: true} : {relayDatabaseNamespace: ""})};
+    const row = {...stopTarget, state: "released", materialized: true, ...(scenario === "binding" ? {binding: {...stopTarget.binding, restoreFenceGeneration: 1}} : scenario === "state" ? {state: "requested"} : scenario === "extra" ? {extra: true}
+      : scenario === "unmaterialized" ? {materialized: undefined} : scenario === "materialized text" ? {materialized: "yes"} : {relayDatabaseNamespace: ""})};
     peer.onEnvelope = e => {if (e.type === "request") peer.send({type: "response", id: e.id, result: {stops: [row]}});};
     try {await expect(transport.ownerYDocRelease(request, target.binding, 0)).rejects.toThrow(TypeError);}
     finally {transport.close();}

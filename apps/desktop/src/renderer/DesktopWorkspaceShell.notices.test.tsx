@@ -43,7 +43,7 @@ describe("edits the server refused", () => {
   const quarantined = (...rows: NonNullable<SyncStatusResult["ownerLiveQuarantines"]>): SyncStatusResult =>
     ({...SYNC_STATUS, ownerLiveQuarantines: rows});
   const TITLE = "Live editing paused for notes/plan.md";
-  const BODY = "The server could not accept your edits. dohc kept them on this computer. Choose Stop live editing to recover them.";
+  const BODY = "The server could not accept your edits. dohc kept them on this computer. Save a recovery copy to get them back.";
   const RECOVERED = "Live editing stopped for notes/plan.md. dohc wrote your kept edits into the file.";
   const liveRows = (): OwnerLiveDocumentsResult => ({nextCursor: null, documents: [
     {path: "other.md", status: "ready", canResume: false},
@@ -144,7 +144,7 @@ describe("edits the server refused", () => {
     await waitFor(() => expect(document.activeElement).toBe(stop));
     const row = within(dialog).getByTestId("live-document-row-notes/plan.md");
     expect(row.getAttribute("aria-current")).toBe("true");
-    expect(row.textContent).toContain("Stop live editing writes them into your file.");
+    expect(row.textContent).toContain("Save a recovery copy to get them back.");
   });
 
   it("says the kept edits are in the file only after the Stop wrote them", async () => {
@@ -181,10 +181,104 @@ describe("edits the server refused", () => {
     act(() => bridge.emitWorkspaceActivity());
     const kept = await screen.findByText("Live editing stopped for notes/plan.md");
     const toast = kept.closest<HTMLElement>("[data-testid='workspace-shell-error']")!;
-    expect(within(toast).getByText("dohc kept your unsent edits, but could not write them to your file.")).toBeTruthy();
+    expect(within(toast).getByText("dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.")).toBeTruthy();
     expect(within(toast).queryByRole("button", {name: "Try again"})).toBeNull();
+    expect(within(toast).getByRole("button", {name: "Save recovery copy"})).toBeTruthy();
     expect(within(toast).getByRole("button", {name: "Open Live documents"})).toBeTruthy();
     expect(screen.queryByText(RECOVERED)).toBeNull();
+  });
+
+  // A queue over the release limits defers every Stop, so the copy is the way back.
+  it("saves a recovery copy from the notice, opens it, and keeps the notice", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(async () => quarantined({...quarantine, recovery: "stopped-kept"}));
+    const saving = deferred<{copyPath: string | null; packagePath: string}>();
+    bridge.saveOwnerLiveRecoveryCopy = vi.fn(() => saving.promise);
+    renderShell(bridge);
+    const user = userEvent.setup();
+    await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", {name: "Save recovery copy"}));
+    expect(bridge.saveOwnerLiveRecoveryCopy).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId, path: "notes/plan.md"});
+    await act(async () => { saving.resolve({copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json"}); await saving.promise; });
+    expect(await screen.findByText("Saved a recovery copy of notes/plan.md. Your kept edits stay on this computer.")).toBeTruthy();
+    expect(screen.getByRole("button", {name: "Open"})).toBeTruthy();
+    // The edits stay queued, so the notice that holds them stays too.
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(within(await screen.findByTestId("notice-center")).getByText("Live editing stopped for notes/plan.md")).toBeTruthy();
+    expect(bridge.stopOwnerLiveDocument).not.toHaveBeenCalled();
+  });
+
+  it("says when only a recovery package could be saved, and offers Try again when nothing could", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(async () => quarantined(quarantine));
+    bridge.saveOwnerLiveRecoveryCopy = vi.fn()
+      .mockRejectedValueOnce(new Error("dohc could not find a free name for the recovery copy. Rename older recovery copies, then try again."))
+      .mockResolvedValueOnce({copyPath: null, packagePath: "notes/plan (recovered).dohc-recovery.json"});
+    renderShell(bridge);
+    const user = userEvent.setup();
+    await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", {name: "Save recovery copy"}));
+    const failed = await screen.findByText(/^dohc could not save a recovery copy of notes\/plan\.md\. dohc could not find a free name/);
+    await user.click(within(failed.closest<HTMLElement>("[data-testid='workspace-shell-error']")!).getByRole("button", {name: "Try again"}));
+    expect(await screen.findByText("Saved your kept edits for notes/plan.md as a recovery package. dohc could not make a readable copy.")).toBeTruthy();
+    expect(bridge.saveOwnerLiveRecoveryCopy).toHaveBeenCalledTimes(2);
+  });
+
+  // The release committed, then settlement could not write the file.
+  it("says once that a Stop could not write the file, and its Try again writes it", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    let status = quarantined({...quarantine, incident: "release:lineage:0", recovery: "not-written"});
+    bridge.getSyncStatus = vi.fn(async () => status);
+    bridge.stopOwnerLiveDocument = vi.fn(async () => {status = SYNC_STATUS; return {keptEdits: "recovered" as const};});
+    renderShell(bridge);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(within(toast).getByText("Live editing stopped for notes/plan.md")).toBeTruthy();
+    expect(within(toast).getByText("dohc kept your unsent edits, but could not write them to your file.")).toBeTruthy();
+    expect(within(toast).queryByRole("button", {name: "Save recovery copy"})).toBeNull();
+    expect(screen.queryByText(RECOVERED)).toBeNull();
+    // The same incident read again adds nothing.
+    const reads = bridge.getSyncStatus.mock.calls.length;
+    act(() => bridge.emitWorkspaceActivity());
+    await waitFor(() => expect(bridge.getSyncStatus.mock.calls.length).toBeGreaterThan(reads));
+    expect(screen.getAllByText("Live editing stopped for notes/plan.md")).toHaveLength(1);
+    await userEvent.setup().click(within(toast).getByRole("button", {name: "Try again"}));
+    expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId, path: "notes/plan.md"});
+    expect(await screen.findByText(RECOVERED)).toBeTruthy();
+    act(() => bridge.emitWorkspaceActivity());
+    await waitFor(() => expect(screen.queryByText("Live editing stopped for notes/plan.md")).toBeNull());
+  });
+
+  // A Stop recorded on this computer whose server call failed: it waits, it is not stopped.
+  it("files a waiting Stop quietly with Try again, and replaces it once background recovery finishes", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    let status = quarantined({...quarantine, recovery: "stopping"});
+    bridge.getSyncStatus = vi.fn(async () => status);
+    renderShell(bridge);
+    const user = userEvent.setup();
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const row = (await within(notices).findByText("Stopping live editing for notes/plan.md")).closest("li")!;
+    expect(within(row).getByText("dohc is waiting for the server to stop live editing. Your unsent edits stay on this computer.")).toBeTruthy();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.queryByText(/Live editing stopped/)).toBeNull();
+    await user.click(within(row).getByRole("button", {name: "Try again"}));
+    await waitFor(() => expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledWith({workspaceId: WORKSPACE.workspaceId, path: "notes/plan.md"}));
+    // Reconciliation released it in the background and wrote the file: nothing is left to say.
+    status = SYNC_STATUS;
+    const reads = bridge.getSyncStatus.mock.calls.length;
+    act(() => bridge.emitWorkspaceActivity());
+    await waitFor(() => expect(bridge.getSyncStatus.mock.calls.length).toBeGreaterThan(reads));
+    await waitFor(() => expect(screen.queryByText("Stopping live editing for notes/plan.md")).toBeNull());
+  });
+
+  it("keeps a quiet row while a Try again waits", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(async () => quarantined({...quarantine, incident: "outbox:delivery:1", recovery: "retrying"}));
+    renderShell(bridge);
+    const user = userEvent.setup();
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const row = (await within(await screen.findByTestId("notice-center")).findByText("Trying again for notes/plan.md")).closest("li")!;
+    expect(within(row).getByText("dohc is sending your kept edits to the server once more.")).toBeTruthy();
+    expect(within(row).getByRole("button", {name: "Save recovery copy"})).toBeTruthy();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
   // DesktopRoot remounts the shell on a switch; this rerenders the same

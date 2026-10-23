@@ -339,7 +339,46 @@ export async function createFile(
   if (observedBytes > WORKSPACE_TEXT_EDITOR_MAX_BYTES) {
     throw new Error(workspaceTextLimitReason(observedBytes));
   }
-  const absolute = join(rootPath, validated.normalized);
+  const target = await newFileTarget(rootPath, relativePath, validated.normalized);
+  const handle = await open(target, "wx").catch((error: unknown) => {
+    if (options.exclusive || (error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    return null;
+  });
+  if (handle) {
+    try {
+      try { await handle.writeFile(initialText); }
+      finally { await handle.close(); }
+    } catch (error) {
+      throw new CreatedFileWriteError(validated.normalized, error);
+    }
+  }
+  return validated.normalized;
+}
+
+/**
+ * Creates a new workspace file of any size and syncs it to disk before
+ * returning. It never replaces a file: an existing path refuses with EEXIST.
+ */
+export async function createDurableFile(rootPath: string, relativePath: string, text: string): Promise<string> {
+  const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
+  if (!validated.ok) {
+    throw new Error(`Invalid file path (${validated.reason}): ${relativePath}`);
+  }
+  const target = await newFileTarget(rootPath, relativePath, validated.normalized);
+  const handle = await open(target, "wx");
+  try {
+    try { await handle.writeFile(text); await handle.sync(); }
+    finally { await handle.close(); }
+  } catch (error) {
+    // A partial file would read as a complete one.
+    await unlink(target).catch(() => undefined);
+    throw error;
+  }
+  return validated.normalized;
+}
+
+async function newFileTarget(rootPath: string, relativePath: string, normalized: string): Promise<string> {
+  const absolute = join(rootPath, normalized);
   // Lexical validation can't see symlinks, and it read the path as SPELLED.
   // Both questions get asked of the real path before mkdir, so a symlinked
   // ancestor can neither have directories created through it nor name a
@@ -361,19 +400,7 @@ export async function createFile(
   if (!isInside(realRoot, await realpath(dirname(target)))) {
     throw new Error(`Invalid file path (escapes workspace): ${relativePath}`);
   }
-  const handle = await open(target, "wx").catch((error: unknown) => {
-    if (options.exclusive || (error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    return null;
-  });
-  if (handle) {
-    try {
-      try { await handle.writeFile(initialText); }
-      finally { await handle.close(); }
-    } catch (error) {
-      throw new CreatedFileWriteError(validated.normalized, error);
-    }
-  }
-  return validated.normalized;
+  return target;
 }
 
 // Import outcome: what landed (workspace-relative paths, destination prefix

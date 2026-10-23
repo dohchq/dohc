@@ -814,8 +814,9 @@ export class EngineClient implements EngineTransport {
   async ownerYDocRelease(request: OwnerYDocDeliveryRequest, binding: OwnerYDocDeliveryTarget["binding"], acceptedCursor: number, signal?: AbortSignal) {
     if (!Number.isSafeInteger(acceptedCursor) || acceptedCursor < 0) throw new TypeError("Invalid retirement cursor.");
     const rows = await this.ownerLiveStop(request, "release", {binding,acceptedCursor}, signal);
-    if (rows.length !== 1 || rows[0]!.state !== "released" || JSON.stringify(rows[0]!.binding) !== JSON.stringify(parseLiveObjectBinding(binding))) throw new TypeError("Invalid release response.");
-    return rows[0]!;
+    const row = rows[0], materialized = row?.materialized;
+    if (rows.length !== 1 || !row || row.state !== "released" || materialized === undefined || JSON.stringify(row.binding) !== JSON.stringify(parseLiveObjectBinding(binding))) throw new TypeError("Invalid release response.");
+    return {...row, materialized};
   }
   async ownerYDocStopRetired(request: OwnerYDocDeliveryRequest, document: {mainVersionId: string; objectId: string; currentPath: string}, signal?: AbortSignal): Promise<void> {
     const rows=await this.ownerLiveStop(request,"retired",{document},signal);
@@ -833,8 +834,11 @@ export class EngineClient implements EngineTransport {
     const value = response.result as {stops?: unknown};
     if (!value || Object.keys(value).join() !== "stops" || !Array.isArray(value.stops) || value.stops.length > 64) throw new TypeError("Invalid Stop response.");
     return value.stops.map((row: unknown) => {
-      if (!row || typeof row !== "object" || Object.keys(row).filter(key => key !== "deferred").sort().join() !== "binding,document,relayDatabaseNamespace,retirementOwed,state") throw new TypeError("Invalid Stop row.");
-      const r=row as {binding: unknown;document: unknown;relayDatabaseNamespace: unknown;retirementOwed: unknown;state: unknown;deferred?: unknown};
+      // Only a release says whether settlement wrote the file.
+      const optional = action === "release" ? ["deferred", "materialized"] : ["deferred"];
+      if (!row || typeof row !== "object" || Object.keys(row).filter(key => !optional.includes(key)).sort().join() !== "binding,document,relayDatabaseNamespace,retirementOwed,state") throw new TypeError("Invalid Stop row.");
+      const r=row as {binding: unknown;document: unknown;relayDatabaseNamespace: unknown;retirementOwed: unknown;state: unknown;deferred?: unknown;materialized?: unknown};
+      if (r.materialized !== undefined && typeof r.materialized !== "boolean") throw new TypeError("Invalid Stop materialization.");
       if (r.state !== "requested" && r.state !== "released" || typeof r.retirementOwed !== "boolean") throw new TypeError("Invalid Stop state.");
       const d=r.document as {mainVersionId?: unknown;objectId?: unknown;currentPath?: unknown};
       if (!d || Object.keys(d).sort().join()!=="currentPath,mainVersionId,objectId" || typeof d.currentPath!=="string" || !validateUserWritePath(d.currentPath).ok) throw new TypeError("Invalid Stop document.");
@@ -847,7 +851,8 @@ export class EngineClient implements EngineTransport {
         if (!d || Object.keys(d).sort().join()!=="editable,unsentEdits" || !Number.isSafeInteger(d.unsentEdits) || d.unsentEdits<0 || typeof d.editable!=="boolean" || !binding || r.state!=="released" || r.retirementOwed) throw new TypeError("Invalid deferred Stop.");
         deferred={unsentEdits:d.unsentEdits,editable:d.editable};
       }
-      return {binding,document,retirementOwed:r.retirementOwed,relayDatabaseNamespace:binding ? parseLiveUpdateIdentifier(r.relayDatabaseNamespace,"relay namespace") : r.relayDatabaseNamespace==="" ? "" : (()=>{throw new TypeError("Invalid Stop namespace.");})(),state:r.state,...(deferred ? {deferred} : {})};
+      return {binding,document,retirementOwed:r.retirementOwed,relayDatabaseNamespace:binding ? parseLiveUpdateIdentifier(r.relayDatabaseNamespace,"relay namespace") : r.relayDatabaseNamespace==="" ? "" : (()=>{throw new TypeError("Invalid Stop namespace.");})(),state:r.state,...(deferred ? {deferred} : {}),
+        ...(typeof r.materialized === "boolean" ? {materialized:r.materialized} : {})};
     });
   }
 
