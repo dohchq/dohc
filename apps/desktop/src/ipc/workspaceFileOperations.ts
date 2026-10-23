@@ -1,3 +1,4 @@
+import { DuplicateWorkspaceFilePayload, DuplicateWorkspaceFileResult } from "./bridgeContract";
 import {
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
@@ -5,6 +6,7 @@ import {
   CreateWorkspaceFileResult,
   CreateWorkspaceFolderPayload,
   MoveWorkspacePathPayload,
+  MoveWorkspacePathResult,
   DeleteWorkspacePathPayload,
   DeleteWorkspacePathResult,
   UndoHistoryOperationPayload,
@@ -51,14 +53,20 @@ export const workspaceFileOperations = {
     },
     payload: CreateWorkspaceFolderPayload, result: CreateWorkspaceFileResult,
   },
+  duplicateWorkspaceFile: {
+    capabilityId: "file.duplicate", channel: "desktop:duplicate-workspace-file",
+    scope: "workspace", guard: "trusted-sender",
+    handlerCheck: {check: "workspaceFileMutationOwner.runAdmittedMutation + duplicateWorkspaceFile/withExclusiveWorkspaceOperation", reason: "The mutation owner admits the workspace and holds the same mutation lease as moves."},
+    payload: DuplicateWorkspaceFilePayload, result: DuplicateWorkspaceFileResult,
+  },
   moveWorkspacePath: {
     capabilityId: "file.move", channel: "desktop:move-workspace-path",
     scope: "workspace", guard: "trusted-sender",
     handlerCheck: {
-      check: "workspaceFileMutationOwner.runAdmittedMutation + withExclusiveWorkspaceOperation",
+      check: "workspaceFileMutationOwner.runAdmittedMutation + moveWorkspacePathByHand/withExclusiveWorkspaceOperation",
       reason: "The mutation owner retains renderer admission, writable/share checks, and its mutation lease.",
     },
-    payload: MoveWorkspacePathPayload, result: CreateWorkspaceFileResult,
+    payload: MoveWorkspacePathPayload, result: MoveWorkspacePathResult,
   },
   deleteWorkspacePath: {
     capabilityId: "file.delete", channel: "desktop:delete-workspace-path",

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { duplicateWorkspaceFile } from "../workspaces/workspaceDuplicate";
 import { createOperationHistory, readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation } from "../workspaces/workspaceHistoryOperations";
 import { writeWorkspaceFilesAs } from "../workspaces/workspaceFileWrites";
 import { prepareDeleteWorkspacePathAs, prepareMoveWorkspacePathAs, type PathChangeOptions } from "../workspaces/workspaceFileMoves";
@@ -45,6 +47,7 @@ import { readWorkspaceText } from "../workspaces/workspaceAssets";
 import { historyPathAdmission, historyMomentPathsAdmitted, readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
 import type { DocumentProjection } from "../workspaces/documentProjection";
 import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projection";
+import { lossyNoteRefusal, unreadNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
 import { VersionedTextStoreError, type MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 
 export function agentWriteAuthor(origin: LiveDocumentEditOrigin): MomentWriteAuthor {
@@ -61,6 +64,9 @@ async function settledMarkdown(rootPath: string, path: string): Promise<string> 
 }
 
 interface DesktopCliServerDependencies<State> {
+  chatLinks: NonNullable<CliServerOptions["chatLinks"]>;
+  chatFileMentions: NonNullable<CliServerOptions["chatFileMentions"]>;
+  links: ReturnType<typeof import("../workspaces/workspaceLinks").createWorkspaceLinksReader>;
   stopWorkspaceSync?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<import("@dohc/cli/protocol").CliResultByVerb["stopSync"]>;
   shareCopy?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
   access?(workspaceId: string): NonNullable<CliWorkspaceContext["access"]>;
@@ -80,7 +86,7 @@ interface DesktopCliServerDependencies<State> {
     engineCaptureFor(workspaceId: string): Pick<
       WorkspaceEngineCapture,
       | "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment"
-      | "listKeptCopies" | "saveKeptCopy"
+      | "listKeptCopies" | "saveKeptCopy" | "listRetainedCopies" | "deleteRetainedCopies"
       | "listVersions" | "writeAuthoredFile"
       | "changePathsAs"
     > | null;
@@ -155,6 +161,23 @@ export function createDesktopCliServer<State>(
     rememberPendingCliRunMessageLink,
   } = dependencies;
 
+  // A lossy note's file text, or null for any other file. The check runs in
+  // the projection worker, which remembers it by the text's SHA-256. A file
+  // that isn't there has nothing on disk to rewrite; the edit's own check
+  // covers its session. Any other failed or partial read refuses.
+  async function lossyNoteText(rootPath: string, path: string): Promise<string | null> {
+    let read: Awaited<ReturnType<typeof readWorkspaceText>>;
+    try {
+      read = await readWorkspaceText(rootPath, path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") return null;
+      throw new Error(unreadNoteRefusal(path), { cause: error });
+    }
+    if (read.truncated) throw new Error(unreadNoteRefusal(path));
+    const digest = createHash("sha256").update(read.text).digest("hex");
+    return await documentProjection.run({ kind: "lossy", markdown: read.text, digest }) ? read.text : null;
+  }
+
   // Agent-facing `dohc chat`: the socket authenticates locally, then MAIN
   // resolves the registry workspace, and chat writes go through the same
   // chatWrites module renderer sends use. The client can claim only the
@@ -198,77 +221,62 @@ export function createDesktopCliServer<State>(
       );
     };
     const publicationAttachment = await withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
-        if (resolve(operation.workspace.rootPath) !== resolve(workspace.rootPath)) throw new Error("The workspace attachment changed.");
+        if (resolve(operation.workspace.rootPath) !== resolve(workspace.rootPath)) throw new Error("This workspace changed while this ran. Try again.");
         return operation.signal;
       });
     // A move or delete holds the workspace operation fileWrite holds.
     const withPathChange = async <Result>(requestId: string, work: (
       operation: WorkspaceAuthorityOperation<RegistryEntry, State>, options: PathChangeOptions) => Promise<() => Promise<Result>>) => {
-      let finish: (() => Promise<Result>) | undefined;
-      try {
-        await withPhysicalWorkspaceOperation(workspace.workspaceId, async operation => {
-          operation.assertCurrent();
-          if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The workspace attachment changed.");
-          if (sharedViewOf(workspace.workspaceId)) throw new Error("This workspace is read-only. Write in the owning workspace.");
-          const current = activity.engineCaptureFor(workspace.workspaceId);
-          if (!current) throw new Error("dohc could not start the engine for this workspace. Restart dohc to try again.");
-          const attachmentId = operation.workspace.attachmentId;
-          finish = await work(operation, {
-            capture: current, requestId, trashItem: dependencies.trashItem,
-            markDeleted: path => dependencies.markDeletedUnderPath(attachmentId, path),
-          });
+      const finish = await withPhysicalWorkspaceOperation(workspace.workspaceId, async operation => {
+        operation.assertCurrent();
+        if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
+        if (sharedViewOf(workspace.workspaceId)) throw new Error("This workspace is read-only. Write in the owning workspace.");
+        const current = activity.engineCaptureFor(workspace.workspaceId);
+        if (!current) throw new Error("dohc could not start the engine for this workspace. Restart dohc to try again.");
+        const attachmentId = operation.workspace.attachmentId;
+        return work(operation, {
+          capture: current, requestId, trashItem: dependencies.trashItem,
+          markDeleted: path => dependencies.markDeletedUnderPath(attachmentId, path),
         });
-      } catch (error) {
-        // Preparation already changed disk and History, even if the lease retired.
-        await finish?.().catch(() => undefined);
-        throw error;
-      }
-      return finish!();
+      });
+      return finish();
     };
     const operationHistory = createOperationHistory(work => withEngineAdapter(workspace, work));
     const withHistoryOperation = <T>(work: (operation: WorkspaceAuthorityOperation<RegistryEntry, State>) => Promise<T>) =>
       withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
         operation.assertCurrent();
-        if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The workspace attachment changed.");
+        if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
         return work(operation);
       });
     return {
       workspaceId: workspace.workspaceId,
       historyOperation: input => withHistoryOperation(operation => readWorkspaceHistoryOperation(operation, input, operationHistory)),
       historyUndo: (input, origin) => withHistoryOperation(operation => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history: operationHistory, agent: true })),
-      ...(dependencies.stopWorkspaceSync ? { stopSync: async author => {
-        let saved: import("@dohc/cli/protocol").CliResultByVerb["stopSync"] | undefined;
-        try {
-          return await withPhysicalWorkspaceOperation(workspace.workspaceId, async operation => {
-            if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace was closed. Open it again.");
-            saved = await dependencies.stopWorkspaceSync!(operation, author);
-            return saved;
-          });
-        } catch (error) {
-          if (saved?.ok) return saved;
-          throw error;
-        }
-      } } : {}),
+      ...(dependencies.stopWorkspaceSync ? { stopSync: author =>
+        withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
+          if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
+          return dependencies.stopWorkspaceSync!(operation, author);
+        }) } : {}),
       ...(dependencies.shareCopy ? { shareCopy: (input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
-          if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The workspace attachment changed.");
+          if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
           return dependencies.shareCopy!(operation, input);
         }) } : {}),
       ...(dependencies.access ? { access: dependencies.access(workspace.workspaceId) } : {}),
       ...(dependencies.dataset ? { dataset: (request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
-          if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The Collection workspace attachment changed.");
+          if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
           if (request.action === "prepareRecovery" && !request.sourcePath) throw new Error("Collection recovery requires an explicit sourcePath.");
           return dependencies.dataset!(request, agent);
         }) } : {}),
       ...(dependencies.ownerAppResponses ? {ownerAppResponses:(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>
         withPhysicalWorkspaceOperation(workspace.workspaceId,operation=>{
-          if(request.workspaceId!==workspace.workspaceId || operation.signal!==publicationAttachment || publicationAttachment.aborted)throw new Error("The response workspace attachment changed.");
+          if(request.workspaceId!==workspace.workspaceId || operation.signal!==publicationAttachment || publicationAttachment.aborted)throw new Error("This workspace changed while this ran. Try again.");
           return dependencies.ownerAppResponses!(request);
         })}:{}),
       ...(dependencies.ownerAppPublication ? { appPublication: (request: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null = null) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
-          if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The app publication workspace attachment changed.");
+          if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
           return dependencies.ownerAppPublication!(request, agent);
         }) } : {}),
       rootPath: workspace.rootPath,
@@ -303,6 +311,11 @@ export function createDesktopCliServer<State>(
               input,
             ),
           );
+        },
+        async collectionsWaiting() {
+          const waiting = await withEngineAdapter(workspace, async (adapter) => await adapter.collectionsWaiting());
+          if (waiting === null) throw new Error("The workspace engine is not running.");
+          return waiting;
         },
       },
       // Engine-backed collection reads and writes for the CLI/MCP verbs.
@@ -345,11 +358,15 @@ export function createDesktopCliServer<State>(
       },
       writeFiles: (files, origin, requestId) => withPhysicalWorkspaceOperation(workspace.workspaceId, async operation => {
         operation.assertCurrent();
-        if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The workspace attachment changed.");
+        if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
         if (sharedViewOf(workspace.workspaceId)) throw new Error("This workspace is read-only. Write in the owning workspace.");
         const current = activity.engineCaptureFor(workspace.workspaceId);
         if (!current) throw new Error("dohc could not start the engine for this workspace. Restart dohc to try again.");
         return writeWorkspaceFilesAs(operation, files, agentWriteAuthor(origin), { capture: current, requestId });
+      }),
+      duplicateFile: (path, origin, requestId) => withPathChange(requestId, async (operation, options) => {
+        const copied = await duplicateWorkspaceFile(operation, path, agentWriteAuthor(origin), options.capture);
+        return async () => ({ok: true as const, ...copied});
       }),
       movePath: (input, origin, requestId) => withPathChange(requestId, (operation, options) =>
         prepareMoveWorkspacePathAs(operation, input, agentWriteAuthor(origin), options)),
@@ -364,6 +381,10 @@ export function createDesktopCliServer<State>(
       documents: {
         read: async (path) => {
           const live = await liveDocuments.readDocument({ workspaceId: workspace.workspaceId, path });
+          // A lossy note reads as its file, not as the editor's canonical
+          // Markdown, which leaves out the parts dohc can't show.
+          const file = await lossyNoteText(workspace.rootPath, live.path);
+          if (file !== null) return { path: live.path, markdown: file };
           const markdown = live.state
             ? await documentProjection.run({ kind: "read", state: live.state })
             : await documentProjection.run({
@@ -377,8 +398,13 @@ export function createDesktopCliServer<State>(
             workspaceId: workspace.workspaceId,
             path,
             origin,
+            assertEditable: async (resolved) => {
+              if (await lossyNoteText(workspace.rootPath, resolved) !== null) {
+                throw new Error(lossyNoteRefusal(resolved));
+              }
+            },
             change: (state, { keepBlocks }) =>
-              documentProjection.run({ kind: "edit", state, edit, keepBlocks }),
+              documentProjection.run({ kind: "edit", state, edit, keepBlocks, refuseLossy: path }),
           }),
         create: async ({ path, markdown, origin }) => {
           // Frontmatter would land as body blocks, so it is refused before
@@ -409,6 +435,8 @@ export function createDesktopCliServer<State>(
               workspaceId: workspace.workspaceId,
               path,
               origin,
+              // This verb wrote the file empty just above.
+              assertEditable: async () => undefined,
               change: (state, { keepBlocks }) =>
                 documentProjection.run({ kind: "create", state, markdown, keepBlocks }),
             });
@@ -428,6 +456,10 @@ export function createDesktopCliServer<State>(
             keptCopies: {
               list: () => capture.listKeptCopies(),
               save: (id: number) => capture.saveKeptCopy(id),
+            },
+            retainedCopies: {
+              list: () => capture.listRetainedCopies(),
+              delete: (copies) => capture.deleteRetainedCopies(copies),
             },
           }),
       filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),
@@ -474,6 +506,12 @@ export function createDesktopCliServer<State>(
     };
   }
 
+  const readLinks = <T>(requested: CliRegistryWorkspace, run: (workspace: RegistryEntry) => Promise<T>) =>
+    withPhysicalWorkspaceOperation(requested.workspaceId, operation => {
+      if (resolve(operation.workspace.rootPath) !== resolve(requested.rootPath)) throw new Error("The workspace attachment changed.");
+      return run(operation.workspace);
+    });
+
   async function startDesktopCliServer(): Promise<CliServerHandle> {
     return startCliServer({
       recordSuccess: dependencies.recordSuccess,
@@ -487,6 +525,13 @@ export function createDesktopCliServer<State>(
             readOnly: Boolean(sharedViewOf(workspaceId)),
           })),
       openWorkspace: openCliWorkspace,
+      chatLinks: (workspace,input) => readLinks(workspace,current=>dependencies.chatLinks(current,input)),
+      chatFileMentions: (workspace, input) => readLinks(workspace, current => dependencies.chatFileMentions(current, input)),
+      links: {
+        edges: (workspace, input) => readLinks(workspace, current => dependencies.links.edges(current, input)),
+        incoming: (workspace, input) => readLinks(workspace, current => dependencies.links.incoming(current, input)),
+        resolve: (workspace, input) => readLinks(workspace, current => dependencies.links.resolve(current, input)),
+      },
       chatWrites,
       localUserDisplayName,
       localPersonId,

@@ -605,16 +605,21 @@ it('keeps policy constructors outside root exports and pins explicit subpaths', 
   expect(barrel).not.toHaveProperty('createLiveMarkdownRegistrationValidator')
   expect(barrel).not.toHaveProperty('validateRegistrationCutForProjection')
   expect(barrel).not.toHaveProperty('createLiveMarkdownJournalValidator')
+  expect(barrel).not.toHaveProperty('createEngineMarkdownReader')
   expect(barrel).not.toHaveProperty('validateJournalCutForProjection')
+  expect(barrel).not.toHaveProperty('isLossyMarkdown')
   const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   expect(manifest.exports).toEqual({
     '.': './src/index.ts',
+    './artifact-markdown-guard': './src/artifact-markdown-guard.ts',
     './body-fragment': './src/body-fragment.ts',
+    './engine-markdown-reader': './src/engine-markdown-reader.ts',
     './browser-editor': './src/browser-editor.ts',
     './frontmatter': './src/frontmatter.ts',
     './frontmatter-map': './src/frontmatter-map.ts',
     './live-journal-validation': './src/live-journal-validation.ts',
     './image-src': './src/image-src.ts',
+    './lossy-markdown': './src/lossy-markdown.ts',
     './markdown-extensions': './src/dohc-markdown-extensions.ts',
     './restore-proof': './src/liveRestoreProof.ts',
     './named-live-provider': './src/namedLiveProvider.ts',
@@ -1024,4 +1029,12 @@ it('never projects a preserved source that holds text the document lacks', () =>
     })))
     expect(result.kind === 'accepted' ? result.evidence.projectedMarkdown : canonical, source).toBe(canonical)
   }
+})
+
+const sourceHashProbe=vi.hoisted(()=>({target:undefined as Uint8Array|undefined,count:0}));
+vi.mock('lib0/hash/sha256',async original=>{const actual=await original<typeof import('lib0/hash/sha256')>();return {...actual,digest:(bytes:Uint8Array)=>{const target=sourceHashProbe.target;if(target&&bytes.length===target.length&&bytes.every((byte,i)=>byte===target[i]))sourceHashProbe.count++;return actual.digest(bytes)}}})
+it('hashes source once for proof plus the required evidence digest',()=>{
+ const source='---\nzebra: last\nalpha: first\n---\n\nBody\n\n';
+ const checkpoint=encode(source,doc=>{const meta=doc.getMap('meta');meta.set('dohcMarkdownSource',source);meta.set('dohcMarkdownSourceSha256',hash(new TextEncoder().encode(source)));meta.set('dohcMarkdownSourceProjectionSha256',hash(new TextEncoder().encode(projection.yDocToMarkdown(doc))));});
+ sourceHashProbe.target=new TextEncoder().encode(source);sourceHashProbe.count=0;try {expect(accepted(checkpoint).projectedMarkdown).toBe(source);expect(sourceHashProbe.count).toBe(2);} finally {sourceHashProbe.target=undefined;}
 })

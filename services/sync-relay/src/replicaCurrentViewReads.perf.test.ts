@@ -18,7 +18,7 @@ it.skipIf(process.env.DOHC_REPLICA_READ_PERF !== "1")("measures authorized curre
   storage.createShare({share:{shareId:"s",workspaceId:"w",granterUserId:"owner",selectorJson:'{"paths":["private/docs"],"versionId":null}',createdAtMs:1},
     grant:{grantId:"named",shareId:"s",principalKind:"user",principalUserId:"reader",principalEmail:null,access:"view",generation:1,status:"active",createdAtMs:1,revokedAtMs:null,parentGrantId:null}});
   seedLinkGrant(storage,{grantId:"link",shareId:"s",secretHash:"hash"});
-  const input = {grantId:"link",generation:1,principal:{kind:"link" as const}};
+  const input = {grantId:"link",generation:1,principal:{kind:"link" as const,requireSession(){return {grantId:"link",generation:1};}}};
   const distinctTexts = Array.from({length:1_000},(_,i)=>`distinct-${i}-${"x".repeat(32)}`);
   const textFor = (i: number) => i === 0 ? "a".repeat(50_000) : i === 1 ? "b".repeat(1_000_000) : i >= 2 && i < 1_002 ? distinctTexts[i - 2]! : "";
   const uniqueTexts = [textFor(0),textFor(1),...distinctTexts,""];
@@ -46,7 +46,7 @@ it.skipIf(process.env.DOHC_REPLICA_READ_PERF !== "1")("measures authorized curre
   storage.storeReplicaCurrentView(lease,view);
   let liveView = view;
   const supervisor = createReplicaSupervisor({storage,storeRoot:await tempRoot("read-perf"),startChild:async()=>({
-    pull:async()=>{},close:async()=>{},currentView:async()=>({...liveView,moved:false,nextCursor:null,refusedFiles:[]})})});
+    pull:async()=>{},close:async()=>{},currentView:async()=>({...liveView,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[]})})});
   const queries = createShareReadQueries(storage,500);
   const authorize = () => {
     const result = authorizeShareGrantAction({storage,...input,action:"read"});

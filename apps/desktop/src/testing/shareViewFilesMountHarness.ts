@@ -24,6 +24,8 @@ import type { CaptureVersionedTextStore } from "../workspaces/workspaceEngineCap
 export async function refreshStandaloneShareThroughOwnerForTest(input: {
   rootDir: string;
   workspaceId: string;
+  /** The attachment the view's store opened under, as main resolves it. */
+  attachmentId?: symbol;
   relay: SyncRelayConnection;
   shareId: string;
   store: CaptureVersionedTextStore;
@@ -45,6 +47,7 @@ export async function refreshStandaloneShareThroughOwnerForTest(input: {
     granterEmail: null,
     grantedSelector: input.pinnedSelector,
     ended: false,
+    ...(input.attachmentId === undefined ? {} : { attachmentId: input.attachmentId }),
   };
   const requested = {
     kind: "standalone" as const,

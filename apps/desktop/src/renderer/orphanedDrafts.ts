@@ -7,6 +7,7 @@ import {
   forgetStoredDraft,
   loadStoredDrafts,
   isStoredDraftCurrent,
+  persistable,
   remapStoredDraftPaths,
   replaceStoredDraft,
   storeDraft,
@@ -92,7 +93,7 @@ function captureLiveDraftRecovery(workspaceId: string, records: readonly LiveDra
   for (const record of records) {
     if (findWorkspaceDraft(workspaceId, draft => draft.recovery?.recordId === record.recordId)) continue;
     const current = drafts.get(keyFor(workspaceId, record.path)) ?? EMPTY;
-    const recovery = {objectId: record.objectId, updateBase64: record.updateBase64, recordId: record.recordId};
+    const recovery = {objectId: record.objectId, updateBase64: record.updateBase64, recordId: record.recordId, ...(record.reason ? {reason: record.reason} : {})};
     const existing = current.find(draft => draft.recovery?.recordId === undefined &&
       draft.recovery?.objectId === record.objectId && draft.recovery.updateBase64 === record.updateBase64 && draft.text === record.text);
     if (existing) replaceOrphanedDraft(workspaceId, record.path, existing.id, record.text, recovery);
@@ -109,11 +110,23 @@ function findWorkspaceDraft(workspaceId: string, matches: (draft: OrphanedDraft)
   }
 }
 
+// Every draft main keeps for the workspace, as main lists them now. A row of
+// main's draft that is no longer listed goes: main removed it, or replaced it
+// with a draft of newer text, which the listing adds.
 export function loadLiveDraftRecovery(workspaceId: string, isCurrent: () => boolean): Promise<void> {
   return withRecoveryRequest(workspaceId, async () => {
     if (!isCurrent()) return;
     const records = await bridge().listLiveDraftRecovery({workspaceId});
     if (!isCurrent()) return;
+    const listed = new Set(records.map(record => record.recordId));
+    for (const [key, kept] of [...drafts]) {
+      const [keyWorkspaceId, path] = JSON.parse(key) as [string, string];
+      if (keyWorkspaceId !== workspaceId) continue;
+      for (const draft of kept) {
+        const recordId = draft.recovery?.recordId;
+        if (recordId !== undefined && !listed.has(recordId)) retireOrphanedDraft(workspaceId, path, draft.id);
+      }
+    }
     captureLiveDraftRecovery(workspaceId, records);
   });
 }
@@ -193,7 +206,8 @@ export function replaceOrphanedDraft(
   const key = keyFor(workspaceId, path);
   const current = drafts.get(key) ?? EMPTY;
   const captured = current.find((draft) => draft.id === id);
-  if (!captured || (captured.text === text && recovery === undefined)) return;
+  // Unchanged text still retries a write storage refused.
+  if (!captured || (captured.text === text && recovery === undefined && !orphanedDraftStorageRefused(path, id))) return;
   let replacementRecovery = recovery ?? captured.recovery;
   if (recovery === undefined && text !== captured.text && replacementRecovery?.recordId !== undefined) {
     replacementRecovery = {objectId: replacementRecovery.objectId, updateBase64: replacementRecovery.updateBase64};
@@ -391,9 +405,20 @@ export function useOrphanedDraftPaths(workspaceId: string): ReadonlySet<string> 
 export function atRiskOrphanedDraftIds(): readonly number[] {
   const ids: number[] = [];
   for (const kept of drafts.values()) {
-    for (const draft of kept) if ((!storedIds.has(draft.id) || !isStoredDraftCurrent(draft.id))) ids.push(draft.id);
+    for (const draft of kept) if (!isOrphanedDraftStored(draft.id)) ids.push(draft.id);
   }
   return ids;
+}
+
+// Whether a restart brings this draft back.
+export function isOrphanedDraftStored(id: number): boolean {
+  return storedIds.has(id) && isStoredDraftCurrent(id);
+}
+
+// Whether storage refused a draft it should keep. A path storage never keeps
+// stays in this run, behind the close warning.
+export function orphanedDraftStorageRefused(path: string, id: number): boolean {
+  return persistable(path) && !isOrphanedDraftStored(id);
 }
 
 export type OrphanedDraftRow = {
@@ -443,7 +468,7 @@ export function useAllOrphanedDrafts(): readonly OrphanedDraftRow[] {
           workspaceLabel,
           path,
           draft,
-          persisted: storedIds.has(draft.id) && isStoredDraftCurrent(draft.id),
+          persisted: isOrphanedDraftStored(draft.id),
         });
       }
     }

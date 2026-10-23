@@ -10,6 +10,7 @@ import {
   registerWorkspaceRegistryIpcHandlers,
 } from "./workspaceRegistryIpc";
 import { RendererWorkspaceSessionOwner } from "../window/rendererWorkspaceSessionOwner";
+import type { Computer } from "../workspaces/syncHistory";
 import { createTestScratch } from "../workspaces/testTemp";
 import { deferred } from "../testing/deferred";
 
@@ -23,9 +24,15 @@ async function registryHarness() {
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   const summaries: WorkspaceSummary[] = [];
   const steps: string[] = [];
-  const createFolder = vi.fn(async (input: { rootPath: string; kind: "personal" | "shared" }) => {
+  const emptyFolders = new Set<string>();
+  const trusted: Array<{ workspaceId: string; folder: string | null }> = [];
+  const createFolder = vi.fn(async ({ homeDir, computer, ...input }: { rootPath: string; homeDir: string; kind: "personal" | "shared"; computer: Computer }) => {
     steps.push("create");
-    return { workspaceId: "workspace", ...input, mode: defaultWorkspaceMode(input.kind) };
+    expect(homeDir).toBe(home);
+    expect(computer, "a new workspace runs its schedules on this computer").toEqual({ installId: "install-here", label: "This Mac" });
+    // The real creation reports a folder it made from nothing.
+    const fresh = emptyFolders.has(input.rootPath) ? { folder: "7:42" } : null;
+    return { workspace: { workspaceId: "workspace", ...input, mode: defaultWorkspaceMode(input.kind) }, fresh };
   });
   const register = vi.fn((summary: WorkspaceSummary) => { steps.push("register"); summaries.push(summary); });
   const refresh = vi.fn(() => { steps.push("refresh"); });
@@ -38,7 +45,8 @@ async function registryHarness() {
     app: { isPackaged: false }, dialog: { showOpenDialog: pick }, roots,
     effectiveHome: () => home, workspaceSummaries: () => summaries,
     prioritizePreferredWorkspace: (rows) => [...rows].reverse(),
-    createWorkspaceFolder: createFolder, registerPhysicalWorkspace: register,
+    createWorkspaceFolder: createFolder, registerPhysicalWorkspace: register, thisComputer: () => ({ installId: "install-here", label: "This Mac" }),
+    trustNewWorkspace: async (workspace, fresh) => { steps.push("trust"); trusted.push({ workspaceId: workspace.workspaceId, folder: fresh.folder }); },
     forgetWorkspace: forget, showItemInFolder: reveal,
     openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
     refreshNativeWorkspaceSurfaces: refresh,
@@ -49,7 +57,7 @@ async function registryHarness() {
     if (!handler) throw new Error(`missing ${channel}`);
     return handler({ trusted }, payload);
   };
-  return { home, roots, handlers, createFolder, register, refresh, pick, forget, reveal, steps, summaries, invoke };
+  return { home, roots, handlers, createFolder, register, refresh, pick, forget, reveal, steps, summaries, invoke, emptyFolders, trusted };
 }
 
 describe("registered workspace registry handlers", () => {
@@ -90,6 +98,36 @@ describe("registered workspace registry handlers", () => {
     expect(h.createFolder).toHaveBeenCalledOnce();
   });
 
+  it("trusts a new workspace only when creation made it from nothing, bound to that folder", async () => {
+    const h = await registryHarness();
+    const root = await h.invoke(CHANNELS.getDefaultWorkspaceRoot) as string;
+    const fresh = h.roots.usableRoot(join(root, "fresh"));
+    h.emptyFolders.add(fresh);
+    await h.invoke(CHANNELS.createLocalWorkspace, { rootPath: fresh, kind: "personal" });
+    expect(h.trusted).toEqual([{ workspaceId: "workspace", folder: "7:42" }]);
+    expect(h.steps.slice(-4)).toEqual(["measure", "trust", "register", "refresh"]);
+
+    // A folder with files in it, chosen in New workspace, is an existing folder.
+    await h.invoke(CHANNELS.createLocalWorkspace, { rootPath: join(root, "cloned"), kind: "personal" });
+    // Open folder never trusts, empty or not.
+    const picked = await h.invoke(CHANNELS.pickWorkspaceRoot) as string;
+    h.emptyFolders.add(h.roots.usableRoot(picked));
+    await h.invoke(CHANNELS.attachWorkspaceFolder, { rootPath: picked });
+    expect(h.trusted).toEqual([{ workspaceId: "workspace", folder: "7:42" }]);
+  });
+
+  it.skipIf(process.platform === "win32")("keeps a backslash in a picked folder's name through create and attach", async () => {
+    const h = await registryHarness();
+    const picked = join(h.home, "trip\\2026");
+    h.pick.mockResolvedValue({ canceled: false, filePaths: [picked] });
+    expect(await h.invoke(CHANNELS.pickWorkspaceRoot)).toBe(picked);
+    await h.invoke(CHANNELS.attachWorkspaceFolder, { rootPath: picked });
+    await h.invoke(CHANNELS.createLocalWorkspace, { rootPath: `${picked}/Notes`, kind: "personal" });
+    expect(h.createFolder.mock.calls.map(([input]) => input.rootPath)).toEqual([picked, `${picked}/Notes`]);
+    // The same name with a separator is another folder, which was never picked.
+    expect(() => h.roots.usableRoot(join(h.home, "trip", "2026"))).toThrow("chosen through dohc");
+  });
+
   it("uses each dialog pick and preserves attach identity and registry ordering", async () => {
     const h = await registryHarness();
     const picked = await h.invoke(CHANNELS.pickWorkspaceRoot) as string;
@@ -105,7 +143,7 @@ describe("registered workspace registry handlers", () => {
     "rejects a malformed created summary before persistence for %s", async (channel) => {
       const h = await registryHarness();
       const rootPath = await h.invoke(CHANNELS.getDefaultWorkspaceRoot) as string;
-      h.createFolder.mockResolvedValue({ workspaceId: "INVALID ID", rootPath, kind: "personal", mode: "local-first" });
+      h.createFolder.mockResolvedValue({ workspace: { workspaceId: "INVALID ID", rootPath, kind: "personal", mode: "local-first" }, fresh: null });
       await expect(h.invoke(channel, { rootPath, kind: "personal" })).rejects.toThrow();
       expect(h.register).not.toHaveBeenCalled();
       expect(h.refresh).not.toHaveBeenCalled();
@@ -157,19 +195,20 @@ function openHarness() {
   const projection = vi.fn(async (_workspace: typeof workspace, value: SyncStatusResult) => value);
   const preferred = vi.fn();
   const opened = vi.fn();
+  const shown = vi.fn();
   const handlers = new Map<string, (event: OpenEvent, payload: unknown) => unknown>();
   registerOpenWorkspaceIpcHandler<typeof sender, OpenEvent, typeof workspace, typeof operation>({
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender: (event) => { if (!event.trusted) throw new Error("untrusted"); },
     withPhysicalWorkspaceOperation, rendererWorkspaceSessions: sessions,
-    setPreferredWorkspaceId: preferred, markWorkspaceOpened: opened, openWorkspaceActivity: activity,
+    setPreferredWorkspaceId: preferred, markWorkspaceOpened: opened, workspaceShown: shown, openWorkspaceActivity: activity,
     syncStatusWithOwnedProjection: projection,
   });
   const invoke = async (trusted = true) => handlers.get(CHANNELS.openWorkspace)!({ sender, trusted }, {
     workspaceId: workspace.workspaceId, rendererDocumentId: documentId,
   });
   return {
-    sender, workspace, sessions, activity, projection, preferred, opened, handlers, invoke,
+    sender, workspace, sessions, activity, projection, preferred, opened, shown, handlers, invoke,
     retirePhysical: () => { physicalCurrent = false; },
   };
 }
@@ -183,6 +222,7 @@ describe("registered workspace open", () => {
     await expect(h.invoke()).resolves.toEqual(status);
     expect(h.preferred).toHaveBeenCalledWith("workspace", h.sender);
     expect(h.opened).toHaveBeenCalledWith("workspace");
+    expect(h.shown).toHaveBeenCalledWith("workspace", h.sender);
     expect(h.projection).toHaveBeenCalledWith(h.workspace, status);
   });
 
@@ -199,6 +239,7 @@ describe("registered workspace open", () => {
     held.resolve(status);
     await expect(result).rejects.toThrow();
     expect(h.opened).not.toHaveBeenCalled();
+    expect(h.shown).not.toHaveBeenCalled();
   });
 
   it("stamps the last open only after the open succeeds, and a stamp failure does not fail it", async () => {

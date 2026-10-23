@@ -34,9 +34,7 @@ describe("ChatsView decisions", () => {
         parentMessageId: opening.id,
         body: "Resolved ✓",
       }),
-    });
-    bridgeMock.resolveChatDecision.mockResolvedValue({
-      decision: {
+      resolved: {
         ...openDecision,
         state: "resolved",
         resolvedByMessageId: "resolution-message",
@@ -63,14 +61,7 @@ describe("ChatsView decisions", () => {
         threadId: "thread-1",
         parentMessageId: "message-1",
         body: "Resolved ✓",
-      }),
-    );
-    await waitFor(() =>
-      expect(bridgeMock.resolveChatDecision).toHaveBeenCalledWith({
-        workspaceId: "workspace-a",
-        threadId: "thread-1",
-        messageId: "message-1",
-        resolvedByMessageId: "resolution-message",
+        resolves: { messageId: "message-1" },
       }),
     );
     expect(await screen.findByTestId("chats-message-decision-resolved")).toBeTruthy();
@@ -94,9 +85,7 @@ describe("ChatsView decisions", () => {
     bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [poll] });
     bridgeMock.sendChatMessage.mockResolvedValue({
       message: message({ id: "answer", parentMessageId: opening.id, body: "Monday" }),
-    });
-    bridgeMock.resolveChatDecision.mockResolvedValue({
-      decision: {
+      resolved: {
         ...poll,
         state: "resolved",
         resolvedByMessageId: "answer",
@@ -122,15 +111,7 @@ describe("ChatsView decisions", () => {
         threadId: "thread-1",
         parentMessageId: "message-1",
         body: "Monday",
-      }),
-    );
-    await waitFor(() =>
-      expect(bridgeMock.resolveChatDecision).toHaveBeenCalledWith({
-        workspaceId: "workspace-a",
-        threadId: "thread-1",
-        messageId: "message-1",
-        resolvedByMessageId: "answer",
-        chosenOption: "Monday",
+        resolves: { messageId: "message-1", chosenOption: "Monday" },
       }),
     );
     expect(await screen.findByTestId("chats-message-decision-resolved")).toBeTruthy();
@@ -191,21 +172,19 @@ describe("ChatsView decisions", () => {
           : [targetOpen, otherOpen],
       }),
     );
-    bridgeMock.sendChatMessage.mockResolvedValue({ message: resolutionMessage });
-    let resolveDecision!: (value: { decision: typeof targetResolved }) => void;
-    const pendingResolution = new Promise<{ decision: typeof targetResolved }>(
-      (resolve) => {
-        resolveDecision = resolve;
-      },
-    );
-    bridgeMock.resolveChatDecision.mockImplementation(() => pendingResolution);
+    type Answered = { message: typeof resolutionMessage; resolved: typeof targetResolved };
+    let finishAnswer!: (value: Answered) => void;
+    const pendingAnswer = new Promise<Answered>((resolve) => {
+      finishAnswer = resolve;
+    });
+    bridgeMock.sendChatMessage.mockImplementation(() => pendingAnswer);
 
     renderView();
     await user.click(await screen.findByTestId("chats-channel"));
     await user.click(await screen.findByTestId("chats-thread"));
     await user.click(await screen.findByTestId("chats-message-decision-resolve"));
     await user.click(screen.getByTestId("chats-send"));
-    await waitFor(() => expect(bridgeMock.resolveChatDecision).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(1));
 
     refreshed = true;
     await user.click(screen.getByTestId("chats-thread-back"));
@@ -214,8 +193,8 @@ describe("ChatsView decisions", () => {
     expect(await screen.findByTestId("chats-comment-decision-open")).toBeTruthy();
 
     await act(async () => {
-      resolveDecision({ decision: targetResolved });
-      await pendingResolution;
+      finishAnswer({ message: resolutionMessage, resolved: targetResolved });
+      await pendingAnswer;
     });
 
     expect(screen.getAllByTestId("chats-comment-decision-open")).toHaveLength(1);
@@ -295,6 +274,36 @@ describe("ChatsView work and run links", () => {
     expect(onOpenPath).not.toHaveBeenCalled();
   });
 
+  it("names a heading attachment by its file and heading, as before the chip", async () => {
+    const user = userEvent.setup();
+    const onOpenPath = vi.fn();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.listChatThreadAttachments.mockResolvedValue({
+      attachments: [
+        {
+          attachmentId: "attachment-heading",
+          threadId: "thread-1",
+          messageId: "message-1",
+          targetKind: "file",
+          objectId: "object-1",
+          pathHint: "projects/launch/brief.md",
+          headingText: "Scope",
+          headingAnchor: "scope",
+          createdAtMs: NOW,
+        },
+      ],
+    });
+    renderView(vi.fn(), vi.fn(), { onOpenPath });
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    const chip = await screen.findByTestId("chats-attachment-chip");
+    expect(screen.getByRole("button", { name: "brief.md#Scope" })).toBe(chip);
+    await user.click(chip);
+    expect(onOpenPath).toHaveBeenCalledWith("projects/launch/brief.md", "scope");
+  });
+
   it("opens attachment paths and shows linked agent-run details", async () => {
     const user = userEvent.setup();
     const onOpenPath = vi.fn();
@@ -349,6 +358,7 @@ describe("ChatsView work and run links", () => {
     });
     expect(attachment.textContent).toContain("brief.md");
     expect(attachment.getAttribute("title")).toBe("projects/launch/brief.md");
+    expect(screen.getByRole("button", { name: "brief.md" })).toBe(attachment);
     await user.click(attachment);
     expect(onOpenPath).toHaveBeenCalledWith("projects/launch/brief.md");
 

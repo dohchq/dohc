@@ -1,6 +1,6 @@
 import { historyPageFields, neutralHistoryPresentations } from "../testing/historyPageFixture";
 import { createHash } from "node:crypto";
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { afterAll, describe, expect, it, onTestFinished, vi } from "vitest";
 import * as Y from "yjs";
@@ -18,7 +18,6 @@ import { parseReachHandover } from "@dohc/automation-executor/reach-verdicts";
 import { collectionRecordWrites } from "@dohc/automation-executor/collection-record-edits";
 import { desktopRecordEditContext, type DesktopRecordEditHost } from "../workspaces/desktopRecordEdits";
 import { createTestScratch } from "../workspaces/testTemp";
-import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
 import { createLocalDatasetHost } from "../workspaces/localDatasetHost";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
@@ -27,9 +26,13 @@ import { observeWorkspaceFiles } from "../workspaces/workspaceFileObservation";
 import type { FileObservationFact } from "@dohc/workspace-engine-client/daemon";
 import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
 import { definitionHash, localIsoTime, stepKey } from "@dohc/automation-executor/automation-plan";
+import { automationFailedNotice } from "@dohc/automation-executor/automation-failed-notice";
+import { lossyNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
 import { PERSONAL_NEEDS_ACCOUNT, type ReachRoster, type RosterGrant } from "@dohc/automation-executor/automation-reach";
 import { createAutomationRunStore, type AutomationRunStore, type ReportedFailure, type StoredRun, type StoredSubscription } from "@dohc/automation-executor/automation-run-store";
-import { automationHostGeneration, createAutomationHosts, HANDOVER_READ_FIRST_MS, HOST_FRESH_MS, type AutomationHosts } from "./automationHost";
+import { fakeLocalStateOpens, preparedAutomationStoreFolder } from "../testing/preparedLocalState";
+import { localAutomationStoreFolder } from "./localAutomationStore";
+import { automationHostGeneration, createAutomationHosts, createWorkspaceHosts, HANDOVER_READ_FIRST_MS, HOST_FRESH_MS, type AutomationHosts } from "./automationHost";
 import { recordNeverSynced, recordSynced } from "../workspaces/syncHistory";
 import { collectionAutomationAuthor, listEngineMomentsForIpc, type EngineMomentAuthorNames } from "../ipc/engineHistoryIpc";
 import {
@@ -60,6 +63,7 @@ import {
 
 import { createUsageStore } from "../usage/usageStore";
 import { DESKTOP_USAGE_COVERAGE } from "../usage/cliUsage";
+import { unguardedCollections } from "../testing/collectionsHolder";
 
 type RecordChange = Exclude<AutomationClaim["change"], { kind: "message" }>;
 
@@ -67,6 +71,8 @@ type RecordChange = Exclude<AutomationClaim["change"], { kind: "message" }>;
 // documents with the engine's idempotency rule, and files adopted as records.
 // Formulas run in the real evaluator.
 
+// Each world's engine open, which prepares its .dohc/local.
+const localState = fakeLocalStateOpens();
 const sharedEvaluator = createAutomationFormulaEvaluator();
 afterAll(() => sharedEvaluator.close());
 const evaluator = sharedEvaluator.forWorkspace("workspace");
@@ -499,7 +505,10 @@ async function world(options: {
   // The claims each run history prune kept.
   const historyPrunes: string[][] = [];
   let updates = 0;
-  const baseStore = createAutomationRunStore(root, resolveWorkspaceMetadataDir);
+  // The store main makes, which writes only while the engine's open stands.
+  const opened = { workspaceId: "workspace", rootPath: root };
+  await localState.open(opened);
+  const baseStore = createAutomationRunStore(localAutomationStoreFolder(opened));
   let failRecordAt: number | null = null;
   let beforeRecord: (() => void) | null = null;
   // Ids the engine treats as taken, so it adopts a file carrying one under a new id.
@@ -736,6 +745,8 @@ async function world(options: {
       })));
     },
     addRecord, claim, settledClaim, until, writeAutomations, baseStore,
+    /** Ends the engine's open of the workspace, or opens it again. */
+    localState: { close: () => localState.close(opened), open: () => localState.open(opened) },
     requeue: (claim: AutomationClaim) => { pending.push(claim); },
     fieldsOf,
     idleDrains: () => idleDrains,
@@ -1811,6 +1822,30 @@ describe("Collection automations", () => {
     await w.until(() => w.runsChanged.length === 1);
   });
 
+  it("sends a notice naming a lossy note whose field it could not set, and leaves the note as it was", async () => {
+    const w = await world({ automations: { Tasks: "  - id: finish\n    name: Finish\n    when: {field-changed: Status, to: Done}\n    do: [{set: {Note: saved}}]\n" } });
+    const record = w.addRecord("Tasks", "readme", { Status: "Done" });
+    const lossy = "---\nStatus: Done\n---\n\n<details>\n<summary>More</summary>\n\nHidden.\n</details>\n";
+    await mkdir(join(w.root, "Tasks"), { recursive: true });
+    await writeFile(join(w.root, record.path), lossy);
+    const claim = w.claim("collection:Tasks#finish", record);
+    await w.executor.open();
+    expect((await w.settledClaim(claim)).state).toBe("failed");
+    await w.until(() => w.failureReports.length === 1);
+    const report = w.failureReports[0]!;
+    expect(report.failure.error).toBe(lossyNoteRefusal("Tasks/readme.md"));
+    expect(automationFailedNotice({
+      workspaceId: "ws", computer: { installId: "install", label: "Ice's laptop" },
+      failure: report.failure, name: report.name, collectionPath: report.collectionPath,
+    })).toMatchObject({
+      kind: "automation-failed",
+      title: 'Automation "Finish" failed',
+      body: "dohc can't change Tasks/readme.md without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead. It ran on Ice's laptop.",
+    });
+    expect(record.doc.getMap("frontmatter").get("Note")).toBeUndefined();
+    expect(await readFile(join(w.root, record.path), "utf8")).toBe(lossy);
+  });
+
   it("sends one notice per failure, replacing the one before, and none again after a restart", async () => {
     const w = await world({ collections: ["Tasks", "Budget"], automations: { Tasks: [
       "  - id: spend",
@@ -1947,7 +1982,7 @@ describe("Collection automations", () => {
       await mkdir(dirname(join(w.root, path)), { recursive: true });
       await writeFile(join(w.root, path), text);
     }
-    const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "workspace", workspaceRoot: w.root, capacityBytes: 1024 * 1024 });
+    const host = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "workspace", workspaceRoot: w.root, capacityBytes: 1024 * 1024 });
     const executor = w.makeExecutor({ withDatasetHost: async (work) => await work(host.automations) });
     try {
       const prepared = await host.prepare({ descriptorPath: "Donations/dataset.json", adapter: sourceCaptureAdapter(new Map(Object.entries(files)), { workspaceId: "workspace" }) });
@@ -2029,6 +2064,59 @@ describe("Collection automations", () => {
     const [run] = (await w.executor.runs(TASKS)).runs;
     // The step that landed before the stop is recorded with what it changed.
     expect(run!.writes).toContainEqual({ kind: "field", recordId: task.id, path: task.path, field: "Count", before: 2, after: 3 });
+  });
+
+  it("writes nothing and makes no .dohc/local before the engine's open prepares it, and runs once it has", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: BUMP } });
+    w.localState.close();
+    await rm(join(w.root, ".dohc"), { recursive: true, force: true });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2 });
+    const claim = w.claim(TASKS, task);
+    // An open, a claim's wake and a Group message before the engine's open.
+    await w.executor.open();
+    w.executor.notifyClaimed();
+    await w.executor.groupMessagesArrived();
+    await w.executor.idle();
+    expect(claim.state).toBe("pending");
+    expect(w.fieldsOf(task).Count).toBe(2);
+    await expect(readdir(join(w.root, ".dohc"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(w.errors.map(({ error }) => (error as Error).message)).toContain(
+      "dohc did not save automation progress because the workspace has not finished opening. Try again when it opens.",
+    );
+
+    // The next open, once the engine's has prepared the folder, runs it.
+    await w.localState.open();
+    await w.executor.open();
+    await w.settledClaim(claim);
+    expect(claim.state).toBe("done");
+    expect(w.fieldsOf(task).Count).toBe(3);
+  });
+
+  it("fails a run whose progress dohc may not save, keeps what it saved, and tries it again without repeating what landed", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: BUMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2 });
+    const claim = w.claim(TASKS, task);
+    // The engine's open ends after step 1's write landed, before it is recorded.
+    w.beforeNextRecord(() => w.localState.close());
+    await w.executor.open();
+    await w.settledClaim(claim);
+    const refused = "dohc did not save automation progress because the workspace has not finished opening. Try again when it opens.";
+    expect(claim).toMatchObject({ state: "failed", error: refused });
+    expect(w.fieldsOf(task).Count).toBe(3);
+    // The person hears why, with Try again.
+    await w.until(() => w.failureReports.length === 1);
+    expect(w.failureReports[0]!.failure).toMatchObject({ claimId: claim.claimId, error: refused });
+
+    await w.localState.open();
+    // The step saved before the refusal is still there. On Windows dohc reads
+    // it only while an open holds `.dohc/local`.
+    const [saved] = (await w.baseStore.runsOf(TASKS, claim.claimId)).runs;
+    expect(saved!.steps).toHaveLength(1);
+    expect(saved!.applied).toEqual([]);
+    await w.executor.retry({ automationId: TASKS, claimId: claim.claimId, startOver: false });
+    await w.until(() => claim.state === "done");
+    expect(w.fieldsOf(task).Count).toBe(3);
+    expect([...w.records.values()].filter((record) => record.collection === "Log")).toHaveLength(1);
   });
 
   it("asks before running a changed automation from the start, and repeats its steps only when confirmed", async () => {
@@ -2696,7 +2784,7 @@ describe("Collection automations", () => {
     const claim = w.claim(TASKS, task);
     await w.executor.open();
     await w.settledClaim(claim);
-    const folder = join(w.root, ".dohc", "automations", "runs");
+    const folder = join(w.root, ".dohc", "local", "automations", "runs");
     for (const automation of await readdir(folder)) {
       for (const file of await readdir(join(folder, automation))) await writeFile(join(folder, automation, file), "{ torn");
     }
@@ -3550,7 +3638,7 @@ describe("Collection automations", () => {
     const w = await world({ automations: { Tasks: source },
       evaluator: createAutomationFormulaEvaluator(() => ({ evaluate: timedOut, runCode: async () => { throw new Error("unused"); }, close: async () => undefined })).forWorkspace("workspace") });
     await w.executor.dispose();
-    const store = createAutomationRunStore(w.root, resolveWorkspaceMetadataDir);
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(w.root));
     let failedSave = false;
     const executor = w.makeExecutor({ store: { ...store,
       recordCircuitBreaker: async (breaker) => {
@@ -3908,7 +3996,7 @@ describe("Collection automations", () => {
     await w.executor.retry({ automationId: "collection:Tasks#log", claimId: claim.claimId, startOver: true });
     await w.until(() => claim.state === "failed" && claim.run === 2);
     // Pruning drops A's superseded run while B's failure stays.
-    const folder = join(w.root, ".dohc", "automations", "runs");
+    const folder = join(w.root, ".dohc", "local", "automations", "runs");
     for (const automation of await readdir(folder)) {
       for (const file of await readdir(join(folder, automation))) {
         if (!file.endsWith(".json")) continue;
@@ -3958,10 +4046,29 @@ describe("Collection automations", () => {
     expect(run!.outcome).toEqual({ state: "done" });
   });
 
+  // Node reports no mode on Windows.
+  it.skipIf(process.platform === "win32")("keeps every automation waiting when other users could have changed which steps were allowed", async () => {
+    const seen = "  - id: seen\n    name: Seen\n    when: {field-changed: Status}\n    do: [{set: {Seen: true}}]\n";
+    const w = await world({ automations: { Tasks: seen } });
+    const parsed = parseAutomationsFile(`version: 1\nautomations:\n${seen}`);
+    const automation = parsed.status === "read" && parsed.entries[0]!.status === "valid" ? parsed.entries[0]!.automation : null;
+    await w.baseStore.saveReachVerdicts({
+      verdicts: [{ automationId: "collection:Tasks#seen", definitionHash: definitionHash(automation!), step: "0", verdict: "allowed", stoppedFor: null, seq: 1 }],
+      hostRecord: 0, unproven: [], unprovenAll: false, unprovenFolders: [], unprovenPaths: [], pending: null, taken: null,
+    });
+    await chmod(join(w.root, ".dohc", "local", "automations", "reach.json"), 0o666);
+    const task = w.addRecord("Tasks", "one", { Status: "Done" });
+    const claim = w.claim("collection:Tasks#seen", task);
+    await w.executor.open();
+    await w.until(() => w.events.includes(`released ${claim.claimId}`) || claim.state !== "running" && claim.state !== "pending");
+    expect(w.executor.holdState()).toMatchObject({ unreadable: true });
+    expect(w.fieldsOf(task).Seen).toBeUndefined();
+  });
+
   it("keeps every automation waiting when the saved verdicts cannot be read, until the holds are reset and allowed", async () => {
     const w = await world({ automations: { Tasks: "  - id: seen\n    name: Seen\n    when: {field-changed: Status}\n    do: [{set: {Seen: true}}]\n" } });
-    await mkdir(join(w.root, ".dohc", "automations"), { recursive: true });
-    await writeFile(join(w.root, ".dohc", "automations", "reach.json"), "{ torn");
+    await mkdir(join(w.root, ".dohc", "local", "automations"), { recursive: true });
+    await writeFile(join(w.root, ".dohc", "local", "automations", "reach.json"), "{ torn");
     const task = w.addRecord("Tasks", "one", { Status: "Done" });
     const claim = w.claim("collection:Tasks#seen", task);
     await w.executor.open();
@@ -3969,7 +4076,7 @@ describe("Collection automations", () => {
     expect(w.executor.holdState()).toEqual({ holds: [], stops: [], unreadable: true, unprovenPaths: [] });
     expect(await w.executor.automationsIn("Tasks")).toMatchObject({ automations: [{ reach: { kind: "waiting", reason: UNREADABLE_REACH } }] });
     // Nothing overwrote the file dohc could not read.
-    expect(await readFile(join(w.root, ".dohc", "automations", "reach.json"), "utf8")).toBe("{ torn");
+    expect(await readFile(join(w.root, ".dohc", "local", "automations", "reach.json"), "utf8")).toBe("{ torn");
 
     // Every run waits, so no field is marked.
     await expect(w.executor.fieldMarks("Tasks")).resolves.toEqual([]);
@@ -5073,9 +5180,9 @@ describe("Collection automations that a Group message starts", () => {
   it("subscribes in a workspace that never synced, whose only computer this is, and not in one that synced before", async () => {
     const w = await world({ channels: [TRIP], automations: { Tasks: task } });
     await mkdir(join(w.root, ".dohc"), { recursive: true });
-    await recordNeverSynced(w.root);
+    await recordNeverSynced(w.root, { installId: "laptop", label: "Laptop" });
     // No remote: the workspace does not sync now.
-    const host = () => automationHostGeneration({ rootPath: w.root }, () => null);
+    const host = () => automationHostGeneration({ rootPath: w.root }, { installId: "laptop", label: "Laptop" }, () => null);
     const neverSynced = w.makeExecutor({ groupHost: host });
     await neverSynced.open();
     await w.until(() => w.subscriptions.has("collection:Tasks#task"));
@@ -5088,6 +5195,46 @@ describe("Collection automations that a Group message starts", () => {
     await syncedBefore.open();
     await w.until(() => !w.subscriptions.has("collection:Tasks#task"));
     expect(await cannotRunOf(syncedBefore)).toBe("Turn on sync so Group messages start this automation.");
+  });
+
+  it("watches its Groups again once a read of a never-synced folder works again, with nothing else asking", async () => {
+    const w = await world({ channels: [TRIP], automations: { Tasks: task } });
+    await mkdir(join(w.root, ".dohc"), { recursive: true });
+    const laptop = { installId: "laptop", label: "Laptop" };
+    await recordNeverSynced(w.root, laptop);
+    let executor: CollectionAutomations | null = null;
+    let recheck: (() => Promise<void>) | null = null;
+    const hosts = createWorkspaceHosts({
+      here: () => laptop,
+      workspace: () => ({ rootPath: w.root }),
+      relay: { runsHere: async () => false, stillRuns: () => false, runsAt: () => null },
+      hasHostTriggers: () => executor?.hasHostTriggers() ?? false,
+      hostChanged: () => executor?.hostChanged(),
+      elsewhereChanged: () => undefined,
+      logError: (_id, error) => { throw error; },
+      setTimer: (wake) => { recheck = wake; return wake; },
+      clearTimer: () => { recheck = null; },
+    });
+    hosts.open("ws");
+    executor = w.makeExecutor({ groupHost: () => hosts.groupHost("ws") });
+    await executor.open();
+    await w.until(() => w.subscriptions.has("collection:Tasks#task"));
+
+    // The record is out of reach, as when the folder is evicted offline: a
+    // read finds no host, so the Group subscriptions go.
+    const record = join(w.root, ".dohc", "sync-history.json");
+    await rename(record, `${record}.away`);
+    executor.hostChanged();
+    await w.until(() => !w.subscriptions.has("collection:Tasks#task"));
+
+    // It is back, and only the 15-minute read notices.
+    await rename(`${record}.away`, record);
+    const next = recheck as (() => Promise<void>) | null;
+    expect(next).not.toBeNull();
+    await next?.();
+    await w.until(() => w.subscriptions.has("collection:Tasks#task"));
+    hosts.close("ws");
+    await executor.dispose();
   });
 
   it("runs for a Group message with the message and its author in its formulas", async () => {
@@ -5412,7 +5559,7 @@ describe("Collection automations that a Group message starts", () => {
       clearTimer: (cleared) => { for (const timer of timers) if (timer === cleared) timer.done = true; },
     });
     const executor = w.makeExecutor({
-      groupHost: () => automationHostGeneration(workspace, () => hosts.runsAt("ws")),
+      groupHost: () => automationHostGeneration(workspace, { installId, label: installId }, () => hosts.runsAt("ws")),
       // The relay answers only for the current generation, as main.ts reads it.
       groupRelayRecord: async (generation) => {
         if (relay.down) throw new TypeError("fetch failed");
@@ -5518,7 +5665,7 @@ describe("Collection automations that a Group message starts", () => {
   it("keeps its subscriptions when a workspace that never synced turns sync on", async () => {
     const w = await world({ channels: [TRIP], automations: { Tasks: task } });
     await mkdir(join(w.root, ".dohc"), { recursive: true });
-    await recordNeverSynced(w.root);
+    await recordNeverSynced(w.root, { installId: "laptop", label: "Laptop" });
     const workspace: Workspace = { rootPath: w.root };
     const relay: Relay = { row: null, kept: null };
     const here = ownersComputer("laptop", w, relay, workspace);
@@ -5546,7 +5693,7 @@ describe("Collection automations that a Group message starts", () => {
   ] as const)("drops its subscriptions when a workspace that never synced turns sync on and %s", async (_case, start) => {
     const w = await world({ channels: [TRIP], automations: { Tasks: task } });
     await mkdir(join(w.root, ".dohc"), { recursive: true });
-    await recordNeverSynced(w.root);
+    await recordNeverSynced(w.root, { installId: "laptop", label: "Laptop" });
     const workspace: Workspace = { rootPath: w.root };
     const relay: Relay = { row: null, kept: null };
     const here = ownersComputer("laptop", w, relay, workspace);
@@ -7088,7 +7235,7 @@ it.skipIf(!process.env.DOHC_UNDO_BENCHMARK)("measures production Undo of 2000 re
     path: record.path, collectionPath: "Tasks"}, fields: [{field: "Count", before: 1, after: 2}]}))}];
   run.applied = [{ordinal: 0, writes: records.map(record => ({kind: "field", recordId: record.id,
     path: record.path, field: "Count", before: 1, after: 2}))}];
-  const store = createAutomationRunStore(w.root, resolveWorkspaceMetadataDir);
+  const store = createAutomationRunStore(preparedAutomationStoreFolder(w.root));
   await store.save(run);
   const start = performance.now();
   const result = await w.executor.undo({automationId: TASKS, claimId: claim.claimId, deletes: null}, async () => {});

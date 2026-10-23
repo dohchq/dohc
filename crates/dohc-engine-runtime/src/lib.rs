@@ -25,6 +25,8 @@
 #![forbid(unsafe_code)]
 
 pub mod actor;
+mod chat_mentions;
+mod conversation_links;
 pub mod error;
 pub mod identity;
 pub(crate) mod links;
@@ -40,6 +42,10 @@ pub use actor::{
     TextWriteExecutionResult, WorkspaceActor, WorkspaceRootGuard, WriteConditions, YdocAppend,
     YdocCloseMaterialization, YdocCloseSessionOutcome, YdocOpenState, YdocSettleOutcome,
     YdocSettlement,
+};
+#[cfg(unix)]
+pub use actor::{
+    RETAINED_COPIES_DELETE_LIMIT, RETAINED_COPIES_LIST_LIMIT, RetainedCandidate, RetainedDeletion,
 };
 pub use error::RuntimeError;
 pub use identity::EngineDbIdentity;

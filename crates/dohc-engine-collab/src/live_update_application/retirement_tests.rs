@@ -160,6 +160,7 @@ fn device_seeded() -> (Fixture, String, Vec<u8>) {
 fn imported_source(f: &Fixture, full: &[u8]) -> ImportedOwnerSource {
     ImportedOwnerSource {
         version: 1,
+        reader_source: false,
         relay_database_namespace: "namespace".into(),
         workspace_id: "workspace".into(),
         main_version_id: "main".into(),
@@ -1760,10 +1761,10 @@ fn a_retiring_activation_never_serves_again_after_a_restart() {
         f.store = EngineStore::open(&f._scratch.join("engine.db"), 31).unwrap();
         f._owner = ApplicationOwner::new("workspace".into()).unwrap();
         let unrelated =
-            capture_imported_owner_activation(&mut f.store, "namespace", &other_key, "other.md", 1_000_000, &NoFaults)
+            capture_imported_owner_activation(&mut f.store, "namespace", &other_key, "other.md", 1_000_000, &NoFaults, None)
                 .unwrap()
                 .activation_id;
-        resume_imported_owner_activation(&mut f.store, "namespace", &other_key, "other.md", &unrelated, 1_000_000)
+        resume_imported_owner_activation(&mut f.store, "namespace", &other_key, "other.md", &unrelated, 1_000_000, None)
             .unwrap();
         let unrelated_handle = f
             ._owner

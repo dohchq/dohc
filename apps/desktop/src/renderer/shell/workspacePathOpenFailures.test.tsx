@@ -150,6 +150,19 @@ describe("folders a launch could not open", () => {
     expect(details).toContain("Folder: C:\\work\\Notes\nFolder: C:\\work\\Plans\nNot listed: 1 more, named in dohc's log");
   });
 
+  it("shows a failed move to Applications with Try again, which asks main to move again", async () => {
+    const user = userEvent.setup();
+    render(<Root owner={null} />);
+    const said = "Failed to copy dohc.app. Drag dohc into Applications in Finder to move it yourself.";
+    await emit({ attemptId: "move-1", moveToApplications: true, cause: `Error: ${said}`, workspaceId: null });
+
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(`dohc could not move itself to Applications. ${said}`);
+    expect(await copied(toast)).toContain(`Error: dohc could not move itself to Applications. ${said}`);
+    await user.click(within(toast).getByRole("button", { name: "Try again" }));
+    expect(retryWorkspacePathOpen).toHaveBeenCalledExactlyOnceWith({ attemptId: "move-1" });
+  });
+
   it("keeps the row in Notices, with Try again and Copy, after the toast closes", async () => {
     const user = userEvent.setup();
     render(<Root owner={null} />);

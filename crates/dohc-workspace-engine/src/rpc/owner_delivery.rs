@@ -131,7 +131,7 @@ struct OwnerOutputGuard {
     connection: ConnectionHandle,
     cancel: dohc_engine_protocol::cancel::CancelSignal,
     deadline: Option<Instant>,
-    reservation: Arc<dyn Send + Sync>,
+    reservation: std::sync::Mutex<Option<Arc<dyn Send + Sync>>>,
 }
 impl std::fmt::Debug for OwnerOutputGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -139,13 +139,13 @@ impl std::fmt::Debug for OwnerOutputGuard {
     }
 }
 impl OutputGuard for OwnerOutputGuard {
-    fn with_current(&self, action: &mut dyn FnMut()) -> bool {
+    fn with_current(&self, cancellable: bool, action: &mut dyn FnMut()) -> bool {
         let Some(service) = self.service.upgrade() else {
             return false;
         };
         let handles = crate::lock(&service.handles);
         if !self.connection.is_current()
-            || self.cancel.is_cancelled()
+            || (cancellable && self.cancel.is_cancelled())
             || self.deadline.is_some_and(|d| Instant::now() >= d)
             || !handles
                 .get(&self.workspace)
@@ -165,15 +165,17 @@ impl OutputGuard for OwnerOutputGuard {
     fn deadline(&self) -> Option<Instant> {
         self.deadline
     }
-    fn is_current(&self) -> bool {
+    fn is_current_ignoring_cancel(&self) -> bool {
         self.connection.is_current()
-            && !self.cancel.is_cancelled()
             && self.deadline.is_none_or(|d| Instant::now() < d)
             && self.service.upgrade().is_some_and(|service| {
                 service
                     .open(Some(&self.workspace))
                     .is_ok_and(|open| Arc::ptr_eq(&open, &self.open))
             })
+    }
+    fn release(&self) {
+        crate::lock(&self.reservation).take();
     }
 }
 
@@ -224,7 +226,7 @@ impl EngineService {
             &ctx,
             request.workspace.as_ref(),
             Some(&params.binding),
-            reservation,
+            reservation.clone(),
         )?;
         let cancellation = OperationCancellation::new(&ctx);
         let _serial = self
@@ -250,7 +252,7 @@ impl EngineService {
                     automation_declaration: None,
                 },
                 cancellation.token(),
-                guard.reservation.clone(),
+                reservation.clone(),
             )
             .await
             .map_err(map_runtime)?
@@ -286,11 +288,12 @@ impl EngineService {
         if !ctx.capabilities.iter().any(|c| c == "blobs") {
             return Err(invalid());
         }
+        let reservation = self.reserve_owner_delivery()?;
         let guard = self.owner_delivery_guard(
             &ctx,
             request.workspace.as_ref(),
             Some(&params.binding),
-            self.reserve_owner_delivery()?,
+            reservation.clone(),
         )?;
         let cancellation = OperationCancellation::new(&ctx);
         let state = guard
@@ -300,7 +303,7 @@ impl EngineService {
                 params.binding,
                 params.expected_revision,
                 cancellation.token(),
-                guard.reservation.clone(),
+                reservation.clone(),
             )
             .await
             .map_err(map_runtime)?
@@ -343,12 +346,9 @@ impl EngineService {
             writes: Option<Vec<dohc_engine_collab::owner_outbox::draft::OwnerDraftWrite>>,
         }
         let params: Params = serde_json::from_value(request.params).map_err(|_| invalid())?;
-        let guard = self.owner_delivery_guard(
-            &ctx,
-            request.workspace.as_ref(),
-            None,
-            self.reserve_owner_delivery()?,
-        )?;
+        let reservation = self.reserve_owner_delivery()?;
+        let guard =
+            self.owner_delivery_guard(&ctx, request.workspace.as_ref(), None, reservation.clone())?;
         let cancellation = OperationCancellation::new(&ctx);
         if let Some(writes) = params.writes {
             let states = guard
@@ -358,7 +358,7 @@ impl EngineService {
                     guard.open.workspace_id.clone(),
                     writes,
                     cancellation.token(),
-                    guard.reservation.clone(),
+                    reservation.clone(),
                 )
                 .await
                 .map_err(map_runtime)?
@@ -384,7 +384,7 @@ impl EngineService {
                 params.limit,
                 params.pending_only,
                 cancellation.token(),
-                guard.reservation.clone(),
+                reservation.clone(),
             )
             .await
             .map_err(map_runtime)?
@@ -480,7 +480,7 @@ impl EngineService {
             connection: connection.clone(),
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
-            reservation,
+            reservation: std::sync::Mutex::new(Some(reservation)),
         });
         if !guard.is_current() {
             return Err(workspace_unavailable());
@@ -524,14 +524,15 @@ impl EngineService {
             OwnerUpload::Accepted(params) => params,
         };
         params.validate(&request.method)?;
+        let reservation = input.reservation;
         let guard = self.owner_delivery_guard(
             &ctx,
             request.workspace.as_ref(),
             Some(&params.binding),
-            input.reservation,
+            reservation.clone(),
         )?;
         let cancellation = OperationCancellation::new(&ctx);
-        let _serial = self
+        let serial = self
             .mutation_session_guard(&guard.open, &cancellation, "owner delivery (queued)")
             .await?;
         if !guard.is_current() {
@@ -546,6 +547,7 @@ impl EngineService {
             None
         };
         let binding = p.binding.clone();
+        let namespace = p.relay_database_namespace.clone();
         let applied = dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameInput {
             binding: p.binding,
             relay_database_namespace: p.relay_database_namespace,
@@ -555,35 +557,63 @@ impl EngineService {
             journal_cursor: p.journal_cursor,
             update_bytes: bytes,
         };
-        let result = if let Some(vector) = vector {
-            guard
-                .open
-                .actor
-                .owner_ydoc_apply_initial_sync(
-                    guard.open.workspace_id.clone(),
-                    applied,
-                    vector,
-                    now_ms()?,
-                    cancellation.token(),
-                    guard.reservation.clone(),
-                )
-                .await
-        } else {
-            guard
-                .open
-                .actor
-                .owner_ydoc_apply_accepted(
-                    guard.open.workspace_id.clone(),
-                    applied,
-                    now_ms()?,
-                    cancellation.token(),
-                    guard.reservation.clone(),
-                )
-                .await
-        }
-        .map_err(map_runtime)?
-        .map_err(map_owner_outbox)?;
-        self.notify_owner_sessions(&guard.workspace, &binding);
+        let service = guard.service.upgrade().ok_or_else(workspace_unavailable)?;
+        let token = cancellation.token();
+        let now = now_ms()?;
+        // Keep commit and session refresh ordered even if the RPC future is
+        // dropped after the actor commits. The next edit must see both.
+        let result = tokio::spawn({
+            let guard = Arc::clone(&guard);
+            async move {
+                let _serial = serial;
+                let result = if let Some(vector) = vector {
+                    guard
+                        .open
+                        .actor
+                        .owner_ydoc_apply_initial_sync(
+                            guard.open.workspace_id.clone(),
+                            applied,
+                            vector,
+                            now,
+                            token,
+                            reservation.clone(),
+                        )
+                        .await
+                } else {
+                    guard
+                        .open
+                        .actor
+                        .owner_ydoc_apply_accepted(
+                            guard.open.workspace_id.clone(),
+                            applied,
+                            now,
+                            token,
+                            reservation.clone(),
+                        )
+                        .await
+                }
+                .map_err(map_runtime)?
+                .map_err(map_owner_outbox)?;
+                for session in crate::lock(&service.sessions).values_mut() {
+                    if session.workspace == guard.workspace
+                        && let Some(draft) = &mut session.owner_draft
+                        && draft.binding == binding
+                        && draft.relay_database_namespace == namespace
+                        && draft.revision == p.expected_revision
+                        && draft.accepted_cursor == p.previous_accepted_cursor
+                        && draft.native_head_sequence == p.expected_native_head_sequence
+                    {
+                        draft.revision = result.revision;
+                        draft.accepted_cursor = result.accepted_cursor;
+                        draft.native_head_sequence = result.native_head_sequence;
+                    }
+                }
+                service.notify_owner_sessions(&guard.workspace, &binding);
+                Ok::<_, WireError>(result)
+            }
+        })
+        .await
+        .map_err(|_| WireError::new(ErrorCode::Internal, "owner delivery task failed"))??;
         if !guard.is_current() {
             return Err(workspace_unavailable());
         }
@@ -609,7 +639,7 @@ impl EngineService {
             &ctx,
             request.workspace.as_ref(),
             Some(&params.binding),
-            reservation,
+            reservation.clone(),
         )?;
         let cancellation = OperationCancellation::new(&ctx);
         let _serial = self
@@ -642,7 +672,7 @@ impl EngineService {
                 limits,
                 now_ms()?,
                 cancellation.token(),
-                guard.reservation.clone(),
+                reservation.clone(),
             )
             .await
             .map_err(map_runtime)?
@@ -696,7 +726,7 @@ impl EngineService {
             &ctx,
             request.workspace.as_ref(),
             Some(&params.binding),
-            reservation,
+            reservation.clone(),
         )?;
         let cancellation = OperationCancellation::new(&ctx);
         let result = guard
@@ -707,7 +737,7 @@ impl EngineService {
                 params.relay_database_namespace,
                 params.recovery,
                 cancellation.token(),
-                guard.reservation.clone(),
+                reservation.clone(),
             )
             .await
             .map_err(map_runtime)?
@@ -733,11 +763,12 @@ impl EngineService {
         // Keep the refusal future and its construction out of the RPC dispatcher.
         Box::pin(async move {
             let input = serde_json::from_value(request.params).map_err(|_| invalid())?;
+            let reservation = self.reserve_owner_delivery()?;
             let guard = self.owner_delivery_guard(
                 &ctx,
                 request.workspace.as_ref(),
                 None,
-                self.reserve_owner_delivery()?,
+                reservation.clone(),
             )?;
             let cancellation = OperationCancellation::new(&ctx);
             let _serial = self
@@ -754,7 +785,7 @@ impl EngineService {
                     input,
                     now_ms()?,
                     cancellation.token(),
-                    guard.reservation.clone(),
+                    reservation.clone(),
                 )
                 .await
                 .map_err(map_runtime)?
@@ -800,7 +831,7 @@ impl EngineService {
             &ctx,
             request.workspace.as_ref(),
             Some(&p.binding),
-            reservation,
+            reservation.clone(),
         )?;
         let cancellation = OperationCancellation::new(&ctx);
         let (result, blob_egress) = if let Some(receipt) = p.receipt {
@@ -812,7 +843,7 @@ impl EngineService {
                     p.relay_database_namespace,
                     receipt,
                     cancellation.token(),
-                    guard.reservation.clone(),
+                    reservation.clone(),
                 )
                 .await
                 .map_err(map_runtime)?
@@ -826,7 +857,7 @@ impl EngineService {
                     p.binding,
                     p.relay_database_namespace,
                     cancellation.token(),
-                    guard.reservation.clone(),
+                    reservation.clone(),
                 )
                 .await
                 .map_err(map_runtime)?

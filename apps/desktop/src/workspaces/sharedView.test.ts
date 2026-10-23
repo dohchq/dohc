@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
+  chmod,
+  link,
   lstat,
   mkdir,
   readFile,
   readdir,
   realpath,
+  rename,
   rm,
   stat,
   symlink,
@@ -57,20 +60,26 @@ import {
 import { deniedReadCode, denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createTestScratch } from "./testTemp";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
+import { LocalStateUnavailableError, readLocalStateFrom } from "./workspaceLocalState";
 
 // This suite isolates shared-view primitives. Owner admission itself is kept
 // real in shareViewFiles.test.ts and every file-operation/mount e2e suite.
 vi.mock("./shareViewFilesOwner", () => {
   const resources = new WeakMap<object, Record<string, unknown>>();
   return {
-    assertActiveShareViewFilesOwner: (owner: object) =>
+    // Without an owner, the view each call names is its own workspace.
+    assertActiveShareViewFilesOwner: (
+      owner: object,
+      expected: { rootPath?: string } = {},
+    ) =>
       resources.get(owner) ?? {
         kind: "standalone",
         workspaceId: "test-workspace",
         storeWorkspaceId: "test-workspace",
-        schedulingRootPath: "unused",
+        schedulingRootPath: expected.rootPath ?? "unused",
         rootPath: "unused",
         shareId: "test-share",
+        ...expected,
       },
     withActiveShareViewFilesOwnerOperation: (
       _owner: unknown,
@@ -144,6 +153,7 @@ let realpathOverride:
 let failRenameToPathOnce: { path: string; error: Error } | null = null;
 let failRemovePathOnce: { path: string; error: Error } | null = null;
 let failReaddirPathOnce: { path: string; error: Error } | null = null;
+let beforeOpen: ((path: string) => Promise<void>) | null = null;
 let collisionRecordRenameTargets: string[] = [];
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -183,6 +193,10 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       }
       return actual.rename(oldPath, newPath);
     }) as typeof actual.rename,
+    open: (async (...args: Parameters<typeof actual.open>) => {
+      await beforeOpen?.(String(args[0]));
+      return actual.open(...args);
+    }) as typeof actual.open,
     rm: (async (
       path: Parameters<typeof actual.rm>[0],
       options?: Parameters<typeof actual.rm>[1],
@@ -194,6 +208,21 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       }
       return actual.rm(path, options);
     }) as typeof actual.rm,
+  };
+});
+
+// Another process changes a dropped folder after the screen and before the
+// import reads it. A test can also forge what the screen recorded.
+let afterDropScreen: ((screened: Awaited<ReturnType<typeof import("./workspaceFiles").screenDroppedPaths>>) => Promise<void>) | null = null;
+vi.mock("./workspaceFiles", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./workspaceFiles")>();
+  return {
+    ...actual,
+    screenDroppedPaths: (async (...args: Parameters<typeof actual.screenDroppedPaths>) => {
+      const screened = await actual.screenDroppedPaths(...args);
+      await afterDropScreen?.(screened);
+      return screened;
+    }) as typeof actual.screenDroppedPaths,
   };
 });
 
@@ -225,6 +254,7 @@ function reconcileStandaloneForTest(
       pinnedSelector: input.pinnedSelector,
       shareId: input.shareId,
       ended,
+      preservedPaths: input.preservedPaths,
     });
     return reconcileStandaloneShareView({ ...refreshInput, captured });
   });
@@ -274,7 +304,43 @@ function stubStore(
 let outsideLinks: string[] = [];
 let harnesses: ShareViewDaemonHarness[] = [];
 
+// Writers of `.dohc/local` ask the engine's open. Here a view counts as opened
+// once its `.dohc/local` exists, as the loopback's open leaves it, unless a
+// test closes it or opens it without keeping `.dohc/local` out of iCloud.
+const OPENED = { localStateReady: true };
+const NOT_EXCLUDED = { localStateReady: false };
+const closedViews = new Set<string>();
+const unexcludedViews = new Set<string>();
+
+/** Where a view's refresh records live. */
+function recordsDir(rootDir: string): string {
+  return join(rootDir, ".dohc", "local", "share-refresh");
+}
+
+/** A view whose store the engine has opened: its `.dohc/local` is made. */
+async function openedView(rootDir: string): Promise<void> {
+  await mkdir(join(rootDir, ".dohc", "local"), { recursive: true, mode: 0o700 });
+}
+
+/** An opened view's records folder, made as dohc makes it. */
+async function openedRecordsDir(rootDir: string): Promise<string> {
+  await mkdir(recordsDir(rootDir), { recursive: true, mode: 0o700 });
+  return recordsDir(rootDir);
+}
+
 beforeEach(() => {
+  closedViews.clear();
+  unexcludedViews.clear();
+  readLocalStateFrom({
+    currentBinding: (view) =>
+      closedViews.has(view.rootPath)
+        ? null
+        : unexcludedViews.has(view.rootPath)
+          ? NOT_EXCLUDED
+          : OPENED,
+    // An open that could not keep the folder out of iCloud Drive prepared it.
+    localStateOpenAt: async (rootPath) => (closedViews.has(rootPath) ? null : { current: () => !closedViews.has(rootPath) }),
+  });
   outsideLinks = [];
   harnesses = [];
   observeRealpath = null;
@@ -345,16 +411,17 @@ async function writePendingMaterializationPaths(
   rootDir: string,
   paths: readonly string[],
 ): Promise<void> {
-  const metadataDir = join(rootDir, ".dohc");
-  const recordPath = join(metadataDir, "pending-materialization.json");
-  await mkdir(metadataDir, { recursive: true });
+  const recordPath = join(
+    await openedRecordsDir(rootDir),
+    "pending-materialization.json",
+  );
   const counts = await readFile(recordPath, "utf8").then(
     (serialized) =>
       (JSON.parse(serialized) as { counts: Record<string, number> }).counts,
     () => ({}) as Record<string, number>,
   );
   for (const path of new Set(paths)) counts[path] = (counts[path] ?? 0) + 1;
-  await writeFile(recordPath, JSON.stringify({ counts }), "utf8");
+  await writeFile(recordPath, JSON.stringify({ counts }), { encoding: "utf8", mode: 0o600 });
 }
 
 async function materializeSharedViewPaths(
@@ -388,6 +455,8 @@ interface OwnedChangeScope {
   workspaceId: string;
   rootPath: string;
   shareViewStore: () => CaptureVersionedTextStore;
+  // Files the share grants one by one. Absent grants the whole version.
+  grantedPaths?: string[];
 }
 
 async function applyOwnedShareViewChange(
@@ -406,7 +475,7 @@ async function applyOwnedShareViewChange(
     shareId: SHARE_ID,
     recipientUserId: "recipient-a",
     granterEmail: "granter@example.com",
-    grantedSelector: { paths: [], versionId: "main", access: "edit" },
+    grantedSelector: { paths: scope.grantedPaths ?? [], versionId: "main", access: "edit" },
     ended: false,
   };
   const files = createShareViewFiles({
@@ -549,6 +618,32 @@ class FakeShareRelay {
         payloadAfterPath: path,
         metadata: { origin: "local-file" },
         beforePresent: "null",
+      },
+      recordedAtMs: 1000 + relaySeq,
+    });
+  }
+
+  addRename(from: string, to: string, content: string): void {
+    const relaySeq = this.nextSeq++;
+    this.blobs.set(sha256(content), Buffer.from(content, "utf8"));
+    this.ops.push({
+      relaySeq,
+      originId: "origin-granter",
+      originSeq: relaySeq,
+      opKind: "moment.append",
+      payload: {
+        momentId: `moment-${relaySeq}`,
+        versionId: "main",
+        objectId: "object-renamed",
+        path: to,
+        recordedAtMs: 1000 + relaySeq,
+        operation: "rename",
+        payloadBeforeBlobSha256: sha256(content),
+        payloadBeforePath: from,
+        payloadAfterBlobSha256: sha256(content),
+        payloadAfterPath: to,
+        metadata: { origin: "local-file" },
+        beforePresent: "present",
       },
       recordedAtMs: 1000 + relaySeq,
     });
@@ -1007,7 +1102,7 @@ describe("shared view refresh", () => {
     const { rootDir, store, path } = await binaryAutomationsView();
     try {
       await writePendingMaterializationPaths(rootDir, [path]);
-      await writeFile(join(rootDir, ".dohc", "pull-in-flight.marker"), "");
+      await writeFile(join(recordsDir(rootDir), "pull-in-flight.marker"), "");
       const before = await momentIds(store);
       await expect(
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
@@ -1047,7 +1142,7 @@ describe("shared view refresh", () => {
         metadata: { origin: "sync" },
       });
       await writeFile(
-        join(rootDir, ".dohc", "pull-in-flight.marker"),
+        join(await openedRecordsDir(rootDir), "pull-in-flight.marker"),
         "",
         "utf8",
       );
@@ -1696,6 +1791,544 @@ describe("shared view refresh", () => {
         ),
       }),
     );
+  });
+
+  // A refresh merges its pull's pages, and a merged path keeps the place it
+  // first had. Here page one writes `notes.md` and renames it `Notes.md`, and
+  // page two renames it back, so the merge lists the write of `notes.md`
+  // before the delete of `Notes.md`. On a disk that ignores case that delete
+  // would remove the file just written.
+  it("keeps a file renamed by case and back across pages", async (context) => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    await writeFile(join(rootDir, "probe.md"), "");
+    const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootDir, "probe.md"));
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    const relay = new FakeShareRelay();
+    relay.pageSize = 2;
+    relay.addWrite("notes.md", "body\n");
+    relay.addRename("notes.md", "Notes.md", "body\n");
+    relay.addRename("Notes.md", "notes.md", "body\n");
+
+    await refreshSharedViewOnce(daemonHarness(relay), {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+
+    expect((await readdir(rootDir)).filter((name) => !name.startsWith("."))).toEqual(["notes.md"]);
+    expect(await readFile(join(rootDir, "notes.md"), "utf8")).toBe("body\n");
+  });
+
+  // A sharer on Linux holds `notes.md` and `Notes.md` as two files. Here the
+  // second arrives in its own refresh and takes the one file a disk that
+  // ignores case has for both, and a later refresh deletes `notes.md`. That
+  // delete would remove the file `Notes.md` still owns (#2294).
+  it("keeps the file another spelling still owns when a later refresh deletes one spelling", async (context) => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    await writeFile(join(rootDir, "probe.md"), "");
+    const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootDir, "probe.md"));
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const refresh = () => refreshSharedViewOnce(harness, { rootDir, workspaceId: WORKSPACE, shareId: SHARE_ID });
+    relay.addWrite("docs/notes.md", "old\n");
+    await refresh();
+    relay.addWrite("Docs/Notes.md", "live\n");
+    await refresh();
+    relay.addDelete("docs/notes.md");
+    await refresh();
+
+    expect(await readdir(join(rootDir, "docs"))).toEqual(["Notes.md"]);
+    expect(await readFile(join(rootDir, "docs", "Notes.md"), "utf8")).toBe("live\n");
+  });
+
+  // The same sequence the way dohc refreshes a view, capturing first: the
+  // second spelling arrives while the first's file is there, so it is held back
+  // as a collision and never written. Deleting the first then writes the live
+  // spelling's head into the file, which settles the collision.
+  it("writes the live spelling's head when a later refresh deletes the spelling the disk holds", async (context) => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    await writeFile(join(rootDir, "probe.md"), "");
+    const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootDir, "probe.md"));
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    const store = harness.openStore(target);
+    const reconcile = async () => {
+      const refreshed = await reconcileStandaloneForTest({
+        rootDir, workspaceId: WORKSPACE, relay: harness.relay, shareId: SHARE_ID, store, pull: harness.pullFor(target),
+        pinnedSelector: PINNED_SELECTOR, recordRefusals: async () => undefined, ended: false,
+      });
+      if (!refreshed.ok) throw new Error(refreshed.errorMessage);
+      return refreshed;
+    };
+    try {
+      relay.addWrite("docs/notes.md", "old\n");
+      await reconcile();
+      relay.addWrite("Docs/Notes.md", "live\n");
+      await reconcile();
+      expect(await readFile(join(rootDir, "docs", "notes.md"), "utf8")).toBe("old\n");
+      relay.addDelete("docs/notes.md");
+      await reconcile();
+
+      expect(await readdir(join(rootDir, "docs"))).toEqual(["Notes.md"]);
+      expect(await readFile(join(rootDir, "docs", "Notes.md"), "utf8")).toBe("live\n");
+      expect((await reconcile()).unjournalablePaths).toEqual([]);
+      expect(await readFile(join(rootDir, "docs", "Notes.md"), "utf8")).toBe("live\n");
+    } finally {
+      await store.close();
+    }
+  });
+
+  // Both spellings arrive in one refresh, so the first owns the disk's one
+  // file and the later one is held back. Deleting the first writes the later
+  // one's head there, under its spelling, which ends the hold.
+  it("writes the held spelling's head when a refresh deletes the spelling whose file it is", async (context) => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    await writeFile(join(rootDir, "probe.md"), "");
+    const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootDir, "probe.md"));
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    const store = harness.openStore(target);
+    const reconcile = async () => {
+      const refreshed = await reconcileStandaloneForTest({
+        rootDir, workspaceId: WORKSPACE, relay: harness.relay, shareId: SHARE_ID, store, pull: harness.pullFor(target),
+        pinnedSelector: PINNED_SELECTOR, recordRefusals: async () => undefined, ended: false,
+      });
+      if (!refreshed.ok) throw new Error(refreshed.errorMessage);
+      return refreshed;
+    };
+    try {
+      relay.addWrite("notes.md", "old\n");
+      relay.addWrite("Notes.md", "live\n");
+      await reconcile();
+      expect(await readFile(join(rootDir, "notes.md"), "utf8")).toBe("old\n");
+      relay.addDelete("notes.md");
+      await reconcile();
+
+      expect((await readdir(rootDir)).filter((name) => !name.startsWith("."))).toEqual(["Notes.md"]);
+      expect(await readFile(join(rootDir, "Notes.md"), "utf8")).toBe("live\n");
+      expect((await reconcile()).unjournalablePaths).toEqual([]);
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(new Set());
+    } finally {
+      await store.close();
+    }
+  });
+
+  // A spelling the refresh protects, here a preserved path holding local
+  // edits, keeps its file: deleting another spelling neither removes the file
+  // nor writes the protected spelling's head over those edits.
+  it("leaves a protected spelling's file alone when a refresh deletes another spelling of it", async (context) => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    await writeFile(join(rootDir, "probe.md"), "");
+    const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootDir, "probe.md"));
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    relay.addWrite("Notes.md", "N\n");
+    relay.addWrite("notes.md", "n\n");
+    await refreshSharedViewOnce(harness, { rootDir, workspaceId: WORKSPACE, shareId: SHARE_ID });
+    await writeFile(join(rootDir, "notes.md"), "local bytes\n");
+    relay.addDelete("Notes.md");
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    const store = harness.openStore(target);
+    try {
+      const notes = new Set(["notes.md"]);
+      await refreshSharedViewOnceWithPull({
+        rootDir, workspaceId: WORKSPACE, relay: harness.relay, shareId: SHARE_ID, pull: harness.pullFor(target),
+        pinnedSelector: PINNED_SELECTOR, recordRefusals: async () => undefined, store,
+        excludeFromMaterialization: notes, protectedPaths: notes, trackPendingMaterialization: true,
+      });
+
+      expect(await readFile(join(rootDir, "notes.md"), "utf8")).toBe("local bytes\n");
+      // The delete left undone keeps its debt, so a capture after the owner is free settles the file.
+      await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(new Set(["Notes.md"]));
+    } finally {
+      await store.close();
+    }
+  });
+
+  // A rename only by capitals in one refresh leaves the old spelling to the
+  // new one's write, which recreates the file under the new spelling.
+  it("ends a rename only by capitals with the new spelling on a disk that ignores case", async (context) => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    await writeFile(join(rootDir, "probe.md"), "");
+    const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootDir, "probe.md"));
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const refresh = () => refreshSharedViewOnce(harness, { rootDir, workspaceId: WORKSPACE, shareId: SHARE_ID });
+    relay.addWrite("notes.md", "body\n");
+    await refresh();
+    relay.addRename("notes.md", "Notes.md", "body\n");
+    await refresh();
+
+    expect((await readdir(rootDir)).filter((name) => !name.startsWith("."))).toEqual(["Notes.md"]);
+    expect(await readFile(join(rootDir, "Notes.md"), "utf8")).toBe("body\n");
+  });
+
+  // On a disk that keeps case apart the two spellings are two files, so the
+  // delete removes only its own.
+  it("deletes only its own spelling where the disk keeps case apart", async (context) => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    await writeFile(join(rootDir, "probe.md"), "");
+    const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootDir, "probe.md"));
+    if (ignoresCase) context.skip("this disk ignores case");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const refresh = () => refreshSharedViewOnce(harness, { rootDir, workspaceId: WORKSPACE, shareId: SHARE_ID });
+    relay.addWrite("notes.md", "old\n");
+    relay.addWrite("Notes.md", "live\n");
+    await refresh();
+    relay.addDelete("notes.md");
+    await refresh();
+
+    expect((await readdir(rootDir)).filter((name) => !name.startsWith("."))).toEqual(["Notes.md"]);
+    expect(await readFile(join(rootDir, "Notes.md"), "utf8")).toBe("live\n");
+  });
+
+  // A view on a disk that ignores case, refreshed the way dohc refreshes it,
+  // capturing first. Skips where the disk keeps case apart.
+  async function caseFoldingView(context: { skip: (note: string) => void }, access: "view" | "edit") {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    await writeFile(join(rootDir, "probe.md"), "");
+    const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootDir, "probe.md"));
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    const store = harness.openStore(target);
+    const pinnedSelector = { ...PINNED_SELECTOR, access };
+    const reconcile = async (preservedPaths?: readonly string[]) => {
+      const refreshed = await reconcileStandaloneForTest({
+        rootDir, workspaceId: WORKSPACE, relay: harness.relay, shareId: SHARE_ID, store, pull: harness.pullFor(target),
+        pinnedSelector, recordRefusals: async () => undefined, ended: false, preservedPaths,
+      });
+      if (!refreshed.ok) throw new Error(refreshed.errorMessage);
+      return refreshed;
+    };
+    const capture = (preservedPaths?: readonly string[] | null) => captureStandaloneShareViewDivergence({
+      rootDir, workspaceId: WORKSPACE, store, pinnedSelector, shareId: SHARE_ID, ended: false, preservedPaths,
+    });
+    const head = async (path: string) => {
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      return (await store.readTextFile({ workspaceId: WORKSPACE, versionId: main.id, path }))?.text ?? null;
+    };
+    const names = async (folder = rootDir) => (await readdir(folder)).filter((name) => !name.startsWith("."));
+    return { rootDir, relay, store, reconcile, capture, head, names };
+  }
+
+  // Both spellings arrive in one refresh. The first one written owns the
+  // file, and the later one is held back, as one arriving in a later refresh
+  // is. Neither sends anything, and a view that can only read leaves the file
+  // alone (#2416).
+  for (const access of ["view", "edit"] as const) {
+    it(`holds back the later of two spellings from one refresh and sends nothing (${access})`, async (context) => {
+      const view = await caseFoldingView(context, access);
+      try {
+        view.relay.addWrite("notes.md", "old\n");
+        view.relay.addWrite("Notes.md", "live\n");
+        await view.reconcile();
+        const before = await momentIds(view.store);
+        for (let pass = 0; pass < 2; pass += 1) {
+          const settled = await view.reconcile();
+          expect(settled.unjournalablePaths).toEqual([{ path: "Notes.md", reason: "spelling-collision", owner: "notes.md" }]);
+          expect(() => assertShareChangesJournalable(settled.unjournalablePaths)).not.toThrow();
+        }
+        expect(await momentIds(view.store)).toEqual(before);
+        expect(await view.names()).toEqual(["notes.md"]);
+        expect(await readFile(join(view.rootDir, "notes.md"), "utf8")).toBe("old\n");
+      } finally {
+        await view.store.close();
+      }
+    });
+  }
+
+  // The spellings can differ in a folder name too. The folder keeps the first
+  // write's spelling, and the later spelling is still held back.
+  for (const [first, later] of [["docs/a.md", "Docs/a.md"], ["docs/A.md", "Docs/a.md"]] as const) {
+    it(`holds back ${later} after ${first} from one refresh and sends nothing`, async (context) => {
+      const view = await caseFoldingView(context, "edit");
+      try {
+        view.relay.addWrite(first, "first\n");
+        view.relay.addWrite(later, "later\n");
+        await view.reconcile();
+        const before = await momentIds(view.store);
+        expect((await view.reconcile()).unjournalablePaths).toEqual([{ path: later, reason: "spelling-collision", owner: first }]);
+        expect(await momentIds(view.store)).toEqual(before);
+        expect(await view.head(first)).toBe("first\n");
+        expect(await view.head(later)).toBe("later\n");
+        expect(await readFile(join(view.rootDir, ...first.split("/")), "utf8")).toBe("first\n");
+      } finally {
+        await view.store.close();
+      }
+    });
+  }
+
+  // A capture that keeps unsaved work aside, as one before access narrows
+  // does, still sends nothing for a held spelling, and does not keep it
+  // aside: its file is another spelling's, not unsaved work.
+  it("sends nothing for a held spelling that a capture keeps aside", async (context) => {
+    const view = await caseFoldingView(context, "view");
+    try {
+      view.relay.addWrite("notes.md", "old\n");
+      view.relay.addWrite("Notes.md", "live\n");
+      await view.reconcile();
+      for (const preserved of [["Notes.md"], null]) {
+        const captured = await view.capture(preserved);
+        expect(captured.unjournalablePaths).toEqual([{ path: "Notes.md", reason: "spelling-collision", owner: "notes.md" }]);
+        expect(captured.remainingPreservedPaths).not.toContain("Notes.md");
+      }
+      expect(await view.head("Notes.md")).toBe("live\n");
+      expect(await view.head("notes.md")).toBe("old\n");
+      await expect(readCollisionRecordPaths(view.rootDir, SHARE_ID)).resolves.toEqual(new Set(["Notes.md"]));
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  // What a capture kept aside protects files in the next refresh. A held
+  // spelling is not among them, so when its owner is deleted, it gets the
+  // file with its own text, and capture never saves the owner's text as its.
+  it("gives a held spelling its own text when its owner is deleted after a capture kept files aside", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    try {
+      view.relay.addWrite("notes.md", "old\n");
+      view.relay.addWrite("Notes.md", "live\n");
+      await view.reconcile();
+      const kept = (await view.capture(null)).remainingPreservedPaths ?? [];
+      view.relay.addDelete("notes.md");
+      await view.reconcile(kept);
+      await view.reconcile(kept);
+
+      expect(await view.head("Notes.md")).toBe("live\n");
+      expect(await view.names()).toEqual(["Notes.md"]);
+      expect(await readFile(join(view.rootDir, "Notes.md"), "utf8")).toBe("live\n");
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  // With three spellings, deleting the owner gives its file to one held
+  // spelling, which then owns it: the other stays held behind it, even when
+  // a capture keeps it aside.
+  it("hands a deleted owner's file to one held spelling and keeps holding the rest", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    try {
+      view.relay.addWrite("notes.md", "n\n");
+      view.relay.addWrite("Notes.md", "N\n");
+      view.relay.addWrite("NOTES.md", "NN\n");
+      await view.reconcile();
+      view.relay.addDelete("notes.md");
+      await view.reconcile();
+      const before = await momentIds(view.store);
+      const captured = await view.capture(["Notes.md"]);
+
+      expect(captured.unjournalablePaths).toEqual([{ path: "Notes.md", reason: "spelling-collision", owner: "NOTES.md" }]);
+      expect(await momentIds(view.store)).toEqual(before);
+      expect(await view.head("Notes.md")).toBe("N\n");
+      expect(await view.head("NOTES.md")).toBe("NN\n");
+      expect(await view.names()).toEqual(["NOTES.md"]);
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  // Deleting the visible file deletes only the spelling the person saw, even
+  // when a capture keeps the held spelling aside: the held one gets its own
+  // file and text.
+  for (const preserved of [["Notes.md"], null]) {
+    it(`deletes only the visible spelling when a capture keeps the held one aside (${JSON.stringify(preserved)})`, async (context) => {
+      const view = await caseFoldingView(context, "edit");
+      try {
+        view.relay.addWrite("notes.md", "old\n");
+        view.relay.addWrite("Notes.md", "live\n");
+        await view.reconcile();
+        await rm(join(view.rootDir, "notes.md"));
+        await view.capture(preserved);
+
+        expect(await view.head("notes.md")).toBeNull();
+        expect(await view.head("Notes.md")).toBe("live\n");
+        expect(await view.names()).toEqual(["Notes.md"]);
+        expect(await readFile(join(view.rootDir, "Notes.md"), "utf8")).toBe("live\n");
+      } finally {
+        await view.store.close();
+      }
+    });
+  }
+
+  // A capture scoped to one path, as a save, move or delete runs before it
+  // acts, still treats a recorded spelling outside its scope as held. Here
+  // this machine's own notes.md blocks both incoming spellings, so neither
+  // owns the file, and the capture of notes.md keeps its local collision.
+  for (const scoped of ["notes.md", "Notes.md"]) {
+    it(`keeps a local collision blocking in a capture scoped to one spelling (${scoped})`, async (context) => {
+      const view = await caseFoldingView(context, "edit");
+      try {
+        await writeFile(join(view.rootDir, "notes.md"), "mine\n");
+        view.relay.addWrite("notes.md", "n\n");
+        view.relay.addWrite("Notes.md", "N\n");
+        await view.reconcile();
+        await expect(readCollisionRecordPaths(view.rootDir, SHARE_ID)).resolves.toEqual(new Set(["notes.md", "Notes.md"]));
+        const captured = await captureStandaloneShareViewDivergence({
+          rootDir: view.rootDir, workspaceId: WORKSPACE, store: view.store,
+          pinnedSelector: { ...PINNED_SELECTOR, access: "edit" }, shareId: SHARE_ID, ended: false, paths: [scoped],
+        });
+
+        expect(captured.unjournalablePaths).toEqual([{ path: scoped, reason: "local-collision" }]);
+        expect(await readFile(join(view.rootDir, "notes.md"), "utf8")).toBe("mine\n");
+      } finally {
+        await view.store.close();
+      }
+    });
+  }
+
+  // A pull that deleted the owner in the store and stopped before the disk
+  // leaves the owner pending and its file in place. A capture that keeps
+  // every path aside then never saves the owner's text as the held spelling's.
+  it("never saves a crashed pull's deleted owner's text as a held spelling's", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    try {
+      view.relay.addWrite("notes.md", "old\n");
+      view.relay.addWrite("Notes.md", "live\n");
+      await view.reconcile();
+      const main = await view.store.ensureMainVersion({ workspaceId: WORKSPACE });
+      await view.store.deleteTextFile({ workspaceId: WORKSPACE, versionId: main.id, path: "notes.md", metadata: { origin: "sync" } });
+      await writePendingMaterializationPaths(view.rootDir, ["notes.md"]);
+      await view.capture(null);
+
+      expect(await view.head("Notes.md")).toBe("live\n");
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  // A person's own file at a recorded path, beside a spelling the disk keeps
+  // apart, is still their unsaved work: a capture that keeps it aside saves
+  // it, whatever other spellings of its name exist. NTFS keeps decomposed and
+  // composed accents apart; a disk that folds them skips.
+  it("saves a person's own file at a recorded path beside another spelling with its own file", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    try {
+      const [decomposed, composed] = ["café.md", "café.md"];
+      view.relay.addWrite(decomposed, "decomposed\n");
+      await view.reconcile();
+      if (await stat(join(view.rootDir, composed)).then(() => true, () => false)) context.skip("this disk folds normalization");
+      await writeFile(join(view.rootDir, composed), "mine\n");
+      view.relay.addWrite(composed, "theirs\n");
+      await view.reconcile();
+      const captured = await view.capture([composed]);
+
+      expect(captured.unjournalablePaths).toEqual([]);
+      expect(await view.head(composed)).toBe("mine\n");
+      expect(await view.head(decomposed)).toBe("decomposed\n");
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  // A refresh that stopped after giving a deleted owner's file to NOTES.md,
+  // before ending its record, leaves both remaining spellings recorded. The
+  // capture after it settles NOTES.md and never saves its text as Notes.md's.
+  it("never saves the new owner's text as a held spelling's after an interrupted handoff", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    try {
+      view.relay.addWrite("notes.md", "n\n");
+      view.relay.addWrite("Notes.md", "N\n");
+      view.relay.addWrite("NOTES.md", "NN\n");
+      await view.reconcile();
+      view.relay.addDelete("notes.md");
+      await view.reconcile();
+      await recordCollisionPaths(view.rootDir, SHARE_ID, ["NOTES.md"]);
+      const before = await momentIds(view.store);
+      await view.capture(["Notes.md"]);
+      await view.capture(["Notes.md"]);
+
+      expect(await momentIds(view.store)).toEqual(before);
+      expect(await view.head("Notes.md")).toBe("N\n");
+      expect(await view.head("NOTES.md")).toBe("NN\n");
+      await expect(readCollisionRecordPaths(view.rootDir, SHARE_ID)).resolves.toEqual(new Set(["Notes.md"]));
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  // Three spellings where the disk keeps the first apart but not the other
+  // two, as NTFS keeps decomposed and composed accents apart but not case:
+  // the second gets its own file, and the third stays held behind it.
+  it("holds a spelling that reaches the file of another spelling the refresh released", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    try {
+      const [decomposed, composed, upper] = ["café.md", "café.md", "CAFÉ.md"];
+      view.relay.addWrite(decomposed, "decomposed\n");
+      view.relay.addWrite(composed, "composed\n");
+      view.relay.addWrite(upper, "upper\n");
+      await view.reconcile();
+      const before = await momentIds(view.store);
+      await view.reconcile();
+
+      expect(await momentIds(view.store)).toEqual(before);
+      expect(await view.head(decomposed)).toBe("decomposed\n");
+      expect(await view.head(composed)).toBe("composed\n");
+      expect(await view.head(upper)).toBe("upper\n");
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  // Deleting the file someone sees deletes the spelling they saw, and the
+  // held spelling then gets its own file.
+  it("deletes the spelling the person saw when they delete a held-back pair's file", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    try {
+      view.relay.addWrite("notes.md", "old\n");
+      view.relay.addWrite("Notes.md", "live\n");
+      await view.reconcile();
+      await rm(join(view.rootDir, "notes.md"));
+      await view.capture();
+
+      expect(await view.head("notes.md")).toBeNull();
+      expect(await view.head("Notes.md")).toBe("live\n");
+      expect(await view.names()).toEqual(["Notes.md"]);
+      expect(await readFile(join(view.rootDir, "Notes.md"), "utf8")).toBe("live\n");
+      await expect(readCollisionRecordPaths(view.rootDir, SHARE_ID)).resolves.toEqual(new Set());
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  // A spelling held back because another one's file is there says so, and
+  // once the sharer deletes it, the hold ends and the other file stays.
+  it("reports a held-back spelling as one and ends the hold when it is deleted", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    try {
+      view.relay.addWrite("notes.md", "old\n");
+      await view.reconcile();
+      view.relay.addWrite("Notes.md", "live\n");
+      const held = [{ path: "Notes.md", reason: "spelling-collision", owner: "notes.md" }];
+      expect((await view.reconcile()).unjournalablePaths).toEqual(held);
+      expect((await view.reconcile()).unjournalablePaths).toEqual(held);
+      view.relay.addDelete("Notes.md");
+      await view.reconcile();
+
+      expect((await view.reconcile()).unjournalablePaths).toEqual([]);
+      await expect(readCollisionRecordPaths(view.rootDir, SHARE_ID)).resolves.toEqual(new Set());
+      expect(await view.names()).toEqual(["notes.md"]);
+      expect(await readFile(join(view.rootDir, "notes.md"), "utf8")).toBe("old\n");
+    } finally {
+      await view.store.close();
+    }
   });
 
   it("leaves a directory that replaced a tracked file untouched during refresh", async () => {
@@ -2543,8 +3176,10 @@ describe("shared view refresh", () => {
 
   it("uses the same written error for an invalid pending shape and malformed JSON", async () => {
     const rootDir = await createTestScratch("dohc-shared-view-desktop-");
-    await mkdir(join(rootDir, ".dohc"), { recursive: true });
-    const pendingPath = join(rootDir, ".dohc", "pending-materialization.json");
+    const pendingPath = join(
+      await openedRecordsDir(rootDir),
+      "pending-materialization.json",
+    );
     await writeFile(pendingPath, JSON.stringify({ counts: [] }), "utf8");
     await expect(readPendingMaterializationPaths(rootDir)).rejects.toThrow(
       "Invalid pending-materialization record.",
@@ -2584,8 +3219,7 @@ describe("shared view refresh", () => {
       });
       const before = await momentIds(store);
       const pendingPath = join(
-        rootDir,
-        ".dohc",
+        await openedRecordsDir(rootDir),
         "pending-materialization.json",
       );
       await writeFile(pendingPath, "not json", "utf8");
@@ -2607,7 +3241,7 @@ describe("shared view refresh", () => {
       expect(await readFile(join(rootDir, path), "utf8")).toBe("moment two");
       expect(await momentIds(store)).toEqual(before);
       expect(
-        (await readdir(join(rootDir, ".dohc"))).some((name) =>
+        (await readdir(recordsDir(rootDir))).some((name) =>
           /^pending-materialization\.json\.invalid-\d+$/.test(name),
         ),
       ).toBe(true);
@@ -2645,7 +3279,7 @@ describe("shared view refresh", () => {
       try {
         const before = await momentIds(store);
         await writeFile(
-          join(rootDir, ".dohc", "pending-materialization.json"),
+          join(await openedRecordsDir(rootDir), "pending-materialization.json"),
           JSON.stringify({ counts: { [invalidPath]: 1 } }),
           "utf8",
         );
@@ -2666,7 +3300,7 @@ describe("shared view refresh", () => {
 
         expect(await momentIds(store)).toEqual(before);
         expect(
-          (await readdir(join(rootDir, ".dohc"))).some((name) =>
+          (await readdir(recordsDir(rootDir))).some((name) =>
             /^pending-materialization\.json\.invalid-\d+$/.test(name),
           ),
         ).toBe(true);
@@ -3249,7 +3883,7 @@ describe("shared view refresh", () => {
         ],
       });
       expect(collisionRecordRenameTargets).toEqual([
-        join(rootDir, ".dohc", "share-collision-record.json"),
+        join(recordsDir(rootDir), "share-collision-record.json"),
       ]);
       await expect(
         readCollisionRecordPaths(rootDir, SHARE_ID),
@@ -3631,28 +4265,27 @@ describe("shared view refresh", () => {
   it("publishes a durable collision record without leaving a temp file", async () => {
     const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const paths = ["docs/b.md", "docs/a.md"];
+    await openedView(rootDir);
 
     await recordCollisionPaths(rootDir, SHARE_ID, paths);
 
     await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(
       new Set(paths),
     );
-    expect(
-      (await readdir(join(rootDir, ".dohc"))).filter((name) =>
-        /^\.share-collision-record\.json\..+\.tmp$/.test(name),
-      ),
-    ).toEqual([]);
+    expect(await readdir(recordsDir(rootDir))).toEqual([
+      "share-collision-record.json",
+    ]);
   });
 
   it("ignores a stale collision-record temp file beside the intact target", async () => {
     const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const paths = ["docs/a.md", "docs/b.md"];
+    await openedView(rootDir);
     await recordCollisionPaths(rootDir, SHARE_ID, paths);
     await writeFile(
       join(
-        rootDir,
-        ".dohc",
-        ".share-collision-record.json.999.00000000-0000-0000-0000-000000000000.tmp",
+        recordsDir(rootDir),
+        "share-collision-record.json.tmp-999-00000000-0000-0000-0000-000000000000",
       ),
       "not json",
       "utf8",
@@ -3677,7 +4310,7 @@ describe("shared view refresh", () => {
     });
     await writeFile(join(rootDir, path), "recipient data", "utf8");
     relay.addWrite(path, "granter file");
-    const collisionPath = join(rootDir, ".dohc", "share-collision-record.json");
+    const collisionPath = join(recordsDir(rootDir), "share-collision-record.json");
     const store = harness.openStore(target);
     const errorLog = vi
       .spyOn(console, "error")
@@ -3712,7 +4345,7 @@ describe("shared view refresh", () => {
         readCollisionRecordPaths(rootDir, SHARE_ID),
       ).resolves.toEqual(new Set());
       expect(
-        (await readdir(join(rootDir, ".dohc"))).some((name) =>
+        (await readdir(recordsDir(rootDir))).some((name) =>
           /^share-collision-record\.json\.invalid-\d+$/.test(name),
         ),
       ).toBe(true);
@@ -3747,7 +4380,7 @@ describe("shared view refresh", () => {
     });
     await writeFile(join(rootDir, path), "recipient data", "utf8");
     await writeFile(
-      join(rootDir, ".dohc", "share-collision-record.json"),
+      join(await openedRecordsDir(rootDir), "share-collision-record.json"),
       "not json",
       "utf8",
     );
@@ -3833,7 +4466,7 @@ describe("shared view refresh", () => {
         ended: false,
       });
       await writeFile(
-        join(rootDir, ".dohc", "share-collision-record.json"),
+        join(await openedRecordsDir(rootDir), "share-collision-record.json"),
         "not json",
         "utf8",
       );
@@ -3921,7 +4554,7 @@ describe("shared view refresh", () => {
         ended: false,
       });
       await writeFile(
-        join(rootDir, ".dohc", "pending-materialization.json"),
+        join(await openedRecordsDir(rootDir), "pending-materialization.json"),
         "not json",
         "utf8",
       );
@@ -4010,7 +4643,7 @@ describe("shared view refresh", () => {
         readCollisionRecordPaths(rootDir, SHARE_ID),
       ).resolves.toEqual(new Set([collisionPath]));
       expect(
-        (await readdir(join(rootDir, ".dohc"))).some((name) =>
+        (await readdir(recordsDir(rootDir))).some((name) =>
           /^share-collision-record\.json\.invalid-\d+$/.test(name),
         ),
       ).toBe(true);
@@ -4472,6 +5105,242 @@ describe("shared view refresh", () => {
     } finally {
       releaseMutation();
       await store.close();
+    }
+  });
+
+  // The store holds files, not folders: a dropped folder lands through its
+  // files, under a name no held file's folder already uses.
+  it("imports a dropped folder through its files, beside a held folder of its name", async () => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    const sourceRoot = await createTestScratch("dohc-shared-view-desktop-");
+    const trip = join(sourceRoot, "Trip");
+    await mkdir(join(trip, "sub"), { recursive: true });
+    await mkdir(join(trip, "empty"), { recursive: true });
+    await writeFile(join(trip, "plan.md"), "plan\n", "utf8");
+    await writeFile(join(trip, "sub", "notes.md"), "notes\n", "utf8");
+    await writeFile(join(trip, ".DS_Store"), "finder", "utf8");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    relay.addWrite("docs/Trip/seed.md", "seed");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    // Only the store holds the folder now, so only the store can say its
+    // name is taken.
+    await rm(join(rootDir, "docs", "Trip"), { recursive: true });
+
+    const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
+    try {
+      const outcome = await applyShareViewFileImport({
+        workspaceId: WORKSPACE,
+        rootPath: rootDir,
+        shareViewStore: () => store,
+        absolutePaths: [trip],
+        screenAgainstRoots: [rootDir],
+        targetDir: "docs",
+      });
+      expect({ ...outcome, imported: outcome.imported.sort() }).toEqual({
+        imported: ["docs/Trip (2)/plan.md", "docs/Trip (2)/sub/notes.md"],
+        skipped: 0,
+      });
+      await expect(
+        readFile(join(rootDir, "docs", "Trip (2)", "sub", "notes.md"), "utf8"),
+      ).resolves.toBe("notes\n");
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      const held = await store.listTextFileMetadata({
+        workspaceId: WORKSPACE,
+        versionId: main.id,
+      });
+      expect(held.map((file) => file.path).sort()).toEqual([
+        "docs/Trip (2)/plan.md",
+        "docs/Trip (2)/sub/notes.md",
+        "docs/Trip/seed.md",
+      ]);
+    } finally {
+      await store.close();
+    }
+  });
+
+  async function dropIntoDocs(
+    build: (sourceRoot: string) => Promise<string[]>,
+    options: { held?: string; grantedPaths?: string[] } = {},
+  ) {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    const sourceRoot = await createTestScratch("dohc-shared-view-desktop-");
+    const absolutePaths = await build(sourceRoot);
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    relay.addWrite(options.held ?? "docs/seed.md", "seed");
+    await refreshSharedViewOnce(harness, { rootDir, workspaceId: WORKSPACE, shareId: SHARE_ID });
+    const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
+    const importing = applyShareViewFileImport({
+      workspaceId: WORKSPACE,
+      rootPath: rootDir,
+      shareViewStore: () => store,
+      absolutePaths,
+      screenAgainstRoots: [rootDir],
+      targetDir: "docs",
+      ...(options.grantedPaths ? { grantedPaths: options.grantedPaths } : {}),
+    });
+    const stored = async () => {
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      return store.listTextFileMetadata({ workspaceId: WORKSPACE, versionId: main.id });
+    };
+    const storePaths = async () => (await stored()).map((file) => file.path).sort();
+    return { importing, stored, storePaths, close: () => store.close() };
+  }
+
+  // A share view never takes a .env. The grant decides every file before the
+  // first write, so the refusal names it and nothing lands.
+  it("refuses a drop holding a file the grant refuses before any file lands", async () => {
+    const drop = await dropIntoDocs(async (sourceRoot) => {
+      await writeFile(join(sourceRoot, "first.md"), "first\n", "utf8");
+      await mkdir(join(sourceRoot, "Trip"));
+      await writeFile(join(sourceRoot, "Trip", "plan.md"), "plan\n", "utf8");
+      await writeFile(join(sourceRoot, "Trip", ".env"), "TOKEN=1\n", "utf8");
+      return [join(sourceRoot, "first.md"), join(sourceRoot, "Trip")];
+    });
+    try {
+      await expect(drop.importing).rejects.toThrow("docs/Trip/.env");
+      expect(await drop.storePaths()).toEqual(["docs/seed.md"]);
+    } finally {
+      await drop.close();
+    }
+  });
+
+  // The validator decodes %2f, so the grant would check docs/Trip/x/y.md
+  // while the store took the raw name.
+  it("skips a nested name the destination would rewrite", async () => {
+    const drop = await dropIntoDocs(async (sourceRoot) => {
+      await mkdir(join(sourceRoot, "Trip"));
+      await writeFile(join(sourceRoot, "Trip", "ok.md"), "ok\n", "utf8");
+      await writeFile(join(sourceRoot, "Trip", "x%2fy.md"), "encoded\n", "utf8");
+      return [join(sourceRoot, "Trip")];
+    });
+    try {
+      await expect(drop.importing).resolves.toEqual({ imported: ["docs/Trip/ok.md"], skipped: 1 });
+      expect(await drop.storePaths()).toEqual(["docs/Trip/ok.md", "docs/seed.md"]);
+    } finally {
+      await drop.close();
+    }
+  });
+
+  it.each(["file", "folder"] as const)("never reads a %s swapped for a link after the screen", async (swapped) => {
+    const secrets = await createTestScratch("dohc-shared-view-secrets-");
+    await writeFile(join(secrets, "a.md"), "SECRET\n", "utf8");
+    let trip = "";
+    afterDropScreen = async () => {
+      if (swapped === "file") {
+        await rm(join(trip, "notes", "a.md"));
+        await symlink(join(secrets, "a.md"), join(trip, "notes", "a.md"), "file");
+      } else {
+        await rm(join(trip, "notes"), { recursive: true });
+        await symlink(secrets, join(trip, "notes"), "dir");
+      }
+    };
+    try {
+      const drop = await dropIntoDocs(async (sourceRoot) => {
+        trip = join(sourceRoot, "Trip");
+        await mkdir(join(trip, "notes"), { recursive: true });
+        await writeFile(join(trip, "notes", "a.md"), "notes\n", "utf8");
+        return [trip];
+      });
+      try {
+        await expect(drop.importing).rejects.toThrow("changed after dohc checked it");
+        expect(await drop.storePaths()).toEqual(["docs/seed.md"]);
+      } finally {
+        await drop.close();
+      }
+    } finally {
+      afterDropScreen = null;
+    }
+  });
+
+  // notes.md is held, so the dropped notes.md lands as notes (2).md, which
+  // the grant does not name. That is known before ok.md is written.
+  it("checks the final collision names against the grant before any file lands", async () => {
+    const drop = await dropIntoDocs(async (sourceRoot) => {
+      await writeFile(join(sourceRoot, "ok.md"), "ok\n", "utf8");
+      await writeFile(join(sourceRoot, "notes.md"), "notes\n", "utf8");
+      return [join(sourceRoot, "ok.md"), join(sourceRoot, "notes.md")];
+    }, { held: "docs/notes.md", grantedPaths: ["docs/ok.md", "docs/notes.md"] });
+    try {
+      await expect(drop.importing).rejects.toThrow("docs/notes (2).md");
+      expect(await drop.storePaths()).toEqual(["docs/notes.md"]);
+    } finally {
+      await drop.close();
+    }
+  });
+
+  // Capture reads main.ts under sites/<app>/ as site source text, so the
+  // import classifies it by the path it lands at, not its path in the drop.
+  it("classifies a dropped file by the path it lands at", async () => {
+    const drop = await dropIntoDocs(async (sourceRoot) => {
+      await mkdir(join(sourceRoot, "sites", "app"), { recursive: true });
+      await writeFile(join(sourceRoot, "sites", "app", "main.ts"), "export {};\n", "utf8");
+      return [join(sourceRoot, "sites")];
+    });
+    try {
+      await expect(drop.importing).resolves.toEqual({ imported: ["docs/sites/app/main.ts"], skipped: 0 });
+      expect((await drop.stored()).find((file) => file.path === "docs/sites/app/main.ts")?.contentKind).toBe("text");
+    } finally {
+      await drop.close();
+    }
+  });
+
+  itNonRoot("skips a dropped file it cannot read, as the path reader does", async () => {
+    let locked = "";
+    const drop = await dropIntoDocs(async (sourceRoot) => {
+      await mkdir(join(sourceRoot, "Trip"));
+      await writeFile(join(sourceRoot, "Trip", "ok.md"), "ok\n", "utf8");
+      locked = join(sourceRoot, "Trip", "locked.md");
+      await writeFile(locked, "locked\n", "utf8");
+      await denyFileContentRead(locked);
+      return [join(sourceRoot, "Trip")];
+    });
+    try {
+      await expect(drop.importing).resolves.toEqual({ imported: ["docs/Trip/ok.md"], skipped: 1 });
+    } finally {
+      await restoreRead(locked, 0o600);
+      await drop.close();
+    }
+  });
+
+  // The forged identity stands for a screen that recorded the link target's
+  // file. The folder check after the open still refuses the read.
+  it("checks a dropped file's folder again after opening it", async () => {
+    const secrets = await createTestScratch("dohc-shared-view-secrets-");
+    await writeFile(join(secrets, "a.md"), "SECRET\n", "utf8");
+    const secret = await lstat(join(secrets, "a.md"), { bigint: true });
+    let trip = "";
+    afterDropScreen = async (screened) => {
+      const entry = screened.usable[0]!.entries!.find((candidate) => candidate.path === "sub/a.md")!;
+      entry.identity = { dev: secret.dev, ino: secret.ino };
+      beforeOpen = async (path) => {
+        if (path !== join(trip, "sub", "a.md")) return;
+        beforeOpen = null;
+        await rm(join(trip, "sub"), { recursive: true });
+        await symlink(secrets, join(trip, "sub"), "dir");
+      };
+    };
+    try {
+      const drop = await dropIntoDocs(async (sourceRoot) => {
+        trip = join(sourceRoot, "Trip");
+        await mkdir(join(trip, "sub"), { recursive: true });
+        await writeFile(join(trip, "sub", "a.md"), "a\n", "utf8");
+        return [trip];
+      });
+      try {
+        await expect(drop.importing).rejects.toThrow("sub changed after dohc checked it.");
+        expect(await drop.storePaths()).toEqual(["docs/seed.md"]);
+      } finally {
+        await drop.close();
+      }
+    } finally {
+      afterDropScreen = null;
+      beforeOpen = null;
     }
   });
 
@@ -4951,7 +5820,7 @@ describe("shared view refresh", () => {
         }),
       ).resolves.toMatchObject({ status: "ended", changedPaths: 1 });
       await expect(
-        lstat(join(rootDir, ".dohc", "pull-in-flight.marker")),
+        lstat(join(recordsDir(rootDir), "pull-in-flight.marker")),
       ).rejects.toMatchObject({
         code: "ENOENT",
       });
@@ -5040,7 +5909,7 @@ describe("shared view refresh", () => {
       expect(await readFile(join(rootDir, path), "utf8")).toBe("moment B");
       expect(await momentIds(store)).toEqual(beforeRecovery);
       await expect(
-        readFile(join(rootDir, ".dohc", "pull-in-flight.marker"), "utf8"),
+        readFile(join(recordsDir(rootDir), "pull-in-flight.marker"), "utf8"),
       ).rejects.toMatchObject({
         code: "ENOENT",
       });
@@ -5053,8 +5922,7 @@ describe("shared view refresh", () => {
     const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const path = "docs/retried.md";
     const pendingRecord = join(
-      rootDir,
-      ".dohc",
+      recordsDir(rootDir),
       "pending-materialization.json",
     );
     await writePendingMaterializationPaths(rootDir, [path]);
@@ -5100,9 +5968,11 @@ describe("shared view refresh", () => {
     const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const outsideDir = await createTestScratch("dohc-shared-view-desktop-");
     const externalPath = join(outsideDir, "external.txt");
-    const markerPath = join(rootDir, ".dohc", "pull-in-flight.marker");
+    const markerPath = join(
+      await openedRecordsDir(rootDir),
+      "pull-in-flight.marker",
+    );
     const original = Buffer.from("outside authority stays unchanged", "utf8");
-    await mkdir(join(rootDir, ".dohc"), { recursive: true });
     await writeFile(externalPath, original);
     await symlink(externalPath, markerPath, "file");
 
@@ -5161,8 +6031,10 @@ describe("shared view refresh", () => {
       workspaceId: WORKSPACE,
       shareId: SHARE_ID,
     });
-    await mkdir(join(rootDir, ".dohc"), { recursive: true });
-    await writeFile(join(rootDir, ".dohc", "pull-in-flight.marker"), "");
+    await writeFile(
+      join(await openedRecordsDir(rootDir), "pull-in-flight.marker"),
+      "",
+    );
 
     const store = harness.openStore({
       workspaceId: WORKSPACE,
@@ -5214,14 +6086,14 @@ describe("shared view refresh", () => {
     }
   });
 
-  it("leaves a substituted pull-marker directory untouched", async () => {
+  it("leaves a pull marker under a substituted .dohc/local untouched", async () => {
     const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const outsideDir = await createTestScratch("dohc-shared-view-desktop-");
-    const metadataDir = join(rootDir, ".dohc");
-    const markerName = "pull-in-flight.marker";
-    const markerPath = join(metadataDir, markerName);
-    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    const localDir = join(rootDir, ".dohc", "local");
+    const markerName = join("share-refresh", "pull-in-flight.marker");
+    const markerPath = join(localDir, markerName);
     const published = new Error("leave the published marker in place");
+    await openedView(rootDir);
 
     await expect(
       refreshSharedViewOnceWithPull({
@@ -5240,24 +6112,34 @@ describe("shared view refresh", () => {
     ).rejects.toBe(published);
     await expect(lstat(markerPath)).resolves.toBeTruthy();
 
-    await rm(metadataDir, { force: true, recursive: true });
+    await rm(localDir, { force: true, recursive: true });
+    await mkdir(join(outsideDir, "share-refresh"));
     await writeFile(join(outsideDir, markerName), "external marker", "utf8");
-    const outsideBefore = await readdir(outsideDir);
     await symlink(
       outsideDir,
-      metadataDir,
+      localDir,
       process.platform === "win32" ? "junction" : "dir",
     );
 
-    await expect(clearPullInFlightMarker(rootDir)).resolves.toBeUndefined();
+    // dohc trusts nothing under a linked `.dohc/local`, so the view reads as
+    // not current, and nothing there is removed.
+    await expect(readSharedViewProjectionDebt(rootDir, SHARE_ID)).rejects.toThrow(
+      /\.dohc\/local is a link/,
+    );
+    await expect(clearPullInFlightMarker(rootDir)).rejects.toBeInstanceOf(
+      LocalStateUnavailableError,
+    );
 
-    expect(await readdir(outsideDir)).toEqual(outsideBefore);
+    await expect(
+      readFile(join(outsideDir, markerName), "utf8"),
+    ).resolves.toBe("external marker");
   });
 
   it("reports an ended share when pull-marker cleanup finds a metadata symlink", async () => {
     const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const outsideDir = await createTestScratch("dohc-shared-view-desktop-");
     const metadataDir = join(rootDir, ".dohc");
+    await openedView(rootDir);
 
     const outcome = refreshSharedViewOnceWithPull({
       rootDir,
@@ -5450,7 +6332,7 @@ describe("shared view refresh", () => {
       ).rejects.toThrow("materialization interrupted");
       await expect(
         readFile(
-          join(rootDir, ".dohc", "pending-materialization.json"),
+          join(recordsDir(rootDir), "pending-materialization.json"),
           "utf8",
         ),
       ).resolves.toBe(JSON.stringify({ counts: { [path]: 1 } }));
@@ -5580,7 +6462,7 @@ describe("shared view refresh", () => {
       expect(await readFile(join(rootDir, path), "utf8")).toBe("granter one");
       await expect(
         readFile(
-          join(rootDir, ".dohc", "pending-materialization.json"),
+          join(recordsDir(rootDir), "pending-materialization.json"),
           "utf8",
         ),
       ).resolves.toContain(path);
@@ -5831,7 +6713,7 @@ describe("shared view refresh", () => {
     const store = harness.openStore(target);
     try {
       failRenameToPathOnce = {
-        path: join(rootDir, ".dohc", "pending-materialization.json"),
+        path: join(recordsDir(rootDir), "pending-materialization.json"),
         error: new Error("pending marker unavailable"),
       };
       await expect(
@@ -5938,7 +6820,7 @@ describe("shared view refresh", () => {
     try {
       const cleanupFailure = new Error("collision record unavailable");
       failRemovePathOnce = {
-        path: join(rootDir, ".dohc", "share-collision-record.json"),
+        path: join(recordsDir(rootDir), "share-collision-record.json"),
         error: cleanupFailure,
       };
 
@@ -5978,7 +6860,10 @@ describe("shared view refresh", () => {
       shareId: SHARE_ID,
     });
     await rm(join(rootDir, path));
-    const markerPath = join(rootDir, ".dohc", "pull-in-flight.marker");
+    const markerPath = join(
+      await openedRecordsDir(rootDir),
+      "pull-in-flight.marker",
+    );
     await writeFile(markerPath, "", "utf8");
 
     const store = harness.openStore(target);
@@ -6847,6 +7732,533 @@ describe("shared view refresh", () => {
 // The main process runs this before an Edit share submits document changes.
 // It must fail closed on every tri-state: skip, never throw, and never enrol a
 // share outside that proposal lane.
+// A shared view's refresh records describe what this computer did to its own
+// copy, so they live in its `.dohc/local/share-refresh`, written only after
+// the engine's open prepared `.dohc/local`. A record dohc can't trust never
+// lets a refresh replace the person's files or count a pull as finished.
+describe("share-refresh records in .dohc/local", () => {
+  const RECORDS = [
+    "pull-in-flight.marker",
+    "pending-materialization.json",
+    "share-collision-record.json",
+  ];
+
+  // A view share whose granter added a file where the person already had
+  // their own. The refresh recorded the collision and kept the person's file.
+  async function collidedView() {
+    const rootDir = await createTestScratch("dohc-shared-view-records-");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/mine.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite("docs/seed.md", "seed");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writeFile(join(rootDir, path), "my own file", "utf8");
+    relay.addWrite(path, "granter file");
+    const store = harness.openStore(target);
+    // As ShareViewFiles refreshes: capture, then pull, each failure an outcome.
+    const refresh = (
+      pull: Parameters<typeof refreshSharedViewOnceWithPull>[0]["pull"] =
+        harness.pullFor(target),
+      access: "view" | "edit" = "view",
+    ) =>
+      withShareViewRefreshLifecycleLock(rootDir, async () => {
+        const pinnedSelector = { ...PINNED_SELECTOR, access };
+        const captured = await captureStandaloneShareViewRefresh({
+          rootDir,
+          workspaceId: WORKSPACE,
+          store,
+          pinnedSelector,
+          shareId: SHARE_ID,
+          ended: false,
+        });
+        if (!captured.ok) return captured;
+        return reconcileStandaloneShareView({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull,
+          pinnedSelector,
+          recordRefusals: async () => undefined,
+          captured: captured.captured,
+        });
+      });
+    await expect(refresh()).resolves.toMatchObject({
+      ok: true,
+      unjournalablePaths: [{ path, reason: "local-collision" }],
+    });
+    const collisionRecord = join(recordsDir(rootDir), "share-collision-record.json");
+    return { rootDir, relay, harness, store, target, path, refresh, collisionRecord };
+  }
+
+  it("writes each record in .dohc/local/share-refresh for this user only", async () => {
+    const view = await collidedView();
+    try {
+      const seen: string[][] = [];
+      const modes: number[] = [];
+      view.relay.addWrite("docs/new.md", "new");
+      await expect(
+        view.refresh(async (input) => {
+          const pulled = await view.harness.pullFor(view.target)(input);
+          await input.recordChangedPaths?.(["docs/new.md"]);
+          const names = await readdir(recordsDir(view.rootDir));
+          seen.push(names);
+          for (const name of names) {
+            modes.push((await stat(join(recordsDir(view.rootDir), name))).mode & 0o777);
+          }
+          return pulled;
+        }),
+      ).resolves.toMatchObject({ ok: true });
+      // The pull ran with its marker and its pending paths beside the
+      // collision record, each this user's alone.
+      expect(seen).toEqual([RECORDS.slice().sort()]);
+      if (process.platform !== "win32") {
+        expect(modes).toEqual([0o600, 0o600, 0o600]);
+        expect((await stat(recordsDir(view.rootDir))).mode & 0o777).toBe(0o700);
+      }
+      // A finished refresh leaves only the collision it still protects.
+      expect(await readdir(recordsDir(view.rootDir))).toEqual([
+        "share-collision-record.json",
+      ]);
+      expect(await readFile(view.collisionRecord, "utf8")).toBe(
+        JSON.stringify({ shareId: SHARE_ID, paths: [view.path] }),
+      );
+      const top = await readdir(join(view.rootDir, ".dohc"));
+      expect(top.filter((name) => RECORDS.includes(name))).toEqual([]);
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  // An old collision record is the exception: see the test after this one.
+  it("ignores a pull marker and pending record left at the top of .dohc, and leaves them there", async () => {
+    const rootDir = await createTestScratch("dohc-shared-view-records-");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite("docs/seed.md", "seed");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    const old = {
+      "pull-in-flight.marker": "",
+      "pending-materialization.json": JSON.stringify({ counts: { "docs/seed.md": 1 } }),
+    };
+    for (const [name, content] of Object.entries(old)) {
+      await writeFile(join(rootDir, ".dohc", name), content, { mode: 0o600 });
+    }
+    await expect(readSharedViewProjectionDebt(rootDir, SHARE_ID)).resolves.toEqual({
+      pendingPaths: new Set(),
+      collisionPaths: new Set(),
+      pullInFlight: false,
+    });
+
+    relay.addWrite("docs/seed.md", "seed two");
+    const store = harness.openStore(target);
+    try {
+      await expect(
+        reconcileStandaloneForTest({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: PINNED_SELECTOR,
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).resolves.toMatchObject({ ok: true, status: "updated", unjournalablePaths: [] });
+    } finally {
+      await store.close();
+    }
+    // The old records changed nothing, and nothing touched them.
+    expect(await readFile(join(rootDir, "docs/seed.md"), "utf8")).toBe("seed two");
+    for (const [name, content] of Object.entries(old)) {
+      expect(await readFile(join(rootDir, ".dohc", name), "utf8")).toBe(content);
+    }
+  });
+
+  // A view updated from before #2372 may have its collision record at the top
+  // of `.dohc`. With no new record, ordinary rules would replace the files it
+  // kept apart, so the refresh refuses until the person moves the old one.
+  it.each(["view", "edit"] as const)(
+    "refuses a %s share's refresh while an older collision record is in .dohc, and keeps the person's file",
+    async (access) => {
+      const view = await collidedView();
+      try {
+        const older = join(view.rootDir, ".dohc", "share-collision-record.json");
+        await rename(view.collisionRecord, older);
+        view.relay.addWrite(view.path, "granter file two");
+        const logRequests = view.relay.logRequests;
+        const moments = await momentIds(view.store);
+        const refusal = {
+          ok: false,
+          changedPaths: 0,
+          errorMessage:
+            "dohc did not update these shared files because an older record at .dohc/share-collision-record.json may be keeping your own files apart from the share. " +
+            "Move the files it lists out of the shared folder, then remove the record and try again. " +
+            "Files you leave in place are no longer kept apart. A refresh may replace them or count them as your edits.",
+        };
+
+        await expect(view.refresh(undefined, access)).resolves.toEqual(refusal);
+        expect(view.relay.logRequests).toBe(logRequests);
+        expect(await momentIds(view.store)).toEqual(moments);
+        expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe("my own file");
+        await expect(readSharedViewProjectionDebt(view.rootDir, SHARE_ID)).rejects.toThrow("older share collision record");
+
+        // Once the person moves their file out and removes the record, the share's file lands.
+        await rename(join(view.rootDir, view.path), join(await createTestScratch("dohc-moved-out-"), "mine.md"));
+        await rm(older);
+        await expect(view.refresh(undefined, access)).resolves.toMatchObject({ ok: true, unjournalablePaths: [] });
+        expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe("granter file two");
+      } finally {
+        await view.store.close();
+      }
+    },
+  );
+
+  // Sol's case: a folder dohc can't look into is not a folder with no records.
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "refuses a refresh while it can't look into .dohc, and keeps the person's file",
+    async () => {
+      const view = await collidedView();
+      const dohc = join(view.rootDir, ".dohc");
+      const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        view.relay.addWrite(view.path, "granter file two");
+        const logRequests = view.relay.logRequests;
+        await chmod(dohc, 0o600);
+        try {
+          await expect(view.refresh()).resolves.toEqual({
+            ok: false,
+            changedPaths: 0,
+            errorMessage:
+              "dohc did not update these shared files. This workspace's .dohc/local can't be read. Make sure you can open it, then try again.",
+          });
+        } finally {
+          await chmod(dohc, 0o700);
+        }
+        expect(view.relay.logRequests).toBe(logRequests);
+        expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe("my own file");
+        expect(await readdir(recordsDir(view.rootDir))).toEqual(["share-collision-record.json"]);
+      } finally {
+        errorLog.mockRestore();
+        await view.store.close();
+      }
+    },
+  );
+
+  it("writes nothing before the view's open prepares .dohc/local, and creates nothing", async () => {
+    const rootDir = await createTestScratch("dohc-shared-view-records-");
+    await mkdir(join(rootDir, ".dohc"));
+    const notOpened = {
+      refusal: "not-opened",
+      message:
+        "dohc did not update these shared files because the workspace has not finished opening. Try again when it opens.",
+    };
+    const pull = vi.fn(async (): Promise<PullShareViewResult> => {
+      throw new Error("Unexpected pull");
+    });
+    const refresh = () =>
+      refreshSharedViewOnceWithPull({
+        rootDir,
+        workspaceId: WORKSPACE,
+        relay: new FakeShareRelay().connection(),
+        shareId: SHARE_ID,
+        pinnedSelector: PINNED_SELECTOR,
+        recordRefusals: async () => undefined,
+        store: stubStore(async () => ({ text: "unused" })),
+        trackPendingMaterialization: true,
+        pull,
+      });
+
+    // No `.dohc/local` yet: the engine has not opened this view's store.
+    await expect(testProjection.markPending(rootDir, ["docs/a.md"])).rejects.toMatchObject(notOpened);
+    await expect(recordCollisionPaths(rootDir, SHARE_ID, ["docs/a.md"])).rejects.toMatchObject(notOpened);
+    await expect(refresh()).rejects.toMatchObject(notOpened);
+    expect(await readdir(join(rootDir, ".dohc"))).toEqual([]);
+
+    // `.dohc/local` is there, but this open is closing.
+    await openedView(rootDir);
+    closedViews.add(rootDir);
+    await expect(refresh()).rejects.toMatchObject(notOpened);
+    await expect(testProjection.markPending(rootDir, ["docs/a.md"])).rejects.toMatchObject(notOpened);
+
+    // The open could not keep `.dohc/local` out of iCloud Drive.
+    closedViews.delete(rootDir);
+    unexcludedViews.add(rootDir);
+    await expect(refresh()).rejects.toMatchObject({
+      refusal: "not-excluded",
+      message:
+        "dohc did not update these shared files because it can't keep .dohc/local out of iCloud Drive. Restart dohc to try again.",
+    });
+    await expect(recordCollisionPaths(rootDir, SHARE_ID, ["docs/a.md"])).rejects.toBeInstanceOf(
+      LocalStateUnavailableError,
+    );
+
+    expect(pull).not.toHaveBeenCalled();
+    expect(await readdir(join(rootDir, ".dohc", "local"))).toEqual([]);
+  });
+
+  it.each([
+    ["has not finished opening", closedViews, "dohc did not update these shared files because the workspace has not finished opening. Try again when it opens."],
+    ["can't keep .dohc/local out of iCloud Drive", unexcludedViews, "dohc did not update these shared files because it can't keep .dohc/local out of iCloud Drive. Restart dohc to try again."],
+  ] as const)(
+    "refuses a refresh while the view %s, changes nothing, and keeps protecting the person's file",
+    async (_state, views, errorMessage) => {
+      const view = await collidedView();
+      try {
+        view.relay.addWrite(view.path, "granter file two");
+        view.relay.addWrite("docs/new.md", "new");
+        const record = await readFile(view.collisionRecord, "utf8");
+        const logRequests = view.relay.logRequests;
+
+        views.add(view.rootDir);
+        await expect(view.refresh()).resolves.toEqual({ ok: false, changedPaths: 0, errorMessage });
+        expect(view.relay.logRequests).toBe(logRequests);
+        expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe("my own file");
+        await expect(stat(join(view.rootDir, "docs/new.md"))).rejects.toMatchObject({ code: "ENOENT" });
+        expect(await readdir(recordsDir(view.rootDir))).toEqual(["share-collision-record.json"]);
+        expect(await readFile(view.collisionRecord, "utf8")).toBe(record);
+
+        views.delete(view.rootDir);
+        await expect(view.refresh()).resolves.toMatchObject({
+          ok: true,
+          status: "updated",
+          unjournalablePaths: [{ path: view.path, reason: "local-collision" }],
+        });
+        expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe("my own file");
+        expect(await readFile(join(view.rootDir, "docs/new.md"), "utf8")).toBe("new");
+      } finally {
+        await view.store.close();
+      }
+    },
+  );
+
+  it("keeps a pull in flight, and the person's file, when the view's open ends during the pull", async () => {
+    const view = await collidedView();
+    try {
+      view.relay.addWrite(view.path, "granter file two");
+      view.relay.addWrite("docs/new.md", "new");
+      await expect(
+        view.refresh(async (input) => {
+          const pulled = await view.harness.pullFor(view.target)(input);
+          closedViews.add(view.rootDir);
+          return pulled;
+        }),
+      ).resolves.toMatchObject({
+        ok: false,
+        errorMessage:
+          "dohc did not update these shared files because the workspace has not finished opening. Try again when it opens.",
+      });
+      // The store moved on, the folder did not, and the marker says so.
+      expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe("my own file");
+      await expect(stat(join(view.rootDir, "docs/new.md"))).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await readdir(recordsDir(view.rootDir))).toEqual([
+        "pull-in-flight.marker",
+        "share-collision-record.json",
+      ]);
+
+      closedViews.delete(view.rootDir);
+      await expect(view.refresh()).resolves.toMatchObject({
+        ok: true,
+        unjournalablePaths: [{ path: view.path, reason: "local-collision" }],
+      });
+      expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe("my own file");
+      expect(await readFile(join(view.rootDir, "docs/new.md"), "utf8")).toBe("new");
+      expect(await readdir(recordsDir(view.rootDir))).toEqual([
+        "share-collision-record.json",
+      ]);
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  // What another user, a second name or a link could make a collision record
+  // say. The planted record protects nothing, so a refresh that trusted it
+  // would replace the person's file with the granter's.
+  it.skipIf(process.platform === "win32").each([
+    ["writable by others", "dohc did not update these shared files because it can't trust .dohc/local/share-refresh/share-collision-record.json. It keeps a refresh from replacing your own files. Make it a file only you can change, then try again."],
+    ["hard-linked", "dohc did not update these shared files because .dohc/local/share-refresh/share-collision-record.json has a second name elsewhere. It keeps a refresh from replacing your own files. Remove the other name, or replace this file with a copy of it, then try again."],
+    ["another user's", "dohc did not update these shared files. This workspace's .dohc belongs to another user. Make it and everything in it yours again, then try again."],
+    ["under a linked .dohc/local", "dohc did not update these shared files. This workspace's .dohc/local is a link. Put what it links to in its place, then try again."],
+    ["under a linked records folder", "dohc did not update these shared files because it can't trust .dohc/local/share-refresh. Its records keep a refresh from replacing your own files. Make it a folder only you can change, then try again."],
+  ] as const)(
+    "refuses a collision record %s, and keeps the person's file",
+    async (kind, errorMessage) => {
+      const view = await collidedView();
+      const elsewhere = await createTestScratch("dohc-shared-view-records-elsewhere-");
+      const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      let uid: ReturnType<typeof vi.spyOn> | undefined;
+      try {
+        view.relay.addWrite(view.path, "granter file two");
+        await writeFile(view.collisionRecord, JSON.stringify({ shareId: SHARE_ID, paths: [] }));
+        if (kind === "writable by others") await chmod(view.collisionRecord, 0o666);
+        if (kind === "hard-linked") await link(view.collisionRecord, join(elsewhere, "second-name.json"));
+        if (kind === "another user's") uid = vi.spyOn(process, "getuid").mockReturnValue(process.getuid!() + 1);
+        const moved =
+          kind === "under a linked .dohc/local" ? join(view.rootDir, ".dohc", "local")
+            : kind === "under a linked records folder" ? recordsDir(view.rootDir)
+              : undefined;
+        if (moved) {
+          await rename(moved, join(elsewhere, "moved"));
+          await symlink(join(elsewhere, "moved"), moved, "dir");
+        }
+        const elsewhereBefore = await readdir(elsewhere, { recursive: true });
+        const logRequests = view.relay.logRequests;
+
+        await expect(view.refresh()).resolves.toEqual({ ok: false, changedPaths: 0, errorMessage });
+        uid?.mockRestore();
+        expect(view.relay.logRequests).toBe(logRequests);
+        expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe("my own file");
+        expect(await readdir(elsewhere, { recursive: true })).toEqual(elsewhereBefore);
+        if (!moved) {
+          expect(await readdir(recordsDir(view.rootDir))).toEqual(["share-collision-record.json"]);
+        }
+      } finally {
+        uid?.mockRestore();
+        errorLog.mockRestore();
+        await view.store.close();
+      }
+    },
+  );
+
+  // The granter deleted a file and the pull stopped before removing it from
+  // the folder. A pending record of dohc's own lets capture finish that
+  // delete; one dohc can't trust must not delete anything.
+  it.skipIf(process.platform === "win32").each(["writable by others", "hard-linked"] as const)(
+    "sets aside a pending record %s and deletes nothing on its word",
+    async (kind) => {
+      const rootDir = await createTestScratch("dohc-shared-view-records-");
+      const relay = new FakeShareRelay();
+      const harness = daemonHarness(relay);
+      const path = "docs/deleted-by-granter.md";
+      const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+      relay.addWrite(path, "granter body");
+      await refreshSharedViewOnce(harness, { rootDir, workspaceId: WORKSPACE, shareId: SHARE_ID });
+      const elsewhere = await createTestScratch("dohc-shared-view-records-elsewhere-");
+      const store = harness.openStore(target);
+      const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+        await store.deleteTextFile({ workspaceId: WORKSPACE, versionId: main.id, path, metadata: { origin: "sync" } });
+        await writePendingMaterializationPaths(rootDir, [path]);
+        const pending = join(recordsDir(rootDir), "pending-materialization.json");
+        if (kind === "writable by others") await chmod(pending, 0o666);
+        if (kind === "hard-linked") await link(pending, join(elsewhere, "second-name.json"));
+
+        await expect(captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID)).resolves.toEqual({
+          capturedPaths: 0,
+          repairedPaths: 0,
+          unjournalablePaths: [],
+          collisionRecordQuarantined: false,
+        });
+        expect(await readFile(join(rootDir, path), "utf8")).toBe("granter body");
+        expect((await readdir(recordsDir(rootDir))).some((name) =>
+          /^pending-materialization\.json\.invalid-\d+$/.test(name))).toBe(true);
+        await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(new Set());
+
+        // The same record of dohc's own finishes the delete.
+        await writePendingMaterializationPaths(rootDir, [path]);
+        await expect(captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID)).resolves.toMatchObject({
+          repairedPaths: 1,
+        });
+        await expect(stat(join(rootDir, path))).rejects.toMatchObject({ code: "ENOENT" });
+      } finally {
+        errorLog.mockRestore();
+        await store.close();
+      }
+    },
+  );
+
+  // A marker says the store may be ahead of the folder. One dohc can't trust
+  // still says so, and capture checks every tracked path before it counts the
+  // pull as finished.
+  it.skipIf(process.platform === "win32").each(["writable by others", "hard-linked"] as const)(
+    "reads a pull marker %s as a pull in flight",
+    async (kind) => {
+      const rootDir = await createTestScratch("dohc-shared-view-records-");
+      const relay = new FakeShareRelay();
+      const harness = daemonHarness(relay);
+      const path = "docs/stale.md";
+      const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+      relay.addWrite(path, "moment one");
+      await refreshSharedViewOnce(harness, { rootDir, workspaceId: WORKSPACE, shareId: SHARE_ID });
+      const elsewhere = await createTestScratch("dohc-shared-view-records-elsewhere-");
+      const store = harness.openStore(target);
+      const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        // The pull wrote moment two to the store and stopped before the folder.
+        const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+        await store.writeTextFile({ workspaceId: WORKSPACE, versionId: main.id, path, text: "moment two", metadata: { origin: "sync" } });
+        const marker = join(await openedRecordsDir(rootDir), "pull-in-flight.marker");
+        await writeFile(marker, "", { mode: 0o600 });
+        if (kind === "writable by others") await chmod(marker, 0o666);
+        if (kind === "hard-linked") await link(marker, join(elsewhere, "second-name.marker"));
+        await expect(readSharedViewProjectionDebt(rootDir, SHARE_ID)).resolves.toMatchObject({ pullInFlight: true });
+        const before = await momentIds(store);
+
+        // An edit share would otherwise take moment one, still on disk, as the person's edit.
+        await expect(captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID)).resolves.toMatchObject({
+          capturedPaths: 0,
+          repairedPaths: 1,
+          unjournalablePaths: [],
+        });
+        expect(await momentIds(store)).toEqual(before);
+        expect(await readFile(join(rootDir, path), "utf8")).toBe("moment two");
+        await expect(readSharedViewProjectionDebt(rootDir, SHARE_ID)).resolves.toMatchObject({ pullInFlight: false });
+      } finally {
+        errorLog.mockRestore();
+        await store.close();
+      }
+    },
+  );
+
+  it("never reads a view under a linked .dohc/local as current", async () => {
+    const view = await collidedView();
+    const elsewhere = await createTestScratch("dohc-shared-view-records-elsewhere-");
+    try {
+      // What the link leads to holds no records at all.
+      const local = join(view.rootDir, ".dohc", "local");
+      await rename(local, join(elsewhere, "moved"));
+      await mkdir(join(elsewhere, "empty"));
+      await symlink(join(elsewhere, "empty"), local, "dir");
+      await expect(readSharedViewProjectionDebt(view.rootDir, SHARE_ID)).rejects.toThrow(
+        "This workspace's .dohc/local is a link.",
+      );
+      await expect(readPendingMaterializationPaths(view.rootDir)).rejects.toThrow();
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  it("removes each record from .dohc/local/share-refresh once its work is done", async () => {
+    const view = await collidedView();
+    try {
+      await rm(join(view.rootDir, view.path));
+      await expect(view.refresh()).resolves.toMatchObject({ ok: true, unjournalablePaths: [] });
+      expect(await readFile(join(view.rootDir, view.path), "utf8")).toBe("granter file");
+      expect(await readdir(recordsDir(view.rootDir))).toEqual([]);
+      await expect(readSharedViewProjectionDebt(view.rootDir, SHARE_ID)).resolves.toEqual({
+        pendingPaths: new Set(),
+        collisionPaths: new Set(),
+        pullInFlight: false,
+      });
+    } finally {
+      await view.store.close();
+    }
+  });
+});
+
 describe("shareViewIdentitySelector", () => {
   const EDIT = { paths: ["docs"], versionId: null, access: "edit" };
   const match = (left: string, right: string): boolean => left === right;

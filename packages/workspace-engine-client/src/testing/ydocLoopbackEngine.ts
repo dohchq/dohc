@@ -47,7 +47,7 @@ interface Lineage {
   // the durable close guard's coverage check.
   lastSettledSha: string | null;
   // How many updates this lineage journaled — the loopback's stand-in for the
-  // daemon's exactly-one-update proof (`seed_only_lineage_source`,
+  // daemon's exactly-one-update proof (`pristine_seed_lineage_source`,
   // crates/dohc-engine-collab/src/durable.rs).
   journaledUpdates: number;
   // How many journaled updates the last settle covered, or `null` —
@@ -199,6 +199,34 @@ function seedNotFirstUpdateRefusal(): Error {
   });
 }
 
+// The engine's in-band cap (`INBAND_CONTENT_CAP_BYTES`,
+// crates/dohc-engine-domain/src/store.rs). A seed past it travels as a blob.
+const INBAND_CONTENT_CAP_BYTES = 48 * 1024;
+
+// The literal from crates/dohc-workspace-engine/src/rpc/ydoc.rs: a seed past
+// the in-band cap and past the open's `seedLimitBytes`.
+function seedTooLargeRefusal(): Error {
+  return Object.assign(new Error("ydoc-seed-too-large"), {
+    wireError: {
+      code: "INVALID_PARAMS",
+      message: "ydoc-seed-too-large",
+      retry: "no",
+    },
+  });
+}
+
+// An update whose expected claim is not the session's
+// (`CollabError::LineageWriteStale`). Loopback lineages stay unclaimed.
+function lineageStaleRefusal(): Error {
+  return Object.assign(new Error("ydoc-lineage-stale"), {
+    wireError: {
+      code: "INVALID_PARAMS",
+      message: "ydoc-lineage-stale",
+      retry: "no",
+    },
+  });
+}
+
 // A journal write whose idempotency key already recorded other content
 // (`CollabError::IdempotencyKeyReused`).
 function idempotencyKeyReuseRefusal(): Error {
@@ -306,6 +334,8 @@ export class YdocLoopbackEngine implements EngineTransport {
   // certify a convergence that does not happen. Keyed by
   // (workspace, version, objectId) — see `lineageKey` — not by path.
   private readonly lineages = new Map<string, Lineage>();
+  // Seeds an open sent as blobs, by digest, for `versionedText.readBlob`.
+  private readonly seedBlobs = new Map<string, string>();
   private readonly eventHandlers = new Set<(event: Event) => void>();
   private readonly blobHandlers = new Set<
     (blob: CompletedDaemonBlob) => void
@@ -524,9 +554,24 @@ export class YdocLoopbackEngine implements EngineTransport {
         return { result: this.evict(request.params) };
       case YDOC_METHOD.resync:
         return this.resync(request.params);
+      case "versionedText.readBlob":
+        return this.readSeedBlob(request.params);
       default:
         throw new Error(`Unsupported loopback method: ${request.method}`);
     }
+  }
+
+  private readSeedBlob(params: Request["params"]): { result: JsonValue; blob: Uint8Array } {
+    const read = asObject(params, "versionedText.readBlob params");
+    requiredString(read, "workspaceId", "versionedText.readBlob params");
+    const digest = requiredString(read, "sha256", "versionedText.readBlob params");
+    const text = this.seedBlobs.get(digest);
+    if (text === undefined) throw new Error(`Unknown loopback seed blob: ${digest}`);
+    const bytes = new TextEncoder().encode(text);
+    return {
+      result: { bytesBase64: null, byteLength: bytes.byteLength, inbandLimitBytes: INBAND_CONTENT_CAP_BYTES },
+      blob: bytes,
+    };
   }
 
   private open(request: Request): { result: JsonValue; blob: Uint8Array } {
@@ -600,8 +645,22 @@ export class YdocLoopbackEngine implements EngineTransport {
     // this loopback did) leaves an ordinary settle over a freshly-opened
     // captured file looking untouched forever, and the NoMarker guard
     // refuses it.
-    const seedContent =
+    const seed =
       !lineage && file?.head === "present" ? file.content : undefined;
+    // Like the engine, a seed past the in-band cap goes as a blob when the
+    // open accepts one that large, and refuses the open otherwise.
+    const seedBytes = seed === undefined ? 0 : Buffer.byteLength(seed, "utf8");
+    const seedLimitBytes = params.seedLimitBytes;
+    if (
+      seedBytes > INBAND_CONTENT_CAP_BYTES &&
+      (typeof seedLimitBytes !== "number" || seedBytes > seedLimitBytes)
+    ) {
+      throw seedTooLargeRefusal();
+    }
+    const seedBlobSha256 =
+      seed !== undefined && seedBytes > INBAND_CONTENT_CAP_BYTES ? sha256(seed) : undefined;
+    if (seedBlobSha256 !== undefined && seed !== undefined) this.seedBlobs.set(seedBlobSha256, seed);
+    const seedContent = seedBlobSha256 === undefined ? seed : undefined;
     this.sessions.set(sessionId, {
       sessionId,
       workspace: request.workspace,
@@ -629,9 +688,9 @@ export class YdocLoopbackEngine implements EngineTransport {
         lineageClaimId: null,
         lineageOriginatedHere: false,
         head: file ? file.head : "absent",
-        ...(seedContent !== undefined && file !== undefined
+        ...(seed !== undefined && file !== undefined
           ? {
-              seedContent,
+              ...(seedContent !== undefined ? { seedContent } : { seedBlobSha256 }),
               seedClientId: seedClientId(request.workspace, versionId, objectId, contentKind, file),
             }
           : {}),
@@ -654,6 +713,11 @@ export class YdocLoopbackEngine implements EngineTransport {
     const update = decodeBase64(
       requiredString(params, "updateBase64", "ydoc.recordUpdate params"),
     );
+    const expectedClaim = params.expectedLineageClaimId;
+    if (expectedClaim !== null && typeof expectedClaim !== "string") {
+      throw new Error("ydoc.recordUpdate params.expectedLineageClaimId is required.");
+    }
+    if (expectedClaim !== null) throw lineageStaleRefusal();
     optionalString(params, "actorOriginId");
     const seed = optionalBoolean(params, "seed") ?? false;
     // A seed can only be the first update of a lineage-absent session —
@@ -684,7 +748,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       attribution: params.attribution ?? null,
     });
     session.updateSeq += 1;
-    const result = { seq: session.updateSeq, lineageClaimId: null };
+    const result = { seq: session.updateSeq, lineageClaimId: null, lineageOriginatedHere: false };
     this.recordRequests.set(request.idempotencyKey, { payload, result });
     return result;
   }
@@ -821,7 +885,7 @@ export class YdocLoopbackEngine implements EngineTransport {
         capturedFile.head === "present" &&
         sha256(capturedFile.content) === currentSha;
       // Third proof, mirroring `close_session` (durable.rs): a
-      // seed-only lineage whose recorded source is still the captured head
+      // pristine seed lineage whose recorded source is still the captured head
       // holds nothing the file does not — pruning discards a cache of the
       // file, not content.
       const coveredBySeedOnly =

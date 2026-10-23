@@ -710,6 +710,7 @@ export function createWorkspaceOperationScheduler() {
       lease: WorkspaceOperationLease,
     ) => Promise<T>,
     staleSensitive = false,
+    markOnSuccess = true,
   ): Promise<T> => {
     const key = resolvedPathKey(rootPath);
     const state = states.get(key) ?? {
@@ -738,7 +739,7 @@ export function createWorkspaceOperationScheduler() {
               },
               lease,
             );
-            if (mode === "exclusive") changed = true;
+            if (mode === "exclusive" && markOnSuccess) changed = true;
             resolve(value);
           } catch (error) {
             reject(error);
@@ -772,7 +773,8 @@ export function createWorkspaceOperationScheduler() {
         markChanged: () => void,
         lease: WorkspaceOperationLease,
       ) => Promise<T>,
-    ) => enqueue(rootPath, "exclusive", operation),
+      options?: { markOnSuccess?: boolean },
+    ) => enqueue(rootPath, "exclusive", operation, false, options?.markOnSuccess),
     assertActiveLease: (
       rootPath: string,
       lease: WorkspaceOperationLease,
@@ -1001,8 +1003,9 @@ export function withExclusiveWorkspaceOperation<T>(
     markChanged: () => void,
     lease: WorkspaceOperationLease,
   ) => Promise<T>,
+  options?: { markOnSuccess?: boolean },
 ): Promise<T> {
-  return workspaceOperationScheduler.exclusive(rootPath, operation);
+  return workspaceOperationScheduler.exclusive(rootPath, operation, options);
 }
 
 export function withStaleSensitiveWorkspaceOperation<T>(

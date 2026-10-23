@@ -7,6 +7,7 @@ import { RendererWorkspaceSessionOwner } from "../window/rendererWorkspaceSessio
 import { DEFAULT_USER_SETTINGS, type ZoomStep } from "../settings/userSettings";
 import { createMarkRecorder } from "../performance/desktopMarks";
 import { deferred } from "../testing/deferred";
+import { palette } from "../renderer/tokens";
 
 const DOCUMENT = "123e4567-e89b-42d3-a456-426614174001";
 const OTHER_DOCUMENT = "123e4567-e89b-42d3-a456-426614174002";
@@ -52,7 +53,10 @@ async function harness(isPackaged = false) {
   }));
   const shell = { openExternal: vi.fn(async (_url: string) => undefined) };
   const overlay = vi.fn();
-  const windows = new Map<Sender, { setTitleBarOverlay?: typeof overlay }>([[first, { setTitleBarOverlay: overlay }]]);
+  const background = vi.fn((_color: string) => undefined);
+  const windows = new Map<Sender, { setBackgroundColor: typeof background; setTitleBarOverlay?: typeof overlay }>([
+    [first, { setBackgroundColor: background, setTitleBarOverlay: overlay }],
+  ]);
   const BrowserWindow = { fromWebContents: vi.fn((value: Sender) => windows.get(value) ?? null) };
   const rememberChromeTheme = vi.fn();
   const titleBarOverlayOptions = vi.fn((_theme: "light" | "dark") => ({ height: 32, color: "paper", symbolColor: "ink" }));
@@ -80,7 +84,7 @@ async function harness(isPackaged = false) {
     ...capability, first, second, handlers, events, order, sessions, retiring,
     prepareForRendererReload, setRetirement: (next: Promise<void>) => { retirement = next; },
     quit, forceQuit, ask, quitGuard, exitRounds, requestIds, confirmProceed,
-    stepWindowZoom, shell, overlay, windows,
+    stepWindowZoom, shell, overlay, background, windows,
     BrowserWindow, rememberChromeTheme, titleBarOverlayOptions, launchMarks, desktopMarks,
     logLaunchMarksOnce,
     registerAll() { capability.registerReload(); capability.registerExternalUrl(); capability.registerWindowControls(); capability.registerQuitAndMarks(); },
@@ -212,11 +216,22 @@ describe("registered window IPC", () => {
     expect(h.overlay).toHaveBeenCalledTimes(1);
   });
 
+  it("repaints the sender window's background in the new theme's paper", async () => {
+    const h = await harness(); h.registerWindowControls();
+    h.windows.set(h.first, { setBackgroundColor: h.background });
+    await h.invoke(CHANNELS.setTitlebarTheme, { theme: "dark" });
+    expect(h.background).toHaveBeenLastCalledWith(palette.dark.bg);
+    await h.invoke(CHANNELS.setTitlebarTheme, { theme: "light" });
+    expect(h.background).toHaveBeenLastCalledWith(palette.light.bg);
+    await h.invoke(CHANNELS.setTitlebarTheme, { theme: "dark" }, h.second);
+    expect(h.background).toHaveBeenCalledTimes(2);
+  });
+
   it("tolerates absent and throwing platform overlays", async () => {
     const h = await harness(); h.registerWindowControls();
-    h.windows.set(h.first, {});
+    h.windows.set(h.first, { setBackgroundColor: h.background });
     await expect(h.invoke(CHANNELS.setTitlebarTheme, { theme: "dark" })).resolves.toBeUndefined();
-    h.windows.set(h.first, { setTitleBarOverlay: h.overlay });
+    h.windows.set(h.first, { setBackgroundColor: h.background, setTitleBarOverlay: h.overlay });
     h.overlay.mockImplementationOnce(() => { throw new Error("unsupported"); });
     await expect(h.invoke(CHANNELS.setTitlebarTheme, { theme: "light" })).resolves.toBeUndefined();
     expect(h.rememberChromeTheme).toHaveBeenCalledTimes(2);

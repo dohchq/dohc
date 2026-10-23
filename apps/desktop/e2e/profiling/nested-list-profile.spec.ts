@@ -87,7 +87,7 @@ test("@nested-list-performance compares typing in 2000 flat and nested items", a
         p95: sorted[Math.ceil(sorted.length * .95) - 1], samplesMs: samples };
     };
     expect(desktop.logs.filter(entry => entry.level === "pageerror"
-      || entry.text.includes("ydoc-seed-exceeds-inband-cap"))).toEqual([]);
+      || entry.text.includes("ydoc-seed-too-large"))).toEqual([]);
     const result = {
       items: count, levels: 3, warmupsPerRound: 5, samplesPerRound: 30,
       method: "keydown to changed input plus two animation frames",

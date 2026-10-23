@@ -1,5 +1,6 @@
 use crate::EngineService;
 use crate::rpc::capture::MAX_DESKTOP_CAPTURE_TEXT_BYTES;
+use crate::rpc::error::workspace_unavailable;
 use crate::rpc::reads::MAX_INBAND_CONTENT_BYTES;
 use crate::rpc::reads::byte_budget_cut_serialized;
 use crate::rpc::request::OperationCancellation;
@@ -498,6 +499,55 @@ struct AgentAuthorWire<'a> {
 }
 
 impl EngineService {
+    pub(super) async fn history_rewrite_links(
+        &self,
+        ctx: &RequestContext,
+        request: dohc_engine_protocol::wire::Request,
+    ) -> Result<Value, WireError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            operation_id: String,
+            author: Option<Value>,
+        }
+        let params: Params = parse(request.params)?;
+        let handle = request.workspace.as_ref();
+        let open = self.open(handle)?;
+        if !open.is_local_owner() {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "history.rewriteLinks needs the workspace's owning handle",
+            ));
+        }
+        let request_key = crate::rpc::request::required_idempotency_key(request.idempotency_key)?;
+        let author = crate::rpc::request::validated_author(params.author.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let result = Self::read_under_ctx(
+            &cancellation,
+            "history.rewriteLinks",
+            open.actor.history_rewrite_links(
+                open.workspace_id.clone(),
+                params.operation_id,
+                request_key,
+                author,
+                open.root.clone(),
+                self.leases.scoped(&open.root),
+                [open.capture_apply_gate.clone(), open.session_ops.clone()],
+                std::sync::Arc::new(dohc_engine_runtime::NoFaults),
+                (
+                    self.version_fence()
+                        .link_document_is_open(handle.ok_or_else(workspace_unavailable)?),
+                    self.version_fence()
+                        .link_document_resync(handle.ok_or_else(workspace_unavailable)?),
+                ),
+                std::sync::Arc::new(self.self_writes.scoped(&open.root)),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(result)
+    }
+
     pub(super) async fn moments_list(
         &self,
         ctx: &RequestContext,
@@ -560,7 +610,7 @@ impl EngineService {
         )
         .await?;
         Ok(
-            json!({"operationId":result.operation_id,"versionId":result.version_id,"momentCount":result.moments.len()}),
+            json!({"operationId":result.operation_id,"versionId":result.version_id,"momentCount":result.moments.len(),"kind":result.kind}),
         )
     }
 
@@ -1215,3 +1265,7 @@ mod snapshot_confirmation_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "link_publication_tests.rs"]
+mod link_publication_tests;

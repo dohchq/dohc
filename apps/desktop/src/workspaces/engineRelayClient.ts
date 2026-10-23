@@ -1,5 +1,6 @@
 import { decodeOrdinarySyncResult } from "@dohc/workspace-engine-client/relay-wire";
 import { runInKeyedLane } from "../keyedLane";
+import { insecureLoopbackServersForTests } from "./cloudConfiguration";
 import {
   RelayApiVersionError,
   RelayConflictError,
@@ -36,7 +37,9 @@ import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import {
   DaemonRefusalError,
   decodeKeyEnvelopeResult,
+  decodeWorkspaceResult,
   KEY_ENVELOPE_METHOD,
+  WORKSPACE_METHOD,
   WorkspaceDaemonRequester,
   type JsonValue,
   type KeyEnvelopeDownloadResult,
@@ -77,9 +80,6 @@ function normalizedRelayUrl(baseUrl: string): string {
   return baseUrl.replace(/\/+$/u, "");
 }
 
-export const INSECURE_LOOPBACK_RELAY_TEST_ENV =
-  "DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY";
-
 const LOOPBACK_RELAY_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /**
@@ -92,7 +92,7 @@ export function allowInsecureLoopbackRelayForTests(
   relayBaseUrl: string,
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): boolean {
-  if (env[INSECURE_LOOPBACK_RELAY_TEST_ENV] !== "1") return false;
+  if (!insecureLoopbackServersForTests(env)) return false;
   let url: URL;
   try {
     url = new URL(relayBaseUrl);
@@ -181,6 +181,7 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
   constructor(
     private readonly client: EngineDaemonClient,
     private readonly routes: RelayTransportRouteGuard,
+    private readonly hasNoOrdinarySync: (workspaceId: string) => boolean,
   ) {
     if (client.cancelRequest) this.cancelRequest = client.cancelRequest.bind(client);
     if (client.onBlob) this.onBlob = client.onBlob.bind(client);
@@ -199,9 +200,20 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
       "workspace.open params",
     );
     const relay = this.routes.relayForOpen(workspaceId, rootPath);
+    if (relay) {
+      return await this.client.sendRequest({ ...request, params: { ...params, relay } });
+    }
+    // A full owner open of a workspace with no ordinary sync makes what an
+    // unfinished pull applied local truth. Capture-free and read-only opens
+    // are temporary, so they leave it for the owner's own open.
+    const abandonOrdinaryPull =
+      params.captureMode === undefined &&
+      params.storeMode === undefined &&
+      params.skipStartupMaintenance !== true &&
+      this.hasNoOrdinarySync(workspaceId);
     return await this.client.sendRequest({
       ...request,
-      params: relay ? { ...params, relay } : params,
+      params: abandonOrdinaryPull ? { ...params, abandonOrdinaryPull } : params,
     });
   }
 
@@ -224,9 +236,14 @@ export class RelayConfiguredDaemonClientSource
     RelayConfiguredDaemonClient
   >();
 
+  /**
+   * `hasNoOrdinarySync` answers from the workspace's saved sync setting, never
+   * from a missing route: sign-out and a lost connection keep ordinary sync.
+   */
   constructor(
     private readonly source: EngineDaemonClientSource,
     private readonly routes: RelayTransportRouteGuard,
+    private readonly hasNoOrdinarySync: (workspaceId: string) => boolean = () => false,
   ) {
     if (source.onClientChanged) this.onClientChanged = source.onClientChanged.bind(source);
   }
@@ -235,7 +252,7 @@ export class RelayConfiguredDaemonClientSource
     const client = this.source.currentClient();
     const existing = this.wrappers.get(client);
     if (existing) return existing;
-    const wrapper = new RelayConfiguredDaemonClient(client, this.routes);
+    const wrapper = new RelayConfiguredDaemonClient(client, this.routes, this.hasNoOrdinarySync);
     this.wrappers.set(client, wrapper);
     return wrapper;
   }
@@ -491,6 +508,8 @@ export interface EngineRelayWorkspaceClient {
   commitCursor(
     cursor: Record<string, JsonValue | undefined>,
   ): Promise<CommitRelayCursorResult>;
+  // Collections updates wait for a pull that has not committed its last page.
+  collectionsWaiting(): Promise<boolean>;
   recoverOrigin(): Promise<RecoverRelayOriginResult>;
   claim(): Promise<void>;
   bootstrapJoinIdentity(
@@ -836,6 +855,11 @@ export class EngineRelayClient {
         };
       },
       commitCursor,
+      collectionsWaiting: async () =>
+        decodeWorkspaceResult(
+          WORKSPACE_METHOD.syncCollectionsWaiting,
+          await request(WORKSPACE_METHOD.syncCollectionsWaiting, { workspaceId: workspace.workspaceId }),
+        ).waiting,
       recoverOrigin: async () => {
         const result = resultRecord(
           await request("sync.recoverOrigin", {

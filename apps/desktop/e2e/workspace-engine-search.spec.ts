@@ -1,4 +1,5 @@
 import { activityPin } from "../src/testPins";
+import { DOCUMENT_END } from "./helpers/keys";
 import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -12,6 +13,7 @@ import {
   openWorkspaceFromFirstRun,
   revealExplorerPath,
   seedWorkspaceManifest,
+  waitForFileObjectId,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
@@ -24,28 +26,6 @@ import {
 // raw FTS tables.
 
 const SECRET_VALUE = "E2E_INDEX_SECRET_z9y8x7w6";
-
-async function waitForFileObjectId(
-  page: import("@playwright/test").Page,
-  workspaceId: string,
-  path: string,
-): Promise<void> {
-  await page.waitForFunction(
-    async ({ id, filePath }) => {
-      const api = (window as unknown as {
-        dohcDesktop?: {
-          listFileChats(payload: { workspaceId: string; path: string }): Promise<{
-            fileObjectId: string | null;
-          }>;
-        };
-      }).dohcDesktop;
-      if (!api) return false;
-      const result = await api.listFileChats({ workspaceId: id, path: filePath });
-      return result.fileObjectId !== null;
-    },
-    { id: workspaceId, filePath: path },
-  );
-}
 
 const requireModule = createRequire(import.meta.url);
 const { DatabaseSync } = requireModule("node:sqlite") as {
@@ -186,7 +166,7 @@ test("a newly saved editor change is searchable before relaunch", async () => {
     await expect(editor).toBeVisible();
     await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0);
     await editor.click();
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.type(` ${sentinel}`);
     await expect(editor).toContainText(sentinel);
     await expect(saveState).toHaveAttribute("data-state", "saved", {

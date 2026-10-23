@@ -122,6 +122,51 @@ fn imported_live_moment_preserves_public_author_snapshots() {
     }
 }
 
+/// An older build captured Finder's `.DS_Store`. Its moment there applies as
+/// nothing, without a refusal, and the origin's next moment still applies.
+#[test]
+fn an_older_peers_moment_at_an_ignored_path_applies_as_nothing() {
+    let (_scratch, mut store) = test_store();
+    hydrate_texts(&mut store, &["finder", "notes"]);
+    let ignored = envelope(
+        "older-peer",
+        0,
+        "ws",
+        absent_text_payload("ds-store", "finder", ".DS_Store", "finder"),
+    );
+    assert!(matches!(
+        apply_moment_envelope(&mut store, &ignored, &NoFaults).unwrap(),
+        ApplyOutcome {
+            primary: ApplyDisposition::Applied(0),
+            ref refusals,
+            ..
+        } if refusals.is_empty()
+    ));
+    let next = envelope(
+        "older-peer",
+        1,
+        "ws",
+        absent_text_payload("notes", "notes", "notes.md", "notes"),
+    );
+    assert!(matches!(
+        apply_moment_envelope(&mut store, &next, &NoFaults)
+            .unwrap()
+            .primary,
+        ApplyDisposition::Applied(_)
+    ));
+    let ignored_rows: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM path_aliases WHERE path='.DS_Store') \
+                 + (SELECT COUNT(*) FROM moments WHERE moment_id='ds-store')",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(ignored_rows, 0);
+}
+
 #[test]
 fn client_declared_human_cannot_preserve_relay_confirmation() {
     let (_scratch, mut store) = test_store();
@@ -1816,6 +1861,7 @@ fn restore_settlement_skipped_by_a_later_generation_is_refused_and_released() {
             replication_epoch: "epoch".into(),
             stream_identity: "stream".into(),
             settlement_report_id: report.report_id,
+            ordinary_pull: None,
         },
         &NoFaults,
         &NoLiveLeases,
@@ -2128,6 +2174,7 @@ fn held_settlement_recovery(case: RecoveryBinding, later_generation: bool) {
             replication_epoch: "epoch".into(),
             stream_identity: "stream".into(),
             settlement_report_id: report.report_id,
+            ordinary_pull: None,
         },
         &NoFaults,
         &NoLiveLeases,
@@ -2326,6 +2373,7 @@ fn commit_settlement_report(store: &mut EngineStore, report_id: Option<String>) 
             replication_epoch: "epoch".into(),
             stream_identity: "stream".into(),
             settlement_report_id: report_id,
+            ordinary_pull: None,
         },
         &NoFaults,
         &NoLiveLeases,
@@ -4765,6 +4813,7 @@ fn stopped_moment_retains_shared_blobs_after_outbox_ack_report_and_restart() {
             replication_epoch: "epoch".into(),
             stream_identity: "stream".into(),
             settlement_report_id: None,
+            ordinary_pull: None,
         },
         &NoFaults,
         &crate::NoLiveLeases,

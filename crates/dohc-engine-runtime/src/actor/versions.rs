@@ -12,8 +12,9 @@ use dohc_engine_domain::{
     SecretFileStore, SnapshotContent, SnapshotMetadata, VersionFileChangePage, VersionRecord,
     VersionedTextStore, list_secret_files_keyless,
 };
+use dohc_engine_files::floor::path_collision_key;
 use dohc_engine_files::{
-    PlacementHolds, ProjectionTargetKind, ProjectionTargetState, probe_projection_target,
+    PlacementHolds, ProjectionProbe, ProjectionTargetKind, ProjectionTargetState,
     remove_empty_directory_target,
 };
 use dohc_engine_storage::{
@@ -334,12 +335,19 @@ fn is_folder(root_dir: &std::path::Path, path: &str) -> bool {
 /// folder already gone, which an interrupted pass removed, and stops at the
 /// first that stays: one with content, or one that cannot go, which a later
 /// write there reports.
-fn remove_emptied_folders(root_dir: &std::path::Path, path: &str, top: Option<&str>) {
+fn remove_emptied_folders(
+    store: &EngineStore,
+    root_dir: &std::path::Path,
+    path: &str,
+    top: Option<&str>,
+) {
     let top = top.map(path_key);
     let mut parent = path;
     while let Some((folder, _)) = parent.rsplit_once('/') {
-        if !matches!(remove_empty_directory_target(root_dir, folder), Ok(true))
-            && std::fs::symlink_metadata(root_dir.join(folder)).is_ok()
+        if !matches!(
+            remove_empty_directory_target(store, root_dir, folder),
+            Ok(true)
+        ) && std::fs::symlink_metadata(root_dir.join(folder)).is_ok()
         {
             break;
         }
@@ -376,12 +384,12 @@ fn run_relay_batch(
     } else {
         batch
             .iter()
-            .map(|projection| projection.spec.target_path.to_lowercase())
+            .map(|projection| path_collision_key(&projection.spec.target_path))
             .collect()
     };
     let outcome = store.write_with(&dohc_engine_storage::NoFaults, |tx| {
         complete_held_switch_jobs(tx, workspace_id, holds, now_ms, |_, path| {
-            targets.contains(&path.to_lowercase())
+            targets.contains(&path_collision_key(path))
         })?;
         for projection in &batch {
             if let Some(bytes) = projection.inline_content.as_deref()
@@ -419,6 +427,7 @@ fn run_relay_batch(
             progress: None,
             file_outcomes_settled: false,
             released_hold_paths: None,
+            planned_against_active_heads: true,
         },
         now_ms,
         faults,
@@ -495,27 +504,208 @@ fn projection_target_contains<'a>(
     targets: &HashSet<&'a str>,
     case_paths: &mut Option<HashMap<String, Vec<&'a str>>>,
 ) -> bool {
-    if targets.contains(path) {
-        return true;
+    projection_target_alias(root, path, targets, case_paths).is_some()
+}
+
+pub(super) fn projection_target_alias<'a>(
+    root: &std::path::Path,
+    path: &str,
+    targets: &HashSet<&'a str>,
+    case_paths: &mut Option<HashMap<String, Vec<&'a str>>>,
+) -> Option<&'a str> {
+    if let Some(target) = targets.get(path) {
+        return Some(*target);
     }
     let aliases = case_paths.get_or_insert_with(|| {
         let mut aliases: HashMap<String, Vec<&str>> = HashMap::new();
         for target in targets {
             aliases
-                .entry(target.to_lowercase())
+                .entry(path_collision_key(target))
                 .or_default()
                 .push(target);
         }
         aliases
     });
-    let Some(candidates) = aliases.get(&path.to_lowercase()) else {
-        return false;
-    };
+    let candidates = aliases.get(&path_collision_key(path))?;
+    candidates
+        .iter()
+        .copied()
+        .find(|target| projection_paths_share_entry(root, path, target))
+}
+
+fn projection_paths_share_entry(root: &std::path::Path, path: &str, target: &str) -> bool {
     let Ok(previous) = std::fs::canonicalize(root.join(path)) else {
         return false;
     };
-    candidates.iter().any(|target| {
-        std::fs::canonicalize(root.join(target)).is_ok_and(|target| target == previous)
+    std::fs::canonicalize(root.join(target)).is_ok_and(|target| target == previous)
+}
+
+/// The heads of one version, with their content kinds, grouped by how a disk
+/// that ignores case or normalization names their paths.
+struct AliasHeads(HashMap<String, Vec<(String, &'static str)>>);
+
+impl AliasHeads {
+    fn load(
+        store: &EngineStore,
+        workspace_id: &str,
+        version_id: &str,
+    ) -> Result<Self, RuntimeError> {
+        let heads: Vec<(String, String)> = store.read_with(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT a.path, COALESCE(s.content_kind, 'text') FROM path_aliases a \
+                     JOIN snapshots s ON s.workspace_id = a.workspace_id \
+                     AND s.version_id = a.version_id AND s.object_id = a.object_id \
+                     WHERE a.workspace_id = ?1 AND a.version_id = ?2 \
+                     UNION SELECT path, 'secret' FROM secret_files \
+                     WHERE workspace_id = ?1 AND version_id = ?2",
+                )
+                .map_err(StorageError::corrupt_public)?;
+            let rows = statement
+                .query_map(params![workspace_id, version_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .map_err(StorageError::corrupt_public)?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(StorageError::corrupt_public)
+        })?;
+        let mut grouped: HashMap<String, Vec<(String, &'static str)>> = HashMap::new();
+        for (path, kind) in heads {
+            let kind = match kind.as_str() {
+                "secret" => "secret",
+                "binary" => "binary",
+                _ => "text",
+            };
+            grouped
+                .entry(path_collision_key(&path))
+                .or_default()
+                .push((path, kind));
+        }
+        Ok(Self(grouped))
+    }
+
+    /// The heads, with their content kinds and in path order, at other
+    /// spellings of `path` that reach the file `path` reaches, as they do on a
+    /// disk that ignores case. They own the file, so a delete at `path` must
+    /// leave it to them (#2157).
+    fn owners(&self, root: &std::path::Path, path: &str) -> Vec<(String, &'static str)> {
+        let Some(candidates) = self.0.get(&path_collision_key(path)) else {
+            return Vec::new();
+        };
+        let mut owners: Vec<_> = candidates
+            .iter()
+            .filter(|(head, _)| head != path && projection_paths_share_entry(root, path, head))
+            .cloned()
+            .collect();
+        owners.sort();
+        owners
+    }
+}
+
+/// Whether the disk might reach `path`'s file through another spelling. A
+/// path with other than ASCII characters can differ in Unicode case or
+/// normalization, which this can't test, so it counts. An ASCII segment has two
+/// other spellings: its letters in the other case reach the file in a folder
+/// that ignores case, and its `;`, `` ` `` and `K` written as the only other
+/// characters Unicode normalizes to them reach it in a folder that ignores
+/// normalization. A disk that keeps every spelling apart needs no owner lookup.
+fn reaches_other_spelling(root: &std::path::Path, path: &str) -> bool {
+    if !path.is_ascii() {
+        return true;
+    }
+    let segments: Vec<&str> = path.split('/').collect();
+    (0..segments.len()).any(|index| {
+        let swapped: String = segments[index]
+            .chars()
+            .map(|c| {
+                if c.is_ascii_lowercase() {
+                    c.to_ascii_uppercase()
+                } else {
+                    c.to_ascii_lowercase()
+                }
+            })
+            .collect();
+        let composed: String = segments[index]
+            .chars()
+            .map(|c| match c {
+                ';' => '\u{37e}',
+                '`' => '\u{1fef}',
+                'K' => '\u{212a}',
+                c => c,
+            })
+            .collect();
+        [swapped, composed].iter().any(|spelling| {
+            if spelling == segments[index] {
+                return false;
+            }
+            let mut probe = segments.clone();
+            probe[index] = spelling;
+            root.join(probe.join("/")).exists()
+        })
+    })
+}
+
+/// Whether the disk stores the file `path` reaches under another spelling of
+/// its last segment.
+fn stored_spelling_differs(root: &std::path::Path, path: &str) -> bool {
+    let leaf = path.rsplit('/').next().unwrap_or(path);
+    std::fs::canonicalize(root.join(path)).is_ok_and(|file| {
+        file.file_name()
+            .is_some_and(|name| name != std::ffi::OsStr::new(leaf))
+    })
+}
+
+/// Whether the disk stores the file `path` reaches under exactly that path,
+/// folders included.
+fn stored_as(root: &std::path::Path, path: &str) -> bool {
+    let mut prefix = root.to_path_buf();
+    path.split('/').all(|segment| {
+        prefix.push(segment);
+        std::fs::canonicalize(&prefix)
+            .is_ok_and(|stored| stored.file_name() == Some(std::ffi::OsStr::new(segment)))
+    })
+}
+
+fn case_alias_targets<'a>(
+    previous: impl Iterator<Item = &'a str>,
+    target: &HashSet<&str>,
+) -> HashSet<String> {
+    if !cfg!(windows) {
+        return HashSet::new();
+    }
+    let mut aliases: HashMap<String, Vec<&str>> = HashMap::new();
+    for path in previous {
+        aliases
+            .entry(path_collision_key(path))
+            .or_default()
+            .push(path);
+    }
+    target
+        .iter()
+        .filter(|path| {
+            aliases
+                .get(&path_collision_key(path))
+                .is_some_and(|previous| previous.iter().any(|previous| previous != *path))
+        })
+        .map(|path| (*path).to_owned())
+        .collect()
+}
+
+fn spelling_differs(
+    probe: Option<&ProjectionProbe>,
+    aliases: &HashSet<String>,
+    path: &str,
+) -> bool {
+    aliases.contains(path) && probe.is_some_and(|probe| probe.stored_under_other_spelling(path))
+}
+
+fn probe_target(
+    probe: Option<&ProjectionProbe>,
+    path: &str,
+    kind: ProjectionTargetKind,
+) -> ProjectionTargetState {
+    probe.map_or(ProjectionTargetState::UntrackedContent, |probe| {
+        probe.probe(path, kind)
     })
 }
 
@@ -530,6 +720,7 @@ fn plan_plaintext_switch(
     previous_version_id: &str,
     additional_previous_paths: &[(&str, i64)],
     root_dir: &std::path::Path,
+    probe: Option<&ProjectionProbe>,
     now_ms: i64,
     token: &CancellationToken,
     holds: &PlacementHolds,
@@ -553,6 +744,30 @@ fn plan_plaintext_switch(
         }
         .into());
     }
+    let previous = VersionedTextStore::new(store)
+        .list_snapshots(workspace_id, previous_version_id)
+        .map_err(RuntimeError::from)?;
+    let mut previous_paths: Vec<(String, i64)> = previous
+        .into_iter()
+        .map(|snapshot| (snapshot.path, snapshot.updated_at_ms))
+        .collect();
+    for (path, target_generation) in additional_previous_paths {
+        if !previous_paths
+            .iter()
+            .any(|(previous_path, _)| previous_path == path)
+        {
+            previous_paths.push(((*path).to_owned(), *target_generation));
+        }
+    }
+    for (path, _) in holds.entries() {
+        if !previous_paths.iter().any(|(previous, _)| previous == path) {
+            previous_paths.push((path.to_owned(), now_ms));
+        }
+    }
+    let spelling_aliases = case_alias_targets(
+        previous_paths.iter().map(|(path, _)| path.as_str()),
+        &target_paths,
+    );
     let mut projections = Vec::new();
     if !policy.is_degraded() {
         for snapshot in &target {
@@ -575,7 +790,7 @@ fn plan_plaintext_switch(
             let state = if held.is_some() {
                 ProjectionTargetState::UntrackedContent
             } else {
-                probe_projection_target(root_dir, &snapshot.path, ProjectionTargetKind::Plaintext)
+                probe_target(probe, &snapshot.path, ProjectionTargetKind::Plaintext)
             };
             let Some(preimage) = held
                 .map(|(_, hold)| hold.preimage.clone())
@@ -589,7 +804,9 @@ fn plan_plaintext_switch(
                 }
                 SnapshotContent::Binary { sha256 } => (sha256.clone(), None),
             };
-            if projection_matches(&state, &desired_sha256) {
+            if projection_matches(&state, &desired_sha256)
+                && !spelling_differs(probe, &spelling_aliases, &snapshot.path)
+            {
                 continue;
             }
             projections.push(planned_projection(
@@ -604,26 +821,6 @@ fn plan_plaintext_switch(
                 false,
                 inline_content,
             ));
-        }
-    }
-    let previous = VersionedTextStore::new(store)
-        .list_snapshots(workspace_id, previous_version_id)
-        .map_err(RuntimeError::from)?;
-    let mut previous_paths: Vec<(String, i64)> = previous
-        .into_iter()
-        .map(|snapshot| (snapshot.path, snapshot.updated_at_ms))
-        .collect();
-    for (path, target_generation) in additional_previous_paths {
-        if !previous_paths
-            .iter()
-            .any(|(previous_path, _)| previous_path == path)
-        {
-            previous_paths.push(((*path).to_owned(), *target_generation));
-        }
-    }
-    for (path, _) in holds.entries() {
-        if !previous_paths.iter().any(|(previous, _)| previous == path) {
-            previous_paths.push((path.to_owned(), now_ms));
         }
     }
     if !policy.is_degraded() {
@@ -657,7 +854,7 @@ fn plan_plaintext_switch(
             let state = if held.is_some() {
                 ProjectionTargetState::UntrackedContent
             } else {
-                probe_projection_target(root_dir, &path, ProjectionTargetKind::Plaintext)
+                probe_target(probe, &path, ProjectionTargetKind::Plaintext)
             };
             let Some(preimage) = held
                 .map(|(_, hold)| hold.preimage.clone())
@@ -709,8 +906,8 @@ fn secret_ciphertext_sha(
     Ok(hex_sha256(&ciphertext))
 }
 
-fn load_projection_secret_key(root_dir: &std::path::Path) -> Result<SecretDataKey, RuntimeError> {
-    load_key_file(root_dir)
+fn load_projection_secret_key(store: &EngineStore) -> Result<SecretDataKey, RuntimeError> {
+    load_key_file(super::store_folder(store.database_path()))
         .map_err(DomainError::from)?
         .ok_or_else(|| {
             RuntimeError::from(DomainError::StateCorrupt {
@@ -729,6 +926,7 @@ fn plan_secret_switch(
     target_version_id: &str,
     previous_version_id: &str,
     root_dir: &std::path::Path,
+    probe: Option<&ProjectionProbe>,
     now_ms: i64,
     token: &CancellationToken,
     secret_key: &mut Option<SecretDataKey>,
@@ -741,6 +939,11 @@ fn plan_secret_switch(
         .iter()
         .filter_map(|path| holds.get(path).map(|(path, _)| path))
         .collect();
+    let previous = list_secret_files_keyless(store, workspace_id, previous_version_id)?;
+    let spelling_aliases = case_alias_targets(
+        previous.iter().map(|stat| stat.path.as_str()),
+        &target_paths,
+    );
     let mut projections = Vec::new();
     for stat in &target {
         if token.is_cancelled() {
@@ -753,7 +956,7 @@ fn plan_secret_switch(
         let state = if held.is_some() {
             ProjectionTargetState::UntrackedContent
         } else {
-            probe_projection_target(root_dir, &stat.path, ProjectionTargetKind::Secret)
+            probe_target(probe, &stat.path, ProjectionTargetKind::Secret)
         };
         let Some(preimage) = held
             .map(|(_, hold)| hold.preimage.clone())
@@ -762,7 +965,7 @@ fn plan_secret_switch(
             continue;
         };
         if secret_key.is_none() {
-            *secret_key = Some(load_projection_secret_key(root_dir)?);
+            *secret_key = Some(load_projection_secret_key(store)?);
         }
         let plaintext =
             SecretFileStore::new(store, secret_key.as_ref().expect("secret key loaded"))
@@ -776,7 +979,7 @@ fn plan_secret_switch(
             ProjectionTargetState::Text { sha256 } if sha256 == &desired_plaintext_sha
         );
         drop(plaintext);
-        if already_equal {
+        if already_equal && !spelling_differs(probe, &spelling_aliases, &stat.path) {
             continue;
         }
         let ciphertext_sha =
@@ -794,7 +997,6 @@ fn plan_secret_switch(
             None,
         ));
     }
-    let previous = list_secret_files_keyless(store, workspace_id, previous_version_id)?;
     let empty_sha = hex_sha256(&[]);
     for stat in previous {
         if token.is_cancelled() {
@@ -819,7 +1021,7 @@ fn plan_secret_switch(
         let state = if held.is_some() {
             ProjectionTargetState::UntrackedContent
         } else {
-            probe_projection_target(root_dir, &stat.path, ProjectionTargetKind::Secret)
+            probe_target(probe, &stat.path, ProjectionTargetKind::Secret)
         };
         let Some(preimage) = held
             .map(|(_, hold)| hold.preimage.clone())
@@ -863,6 +1065,7 @@ pub(super) fn reconcile_active_plaintext_projection_on_store(
     token: &CancellationToken,
 ) -> Result<(), RuntimeError> {
     let holds = PlacementHolds::load(store, workspace_id)?;
+    let probe = ProjectionProbe::new(root_dir).ok();
     let mut projections = plan_plaintext_switch(
         store,
         workspace_id,
@@ -870,6 +1073,7 @@ pub(super) fn reconcile_active_plaintext_projection_on_store(
         inactive_version_id,
         rollback_paths,
         root_dir,
+        probe.as_ref(),
         now_ms,
         token,
         &holds,
@@ -878,10 +1082,9 @@ pub(super) fn reconcile_active_plaintext_projection_on_store(
         return Ok(());
     }
     for projection in &mut projections {
-        if rollback_paths
-            .iter()
-            .any(|(path, _)| path.to_lowercase() == projection.spec.target_path.to_lowercase())
-            && let Some(job) = store.load_materialization_job(&projection.spec.job_id)?
+        if rollback_paths.iter().any(|(path, _)| {
+            path_collision_key(path) == path_collision_key(&projection.spec.target_path)
+        }) && let Some(job) = store.load_materialization_job(&projection.spec.job_id)?
             && job.status == dohc_engine_storage::JobStatus::Pending
         {
             projection.spec.preimage = job.preimage;
@@ -920,6 +1123,7 @@ pub(super) fn reconcile_active_plaintext_projection_on_store(
             progress: None,
             file_outcomes_settled: false,
             released_hold_paths: None,
+            planned_against_active_heads: true,
         },
         now_ms,
         faults,
@@ -950,6 +1154,7 @@ pub(super) fn switch_active_version_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    store.read_with(|conn| dohc_engine_domain::ensure_no_pending_undo_in(conn, workspace_id))?;
     let previous = VersionedTextStore::new(store).get_active_version(workspace_id)?;
     let target = VersionedTextStore::new(store)
         .list_versions(workspace_id)?
@@ -961,6 +1166,7 @@ pub(super) fn switch_active_version_on_store(
     }
     let holds = PlacementHolds::load(store, workspace_id)?;
     let mut secret_key = None;
+    let probe = ProjectionProbe::new(root_dir).ok();
     let mut projections = plan_plaintext_switch(
         store,
         workspace_id,
@@ -968,6 +1174,7 @@ pub(super) fn switch_active_version_on_store(
         &previous.version_id,
         &[],
         root_dir,
+        probe.as_ref(),
         now_ms,
         token,
         &holds,
@@ -978,6 +1185,7 @@ pub(super) fn switch_active_version_on_store(
         version_id,
         &previous.version_id,
         root_dir,
+        probe.as_ref(),
         now_ms,
         token,
         &mut secret_key,
@@ -1023,6 +1231,7 @@ pub(super) fn switch_active_version_on_store(
             progress: None,
             file_outcomes_settled: false,
             released_hold_paths: None,
+            planned_against_active_heads: true,
         },
         now_ms,
         faults,
@@ -1060,6 +1269,7 @@ pub(super) fn switch_active_version_on_store(
                 progress: None,
                 file_outcomes_settled: false,
                 released_hold_paths: None,
+                planned_against_active_heads: false,
             },
             now_ms,
             faults,
@@ -1166,7 +1376,10 @@ pub(super) fn materialize_relay_page_on_store(
     let hosted = dohc_engine_sync::is_hosted_replica(store, workspace_id)?;
     let mut page = Vec::new();
     for change in changes {
-        if change.version_id != active {
+        // An older build's change at a path the floor now ignores (an old
+        // `.DS_Store`) has no file here.
+        if change.version_id != active || dohc_engine_files::floor::names_os_metadata(&change.path)
+        {
             continue;
         }
         if !matches!(change.operation, "write" | "delete") {
@@ -1192,6 +1405,16 @@ pub(super) fn materialize_relay_page_on_store(
         let has_head = relay_has_head(store, workspace_id, &active, &change)?;
         page.push((path_key(&change.path), change, has_head));
     }
+    let probe = ProjectionProbe::new(root_dir).ok();
+    let target_paths: HashSet<&str> = page
+        .iter()
+        .filter(|(_, _, head)| *head)
+        .map(|(_, change, _)| change.path.as_str())
+        .collect();
+    let spelling_aliases = case_alias_targets(
+        page.iter().map(|(_, change, _)| change.path.as_str()),
+        &target_paths,
+    );
     let writes: Vec<Vec<String>> = page
         .iter()
         .filter(|(_, _, has_head)| *has_head)
@@ -1219,6 +1442,8 @@ pub(super) fn materialize_relay_page_on_store(
     let mut projections: Vec<SwitchProjection> = Vec::new();
     let mut batch_aliases = HashSet::new();
     let mut deleted: Vec<String> = Vec::new();
+    // Loaded only for a page that deletes a file the disk still has.
+    let mut alias_heads: Option<AliasHeads> = None;
     // Cancellation stops the page only until its first change lands; after
     // that the page runs to its end.
     let mut changed = false;
@@ -1249,7 +1474,7 @@ pub(super) fn materialize_relay_page_on_store(
                 .filter(|path| is_inside(&path_key(path), &key))
             {
                 changed = true;
-                remove_emptied_folders(root_dir, path, Some(&change.path));
+                remove_emptied_folders(store, root_dir, path, Some(&change.path));
             }
         }
         let secret = change.content_kind == "secret";
@@ -1257,8 +1482,8 @@ pub(super) fn materialize_relay_page_on_store(
         let state = if held.is_some() {
             ProjectionTargetState::UntrackedContent
         } else {
-            probe_projection_target(
-                root_dir,
+            probe_target(
+                probe.as_ref(),
                 &change.path,
                 if secret {
                     ProjectionTargetKind::Secret
@@ -1267,17 +1492,119 @@ pub(super) fn materialize_relay_page_on_store(
                 },
             )
         };
-        let head = relay_head(
-            store,
-            workspace_id,
-            &active,
-            root_dir,
-            &change,
-            &mut secret_key,
-        )?;
+        let head = relay_head(store, workspace_id, &active, &change, &mut secret_key)?;
         // A path with no head needs no file there, and a folder is none.
         if head.is_none() && is_folder(root_dir, &change.path) {
             continue;
+        }
+        // On a disk that ignores case or normalization, a head at another
+        // spelling can own the file this delete reaches (#2157). The file then
+        // goes to that head: it stays, or gets the head's bytes and spelling.
+        // A page that also writes that spelling, as a case-only rename does,
+        // or a path inside or around it, runs its deletes and writes in order
+        // instead.
+        if head.is_none()
+            && held.is_none()
+            && !matches!(state, ProjectionTargetState::Absent)
+            && !writes
+                .iter()
+                .any(|write| write.starts_with(&key) || key.starts_with(write))
+            && reaches_other_spelling(root_dir, &change.path)
+        {
+            if alias_heads.is_none() {
+                alias_heads = Some(AliasHeads::load(store, workspace_id, &active)?);
+            }
+            let owners = alias_heads
+                .as_ref()
+                .map(|heads| heads.owners(root_dir, &change.path))
+                .unwrap_or_default();
+            if !owners.is_empty() {
+                // An owner the file already holds, spelled as it is, keeps it.
+                // Otherwise the file takes the first owner it holds the bytes
+                // of, or the first owner in path order that can read it. A file
+                // stored as an owner the files policy no longer tracks is that
+                // owner's to keep, and such an owner gets no other file. With
+                // no owner left, the delete runs as it would without one.
+                let mut kept = false;
+                let mut held_bytes = None;
+                let mut first = None;
+                for (path, kind) in owners {
+                    let secret = kind == "secret";
+                    if !secret
+                        && !resolve_effective_policy(
+                            &path,
+                            policy.files_policy.as_deref(),
+                            policy.visibility_policy.as_deref(),
+                        )
+                        .tracked
+                    {
+                        if stored_as(root_dir, &path) {
+                            kept = true;
+                            break;
+                        }
+                        continue;
+                    }
+                    let owner = dohc_engine_sync::MomentMaterializationChange {
+                        version_id: change.version_id.clone(),
+                        path,
+                        operation: "write",
+                        content_kind: kind,
+                    };
+                    let Some(owner_head) =
+                        relay_head(store, workspace_id, &active, &owner, &mut secret_key)?
+                    else {
+                        continue;
+                    };
+                    // The file reads as the owner's kind reads it.
+                    let owner_state = if secret == (change.content_kind == "secret") {
+                        state.clone()
+                    } else {
+                        probe_target(
+                            probe.as_ref(),
+                            &change.path,
+                            if secret {
+                                ProjectionTargetKind::Secret
+                            } else {
+                                ProjectionTargetKind::Plaintext
+                            },
+                        )
+                    };
+                    if owner_head.current(&owner_state, secret) {
+                        if !stored_spelling_differs(root_dir, &owner.path) {
+                            kept = true;
+                            break;
+                        }
+                        if held_bytes.is_none() {
+                            held_bytes = Some((owner, owner_head, secret, owner_state));
+                        }
+                    } else if first.is_none() && projection_preimage(&owner_state).is_some() {
+                        first = Some((owner, owner_head, secret, owner_state));
+                    }
+                }
+                if kept {
+                    continue;
+                }
+                if let Some((owner, owner_head, secret, owner_state)) = held_bytes.or(first) {
+                    let preimage =
+                        projection_preimage(&owner_state).ok_or(DomainError::InvalidPath {
+                            reason: "ordinary materialization target is unsafe or unreadable",
+                        })?;
+                    batch_aliases.insert(key);
+                    projections.push(planned_projection(
+                        workspace_id,
+                        &active,
+                        owner.path,
+                        MaterializationOperation::Write,
+                        owner_head.sha,
+                        preimage,
+                        now_ms,
+                        now_ms,
+                        secret,
+                        owner_head.inline,
+                    ));
+                    continue;
+                }
+            }
         }
         let preimage = held
             .map(|(_, hold)| hold.preimage.clone())
@@ -1286,7 +1613,12 @@ pub(super) fn materialize_relay_page_on_store(
                 reason: "ordinary materialization target is unsafe or unreadable",
             })?;
         let (operation, sha, inline) = match head {
-            Some(head) if head.current(&state, secret) => continue,
+            Some(head)
+                if head.current(&state, secret)
+                    && !spelling_differs(probe.as_ref(), &spelling_aliases, &change.path) =>
+            {
+                continue;
+            }
             Some(head) => (MaterializationOperation::Write, head.sha, head.inline),
             None if matches!(state, ProjectionTargetState::Absent) => {
                 deleted.push(change.path);
@@ -1327,7 +1659,7 @@ pub(super) fn materialize_relay_page_on_store(
     )?;
     if hosted {
         for path in &deleted {
-            remove_emptied_folders(root_dir, path, None);
+            remove_emptied_folders(store, root_dir, path, None);
         }
     }
     Ok(())
@@ -1369,7 +1701,6 @@ fn relay_head(
     store: &mut EngineStore,
     workspace_id: &str,
     active: &str,
-    root_dir: &std::path::Path,
     change: &dohc_engine_sync::MomentMaterializationChange,
     secret_key: &mut Option<SecretDataKey>,
 ) -> Result<Option<RelayHead>, RuntimeError> {
@@ -1377,7 +1708,7 @@ fn relay_head(
     Ok(match change.content_kind {
         "secret" => {
             if secret_key.is_none() {
-                *secret_key = Some(load_projection_secret_key(root_dir)?);
+                *secret_key = Some(load_projection_secret_key(store)?);
             }
             let key = secret_key.as_ref().expect("secret key loaded");
             let Some(plaintext) = SecretFileStore::new(store, key).materialize_secret_file(
@@ -1453,7 +1784,7 @@ fn invalid_relay_kind() -> RuntimeError {
 pub(super) mod tests {
     use super::{
         ensure_mutation_version_on_store, is_inside, materialize_relay_page_on_store, path_key,
-        relay_delete_precedes_write,
+        reaches_other_spelling, relay_delete_precedes_write,
     };
     use dohc_engine_domain::{VersionedTextStore, WriteText};
     use dohc_engine_storage::{FaultInjector, NoFaults};
@@ -1543,6 +1874,591 @@ pub(super) mod tests {
         )
         .unwrap();
         assert_eq!(HEADS_HELD.with(Cell::get), (0, 1));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_case_alias_page_publishes_the_new_spelling_even_with_equal_bytes() {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        for path in ["held.md", "HELD.MD"] {
+            VersionedTextStore::new(&mut store)
+                .write_text(
+                    &WriteText {
+                        workspace_id: "ws".into(),
+                        version_id: "main".into(),
+                        object_id: path.into(),
+                        path: path.into(),
+                        text: "same\n".into(),
+                        moment_id: path.into(),
+                        metadata_origin: "test".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 2,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+        std::fs::write(scratch.join("held.md"), "same\n").unwrap();
+        if !scratch.join("HELD.MD").exists() {
+            return;
+        }
+        materialize_relay_page_on_store(
+            &mut store,
+            "ws",
+            &scratch,
+            vec![
+                MomentMaterializationChange {
+                    version_id: "main".into(),
+                    path: "held.md".into(),
+                    operation: "write",
+                    content_kind: "text",
+                },
+                MomentMaterializationChange {
+                    version_id: "main".into(),
+                    path: "HELD.MD".into(),
+                    operation: "write",
+                    content_kind: "text",
+                },
+            ],
+            &(),
+            3,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert!(
+            std::fs::read_dir(&scratch)
+                .unwrap()
+                .any(|entry| entry.unwrap().file_name() == "HELD.MD")
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("HELD.MD")).unwrap(),
+            "same\n"
+        );
+    }
+
+    fn write_head(
+        store: &mut dohc_engine_storage::EngineStore,
+        object: &str,
+        path: &str,
+        text: &str,
+        now_ms: i64,
+    ) {
+        VersionedTextStore::new(store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: object.to_owned(),
+                    path: path.to_owned(),
+                    text: text.to_owned(),
+                    moment_id: format!("moment-{object}-{now_ms}"),
+                    metadata_origin: "test".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+    }
+
+    fn delete_head(store: &mut dohc_engine_storage::EngineStore, path: &str, now_ms: i64) {
+        VersionedTextStore::new(store)
+            .delete_text_file(
+                &dohc_engine_domain::DeleteTextFile {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path: path.to_owned(),
+                    moment_id: format!("moment-delete-{now_ms}"),
+                    request_id: None,
+                    metadata_origin: "test".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+    }
+
+    /// One page that brings `path` to its head.
+    fn relay_page(
+        store: &mut dohc_engine_storage::EngineStore,
+        root: &std::path::Path,
+        path: &str,
+        operation: &'static str,
+        now_ms: i64,
+    ) {
+        materialize_relay_page_on_store(
+            store,
+            "ws",
+            root,
+            vec![MomentMaterializationChange {
+                version_id: "main".to_owned(),
+                path: path.to_owned(),
+                operation,
+                content_kind: "text",
+            }],
+            &(),
+            now_ms,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    }
+
+    /// A peer whose disk keeps case apart can hold `notes.md` and `Notes.md`.
+    /// When it creates `Notes.md` in one page and deletes `notes.md` in a
+    /// later one, both spellings reach one file on a disk that ignores case.
+    /// `Notes.md`'s head owns it, so the delete leaves it (#2157).
+    #[test]
+    fn a_later_pages_delete_leaves_the_file_another_spelling_owns() {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        write_head(&mut store, "older", "notes.md", "older\n", 2);
+        std::fs::write(scratch.join("notes.md"), "older\n").unwrap();
+        // The test needs a disk that ignores case.
+        if !scratch.join("Notes.md").exists() {
+            return;
+        }
+        write_head(&mut store, "newer", "Notes.md", "newer\n", 3);
+        relay_page(&mut store, &scratch, "Notes.md", "write", 3);
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("Notes.md")).unwrap(),
+            "newer\n"
+        );
+        delete_head(&mut store, "notes.md", 4);
+        relay_page(&mut store, &scratch, "notes.md", "delete", 4);
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("Notes.md")).unwrap(),
+            "newer\n"
+        );
+        assert!(
+            VersionedTextStore::new(&mut store)
+                .read_text("ws", "main", "notes.md")
+                .unwrap()
+                .is_none(),
+            "the delete itself still lands"
+        );
+    }
+
+    /// With three spellings, the file stays with the owner whose bytes it
+    /// holds, though another owner comes first in path order.
+    #[test]
+    fn a_later_pages_delete_keeps_the_owner_the_file_holds() {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        write_head(&mut store, "older", "notes.md", "older\n", 2);
+        std::fs::write(scratch.join("notes.md"), "held\n").unwrap();
+        if !scratch.join("NOTES.md").exists() {
+            return;
+        }
+        write_head(&mut store, "first", "NOTES.md", "first\n", 3);
+        write_head(&mut store, "held", "Notes.md", "held\n", 3);
+        delete_head(&mut store, "notes.md", 4);
+        relay_page(&mut store, &scratch, "notes.md", "delete", 4);
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("notes.md")).unwrap(),
+            "held\n"
+        );
+    }
+
+    /// An owner with equal bytes can still be stored under the deleted
+    /// spelling, when its own page found the bytes current. The delete then
+    /// publishes the owner's spelling.
+    #[cfg(windows)]
+    #[test]
+    fn a_later_pages_delete_publishes_the_owners_spelling() {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        write_head(&mut store, "older", "notes.md", "same\n", 2);
+        std::fs::write(scratch.join("notes.md"), "same\n").unwrap();
+        if !scratch.join("Notes.md").exists() {
+            return;
+        }
+        write_head(&mut store, "newer", "Notes.md", "same\n", 3);
+        delete_head(&mut store, "notes.md", 4);
+        relay_page(&mut store, &scratch, "notes.md", "delete", 4);
+        assert!(
+            std::fs::read_dir(&scratch)
+                .unwrap()
+                .any(|entry| entry.unwrap().file_name() == "Notes.md")
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("Notes.md")).unwrap(),
+            "same\n"
+        );
+    }
+
+    /// A page that deletes `d/a` and writes a file at `d` runs in order, though
+    /// a head at `D/A` reaches the same file on a disk that ignores case.
+    #[test]
+    fn a_page_that_writes_around_an_aliased_delete_runs_in_order() {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        write_head(&mut store, "older", "d/a", "older\n", 2);
+        std::fs::create_dir_all(scratch.join("d")).unwrap();
+        std::fs::write(scratch.join("d/a"), "older\n").unwrap();
+        if !scratch.join("D/A").exists() {
+            return;
+        }
+        write_head(&mut store, "kept", "D/A", "older\n", 3);
+        delete_head(&mut store, "d/a", 4);
+        write_head(&mut store, "file", "d", "file\n", 4);
+        let change = |path: &str, operation| MomentMaterializationChange {
+            version_id: "main".to_owned(),
+            path: path.to_owned(),
+            operation,
+            content_kind: "text",
+        };
+        materialize_relay_page_on_store(
+            &mut store,
+            "ws",
+            &scratch,
+            vec![change("d/a", "delete"), change("d", "write")],
+            &(),
+            4,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("d")).unwrap(),
+            "file\n"
+        );
+    }
+
+    /// Two owners hold the file's bytes. The one the disk already spells the
+    /// file as keeps it, though the other comes first in path order.
+    #[cfg(windows)]
+    #[test]
+    fn a_later_pages_delete_keeps_the_owner_spelled_as_the_file() {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        write_head(&mut store, "older", "notes.md", "same\n", 2);
+        std::fs::write(scratch.join("Notes.md"), "same\n").unwrap();
+        if !scratch.join("NOTES.md").exists() {
+            return;
+        }
+        write_head(&mut store, "first", "NOTES.md", "same\n", 3);
+        write_head(&mut store, "kept", "Notes.md", "same\n", 3);
+        delete_head(&mut store, "notes.md", 4);
+        relay_page(&mut store, &scratch, "notes.md", "delete", 4);
+        assert!(
+            std::fs::read_dir(&scratch)
+                .unwrap()
+                .any(|entry| entry.unwrap().file_name() == "Notes.md")
+        );
+    }
+
+    /// The disk spells the file as an owner the files policy no longer tracks,
+    /// so the file and its local edits are that owner's to keep.
+    #[cfg(windows)]
+    #[test]
+    fn a_later_pages_delete_keeps_the_file_of_an_untracked_owner() {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        write_head(&mut store, "older", "notes.md", "older\n", 2);
+        std::fs::write(scratch.join("NOTES.md"), "edited\n").unwrap();
+        if !scratch.join("notes.md").exists() {
+            return;
+        }
+        write_head(&mut store, "other", "NOTES.md", "other\n", 3);
+        std::fs::create_dir_all(scratch.join(".dohc")).unwrap();
+        std::fs::write(
+            scratch.join(".dohc/files.toml"),
+            "version = 1\n[[rule]]\npath = \"NOTES.md\"\ntracked = false\n",
+        )
+        .unwrap();
+        delete_head(&mut store, "notes.md", 4);
+        relay_page(&mut store, &scratch, "notes.md", "delete", 4);
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("NOTES.md")).unwrap(),
+            "edited\n"
+        );
+    }
+
+    /// The disk spells the file's folder as the deleted path does, not as the
+    /// untracked owner does, so the file isn't that owner's and the delete runs.
+    #[cfg(windows)]
+    #[test]
+    fn a_later_pages_delete_removes_a_file_only_its_folder_spells_as_an_untracked_owner() {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        write_head(&mut store, "older", "d/a.md", "older\n", 2);
+        std::fs::create_dir_all(scratch.join("d")).unwrap();
+        std::fs::write(scratch.join("d/a.md"), "older\n").unwrap();
+        if !scratch.join("D/a.md").exists() {
+            return;
+        }
+        write_head(&mut store, "other", "D/a.md", "other\n", 3);
+        std::fs::create_dir_all(scratch.join(".dohc")).unwrap();
+        std::fs::write(
+            scratch.join(".dohc/files.toml"),
+            "version = 1\n[[rule]]\npath = \"D/**\"\ntracked = false\n",
+        )
+        .unwrap();
+        delete_head(&mut store, "d/a.md", 4);
+        relay_page(&mut store, &scratch, "d/a.md", "delete", 4);
+        assert!(!scratch.join("d/a.md").exists());
+    }
+
+    /// Two deletes in one page reach the same file while a third spelling
+    /// keeps its head. The first gives the file that head's bytes, and the
+    /// second then finds them in place.
+    #[test]
+    fn two_aliased_deletes_in_one_page_leave_the_file_to_the_third_spelling() {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        write_head(&mut store, "older", "notes.md", "older\n", 2);
+        std::fs::write(scratch.join("notes.md"), "older\n").unwrap();
+        if !scratch.join("NOTES.md").exists() {
+            return;
+        }
+        write_head(&mut store, "other", "NOTES.md", "other\n", 3);
+        write_head(&mut store, "kept", "Notes.md", "kept\n", 3);
+        delete_head(&mut store, "notes.md", 4);
+        delete_head(&mut store, "NOTES.md", 5);
+        let change = |path: &str| MomentMaterializationChange {
+            version_id: "main".to_owned(),
+            path: path.to_owned(),
+            operation: "delete",
+            content_kind: "text",
+        };
+        materialize_relay_page_on_store(
+            &mut store,
+            "ws",
+            &scratch,
+            vec![change("notes.md"), change("NOTES.md")],
+            &(),
+            4,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("Notes.md")).unwrap(),
+            "kept\n"
+        );
+    }
+
+    /// Only a path that can have another spelling looks for an owner: one with
+    /// other than ASCII characters always, and an ASCII one when a folder on its
+    /// way ignores case or normalization. An ASCII path with no letters, `;` or
+    /// `` ` `` has no other spelling.
+    #[test]
+    fn only_a_path_with_another_spelling_looks_for_an_owner() {
+        let (scratch, _, _store) = dohc_engine_testkit::open_store();
+        std::fs::create_dir_all(scratch.join("d")).unwrap();
+        std::fs::write(scratch.join("d/notes.md"), "x").unwrap();
+        std::fs::write(scratch.join("123"), "x").unwrap();
+        std::fs::write(scratch.join("123;"), "x").unwrap();
+        assert!(!reaches_other_spelling(&scratch, "123"));
+        assert!(reaches_other_spelling(&scratch, "caf\u{e9}.md"));
+        assert_eq!(
+            reaches_other_spelling(&scratch, "d/notes.md"),
+            scratch.join("D/NOTES.MD").exists()
+        );
+        assert_eq!(
+            reaches_other_spelling(&scratch, "123;"),
+            scratch.join("123\u{37e}").exists()
+        );
+        std::fs::write(scratch.join("123\u{37e}"), "x").unwrap();
+        assert!(reaches_other_spelling(&scratch, "123;"));
+    }
+
+    /// A case-only rename arrives as one page that deletes `notes.md` and
+    /// writes `Notes.md` with the same bytes. The page runs its delete and then
+    /// its write, as #2146 orders them, and the file takes the new spelling.
+    #[test]
+    fn a_case_only_rename_page_runs_its_delete_and_write() {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        write_head(&mut store, "older", "notes.md", "same\n", 2);
+        std::fs::write(scratch.join("notes.md"), "same\n").unwrap();
+        if !scratch.join("Notes.md").exists() {
+            return;
+        }
+        delete_head(&mut store, "notes.md", 3);
+        write_head(&mut store, "renamed", "Notes.md", "same\n", 3);
+        let change = |path: &str, operation| MomentMaterializationChange {
+            version_id: "main".to_owned(),
+            path: path.to_owned(),
+            operation,
+            content_kind: "text",
+        };
+        materialize_relay_page_on_store(
+            &mut store,
+            "ws",
+            &scratch,
+            vec![change("notes.md", "delete"), change("Notes.md", "write")],
+            &(),
+            3,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert!(
+            std::fs::read_dir(&scratch)
+                .unwrap()
+                .any(|entry| entry.unwrap().file_name() == "Notes.md")
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("Notes.md")).unwrap(),
+            "same\n"
+        );
+    }
+
+    /// The same peer edits `notes.md` after creating `Notes.md`. The edit lands
+    /// on the one file both spellings reach, so when `notes.md` goes, the file
+    /// holds neither head's bytes until it gets `Notes.md`'s again.
+    #[test]
+    fn a_later_pages_delete_gives_the_file_back_to_the_other_spelling() {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        write_head(&mut store, "older", "notes.md", "older\n", 2);
+        std::fs::write(scratch.join("notes.md"), "older\n").unwrap();
+        if !scratch.join("Notes.md").exists() {
+            return;
+        }
+        write_head(&mut store, "newer", "Notes.md", "newer\n", 3);
+        relay_page(&mut store, &scratch, "Notes.md", "write", 3);
+        write_head(&mut store, "older", "notes.md", "edited\n", 4);
+        relay_page(&mut store, &scratch, "notes.md", "write", 4);
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("Notes.md")).unwrap(),
+            "edited\n"
+        );
+        delete_head(&mut store, "notes.md", 5);
+        relay_page(&mut store, &scratch, "notes.md", "delete", 5);
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("Notes.md")).unwrap(),
+            "newer\n"
+        );
+    }
+
+    /// An older build's page can carry a change for Finder's `.DS_Store`. The
+    /// page skips it and still places the rest.
+    #[test]
+    fn a_page_skips_a_change_at_an_ignored_path() {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        VersionedTextStore::new(&mut store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "notes".to_owned(),
+                    path: "notes.md".to_owned(),
+                    text: "body\n".to_owned(),
+                    moment_id: "moment-notes".to_owned(),
+                    metadata_origin: "test".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        let change = |path: &str| MomentMaterializationChange {
+            version_id: "main".to_owned(),
+            path: path.to_owned(),
+            operation: "write",
+            content_kind: "text",
+        };
+        materialize_relay_page_on_store(
+            &mut store,
+            "ws",
+            &scratch,
+            vec![change(".DS_Store"), change("notes.md")],
+            &(),
+            20,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("notes.md")).unwrap(),
+            "body\n"
+        );
+        assert!(!scratch.join(".DS_Store").exists());
+    }
+
+    /// Finder leaves `.DS_Store` in a folder it showed. When a page deletes the
+    /// folder's last file and writes a file at the folder's name, that folder
+    /// still gives way.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_folder_holding_only_finder_files_gives_way_to_a_file() {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        let write = |store: &mut dohc_engine_storage::EngineStore, object: &str, path: &str| {
+            VersionedTextStore::new(store)
+                .write_text(
+                    &WriteText {
+                        workspace_id: "ws".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: object.to_owned(),
+                        path: path.to_owned(),
+                        text: format!("{object}\n"),
+                        moment_id: format!("moment-{object}"),
+                        metadata_origin: "test".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 2,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        };
+        write(&mut store, "inner", "d/a.md");
+        std::fs::create_dir_all(scratch.join("d")).unwrap();
+        std::fs::write(scratch.join("d/a.md"), "inner\n").unwrap();
+        std::fs::write(scratch.join("d/.DS_Store"), "finder").unwrap();
+        VersionedTextStore::new(&mut store)
+            .delete_text_file(
+                &dohc_engine_domain::DeleteTextFile {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path: "d/a.md".to_owned(),
+                    moment_id: "moment-delete".to_owned(),
+                    request_id: None,
+                    metadata_origin: "test".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 3,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        write(&mut store, "file", "d");
+        let change = |path: &str, operation| MomentMaterializationChange {
+            version_id: "main".to_owned(),
+            path: path.to_owned(),
+            operation,
+            content_kind: "text",
+        };
+        materialize_relay_page_on_store(
+            &mut store,
+            "ws",
+            &scratch,
+            vec![change("d/a.md", "delete"), change("d", "write")],
+            &(),
+            20,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("d")).unwrap(),
+            "file\n"
+        );
     }
 
     #[test]

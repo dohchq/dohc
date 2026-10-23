@@ -23,6 +23,8 @@ impl std::fmt::Display for ObservedBytes {
 /// content, keys, or bearer credentials.
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
+    #[error("dohc is checking this file. Try again.")]
+    MarkdownReaderPending(std::sync::Arc<dohc_engine_collab::reader_resolver::PendingProof>),
     #[error("live document binding is still active")]
     LiveDocumentBindingActive,
     #[error("storage error: {0}")]
@@ -174,6 +176,7 @@ impl SyncError {
             // it was wrong, and would commit the cursor past content that is
             // still coming.
             SyncError::Storage(_)
+            | SyncError::MarkdownReaderPending(_)
             | SyncError::SequenceGap
             | SyncError::CoordinateDiverged
             | SyncError::RetryableState { .. }
@@ -189,6 +192,7 @@ impl SyncError {
     pub fn code(&self) -> &'static str {
         match self {
             SyncError::Shared(original) => original.code(),
+            SyncError::MarkdownReaderPending(_) => "retryable-state",
             SyncError::LiveDocumentBindingActive => "live-document-binding-active",
             SyncError::Storage(err) => err.code(),
             SyncError::InvalidInput { .. } => "invalid-input",
@@ -360,6 +364,7 @@ impl RelayError {
             | RelayError::HttpStatus(_)
             | RelayError::Partitioned
             | RelayError::InvalidResponse
+            | RelayError::HttpsRequired
             // TRANSIENT, and therefore never skipped: the op says nothing
             // wrong, the store was simply busy. Advancing the cursor past it
             // would drop content the next pull would have applied.
@@ -534,6 +539,10 @@ pub enum RelayError {
     Partitioned,
     #[error("relay response failed validation")]
     InvalidResponse,
+    /// The relay address is not an https origin, so the engine refused it
+    /// before sending the bearer token anywhere.
+    #[error("relay address must use https")]
+    HttpsRequired,
     /// The engine's own database was busy while a relay operation used it.
     ///
     /// Typed rather than folded into `Local`, which carries a code STRING: the

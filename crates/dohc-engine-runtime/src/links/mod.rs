@@ -1,11 +1,18 @@
 //! Persisted derived links. Reads and writes here run only on the owning actor;
 //! body integrity checks, parsing and lexical key construction run off it.
+pub(crate) mod cache;
+mod edges;
+pub(crate) mod incoming;
 mod parser;
+pub(crate) mod query;
+pub(crate) mod resolver;
+pub(crate) mod rewrite;
 #[cfg(test)]
 #[path = "link_tests.rs"]
 mod tests;
 mod worker;
 
+use dohc_engine_storage::text;
 use dohc_engine_storage::{EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome};
 use parser::{MAX_DOCUMENT_BYTES, Parsed};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -13,7 +20,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub(crate) use worker::DrainWorker;
 pub use worker::{LinkDrainMetrics, SharedMetrics};
 
-pub const PARSER_GENERATION: i64 = 1;
+// Generation 2 uses the resolver's all-or-nothing URI decoding for probe keys.
+pub const PARSER_GENERATION: i64 = 2;
 const ROW_SLICE: usize = 16;
 const SOURCE_SLICE: usize = 16;
 pub const ACTOR_SLICE_BUDGET: Duration = Duration::from_millis(5);
@@ -55,26 +63,36 @@ fn sql(error: rusqlite::Error) -> StorageError {
         source: Some(Box::new(error)),
     }
 }
-fn head(conn: &Connection, w: &Work, hydrate: bool) -> Result<Option<Head>, StorageError> {
+fn head(
+    conn: &Connection,
+    w: &Work,
+    hydrate: bool,
+    current_paths: bool,
+) -> Result<Option<Head>, StorageError> {
+    let aliases = if current_paths {
+        "path_aliases"
+    } else {
+        "link_aliases"
+    };
     let mut h = conn.query_row(
-        "WITH effective AS (
+        &format!("WITH effective AS (
           SELECT path,blob_sha256,binary_sha256,content_kind FROM snapshots
            WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
           UNION ALL SELECT path,blob_sha256,binary_sha256,content_kind FROM fork_base_snapshots
            WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
            AND NOT EXISTS(SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)
         ) SELECT e.path,COALESCE(e.blob_sha256,e.binary_sha256),e.content_kind,COALESCE(b.byte_length,-1),
-          CASE WHEN ?4 AND b.byte_length<=?5 THEN b.text ELSE NULL END
+          CASE WHEN ?4 AND b.byte_length<=?5 THEN b.sha256 ELSE NULL END
           FROM effective e LEFT JOIN blobs b ON b.sha256=e.blob_sha256
-          WHERE EXISTS(SELECT 1 FROM link_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3) LIMIT 1",
+          WHERE EXISTS(SELECT 1 FROM {aliases} WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3) LIMIT 1"),
         params![w.workspace,w.version,w.object,hydrate,MAX_DOCUMENT_BYTES as i64],
-        |r| Ok(Head {path:r.get(0)?,hash:r.get(1)?,kind:r.get(2)?,byte_length:r.get(3)?,text:r.get(4)?,aliases:Vec::new(),unindexed_reason:None}),
+        |r| Ok(Head {path:r.get(0)?,hash:r.get(1)?,kind:r.get(2)?,byte_length:r.get(3)?,text:text::optional_from_row(conn, r, 4)?,aliases:Vec::new(),unindexed_reason:None}),
     ).optional().map_err(sql)?;
     if let Some(h) = h.as_mut() {
         if h.kind == "text" && h.byte_length < 0 {
             return Err(StorageError::StateCorrupt { source: None });
         }
-        let mut stmt=conn.prepare_cached("SELECT path FROM link_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 ORDER BY path LIMIT 65").map_err(sql)?;
+        let mut stmt=conn.prepare_cached(&format!("SELECT path FROM {aliases} WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 ORDER BY path LIMIT 65")).map_err(sql)?;
         h.aliases = stmt
             .query_map(params![w.workspace, w.version, w.object], |r| r.get(0))
             .map_err(sql)?
@@ -118,12 +136,12 @@ fn prepare_batch(store: &EngineStore, limit: usize) -> Result<Vec<Prepared>, Sto
         let mut hydrated_bytes = 0;
         for w in work {
             let h = (|| {
-                let mut h = head(conn,&w,false)?;
+                let mut h = head(conn,&w,false,false)?;
                 if let Some(h)=h.as_mut() {
                     let reason:Option<String>=conn.query_row("SELECT reason FROM link_sources WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND source_hash=?4 AND parser_generation=?5 AND status='unindexed'",params![w.workspace,w.version,w.object,h.hash,PARSER_GENERATION],|r|r.get(0)).optional().map_err(sql)?;
                     h.unindexed_reason=match reason.as_deref(){Some("byte-bound")=>Some("byte-bound"),Some("parse-refused")=>Some("parse-refused"),_=>None};
                 }
-                if h.as_ref().is_some_and(|h|h.unindexed_reason.is_none()) {h=head(conn,&w,true)?;}
+                if h.as_ref().is_some_and(|h|h.unindexed_reason.is_none()) {h=head(conn,&w,true,false)?;}
                 Ok::<_, StorageError>(h)
             })();
             if let Ok(Some(h)) = &h { hydrated_bytes += h.text.as_ref().map_or(0,String::len); }
@@ -157,7 +175,7 @@ fn current(conn: &Connection, p: &Parsed) -> Result<bool, StorageError> {
     if !exists {
         return Ok(false);
     }
-    let h = head(conn, &p.work, false)?;
+    let h = head(conn, &p.work, false, false)?;
     Ok(match (&h, &p.head) {
         (None, None) => true,
         (Some(a), Some(b)) => {
@@ -167,8 +185,8 @@ fn current(conn: &Connection, p: &Parsed) -> Result<bool, StorageError> {
     })
 }
 
-// These probes are candidate supersets. The next PR's resolver checks current
-// aliases and resolution precedence; no resolved target is persisted here.
+// These probes are candidate supersets. The resolver checks current aliases
+// and resolution precedence; no resolved target is persisted here.
 fn normalize_path(path: &str) -> Option<String> {
     let mut parts = Vec::new();
     for p in path.split('/') {
@@ -185,82 +203,54 @@ fn normalize_path(path: &str) -> Option<String> {
 fn path_keys(path: &str) -> Vec<(&'static str, String)> {
     let folded = path.to_lowercase();
     let name = path.rsplit('/').next().unwrap_or(path);
-    let stem = name.rsplit_once('.').map_or(name, |(s, _)| s);
-    let extensionless = path.strip_suffix(&name[stem.len()..]).unwrap_or(path);
+    let stem = resolver::without_extension(name);
+    let extensionless = resolver::without_extension(path);
     vec![
         ("folded-path", folded),
         ("extensionless", extensionless.to_lowercase()),
         ("stem", stem.to_lowercase()),
     ]
 }
-fn decoded_literal(literal: &str) -> String {
-    let b = literal.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            let digits = std::str::from_utf8(&b[i + 1..i + 3])
-                .ok()
-                .and_then(|s| u8::from_str_radix(s, 16).ok());
-            if let Some(byte) = digits {
-                out.push(byte);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8(out).unwrap_or_else(|_| literal.to_owned())
-}
 fn occurrence_keys(source: &str, literal: &str, kind: &str) -> Vec<(&'static str, String)> {
-    let literal = literal.split('?').next().unwrap_or(literal);
-    let decoded = decoded_literal(literal);
-    let literal = decoded.as_str();
+    let Some(target) = resolver::target(literal) else {
+        return Vec::new();
+    };
     let directory = source.rsplit_once('/').map_or("", |(d, _)| d);
     let mut keys = Vec::new();
-    // Whole filenames win before fragment splitting, so index both probes.
-    for target in [literal, literal.split('#').next().unwrap_or(literal)] {
-        if target.is_empty() {
-            keys.extend(path_keys(source));
-            continue;
-        }
-        let paths = if target.starts_with('/') {
-            vec![target.trim_start_matches('/').to_owned()]
-        } else if kind == "markdown" || target.starts_with("./") || target.starts_with("../") {
-            vec![format!("{directory}/{target}")]
-        } else if target.contains('/') {
-            vec![target.to_owned()]
-        } else {
-            vec![format!("{directory}/{target}"), target.to_owned()]
-        };
-        for path in paths {
-            if let Some(path) = normalize_path(&path) {
-                let name = path.rsplit('/').next().unwrap_or(&path);
-                let extensionless = match name.rsplit_once('.') {
-                    Some((_, ext))
-                        if matches!(
-                            ext.to_ascii_lowercase().as_str(),
-                            "md" | "markdown" | "mdx"
-                        ) =>
-                    {
-                        &path[..path.len() - ext.len() - 1]
-                    }
-                    _ => &path,
-                };
-                keys.extend([
-                    ("folded-path", path.to_lowercase()),
-                    ("extensionless", extensionless.to_lowercase()),
-                    (
-                        "stem",
-                        extensionless
-                            .rsplit('/')
-                            .next()
-                            .unwrap_or(extensionless)
-                            .to_lowercase(),
-                    ),
-                ]);
-            }
+    let paths = if target.starts_with('/') {
+        vec![target.trim_start_matches('/').to_owned()]
+    } else if kind == "markdown" || target.starts_with("./") || target.starts_with("../") {
+        vec![format!("{directory}/{target}")]
+    } else if target.contains('/') {
+        vec![target.to_owned()]
+    } else {
+        vec![format!("{directory}/{target}"), target.to_owned()]
+    };
+    for path in paths {
+        if let Some(path) = normalize_path(&path) {
+            let name = path.rsplit('/').next().unwrap_or(&path);
+            let extensionless = match name.rsplit_once('.') {
+                Some((_, ext))
+                    if matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown" | "mdx") =>
+                {
+                    &path[..path.len() - ext.len() - 1]
+                }
+                _ => &path,
+            };
+            keys.extend([
+                ("folded-path", path.to_lowercase()),
+                ("extensionless", extensionless.to_lowercase()),
+                ("extensionless", path.to_lowercase()),
+                ("stem", name.to_lowercase()),
+                (
+                    "stem",
+                    extensionless
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(extensionless)
+                        .to_lowercase(),
+                ),
+            ]);
         }
     }
     keys.sort();
@@ -525,12 +515,16 @@ pub fn reseed_step(store: &mut EngineStore) -> Result<bool, StorageError> {
     let outcome=store.write_with(&NoFaults,|tx| {
         let state=tx.query_row("SELECT workspace_id,version_id,seed_after_object_id FROM link_index_state WHERE parser_generation<>?1 LIMIT 1",[PARSER_GENERATION],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).optional().map_err(sql)?;
         let Some((ws,v,after))=state else{return Ok(false);};
-        let mut stmt=tx.prepare("SELECT object_id FROM link_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id>?3 GROUP BY object_id ORDER BY object_id LIMIT 32").map_err(sql)?;
-        let objects=stmt.query_map(params![ws,v,after],|r|r.get::<_,String>(0)).map_err(sql)?.collect::<Result<Vec<_>,_>>().map_err(sql)?;
-        for o in &objects {
+        let mut stmt=tx.prepare("SELECT a.object_id,EXISTS(SELECT 1 FROM link_sources s WHERE s.workspace_id=a.workspace_id AND s.version_id=a.version_id AND s.object_id=a.object_id AND s.parser_generation=?4) FROM link_aliases a WHERE a.workspace_id=?1 AND a.version_id=?2 AND a.object_id>?3 ORDER BY a.object_id LIMIT 32").map_err(sql)?;
+        let objects=stmt.query_map(params![ws,v,after,PARSER_GENERATION],|r|Ok((r.get::<_,String>(0)?,r.get::<_,bool>(1)?))).map_err(sql)?.collect::<Result<Vec<_>,_>>().map_err(sql)?;
+        let mut previous = None;
+        for (o,current) in &objects {
+            if previous == Some(o) { continue; }
+            previous = Some(o);
+            if *current { continue; }
             tx.execute("INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) VALUES(?1,?2,?3,?4) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1,queued_at_ms=excluded.queued_at_ms,retry_after_ms=0",params![ws,v,o,now_ms()]).map_err(sql)?;
         }
-        if let Some(last)=objects.last() {
+        if let Some((last,_))=objects.last() {
             tx.execute("UPDATE link_index_state SET seed_after_object_id=?3 WHERE workspace_id=?1 AND version_id=?2",params![ws,v,last]).map_err(sql)?;
         } else {
             tx.execute("UPDATE link_index_state SET parser_generation=?3,seed_after_object_id='' WHERE workspace_id=?1 AND version_id=?2",params![ws,v,PARSER_GENERATION]).map_err(sql)?;
@@ -571,7 +565,7 @@ fn seed_step_with(
             [], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
             .optional().map_err(sql)?;
         let Some((ws,v,after)) = state else { return Ok(false); };
-        tx.execute("UPDATE link_index_state SET seed_phase='aliases' WHERE workspace_id=?1 AND version_id=?2",params![ws,v]).map_err(sql)?;
+        tx.execute("UPDATE link_index_state SET parser_generation=CASE WHEN seed_phase='deferred' THEN ?3 ELSE parser_generation END,seed_phase='aliases' WHERE workspace_id=?1 AND version_id=?2",params![ws,v,PARSER_GENERATION]).map_err(sql)?;
         let mut stmt = tx.prepare("SELECT path,object_id FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path>?3 ORDER BY path LIMIT 32").map_err(sql)?;
         let aliases = stmt.query_map(params![ws,v,after], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))
             .map_err(sql)?.collect::<Result<Vec<_>,_>>().map_err(sql)?;

@@ -1,5 +1,5 @@
 import { ProtocolShapeError } from "../wireSchema";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { EngineRequestError } from "../daemon/engineClient";
 import type { JsonValue, Request, Response } from "../protocol";
 import {
@@ -87,7 +87,7 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
   },
   { method: CHATS_METHOD.reactionsList, params: { threadId: "t" } },
   { method: CHATS_METHOD.attachmentsListForThread, params: { threadId: "t" } },
-  { method: CHATS_METHOD.attachmentsListFileMentions, params: { objectId: "o" } },
+  { method: CHATS_METHOD.attachmentsListFileMentions, params: { subject: {objectId: "o"}, scope: "grant", sharedChannelRowsUncovered: 0 } },
   { method: CHATS_METHOD.mentionsListForHandle, params: { handle: "agent" } },
   { method: CHATS_METHOD.agentReadListUnreadThreads, params: {} },
   {
@@ -1441,4 +1441,24 @@ describe("local chat actor key transport", () => {
     expect(rows[0]!.authorActorKey).toBe(key);
     expect(rows[1]!.authorActorKey).toBeUndefined();
   });
+});
+
+it("returns exactly one chat mention page even when an empty filtered page has a continuation",async()=>{
+  const requests: Request[]=[];
+  const page={versionId:"main",subject:null,entries:[],unchecked:[],complete:false,indexBuilding:false,mountsCovered:true,sharedChannelRowsUncovered:2,nextCursor:"sealed-next"};
+  const adapter=new ChatsLiveAdapter(mockDaemon(requests,()=>page),WORKSPACE,{workspaceId:"workspace"});
+  await expect(adapter.fileMentionsPage({workspaceId:"workspace",scope:"grant",sharedChannelRowsUncovered:2,cursor:"sealed-before"})).resolves.toEqual(page);
+  expect(requests).toHaveLength(1);
+  expect(requests[0]).toMatchObject({workspace:WORKSPACE,method:CHATS_METHOD.attachmentsListFileMentions,params:{scope:"grant",sharedChannelRowsUncovered:2,cursor:"sealed-before"}});
+});
+
+it("reads one conversation Links page without draining or accepting another workspace",async()=>{
+  const page={versionId:"main",subject:{channelWireId:"wire"},entries:[],unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,sharedChannelRowsUncovered:0,nextCursor:"next"};
+  const sendRequest=vi.fn(async(request:Request):Promise<Response>=>({id:request.id,result:page}));
+  const adapter=new ChatsLiveAdapter({sendRequest,close(){}},WORKSPACE,{workspaceId:"workspace"});
+  expect(await adapter.linksPage({workspaceId:"workspace",channelWireId:"wire",scope:"scope",sharedChannelRowsUncovered:2,cursor:"previous"})).toEqual(page);
+  expect(sendRequest).toHaveBeenCalledTimes(1);
+  expect(sendRequest.mock.calls[0]?.[0]).toMatchObject({method:CHATS_METHOD.conversationLinks,params:{channelWireId:"wire",scope:"scope",sharedChannelRowsUncovered:2,cursor:"previous"}});
+  await expect(adapter.linksPage({workspaceId:"other",channelWireId:"wire",scope:"scope",sharedChannelRowsUncovered:0})).rejects.toThrow();
+  expect(sendRequest).toHaveBeenCalledTimes(1);
 });

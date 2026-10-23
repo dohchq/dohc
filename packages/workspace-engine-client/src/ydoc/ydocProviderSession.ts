@@ -1,4 +1,4 @@
-import { retryStoreBusy } from "../daemon/storeBusyRetry";
+import { retryWhileEngineBusy } from "../daemon/storeBusyRetry";
 import type * as Y from "yjs";
 import {
   isEngineStoreBusyRefusal,
@@ -6,12 +6,14 @@ import {
   isYdocUpdateAdmissionRefusal,
 } from "../live/daemonLiveAdapter";
 import {
+  isLineageChange,
   RemoteYdocApplyError,
   YdocLiveAdapter,
   YdocOwnerDraftPendingError,
   type ApplyLocalUpdateOptions,
   type YdocResyncNeededError,
   type EngineTransport,
+  type LargeSeedReading,
   type YdocAdapterSession,
 } from "./ydocLiveAdapter";
 import type {
@@ -79,10 +81,12 @@ export interface EngineYdocProviderSessionOptions {
   // Forwarded to the adapter: false when the caller already holds the
   // document's canonical state and will replay it into this generation.
   seedAbsentLineage?: boolean;
+  // Forwarded to the adapter: reads a seed past the in-band cap as a blob.
+  largeSeed?: LargeSeedReading;
   onRemoteUpdate: (update: Uint8Array) => void;
   onRemoteApplyError?: (error: RemoteYdocApplyError) => void;
   onLocalEditError?: (error: unknown) => void;
-  onLocalUpdateAcknowledged?: (idempotencyKey: string) => void;
+  onLocalUpdateAcknowledged?: (idempotencyKey: string, lane: "journal" | "owner-outbox") => void;
   onLocalUpdateRefused?: (idempotencyKey: string, error: unknown) => void;
   onResyncNeeded?: (error: YdocResyncNeededError) => void;
   onLineageReplaced?: (doc: Y.Doc, recoveredPaths: string[]) => void;
@@ -153,6 +157,9 @@ export interface EngineYdocProviderSession {
     options?: ApplyLocalUpdateOptions & { armSettle?: boolean },
   ): Promise<void>;
   reestablishAcknowledgedState?(update: Uint8Array): Promise<void>;
+  // Resolves once the engine's current state has landed. When the engine
+  // holds another history, `onLineageReplaced` has announced it by then.
+  resync?(): Promise<void>;
   adoptCollectionRecord?(): Promise<"settled" | "ownerPending" | "declined">;
   settleNow(options?: { summary?: string }): Promise<YdocSettleResult>;
   // `settle: false` alone does not promise the file will be left alone: a
@@ -192,6 +199,7 @@ export async function openEngineYdocProviderSession(
       ...(options.seedAbsentLineage !== undefined
         ? { seedAbsentLineage: options.seedAbsentLineage }
         : {}),
+      ...(options.largeSeed ? { largeSeed: options.largeSeed } : {}),
     });
   } catch (error) {
     if (ownsAdapter) adapter.dispose();
@@ -200,7 +208,7 @@ export async function openEngineYdocProviderSession(
 
   const settleDebounceMs =
     options.settleDebounceMs ?? DEFAULT_SETTLE_DEBOUNCE_MS;
-  session.onLocalUpdateAcknowledged((id) => options.onLocalUpdateAcknowledged?.(id));
+  session.onLocalUpdateAcknowledged((id, lane) => options.onLocalUpdateAcknowledged?.(id, lane));
   session.onLocalUpdateRefused((id, error) => options.onLocalUpdateRefused?.(id, error));
   const scheduleSettle =
     options.scheduleSettle ??
@@ -276,11 +284,13 @@ export async function openEngineYdocProviderSession(
       try {
         settledRevision = -1;
         await journalChain;
-        await session.resyncIfNeeded();
-        await session.resendMissingState();
+        await retryWhileEngineBusy(async () => {
+          await session.resyncIfNeeded();
+          await session.resendMissingState();
+        }, retrySignal);
         if (localEditError !== null) throw localEditError;
         const revision = documentRevision;
-        const result = await retryStoreBusy(() =>
+        const result = await retryWhileEngineBusy(() =>
           session.settle(summary !== undefined ? { summary } : undefined),
           retrySignal,
         );
@@ -342,7 +352,8 @@ export async function openEngineYdocProviderSession(
     // The caller receives its refusal while the chain keeps later writes usable.
     const journaled = journalChain.then(() => operation).then(() => undefined);
     journalChain = journaled.catch((error: unknown) => {
-      if (isTransientEngineRefusal(error)) return;
+      // A refused history hands over to the winner, where later edits record.
+      if (isTransientEngineRefusal(error) || isLineageChange(error)) return;
       rememberLocalEditError(error);
       if (!isYdocUpdateAdmissionRefusal(error)) throw error;
     });
@@ -465,7 +476,7 @@ export async function openEngineYdocProviderSession(
       try {
         operation = session.applyLocalUpdate(update, {...recordOptions, ...(options.trustedAutomationDraft ? {trustedAutomationDraft: true} : {})});
       } catch (error) {
-        rememberLocalEditError(error);
+        if (!isLineageChange(error)) rememberLocalEditError(error);
         throw error;
       }
       return trackLocalOperation(operation, armSettle);
@@ -480,6 +491,11 @@ export async function openEngineYdocProviderSession(
     async reestablishAcknowledgedState(update) {
       await journalChain;
       await session.reestablishAcknowledgedState(update);
+    },
+
+    async resync() {
+      if (closed) throw new Error(`Y.Doc provider session for ${options.path} is closing.`);
+      await session.resync();
     },
 
     async adoptCollectionRecord() {
@@ -524,7 +540,7 @@ export async function openEngineYdocProviderSession(
             // then release separately so terminal refusals still release.
             const token = ++settleTokens;
             try {
-              const result = await retryStoreBusy(
+              const result = await retryWhileEngineBusy(
                 () => session.settle({ summary: closeOptions?.summary ?? "session close" }),
                 closeRetryController.signal,
               );

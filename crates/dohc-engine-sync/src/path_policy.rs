@@ -23,6 +23,14 @@ pub enum PathClass {
     Unsafe,
 }
 
+/// Whether `path` is OS metadata, such as `.DS_Store`, that an older build
+/// captured before the floor named it. Such paths are skipped, never refused,
+/// so an older peer's history cannot stop sync.
+pub(crate) fn floor_ignores(path: &str) -> bool {
+    classify_share_path(path) == PathClass::Ignored
+        && dohc_engine_files::floor::names_os_metadata(path)
+}
+
 pub fn classify_share_path(path: &str) -> PathClass {
     if path.is_empty()
         || path.starts_with('/')

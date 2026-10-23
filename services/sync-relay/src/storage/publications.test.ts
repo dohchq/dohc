@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, copyFileSync, renameSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, copyFileSync, renameSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
@@ -55,7 +55,7 @@ function fixture(options: {paths?: string[]; quota?: number} = {}) {
   cleanups.push(() => rmSync(dir, {recursive: true, force: true}));
   let storage = openSyncRelayStorage(path, {blobGraceMs: 0, ...(options.quota ? {workspaceQuotaBytes: options.quota} : {})});
   cleanups.push(() => storage.close());seed(storage, options.paths);
-  return {path, get storage() {return storage;}, restart() {storage.close(); storage = openSyncRelayStorage(path, {blobGraceMs: 0});},
+  return {directory: dir, path, get storage() {return storage;}, restart() {storage.close(); storage = openSyncRelayStorage(path, {blobGraceMs: 0});},
     get raw() {return (storage as StorageContext).db;}};
 }
 
@@ -555,10 +555,10 @@ it("operator takedown stops serving and cached launch authority without disclosi
   const stream = await f.http(f.blobPath), reader = stream.body!.getReader();
   expect((await reader.read()).value!.byteLength).toBe(64 * 1024);
   const socketPath = operatorSocketPath({SYNC_RELAY_DB_PATH: f.path});
-  const operator = await startPublicationOperator(f.storage, socketPath);
+  const operator = await startPublicationOperator(f.storage, socketPath, join(f.directory, "operator.secret"));
   try {
     expect(operator.address()).toBe(socketPath);
-    const disabled = await requestPublicationTakedown(socketPath, {type: "disable-publication", publicationId: f.published.publicationId, reason: "Confirmed phishing"});
+    const disabled = await requestPublicationTakedown(socketPath, {type: "disable-publication", publicationId: f.published.publicationId, reason: "Confirmed phishing"}, readFileSync(join(f.directory, "operator.secret"), "utf8"));
     expect(disabled).toMatchObject({code: 0, authorityRevision: 2, operatorTakedown: {actor: "operator", reason: "Confirmed phishing"}});
   } finally {await operator.close();}
   expect(() => guard(22)).toThrow();

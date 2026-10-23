@@ -4,7 +4,6 @@ import type { MenuItemConstructorOptions } from "electron";
 import type { DesktopUserSettingsResult } from "../settings/userSettings";
 import type { ChatDispatchService } from "../agents/chatDispatchService";
 import {
-  applyDesktopIconToPlatform,
   resolveDesktopIconDirectory,
   resolveSystemThemeIconPath,
 } from "../systemThemeIcon";
@@ -27,7 +26,6 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
     readonly isPackaged: boolean;
     getAppPath(): string;
     quit(): void;
-    readonly dock?: { setIcon(path: string): void };
   };
   process: Pick<NodeJS.Process, "platform"> & { resourcesPath?: string };
   moduleDirectory: string;
@@ -35,7 +33,6 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   nativeImage: { createFromPath(path: string): Image };
   nativeTheme: { readonly shouldUseDarkColors: boolean };
   Tray: new (image: Image) => DesktopTrayInstance<Image, Menu>;
-  BrowserWindow: { getAllWindows(): Array<{ setIcon(path: string): void }> };
   readCachedUserSettingsFile(directory: string): Promise<DesktopUserSettingsResult>;
   stateDir(): string;
   chatDispatchService: Pick<ChatDispatchService, "isPaused" | "setPaused">;
@@ -45,7 +42,7 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   readonly appLifecycle: { isQuitting(): boolean };
 }) {
   const {
-    app, process, Menu, nativeImage, nativeTheme, Tray, BrowserWindow,
+    app, process, Menu, nativeImage, nativeTheme, Tray,
     readCachedUserSettingsFile, stateDir, chatDispatchService, showOrCreateMainWindow,
   } = dependencies;
 
@@ -75,6 +72,13 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   }
 
   function dispatchTrayIcon() {
+    // The macOS menu bar draws a monochrome template image and tints it for
+    // its own appearance; the app icon would draw as a dark blob there.
+    if (process.platform === "darwin") {
+      const template = nativeImage.createFromPath(join(desktopIconDirectory(), "trayTemplate.png"));
+      template.setTemplateImage(true);
+      return template;
+    }
     const resourcesPath = (
       process as NodeJS.Process & { resourcesPath?: string }
     ).resourcesPath;
@@ -86,7 +90,6 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
     if (icon.isEmpty()) {
       icon = nativeImage.createFromPath(join(app.getAppPath(), "build/icon.png"));
     }
-    if (process.platform === "darwin") icon.setTemplateImage(true);
     return icon;
   }
 
@@ -135,16 +138,7 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
     rebuildDispatchTrayMenu();
   }
 
-  function refreshSystemThemeDesktopIcons(): void {
-    const iconPath = currentDesktopIconPath();
-    if (iconPath) {
-      applyDesktopIconToPlatform({
-        platform: process.platform,
-        iconPath,
-        windows: BrowserWindow.getAllWindows(),
-        setDockIcon: (path) => app.dock?.setIcon(path),
-      });
-    }
+  function refreshTrayIcon(): void {
     if (dispatchTray) dispatchTray.setImage(dispatchTrayIcon());
   }
 
@@ -167,5 +161,5 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   /** Whether agent dispatch keeps dohc running, as the last refresh read it. */
   const dispatchKeepsRunning = () => dispatchEnabled;
 
-  return { refreshDispatchTray, refreshSystemThemeDesktopIcons, dispatchKeepsRunning };
+  return { refreshDispatchTray, refreshTrayIcon, dispatchKeepsRunning };
 }

@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestScratch } from "./testTemp";
 import {
-  getSitePackage as getKnownSitePackage,
   listSitePackages as listKnownSitePackages,
   requireExactSiteRoot,
   sharedStaticEntryRelativeToSite,
@@ -15,6 +14,9 @@ import {
 } from "./sitePackage";
 import { startStaticSitePreview } from "./siteRunner";
 import { listFiles } from "./workspaceFiles";
+import { createOwnedSiteCatalog } from "./ownedSiteCatalog";
+import { createOwnedWorkspaceReadPort } from "./ownedWorkspaceReadPort";
+import { selectListedSitePackage } from "../testing/sitePackageTestOracle";
 
 async function listSitePackages(rootPath: string): Promise<SitePackageInfo[]> {
   return listKnownSitePackages(rootPath, await listFiles(rootPath));
@@ -26,12 +28,13 @@ async function getSitePackage(
   knownSites?: readonly SitePackageInfo[],
   effectiveMode?: SitePackageInfo["configuredPreviewMode"],
 ): Promise<SitePackageInfo | null> {
-  return getKnownSitePackage(
-    rootPath,
-    anyPath,
-    knownSites ?? (await listSitePackages(rootPath)),
-    effectiveMode,
-  );
+  if (knownSites) return selectListedSitePackage(anyPath, knownSites);
+  const reads = createOwnedWorkspaceReadPort({
+    hasShareState: false, searchSources: [], repairProjection: async () => undefined,
+    listFiles: scope => listFiles(rootPath, scope),
+    lookupFiles: paths => listFiles(rootPath, { paths }),
+  });
+  return createOwnedSiteCatalog({ reads: () => reads }).get({ rootPath }, anyPath, effectiveMode);
 }
 
 let root: string;
@@ -2223,6 +2226,12 @@ describe("listSitePackages", () => {
   it("refuses to share a manifest whose path exceeds the relay selector's character bound", async () => {
     const segment = "a".repeat(250);
     const nestedDir = join(root, "long-path", segment, segment, segment, segment, segment);
+    if (process.platform === "darwin") {
+      // macOS limits a whole path to 1024 bytes, so no file a site can read
+      // lies past the bound there.
+      await expect(mkdir(nestedDir, { recursive: true })).rejects.toMatchObject({ code: "ENAMETOOLONG" });
+      return;
+    }
     await mkdir(nestedDir, { recursive: true });
     await writeFile(
       join(root, "long-path", "index.html"),

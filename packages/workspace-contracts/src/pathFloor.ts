@@ -14,7 +14,36 @@ export function foldPathSegment(segment: string): string {
   return folded.normalize("NFC");
 }
 
+/**
+ * The engine's `path_collision_key`: one key for every spelling of a path
+ * that a disk ignoring case or Unicode normalization may treat as the same.
+ */
+export function pathCollisionKey(path: string): string {
+  return path
+    .split("/")
+    .map((segment) =>
+      foldPathSegment(segment.normalize("NFKC").toLowerCase().toUpperCase().toLowerCase())
+        .replace(/[. ]+$/, ""))
+    .join("/");
+}
+
 const reservedSegments = [".dohc", ".git", "node_modules"];
+
+// Names the OS writes beside user files, with AppleDouble `._*` files checked
+// below. The shared fold fixtures hold this equal to the engine floor's
+// macOS and Windows metadata lists in crates/dohc-engine-files/src/floor.rs.
+const osMetadataSegments = [
+  ".ds_store",
+  ".localized",
+  "icon\r",
+  ".spotlight-v100",
+  ".fseventsd",
+  ".trashes",
+  ".temporaryitems",
+  ".documentrevisions-v100",
+  "thumbs.db",
+  "desktop.ini",
+];
 
 /** Inputs have already been folded by the caller. */
 export function isReserved83Alias(segment: string, reserved: string): boolean {
@@ -31,5 +60,7 @@ export function isIgnoredPathSegment(segment: string, stripAliases = true): bool
   return reservedSegments.includes(name)
     || reservedSegments.some((reserved) => isReserved83Alias(name, reserved))
     || name.startsWith(".dohc-write-")
-    || isReserved83Alias(name, ".dohc-write-");
+    || isReserved83Alias(name, ".dohc-write-")
+    || osMetadataSegments.includes(name)
+    || name.startsWith("._");
 }

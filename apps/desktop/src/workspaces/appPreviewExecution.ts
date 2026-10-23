@@ -52,6 +52,9 @@ export function createAppPreviewExecution(dependencies: {
     workspace: { workspaceId: string },
     path: string,
   ) => Promise<{ target: ShareViewFilesTarget; path: string } | null>;
+  // Throws unless this computer trusts the workspace to run its apps' code.
+  // Its answer checks again, synchronously, at the spawn itself.
+  readonly assertMayRunAppCode: (workspace: { workspaceId: string; rootPath: string }) => Promise<() => void>;
 }) {
   async function executeAppPreview(input: SitePreviewExecutionInput) {
     if (input.mode === "static") {
@@ -98,12 +101,15 @@ export function createAppPreviewExecution(dependencies: {
       const script =
         input.site.configuredScripts.dev || input.site.scripts.dev ? "dev" : "start";
       const command = commandForSiteScript(input.site, script);
+      const assertMayRun = await dependencies.assertMayRunAppCode({ workspaceId: input.workspaceId, rootPath: input.workspaceRoot });
       const handle = await startSiteDevServer({
         workspaceRoot: input.workspaceRoot,
         siteRoot: input.site.root,
         command: command.command,
         args: command.args,
+        env: command.env,
         signal: input.signal,
+        assertMayRun,
       });
       return {
         handle,
@@ -128,6 +134,7 @@ export function createAppPreviewExecution(dependencies: {
     let outputRoot = preferredBuildOutput(input.site);
     if (input.site.configuredScripts.build || input.site.scripts.build) {
       const command = commandForSiteScript(input.site, "build");
+      const assertMayRun = await dependencies.assertMayRunAppCode({ workspaceId: input.workspaceId, rootPath: input.workspaceRoot });
       const result = await buildSite({
         workspaceRoot: input.workspaceRoot,
         siteRoot: input.site.root,
@@ -135,6 +142,7 @@ export function createAppPreviewExecution(dependencies: {
         args: command.args,
         output: outputRoot ?? undefined,
         signal: input.signal,
+        assertMayRun,
       });
       logs = result.logs;
       build = {

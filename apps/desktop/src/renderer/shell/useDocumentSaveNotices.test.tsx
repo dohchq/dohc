@@ -3,7 +3,8 @@ import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } 
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DohcDesktopBridge, EngineYDocSaveStateEvent, RetryEngineYDocSaveResult, SyncStatusResult } from "../../ipc/bridgeContract";
+import type { DohcDesktopBridge, EngineYDocSaveStateEvent, RetryEngineYDocSaveResult, SaveFailureReason, SyncStatusResult } from "../../ipc/bridgeContract";
+import { PRIVACY_DENIED_WORDS, VOLUME_SHARES_NEW_FILES_WORDS } from "../../ipc/errorWords";
 import { deferred } from "../../testing/deferred";
 import { CsvView } from "../CsvView";
 import { documentVersionKey } from "../documentVersionKey";
@@ -11,17 +12,19 @@ import { resetOrphanedDrafts } from "../orphanedDrafts";
 import { loadStoredDrafts } from "../orphanedDraftStorage";
 import { acquireSharedLocalDocument, resetSharedLocalDocumentsForTests } from "../sharedLocalDocument";
 import { AUTOSAVE_DEBOUNCE_MS, useAutosavedTextDraft, type DraftFlush } from "../useAutosavedTextDraft";
+import { NoticeCenter } from "../workbench/NoticeCenter";
 import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
 import { ConnectionNotices } from "./connectionNotices";
 import { errorDetails } from "./copyDetails";
-import { useDocumentSaveNotices } from "./useDocumentSaveNotices";
+import { REPLACED_DOCUMENT_SAVED, REPLACED_DOCUMENT_UNSAVED, reportDocumentReplacement, useDocumentSaveNotices } from "./useDocumentSaveNotices";
 import { useShellError } from "./useShellError";
 
 type WriteResult = Awaited<ReturnType<DohcDesktopBridge["writeWorkspaceText"]>>;
 const listeners = new Set<(event: EngineYDocSaveStateEvent) => void>();
-const retryEngineYDocSave = vi.fn<(payload: { workspaceId: string; path: string }) => Promise<RetryEngineYDocSaveResult>>();
+const retryEngineYDocSave = vi.fn<(payload: { workspaceId: string; path: string; recreateFile?: true }) => Promise<RetryEngineYDocSaveResult>>();
 const writeWorkspaceText = vi.fn<DohcDesktopBridge["writeWorkspaceText"]>();
 const open = vi.fn<(path: string) => void>();
+const openSystemPrivacySettings = vi.fn(async () => undefined);
 
 const SYNCED: SyncStatusResult = {
   state: "synced",
@@ -59,6 +62,34 @@ function Shell(props: { workspaceId?: string; children?: ReactNode }) {
       />
       {props.children}
     </>
+  );
+}
+
+// The notice center as the shell draws it, with a row's own action beside Try
+// again.
+function ActionNotices() {
+  const shell = useShellError("ws-1");
+  useDocumentSaveNotices({ workspaceId: "ws-1", report: shell.reportShellFailure, clear: shell.clearIdentity, open });
+  return (
+    <NoticeCenter
+      workspaceId="ws-1" host="corner" syncStatus={null} agentActive={false} conflictSummaries={[]}
+      onOpenHistory={() => {}} onOpenConflicts={() => {}} onRefreshShareView={() => {}} onOpenSettings={() => {}} onRebuildEngineStore={() => {}}
+      workspaceErrors={shell.shellErrors.map((error) => ({
+        id: error.id,
+        ...(error.title ? { title: error.title } : {}),
+        message: error.message,
+        // What the shell copies: the words, then the facts.
+        details: errorDetails([["Error", error.message], ["Title", error.title], ...(error.details ?? [])]),
+        atMs: error.atMs,
+        canRetry: error.retry !== null,
+        ...(error.action ? { actionLabel: error.action.label } : {}),
+        seen: error.seen,
+      }))}
+      onRetryWorkspaceError={shell.retryShellError}
+      onWorkspaceErrorAction={shell.runShellErrorAction}
+      onHideWorkspaceError={shell.hideShellError}
+      onDismissWorkspaceError={shell.dismissShellError}
+    />
   );
 }
 
@@ -107,9 +138,9 @@ const emit = (event: Partial<EngineYDocSaveStateEvent>) =>
       listener({ sessionId: "session-1", workspaceId: "ws-1", path: "notes/a.md", state: { kind: "saving" }, seq: 1, ...event });
     }
   });
-const failed = (readOnly = true): Partial<EngineYDocSaveStateEvent> => ({
+const failed = (reason: SaveFailureReason = "read-only"): Partial<EngineYDocSaveStateEvent> => ({
   state: { kind: "error", reason: "dohc could not confirm the file was saved.", issueId: null },
-  saveFailure: { readOnly },
+  saveFailure: { reason },
 });
 
 describe("document save notices", () => {
@@ -123,6 +154,7 @@ describe("document save notices", () => {
       },
       retryEngineYDocSave,
       writeWorkspaceText,
+      openSystemPrivacySettings,
       getUpdateState: () => new Promise(() => {}),
       onUpdateState: () => () => {},
     });
@@ -172,9 +204,105 @@ describe("document save notices", () => {
     expect(screen.queryByTestId("connection-notices")).toBeNull();
   });
 
+  it("says macOS blocked the folder, and offers System Settings beside Try again", () => {
+    const { result } = renderHook(() => {
+      const shell = useShellError("ws-1");
+      useDocumentSaveNotices({ workspaceId: "ws-1", report: shell.reportShellFailure, clear: shell.clearIdentity, open });
+      return shell.shellErrors;
+    });
+    emit(failed("privacy-denied"));
+    expect(result.current).toHaveLength(1);
+    const [notice] = result.current;
+    expect(notice!.title).toBe("Couldn't save notes/a.md");
+    expect(notice!.message).toBe(PRIVACY_DENIED_WORDS);
+    expect(notice!.details).toContainEqual(["Cause", "macOS blocked dohc from this folder."]);
+    expect(notice!.retry).not.toBeNull();
+    expect(notice!.action?.label).toBe("Open System Settings");
+    notice!.action!.run();
+    expect(openSystemPrivacySettings).toHaveBeenCalledOnce();
+  });
+
+  it("says why a live document can't be kept private on a volume that shares new files", () => {
+    const { result } = renderHook(() => {
+      const shell = useShellError("ws-1");
+      useDocumentSaveNotices({ workspaceId: "ws-1", report: shell.reportShellFailure, clear: shell.clearIdentity, open });
+      return shell.shellErrors;
+    });
+    emit(failed("volume-shares-new-files"));
+    expect(result.current).toHaveLength(1);
+    const [notice] = result.current;
+    expect(notice!.title).toBe("Couldn't save notes/a.md");
+    expect(notice!.message).toBe(VOLUME_SHARES_NEW_FILES_WORDS);
+    expect(notice!.details).toContainEqual(["Cause", "The disk adds sharing permissions to new files."]);
+    expect(notice!.retry).not.toBeNull();
+    expect(notice!.action).toBeUndefined();
+  });
+
+  it("says why a plain-text file can't be kept private on a volume that shares new files", async () => {
+    writeWorkspaceText.mockRejectedValueOnce(writeRejected("DaemonRefusalError [INTERNAL]: volume-shares-new-files"));
+    render(<Shell />);
+    const document = textFile("ws-1", ".env", "OLD=1");
+    const editor = renderHook(useAutosavedTextDraft, { initialProps: document });
+    act(() => editor.result.current.setDraft("SECRET=1"));
+    await act(async () => { await editor.result.current.saveNow(); });
+    const toast = screen.getByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("Couldn't save .env");
+    expect(toast.textContent).toContain(VOLUME_SHARES_NEW_FILES_WORDS);
+    expect(toast.textContent).not.toContain("dohc couldn't write the file.");
+    await closeEditor(editor, document);
+  });
+
+  it("says a file was moved or deleted outside dohc and offers Save it again in place of Try again", async () => {
+    const user = userEvent.setup();
+    const copied = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    render(<ActionNotices />);
+
+    emit(failed("deleted"));
+    const toast = screen.getByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("Couldn't save notes/a.md");
+    expect(toast.textContent).toContain("The file was moved or deleted outside dohc.");
+    expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();
+    await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
+    expect(copied.mock.calls[0]![0]).toBe("Error: The file was moved or deleted outside dohc.\nTitle: Couldn't save notes/a.md\nFile: notes/a.md");
+
+    await user.click(within(toast).getByRole("button", { name: "Save it again" }));
+    expect(retryEngineYDocSave).toHaveBeenCalledWith({ workspaceId: "ws-1", path: "notes/a.md", recreateFile: true });
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+
+    // A save it starts that fails again files the row again, and a save
+    // clears it.
+    emit({ state: { kind: "saving" } });
+    emit(failed("deleted"));
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain("The file was moved or deleted outside dohc.");
+    emit({ state: { kind: "saved-here" } });
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  it("gives a standing row the deleted file's words and Save it again when the file is deleted", async () => {
+    const user = userEvent.setup();
+    render(<ActionNotices />);
+    emit(failed("read-only"));
+    // Try again only repeats the save.
+    await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
+    expect(retryEngineYDocSave).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-1", path: "notes/a.md" });
+    emit({ state: { kind: "saving" } });
+    emit(failed("read-only"));
+
+    // The file is deleted while that row stands.
+    emit({ state: { kind: "saving" } });
+    emit(failed("deleted"));
+    const [toast, ...others] = screen.getAllByTestId("workspace-shell-error");
+    expect(others).toEqual([]);
+    expect(toast!.textContent).toContain("The file was moved or deleted outside dohc.");
+    expect(toast!.textContent).not.toContain("read-only");
+    expect(within(toast!).queryByRole("button", { name: "Try again" })).toBeNull();
+    await user.click(within(toast!).getByRole("button", { name: "Save it again" }));
+    expect(retryEngineYDocSave).toHaveBeenLastCalledWith({ workspaceId: "ws-1", path: "notes/a.md", recreateFile: true });
+  });
+
   it("says only what it knows when the file is not read-only", () => {
     render(<Shell />);
-    emit(failed(false));
+    emit(failed(null));
     const toast = screen.getByTestId("workspace-shell-error");
     expect(toast.textContent).toContain("dohc couldn't write the file.");
     expect(toast.textContent).not.toContain("read-only");
@@ -235,11 +363,23 @@ describe("document save notices", () => {
     expect(screen.queryByTestId("connection-notices")).toBeNull();
   });
 
+  // #2463. A note closed over a change made outside dohc before the capture
+  // poll noticed it: its refused save first reads as a failure, then main
+  // says the file changed outside dohc. No failed-save row may stay.
+  it("clears a closing note's failed save when main says the file changed outside dohc", () => {
+    render(<Shell />);
+    emit({ ...failed(null), closing: true });
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain("Couldn't save notes/a.md");
+    emit({ state: { kind: "changed-on-disk", reason: "The file changed on disk.", issueId: null }, closing: true });
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.queryByTestId("connection-notices")).toBeNull();
+  });
+
   it("ignores a late failure from a session a newer one replaced", () => {
     render(<Shell />);
     emit({ sessionId: "session-1", state: { kind: "saved-here" } });
     emit({ ...failed(), sessionId: "session-2" });
-    emit({ ...failed(false), sessionId: "session-1", closing: true });
+    emit({ ...failed(null), sessionId: "session-1", closing: true });
     expect(screen.getByTestId("workspace-shell-error").textContent).toContain("read-only");
   });
 
@@ -516,6 +656,59 @@ describe("document save notices", () => {
     expect(await rows(user)).toHaveLength(1);
     expect(titleBar().textContent).toBe("Couldn't save 1 file");
     await closeEditor(editor, document);
+  });
+
+  it("files a replaced document's unsaved earlier edits with Try again and copy, then says where they are", async () => {
+    const user = userEvent.setup();
+    const copied = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    const retry = vi.fn();
+    const failure = { setAsideFailed: true, cause: new Error("Storage refused the earlier edits."), retry };
+    const noticeRows = async (text: string) => {
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      const found = within(screen.getByRole("dialog", { name: "Notices" })).queryAllByText(text, { exact: false });
+      await user.keyboard("{Escape}");
+      return found;
+    };
+    render(<Shell />);
+
+    act(() => reportDocumentReplacement("ws-1", "notes/a.md", true, failure));
+    // Another workspace's document files nothing here.
+    act(() => reportDocumentReplacement("ws-2", "notes/b.md", true, failure));
+    const toast = screen.getByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("notes/a.md");
+    expect(toast.textContent).toContain(REPLACED_DOCUMENT_UNSAVED);
+    await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
+    expect(copied.mock.calls[0]![0]).toContain("File: notes/a.md");
+    expect(await noticeRows(REPLACED_DOCUMENT_UNSAVED)).toHaveLength(1);
+
+    await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
+    expect(retry).toHaveBeenCalledOnce();
+    expect(screen.queryByTestId("connection-notices")).toBeNull();
+
+    // The retry fails twice more: still one row.
+    act(() => reportDocumentReplacement("ws-1", "notes/a.md", true, failure));
+    act(() => reportDocumentReplacement("ws-1", "notes/a.md", true, failure));
+    expect(screen.getAllByTestId("workspace-shell-error")).toHaveLength(1);
+    expect(await noticeRows(REPLACED_DOCUMENT_UNSAVED)).toHaveLength(1);
+
+    // Set aside: the success replaces the failure, and its row stays after the toast closes.
+    act(() => reportDocumentReplacement("ws-1", "notes/a.md", true, null));
+    expect(screen.getAllByTestId("workspace-shell-error")).toHaveLength(1);
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain(REPLACED_DOCUMENT_SAVED);
+    await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Dismiss workspace error" }));
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(await noticeRows(REPLACED_DOCUMENT_UNSAVED)).toHaveLength(0);
+    expect(await noticeRows(REPLACED_DOCUMENT_SAVED)).toHaveLength(1);
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Dismiss notice" }));
+    expect(screen.queryByTestId("connection-notices")).toBeNull();
+
+    // A replacement that set nothing aside clears the row its failure filed.
+    act(() => reportDocumentReplacement("ws-1", "notes/a.md", false, { ...failure, setAsideFailed: false }));
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain("dohc could not finish replacing this document.");
+    act(() => reportDocumentReplacement("ws-1", "notes/a.md", false, null));
+    expect(screen.queryByTestId("connection-notices")).toBeNull();
+    expect(titleBar().textContent).toBe("Local · saved");
   });
 
   it("retries every writer failing for a file from its one row", async () => {

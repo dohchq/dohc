@@ -37,8 +37,28 @@ export const DOHC_METADATA_GUARD: DohcPathGuard = {
 };
 
 export const DOHC_TRASH_GUARD: DohcPathGuard = {
-  path: ".dohc/trash",
+  path: ".dohc/local/trash",
   lead: "dohc could not move this to the workspace trash.",
+};
+
+export const DOHC_AGENT_RUNS_GUARD: DohcPathGuard = {
+  path: ".dohc/agent-runs",
+  lead: "dohc could not open this workspace's agent run history.",
+};
+
+export const DOHC_SYNC_HISTORY_GUARD: DohcPathGuard = {
+  path: ".dohc/sync-history",
+  lead: "dohc could not record this workspace's sync history.",
+};
+
+export const DOHC_COLLECTIONS_GUARD: DohcPathGuard = {
+  path: ".dohc/collections.json",
+  lead: "dohc could not read which computer keeps this workspace's Collections.",
+};
+
+export const DOHC_DATABASES_GUARD: DohcPathGuard = {
+  path: ".dohc/databases",
+  lead: "dohc could not save this database edit.",
 };
 
 export const DOHC_ENGINE_GUARD: DohcPathGuard = {
@@ -62,6 +82,36 @@ export function notARealFolderRefusal(
   const noun = squatterNoun(stats);
   const article = noun === "item" ? "An" : "A";
   return `${guard.lead} ${article} ${noun} is at ${guard.path}, which must be a real folder. Remove or rename that ${noun}. Then retry.`;
+}
+
+// Something that is not a plain file sits at a path dohc writes as a file.
+export function notAFileRefusal(
+  guard: DohcPathGuard,
+  stats: SquattedPathStats,
+): string {
+  const noun = squatterNoun(stats);
+  const article = noun === "item" ? "An" : "A";
+  return `${guard.lead} ${article} ${noun} is at ${guard.path}, which must be a file. Remove or rename that ${noun}. Then retry.`;
+}
+
+export function hardLinkedFileRefusal(guard: DohcPathGuard): string {
+  return `${guard.lead} The file at ${guard.path} has another link, so changes here would change that file too. Remove or rename this file. Then retry.`;
+}
+
+export function fileChangedWhileOpeningRefusal(guard: DohcPathGuard): string {
+  return `${guard.lead} The file at ${guard.path} changed while dohc opened it. Stop other programs from changing this file. Then retry.`;
+}
+
+export function folderChangedBeforeWritingRefusal(guard: DohcPathGuard): string {
+  return `${guard.lead} The folder at ${guard.path} changed before dohc could save the edit. Stop other programs from changing this folder. Then retry.`;
+}
+
+// The path is a real folder, but another user owns it or can write in it, so
+// they could replace what dohc keeps there. The folder can hold what only
+// this computer has, such as the Collections or the workspace trash, so the
+// way out keeps it.
+export function notOnlyYoursRefusal(guard: DohcPathGuard): string {
+  return `${guard.lead} Another user can change ${guard.path}. Make it a folder only you can change. Then retry.`;
 }
 
 // The path is a real folder, but it leads out of the workspace. With the root

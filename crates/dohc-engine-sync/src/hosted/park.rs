@@ -8,6 +8,7 @@
 //! file is gone. On its return, its heads come back once nothing holds their
 //! paths, the same gate a replayed row meets.
 
+use dohc_engine_storage::text;
 use std::collections::HashMap;
 
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
@@ -251,7 +252,10 @@ pub fn departed_hosted_materialization(
         }
         Ok::<_, SyncError>(page)
     })?;
-    Ok(Some(page.into_values().collect()))
+    Ok(Some(crate::relay::page_order(
+        page.into_values(),
+        |change| change.operation,
+    )))
 }
 
 /// Each row journaled for a document in a version that can carry a
@@ -386,7 +390,7 @@ pub(crate) fn unpark_returned(
             occupancy.take(object_id, &parked_paths(tx, workspace_id, object_id)?);
             let heads = tx
                 .prepare(
-                    "SELECT p.version_id,p.path,p.content_kind,b.text FROM hosted_parked_snapshots p \
+                    "SELECT p.version_id,p.path,p.content_kind,b.sha256 FROM hosted_parked_snapshots p \
                      LEFT JOIN blobs b ON b.sha256=p.blob_sha256 \
                      WHERE p.workspace_id=?1 AND p.object_id=?2",
                 )
@@ -396,7 +400,7 @@ pub(crate) fn unpark_returned(
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
-                        row.get::<_, Option<String>>(3)?,
+                        text::optional_from_row(tx, row, 3)?,
                     ))
                 })
                 .map_err(SyncError::corrupt)?
@@ -512,7 +516,7 @@ impl<'c> Occupancy<'c> {
             let holders = self.load(version_id)?;
             self.versions.insert(version_id.to_owned(), holders);
         }
-        let folded = path.to_lowercase();
+        let folded = dohc_engine_files::floor::path_collision_key(path);
         let holder = Holder::merge(
             self.versions[version_id].holder(&folded, object_id),
             self.retired
@@ -606,7 +610,8 @@ impl Holder {
     }
 }
 
-/// Held paths, lowercased: each one, and each folder above one.
+/// Held paths, keyed as capture holds match them: each one, and each folder
+/// above one.
 #[derive(Default)]
 struct Holders {
     at: HashMap<String, Held>,
@@ -654,7 +659,7 @@ impl Held {
 
 impl Holders {
     fn insert(&mut self, held: &str, holder: &Holder) {
-        let held = held.to_lowercase();
+        let held = dohc_engine_files::floor::path_collision_key(held);
         for (end, _) in held.match_indices('/') {
             self.above
                 .entry(held[..end].to_owned())
@@ -664,7 +669,7 @@ impl Holders {
         self.at.entry(held).or_default().add(holder);
     }
 
-    /// What holds `path`, lowercased, against `object_id`: another holder of
+    /// What holds `path`, keyed, against `object_id`: another holder of
     /// a path the same, above it or inside it.
     fn holder(&self, path: &str, object_id: &str) -> Option<Holder> {
         let inside = path.match_indices('/').map(|(end, _)| &path[..end]);
@@ -794,10 +799,12 @@ fn execute(conn: &Connection, sql: &str, bound: &[&dyn ToSql]) -> Result<(), Syn
 #[cfg(test)]
 mod tests {
     use super::{Holder, Holders};
-    use dohc_engine_storage::capture_file_holds::path_is_held;
+    use dohc_engine_files::floor::path_collision_key;
+    use dohc_engine_files::path_is_held;
 
     /// A held path holds another as a capture hold matches them, either way
-    /// round: the same path in any case, or one inside the other.
+    /// round: the same path in any case or normalization, or one inside the
+    /// other.
     #[test]
     fn held_paths_collide_as_capture_holds_match() {
         let paths = [
@@ -810,13 +817,17 @@ mod tests {
             "a/b/c.md",
             "ab/c.md",
             "b.md",
+            "caf\u{e9}.md",
+            "cafe\u{301}.md",
+            "CAF\u{c9}.md/b.md",
+            "cafe.md",
         ];
         for held in paths {
             let mut holders = Holders::default();
             holders.insert(held, &Holder::Departed(None));
             for path in paths {
                 assert_eq!(
-                    holders.holder(&path.to_lowercase(), "doc").is_some(),
+                    holders.holder(&path_collision_key(path), "doc").is_some(),
                     path_is_held(held, path) || path_is_held(path, held),
                     "{held} against {path}"
                 );
@@ -868,7 +879,7 @@ mod tests {
         retired.insert("x.md", &Holder::Departed(None));
         assert!(
             retired
-                .holder("X.md".to_lowercase().as_str(), "doc-a")
+                .holder(path_collision_key("X.md").as_str(), "doc-a")
                 .is_some()
         );
         let mut own = Holders::default();

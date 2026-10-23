@@ -18,10 +18,12 @@ import {
   detectDevUrl,
   packageManagerCommand,
   packageManagerValidatedScriptCommand,
+  siteCommandEnvironment,
   splitCommandLine,
   splitShellStatements,
   startSiteDevServer,
   startStaticSitePreview,
+  type SiteLogEntry,
 } from "./siteRunner";
 
 let root: string;
@@ -380,6 +382,14 @@ describe("package manager helpers", () => {
       "http://localhost:5173/app",
     ],
   ])("removes delimiters from a detected dev URL in %s", (output, expected) => {
+    expect(detectDevUrl(output)).toBe(expected);
+  });
+
+  it.each([
+    ["Next.js", "   - Local:        http://127.0.0.1:3000", "http://127.0.0.1:3000"],
+    ["Create React App", "  http://127.0.0.1:3000", "http://127.0.0.1:3000"],
+    ["Vite", "  ➜  Local:   http://127.0.0.1:5173/", "http://127.0.0.1:5173/"],
+  ])("detects the URL %s prints when started on 127.0.0.1", (_framework, output, expected) => {
     expect(detectDevUrl(output)).toBe(expected);
   });
 
@@ -836,10 +846,101 @@ describe("package manager helpers", () => {
   });
 });
 
+describe("siteCommandEnvironment", () => {
+  it("drops dohc's host bindings and its own variables, and keeps the user's tools working", () => {
+    const env = siteCommandEnvironment({
+      HOST: "0.0.0.0",
+      HOSTNAME: "lan-name",
+      hostname: "lan-name",
+      DOHC_DESKTOP_OWNER_HOST_CONFIG: "/owner/config.json",
+      dohc_dev_tools: "1",
+      ELECTRON_RUN_AS_NODE: "1",
+      ELECTRON_RENDERER_URL: "http://127.0.0.1:5173",
+      PATH: "/usr/bin",
+      HOME: "/home/alex",
+      HTTPS_PROXY: "http://proxy.example:8080",
+      NODE_OPTIONS: "--max-old-space-size=4096",
+      npm_config_registry: "https://registry.example",
+    });
+    expect(env).toEqual({
+      PATH: "/usr/bin",
+      HOME: "/home/alex",
+      HTTPS_PROXY: "http://proxy.example:8080",
+      NODE_OPTIONS: "--max-old-space-size=4096",
+      npm_config_registry: "https://registry.example",
+    });
+  });
+
+  it("keeps dohc's own overrides, including a loopback host", () => {
+    expect(
+      siteCommandEnvironment(
+        { HOST: "0.0.0.0", PATH: "/usr/bin" },
+        { HOST: "127.0.0.1", HOSTNAME: "localhost", DOHC_TEST_PID_FILE: "/tmp/pid" },
+      ),
+    ).toEqual({ PATH: "/usr/bin", HOST: "127.0.0.1", HOSTNAME: "localhost", DOHC_TEST_PID_FILE: "/tmp/pid" });
+  });
+
+  it.each([
+    ["HOST", "0.0.0.0"],
+    ["HOSTNAME", "lan-name"],
+    ["Host", ""],
+  ])("refuses an override that sets %s beyond loopback", (name, value) => {
+    expect(() => siteCommandEnvironment({}, { [name]: value })).toThrow(/loopback host/);
+  });
+});
+
+// Prints what a site command sees of the variables dohc must not pass on,
+// and of one that dohc's own caller sets.
+const REPORT_SITE_ENVIRONMENT =
+  "const names=['HOST','HOSTNAME','DOHC_SITE_TEST_SECRET','ELECTRON_RUN_AS_NODE','DOHC_SITE_TEST_TRUSTED'];" +
+  "console.log('ENV:'+JSON.stringify(Object.fromEntries(names.map((n)=>[n,process.env[n]??null]))));";
+
+function stubDohcParentEnvironment(): void {
+  vi.stubEnv("HOST", "0.0.0.0");
+  vi.stubEnv("HOSTNAME", "lan-name");
+  vi.stubEnv("DOHC_SITE_TEST_SECRET", "owner-token");
+  vi.stubEnv("ELECTRON_RUN_AS_NODE", "1");
+}
+
+function reportedSiteEnvironment(logs: SiteLogEntry[]): unknown {
+  const line = logs.find((entry) => entry.text.startsWith("ENV:"))?.text;
+  return line ? JSON.parse(line.slice("ENV:".length)) : null;
+}
+
+const EXPECTED_SITE_ENVIRONMENT = {
+  HOST: null,
+  HOSTNAME: null,
+  DOHC_SITE_TEST_SECRET: null,
+  ELECTRON_RUN_AS_NODE: null,
+  DOHC_SITE_TEST_TRUSTED: "1",
+};
+
 // A loaded gate can take seconds to start a child. Ready and build timeouts
 // the test does not expect to fire are 20 s, inside the 30 s test timeout.
 describe("startSiteDevServer", () => {
   registerSiteScratch();
+
+  it("starts the dev server without dohc's host bindings or its own variables", async () => {
+    await mkdir(join(root, "site"), { recursive: true });
+    stubDohcParentEnvironment();
+    try {
+      const handle = await startSiteDevServer({
+        workspaceRoot: root,
+        siteRoot: "site",
+        command: process.execPath,
+        args: ["-e", `${REPORT_SITE_ENVIRONMENT}console.log('Local: http://127.0.0.1:43298');setInterval(()=>{},1000);`],
+        env: { DOHC_SITE_TEST_TRUSTED: "1" },
+        readyTimeoutMs: 20_000,
+      });
+      try {
+        expect(reportedSiteEnvironment(handle.logs())).toEqual(EXPECTED_SITE_ENVIRONMENT);
+      } finally {
+        await handle.stop();
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 
   it.runIf(process.platform !== "win32")(
     "stops descendants after the shell wrapper exits",
@@ -1232,6 +1333,25 @@ const BUILD_TEST_TIMEOUT_MS = 60_000;
 describe("buildSite", () => {
   registerSiteScratch();
 
+  it("runs the build without dohc's host bindings or its own variables", async () => {
+    await mkdir(join(root, "site"), { recursive: true });
+    stubDohcParentEnvironment();
+    try {
+      const result = await buildSite({
+        workspaceRoot: root,
+        siteRoot: "site",
+        command: process.execPath,
+        args: ["-e", REPORT_SITE_ENVIRONMENT],
+        env: { DOHC_SITE_TEST_TRUSTED: "1" },
+        timeoutMs: BUILD_TIMEOUT_MS,
+      });
+      expect(result.exitCode).toBe(0);
+      expect(reportedSiteEnvironment(result.logs)).toEqual(EXPECTED_SITE_ENVIRONMENT);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  }, BUILD_TEST_TIMEOUT_MS);
+
   it("runs a build command and detects the output directory", async () => {
     await mkdir(join(root, "site"), { recursive: true });
     const result = await buildSite({
@@ -1254,36 +1374,69 @@ describe("buildSite", () => {
     "stops a descendant a successful build wrapper backgrounds and leaves behind",
     async () => {
       await mkdir(join(root, "site"), { recursive: true });
-      const result = await buildSite({
-        workspaceRoot: root,
-        siteRoot: "site",
-        command: "sh",
-        args: [
-          "-c",
-          // Backgrounds a helper, writes the configured output, and exits
-          // successfully — the exact "completed wrapper leaves processes
-          // behind" scenario this pin proves gets torn down. A brief real
-          // delay (well under buildSite's own descendant-poll interval)
-          // keeps this realistic — the descendant tree walk itself takes
-          // real wall-clock time, so a wrapper that exits in literally
-          // zero time is an unfixable race no synchronous snapshot can
-          // win (the same residual round 17/#857 accepted).
-          "sleep 500 & echo CHILD:$! ; mkdir -p dist && echo built > dist/index.html; sleep 0.1",
-        ],
-        timeoutMs: 20_000,
-      });
-      expect(result.ok).toBe(true);
-      const childLog = result.logs.find((entry) => entry.text.includes("CHILD:"));
-      const descendantPid = Number(/CHILD:(\d+)/.exec(childLog?.text ?? "")?.[1]);
-      expect(descendantPid).toBeGreaterThan(0);
-
+      const pidFile = join(root, "site", "descendant.pid");
+      const capturedFile = join(root, "site", "descendant.captured");
+      // The wrapper backgrounds a helper, writes the configured output, and
+      // exits successfully, but only after a real process snapshot has found
+      // the helper. A fixed wrapper lifetime raced that snapshot: on a loaded
+      // host the helper was orphaned to init before the walk saw it.
+      const script = "sleep 500 & " + [
+        'echo "$!" > "$DOHC_TEST_DESCENDANT_PID_FILE"',
+        'echo "CHILD:$!"',
+        "mkdir -p dist && echo built > dist/index.html",
+        'while [ ! -f "$DOHC_TEST_DESCENDANT_CAPTURED_FILE" ]; do sleep 0.02; done',
+      ].join("; ");
+      const controller = new AbortController();
+      let descendantPid = 0;
+      let captureError: unknown;
+      let capture: Promise<number[]> | undefined;
+      // The production tree walk and ps reader, with the wrapper held open
+      // until that real snapshot has found the helper.
+      const captureDescendants = async (pid: number): Promise<number[]> => {
+        try {
+          descendantPid = await vi.waitFor(async () => {
+            const value = Number(await readFile(pidFile, "utf8"));
+            expect(Number.isSafeInteger(value) && value > 0).toBe(true);
+            return value;
+          }, { timeout: BUILD_TIMEOUT_MS });
+          const descendants = await posixSpawn.processDescendants(pid, posixSpawn.readProcessTableWithPs);
+          expect(descendants).toContain(descendantPid);
+          await writeFile(capturedFile, "captured");
+          return descendants;
+        } catch (error) {
+          captureError = error;
+          controller.abort();
+          return [];
+        }
+      };
       try {
+        const result = await buildSite({
+          workspaceRoot: root,
+          siteRoot: "site",
+          command: "sh",
+          args: ["-c", script],
+          descendantsReader: (pid) => capture ??= captureDescendants(pid),
+          env: {
+            DOHC_TEST_DESCENDANT_PID_FILE: pidFile,
+            DOHC_TEST_DESCENDANT_CAPTURED_FILE: capturedFile,
+          },
+          timeoutMs: 20_000,
+          signal: controller.signal,
+        });
+        expect(captureError).toBeUndefined();
+        expect(result.ok).toBe(true);
+        const childLog = result.logs.find((entry) => entry.text.includes("CHILD:"));
+        expect(Number(/CHILD:(\d+)/.exec(childLog?.text ?? "")?.[1])).toBe(descendantPid);
         expect(await waitForProcessDeath(descendantPid, PROCESS_DEATH_TIMEOUT_MS)).toBe(true);
       } finally {
-        try {
-          process.kill(descendantPid, "SIGKILL");
-        } catch {
-          // The fixed teardown already removed it.
+        controller.abort();
+        const cleanupPid = descendantPid || Number(await readFile(pidFile, "utf8").catch(() => "0"));
+        if (Number.isSafeInteger(cleanupPid) && cleanupPid > 0) {
+          try {
+            process.kill(cleanupPid, "SIGKILL");
+          } catch {
+            // The fixed teardown already removed it.
+          }
         }
       }
     },

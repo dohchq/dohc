@@ -19,6 +19,16 @@ node tools/perf-profiling/summarize-packaged-benchmark.mjs C:/perf/baseline-1
 
 Use `--label candidate` for the candidate. Keep the workload settings identical. Alternate baseline and candidate runs.
 
+Each receipt records `settings.metricVersion`. Version 2 times a document open from the Explorer click; the harness first scrolls a virtualized row into view outside the timing. Version 1 receipts, which have no setting, included that scroll. The comparison refuses receipts of different versions.
+
+On an Apple silicon Mac, pass the unpacked app bundle, such as `--package-dir apps/desktop/release/mac-arm64/dohc.app`.
+Build it unsigned with `CSC_IDENTITY_AUTO_DISCOVERY=false` and `electron-builder --dir --mac --arm64`.
+Use an output path without symbolic links, such as `/private/tmp/...` instead of `/tmp/...`. The app records workspace roots by their real path.
+The macOS sampler reports CPU time from `ps` and private bytes as the physical footprint from `footprint`. It has no IO counters.
+macOS cannot minimize another app's window without Accessibility permission, so the background idle phase hides the app instead.
+The startup, full, switch, Go to, command palette, search and soak scenarios run on macOS. The scenarios that seed through the Windows job object do not.
+Add `--typing-trace true` to the full scenario to time each key from its EventLatency trace slice, as the presence scenario does, instead of the censored Event Timing value.
+
 To fail on a regression, run `node tools/perf-profiling/compare-packaged-benchmark.mjs <baseline-directory> <candidate-directory>`.
 It writes `comparison.json` in the candidate directory and exits 1 when the candidate fails.
 The candidate fails when:

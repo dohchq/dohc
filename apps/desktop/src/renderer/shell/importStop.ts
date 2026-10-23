@@ -13,6 +13,11 @@ export function importStopSentence(stop: ImportStop): string {
   if (stop.refusal === "dangling-link") {
     return `dohc did not import ${file}, a symbolic link to a missing file. Restore that file, then import it instead.`;
   }
+  // A dropped file, or a folder on either side, that is not what dohc
+  // checked, such as one replaced by a link. Nothing is copied through it.
+  if (stop.refusal === "changed") {
+    return `dohc did not import ${file}, because a file or folder changed while dohc copied it.`;
+  }
   switch (stop.code) {
     case "EACCES":
     case "EPERM":

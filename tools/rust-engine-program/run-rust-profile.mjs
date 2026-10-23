@@ -3,13 +3,12 @@
 import { randomBytes, createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { tmpdir } from "node:os";
 import { withBuildBudget } from "../../scripts/verification/build.mjs";
 import { cancellationScope } from "../../scripts/verification/cancellation.mjs";
 import { git, repoRoot, run } from "../../scripts/verification/process.mjs";
 import { classifyTreeProvenance, readTreeState } from "./tree-provenance.mjs";
 import { verifyNativeTarget } from "./native-target.mjs";
-import { SCRATCH_SENTINEL, inspectScratchRun } from "./scratch-leak-report.mjs";
+import { SCRATCH_SENTINEL, inspectScratchRun, testScratchParent } from "./scratch-leak-report.mjs";
 import { profilingHostContext } from "../perf-profiling/admission.mjs";
 
 const args = process.argv.slice(2);
@@ -31,7 +30,7 @@ for (let index = 0; index < selection.length; index += 1) {
 }
 const output = join(repoRoot, ".agent-artifacts/rust-profile", `${new Date().toISOString().replaceAll(":", "-")}-${label}`);
 mkdirSync(output, { recursive: true });
-const scratch = join(tmpdir(), "dohc-test-scratch", `rust-profile-${process.pid}-${randomBytes(8).toString("hex")}`);
+const scratch = join(testScratchParent(), `profile-${process.pid}-${randomBytes(8).toString("hex")}`);
 const report = { kind: "focused-rust-profile", gateEvidence: false, label, root: repoRoot, pid: process.pid, target: join(repoRoot, "target"), selection, output, steps: [], verdict: "RUNNING" };
 report.hostContext = {scope: "Registered queue work at phase boundaries; does not certify an idle host.", observations: []};
 function observeHost(phase, env = process.env) {

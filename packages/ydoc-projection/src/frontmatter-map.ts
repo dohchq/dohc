@@ -34,12 +34,18 @@ function entryItem(map: Y.Map<unknown>, key: string): string | undefined {
 
 /** Record the item each frontmatter key holds now, beside the kept text. */
 export function recordFrontmatterSourceItems(frontmatter: Y.Map<unknown>, meta: Y.Map<unknown>): void {
-  for (const key of [...meta.keys()]) {
-    if (key.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) meta.delete(key)
+  const items = new Map<string, string>()
+  if (meta.has(FRONTMATTER_SOURCE_META_KEY)) {
+    for (const key of frontmatter.keys()) {
+      const item = entryItem(frontmatter, key)
+      if (item !== undefined) items.set(FRONTMATTER_SOURCE_ITEM_META_PREFIX + key, item)
+    }
   }
-  for (const key of frontmatter.keys()) {
-    const item = entryItem(frontmatter, key)
-    if (item !== undefined) meta.set(FRONTMATTER_SOURCE_ITEM_META_PREFIX + key, item)
+  for (const key of [...meta.keys()]) {
+    if (key.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX) && !items.has(key)) meta.delete(key)
+  }
+  for (const [key, item] of items) {
+    if (meta.get(key) !== item) meta.set(key, item)
   }
 }
 

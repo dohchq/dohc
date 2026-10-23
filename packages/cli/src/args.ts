@@ -1,10 +1,12 @@
+import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-mentions";
+import { LinksEdgesInput, type LinksEdgesInput as EdgesInput, LinksInInput, LinksResolveInput, type LinksInInput as InInput, type LinksResolveInput as ResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
-import { DATASET_CAPABILITIES, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, type CliActor } from "./protocol";
+import { APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliActor } from "./protocol";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
 import { OwnerAppResponsesRequest } from "./appResponses";
-import { DatasetRequest, DatasetSchemaChange } from "./dataset";
+import { DATASET_CAPABILITIES, DatasetRequest, DatasetSchemaChange } from "./dataset";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import { AccessObjectRef } from "@dohc/workspace-contracts/access";
 
@@ -19,11 +21,17 @@ type ExportScope =
   | { kind: "thread"; thread: string };
 
 type CliCommandBody =
+  | ({ verb: "chatLinks" } & z.infer<typeof chatLinksGroupInputSchema>)
+  | ({ verb: "chatFileMentions" } & ChatFileMentionsInput)
+  | ({ verb: "linksEdges" } & EdgesInput)
+  | ({ verb: "linksIn" } & InInput)
+  | ({ verb: "linksResolve" } & ResolveInput)
   | { verb: "stopSync"; agent?: string }
   | { verb: "shareCopy"; shareId: string; grantId: string }
   | { verb: "accountDeletePreview" }
   | { verb: "accountDelete"; server: string; previewToken: string }
   | { verb: "accessObject"; ref: AccessObjectRef; cursor?: string }
+  | { verb: "accessRefresh" }
   | { verb: "accessSharing"; lane: "granted" | "received"; cursor?: string }
   | { verb: "documentRead" | "fileChats"; path: string }
   | { verb: "fileChatStart"; path: string; title: string; body: string; stdin: boolean; agent?: string; requestId?: string; runId?: string }
@@ -73,6 +81,7 @@ type CliCommandBody =
   | { verb: "moments"; path?: string; limit: number }
   | { verb: "historyOperation"; operationId: string; cursor?: string }
   | { verb: "historyUndo"; operationId: string }
+  | { verb: "fileDuplicate"; path: string; agent?: string; requestId?: string }
   | { verb: "moment"; id: string; side: "before" | "after" }
   | { verb: "automationRuns"; collectionPath: string; automation: string; page?: string }
   | { verb: "automationList"; collectionPath: string }
@@ -519,7 +528,7 @@ const HISTORY_VERBS = {
     },
   },
   undo: {
-    capabilityId: "history.operation.undo", summary: "Undo a delete recorded in History.", operands: "<operation>",
+    capabilityId: "history.operation.undo", summary: "Undo a delete, move, or rename recorded in History.", operands: "<operation>",
     parse: input => {
       const [id, ...extra] = input.operands; noExtraArgs(extra, "history undo");
       return { verb: "historyUndo", operationId: operationId(id) };
@@ -784,7 +793,10 @@ const migrationApproval = "Review the result, then approve it with approveMigrat
 const agentLabelNote = "agentLabel is an optional label supplied by the agent. With --as-agent, and always through MCP, agentLabel is recorded as agent-declared. Without it, no agent identity is recorded. Automation runs cannot approve or publish.";
 
 const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
-  list: { summary: "List Collections." },
+  list: {
+    summary: "List Collections.",
+    notes: ["On a computer that doesn't keep the workspace's Collections, list returns the Collections on this computer's server. elsewhere names that server and the computer that keeps the others."],
+  },
   describe: {
     summary: "Show a Collection's tables, fields, and operations.",
     notes: ["Use describe to find approved operation IDs."],
@@ -1028,6 +1040,20 @@ const APP_VERBS: Record<string, CliVerbSpec> = Object.fromEntries([
 
 /** Every command and verb the CLI dispatches. Help reads this table too. */
 export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
+  links: { summary: "Read and resolve document links.", notes: [], verbs: {
+    edges: { capabilityId: "links.edges", summary: "Read a bounded page of file links.", operands: "", flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous page." }], parse: input => {
+      noExtraArgs(input.operands, "links edges");
+      return { verb: "linksEdges", ...LinksEdgesInput.parse({ cursor: lastValue(input, "--cursor") }) };
+    } },
+    in: { capabilityId: "links.in", summary: "Read documents that link to a file.", operands: "<subject-json>", flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous page." }], parse: input => {
+      const [subject, ...extra] = input.operands; noExtraArgs(extra, "links in");
+      try { return { verb: "linksIn", ...LinksInInput.parse({ subject: JSON.parse(subject ?? "null"), cursor: lastValue(input, "--cursor") }) }; } catch { return fail('Use a subject JSON object with path or objectId.'); }
+    } },
+    resolve: { capabilityId: "links.resolve", summary: "Resolve links from one document.", operands: "<source> <literals-json>", parse: input => {
+      const [source, literals, ...extra] = input.operands; noExtraArgs(extra, "links resolve");
+      try { return { verb: "linksResolve", ...LinksResolveInput.parse({ source, literals: JSON.parse(literals ?? "null") }) }; } catch { return fail('Use a source path and a JSON array of kind and literal objects.'); }
+    } },
+  } },
   sync: {
     summary: "Stop syncing this workspace on this computer.",
     notes: ["Local files, documents, records, and history stay here. Shares and protected-file keys are retained.",
@@ -1047,10 +1073,15 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     },
   },
   access: {
-    summary: "Read observed object grants and Sharing inventories.",
+    summary: "Read observed grants and request fresh Sharing inventories.",
     notes: ["Answers describe observed grants, not authorization. An empty page means no matching grants within its coverage.",
       "Paths resolve from your current folder. Received selectors use their source workspace's coordinates."],
     verbs: {
+      refresh: {
+        capabilityId: "access.refresh", operands: "", summary: "Request fresh Sharing observations with the same pacing as opening Sharing.",
+        notes: ["Reports requested, joined, paced, or unavailable. Requested and joined wait for started or existing attempts to settle, without promising success. Paced follows the existing refresh schedule. Read access sharing afterward to inspect observations."],
+        parse: input => { noExtraArgs(input.operands, "access refresh"); return { verb: "accessRefresh" }; },
+      },
       object: {
         capabilityId: "access.object.read", summary: "Read the grants covering an object.", operands: "<reference-json>",
         flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous answer." }],
@@ -1100,7 +1131,28 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
       "Name a Group by its name or ID, and a thread or message by its ID. A unique ID prefix also works.",
       "DOHC_CHAT_ACTOR=agent in the environment does the same as --as-agent.",
     ],
-    verbs: CHAT_VERBS,
+    verbs: { ...CHAT_VERBS, links: {
+      capabilityId: "chat.read", summary: "Read one page of files mentioned in a chat.", operands: "<group>",
+      flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous page." }],
+      parse: input => {
+        const [group, ...extra] = input.operands;
+        if (!group) fail("links requires a group");
+        noExtraArgs(extra, "chat links");
+        return { verb: "chatLinks", ...chatLinksGroupInputSchema.parse({ group, cursor: lastValue(input, "--cursor") }) };
+      },
+    }, "file-mentions": {
+      capabilityId: "chat.read", summary: "Read one bounded page of file mentions.",
+      operands: "", flags: [
+        { name: "--subject", value: "subject", text: "A file path or objectId as JSON." },
+        { name: "--cursor", value: "cursor", text: "Continue the previous page." },
+      ], parse: input => {
+        noExtraArgs(input.operands, "chat file-mentions");
+        const subject = lastValue(input, "--subject");
+        return { verb: "chatFileMentions", ...ChatFileMentionsInput.parse({
+          ...(subject ? { subject: JSON.parse(subject) } : {}), cursor: lastValue(input, "--cursor"),
+        }) };
+      },
+    } },
   },
   dataset: {
     summary: "Create, change, and use transactional Collections.",
@@ -1112,8 +1164,13 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     notes: [workspaceNote],
     verbs: APP_VERBS,
   },
+  file: {
+    summary: "Change workspace files.", notes: ["Undo removes the copy while it is unchanged."],
+    verbs: {duplicate: {capabilityId: "file.duplicate", summary: "Duplicate one file beside its source.", operands: "<path>",
+      parse: input => {const [path, ...extra] = input.operands; if (!path) fail("file duplicate requires a path"); noExtraArgs(extra, "file duplicate"); return {verb: "fileDuplicate", path};}}},
+  },
   history: {
-    summary: "Read History changes and undo deletes.",
+    summary: "Read History changes and undo deletes, moves, and renames.",
     notes: ["Changes come from the active version of the workspace."],
     verbs: HISTORY_VERBS,
   },
@@ -1197,7 +1254,7 @@ export function parseCliArguments(
   const verb = lookup(command.verbs, verbName);
   if (!verb) fail(`unknown ${commandName} verb '${verbName}'; run dohc ${commandName} --help`);
   if (help) return { help: [commandName, verbName] };
-  const agent = (commandName === "history" && verbName === "undo") || commandName === "document" || global.actorFlag || (commandName === "chat" && env.DOHC_CHAT_ACTOR === "agent");
+  const agent = (commandName === "history" && verbName === "undo") || commandName === "document" || commandName === "file" || global.actorFlag || (commandName === "chat" && env.DOHC_CHAT_ACTOR === "agent");
   const body = verb.parse(readVerbInput(`${commandName} ${verbName}`, verb, tokens));
   return { actor: agent ? "agent" : "human", json: global.json, ...body };
 }

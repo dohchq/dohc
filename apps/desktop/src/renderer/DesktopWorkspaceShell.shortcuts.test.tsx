@@ -3,10 +3,12 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { makeBridge, renderShell, STORED_STATE, storedStateWithTabs } from "./DesktopWorkspaceShell.testHarness";
-import { SHORTCUTS, matchShellShortcut, type ShortcutId } from "../shortcuts/shortcutRegistry";
+import { SHORTCUTS, matchShellShortcut, shortcutAccelerators, type ShortcutId } from "../shortcuts/shortcutRegistry";
 import { buildMenuTemplate } from "../window/applicationMenu";
 import type { MenuItemConstructorOptions } from "electron";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
+import { EDITOR_MENU_COMMANDS } from "../ipc/channels";
+import { onEditorMenuCommand } from "./editor/editorMenuCommands";
 
 async function ready(platform: NodeJS.Platform = "win32") {
   const bridge = makeBridge(Promise.resolve(STORED_STATE), platform);
@@ -14,15 +16,19 @@ async function ready(platform: NodeJS.Platform = "win32") {
   await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
   return bridge;
 }
+// An accelerator as the platform's keyboard sends it: CommandOrControl is
+// Command on macOS and Control elsewhere, and Ctrl is Control everywhere.
 function keyEvent(accelerator: string, platform: NodeJS.Platform, extra: KeyboardEventInit = {}) {
   const parts = accelerator.split("+");
+  const primary = parts.includes("CommandOrControl");
   return new KeyboardEvent("keydown", {
-    key: parts.at(-1)!, ctrlKey: platform !== "darwin", metaKey: platform === "darwin",
+    key: parts.at(-1)!, ctrlKey: parts.includes("Ctrl") || (primary && platform !== "darwin"), metaKey: primary && platform === "darwin",
     shiftKey: parts.includes("Shift"), altKey: parts.includes("Alt"), bubbles: true, cancelable: true, ...extra,
   });
 }
-const shellBindings = Object.entries(SHORTCUTS).filter(([, row]) => row.owner === "shell")
-  .flatMap(([id, row]) => row.accelerators.map((accelerator) => [id as ShortcutId, accelerator] as const));
+// Each platform's own chords: a row's macOS keys replace its others there.
+const shellBindings = (platform: NodeJS.Platform) => Object.entries(SHORTCUTS).filter(([, row]) => row.owner === "shell")
+  .flatMap(([id]) => shortcutAccelerators(id as ShortcutId, platform).map((accelerator) => [id as ShortcutId, accelerator] as const));
 
 describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => {
   it("matches the separate history-restore owner without taking editor undo", async () => {
@@ -32,11 +38,11 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     expect(bindings).toHaveLength(1);
     for (const binding of bindings) {
       const event = keyEvent(binding, platform);
-      expect(matchShellShortcut(event)).toBe("history-restore-undo");
+      expect(matchShellShortcut(event, platform)).toBe("history-restore-undo");
       fireEvent(window, event);
       expect(event.defaultPrevented).toBe(false);
       for (const extra of [{ isComposing: true }, { repeat: true }]) {
-        expect(matchShellShortcut(keyEvent(binding, platform, extra))).toBeNull();
+        expect(matchShellShortcut(keyEvent(binding, platform, extra), platform)).toBeNull();
       }
     }
   });
@@ -56,7 +62,7 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     }
   });
 
-  it.each(shellBindings)("claims %s: %s and keeps menu registration disabled", async (_id, accelerator) => {
+  it.each(shellBindings(platform))("claims %s: %s and keeps menu registration disabled", async (_id, accelerator) => {
     const bridge = await ready(platform);
     const menu = buildMenuTemplate({ isDev: false, platform, sendCommand: vi.fn(), stepZoom: vi.fn(), showAbout: vi.fn() });
     const items = menu.flatMap((item) => Array.isArray(item.submenu) ? item.submenu : []) as MenuItemConstructorOptions[];
@@ -68,7 +74,7 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     expect(bridge.stepWindowZoom).not.toHaveBeenCalled();
   });
 
-  it.each(shellBindings)("leaves %s: %s with a focused editor that claimed it", async (_id, accelerator) => {
+  it.each(shellBindings(platform))("leaves %s: %s with a focused editor that claimed it", async (_id, accelerator) => {
     await ready(platform);
     const editor = document.createElement("textarea");
     screen.getByTestId("workspace-shell").append(editor);
@@ -83,7 +89,7 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
   });
 
-  it.each(shellBindings)("blocks %s: %s during composition and repeat", async (_id, accelerator) => {
+  it.each(shellBindings(platform))("blocks %s: %s during composition and repeat", async (_id, accelerator) => {
     await ready(platform);
     for (const init of [{ isComposing: true }, { repeat: true }]) {
       const event = keyEvent(accelerator, platform, init);
@@ -254,6 +260,31 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
   });
 });
 
+describe("macOS Control-key text editing", () => {
+  it.each(["textarea", "contenteditable"] as const)("keeps Control chords in a %s instead of running shell commands", async (kind) => {
+    await ready("darwin");
+    const field = document.createElement(kind === "textarea" ? "textarea" : "div");
+    if (kind === "contenteditable") field.contentEditable = "true";
+    screen.getByTestId("workspace-shell").append(field);
+    field.focus();
+    const groups = () => document.querySelectorAll('[data-testid^="editor-group-"]:not([data-testid*="resize"])').length;
+    const groupsBefore = groups();
+    for (const key of ["n", "p", "k", "b", "w", ",", "\\"]) {
+      const event = new KeyboardEvent("keydown", { key, ctrlKey: true, bubbles: true, cancelable: true });
+      fireEvent(field, event);
+      expect(event.defaultPrevented, `Control+${key}`).toBe(false);
+    }
+    expect(screen.getByTestId("side-panel")).toBeTruthy();
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+    expect(screen.queryByTestId("command-palette")).toBeNull();
+    expect(screen.queryByTestId("quick-open")).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "File name" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
+    expect(groups()).toBe(groupsBefore);
+    field.remove();
+  });
+});
+
 describe("macOS text editing inside a modal", () => {
   it.each([
     ["plain", {}],
@@ -283,5 +314,31 @@ describe("macOS text editing inside a modal", () => {
     expect(screen.queryByTestId("command-palette")).toBeNull();
     expect(screen.queryByTestId("quick-open")).toBeNull();
     expect(screen.queryByRole("textbox", { name: "File name" })).toBeNull();
+  });
+});
+
+describe("macOS Edit > Find", () => {
+  it("hands each item to the editor that has focus, and to nothing without one", async () => {
+    const bridge = await ready("darwin");
+    const editor = document.createElement("div");
+    const field = editor.appendChild(document.createElement("input"));
+    screen.getByTestId("workspace-shell").append(editor);
+    const received = vi.fn();
+    const stop = onEditorMenuCommand(editor, received);
+    try {
+      field.focus();
+      for (const command of EDITOR_MENU_COMMANDS) act(() => bridge.emitMenuCommand(command));
+      expect(received.mock.calls).toEqual(EDITOR_MENU_COMMANDS.map((command) => [command]));
+
+      field.blur();
+      for (const command of EDITOR_MENU_COMMANDS) act(() => bridge.emitMenuCommand(command));
+      expect(received).toHaveBeenCalledTimes(EDITOR_MENU_COMMANDS.length);
+      expect(screen.getByTestId("side-panel")).toBeTruthy();
+      expect(screen.queryByTestId("command-palette")).toBeNull();
+      expect(screen.queryByTestId("quick-open")).toBeNull();
+    } finally {
+      stop();
+      editor.remove();
+    }
   });
 });

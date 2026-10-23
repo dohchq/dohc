@@ -5,6 +5,18 @@
 export const UPDATE_CHANNELS = ["latest", "nightly"] as const;
 export type UpdateChannel = (typeof UPDATE_CHANNELS)[number];
 
+// Main hands the build's channel to every preload as a process argument, so
+// the renderer reads it as a constant, like the platform.
+const RELEASE_CHANNEL_ARGUMENT = "--dohc-release-channel=";
+
+export function releaseChannelPreloadArguments(channel: UpdateChannel): string[] {
+  return [`${RELEASE_CHANNEL_ARGUMENT}${channel}`];
+}
+
+export function releaseChannelFromArgv(argv: readonly string[]): UpdateChannel {
+  return argv.includes(`${RELEASE_CHANNEL_ARGUMENT}nightly`) ? "nightly" : "latest";
+}
+
 export type UpdateState =
   | { status: "idle"; message: string }
   | { status: "checking"; message: string }
@@ -104,7 +116,7 @@ export function transition(state: UpdateState, event: UpdateEvent): UpdateState 
     case "defer":
       return state.status === "ready" ? ready(state.version, true) : state;
     case "offline":
-      // A downloaded update survives going offline: install-on-quit is local.
+      // A downloaded update survives going offline: installing it is local.
       return state.status === "ready"
         ? state
         : {
@@ -114,8 +126,8 @@ export function transition(state: UpdateState, event: UpdateEvent): UpdateState 
             message: "You're offline. dohc will check for updates the next time it starts.",
           };
     case "error":
-      // A downloaded update still installs on quit (autoInstallOnAppQuit), so
-      // "ready" survives errors exactly like it survives going offline.
+      // A downloaded update still installs on restart or quit, so "ready"
+      // survives errors exactly like it survives going offline.
       return state.status === "ready"
         ? state
         : {

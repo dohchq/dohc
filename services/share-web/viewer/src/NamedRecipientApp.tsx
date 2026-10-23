@@ -4,7 +4,7 @@ import {fetchShareWeb} from "./apiVersion";
 import {accountUser, namedFiles, namedRequest, ShareAccessRemovedError, type NamedRecipientFiles} from "./namedRecipient";
 import {NamedDocumentEditor, type NamedDocumentSession} from "./NamedDocumentEditor";
 import {DiscardDraft} from "./DiscardDraft";
-import {NamedSignIn, SIGN_IN_FAILED} from "./NamedSignIn";
+import {NamedSignIn, signInErrorMessage} from "./NamedSignIn";
 
 type Account = {id: string; name: string};
 type Selection = {session: NamedDocumentSession; path: string; objectId: string};
@@ -65,7 +65,7 @@ export default function NamedRecipientApp({grantId}: {grantId: string | null}) {
     const controller = start();
     void namedRequest("/api/account/sign-in", controller.signal, credentials).then(
       () => load(controller).catch((cause: unknown) => {if (!controller.signal.aborted) setError(cause instanceof ShareAccessRemovedError ? cause.message : "dohc could not open this invitation. Retry or sign in with the invited account.");}),
-      () => {if (!controller.signal.aborted) setError(SIGN_IN_FAILED);},
+      (reason: unknown) => {if (!controller.signal.aborted) setError(signInErrorMessage(reason));},
     )
       .finally(() => {if (!controller.signal.aborted) setBusy(false);});
   };

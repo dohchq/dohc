@@ -216,12 +216,67 @@ describe("application menu template", () => {
     ]);
   });
 
+  it.each(["win32", "linux"] as const)("%s shows the tab commands beside Close tab, with Ctrl+PageDown kept as an alternate", (platform) => {
+    const { template, sendCommand } = build(false, platform);
+    const file = items(template, "File");
+    const quit = platform === "linux" ? 2 : 0;
+    expect(file.map((entry) => entry.label ?? entry.role).slice(-6 - quit, file.length - quit)).toEqual([
+      "Show next tab", "Show next tab (alternate)",
+      "Show previous tab", "Show previous tab (alternate)",
+      "Close tab", "Close window",
+    ]);
+    for (const [label, accelerator, hidden] of [
+      ["Show next tab", "Ctrl+Tab", false],
+      ["Show next tab (alternate)", "Ctrl+PageDown", true],
+      ["Show previous tab", "Ctrl+Shift+Tab", false],
+      ["Show previous tab (alternate)", "Ctrl+PageUp", true],
+    ] as const) {
+      const entry = file.find((item) => item.label === label);
+      expect(entry, label).toMatchObject({ accelerator, registerAccelerator: false });
+      expect(entry?.visible === false, label).toBe(hidden);
+    }
+    const fakeWindow = { id: 11 };
+    (file.find((item) => item.label === "Show previous tab")?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
+    expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "previous-tab");
+  });
+
+  it("darwin: the Window menu holds Show next tab and Show previous tab, as in Safari", () => {
+    const { template, sendCommand } = build(false, "darwin");
+    const windowMenu = template.find((entry) => entry.role === "windowMenu")!;
+    const entries = windowMenu.submenu as MenuItemConstructorOptions[];
+    expect(entries.map((entry) => entry.role ?? entry.label ?? entry.type)).toEqual([
+      "minimize", "zoom", "separator",
+      "Show next tab", "Show next tab (alternate)",
+      "Show previous tab", "Show previous tab (alternate)",
+      "separator", "front",
+    ]);
+    expect(entries.filter((entry) => entry.label?.startsWith("Show")).map((entry) => [entry.accelerator, entry.visible !== false])).toEqual([
+      ["Ctrl+Tab", true], ["CommandOrControl+Shift+]", false],
+      ["Ctrl+Shift+Tab", true], ["CommandOrControl+Shift+[", false],
+    ]);
+    expect(items(template, "File").some((entry) => entry.label?.startsWith("Show"))).toBe(false);
+    const fakeWindow = { id: 12 };
+    (entries.find((entry) => entry.label === "Show next tab (alternate)")?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
+    expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "next-tab");
+  });
+
   it("keeps separate CommandOrControl shortcuts for Close Tab and Close Window", () => {
     // The close role defaults to CommandOrControl+W. That shortcut belongs to
     // Close Tab, so Close Window must use a different accelerator.
     const { template } = build();
     const closeWindow = items(template, "File").find((i) => i.role === "close");
     expect(closeWindow?.accelerator).toBe("CommandOrControl+Shift+W");
+  });
+
+  it("linux: File ends with Quit on Ctrl+Q, the way Linux apps quit; Windows keeps Close window last", () => {
+    const linuxFile = items(build(false, "linux").template, "File");
+    expect(linuxFile.slice(-3).map((i) => i.role ?? i.type)).toEqual(["close", "separator", "quit"]);
+    expect(linuxFile.at(-1)).toMatchObject({ role: "quit", label: "Quit", accelerator: "CommandOrControl+Q" });
+    const all = (entries: MenuItemConstructorOptions[]): MenuItemConstructorOptions[] =>
+      entries.flatMap((entry) => [entry, ...(Array.isArray(entry.submenu) ? all(entry.submenu) : [])]);
+    expect(all(build(false, "win32").template).some((entry) => entry.role === "quit")).toBe(false);
+    const macQuit = all(build(false, "darwin").template).filter((entry) => entry.role === "quit");
+    expect(macQuit).toEqual([{ role: "quit", label: "Quit dohc", accelerator: "CommandOrControl+Q" }]);
   });
 
   it("devtools is present in dev and absent in packaged builds", () => {
@@ -231,19 +286,110 @@ describe("application menu template", () => {
     expect(roles(false)).not.toContain("toggleDevTools");
   });
 
-  it("darwin: appMenu role leads (macOS turns the first entry into the app menu) and windowMenu precedes Help", () => {
-    const { template } = build(false, "darwin");
-    expect(template[0]).toEqual({ role: "appMenu" });
-    expect(template.map((entry) => entry.label)).toEqual([
-      undefined, // appMenu — macOS supplies the app name
+  it("darwin: the app menu leads and holds About, updates, Settings, and the system's items", () => {
+    const { template } = build(false, "darwin", true);
+    expect(template.map((entry) => entry.label ?? entry.role)).toEqual([
+      "appMenu", // macOS titles it with the app name
       "File",
       "Edit",
       "View",
-      "Go",
-      undefined, // windowMenu
+      "windowMenu",
       "Help",
     ]);
-    expect(template.at(-2)).toEqual({ role: "windowMenu" });
+    const appMenu = template[0]!;
+    expect(appMenu.role).toBe("appMenu");
+    expect((appMenu.submenu as MenuItemConstructorOptions[]).map((entry) => entry.role ?? entry.label ?? entry.type)).toEqual([
+      "about",
+      "Check for updates",
+      "Update and restart",
+      "separator",
+      "Settings…",
+      "separator",
+      "services",
+      "separator",
+      "hide",
+      "hideOthers",
+      "unhide",
+      "separator",
+      "quit",
+    ]);
+    const settings = (appMenu.submenu as MenuItemConstructorOptions[]).find((entry) => entry.label === "Settings…");
+    expect(settings?.accelerator).toBe("CommandOrControl+,");
+  });
+
+  it("darwin: one About, the native panel, and no Go menu", () => {
+    const { template, sendCommand } = build(false, "darwin");
+    const all = (entries: MenuItemConstructorOptions[]): MenuItemConstructorOptions[] =>
+      entries.flatMap((entry) => [entry, ...(Array.isArray(entry.submenu) ? all(entry.submenu) : [])]);
+    const abouts = all(template).filter((entry) => entry.role === "about" || entry.label === "About dohc");
+    expect(abouts).toEqual([{ role: "about", label: "About dohc" }]);
+    expect(template.some((entry) => entry.label === "Go")).toBe(false);
+    const settings = all(template).filter((entry) => entry.label?.startsWith("Settings"));
+    expect(settings).toHaveLength(1);
+    const fakeWindow = { id: 9 };
+    (settings[0]?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
+    expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "settings");
+  });
+
+  it("darwin: the standard Edit menu with Find, Full Screen in View, and the palette in Help beside the menu search", () => {
+    const { template, sendCommand } = build(false, "darwin");
+    // Electron's editMenu role, with Find before Substitutions as in TextEdit.
+    const edit = items(template, "Edit");
+    expect(edit.map((entry) => entry.role ?? entry.label ?? entry.type)).toEqual([
+      "undo", "redo", "separator",
+      "cut", "copy", "paste", "pasteAndMatchStyle", "delete", "selectAll", "separator",
+      "Find", "Substitutions", "Speech",
+    ]);
+    expect(edit.find((entry) => entry.label === "Substitutions")?.submenu).toEqual([
+      { role: "showSubstitutions" }, { type: "separator" },
+      { role: "toggleSmartQuotes" }, { role: "toggleSmartDashes" }, { role: "toggleTextReplacement" },
+    ]);
+    expect(edit.find((entry) => entry.label === "Speech")?.submenu).toEqual([
+      { role: "startSpeaking" }, { role: "stopSpeaking" },
+    ]);
+    const view = items(template, "View");
+    expect(view.at(-1)).toEqual({ role: "togglefullscreen" });
+    const help = template.at(-1)!;
+    expect(help).toMatchObject({ label: "Help", role: "help" });
+    const helpItems = help.submenu as MenuItemConstructorOptions[];
+    // View registers the palette's keys; a second copy would register them again.
+    expect(helpItems).toEqual([{ label: "Command palette", enabled: true, click: expect.any(Function) }]);
+    const fakeWindow = { id: 10 };
+    (helpItems[0]?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
+    expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "command-palette");
+  });
+
+  it("darwin: Edit > Find shows the editor's find keys and hands each item to the clicked window", () => {
+    const { template, sendCommand } = build(false, "darwin");
+    const find = items(template, "Edit").find((entry) => entry.label === "Find");
+    const entries = find?.submenu as MenuItemConstructorOptions[];
+    expect(entries.map(({ label, accelerator, registerAccelerator, enabled }) => ({ label, accelerator, registerAccelerator, enabled }))).toEqual([
+      { label: "Find…", accelerator: "CommandOrControl+F", registerAccelerator: false, enabled: true },
+      { label: "Find and replace…", accelerator: "CommandOrControl+Alt+F", registerAccelerator: false, enabled: true },
+      { label: "Find next", accelerator: "CommandOrControl+G", registerAccelerator: false, enabled: true },
+      { label: "Find previous", accelerator: "CommandOrControl+Shift+G", registerAccelerator: false, enabled: true },
+    ]);
+    const fakeWindow = { id: 13 };
+    for (const entry of entries) (entry.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
+    expect(sendCommand.mock.calls).toEqual([
+      [fakeWindow, "editor-find"],
+      [fakeWindow, "editor-replace"],
+      [fakeWindow, "find-again-next"],
+      [fakeWindow, "find-again-previous"],
+    ]);
+  });
+
+  it.each(["win32", "linux"] as const)("%s keeps Edit, Go, and Help as they were, without macOS items", (platform) => {
+    const { template } = build(false, platform);
+    expect(template.map((entry) => entry.label)).toEqual(["File", "Edit", "View", "Go", "Help"]);
+    expect(items(template, "Edit").map((entry) => entry.role ?? entry.type)).toEqual([
+      "undo", "redo", "separator", "cut", "copy", "paste", "selectAll",
+    ]);
+    expect(template.at(-1)?.role).toBe("help");
+    expect(items(template, "Help").map((entry) => entry.label ?? entry.type)).toEqual([
+      "Check for updates", "Update and restart", "separator", "About dohc",
+    ]);
+    expect(items(template, "View").some((entry) => entry.role === "togglefullscreen")).toBe(false);
   });
 
   it("About is a Help click-through, not a command", () => {

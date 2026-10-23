@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseCliArguments, type ParsedCliCommand } from "./args";
@@ -77,8 +78,20 @@ function buildCliRequest(
     actor: command.actor,
   } as const;
   switch (command.verb) {
+    case "linksEdges":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, cursor: command.cursor } };
+    case "chatLinks":
+      return {protocolVersion:common.protocolVersion,verb:command.verb,args:{cwd:common.cwd,actor:common.actor,group:command.group,cursor:command.cursor}};
+    case "chatFileMentions":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, subject: command.subject, cursor: command.cursor } };
+    case "linksIn":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, subject: command.subject, cursor: command.cursor } };
+    case "linksResolve":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, source: command.source, literals: command.literals } };
     case "historyOperation":
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, operationId: command.operationId, ...(command.cursor ? { cursor: command.cursor } : {}) } };
+    case "fileDuplicate":
+      return {protocolVersion: common.protocolVersion, verb: command.verb, args: {cwd: common.cwd, actor: common.actor, path: command.path, requestId: command.requestId ?? randomUUID(), agent: command.agent}};
     case "historyUndo":
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, operationId: command.operationId } };
     case "stopSync":
@@ -91,6 +104,8 @@ function buildCliRequest(
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: {
         cwd: common.cwd, actor: common.actor, server: command.server, previewToken: command.previewToken, password: password ?? "",
       } };
+    case "accessRefresh":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor } };
     case "accessObject":
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, ref: command.ref, cursor: command.cursor } };
     case "accessSharing":
@@ -308,13 +323,13 @@ function buildCliRequest(
 // A verb that could not do what was asked exits with its reason. A refused
 // Try again for another computer's run adds the notice that names it.
 function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null {
-  if (!("ok" in result) || result.ok !== false) return null;
+  if (result === null || !("ok" in result) || result.ok !== false) return null;
   return "notice" in result && result.notice
     ? `${result.reason} ${result.notice.title}: ${result.notice.body}`
     : result.reason;
 }
 
-const REFUSING_VERBS = new Set(["historyOperation", "historyUndo", "accountDelete", "moments", "moment", "documentRead", "documentEdit", "documentCreate", "fileChats", "fileChatStart", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
+const REFUSING_VERBS = new Set(["fileDuplicate", "historyOperation", "historyUndo", "accountDelete", "moments", "moment", "documentRead", "documentEdit", "documentCreate", "fileChats", "fileChatStart", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
 
 function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
   return JSON.stringify({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...result }, null, 2);
@@ -356,14 +371,14 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     const refused = REFUSING_VERBS.has(command.verb) ? refusal(result) : null;
     if (refused !== null) throw new DohcCliError(refused);
     const output = command.json
-      ? jsonOutput(result)
+      ? result === null ? "null" : jsonOutput(result)
       : renderCliResult(command.verb, result, {
           grepFilesWithMatches: command.verb === "grep" ? command.filesWithMatches : false,
           grepContext: command.verb === "grep" ? command.context : 0,
           momentSide: command.verb === "moment" ? command.side : "after",
         });
     return {
-      exitCode: ("remaining" in result && result.remaining.length > 0) || ("kind" in result && result.kind === "partial") || ("disconnectError" in result && result.disconnectError !== null) ? 1 : 0,
+      exitCode: result !== null && (("remaining" in result && result.remaining.length > 0) || ("kind" in result && result.kind === "partial") || ("disconnectError" in result && result.disconnectError !== null)) ? 1 : 0,
       // Markdown prints byte for byte so redirection preserves it.
       stdout: (command.verb === "moment" || command.verb === "documentRead") && !command.json
         ? output

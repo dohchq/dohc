@@ -1,3 +1,4 @@
+import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
 import { mapWidgetOwners } from "./widgetOwnership";
 import { stopEditorMouseEvent, isCodeBlockNode } from "./pmHelpers";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
@@ -198,8 +199,9 @@ function buildCodeLanguageDecorations(
   report: ErrorReporter,
 ): DecorationSet {
   const decorations: Decoration[] = [];
+  // A textblock holds only inline content, so the walk never enters one.
   doc.descendants((node, pos) => {
-    if (!isCodeBlockNode(node)) return;
+    if (!isCodeBlockNode(node)) return !node.isTextblock;
     const ownerKey = owners.get(pos) ?? nextOwnerKey();
 
     const language = cleanCodeLanguage(String(node.attrs.language ?? ""));
@@ -339,6 +341,7 @@ function buildCodeLanguageDecorations(
         },
       ),
     );
+    return false;
   });
 
   return DecorationSet.create(doc, decorations);
@@ -398,7 +401,7 @@ export function makeCodeBlockContinuationPlugin() {
         if (!block) return false;
 
         const explicitExit =
-          event.key === "Enter" && (event.metaKey || event.ctrlKey);
+          event.key === "Enter" && hasPrimaryModifier(event, window.dohcDesktop?.platform);
         // ArrowDown only takes over when the code block is the last child of
         // its parent — otherwise native navigation must move into the
         // following content instead of injecting a blank paragraph (which

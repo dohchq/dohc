@@ -5,9 +5,10 @@
 //! `tests/fixtures/workspace-kernel/`) and the shared TypeScript path floor
 //! (`packages/security-contract/src/enginePathFloor.ts`): a path is
 //! excluded if any segment is reserved (`.dohc`, `.git`, `node_modules`), a
-//! segment carries an ignored write-temp prefix (`.dohc-write-`), or the file
-//! is a SQLite sidecar (`*.db-wal` / `-shm` / `-journal`, and the `.sqlite`
-//! variants).
+//! segment carries an ignored write-temp prefix (`.dohc-write-`), a segment is
+//! metadata the OS writes beside user files (`.DS_Store`, `._*`, `Thumbs.db`),
+//! or the file is a SQLite sidecar (`*.db-wal` / `-shm` / `-journal`, and the
+//! `.sqlite` variants).
 //!
 //! Reserved names use canonical Unicode case folding and reject possible
 //! reserved 8.3 aliases on every platform. Only Windows strips trailing
@@ -26,6 +27,29 @@ pub const RESERVED_SEGMENTS: &[&str] = &[ENGINE_STORAGE_SEGMENT, ".git", "node_m
 /// Write-temp file prefixes: an in-progress `.dohc-write-*` staging file is
 /// engine scratch, never user content.
 pub const IGNORED_FILE_PREFIXES: &[&str] = &[".dohc-write-"];
+
+/// Folded names of the files Finder writes beside user files: view state, a
+/// folder's localized name, and its custom icon. With [`MACOS_VOLUME_FOLDERS`],
+/// [`WINDOWS_METADATA_FILES`] and AppleDouble files, these are OS metadata:
+/// never workspace content, so no peer receives another device's copy.
+const MACOS_METADATA_FILES: &[&str] = &[".ds_store", ".localized", "icon\r"];
+
+/// Folded names of the folders macOS keeps at a volume's root: its search
+/// index, file events, trash, temporary files and document versions.
+const MACOS_VOLUME_FOLDERS: &[&str] = &[
+    ".spotlight-v100",
+    ".fseventsd",
+    ".trashes",
+    ".temporaryitems",
+    ".documentrevisions-v100",
+];
+
+/// Folded names of Windows Explorer's thumbnail cache and folder settings.
+const WINDOWS_METADATA_FILES: &[&str] = &["thumbs.db", "desktop.ini"];
+
+/// AppleDouble files (`._name`) hold another file's Finder metadata on a
+/// volume without extended attributes, such as exFAT or SMB.
+const APPLE_DOUBLE_PREFIX: &str = "._";
 
 /// SQLite sidecar suffixes; a sidecar is excluded only when its base ends in a
 /// database extension, so a user's `notes/draft-wal` (no `.db` base) is kept.
@@ -118,6 +142,15 @@ pub fn collision_key(segment: &str) -> String {
     reserved_key(&compatible)
 }
 
+/// `path` as a disk that ignores case or Unicode normalization names it: the
+/// [`collision_key`] of each segment.
+pub fn path_collision_key(path: &str) -> String {
+    path.split('/')
+        .map(collision_key)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Normalize an on-disk name for the capture floor.
 pub fn normalize_segment(segment: &str) -> String {
     #[cfg(windows)]
@@ -130,8 +163,8 @@ pub fn normalize_segment(segment: &str) -> String {
     }
 }
 
-/// Whether a single normalized segment is reserved or carries an ignored
-/// prefix.
+/// Whether a single normalized segment is reserved, carries an ignored
+/// prefix, or is OS metadata.
 pub fn segment_is_ignored(normalized: &str) -> bool {
     RESERVED_SEGMENTS.contains(&normalized)
         || RESERVED_SEGMENTS
@@ -140,6 +173,32 @@ pub fn segment_is_ignored(normalized: &str) -> bool {
         || IGNORED_FILE_PREFIXES.iter().any(|prefix| {
             normalized.starts_with(prefix) || is_reserved_83_alias(normalized, prefix)
         })
+        || is_os_metadata(normalized)
+}
+
+/// Whether a single normalized segment is OS metadata.
+fn is_os_metadata(normalized: &str) -> bool {
+    MACOS_METADATA_FILES.contains(&normalized)
+        || MACOS_VOLUME_FOLDERS.contains(&normalized)
+        || WINDOWS_METADATA_FILES.contains(&normalized)
+        || normalized.starts_with(APPLE_DOUBLE_PREFIX)
+}
+
+/// Whether a normalized name is a file Finder writes beside user files, which
+/// may go with a folder it alone keeps. Volume folders such as `.Trashes` can
+/// hold a person's files, so they never go.
+#[cfg(target_vendor = "apple")]
+pub(crate) fn is_finder_metadata_file(normalized: &str) -> bool {
+    MACOS_METADATA_FILES.contains(&normalized) || normalized.starts_with(APPLE_DOUBLE_PREFIX)
+}
+
+/// Whether any segment of a workspace path is OS metadata, such as
+/// `.DS_Store`: a path an older build may have captured before the floor
+/// named it. Folds case and Win32 trailing aliases on every platform.
+pub fn names_os_metadata(rel_path: &str) -> bool {
+    rel_path
+        .split('/')
+        .any(|segment| is_os_metadata(&reserved_key(segment)))
 }
 
 /// Whether a workspace-relative, forward-slash path has any ignored segment.
@@ -219,6 +278,20 @@ mod tests {
                     "{path}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn shared_collision_key_fixtures() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            path: String,
+            key: String,
+        }
+        let cases: Vec<Case> =
+            serde_json::from_str(include_str!("pathCollisionFixtures.json")).unwrap();
+        for case in cases {
+            assert_eq!(path_collision_key(&case.path), case.key, "{}", case.path);
         }
     }
 
@@ -313,6 +386,35 @@ mod tests {
         assert!(has_ignored_segment(".Dohc/x.md"));
         assert!(!has_ignored_segment(".dohc./x.md"));
         assert!(!has_ignored_segment(".git./config"));
+    }
+
+    #[test]
+    fn os_metadata_is_excluded_at_any_depth() {
+        for path in [
+            ".DS_Store",
+            "notes/.ds_store",
+            "notes/._draft.md",
+            "notes/Icon\r",
+            ".Spotlight-V100/Store-V2/index",
+            ".fseventsd/fseventsd-uuid",
+            "notes/Thumbs.db",
+            "Desktop.ini",
+        ] {
+            assert!(is_excluded_file(path), "{path:?}");
+            assert_eq!(
+                crate::policy::classify_engine_file_path(path),
+                crate::policy::PathClassification::Ignored,
+                "{path:?}"
+            );
+            assert_eq!(
+                crate::search_policy::classify_engine_file_path(path),
+                crate::search_policy::PathFloor::Ignored,
+                "{path:?}"
+            );
+        }
+        for path in ["notes/DS_Store.md", "notes/Icon.png", "notes/_draft.md"] {
+            assert!(!is_excluded_file(path), "{path:?}");
+        }
     }
 
     #[test]

@@ -20,6 +20,11 @@ vi.mock("./editor/import-export", async (importOriginal) => {
   };
 });
 
+const delayedProof=vi.hoisted(()=>({delay:0,active:0,maximum:0}));
+vi.mock('./editor/artifactSource',()=>({prepareArtifactSource:()=>undefined,projectArtifactSource:async(doc:Y.Doc)=>{
+ const text=(await import('@dohc/ydoc-projection')).yDocToArtifactMarkdown(doc);delayedProof.maximum=Math.max(delayedProof.maximum,++delayedProof.active);
+ await new Promise(resolve=>setTimeout(resolve,delayedProof.delay));delayedProof.active--;return text;
+}}));
 let engineDocState: UseEngineDoc;
 vi.mock("./collab/useEngineDoc", () => ({
   useEngineDoc: () => engineDocState,
@@ -49,9 +54,14 @@ function engineState(doc: Y.Doc): UseEngineDoc {
     deletedDraftId: null,
     recoveryAssets: null,
     permanentFailureWhileEditing: false,
+    changedOutside: null,
+    outsideWriteWaiting: false,
+    unsavedEditsPending: () => false,
     readOnlyWhileEditing: false,
     readOnlyDraftId: null,
     readOnlyCause: null,
+    retryReplacement: null,
+    replacedDraftIds: [],
     removalInProgress: null,
     artifactAssets: [],
     readArtifactAsset: async () => {
@@ -137,6 +147,7 @@ async function openSourceView(doc: Y.Doc) {
 
 describe("FileInspector engine source update scheduling", () => {
   beforeEach(() => {
+    delayedProof.delay=0;delayedProof.active=0;delayedProof.maximum=0;
     stubEditorGlobals();
     vi.stubGlobal(
       "dohcDesktop",
@@ -159,11 +170,13 @@ describe("FileInspector engine source update scheduling", () => {
     const doc = markdownToYDoc(INITIAL_MARKDOWN);
     engineDocState = engineState(doc);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    // The engine view shows once the note's check answers.
+    const toggle = await screen.findByTestId("markdown-source-toggle");
     const serialize = vi.mocked(yDocToMarkdown);
     serialize.mockClear();
 
     vi.useFakeTimers();
-    fireEvent.click(screen.getByTestId("markdown-source-toggle"));
+    fireEvent.click(toggle);
     await act(async () => {
       await Promise.resolve();
       // SourceCodeEditor commits on its next frame. This stays well below the
@@ -250,5 +263,15 @@ describe("FileInspector engine source update scheduling", () => {
       "Stale first document.",
     );
     expect(serialize).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps painting delayed replies during continuing edits with one proof in flight',async()=>{
+    const doc=markdownToYDoc(INITIAL_MARKDOWN);doc.getMap('meta').set('dohcMarkdownSource','stale');
+    await openSourceView(doc);vi.useFakeTimers();delayedProof.delay=750;delayedProof.maximum=0;
+    for(let t=0;t<2000;t+=100){act(()=>{replaceYDocWithMarkdown(doc,`# Plan\n\nUpdate at ${t} ms.\n`);doc.getMap('meta').set('dohcMarkdownSource','stale');});await act(async()=>{await vi.advanceTimersByTimeAsync(100)});}
+    expect(screen.getByTestId('markdown-source-view').textContent).toContain('Update at');
+    expect(delayedProof.maximum).toBe(1);
+    await act(async()=>{await vi.advanceTimersByTimeAsync(2500)});
+    expect(screen.getByTestId('markdown-source-view').textContent).toContain('Update at 1900');doc.destroy();
   });
 });

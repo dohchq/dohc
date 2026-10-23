@@ -1,3 +1,4 @@
+import { agentColorsForPresentation } from "../settings/userSettingsStore";
 import { createWorkspaceHandler } from "./rendererWorkspaceHandler";
 import { shareRecordStatuses } from "../workspaces/shareRecordStatus";
 import { WorkspaceDaemonRequester, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
@@ -30,6 +31,7 @@ import type { createReceivedShareEngineAccess } from "../workspaces/receivedShar
 import type { createEngineYDocSessionIpc, EngineYDocIpcSender } from "../workspaces/engineYDocSessionIpc";
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { createHistoryTimeline, type TimelineReads } from "../workspaces/historyTimeline";
+import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 import { sharedViewHistory } from "../workspaces/sharedViewHistory";
 import { historyPathAdmission, historyMomentPathsAdmitted, type readWorkspaceEnginePolicy, type WorkspaceEnginePolicySnapshot } from "../workspaces/workspaceEnginePolicyFile";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
@@ -79,6 +81,7 @@ export function createWorkspaceEngineIpc<
   /** The person a request is made by, read from main's own account when it arrives. */
   localPerson(): Promise<LocalPersonAuthor>;
   localInstallationId(): string;
+  stateDir(): string;
   warmCredentialCache(): Promise<void>;
   currentCredentials(): CloudCredentials | null;
   /** An automation author as History shows it, in one workspace. */
@@ -313,7 +316,9 @@ export function createWorkspaceEngineIpc<
         }
       };
       const presentations = async (): Promise<EngineMomentAuthorNames["presentations"]> => {
-        if (shared) return createHistoryPresentationRequest({ source: "received", workspaceId: entry.workspaceId, assertCurrent });
+        const agentColors = await agentColorsForPresentation(dependencies.stateDir());
+        assertCurrent();
+        if (shared) return createHistoryPresentationRequest({ agentColors, source: "received", workspaceId: entry.workspaceId, assertCurrent });
         await warmCredentialCache();
         assertCurrent();
         const credentials = currentCredentials();
@@ -323,7 +328,7 @@ export function createWorkspaceEngineIpc<
           || (credentials !== null && ["synced", "unknown"].includes(await readSyncHistory(entry.rootPath)));
         assertCurrent();
         return createHistoryPresentationRequest({
-          source: "own-store", workspaceId: entry.workspaceId, assertCurrent, serverUrl: entry.remote?.serverUrl, synced,
+          agentColors, source: "own-store", workspaceId: entry.workspaceId, assertCurrent, serverUrl: entry.remote?.serverUrl, synced,
           installationId: localInstallationId(), credentials,
         });
       };
@@ -379,9 +384,16 @@ export function createWorkspaceEngineIpc<
         const presentations = await identity.presentations();
         let resolved: Awaited<ReturnType<typeof dependencies.historyCollections>> | undefined;
         let pending: Promise<NonNullable<typeof resolved>> | undefined;
-        const getCollections = () => pending ??= dependencies.historyCollections(operation).then(value => { assertCurrent(); resolved = value; return value; });
+        // No Collection moments, for a History without them.
+        const without = (why: Error): Pick<TimelineReads, "scope" | "local" | "remote"> => ({ scope: operation.scope ?? workspace.workspaceId,
+          local: () => ({ pages: [], transferred: [], sourceIds: [], sourceCount: 0 }), remote: async () => { throw why; } });
+        // Another computer keeps the Collections: History shows files and documents without them.
+        const getCollections = () => pending ??= dependencies.historyCollections(operation).catch((error: unknown) => {
+          if (error instanceof CollectionsRefusalError) return without(error);
+          throw error;
+        }).then(value => { assertCurrent(); resolved = value; return value; });
         const collections: Pick<TimelineReads, "scope" | "local" | "remote"> = shared
-          ? { scope: operation.scope ?? workspace.workspaceId, local: () => ({ pages: [], transferred: [], sourceIds: [], sourceCount: 0 }), remote: async () => { throw new Error("Collection History is unavailable in a received share."); } }
+          ? without(new Error("Collection History is unavailable in a received share."))
           : { get scope() { return resolved?.scope ?? operation.scope ?? workspace.workspaceId; },
             local: async (positions, limit, sourceIds) => (await getCollections()).local(positions, limit, sourceIds),
             remote: async (datasetId, beforeRevision, signal) => (await getCollections()).remote(datasetId, beforeRevision, signal) };

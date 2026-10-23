@@ -1,3 +1,5 @@
+import type { ChatLinksEngineInput, ChatLinksEnginePage } from "./chatLinks";
+import type { ChatFileMentionsPage, ChatFileMentionsEngineInput } from "./chatFileMentions";
 import type { AutomationRunAttribution } from "./collection";
 
 type WorkspaceObjectId = string;
@@ -109,11 +111,19 @@ export function refuseCallerOperationId(id: string | undefined): void {
   if (id?.startsWith(OPERATION_ID_PREFIX)) throw new VersionedTextStoreError("invalid-input", "Reserved operation id.");
 }
 
-export interface HistoryOperation { operationId: string; versionId: string; momentCount: number }
-export interface HistoryUndoResult extends HistoryOperation { compensationOperationId: string; deduped: boolean; materialized: boolean }
+export interface HistoryOperation { operationId: string; versionId: string; momentCount: number; kind: "file-duplicate" | null }
+export interface HistoryUndoResult extends Omit<HistoryOperation, "kind"> { compensationOperationId: string; deduped: boolean; materialized: boolean; notRestored: readonly string[] }
+export interface HistoryLinkRewriteResult {
+  documents: number;
+  links: number;
+  unchecked: string[];
+  uncheckedCount: number;
+  complete: boolean;
+}
 export interface HistoryOperationsStore {
   readHistoryOperation(input: {workspaceId: string; operationId: string}): Promise<HistoryOperation>;
   undoHistoryOperation(input: {workspaceId: string; operationId: string; requestId: string; author?: MomentWriteAuthor}): Promise<HistoryUndoResult>;
+  rewriteHistoryLinks(input: {workspaceId: string; operationId: string; requestId: string; author?: MomentWriteAuthor}): Promise<HistoryLinkRewriteResult>;
 }
 
 // A recorded moment can also say that a live document session settled it.
@@ -829,13 +839,6 @@ interface ChatAttachment {
   createdAtMs: number;
 }
 
-export interface ChatFileMention {
-  attachment: ChatAttachment;
-  message: ChatMessage;
-  thread: ChatThread;
-  channel?: ChatChannel;
-}
-
 export interface ChatMessage {
   id: ChatMessageId;
   workspaceId: WorkspaceId;
@@ -1149,11 +1152,8 @@ export interface LinkedChatStore {
     workspaceId: WorkspaceId,
     threadId: ChatThreadId,
   ): Promise<ChatAttachment[]>;
-  listFileMentions(input: {
-    workspaceId: WorkspaceId;
-    objectId?: WorkspaceObjectId;
-    pathHint?: string;
-  }): Promise<ChatFileMention[]>;
+  linksPage(input: ChatLinksEngineInput): Promise<ChatLinksEnginePage>;
+  fileMentionsPage(input: ChatFileMentionsEngineInput): Promise<ChatFileMentionsPage>;
   markThreadReadByAgent(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;

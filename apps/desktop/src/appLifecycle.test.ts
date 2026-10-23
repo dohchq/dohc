@@ -1,11 +1,14 @@
 import { registerTypingCheckpoint } from "./workspaces/outageTypingRecovery";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppLifecycle, LAUNCH_SETTLED_MS } from "./appLifecycle";
+import { createAutomationWakeConsumer, createAutomationWakeIntents, type AutomationWakeIntent } from "./automations/automationWakeIntents";
+import { createTestScratch } from "./workspaces/testTemp";
+import { createWorkspaceAuthorityOwner } from "./workspaces/workspaceAuthorityOwner";
 import { createExitRounds, createQuitGuard } from "./quitGuard";
-import { QUIT_ASK_TIMEOUT_MS, resolveShutdownDeadlineExitCode, WILL_QUIT_BUDGET_MS } from "./shutdownBudgets";
+import { DISPATCH_STOP_LIMIT_MS, QUIT_ASK_TIMEOUT_MS, resolveShutdownDeadlineExitCode, WILL_QUIT_BUDGET_MS } from "./shutdownBudgets";
 import { closeElectronApplication } from "../../../scripts/verification/close-electron.mjs";
 import { DESKTOP_CLOSE_GRACE_MS } from "../../../scripts/verification/desktop-close-policy.mjs";
 import { beginLaunch, finishLaunch, type MarkerFileSystem } from "./launch/launchMarker";
@@ -107,12 +110,15 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
     },
     launch: {
       finished: vi.fn(() => { log.push("launch-finished"); }),
+      settled: vi.fn(() => { log.push("launch-settled"); }),
     },
     beforeQuit: vi.fn(),
     shutdown: {
       budgetMs: 3000,
       deadlineExitCode: 0,
       beginEngineShutdown: vi.fn(() => { log.push("begin-shutdown"); }),
+      stopNoticeRefusals: vi.fn(async () => { log.push("notice-refusals-stop"); }),
+      stopAutomationWakes: vi.fn(async () => { log.push("automation-wakes-stop"); }),
       stopSearch: vi.fn(async () => { log.push("search-stop"); }),
       stopSitePreviews: vi.fn(async () => { log.push("site-previews-stop"); }),
       settleYDocs: vi.fn(async () => { log.push("ydoc-settle"); }),
@@ -122,6 +128,7 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
       disposeDatabase: vi.fn(async () => { log.push("database-stop"); }),
       closeRelay: vi.fn(async () => { log.push("relay-close"); }),
       stopEngine: vi.fn(async () => { log.push("engine-stop"); }),
+      reportQuit: vi.fn(),
     },
   };
   configure?.(dependencies);
@@ -143,7 +150,7 @@ afterEach(() => {
 });
 
 describe("desktop bootstrap", () => {
-  it("registers IPC before the window, applies stored zoom, and overlaps the daemon handshake", async () => {
+  it("registers IPC and installs the menu before the window, applies stored zoom, and overlaps the daemon handshake", async () => {
     const f = fixture();
     const ready = f.lifecycle.start();
     expect(f.log).toEqual([]);
@@ -152,7 +159,7 @@ describe("desktop bootstrap", () => {
     expect(f.log).toEqual(["app-ready", "engine-start", "settings-read", "handlers"]);
     f.settings.resolve({ zoom: 1.75 });
     expect(await f.created.promise).toEqual({ id: 1, zoom: 1.75 });
-    expect(f.log.slice(-4)).toEqual(["settings-apply", "window", "load-listener", "first-window"]);
+    expect(f.log.slice(-5)).toEqual(["settings-apply", "native", "window", "load-listener", "first-window"]);
     expect(f.dependencies.services.startCli).not.toHaveBeenCalled();
     expect(f.dependencies.workspaces.openPath).not.toHaveBeenCalled();
     expect(f.dependencies.services.warmCredentials).not.toHaveBeenCalled();
@@ -366,6 +373,28 @@ describe("desktop bootstrap", () => {
     expect(f.dependencies.launch.finished).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(f.dependencies.launch.finished).toHaveBeenCalledOnce();
+    expect(f.dependencies.launch.settled).toHaveBeenCalledOnce();
+  });
+
+  // Settling starts the engine's startup check, which must not run on the
+  // way out: the timer can still fire during quit or after Windows ends the
+  // session, neither of which stops the process at once.
+  it.each(["quit", "session end"] as const)("does not settle the launch after a %s", async (ending) => {
+    vi.useFakeTimers();
+    const f = fixture();
+    await boot(f);
+    f.loaded.resolve(true);
+    await vi.advanceTimersByTimeAsync(5_000);
+    if (ending === "quit") {
+      f.app.emit("will-quit", event());
+    } else {
+      const window = new EventEmitter();
+      f.app.emit("browser-window-created", {}, window);
+      window.emit("session-end", {});
+    }
+    await vi.advanceTimersByTimeAsync(LAUNCH_SETTLED_MS);
+    expect(f.dependencies.launch.finished).toHaveBeenCalled();
+    expect(f.dependencies.launch.settled).not.toHaveBeenCalled();
   });
 
   it("finishes the launch at a clean quit before 30 s have passed", async () => {
@@ -748,15 +777,17 @@ describe("desktop shutdown", () => {
     expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(0);
   });
 
-  it.each(["search", "sitePreviews", "dispatch", "ydoc", "integration", "cli"] as const)(
+  it.each(["notices", "automationWakes", "search", "sitePreviews", "dispatch", "ydoc", "integration", "cli"] as const)(
     "waits for %s before releasing workspace authority",
     async (heldProducer) => {
       vi.useFakeTimers();
       const gates = {
-        search: deferred(), sitePreviews: deferred(), dispatch: deferred(),
+        notices: deferred(), automationWakes: deferred(), search: deferred(), sitePreviews: deferred(), dispatch: deferred(),
         ydoc: deferred(), integration: deferred(), cli: deferred(),
       };
       const f = fixture((d) => {
+        d.shutdown.stopNoticeRefusals = () => gates.notices.promise;
+        d.shutdown.stopAutomationWakes = () => gates.automationWakes.promise;
         d.shutdown.stopSearch = () => gates.search.promise;
         d.shutdown.stopSitePreviews = () => gates.sitePreviews.promise;
         d.services.dispatch.stop = () => gates.dispatch.promise;
@@ -781,13 +812,16 @@ describe("desktop shutdown", () => {
   it("settles every producer before closing authorities, then closes database, relay, and daemon", async () => {
     vi.useFakeTimers();
     const gates = {
-      search: deferred(), sitePreviews: deferred(), dispatch: deferred(), ydoc: deferred(), integration: deferred(), cli: deferred(),
+      notices: deferred(), automationWakes: deferred(), search: deferred(), sitePreviews: deferred(), dispatch: deferred(),
+      ydoc: deferred(), integration: deferred(), cli: deferred(),
     };
     const integrationStarted = deferred();
     const cliStarted = deferred();
     const workspacesClosed = deferred();
     const exited = deferred();
     const f = fixture((d) => {
+      d.shutdown.stopNoticeRefusals = vi.fn(() => gates.notices.promise);
+      d.shutdown.stopAutomationWakes = vi.fn(() => gates.automationWakes.promise);
       d.shutdown.stopSearch = () => gates.search.promise;
       d.shutdown.stopSitePreviews = () => gates.sitePreviews.promise;
       d.services.dispatch.stop = () => gates.dispatch.promise;
@@ -803,6 +837,12 @@ describe("desktop shutdown", () => {
     expect(quit.preventDefault).toHaveBeenCalledOnce();
     expect(f.lifecycle.isQuitting()).toBe(true);
     expect(f.dependencies.shutdown.beginEngineShutdown).toHaveBeenCalledOnce();
+    // Refusal Notices and agent wakes both stop before any producer starts to
+    // drain, and neither waits for the other.
+    for (const stop of [f.dependencies.shutdown.stopNoticeRefusals, f.dependencies.shutdown.stopAutomationWakes]) {
+      expect(vi.mocked(stop).mock.invocationCallOrder[0])
+        .toBeLessThan(vi.mocked(f.dependencies.shutdown.beginEngineShutdown).mock.invocationCallOrder[0]!);
+    }
     expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
     await integrationStarted.promise;
     gates.dispatch.resolve();
@@ -815,6 +855,12 @@ describe("desktop shutdown", () => {
     expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
     expect(f.app.exit).not.toHaveBeenCalled();
     gates.ydoc.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
+    gates.notices.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
+    gates.automationWakes.resolve();
     await workspacesClosed.promise;
     await exited.promise;
     expect(f.log.slice(-3)).toEqual(["database-stop", "relay-close", "engine-stop"]);
@@ -862,6 +908,7 @@ describe("desktop shutdown", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(f.dependencies.shutdown.stopEngine).toHaveBeenCalledOnce();
     expect(f.app.exit).toHaveBeenCalledWith(0);
+    expect(f.dependencies.shutdown.reportQuit).toHaveBeenCalledExactlyOnceWith("[desktop] quit: shutdown finished in 0 ms");
   });
 
   it.each([0, 1] as const)("exits once with deadline status %s without closing a store beneath a held producer", async (deadlineExitCode) => {
@@ -880,11 +927,145 @@ describe("desktop shutdown", () => {
     expect(f.app.exit).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(deadlineExitCode);
+    expect(f.dependencies.shutdown.reportQuit).toHaveBeenCalledExactlyOnceWith(`[desktop] quit: shutdown ran past its ${WILL_QUIT_BUDGET_MS} ms budget`);
     expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
     held.resolve();
     await vi.advanceTimersByTimeAsync(0);
     expect(f.dependencies.shutdown.closeWorkspaces).toHaveBeenCalledOnce();
     expect(f.app.exit).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["refusal Notice work", 0],
+    ["refusal Notice work", 1],
+    ["an agent wake", 0],
+    ["an agent wake", 1],
+  ] as const)("exits once while %s holds authorities open, with deadline status %d", async (work, deadlineExitCode) => {
+    vi.useFakeTimers();
+    const held = deferred();
+    const f = fixture((d) => {
+      d.shutdown.budgetMs = WILL_QUIT_BUDGET_MS;
+      d.shutdown.deadlineExitCode = deadlineExitCode;
+      if (work === "an agent wake") d.shutdown.stopAutomationWakes = () => held.promise;
+      else d.shutdown.stopNoticeRefusals = () => held.promise;
+    });
+    await boot(f);
+    f.app.emit("will-quit", event());
+    expect(f.dependencies.shutdown.flushReports).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(WILL_QUIT_BUDGET_MS - 1);
+    expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
+    expect(f.app.exit).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(deadlineExitCode);
+    expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
+    held.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.app.exit).toHaveBeenCalledOnce();
+  });
+
+  it("stops waiting on a dispatch stop at its limit and still closes within the budget", async () => {
+    vi.useFakeTimers();
+    const f = fixture((d) => {
+      d.shutdown.budgetMs = WILL_QUIT_BUDGET_MS;
+      d.shutdown.deadlineExitCode = 1;
+      d.services.dispatch.stop = () => new Promise<void>(() => undefined);
+    });
+    await boot(f);
+    f.app.emit("will-quit", event());
+    await vi.advanceTimersByTimeAsync(DISPATCH_STOP_LIMIT_MS - 1);
+    expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.log.slice(-4)).toEqual(["workspaces-close", "database-stop", "relay-close", "engine-stop"]);
+    expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(0);
+    expect(DISPATCH_STOP_LIMIT_MS).toBeLessThan(WILL_QUIT_BUDGET_MS);
+  });
+
+  it.each(["refusal Notice work", "an agent wake"] as const)("keeps %s ahead of authority close after dispatch reaches its limit", async (work) => {
+    vi.useFakeTimers();
+    const held = deferred();
+    const f = fixture((d) => {
+      d.shutdown.budgetMs = WILL_QUIT_BUDGET_MS;
+      d.shutdown.deadlineExitCode = 1;
+      if (work === "an agent wake") d.shutdown.stopAutomationWakes = () => held.promise;
+      else d.shutdown.stopNoticeRefusals = () => held.promise;
+      d.services.dispatch.stop = () => new Promise<void>(() => undefined);
+    });
+    await boot(f);
+    f.app.emit("will-quit", event());
+    await vi.advanceTimersByTimeAsync(DISPATCH_STOP_LIMIT_MS);
+    expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
+    expect(f.app.exit).not.toHaveBeenCalled();
+    held.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.dependencies.shutdown.closeWorkspaces).toHaveBeenCalledOnce();
+    expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(0);
+  });
+
+  it("lets an admitted agent wake finish under open workspace authority, and closes it only after that wake", async () => {
+    const file = join(await createTestScratch("quit-wakes-"), "automation-wakes.json");
+    const intent = (letter: string, claimed: boolean): AutomationWakeIntent => ({
+      account: "relay#owner", workspaceId: "workspace", noticeId: "automation-wake:" + letter.repeat(64), claimed,
+      wake: { automationId: "collection:Tasks#ask", name: "Ask", depth: 1, body: "Check the task." },
+    });
+    const journal = createAutomationWakeIntents(file);
+    await journal.save(intent("a", true));
+    await journal.save(intent("b", false));
+    const authorities = createWorkspaceAuthorityOwner({
+      findWorkspace: (workspaceId) => ({ workspaceId, rootPath: "/workspace" }),
+      canonicalizeRoot: (rootPath) => rootPath,
+      createState: () => ({}),
+    });
+    let closing = false;
+    const acquisitions: Array<{ step: string; afterClose: boolean }> = [];
+    const withAuthority = async (step: string, work: () => Promise<void> = async () => undefined) => {
+      acquisitions.push({ step, afterClose: closing });
+      await authorities.withAuthority("workspace", work);
+    };
+    const waking = deferred();
+    const finishWake = deferred();
+    const ready = vi.fn(async (_intent: { noticeId: string }, _needsRunner: boolean) => true);
+    const errors: unknown[] = [];
+    const consumer = createAutomationWakeConsumer({
+      intents: journal,
+      pending: async () => [],
+      ready,
+      enabledIfOpen: async () => true,
+      enabled: async () => { await withAuthority("read automation"); return true; },
+      dismiss: async () => "first",
+      wake: async () => {
+        await withAuthority("open activity");
+        try {
+          await withAuthority("write wake", async () => { waking.resolve(); await finishWake.promise; });
+        } finally { await withAuthority("release activity"); }
+      },
+      onError: (error) => errors.push(error),
+    });
+    const exited = deferred<number>();
+    const f = fixture((d) => {
+      d.shutdown.deadlineExitCode = 1;
+      d.shutdown.stopAutomationWakes = () => consumer.stop();
+      d.shutdown.closeWorkspaces = vi.fn(async () => {
+        closing = true;
+        // A Notice change while authorities close asks the stopped consumer again.
+        void consumer.resume();
+        await authorities.close();
+      });
+    });
+    f.app.exit.mockImplementation((code: number) => { exited.resolve(code); });
+    void consumer.resume();
+    await waking.promise;
+    f.app.emit("will-quit", event());
+    void consumer.resume();
+    expect(await journal.list()).toEqual([intent("a", true), intent("b", false)]);
+    expect(f.dependencies.shutdown.closeWorkspaces).not.toHaveBeenCalled();
+    finishWake.resolve();
+    expect(await exited.promise).toBe(0);
+    expect(errors).toEqual([]);
+    expect(acquisitions).toEqual(["read automation", "open activity", "write wake", "release activity"]
+      .map((step) => ({ step, afterClose: false })));
+    expect(new Set(ready.mock.calls.map(([admitted]) => admitted.noticeId))).toEqual(new Set([intent("a", true).noticeId]));
+    // The wake that was never admitted stays saved for the next start.
+    expect(await createAutomationWakeIntents(file).list()).toEqual([intent("b", false)]);
   });
 
   it("sends reports alongside teardown and exits only once both finish", async () => {

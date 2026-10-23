@@ -478,7 +478,7 @@ fn another_namespace_never_adopts_or_succeeds_an_adopted_lineage() {
             .expect("an adopted chain keeps its boundary");
         let path = f.binding.current_path.clone();
         let captured =
-            capture_imported_owner_activation(&mut f.store, "other", &f.key, &path, 1_000_000, &NoFaults).unwrap();
+            capture_imported_owner_activation(&mut f.store, "other", &f.key, &path, 1_000_000, &NoFaults, None).unwrap();
         f.handle = f
             ._owner
             .register_activation(&mut f.store, "other".into(), retirement_host(), f.binding.clone(), captured.activation_id.clone())

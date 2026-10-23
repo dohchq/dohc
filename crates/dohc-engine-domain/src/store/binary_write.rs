@@ -125,6 +125,7 @@ pub fn write_published_binary_in_tx(
             &payload_hash,
             moment.moment_order,
             input.now_ms,
+            "versioned",
         )?;
         return Ok(BinaryWriteResult {
             object,
@@ -184,6 +185,7 @@ pub fn write_published_binary_in_tx(
         &payload_hash,
         moment.moment_order,
         input.now_ms,
+        "versioned",
     )?;
     Ok(BinaryWriteResult {
         object,

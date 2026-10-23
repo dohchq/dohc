@@ -45,8 +45,10 @@ import {
   getDohcYDocBodyFragment,
   markdownToYDoc,
 } from "@dohc/ydoc-projection";
-import { SHORTCUTS } from "../../shortcuts/shortcutRegistry";
+import { SHORTCUTS, shortcutAccelerators, type ShortcutId } from "../../shortcuts/shortcutRegistry";
 import { MarkdownEditor, type MarkdownEditorHandle } from "./MarkdownEditor";
+import { sendToFocusedEditor } from "./editorMenuCommands";
+import { findReplaceKey } from "./findReplace";
 import { measureParseWork } from "./markdownParseWork";
 import {
   findEmptyListItemParagraph,
@@ -2204,8 +2206,9 @@ describe("MarkdownEditor focus", () => {
 });
 
 
-it.each(["Win32", "MacIntel"])("keeps the display catalogue and allowed shell conflicts aligned with the mounted %s editor keymaps", async (platform) => {
-  const platformSpy = vi.spyOn(navigator, "platform", "get").mockReturnValue(platform);
+it.each([["Win32", "win32"], ["MacIntel", "darwin"]] as const)("keeps the display catalogue and allowed shell conflicts aligned with the mounted %s editor keymaps", async (navigatorPlatform, platform) => {
+  const platformSpy = vi.spyOn(navigator, "platform", "get").mockReturnValue(navigatorPlatform);
+  vi.stubGlobal("dohcDesktop", { platform });
   try {
     render(createElement(MarkdownEditor, { value: "Text", onDirty: vi.fn(), workspaceId: "ws", path: "note.md", knownFiles: [] }));
     const surface = await screen.findByTestId("markdown-editor");
@@ -2222,12 +2225,17 @@ it.each(["Win32", "MacIntel"])("keeps the display catalogue and allowed shell co
       return [parts.includes("mod") ? "commandorcontrol" : "", parts.includes("ctrl") ? "ctrl" : "", parts.includes("meta") ? "meta" : "", parts.includes("shift") ? "shift" : "", parts.includes("alt") ? "alt" : "", parts.at(-1)!].filter(Boolean).join("+");
     };
     const mounted = [...new Set(keymaps.map(({ key }) => canonical(key)))].sort();
-    const listed = Object.values(SHORTCUTS).filter((row) => row.owner === "editor" && (!("platform" in row) || platform === "MacIntel"))
-      .flatMap((row) => row.accelerators.map((key) => key.toLowerCase())).sort();
+    const listed = (Object.keys(SHORTCUTS) as ShortcutId[]).filter((id) => {
+      const row = SHORTCUTS[id];
+      return row.owner === "editor" && (!("platforms" in row) || (row.platforms as readonly string[]).includes(platform));
+    }).flatMap((id) => shortcutAccelerators(id, platform).map((key) => key.toLowerCase())).sort();
     expect(listed).toEqual(mounted);
-    if (platform === "MacIntel") {
-      expect(mounted).toEqual(expect.arrayContaining(["ctrl+a", "ctrl+e", "ctrl+h", "ctrl+d", "ctrl+alt+backspace"]));
+    if (platform === "darwin") {
+      expect(mounted).toEqual(expect.arrayContaining(["ctrl+a", "ctrl+e", "ctrl+h", "ctrl+d", "ctrl+alt+backspace", "commandorcontrol+alt+f"]));
       expect(mounted).not.toContain("commandorcontrol+d");
+      expect(mounted).not.toContain("commandorcontrol+h");
+    } else {
+      expect(mounted).toContain("commandorcontrol+h");
     }
     const conflicts = Object.entries(SHORTCUTS).filter(([, row]) => row.owner === "shell" || row.owner === "history-restore")
       .flatMap(([id, row]) => row.accelerators.filter((key) => ["commandorcontrol", "ctrl", "meta"].some((modifier) => mounted.includes(key.toLowerCase().replace("commandorcontrol", modifier)))).map((accelerator) => [id, accelerator]));
@@ -2241,4 +2249,45 @@ it.each(["Win32", "MacIntel"])("keeps the display catalogue and allowed shell co
   } finally {
     platformSpy.mockRestore();
   }
+});
+
+it("hands Edit > Find to the editor that has focus, including its find bar", async () => {
+  vi.stubGlobal("dohcDesktop", { platform: "darwin" });
+  // The find bar scrolls its active match into view.
+  Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
+  const left = createRef<MarkdownEditorHandle>();
+  const right = createRef<MarkdownEditorHandle>();
+  const props = { value: "the cat, the mat, the hat", onDirty: vi.fn(), workspaceId: "ws", knownFiles: [] };
+  render(createElement("div", null,
+    createElement(MarkdownEditor, { ...props, key: "left", ref: left, path: "left.md" }),
+    createElement(MarkdownEditor, { ...props, key: "right", ref: right, path: "right.md" })));
+  const [leftSurface, rightSurface] = await waitFor(() => {
+    const surfaces = screen.getAllByTestId("markdown-editor");
+    expect(surfaces).toHaveLength(2);
+    return surfaces;
+  });
+  const find = (surface: HTMLElement) => findReplaceKey.getState(editorBehind(surface!).state);
+
+  // With focus outside every editor, the command does nothing.
+  act(() => sendToFocusedEditor("editor-find"));
+  expect(screen.queryByRole("search", { name: "find and replace" })).toBeNull();
+
+  act(() => right.current?.focus("start"));
+  await waitFor(() => expect(document.activeElement).toBe(rightSurface));
+  act(() => sendToFocusedEditor("editor-find"));
+  const input = await screen.findByPlaceholderText("Find");
+  await waitFor(() => expect(document.activeElement).toBe(input));
+  expect(find(rightSurface!)?.open).toBe(true);
+  expect(find(leftSurface!)?.open).toBe(false);
+
+  // From the find bar, as with ⌘G there.
+  fireEvent.change(input, { target: { value: "the" } });
+  act(() => sendToFocusedEditor("find-again-next"));
+  expect(find(rightSurface!)?.activeIndex).toBe(1);
+  act(() => sendToFocusedEditor("find-again-previous"));
+  act(() => sendToFocusedEditor("find-again-previous"));
+  expect(find(rightSurface!)?.activeIndex).toBe(2);
+  act(() => sendToFocusedEditor("editor-replace"));
+  expect(find(rightSurface!)?.replaceOpen).toBe(true);
+  expect(find(leftSurface!)?.open).toBe(false);
 });

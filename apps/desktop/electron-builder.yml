@@ -2,24 +2,27 @@
 # (electron-vite build), then run electron-builder from apps/desktop.
 #
 # SIGNING SAFETY — this config never fabricates a signature.
-# electron-builder signs only when real credentials are in the environment:
-#   macOS:   CSC_LINK (base64 .p12) + CSC_KEY_PASSWORD, plus notarization via
-#            APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID.
+# electron-builder signs only when real credentials are present:
+#   macOS:   CSC_KEYCHAIN and CSC_NAME name a release keychain and its
+#            Developer ID identity, and APPLE_KEYCHAIN with
+#            APPLE_KEYCHAIN_PROFILE name its notarytool profile
+#            (scripts/release-desktop-macos.mjs sets all four).
 #   Windows: WIN_CSC_LINK + WIN_CSC_KEY_PASSWORD.
 # Without them the artifact is UNSIGNED (scripts/package-smoke.mjs labels it
 # "SIGNING: unsigned (dev)"). forceCodeSigning stays unset here so local/dev
-# and unsigned nightly dogfood packaging work. Stable release pipelines export
-# DOHC_REQUIRE_SIGNING=1 and pass `-c.forceCodeSigning=true` so a missing cert
-# fails the build instead of shipping an unsigned stable binary.
+# and unsigned nightly dogfood packaging work. Release builds that require
+# signing export DOHC_REQUIRE_SIGNING=1 and pass `-c.forceCodeSigning=true` so
+# a missing certificate fails the build instead of shipping an unsigned binary.
 
 appId: app.dohc.desktop
 productName: dohc
 executableName: dohc
 directories:
   output: release
-  # The static launcher/executable fallback is the dual-tone build/icon.png.
-  # Runtime window, taskbar, Dock, and tray surfaces switch between
-  # icon-light.png and icon-dark.png with the OS appearance.
+  # Windows and Linux use a paper tile, icon.ico and icon.png, that reads on
+  # light and dark taskbars; only their tray switches between icon-light.png
+  # and icon-dark.png with the OS appearance. macOS uses icon.icns, drawn on
+  # Apple's icon grid, and a menu bar template.
   buildResources: build
 files:
   - dist/**
@@ -36,6 +39,12 @@ asar: true
 # engine sidecar. The hook throws before packaging if staging did not happen.
 beforePack: scripts/require-workspace-engine.mjs
 extraResources:
+  - from: scripts/compiler-node-LICENSE.txt
+    to: engine-reader/node-LICENSE.txt
+  - from: resources/engine-reader
+    to: engine-reader
+    filter:
+      - "**/*"
   - from: resources/app-backend-runtime
     to: app-backend-runtime
     filter:
@@ -106,17 +115,44 @@ electronFuses:
   # the packaged binary). Workspace bytes still flow through
   # dohc-file://, never raw file://.
   grantFileProtocolExtraPrivileges: true
+  # Flipping a fuse rewrites Electron Framework, which breaks its ad-hoc
+  # signature, and Apple silicon refuses to load a framework whose signature
+  # does not match. Re-sign ad hoc after the flip; a release identity signs
+  # over it.
+  resetAdHocDarwinSignature: true
 
 mac:
   category: public.app-category.productivity
+  # Rendered from build/icon-mac.svg by scripts/render-icon.mjs.
+  icon: build/icon.icns
+  extraResources:
+    - from: build/trayTemplate.png
+      to: trayTemplate.png
+    - from: build/trayTemplate@2x.png
+      to: trayTemplate@2x.png
   # zip is required alongside dmg for macOS auto-updates (electron-updater).
   target: [dmg, zip]
   hardenedRuntime: true
 win:
+  # Rendered from build/icon.svg by scripts/render-icon.mjs.
+  icon: build/icon.ico
+  signExts: ["!node.exe"]
   target: [nsis]
 linux:
-  target: [AppImage]
+  # The .deb links /usr/bin/<executableName>. `dohc` is the chat command agents
+  # use (docs/reference/cli-mcp-sdk.md), so the app takes another name, as
+  # signal-desktop and github-desktop do.
+  executableName: dohc-desktop
+  # Without its own icon, the Linux target falls back to mac.icon.
+  icon: build/icon.png
+  # The AppImage cannot carry Chromium's sandbox helper, so where unprivileged
+  # user namespaces are blocked, as on Ubuntu 24.04, it refuses to start. The
+  # .deb installs an AppArmor profile that allows them.
+  target: [AppImage, deb]
   category: Office
+  # A Linux desktop offers dohc under Open With only for the types its desktop
+  # entry names. These are the existing types of the associations below.
+  mimeTypes: [text/markdown, text/plain, text/csv, application/json]
   # Use package.json desktopName for the launcher filename and StartupWMClass;
   # app.setDesktopName("dohc.desktop") supplies the matching runtime identity.
   syncDesktopName: true
@@ -124,12 +160,41 @@ appImage:
   # electron-builder's default AppImage desktop entry passes --no-sandbox.
   # Menu launches, dohc:// links and opened files keep the Chromium sandbox.
   executableArgs: []
+deb:
+  # A package names who answers for it. The homepage is package.json's.
+  maintainer: dohc <sup@dohc.computer>
+  # Setting depends replaces electron-builder's default list, so this repeats
+  # it and adds two libraries Electron links that the list does not bring:
+  # libasound.so.2, which a minimal or server Ubuntu lacks, and libgbm.so.1,
+  # which otherwise arrives only with Mesa's EGL packages. Ubuntu 24.04
+  # renamed ALSA's package libasound2t64.
+  depends:
+    - libgtk-3-0
+    - libnotify4
+    - libnss3
+    - libxss1
+    - libxtst6
+    - xdg-utils
+    - libatspi2.0-0
+    - libuuid1
+    - libsecret-1-0
+    - libasound2t64 | libasound2
+    - libgbm1
 
+# macOS ranks: dohc edits Markdown as its own documents, so it may be their
+# default app, but it never claims to own the type. For text, CSV and JSON it
+# stays an Open With choice and never replaces the app the person uses.
 fileAssociations:
-  - ext: [md, markdown, txt, csv, json]
+  - ext: [md, markdown]
     name: dohc workspace document
     description: Open with dohc
     role: Editor
+    rank: Default
+  - ext: [txt, csv, json]
+    name: dohc workspace document
+    description: Open with dohc
+    role: Editor
+    rank: Alternate
 
 protocols:
   - name: dohc share link

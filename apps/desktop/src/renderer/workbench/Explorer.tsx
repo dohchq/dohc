@@ -1,5 +1,7 @@
 import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
+import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
 import { useFocusSurface } from "../ui/focusReturn";
+import { isComposingKey, isDeleteKey } from "../ui/keys";
 import { DangerButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph } from "../ui/KindGlyph";
 import { basenameOf, dirnameOf } from "../path";
@@ -11,8 +13,10 @@ import {
   Folder,
   FolderPlus,
   FolderOpen,
+  Laptop,
   Pin,
   RefreshCw,
+  TriangleAlert,
   X,
 } from "lucide-react";
 import {
@@ -49,6 +53,7 @@ import {
 import { TabGlyph, tabMark } from "./tabGlyph";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
+import { KEEP_COLLECTIONS_HERE, KEEPABLE_COLLECTIONS_REFUSALS, type CollectionsRefusalKind } from "../../ipc/errorWords";
 
 // One Explorer disk operation, as the shell's onBeginChanges opens it.
 // `settle` is the deferred draft settlement runChanges awaits before it
@@ -117,6 +122,15 @@ export interface ExplorerProps {
   onOpenDataCollection?: (datasetPath: string, tableId: string) => void;
   onMoreDataCollections?: () => void;
   onRestoreCollection?: () => void;
+  // Why this computer cannot list the workspace's Collections, in main's
+  // words, such as another computer keeping them. The section says so in
+  // place of the list.
+  collectionsRefusal?: { kind: CollectionsRefusalKind; words: string } | null;
+  // Another computer keeps the workspace's Collections, and the list holds
+  // the ones on this computer's server. These words name that computer.
+  collectionsElsewhere?: string | null;
+  onKeepCollections?: () => void;
+  onRetryCollections?: () => void;
   // The shell flushes the stable active editor before disk changes and returns
   // a settlement that retains every editor mounted while those changes run.
   // A rejected begin (a flush failure, an unresolved collection write)
@@ -1037,7 +1051,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       const rowList = rowsRef.current;
       const isFolder =
         rowList.find((row) => row.fullPath === path)?.isFolder ?? false;
-      if (event.ctrlKey || event.metaKey) {
+      if (hasPrimaryModifier(event, window.dohcDesktop?.platform)) {
         setSelection((current) => {
           const next = new Set(current);
           if (next.has(path)) next.delete(path);
@@ -1362,7 +1376,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         if (target) beginRename(target, isFolderPath(target));
         return;
       }
-      if (event.key === "Delete") {
+      if (isDeleteKey(event)) {
         event.preventDefault();
         const targets = selection.size > 0 ? [...selection] : focusedPath ? [focusedPath] : [];
         if (targets.length > 0) setConfirmDelete(targets);
@@ -1469,11 +1483,17 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           readOnly={editPending}
           onChange={(event) => setEditValue(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Escape") finishEdit(false, true);
-            else if (event.key === "Enter") finishEdit(true, true);
             event.stopPropagation();
+            if (isComposingKey(event)) return;
+            if (event.key !== "Escape" && event.key !== "Enter") return;
+            // Focus returns to the row during this keydown. The key's default
+            // action would press that row and open a path the move has not made.
+            event.preventDefault();
+            finishEdit(event.key === "Enter", true);
           }}
           onBlur={() => { renameFocus.current = null; finishEdit(true); }}
+          // The name field takes the text menu, not the tree's menu.
+          onContextMenu={(event) => event.stopPropagation()}
           // The name keeps the row's exact type (13px sans, square) — F2
           // must not morph the label into a web-input pill — and the strong
           // border IS the focus affordance (the input is focused while open;
@@ -1629,16 +1649,19 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             : ""
         }`}
       >
-        {(!!props.dataCollections?.length || props.onIncludeArchivedCollections || props.onRestoreCollection) && <section aria-label="Collections" className="mb-1 border-b border-line px-1 pb-1">
+        {(!!props.dataCollections?.length || props.onIncludeArchivedCollections || props.onRestoreCollection || props.collectionsRefusal || props.collectionsElsewhere) && <section aria-label="Collections" className="mb-1 border-b border-line px-1 pb-1">
           <SectionLabel as="div" className="px-2 py-1">Collections</SectionLabel>
+          {props.collectionsRefusal ? <CollectionsRefusalRow refusal={props.collectionsRefusal} onKeep={props.onKeepCollections} onRetry={props.onRetryCollections} /> : <>
           {props.dataCollections?.map(collection => <button type="button" key={`${collection.datasetId}:${collection.tableId}`} disabled={!collection.datasetPath} title={collection.datasetPath ?? "Collection source unavailable. Restore dataset.json from History or remove duplicate copies."}
             className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
             onClick={() => { if (collection.datasetPath) props.onOpenDataCollection?.(collection.datasetPath, collection.tableId); }}>
             <Database size={14} strokeWidth={1.9} aria-hidden /><span className="truncate">{collection.name}</span>{!collection.datasetPath && <span className="ml-auto text-[10px] text-warning">Source unavailable</span>}{collection.archived && <span className="ml-auto text-[10px] text-muted">Archived</span>}
           </button>)}
           {props.onMoreDataCollections && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onMoreDataCollections}>Show more collections</button>}
+          {props.collectionsElsewhere && <CollectionsElsewhereRow words={props.collectionsElsewhere} onKeep={props.onKeepCollections} />}
           {props.onIncludeArchivedCollections && <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" checked={props.includeArchivedCollections ?? false} onChange={event => props.onIncludeArchivedCollections?.(event.target.checked)} />Archived collections</label>}
-          {props.onRestoreCollection && !props.shareView && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onRestoreCollection}>Restore from recovery file</button>}
+          {props.onRestoreCollection && !props.shareView && !props.collectionsElsewhere && <button type="button" className="h-7 px-2 text-xs text-muted hover:text-ink" onClick={props.onRestoreCollection}>Restore from recovery file</button>}
+          </>}
         </section>}
         <section
           data-testid="open-editors-section"
@@ -1981,7 +2004,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                     } from. ${
                       props.shareView.granterEmail ?? "The person who shared it"
                     } still ${confirmDelete.length === 1 ? "has it" : "has them"} until you send the change and they accept it. You can take the change back before then.`
-                  : `${confirmDelete.length === 1 ? "It moves" : "They move"} to the system trash, or to this workspace's .dohc/trash folder whenever the system trash refuses, and can be restored from there.`}
+                  : `${confirmDelete.length === 1 ? "It moves" : "They move"} to the system trash, or to this workspace's .dohc/local/trash folder whenever the system trash refuses, and can be restored from there.`}
               </p>
               {confirmDelete.length > 1 ? (
                 <ul className="m-0 mt-3 max-h-36 list-none overflow-auto rounded border border-line bg-bg p-0">
@@ -2017,3 +2040,40 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     </>
   );
 });
+
+// Below the Collections on this computer's server: the computer that keeps
+// the workspace's other Collections, where a move to a server starts.
+function CollectionsElsewhereRow({ words, onKeep }: { words: string; onKeep?: () => void }) {
+  return (
+    <div data-testid="collections-elsewhere" className="flex flex-col items-start gap-1.5 px-2 py-1">
+      <p className="m-0 flex gap-1.5 text-[12px] text-muted">
+        <Laptop size={12} strokeWidth={1.9} aria-hidden className="mt-0.5 shrink-0" />
+        <span className="wrap-anywhere">{words}</span>
+      </p>
+      {onKeep && <SecondaryButton data-testid="collections-keep-here" onClick={() => onKeep()}>{KEEP_COLLECTIONS_HERE}</SecondaryButton>}
+    </div>
+  );
+}
+
+// The Collections section when this computer cannot use them: where they
+// are, or what went wrong, and the one step that helps.
+function CollectionsRefusalRow({ refusal, onKeep, onRetry }: {
+  refusal: { kind: CollectionsRefusalKind; words: string };
+  onKeep?: () => void;
+  onRetry?: () => void;
+}) {
+  const held = refusal.kind === "unclaimed" || refusal.kind === "elsewhere";
+  const Icon = held ? Laptop : TriangleAlert;
+  return (
+    <div role="status" data-testid="collections-refusal" className="flex flex-col items-start gap-1.5 px-2 py-1">
+      <p className="m-0 flex gap-1.5 text-[12px] text-muted">
+        <Icon size={12} strokeWidth={1.9} aria-hidden className={`mt-0.5 shrink-0 ${held ? "text-warning" : "text-danger"}`} />
+        <span className="wrap-anywhere">{refusal.words}</span>
+      </p>
+      <div className="flex flex-wrap gap-1.5">
+        {KEEPABLE_COLLECTIONS_REFUSALS.includes(refusal.kind) && onKeep && <SecondaryButton data-testid="collections-keep-here" onClick={() => onKeep()}>{KEEP_COLLECTIONS_HERE}</SecondaryButton>}
+        {refusal.kind !== "unclaimed" && onRetry && <SecondaryButton onClick={() => onRetry()}>Try again</SecondaryButton>}
+      </div>
+    </div>
+  );
+}

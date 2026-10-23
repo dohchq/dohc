@@ -4,6 +4,8 @@ use crate::events::emit_automation_claimed;
 use crate::events::emit_record_events;
 use crate::lock;
 use crate::rpc::collections::collection_in_band_cap;
+use crate::rpc::dispatch::initial_capture_phase_requires_fence;
+use crate::rpc::error::initial_capture_degraded;
 use crate::rpc::error::initial_capture_updating;
 use crate::rpc::error::map_owner_outbox;
 use crate::rpc::error::map_runtime;
@@ -85,7 +87,9 @@ pub(crate) struct YdocSession {
     author_settlement: AuthorSettlementQueue,
     pub(super) last_settled_sha: Option<String>,
     /// The head sha observed at open — the settle preimage expectation
-    /// until the session's first settle replaces it.
+    /// until the session's first settle replaces it. With no head, the empty
+    /// file's sha when the open found one or continues a document whose file
+    /// has existed.
     pub(super) open_head_sha: Option<String>,
     pub(super) owner_seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
     _lease: Lease,
@@ -143,6 +147,21 @@ pub(super) struct YdocSessionView {
     pub(super) last_settled_sha: Option<String>,
     pub(super) open_head_sha: Option<String>,
     pub(super) owner_seed_source: Option<dohc_engine_collab::owner_base_source::OwnerSeedSource>,
+}
+
+/// Whether each part of `path` is on disk under `root` with exactly that name.
+fn names_exactly(root: &std::path::Path, path: &str) -> bool {
+    let mut directory = root.to_path_buf();
+    for name in path.split('/') {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            return false;
+        };
+        if !entries.flatten().any(|entry| entry.file_name() == name) {
+            return false;
+        }
+        directory.push(name);
+    }
+    true
 }
 
 fn map_ydoc_open_runtime(error: RuntimeError) -> WireError {
@@ -237,12 +256,20 @@ struct OwnerYDocOutboxQuarantineParams {
 struct YdocOpenParams {
     version_id: String,
     path: String,
+    /// The document this open continues. The open refuses when the path
+    /// names another object. With no head, settles may not create a file the
+    /// document had.
     #[serde(default)]
     expected_object_id: Option<String>,
     #[serde(default)]
     content_kind: Option<String>,
     #[serde(default)]
     seed_from_artifact: bool,
+    /// The largest seed this client reads through `versionedText.readBlob`
+    /// when it is past the in-band cap. Without it, such a seed refuses the
+    /// open.
+    #[serde(default)]
+    seed_limit_bytes: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -276,6 +303,10 @@ struct YdocOpenResult {
     /// device seeding the same head originates the same base.
     #[serde(skip_serializing_if = "Option::is_none")]
     seed_client_id: Option<u32>,
+    /// Set instead of `seed_content` for a seed past the in-band cap: the
+    /// digest the client reads the seed by through `versionedText.readBlob`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed_blob_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     artifact_assets: Option<Vec<ArtifactAssetDescriptorResult>>,
 }
@@ -299,6 +330,11 @@ struct ArtifactAssetDescriptorResult {
 struct YdocRecordUpdateParams {
     session_id: String,
     update_base64: String,
+    /// The lineage claim the client's document was built on, as the client
+    /// last observed it from open, record, or resync. Required: `null`
+    /// expects an unclaimed lineage and never matches a claimed one.
+    #[serde(deserialize_with = "Option::deserialize")]
+    expected_lineage_claim_id: Option<String>,
     #[serde(default)]
     actor_origin_id: Option<String>,
     /// Declared write provenance: actor kind, `onBehalfOf` principal, and
@@ -339,6 +375,7 @@ struct YdocRecordUpdateResult {
     seq: i64,
     deduped: bool,
     lineage_claim_id: Option<String>,
+    lineage_originated_here: bool,
 }
 
 #[derive(Deserialize)]
@@ -766,7 +803,8 @@ impl EngineService {
         let cancellation = OperationCancellation::new(ctx);
         let read = async move {
             tokio::task::spawn_blocking(move || {
-                let store = dohc_engine_storage::EngineStore::open_read_only(&open.db_path)?;
+                let store =
+                    dohc_engine_storage::EngineStore::open_read_only(open.actor.database_path())?;
                 dohc_engine_collab::read_pending_owner_outbox_page(
                     &store,
                     &open.workspace_id,
@@ -1007,6 +1045,15 @@ impl EngineService {
                 // its head yet. Refuse before lease acquisition; otherwise a new
                 // absent-lineage session can block capture and turn disk bytes
                 // into a misleading uncaptured-artifact failure.
+                if !initial_capture_phase_requires_fence(capture_phase) {
+                    // Degraded: nothing will wake a caller that waits.
+                    return Err(initial_capture_degraded());
+                }
+                // A running import captures the path next, and its progress
+                // wake tells the caller to open again.
+                if let Some(driver) = lock(&open.capture).as_ref() {
+                    driver.request_import_priority(&params.path);
+                }
                 return Err(initial_capture_updating());
             }
         }
@@ -1057,6 +1104,48 @@ impl EngineService {
         for facts in &state.record_facts {
             emit_record_events(&self.events, &open.workspace_id, facts);
         }
+        // With no head, the session expects an empty file when it finds New
+        // File's empty file, or when it continues a document whose file has
+        // existed. Its settles may then replace the file but not create it, so
+        // a file deleted outside dohc stays deleted. An open continues the
+        // document when it names the object, as the desktop's replacement
+        // after a restart does, or resumes the document's Y.Doc state. Any
+        // other open may start a new document at a path whose file was
+        // deleted: it expects nothing, so its first settle creates the file.
+        let open_head_sha = match state.head_blob_sha256.clone() {
+            Some(head) => Some(head),
+            None => {
+                let root = open.root.clone();
+                let path = params.path.clone();
+                // Whether the file is there, whether it is empty, and whether
+                // it is there under exactly this path. A case-insensitive
+                // volume also finds it under another spelling, which names
+                // another document.
+                let file = tokio::task::spawn_blocking(move || {
+                    let metadata = std::fs::symlink_metadata(root.join(&path))
+                        .ok()
+                        .filter(|metadata| metadata.file_type().is_file())?;
+                    Some((metadata.len() == 0, names_exactly(&root, &path)))
+                })
+                .await
+                .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
+                let empty = file.is_some_and(|(empty, _)| empty);
+                let seen = file.is_some_and(|(_, exact)| exact);
+                let continues = params.expected_object_id.is_some() || state.lineage_existing;
+                // A known limit: with no head, the object comes from the path,
+                // so an earlier file at this path counts for a new document
+                // there. Journaled and reopened before its first save, that
+                // document is refused like a deleted file, and Save it again
+                // writes it.
+                let existed = (seen || continues)
+                    && open
+                        .actor
+                        .ydoc_file_has_existed(state.key.clone(), seen)
+                        .await
+                        .map_err(map_runtime)?;
+                (empty || (continues && existed)).then(|| dohc_engine_storage::hex_sha256(b""))
+            }
+        };
         // The read committed the document's pulled edits, so the open runs to
         // its answer, its blob included. If the blob cannot have its egress
         // budget by the deadline, the open answers OVERLOADED without a
@@ -1123,6 +1212,24 @@ impl EngineService {
             )
             .await?;
         let initial_update_sha256 = dohc_engine_storage::hex_sha256(&initial_update);
+        // A seed past the in-band cap cannot cross the wire as one string. The
+        // client reads it as a blob when it accepts a seed that large. A
+        // client that can't seed can't edit, so a larger seed refuses the open.
+        let (seed_content, seed_blob_sha256) = match state.seed_content {
+            Some(seed) if seed.len() > MAX_INBAND_CONTENT_BYTES => {
+                if params
+                    .seed_limit_bytes
+                    .is_none_or(|limit| seed.len() > limit)
+                {
+                    return Err(WireError::new(
+                        ErrorCode::InvalidParams,
+                        "ydoc-seed-too-large",
+                    ));
+                }
+                (None, Some(dohc_engine_storage::hex_sha256(seed.as_bytes())))
+            }
+            seed => (seed, None),
+        };
         let result = YdocOpenResult {
             owner_draft: owner_draft.clone(),
             session_id: session_id.clone(),
@@ -1142,23 +1249,9 @@ impl EngineService {
             } else {
                 "absent"
             },
-            seed_content: {
-                // A seed past the in-band cap cannot cross the wire as one
-                // string, and a client that can't seed can't edit: refuse the
-                // open outright (blob streaming for large bodies is RPC-D).
-                if state
-                    .seed_content
-                    .as_ref()
-                    .is_some_and(|seed| seed.len() > MAX_INBAND_CONTENT_BYTES)
-                {
-                    return Err(WireError::new(
-                        ErrorCode::InvalidParams,
-                        "ydoc-seed-exceeds-inband-cap",
-                    ));
-                }
-                state.seed_content
-            },
+            seed_content,
             seed_client_id: state.seed_client_id,
+            seed_blob_sha256,
             artifact_assets: (!state.artifact_assets.is_empty()).then(|| {
                 state
                     .artifact_assets
@@ -1194,7 +1287,7 @@ impl EngineService {
                 first_update_pending: !state.lineage_existing,
                 author_settlement: AuthorSettlementQueue::default(),
                 last_settled_sha: None,
-                open_head_sha: state.head_blob_sha256,
+                open_head_sha,
                 owner_seed_source: state.owner_seed_source,
                 _lease: lease,
             },
@@ -1238,6 +1331,17 @@ impl EngineService {
             serial = Arc::clone(&open.session_ops).lock_owned() => serial,
         };
         let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
+        // A resync moves the session to a replacement claim before its reply
+        // reaches the client. An edit made on the earlier claim's document
+        // must not enter the replacement, so the client's claim decides.
+        if params.expected_lineage_claim_id != session.lineage_claim_id {
+            return Err(map_runtime(RuntimeError::Collab(
+                CollabError::LineageWriteStale {
+                    expected: params.expected_lineage_claim_id,
+                    observed: session.lineage_claim_id,
+                },
+            )));
+        }
         let update = base64::engine::general_purpose::STANDARD
             .decode(&params.update_base64)
             .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid update encoding"))?;
@@ -1316,6 +1420,7 @@ impl EngineService {
             .map_err(map_owner_outbox)?;
             return Ok(json!({
                 "lineageClaimId": session.lineage_claim_id,
+                "lineageOriginatedHere": false,
                 "ownerDraft": {
                     "outboxId": append.outbox_id,
                     "sequence": append.sequence,
@@ -1353,7 +1458,7 @@ impl EngineService {
                         update,
                         params.actor_origin_id,
                         params.attribution,
-                        session.lineage_claim_id,
+                        params.expected_lineage_claim_id,
                         require_empty,
                         seed_source,
                         idempotency_key,
@@ -1486,6 +1591,7 @@ impl EngineService {
             eprintln!("engine: {declined}");
         }
         let lineage_claim_id = outcome.lineage_claim_id;
+        let lineage_originated_here = outcome.lineage_originated_here;
         let automation_claims = outcome.automation_claims;
         let outcome = outcome.outcome;
         // Post-commit: the append transaction already holds the history rows
@@ -1499,6 +1605,7 @@ impl EngineService {
             seq: outcome.seq,
             deduped: outcome.deduped,
             lineage_claim_id,
+            lineage_originated_here,
         })
         .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
     }
@@ -1587,13 +1694,16 @@ impl EngineService {
             }
             serial = open.session_ops.lock() => serial,
         };
-        self.ydoc_settle_inner(
-            &cancellation,
-            handle.as_ref(),
-            &params.session_id,
-            params.summary.as_deref(),
-        )
-        .await
+        let settled = self
+            .ydoc_settle_inner(
+                &cancellation,
+                handle.as_ref(),
+                &params.session_id,
+                params.summary.as_deref(),
+            )
+            .await?;
+        serde_json::to_value(settled)
+            .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
     }
 
     async fn ydoc_settle_inner(
@@ -1602,7 +1712,7 @@ impl EngineService {
         handle: Option<&WorkspaceHandle>,
         session_id: &str,
         _summary: Option<&str>,
-    ) -> Result<Value, WireError> {
+    ) -> Result<YdocSettleResult, WireError> {
         let (open, session) = self.ydoc_session(handle, session_id)?;
         let settled = open
             .actor
@@ -1645,7 +1755,7 @@ impl EngineService {
         if let Some(session) = lock(&self.sessions).get_mut(session_id) {
             session.last_settled_sha = Some(settled.sha256.clone());
         }
-        serde_json::to_value(YdocSettleResult {
+        Ok(YdocSettleResult {
             moment_id: settled.moment_id,
             path: settled.path,
             content: settled.content,
@@ -1657,7 +1767,6 @@ impl EngineService {
                 destructive: settled.projection.destructive,
             },
         })
-        .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
     }
 
     pub(super) async fn ydoc_close(
@@ -2042,8 +2151,19 @@ mod owner_draft_editor_tests;
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_name_matches_only_its_exact_spelling_on_disk() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().expect("scratch");
+        std::fs::create_dir(scratch.path().join("notes")).expect("folder");
+        std::fs::write(scratch.path().join("notes/caseOnly.md"), b"").expect("file");
+        assert!(super::names_exactly(scratch.path(), "notes/caseOnly.md"));
+        for other in ["notes/CASEONLY.md", "Notes/caseOnly.md", "notes/missing.md"] {
+            assert!(!super::names_exactly(scratch.path(), other), "{other}");
+        }
+    }
+
+    #[test]
     fn desktop_automation_drafts_do_not_require_server_declarations() {
-        let value = serde_json::json!({"sessionId":"session","updateBase64":"AAA=","actorOriginId":"collection:Tasks#mark","attribution":{"actorKind":"automation","depth":1,"onBehalfOf":"presser"}});
+        let value = serde_json::json!({"sessionId":"session","updateBase64":"AAA=","expectedLineageClaimId":null,"actorOriginId":"collection:Tasks#mark","attribution":{"actorKind":"automation","depth":1,"onBehalfOf":"presser"}});
         let desktop: super::YdocRecordUpdateParams = serde_json::from_value(value.clone()).unwrap();
         assert!(desktop.automation_declaration().is_none());
         let mut server_value = value;
@@ -2055,6 +2175,23 @@ mod tests {
             declaration.attribution.on_behalf_of.as_deref(),
             Some("presser")
         );
+    }
+
+    #[test]
+    fn record_update_requires_the_expected_claim() {
+        let parse = |value| serde_json::from_value::<super::YdocRecordUpdateParams>(value);
+        let omitted = parse(serde_json::json!({"sessionId":"session","updateBase64":"AAA="}));
+        assert!(omitted.is_err(), "an omitted expectation is invalid");
+        let unclaimed = parse(serde_json::json!({
+            "sessionId":"session","updateBase64":"AAA=","expectedLineageClaimId":null
+        }))
+        .unwrap();
+        assert_eq!(unclaimed.expected_lineage_claim_id, None);
+        let claimed = parse(serde_json::json!({
+            "sessionId":"session","updateBase64":"AAA=","expectedLineageClaimId":"claim"
+        }))
+        .unwrap();
+        assert_eq!(claimed.expected_lineage_claim_id.as_deref(), Some("claim"));
     }
 
     use super::*;
@@ -2155,6 +2292,7 @@ mod tests {
         let params = |author: &str, update: &[u8]| {
             json!({
                 "sessionId":id,"updateBase64":base64::engine::general_purpose::STANDARD.encode(update),
+                "expectedLineageClaimId":session["lineageClaimId"],
                 "actorOriginId":author,"attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}
             })
         };
@@ -2337,7 +2475,8 @@ mod tests {
         let edit = doc.plaintext_insert(6, " dirty");
         for (seed_flag, bytes, request) in [(true, seed, "seed"), (false, edit, "edit")] {
             service.ydoc_record_update(&RequestContext::unbounded(),Some(handle.clone()),Some(request.into()),json!({
-                "sessionId":id,"updateBase64":base64::engine::general_purpose::STANDARD.encode(bytes),"seed":seed_flag
+                "sessionId":id,"updateBase64":base64::engine::general_purpose::STANDARD.encode(bytes),"seed":seed_flag,
+                "expectedLineageClaimId":session["lineageClaimId"]
             })).await.unwrap();
         }
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
@@ -2477,7 +2616,8 @@ mod tests {
         drop(egress);
         assert_eq!(session["seedContent"], markdown);
         service.ydoc_record_update(&RequestContext::unbounded(),Some(handle.clone()),Some("owner-source-seed".into()),json!({
-            "sessionId":session["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(&bytes),"seed":true
+            "sessionId":session["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(&bytes),"seed":true,
+            "expectedLineageClaimId":session["lineageClaimId"]
         })).await.unwrap();
         let (baseline, lineage, sequence) = {
             let db = rusqlite::Connection::open_with_flags(
@@ -2610,7 +2750,8 @@ mod tests {
             .unwrap();
         let queued_bytes = edited.encode_full_state();
         let edit_params = json!({
-            "sessionId":session["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(&queued_bytes)
+            "sessionId":session["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(&queued_bytes),
+            "expectedLineageClaimId":session["lineageClaimId"]
         });
         for _ in 0..2 {
             service
@@ -2636,7 +2777,8 @@ mod tests {
             .unwrap();
         let refused_bytes = edited.encode_full_state();
         let refusal = service.ydoc_record_update(&RequestContext::unbounded(),Some(handle.clone()),Some("after-seal".into()),json!({
-            "sessionId":session["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(&refused_bytes)
+            "sessionId":session["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(&refused_bytes),
+            "expectedLineageClaimId":session["lineageClaimId"]
         })).await.unwrap_err();
         assert_eq!(refusal.message, "owner-outbox-frozen");
         let refused_settlement = service
@@ -3276,8 +3418,8 @@ mod tests {
             };
             let doc = dohc_engine_collab::Ydoc::wire();
             doc.plaintext_insert(0, "before");
-            let mut store =
-                dohc_engine_storage::EngineStore::open(&open.db_path, 100).expect("store");
+            let mut store = dohc_engine_storage::EngineStore::open(open.actor.database_path(), 100)
+                .expect("store");
             let base = store
                 .put_binary_blob(&doc.encode_full_state())
                 .expect("base blob");
@@ -3304,8 +3446,8 @@ mod tests {
             } else {
                 None
             };
-            let mut store =
-                dohc_engine_storage::EngineStore::open(&open.db_path, 100).expect("store");
+            let mut store = dohc_engine_storage::EngineStore::open(open.actor.database_path(), 100)
+                .expect("store");
             let update = store
                 .put_binary_blob(&doc.plaintext_insert(6, " parked"))
                 .expect("update blob");
@@ -3322,7 +3464,7 @@ mod tests {
                 _scratch: scratch,
                 service,
                 handle,
-                db_path: open.db_path.clone(),
+                db_path: open.actor.database_path().to_path_buf(),
                 session,
             };
             assert_eq!(parked.parked(), 1, "the pulled edit starts parked");
@@ -3518,6 +3660,290 @@ mod tests {
     #[tokio::test]
     async fn a_resync_without_egress_budget_keeps_its_session() {
         full_budget_after_the_pulled_edit_commits(true).await;
+    }
+
+    const REPLACED_PATH: &str = "lineage.txt";
+
+    /// An editor whose first edit, "base", claimed its lineage, after
+    /// replication replaced the durable lineage with another claim. The
+    /// session has not resynced, so it still holds the earlier claim.
+    struct ReplacedLineage {
+        _scratch: ScratchDir,
+        service: Arc<EngineService>,
+        handle: WorkspaceHandle,
+        db_path: std::path::PathBuf,
+        session: String,
+        earlier_claim: String,
+        replacement: String,
+        earlier: dohc_engine_collab::Ydoc,
+    }
+
+    impl ReplacedLineage {
+        async fn new(workspace_id: &'static str) -> Self {
+            let scratch = ScratchDir::new().expect("scratch");
+            let service = Arc::new(EngineService::new());
+            let opened = service
+                .workspace_open(
+                    &RequestContext::unbounded(),
+                    json!({
+                        "rootDir": scratch.path().to_string_lossy(),
+                        "workspaceId": workspace_id,
+                        "captureMode": "none"
+                    }),
+                )
+                .await
+                .expect("workspace open");
+            let handle: WorkspaceHandle =
+                serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+            let db_path = service
+                .open(Some(&handle))
+                .expect("open")
+                .actor
+                .database_path()
+                .to_path_buf();
+            let db = rusqlite::Connection::open(&db_path).expect("engine db");
+            db.execute_batch(&format!(
+                "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+                 VALUES ('{workspace_id}','local-origin','epoch','stream',1); \
+                 INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) \
+                 VALUES ('{workspace_id}','local-origin',0);"
+            ))
+            .expect("enable sync");
+            let (opened, egress) = service
+                .ydoc_open(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    json!({
+                        "versionId": "main", "path": REPLACED_PATH,
+                        "contentKind": "plaintext", "seedFromArtifact": false
+                    }),
+                    1,
+                )
+                .await
+                .expect("the editor's session");
+            drop(egress);
+            assert_eq!(opened["lineageClaimId"], Value::Null);
+            let mut fixture = Self {
+                _scratch: scratch,
+                session: opened["sessionId"].as_str().expect("session").to_owned(),
+                earlier_claim: String::new(),
+                replacement: String::new(),
+                earlier: dohc_engine_collab::Ydoc::wire(),
+                service,
+                handle,
+                db_path,
+            };
+            let base = fixture.earlier.plaintext_insert(0, "base");
+            let recorded = fixture
+                .record("base", None, &base)
+                .await
+                .expect("the first edit");
+            fixture.earlier_claim = recorded["lineageClaimId"]
+                .as_str()
+                .expect("the first edit claims the lineage")
+                .to_owned();
+            let foreign = dohc_engine_collab::Ydoc::wire();
+            foreign.plaintext_insert(0, "foreign base");
+            fixture.replacement = dohc_engine_storage::EngineStore::open(&fixture.db_path, 100)
+                .expect("store")
+                .put_binary_blob(&foreign.encode_full_state())
+                .expect("the replacement's base");
+            db.execute(
+                "UPDATE ydoc_docs SET lineage_claim_id=?1 WHERE path=?2",
+                rusqlite::params![&fixture.replacement, REPLACED_PATH],
+            )
+            .expect("replace the durable lineage claim");
+            fixture
+        }
+
+        fn record(
+            &self,
+            key: &str,
+            expected: Option<&str>,
+            update: &[u8],
+        ) -> impl std::future::Future<Output = Result<Value, WireError>> + use<> {
+            let service = Arc::clone(&self.service);
+            let handle = self.handle.clone();
+            let key = key.to_owned();
+            let params = json!({
+                "sessionId": self.session,
+                "updateBase64": base64::engine::general_purpose::STANDARD.encode(update),
+                "expectedLineageClaimId": expected,
+            });
+            async move {
+                service
+                    .ydoc_record_update(
+                        &RequestContext::unbounded(),
+                        Some(handle),
+                        Some(key),
+                        params,
+                    )
+                    .await
+            }
+        }
+
+        fn resync(
+            &self,
+        ) -> impl std::future::Future<Output = Result<(Value, BlobEgress), WireError>> + use<>
+        {
+            let service = Arc::clone(&self.service);
+            let handle = self.handle.clone();
+            let params = json!({ "sessionId": self.session });
+            async move {
+                service
+                    .ydoc_resync(&RequestContext::unbounded(), Some(handle), params, 2)
+                    .await
+            }
+        }
+
+        async fn hold_egress_budget(&self) -> tokio::sync::OwnedSemaphorePermit {
+            self.service
+                .blob_egress_budget
+                .reserve(
+                    i64::try_from(super::super::reads::BLOB_EGRESS_BYTE_BUDGET).expect("budget"),
+                    &OperationCancellation::new(&RequestContext::unbounded()),
+                    "test",
+                )
+                .await
+                .expect("hold the whole egress budget")
+        }
+
+        fn session_claim(&self) -> Option<String> {
+            lock(&self.service.sessions)
+                .get(&self.session)
+                .and_then(|session| session.lineage_claim_id.clone())
+        }
+
+        fn head(&self) -> i64 {
+            rusqlite::Connection::open_with_flags(
+                &self.db_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("engine db")
+            .query_row(
+                "SELECT head_update_seq FROM ydoc_docs WHERE path=?1",
+                [REPLACED_PATH],
+                |row| row.get(0),
+            )
+            .expect("the lineage head")
+        }
+
+        /// The earlier document's next edit is refused and records nothing.
+        fn assert_earlier_edit_refused(&self, before: i64, refused: Result<Value, WireError>) {
+            let refused = refused.expect_err("an edit on the earlier document");
+            assert_eq!(refused.code, ErrorCode::InvalidParams);
+            assert_eq!(refused.message, "ydoc-lineage-stale");
+            assert_eq!(self.head(), before, "the refusal records nothing");
+        }
+
+        async fn close(self) {
+            self.service
+                .workspace_close(Some(self.handle))
+                .await
+                .expect("workspace close");
+        }
+    }
+
+    /// The resync moves the session to the replacement, then cannot have
+    /// egress budget for its blob and answers OVERLOADED. The editor never
+    /// learned the replacement, so its next edit, which still expects the
+    /// earlier claim, is refused rather than taken as the replacement's. An
+    /// edit that expects no claim is refused too: the engine does not
+    /// substitute its own.
+    #[tokio::test]
+    async fn an_earlier_edit_after_an_overloaded_replacing_resync_is_refused() {
+        let fixture = ReplacedLineage::new("replaced-resync-overloaded").await;
+        let held = fixture.hold_egress_budget().await;
+        let refused = fixture.resync().await.expect_err("the blob has no budget");
+        assert_eq!(refused.code, ErrorCode::Overloaded);
+        assert_eq!(refused.message, "blob-egress-capacity");
+        assert_eq!(
+            fixture.session_claim().as_deref(),
+            Some(fixture.replacement.as_str())
+        );
+        drop(held);
+        let edit = fixture.earlier.plaintext_insert(4, " stale");
+        let before = fixture.head();
+        let refused = fixture
+            .record("earlier", Some(&fixture.earlier_claim), &edit)
+            .await;
+        fixture.assert_earlier_edit_refused(before, refused);
+        let refused = fixture.record("unclaimed", None, &edit).await;
+        fixture.assert_earlier_edit_refused(before, refused);
+        fixture.close().await;
+    }
+
+    /// An edit made on the earlier document waits behind the resync that
+    /// moves the session to the replacement. The resync succeeds; the edit
+    /// is still refused.
+    #[tokio::test]
+    async fn an_earlier_edit_queued_behind_a_replacing_resync_is_refused() {
+        let fixture = ReplacedLineage::new("replaced-resync-queued").await;
+        let held = fixture.hold_egress_budget().await;
+        let resync = tokio::spawn(fixture.resync());
+        // The resync holds the session while it waits for egress budget.
+        let waiting = std::time::Instant::now();
+        while fixture.session_claim().as_deref() != Some(fixture.replacement.as_str()) {
+            assert!(
+                waiting.elapsed() < Duration::from_secs(10),
+                "the resync never moved the session"
+            );
+            tokio::task::yield_now().await;
+        }
+        let edit = fixture.earlier.plaintext_insert(4, " stale");
+        let before = fixture.head();
+        let record = tokio::spawn(fixture.record("earlier", Some(&fixture.earlier_claim), &edit));
+        tokio::task::yield_now().await;
+        assert!(!record.is_finished(), "the edit waits behind the resync");
+        drop(held);
+        let (resynced, egress) = resync
+            .await
+            .expect("resync task")
+            .expect("the resync answers once its blob has budget");
+        drop(egress);
+        assert_eq!(resynced["lineageClaimId"], json!(fixture.replacement));
+        let refused = record.await.expect("record task");
+        fixture.assert_earlier_edit_refused(before, refused);
+        fixture.close().await;
+    }
+
+    /// Before any resync, the session still holds the earlier claim, so the
+    /// append's own lineage guard refuses the earlier edit. The editor then
+    /// resyncs onto the replacement and edits that document. The edit records
+    /// under the replacement and settles.
+    #[tokio::test]
+    async fn an_edit_on_the_replacement_records_and_settles() {
+        let fixture = ReplacedLineage::new("replaced-resync-continues").await;
+        let edit = fixture.earlier.plaintext_insert(4, " stale");
+        let before = fixture.head();
+        let refused = fixture
+            .record("earlier", Some(&fixture.earlier_claim), &edit)
+            .await;
+        fixture.assert_earlier_edit_refused(before, refused);
+        let (resynced, egress) = fixture.resync().await.expect("resync");
+        assert_eq!(resynced["lineageClaimId"], json!(fixture.replacement));
+        let winner = dohc_engine_collab::Ydoc::wire();
+        winner
+            .apply(&egress.bytes)
+            .expect("the replacement's state");
+        drop(egress);
+        let edit = winner.plaintext_insert(4, " fresh");
+        let recorded = fixture
+            .record("winner", Some(&fixture.replacement), &edit)
+            .await
+            .expect("an edit on the replacement records");
+        assert_eq!(recorded["lineageClaimId"], json!(fixture.replacement));
+        let settled = fixture
+            .service
+            .ydoc_settle(
+                &RequestContext::unbounded(),
+                Some(fixture.handle.clone()),
+                json!({ "sessionId": fixture.session }),
+            )
+            .await
+            .expect("the replacement settles");
+        assert_eq!(settled["content"], json!("base fresh"));
+        fixture.close().await;
     }
 
     #[test]

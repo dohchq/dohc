@@ -29,6 +29,7 @@ import {
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
+import { readLocalStateFrom } from "./workspaceLocalState";
 import {
   createShareViewFiles,
   ShareViewFilesTargetMissingError,
@@ -107,6 +108,8 @@ async function harness(
     new RelayConfiguredDaemonClientSource(lifecycle, routes),
   );
   sessionSets.push(sessions);
+  // Writers of `.dohc/local` ask the engine's open, as the desktop's do.
+  readLocalStateFrom(sessions);
   const workspace = {
     workspaceId,
     rootPath,
@@ -307,7 +310,7 @@ describe("share-view text writes through the real store", () => {
     async () => {
       const view = await harness("dohc-share-text-capture-posture-", "edit");
 
-      await expect(flushCapture(view)).resolves.toEqual({
+      await expect(flushCapture(view)).resolves.toEqual({ deferredWrites: [],
         heldFiles: [],
         running: false,
         settled: false,

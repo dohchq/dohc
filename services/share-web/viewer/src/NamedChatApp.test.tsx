@@ -56,6 +56,18 @@ async function opened() {await settle(() => text().includes("Second") && follows
 const historyReads = (fetch: ReturnType<typeof server>) => fetch.mock.calls.map(([input]) => new URL(String(input), "https://viewer.test"))
   .filter(url => url.pathname === "/api/named-chat/messages" && !url.searchParams.has("since")).map(url => url.searchParams.get("before"));
 
+it.each([401, 403])("explains sign-in refusal %s with the shared form", async status => {
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => String(input) === "/api/account/session"
+    ? jsonResponse({user: null}) : jsonResponse({ok: false, ...(status === 403 ? {code: "EMAIL_NOT_VERIFIED"} : {})}, status)));
+  await render(); await settle(() => Boolean(container.querySelector('input[name="email"]')));
+  await act(async () => {setControlValue(container.querySelector('input[name="email"]')!, "alice@example.test"); setControlValue(container.querySelector('input[name="password"]')!, "secret");});
+  await click("Sign in"); await settle(() => Boolean(container.querySelector('[role="alert"]')));
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe(status === 403
+    ? "Choose a password from an emailed link before you sign in. Use Forgot your password? to get a link."
+    : "dohc could not sign you in. Check your email and password, then retry.");
+  expect(Boolean(container.querySelector('a[href="/account/forgot-password"]'))).toBe(status === 403);
+});
+
 it("signs in with the shared form, reads the channel oldest first, and posts as the signed-in account", async () => {
   server({signedIn: false, channelName: "Trip to Lisbon"}); await render();
   await settle(() => Boolean(container.querySelector('input[name="email"]')));

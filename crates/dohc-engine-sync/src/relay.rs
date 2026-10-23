@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use dohc_engine_domain::{DeleteTextFile, DomainError, VersionedTextStore, WriteBinary, WriteText};
+use dohc_engine_storage::text;
 use dohc_engine_storage::{
     EngineStore, FaultInjector, FaultPoint, StorageError, TxnOutcome, hex_sha256,
 };
@@ -811,6 +812,9 @@ struct OrdinaryFetch {
     fetched: usize,
     has_more: bool,
     bootstrap_complete: bool,
+    /// The token [`crate::cursor::begin_ordinary_pull`] gave this pass; only
+    /// its own terminal cursor finishes the pull.
+    pull_token: String,
 }
 
 /// What a hosted pass fetched and read before it applied.
@@ -1809,6 +1813,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         response.current_max_origin_seq,
                         &response.settlement_refusals,
                         &response.hosted_refusals,
+                        batch,
                         faults,
                         leases,
                         now_ms,
@@ -1973,6 +1978,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             fetched,
             has_more,
             bootstrap_complete,
+            pull_token,
             ..
         } = *fetch;
         let AppliedPass {
@@ -2032,6 +2038,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             replication_epoch: identity.replication_epoch,
             stream_identity: identity.stream_identity,
             settlement_report_id,
+            ordinary_pull: Some(crate::OrdinaryPullCompletion {
+                token: pull_token,
+                terminal: !has_more,
+            }),
         };
         if crashes(faults, FaultPoint::SyncBetweenApplyAndCursorCommit) {
             return Ok(SyncPassOutcome::CrashedAfterApply {
@@ -2040,7 +2050,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 skipped,
                 conflicts_opened,
                 pending_cursor,
-                changed_paths: changed_paths.into_values().collect(),
+                changed_paths: page_order(changed_paths.into_values(), |change| change.operation),
                 refusals,
                 sharing_declined,
                 record_facts,
@@ -2056,7 +2066,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             skipped,
             conflicts_opened,
             pending_cursor: Some(pending_cursor),
-            changed_paths: changed_paths.into_values().collect(),
+            changed_paths: page_order(changed_paths.into_values(), |change| change.operation),
             refusals,
             sharing_declined,
             record_facts,
@@ -2146,6 +2156,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .cloned(),
         );
         preflight_collisions(store, workspace_id, &identity.origin_id, &ops)?;
+        let pull_token =
+            match crate::cursor::begin_ordinary_pull(store, &identity, faults).map_err(local)? {
+                TxnOutcome::Committed(token) => token,
+                TxnOutcome::Crashed { .. } => {
+                    return Err(RelayError::Local("injected-crash".to_owned()));
+                }
+            };
         self.repair_pending_ydoc_base_orders(
             store,
             workspace_id,
@@ -2165,9 +2182,43 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 fetched,
                 has_more,
                 bootstrap_complete,
+                pull_token,
             }),
             progress,
         ))
+    }
+
+    /// Confirm the relay holds nothing of this hosted replica's own origin
+    /// past what the replica numbered. A store restored from an older copy
+    /// lost commits it already pushed. The counter is the only local record of
+    /// them: a pull imports the host's own rows back into the journal, so the
+    /// journal's maximum rises to the relay's. Sends one empty push to the
+    /// hosted log and writes nothing.
+    pub fn confirm_hosted_origin(
+        &self,
+        store: &EngineStore,
+        workspace_id: &str,
+    ) -> Result<(), RelayError> {
+        let numbered = store
+            .read_with(|conn| crate::hosted::last_outbound_seq(conn, workspace_id))
+            .map_err(local)?
+            .ok_or(RelayError::HostedRefusal(
+                crate::hosted::NOT_A_HOSTED_REPLICA,
+            ))?;
+        let identity = read_sync_identity(store, workspace_id)
+            .map_err(local)?
+            .ok_or(RelayError::InvalidResponse)?;
+        let probe = self.transport.push_hosted(push_probe_request(
+            workspace_id,
+            &identity,
+            &identity.origin_id,
+            -1,
+        ))?;
+        validate_probe_response(&probe)?;
+        if probe.current_max_origin_seq > numbered {
+            return Err(RelayError::OriginDiverged);
+        }
+        Ok(())
     }
 
     /// Pull one hosted pass: the first document still backfilling reads its
@@ -2231,7 +2282,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             ..
         } = *fetch;
         // A ready document that stopped at a conflict child whose parent the
-        // feed withholds, or at work past the retention limit, is held from
+        // feed withholds, at a move onto another spelling of a path another
+        // document holds, or at work past the retention limit, is held from
         // there and reads its own rows.
         for (object_id, op) in &pass.stopped {
             if replica
@@ -2604,7 +2656,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 reads,
                 settlement_report_id: pass.settlement_report_id,
             }),
-            changed_paths: pass.changed_paths.into_values().collect(),
+            changed_paths: page_order(pass.changed_paths.into_values(), |change| change.operation),
             refusals: pass.refusals,
             sharing_declined: pass.sharing_declined,
             record_facts: pass.record_facts,
@@ -2715,6 +2767,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             round: (0..ops).collect(),
             next: 0,
             still_retryable: Vec::new(),
+            retryable_refusals: Vec::new(),
             first: true,
             made_progress: false,
             held: holding.held_at_round(&durable),
@@ -2806,6 +2859,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 break;
             }
             if !p.first && !p.made_progress {
+                // Nothing left in the pass can free these, so a ready
+                // document whose op can wait indefinitely stops here.
+                for &(index, reason) in &p.retryable_refusals {
+                    p.holding.stop_where_it_can_wait(&ordered[index], reason);
+                }
                 // A document that is not ready retains nothing: its read
                 // stops at its first op still to apply, in relay order.
                 let (stopped, retained): (Vec<_>, Vec<_>) = std::mem::take(&mut p.still_retryable)
@@ -2825,7 +2883,18 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         .key(op)
                         .is_some_and(|key| p.durable.contains(&key))
                 }) {
-                    return Err(RelayError::Local("retryable-state".to_owned()));
+                    return Err(retryable_refusal(
+                        p.retryable_refusals
+                            .iter()
+                            .map(|&(index, reason)| (&ordered[index], reason))
+                            .filter(|(op, _)| {
+                                p.holding.unready(op).is_none()
+                                    && !p
+                                        .holding
+                                        .key(op)
+                                        .is_some_and(|key| p.durable.contains(&key))
+                            }),
+                    ));
                 }
                 // A hosted document that would pass the retention limit is
                 // held at its first op still to apply, as one that is not
@@ -2847,6 +2916,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
             p.first = false;
             p.round = std::mem::take(&mut p.still_retryable);
+            p.retryable_refusals.clear();
             p.next = 0;
             p.made_progress = false;
             p.held = p.holding.held_at_round(&p.durable);
@@ -3116,7 +3186,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         match held_for {
             Err(reason) => {
-                p.holding.stop_at_withheld_parent(op, reason);
+                p.retryable_refusals.push((index, reason));
                 if let Some(key) = key {
                     if retained_while_held(op, reason) {
                         p.durable.insert(key.clone());
@@ -3202,13 +3272,23 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         let save = |store: &mut EngineStore, state: Option<&str>, keep_refusal: bool| match store
             .write_with(faults, |tx| {
+                // A refused claim stops this replica's sync, which abandons
+                // its unfinished ordinary pull.
+                let refused = CLAIM_REFUSALS.iter().any(|(code, _)| Some(*code) == state);
                 let changed = tx
                     .execute(
                         "UPDATE sync_identity SET \
                      claim_account_id=CASE WHEN ?3 THEN claim_account_id ELSE ?4 END, \
-                     claim_state=CASE WHEN ?3 THEN COALESCE(claim_state,?2) ELSE ?2 END \
+                     claim_state=CASE WHEN ?3 THEN COALESCE(claim_state,?2) ELSE ?2 END, \
+                     ordinary_pull_token=CASE WHEN ?5 THEN NULL ELSE ordinary_pull_token END \
                      WHERE workspace_id=?1",
-                        params![req.workspace_id, state, keep_refusal, state.and(account_id)],
+                        params![
+                            req.workspace_id,
+                            state,
+                            keep_refusal,
+                            state.and(account_id),
+                            refused
+                        ],
                     )
                     .map_err(SyncError::persist)?;
                 if changed != 1 {
@@ -3339,8 +3419,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 if local_op.origin_seq != shared_prefix_length
                     || local_op.op_kind != op.op_kind
                     || local_op.recorded_at_ms != op.recorded_at_ms
-                    || canonical_json_bytes(&local_op.payload).map_err(local)?
-                        != canonical_json_bytes(&op.payload).map_err(local)?
+                    || !replication_payloads_match(&op.op_kind, &local_op.payload, &op.payload)
+                        .map_err(local)?
                 {
                     break 'pages;
                 }
@@ -4110,7 +4190,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             applied,
             skipped,
             refusals,
-            changed_paths: changed.into_values().collect(),
+            changed_paths: page_order(changed.into_values(), |change| change.operation),
             pending_cursor: crate::ShareCursor {
                 kind: crate::CursorKind::ShareView,
                 share_id: share_id.to_owned(),
@@ -4552,12 +4632,7 @@ pub(crate) fn local_blob_bytes(
     store
         .read_with(|conn| match kind {
             BlobKind::Text => {
-                let row = conn
-                    .query_row(
-                        "SELECT byte_length,text FROM blobs WHERE sha256=?1",
-                        [sha256],
-                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-                    )
+                let row = text::with_length(conn, sha256)
                     .optional()
                     .map_err(SyncError::corrupt)?;
                 let Some((byte_length, text)) = row else {
@@ -4959,7 +5034,7 @@ fn preflight_collisions(
                 };
                 if op_kind != op.op_kind
                     || recorded_at_ms != op.recorded_at_ms
-                    || canonical_json_bytes(&local_payload)? != canonical_json_bytes(&op.payload)?
+                    || !replication_payloads_match(&op.op_kind, &local_payload, &op.payload)?
                 {
                     return Ok(Some(op.origin_id == local_origin_id));
                 }
@@ -4974,6 +5049,58 @@ fn preflight_collisions(
         Some(false) => Err(RelayError::InvalidResponse),
         None => Ok(()),
     }
+}
+
+/// The relay consumes ordinary recording claims, while main's live, agent,
+/// settlement and full-state payloads retain their exact context.
+pub(crate) fn without_recording_claim(
+    kind: &str,
+    payload: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let context = payload.get("authorContext")?;
+    let account = context.get("accountId")?.as_str()?;
+    if crate::outbound::ordinary_account_context(account).as_ref() != Some(context) {
+        return None;
+    }
+    match kind {
+        "moment.append"
+            if payload.get("settlementReference").is_none()
+                && payload.get("attributionUnavailable").is_none() => {}
+        "ydoc.update"
+            if payload.get("isBaseState") == Some(&serde_json::Value::Bool(false))
+                && payload
+                    .get("actorOriginId")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(account)
+                && payload["attribution"]["actorKind"] == "human" => {}
+        _ => return None,
+    }
+    let mut stored = payload.clone();
+    stored.as_object_mut()?.remove("authorContext");
+    Some(stored)
+}
+
+pub(crate) fn replication_payloads_match(
+    kind: &str,
+    left: &serde_json::Value,
+    right: &serde_json::Value,
+) -> Result<bool, SyncError> {
+    // A lost push acknowledgement can leave the claim only in the local journal.
+    // Two claims, or any other content difference, still compare exactly.
+    let stripped_left = right
+        .get("authorContext")
+        .is_none()
+        .then(|| without_recording_claim(kind, left))
+        .flatten();
+    let stripped_right = left
+        .get("authorContext")
+        .is_none()
+        .then(|| without_recording_claim(kind, right))
+        .flatten();
+    Ok(
+        canonical_json_bytes(stripped_left.as_ref().unwrap_or(left))?
+            == canonical_json_bytes(stripped_right.as_ref().unwrap_or(right))?,
+    )
 }
 
 pub(crate) fn canonical_json_bytes(value: &serde_json::Value) -> Result<Vec<u8>, SyncError> {
@@ -5000,8 +5127,8 @@ pub(crate) fn take_canonical_json_call_count() -> usize {
 
 /// Whether a held op is retained across passes, so the cursor can move past
 /// it: work behind a live session, and a hosted moment or Y.Doc row whose
-/// path waits for a departed document to park. A hosted document that is
-/// not ready retains nothing.
+/// path waits for a departed document to park. A hosted document that is not
+/// ready retains nothing.
 fn retained_while_held(op: &ReplicationEnvelope, reason: &str) -> bool {
     match reason {
         crate::hosted::PATH_HELD_BY_DEPARTED => true,
@@ -5068,15 +5195,20 @@ impl Holding {
         crate::hosted::hosted_document(op).filter(|object_id| unready.contains(*object_id))
     }
 
-    /// Stop a ready hosted document at `op`, whose conflict parent the feed
-    /// withholds, whose released lineage is unsettled, or whose resulting head
-    /// its lineage does not project yet: it can wait indefinitely, so the
-    /// document is held there and retains nothing, as one that is not ready.
-    fn stop_at_withheld_parent(&mut self, op: &ReplicationEnvelope, reason: &str) {
+    /// Stop a ready hosted document at `op` when it can wait indefinitely:
+    /// the feed withholds its conflict parent, it would move onto another
+    /// spelling of a path another document holds, its released lineage is
+    /// unsettled, or its lineage does not project its resulting head yet. The
+    /// document is held there, naming why, and retains nothing, as one that
+    /// is not ready.
+    // MERGE-REVIEW: main stops these only after a round without progress;
+    // the released-lineage and resulting-head reasons now wait for that too.
+    fn stop_where_it_can_wait(&mut self, op: &ReplicationEnvelope, reason: &str) {
         if let Self::ByDocument { unready, .. } = self
             && matches!(
                 reason,
                 crate::hosted::CONFLICT_PARENT_WITHHELD
+                    | crate::hosted::PATH_HELD_IN_SCOPE
                     | crate::hosted::RELEASED_LINEAGE_UNSETTLED
                     | "ydoc-resulting-head-pending"
             )
@@ -5162,6 +5294,8 @@ struct ApplyProgress {
     next: usize,
     /// What the round held for the next one.
     still_retryable: Vec<usize>,
+    /// Why each op the round held could not apply.
+    retryable_refusals: Vec<(usize, &'static str)>,
     first: bool,
     made_progress: bool,
     held: BTreeSet<String>,
@@ -5263,7 +5397,7 @@ fn list_workspace_origins(
 
 /// The highest sequence `origin_id` wrote here. A hosted replica's own origin
 /// reads its counter too, which outlives the journal rows it numbered.
-fn local_max_origin_seq(
+pub(crate) fn local_max_origin_seq(
     store: &EngineStore,
     workspace_id: &str,
     origin_id: &str,
@@ -7038,6 +7172,21 @@ fn accumulate_pull_outcome(
 /// A pass's materialization decisions, by version and path.
 pub(crate) type ChangedPaths = BTreeMap<(String, String), crate::MomentMaterializationChange>;
 
+/// A page's changes in the order they apply: every delete, then every write,
+/// each in path order. A disk that ignores case or Unicode normalization
+/// opens `Notes.md` as the `notes.md` that a rename deletes, so a write that
+/// ran first would go with that delete.
+pub(crate) fn page_order<T>(
+    changes: impl IntoIterator<Item = T>,
+    operation: impl Fn(&T) -> &str,
+) -> Vec<T> {
+    let (mut page, writes): (Vec<T>, Vec<T>) = changes
+        .into_iter()
+        .partition(|change| operation(change) == "delete");
+    page.extend(writes);
+    page
+}
+
 pub(crate) fn insert_changed_path(
     changed_paths: &mut ChangedPaths,
     change: crate::MomentMaterializationChange,
@@ -7102,8 +7251,34 @@ fn local(error: SyncError) -> RelayError {
     match error {
         SyncError::Storage(StorageError::FileLocked) => RelayError::StoreBusy,
         SyncError::ValidationPending(pending) => RelayError::ValidationPending(pending),
+        error if matches!(error.original(), SyncError::RetryableState { .. }) => {
+            RelayError::Local(format!("{}: {error}", error.code()))
+        }
         error => RelayError::Local(error.code().to_owned()),
     }
+}
+
+fn retryable_refusal<'a>(
+    refusals: impl IntoIterator<Item = (&'a ReplicationEnvelope, &'static str)>,
+) -> RelayError {
+    let mut refusals = refusals.into_iter();
+    let Some((op, reason)) = refusals.next() else {
+        return RelayError::Local("retryable-state".to_owned());
+    };
+    let object = crate::hosted::hosted_document(op)
+        .map(|id| format!("object {id}, "))
+        .unwrap_or_default();
+    let mut detail = format!(
+        "retryable-state: {} ({object}origin {} seq {})",
+        SyncError::RetryableState { reason },
+        op.origin_id,
+        op.origin_seq,
+    );
+    let remaining = refusals.count();
+    if remaining > 0 {
+        detail.push_str(&format!("; and {remaining} more"));
+    }
+    RelayError::Local(detail)
 }
 
 /// A hosted feed request on a transport built for an ordinary replica.
@@ -7643,5 +7818,59 @@ mod conflict_resolve_blob_ref_tests {
             (state_vector_sha, BTreeSet::from([BlobKind::Ydoc])),
         ]);
         assert_eq!(refs, expected);
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    #[test]
+    fn local_retryable_refusal_keeps_its_reason() {
+        let error = local(SyncError::RetryableState {
+            reason: "ydoc-resulting-head-pending",
+        });
+        assert!(
+            matches!(&error, RelayError::Local(code) if code.split(':').next() == Some("retryable-state"))
+        );
+        assert!(error.to_string().contains("ydoc-resulting-head-pending"));
+    }
+
+    #[test]
+    fn local_retryable_refusal_keeps_its_reason_and_bounds_pull_detail() {
+        let op = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
+            workspace_id: "ws".into(),
+            origin_id: "peer".into(),
+            origin_seq: 7,
+            relay_seq: Some(7),
+            op_kind: "ydoc.update".into(),
+            payload: serde_json::json!({"objectId": "apollo"}),
+            recorded_at_ms: 0,
+        };
+        let first = (&op, "ydoc-resulting-head-pending");
+        assert_eq!(
+            retryable_refusal([first]).to_string(),
+            "local sync state failed: retryable-state: replication state is not ready: ydoc-resulting-head-pending (object apollo, origin peer seq 7)",
+        );
+        assert_eq!(
+            retryable_refusal(
+                std::iter::once(first).chain(std::iter::repeat_n((&op, "other reason"), 499))
+            )
+            .to_string(),
+            "local sync state failed: retryable-state: replication state is not ready: ydoc-resulting-head-pending (object apollo, origin peer seq 7); and 499 more",
+        );
+        let without_object = ReplicationEnvelope {
+            payload: serde_json::json!({}),
+            ..op
+        };
+        assert_eq!(
+            retryable_refusal([(&without_object, "ydoc-resulting-head-pending")]).to_string(),
+            "local sync state failed: retryable-state: replication state is not ready: ydoc-resulting-head-pending (origin peer seq 7)",
+        );
+        assert!(
+            matches!(retryable_refusal([]), RelayError::Local(detail) if detail == "retryable-state")
+        );
     }
 }

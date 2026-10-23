@@ -90,6 +90,9 @@ pub enum ErrorCode {
     RelayMethodNotAllowed,
     /// The relay returned a response that violated its wire contract.
     RelayInvalidResponse,
+    /// The relay address is not an https origin, so the engine refused it
+    /// before sending anything.
+    RelayHttpsRequired,
     /// Internal engine failure; details in redacted diagnostics only.
     Internal,
 }
@@ -135,6 +138,7 @@ impl ErrorCode {
             ErrorCode::InvalidChannel => "INVALID_CHANNEL",
             ErrorCode::RelayMethodNotAllowed => "RELAY_METHOD_NOT_ALLOWED",
             ErrorCode::RelayInvalidResponse => "RELAY_INVALID_RESPONSE",
+            ErrorCode::RelayHttpsRequired => "RELAY_HTTPS_REQUIRED",
             ErrorCode::Internal => "INTERNAL",
         }
     }
@@ -176,6 +180,7 @@ impl ErrorCode {
             | ErrorCode::InvalidChannel
             | ErrorCode::RelayMethodNotAllowed
             | ErrorCode::RelayInvalidResponse
+            | ErrorCode::RelayHttpsRequired
             | ErrorCode::Cancelled => Retryability::No,
             // Safe to retry only because retryable mutations carry
             // idempotency keys; the engine deduplicates on replay.

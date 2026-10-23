@@ -3,7 +3,7 @@ import { join } from "node:path";
 import * as timers from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAutomationRunStore, type StoredRun } from "./automationRunStore";
-import { createTestScratch, testMetadataDir } from "./testScratch";
+import { createTestScratch, testStoreFolder } from "./testScratch";
 
 const io = vi.hoisted(() => ({
   rename: vi.fn<typeof disk.rename>(), delay: vi.fn<typeof timers.setTimeout>(),
@@ -33,7 +33,7 @@ afterEach(() => {
 
 async function savedRun(withWake = false) {
   const root = await createTestScratch("dohc-run-store-windows-");
-  const store = createAutomationRunStore(root, testMetadataDir);
+  const store = createAutomationRunStore(testStoreFolder(root));
   const run: StoredRun = {
     durableEffects: 0, version: 13, claimId: "reader", automationId: "collection:Tasks#bump",
     definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
@@ -47,7 +47,7 @@ async function savedRun(withWake = false) {
     run.applied = [{ ordinal: 0, writes: [{ kind: "notice", noticeId: "wake", name: "Ice" }] }];
   }
   await store.save(run);
-  const runs = join(root, ".dohc", "automations", "runs");
+  const runs = join(root, ".dohc", "local", "automations", "runs");
   const folder = join(runs, (await actual.readdir(runs))[0]!);
   const path = join(folder, (await actual.readdir(folder)).find(name => name.endsWith(".json"))!);
   io.rename.mockClear();
@@ -61,15 +61,16 @@ describe.skipIf(process.platform !== "win32")("Windows run-store replacement", (
     const reading = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     let held = false;
-    io.readFile.mockImplementation((async (file, options) => {
-      if (file === path && !held) {
+    // A read opens the file with numeric flags; a write opens a temporary name.
+    io.open.mockImplementation(async (file, flags, mode) => {
+      if (file === path && typeof flags === "number" && !held) {
         held = true;
         reading.resolve();
         await release.promise;
       }
-      return actual.readFile(file, options);
-    }) as typeof disk.readFile);
-    const history = createAutomationRunStore(root, testMetadataDir).runsOf(run.automationId, run.claimId);
+      return actual.open(file, flags, mode);
+    });
+    const history = createAutomationRunStore(testStoreFolder(root)).runsOf(run.automationId, run.claimId);
     await reading.promise;
     const write = operation === "save" ? store.save({ ...run, settled: true }) : store.updateState(run, { settled: true });
     try {
@@ -158,7 +159,7 @@ describe.skipIf(process.platform !== "win32")("Windows run-store replacement", (
     expect(await actual.readFile(path, "utf8")).toBe(before);
     expect((await actual.readdir(folder)).some(name => name.includes(".tmp-"))).toBe(false);
     io.rename.mockImplementation(actual.rename);
-    const restarted = createAutomationRunStore(root, testMetadataDir);
+    const restarted = createAutomationRunStore(testStoreFolder(root));
     expect(await restarted.runsOf(run.automationId, run.claimId)).toEqual({ runs: [run], unreadable: false });
     await store.updateState(run, { settled: true });
     expect((await restarted.runsOf(run.automationId, run.claimId)).runs[0]?.settled).toBe(true);
@@ -186,7 +187,7 @@ describe("single-file run saves", () => {
     const next = { ...run, settled: true, steps: [{ ordinal: 0, effects: [] }] };
     await expect(store.save(next)).rejects.toBe(error);
     expect(await actual.readFile(path, "utf8")).toBe(before);
-    for (const reader of [store, createAutomationRunStore(root, testMetadataDir)]) {
+    for (const reader of [store, createAutomationRunStore(testStoreFolder(root))]) {
       expect(await reader.runsOf(run.automationId, run.claimId)).toEqual({ runs: [run], unreadable: false });
     }
     expect(await actual.readdir(folder)).toEqual(files);
@@ -217,7 +218,7 @@ describe("single-file run saves", () => {
     const next = { ...run, settled: true, steps: [{ ordinal: 0, effects: [] }] };
     await expect(store.save(next)).rejects.toBe(error);
     const expected = point === "directory-sync" ? next : run;
-    expect(await createAutomationRunStore(root, testMetadataDir).runsOf(run.automationId, run.claimId)).toEqual({ runs: [expected], unreadable: false });
+    expect(await createAutomationRunStore(testStoreFolder(root)).runsOf(run.automationId, run.claimId)).toEqual({ runs: [expected], unreadable: false });
     expect((await actual.readdir(folder)).some(file => file.includes(".tmp-"))).toBe(false);
     expect(await actual.readFile(path, "utf8")).toContain(expected.settled ? '"settled":true' : '"settled":false');
   });
@@ -229,7 +230,7 @@ describe("single-file run saves", () => {
       await store.updateState(run, { settled: true });
     }
     expect(await actual.readdir(folder)).toHaveLength(1);
-    expect(await createAutomationRunStore(root, testMetadataDir).runsOf(run.automationId, run.claimId)).toEqual({ runs: [{ ...run, settled: true }], unreadable: false });
+    expect(await createAutomationRunStore(testStoreFolder(root)).runsOf(run.automationId, run.claimId)).toEqual({ runs: [{ ...run, settled: true }], unreadable: false });
   });
 
   it("appends a complete line without reading or replacing the header", async () => {
@@ -250,7 +251,7 @@ describe("single-file run saves", () => {
       await store.save(run);
     }
     vi.stubGlobal("process", { ...process, platform });
-    const writer = createAutomationRunStore(root, testMetadataDir);
+    const writer = createAutomationRunStore(testStoreFolder(root));
     const before = { ordinal: 1, effects: [] };
     await writer.appendStep(run, before);
     const staged = Promise.withResolvers<void>();
@@ -294,7 +295,7 @@ describe("single-file run saves", () => {
     if (operation === "state") expected.settled = true;
     if (operation === "end") expected.finishedAtMs = 1000;
     if (operation === "wake") expected.applied = [{ ordinal: 0, writes: [{ kind: "notice", noticeId: "wake", name: "Ice; agent wake superseded by a later run", supersededBy: "later" }] }];
-    expect(await createAutomationRunStore(root, testMetadataDir).runsOf(run.automationId, run.claimId)).toEqual({ runs: [expected], unreadable: false });
+    expect(await createAutomationRunStore(testStoreFolder(root)).runsOf(run.automationId, run.claimId)).toEqual({ runs: [expected], unreadable: false });
   });
 
   it("ignores crash-left staging files and removes them even before a run's first publication", async () => {
@@ -302,15 +303,15 @@ describe("single-file run saves", () => {
     const text = await actual.readFile(path, "utf8");
     const leftovers = ["", "{", text.slice(0, text.indexOf("\n") + 1), text];
     for (let i = 0; i < leftovers.length; i += 1) await actual.writeFile(`${path}.tmp-999-${i}`, leftovers[i]!);
-    expect(await createAutomationRunStore(root, testMetadataDir).runsOf(run.automationId, run.claimId)).toEqual({ runs: [run], unreadable: false });
+    expect(await createAutomationRunStore(testStoreFolder(root)).runsOf(run.automationId, run.claimId)).toEqual({ runs: [run], unreadable: false });
     await actual.rm(path);
-    const reopened = createAutomationRunStore(root, testMetadataDir);
+    const reopened = createAutomationRunStore(testStoreFolder(root));
     expect(await reopened.runsOf(run.automationId, run.claimId)).toEqual({ runs: [], unreadable: false });
     await reopened.expire(1000, async () => "gone", null);
     await expect(actual.readdir(folder)).rejects.toMatchObject({ code: "ENOENT" });
     await store.save(run);
     await actual.writeFile(`${path}.tmp-999-published`, text);
-    await createAutomationRunStore(root, testMetadataDir).expire(30 * 24 * 60 * 60 * 1000 + 1000, async () => "gone", null);
+    await createAutomationRunStore(testStoreFolder(root)).expire(30 * 24 * 60 * 60 * 1000 + 1000, async () => "gone", null);
     await expect(actual.readdir(folder)).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

@@ -17,6 +17,7 @@ use dohc_engine_domain::chats::{
     chat_message_search_text, chat_thread_display_title, upsert_chat_search_index_row,
 };
 use dohc_engine_files::search_text::extract_search_text;
+use dohc_engine_storage::text;
 use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
 use rusqlite::{Connection, params};
 use std::path::Path;
@@ -73,7 +74,8 @@ fn delete_file_index_row(
 ) -> Result<(), SearchError> {
     conn.prepare_cached(
         "DELETE FROM engine_search_files_fts \
-         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+         WHERE rowid IN (SELECT id FROM engine_search_files_fts_content \
+             WHERE c0 = ?1 AND c1 = ?2 AND c2 = ?3)",
     )?
     .execute(params![workspace_id, version_id, object_id])?;
     Ok(())
@@ -88,15 +90,11 @@ fn insert_file_index_row(
     path: &str,
     text: &str,
 ) -> Result<(), SearchError> {
-    conn.prepare_cached(
-        "INSERT INTO engine_search_files_fts \
-         (workspace_id, version_id, object_id, path, text) VALUES (?1, ?2, ?3, ?4, ?5)",
-    )?
-    .execute(params![workspace_id, version_id, object_id, path, text])?;
+    conn.prepare_cached("INSERT INTO engine_search_files_fts (workspace_id,version_id,object_id,path,text) VALUES (?1,?2,?3,?4,?5)")?.execute(params![workspace_id,version_id,object_id,path,text])?;
     Ok(())
 }
 
-/// Replace a group's search rows with one table scan, using the policy read before mutation.
+/// Delete a group's rows through the content-key index, using the policy read before mutation.
 pub(crate) fn begin_file_search_index_batch(
     conn: &Connection,
     policy: &SearchPolicySnapshot,
@@ -113,8 +111,8 @@ pub(crate) fn begin_file_search_index_batch(
     } else {
         conn.execute(
             "DELETE FROM engine_search_files_fts
-             WHERE workspace_id=?1 AND version_id=?2
-                 AND object_id IN (SELECT value FROM json_each(?3))",
+             WHERE rowid IN (SELECT id FROM engine_search_files_fts_content
+                 WHERE c0=?1 AND c1=?2 AND c2 IN (SELECT value FROM json_each(?3)))",
             params![workspace_id, version_id, objects_json],
         )?;
     }
@@ -328,7 +326,7 @@ fn rebuild_file_index_for_version(
     // blob — those are treated as text everywhere else via COALESCE and must stay
     // indexed; only an explicit binary head is excluded.
     let mut stmt = conn.prepare(
-        "SELECT candidate.object_id, candidate.path, b.text \
+        "SELECT candidate.object_id, candidate.path, b.sha256 \
          FROM ( \
            SELECT s.object_id, s.path, s.blob_sha256 \
            FROM snapshots s \
@@ -358,10 +356,10 @@ fn rebuild_file_index_for_version(
         }
         let object_id: String = row.get(0)?;
         let path: String = row.get(1)?;
-        let text: String = row.get(2)?;
         if !path_is_search_indexed(policy, &path) {
             continue;
         }
+        let text = text::from_row(conn, row, 2)?;
         let search_text = extract_search_text(&path, &text);
         insert_file_index_row(
             conn,

@@ -36,6 +36,10 @@ _Avoid_: usage report, telemetry, analytics
 A small count of events that a packaged build sends to its report service while the person's switch in Privacy allows it.
 _Avoid_: usage record (that stays on the computer)
 
+**Privacy denial**:
+macOS refusing dohc a folder the person has not allowed in System Settings › Privacy & Security, such as Documents or a removable volume. It has the code `privacy-denied`. It is not about dohc's own Privacy settings.
+_Avoid_: permission error (a file's own permissions)
+
 ### Offers
 
 **Offer**:
@@ -47,6 +51,12 @@ _Avoid_: Offering (what dohc sells), Moment (see History)
 **Moment**:
 A recorded file change within a workspace version. Writes, renames, and deletions create moments, including saved live edits and restores. History shows each moment as a row. Moments from one multi-file pass, such as a merge or restore, fold into one expandable row.
 _Avoid_: version (the line of history that holds moments), snapshot (a file's current state within a version, which names its latest moment), checkpoint
+
+### Notes
+
+**Lossy note**:
+A Markdown note whose meaning would change if dohc saved it from its editor, because the editor can't hold some of its parts, such as raw HTML or link reference definitions. dohc checks each note's current bytes when it opens and opens a lossy note read-only.
+_Avoid_: reader-built note (a note the engine's reader built, marked by `dohcMarkdownSourceReader`), unsupported note
 
 ### Collections
 
@@ -177,8 +187,14 @@ A replica current view is the relay-owned view of a shared workspace after the p
 It contains a complete file manifest, current text, and the applied ordinary and journal cursors.
 The union of current share selectors limits collection. It grants no recipient access.
 The relay replaces the stored view atomically and removes text with no remaining references.
-Settlement cuts remain a separate concept. Recipient access and pinned History are separate changes.
+Settlement cuts remain a separate concept.
+
+## History pin
+
+An immutable recipient History version of one shared object, sampled from a stored replica current view.
+The current grant, selector, and object visibility control access. A grant cannot read a pin superseded at or before that grant began.
+Pins do not enter the owner's replication log or count against the owner's quota.
 
 ## History operation
 
-A History operation groups the file changes made by one admitted action under a main-minted `dohc-operation:` id. Reading it returns paths and change references. Delete Undo also uses its recovery record.
+A History operation groups the file changes made by one admitted action under a main-minted `dohc-operation:` id. Reading it returns paths and change references. Delete and move Undo also use the operation's recovery record.

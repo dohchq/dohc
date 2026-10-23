@@ -54,11 +54,15 @@ beforeEach(() => {
   vi.mocked(prepareQuickOpenPaths).mockClear();
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 it.each(["win32", "darwin"].flatMap((platform) =>
   ["input", "result row", "panel"].map((focus) => ({ platform, focus })),
 ))("handles its own Go to toggle shortcut on $platform with focus on the $focus", ({ platform, focus }) => {
+  vi.stubGlobal("dohcDesktop", { platform });
   const close = vi.fn();
   render(palette({ onClose: close }));
   const target = focus === "input"

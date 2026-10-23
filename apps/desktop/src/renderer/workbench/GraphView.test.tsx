@@ -1,4 +1,7 @@
 // @vitest-environment jsdom
+import { DaemonRefusalError } from "@dohc/workspace-engine-client";
+import { ipcWireError } from "../../ipc/errorWords";
+import * as graphData from "./graphData";
 import {
   act,
   cleanup,
@@ -10,7 +13,9 @@ import {
 import userEvent from "@testing-library/user-event";
 import { Profiler, useLayoutEffect } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { WorkspaceGraphResult } from "../../ipc/bridgeContract";
+import type { ChatFileMentionRecord } from "../../ipc/bridgeContract";
+import type { LinksEdgesResult } from "@dohc/workspace-contracts/links";
+type GraphFixture = {nodes:{path:string;title:string;incoming:number;outgoing:number}[];edges:{source:string;target:string;kind:"wikilink"|"markdown"}[];[key:string]:unknown};
 import { GraphView } from "./GraphView";
 import { deferred } from "../../testing/deferred";
 
@@ -30,7 +35,7 @@ function immediateResponse<T>() {
   };
 }
 
-function graph(path: string): WorkspaceGraphResult {
+function graph(path: string): GraphFixture {
   return {
     nodes: [{ path, title: path, incoming: 0, outgoing: 0 }],
     edges: [],
@@ -41,7 +46,7 @@ function graph(path: string): WorkspaceGraphResult {
   };
 }
 
-function connectedGraph(): WorkspaceGraphResult {
+function connectedGraph(): GraphFixture {
   return {
     nodes: [
       { path: "alpha.md", title: "Alpha", incoming: 0, outgoing: 1 },
@@ -55,7 +60,7 @@ function connectedGraph(): WorkspaceGraphResult {
   };
 }
 
-function denseGraph(nodeCount: number, edgeCount: number): WorkspaceGraphResult {
+function denseGraph(nodeCount: number, edgeCount: number): GraphFixture {
   const nodes = Array.from({ length: nodeCount }, (_, index) => ({
     path: `note-${index.toString().padStart(4, "0")}.md`,
     title: `Note ${index}`,
@@ -76,7 +81,7 @@ function denseGraph(nodeCount: number, edgeCount: number): WorkspaceGraphResult 
   };
 }
 
-function colonPathGraph(): WorkspaceGraphResult {
+function colonPathGraph(): GraphFixture {
   return {
     nodes: [
       { path: "a:b", title: "A:B", incoming: 0, outgoing: 1 },
@@ -151,8 +156,8 @@ describe("GraphView", () => {
       outgoing: index % 11,
     }));
     const activePath = nodes.at(-1)!.path;
-    vi.stubGlobal("dohcDesktop", {
-      readWorkspaceGraph: vi.fn(async () => ({
+    stubFileGraph({
+      linksEdges: vi.fn(async () => ({
         nodes,
         edges: [],
         unresolvedLinks: 0,
@@ -182,9 +187,7 @@ describe("GraphView", () => {
     expect(screen.getByTestId("graph-unresolved-count").textContent).toContain(
       "240 of 2000 docs shown",
     );
-    expect(screen.getByTestId("graph-unresolved-count").textContent).toContain(
-      "7000 omitted",
-    );
+
   });
 
   it("uses the larger bounded slice in the full-page graph", async () => {
@@ -194,8 +197,8 @@ describe("GraphView", () => {
       incoming: index % 5,
       outgoing: 0,
     }));
-    vi.stubGlobal("dohcDesktop", {
-      readWorkspaceGraph: vi.fn(async () => ({
+    stubFileGraph({
+      linksEdges: vi.fn(async () => ({
         nodes,
         edges: [],
         unresolvedLinks: 0,
@@ -231,8 +234,8 @@ describe("GraphView", () => {
   ])(
     "reports the $variant link limit instead of implying every link is drawn",
     async ({ variant, nodeCount, edgeLimit }) => {
-      vi.stubGlobal("dohcDesktop", {
-        readWorkspaceGraph: vi.fn(async () => denseGraph(nodeCount, edgeLimit + 1)),
+      stubFileGraph({
+        linksEdges: vi.fn(async () => denseGraph(nodeCount, edgeLimit + 1)),
       });
 
       render(
@@ -259,8 +262,8 @@ describe("GraphView", () => {
 
   it("does not commit React renders during force-simulation frames", async () => {
     const frames = stubAnimationFrames();
-    vi.stubGlobal("dohcDesktop", {
-      readWorkspaceGraph: vi.fn(async () => connectedGraph()),
+    stubFileGraph({
+      linksEdges: vi.fn(async () => connectedGraph()),
     });
     let renderCount = 0;
 
@@ -286,8 +289,8 @@ describe("GraphView", () => {
 
   it("commits the final dragged position only when the drag ends", async () => {
     stubAnimationFrames();
-    vi.stubGlobal("dohcDesktop", {
-      readWorkspaceGraph: vi.fn(async () => connectedGraph()),
+    stubFileGraph({
+      linksEdges: vi.fn(async () => connectedGraph()),
     });
     let renderCount = 0;
     const onOpenPath = vi.fn();
@@ -351,12 +354,12 @@ describe("GraphView", () => {
 
   it("keeps the held node at the pointer through a graph refresh", async () => {
     const frames = stubAnimationFrames();
-    const refreshed = deferred<WorkspaceGraphResult>();
-    const readWorkspaceGraph = vi
+    const refreshed = deferred<GraphFixture>();
+    const linksEdges = vi
       .fn()
       .mockResolvedValueOnce(connectedGraph())
       .mockReturnValueOnce(refreshed.promise);
-    vi.stubGlobal("dohcDesktop", { readWorkspaceGraph });
+    stubFileGraph({ linksEdges });
     const view = (refreshKey: string) => (
       <GraphView
         workspaceId="ws-drag-refresh"
@@ -377,7 +380,7 @@ describe("GraphView", () => {
       clientY: 210,
     });
     rerender(view("1"));
-    await waitFor(() => expect(readWorkspaceGraph).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(linksEdges).toHaveBeenCalledTimes(2));
     await act(async () => {
       refreshed.resolve(connectedGraph());
       await refreshed.promise;
@@ -396,8 +399,8 @@ describe("GraphView", () => {
 
   it("keeps one pointer as drag owner and commits when that pointer releases", async () => {
     const frames = stubAnimationFrames();
-    vi.stubGlobal("dohcDesktop", {
-      readWorkspaceGraph: vi.fn(async () => connectedGraph()),
+    stubFileGraph({
+      linksEdges: vi.fn(async () => connectedGraph()),
     });
     let renderCount = 0;
     render(
@@ -461,8 +464,8 @@ describe("GraphView", () => {
 
   it("updates both edges when colon-bearing paths would share a delimited key", async () => {
     stubAnimationFrames();
-    vi.stubGlobal("dohcDesktop", {
-      readWorkspaceGraph: vi.fn(async () => colonPathGraph()),
+    stubFileGraph({
+      linksEdges: vi.fn(async () => colonPathGraph()),
     });
     render(
       <GraphView
@@ -513,8 +516,8 @@ describe("GraphView", () => {
 
   it("matches a full React render after the simulation settles", async () => {
     const frames = stubAnimationFrames();
-    vi.stubGlobal("dohcDesktop", {
-      readWorkspaceGraph: vi.fn(async () => connectedGraph()),
+    stubFileGraph({
+      linksEdges: vi.fn(async () => connectedGraph()),
     });
     const onOpenPath = vi.fn();
     const view = () => (
@@ -543,8 +546,8 @@ describe("GraphView", () => {
 
   it("does not carry residual velocity past a frame-cap commit", async () => {
     const frames = stubAnimationFrames();
-    const readWorkspaceGraph = vi.fn(async () => graph("solo.md"));
-    vi.stubGlobal("dohcDesktop", { readWorkspaceGraph });
+    const linksEdges = vi.fn(async () => graph("solo.md"));
+    stubFileGraph({ linksEdges });
     const view = (refreshKey: string) => (
       <GraphView
         workspaceId="ws-frame-cap"
@@ -584,7 +587,7 @@ describe("GraphView", () => {
 
     const capped = graphNodePosition(node);
     rerender(view("1"));
-    await waitFor(() => expect(readWorkspaceGraph).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(linksEdges).toHaveBeenCalledTimes(2));
     await waitFor(() =>
       expect(screen.getByTestId("graph-view").getAttribute("data-state")).toBe(
         "ready",
@@ -606,343 +609,248 @@ describe("GraphView", () => {
     );
   });
 
-  it("hides chat mentions when Chats is unavailable", async () => {
-    const readWorkspaceGraph = vi.fn(async () => ({
-      nodes: [],
-      edges: [],
-      unresolvedLinks: 0,
-      scannedFileCount: 0,
-      omittedFileCount: 0,
-      truncatedFileCount: 0,
-    }));
-    vi.stubGlobal("dohcDesktop", { readWorkspaceGraph });
 
-    render(
-      <GraphView
-        workspaceId="ws-no-mentions"
-        activePath={null}
-        refreshKey="0"
-        chatMentionsAvailable={false}
-        onOpenPath={vi.fn()}
-      />,
-    );
-
-    await waitFor(() => expect(readWorkspaceGraph).toHaveBeenCalled());
-    expect(screen.queryByTestId("graph-chat-mentions-toggle")).toBeNull();
-    expect(readWorkspaceGraph).toHaveBeenCalledWith({
-      workspaceId: "ws-no-mentions",
-      includeChatMentions: false,
-    });
-  });
-
-  it("loads the workspace graph and opens a clicked document", async () => {
-    const onOpenPath = vi.fn();
-    vi.stubGlobal("dohcDesktop", {
-      readWorkspaceGraph: vi.fn(async () => ({
-        nodes: [
-          { path: "alpha.md", title: "Alpha", incoming: 1, outgoing: 1 },
-          { path: "beta.md", title: "Beta", incoming: 1, outgoing: 0 },
-        ],
-        edges: [{ source: "alpha.md", target: "beta.md", kind: "wikilink" }],
-        unresolvedLinks: 1,
-        scannedFileCount: 2,
-        omittedFileCount: 0,
-        truncatedFileCount: 0,
-      })),
-    });
-
-    render(
-      <GraphView
-        workspaceId="ws-graph"
-        activePath="alpha.md"
-        refreshKey="0"
-        onOpenPath={onOpenPath}
-      />,
-    );
-
-    await waitFor(() =>
-      expect(screen.getByTestId("graph-view").getAttribute("data-state")).toBe(
-        "ready",
-      ),
-    );
-    expect(screen.getByTestId("graph-doc-count").textContent).toBe("2 docs");
+  it("paints the first page before continuing and deduplicates visible degrees", async () => {
+    const frames = stubAnimationFrames();
+    const second = deferred<LinksEdgesResult>();
+    const linksEdges = vi.fn().mockResolvedValueOnce(page("a.md", "next")).mockImplementation(() => second.promise);
+    vi.stubGlobal("dohcDesktop", { linksEdges });
+    render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} />);
+    expect(await screen.findAllByText("a.md")).toBeTruthy();
+    expect(linksEdges).toHaveBeenCalledOnce();
+    expect(screen.getByText("Gathering linked mentions").textContent).toBe("Gathering linked mentions");
+    act(() => { while (frames.pending) frames.runNext(); });
+    await waitFor(() => expect(linksEdges).toHaveBeenCalledTimes(2));
+    await act(async () => second.resolve({ ...page("isolated.md"), entries: [
+      {source:"a.md",target:"b.md",kind:"wikilink",ordinal:0},
+      {source:"a.md",target:"b.md",kind:"wikilink",ordinal:1},
+    ] }));
+    await waitFor(() => expect(screen.getByTestId("graph-doc-count").textContent).toBe("3 docs"));
     expect(screen.getByTestId("graph-link-count").textContent).toBe("1 link");
-    expect(screen.getByTestId("graph-unresolved-count").textContent).toContain(
-      "1 unresolved",
-    );
-    const graphNodes = await screen.findAllByTestId("graph-node");
-    expect(
-      graphNodes
-        .find((node) => node.dataset.path === "beta.md")
-        ?.getAttribute("aria-label"),
-    ).toBe("Open or focus beta.md");
-
-    await userEvent.click(
-      graphNodes.find((node) => node.dataset.path === "beta.md")!,
-    );
-    expect(onOpenPath).toHaveBeenCalledWith("beta.md");
+    const row=screen.getAllByTestId("graph-file-row").find(row=>row.dataset.path==="a.md")!;
+    expect(row.textContent).toContain("0/1");
+    expect(screen.queryByText("Gathering linked mentions")).toBeNull();
   });
 
-  it("clears the previous workspace while the next graph loads and rejects a late repaint", async () => {
-    const lateWorkspaceA = deferred<WorkspaceGraphResult>();
-    const workspaceB = deferred<WorkspaceGraphResult>();
-    const readWorkspaceGraph = vi.fn(
-      (input: { workspaceId: string }) => {
-        if (input.workspaceId === "workspace-a") {
-          return readWorkspaceGraph.mock.calls.length === 1
-            ? Promise.resolve(graph("a.md"))
-            : lateWorkspaceA.promise;
-        }
-        return workspaceB.promise;
-      },
-    );
-    vi.stubGlobal("dohcDesktop", { readWorkspaceGraph });
-
-    const { rerender } = render(
-      <GraphView
-        workspaceId="workspace-a"
-        activePath={null}
-        refreshKey="0"
-        onOpenPath={vi.fn()}
-      />,
-    );
-
-    expect(
-      await screen.findByRole("button", { name: "Open or focus a.md" }),
-    ).toBeTruthy();
-
-    rerender(
-      <GraphView
-        workspaceId="workspace-a"
-        activePath={null}
-        refreshKey="1"
-        onOpenPath={vi.fn()}
-      />,
-    );
-    expect(
-      screen.getByRole("button", { name: "Open or focus a.md" }),
-    ).toBeTruthy();
-
-    rerender(
-      <GraphView
-        workspaceId="workspace-b"
-        activePath={null}
-        refreshKey="0"
-        onOpenPath={vi.fn()}
-      />,
-    );
-    expect(
-      screen.queryByRole("button", { name: "Open or focus a.md" }),
-    ).toBeNull();
-    expect(screen.getByText("Building graph…")).toBeTruthy();
-
-    await act(async () => {
-      lateWorkspaceA.resolve(graph("late-a.md"));
-      await lateWorkspaceA.promise;
-    });
-    expect(
-      screen.queryByRole("button", { name: "Open or focus late-a.md" }),
-    ).toBeNull();
-    expect(screen.getByText("Building graph…")).toBeTruthy();
-
-    await act(async () => {
-      workspaceB.resolve(graph("b.md"));
-      await workspaceB.promise;
-    });
-    expect(
-      await screen.findByRole("button", { name: "Open or focus b.md" }),
-    ).toBeTruthy();
-    expect(
-      screen.queryByRole("button", { name: "Open or focus late-a.md" }),
-    ).toBeNull();
+  it("rejects late workspace pages and routes a failed refresh to Notices with retry", async () => {
+    const late = deferred<LinksEdgesResult>();
+    const linksEdges = vi.fn().mockImplementation(({workspaceId}) => workspaceId==="a" ? late.promise : Promise.resolve(page("b.md")));
+    const onError=vi.fn();
+    vi.stubGlobal("dohcDesktop",{linksEdges});
+    const props={activePath:null,refreshKey:"0",onOpenPath:vi.fn(),onError};
+    const view=render(<GraphView {...props} workspaceId="a"/>);
+    view.rerender(<GraphView {...props} workspaceId="b"/>);
+    expect(await screen.findAllByText("b.md")).toBeTruthy();
+    await act(async()=>late.resolve(page("late.md")));
+    expect(screen.queryByText("late.md")).toBeNull();
+    linksEdges.mockRejectedValueOnce(new Error("offline"));
+    fireEvent.click(screen.getByLabelText("Refresh graph"));
+    await waitFor(()=>expect(onError).toHaveBeenCalledOnce());
+    expect(screen.getAllByText("b.md")).toBeTruthy();
+    linksEdges.mockResolvedValue(page("recovered.md"));
+    act(()=>onError.mock.calls[0]![2]());
+    expect(await screen.findAllByText("recovered.md")).toBeTruthy();
   });
 
-  it("drops a stale response from an older refresh generation", async () => {
-    // Deliver K1 from the parent's layout effect after K2 commits but before
-    // GraphView's passive cleanup retires K1.
-    const first = immediateResponse<WorkspaceGraphResult>();
-    const second = deferred<WorkspaceGraphResult>();
-    const readWorkspaceGraph = vi
-      .fn()
-      .mockReturnValueOnce(first.promise)
-      .mockReturnValueOnce(second.promise);
-    vi.stubGlobal("dohcDesktop", { readWorkspaceGraph });
-    function RefreshRace(props: { refreshKey: string }) {
-      useLayoutEffect(() => {
-        if (props.refreshKey === "1") first.resolve(graph("stale.md"));
-      }, [props.refreshKey]);
-      return (
-        <GraphView
-          workspaceId="ws-refresh-generation"
-          activePath={null}
-          refreshKey={props.refreshKey}
-          onOpenPath={vi.fn()}
-        />
-      );
+  it("leaves terminal unchecked coverage visible without polling", async () => {
+    const linksEdges=vi.fn(async()=>({...page("a.md"),complete:false,unchecked:["a.md"]}));
+    vi.stubGlobal("dohcDesktop",{linksEdges});
+    render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()}/>);
+    expect(await screen.findAllByText("a.md")).toBeTruthy();
+    expect(screen.queryByText("Gathering linked mentions")).toBeNull();
+    expect(screen.getByTestId("graph-unresolved-count").textContent).toContain("1 unchecked");
+    expect(linksEdges).toHaveBeenCalledOnce();
+  });
+
+  it("bounds index-building refreshes and cancels them on unmount", async () => {
+    vi.useFakeTimers();
+    try {
+      const linksEdges=vi.fn(async()=>({...page("a.md"),complete:false,indexBuilding:true}));
+      vi.stubGlobal("dohcDesktop",{linksEdges});
+      const view=render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()}/>);
+      await act(async()=>{ await vi.advanceTimersByTimeAsync(20000); });
+      expect(linksEdges).toHaveBeenCalledTimes(6);
+      view.unmount();
+      await vi.advanceTimersByTimeAsync(20000);
+      expect(linksEdges).toHaveBeenCalledTimes(6);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("keeps file edges usable after chat failure and ignores a late disabled chat answer", async () => {
+    const chat = deferred<{entries:ChatFileMentionRecord[]}>();
+    const linksEdges=vi.fn(async()=>page("a.md"));
+    const chatFileMentionsPage=vi.fn(()=>chat.promise);
+    const onError=vi.fn();
+    vi.stubGlobal("dohcDesktop",{linksEdges,chatFileMentionsPage});
+    render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} onError={onError} chatMentionsAvailable/>);
+    expect(await screen.findAllByText("a.md")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
+    await waitFor(()=>expect(chatFileMentionsPage).toHaveBeenCalled());
+    fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
+    await act(async()=>chat.reject(new Error("chat offline")));
+    expect(onError).not.toHaveBeenCalled();
+    expect(screen.getAllByText("a.md")).toBeTruthy();
+    chatFileMentionsPage.mockRejectedValue(new Error("chat offline"));
+    fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
+    await waitFor(()=>expect(onError).toHaveBeenCalledOnce());
+    expect(screen.getAllByText("a.md")).toBeTruthy();
+  });
+  it("keeps the drawn graph through every page of a refresh", async () => {
+    const next = deferred<LinksEdgesResult>();
+    const linksEdges = vi.fn().mockResolvedValueOnce(page("old.md"))
+      .mockResolvedValueOnce(page("replacement.md", "next")).mockReturnValueOnce(next.promise);
+    vi.stubGlobal("dohcDesktop", { linksEdges });
+    render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} />);
+    await screen.findAllByText("old.md");
+    fireEvent.click(screen.getByLabelText("Refresh graph"));
+    await waitFor(() => expect(linksEdges).toHaveBeenCalledTimes(3));
+    expect(screen.getAllByText("old.md")).toBeTruthy();
+    expect(screen.queryByText("replacement.md")).toBeNull();
+    await act(async () => next.resolve(page("last.md")));
+    await screen.findAllByText("replacement.md");
+    expect(screen.queryByText("old.md")).toBeNull();
+    expect(screen.getAllByText("last.md")).toBeTruthy();
+  });
+
+  it.each([false, true])("restarts a changed-source cursor once; repeated rejection=%s", async repeated => {
+    const frames = stubAnimationFrames();
+    const changed = new Error("DaemonRefusalError [CONFLICT]: links-edges-source-changed");
+    const linksEdges = vi.fn().mockResolvedValueOnce(page("a.md", "cursor"))
+      .mockRejectedValueOnce(changed).mockResolvedValueOnce(page("fresh.md", "fresh-cursor"));
+    if (repeated) linksEdges.mockRejectedValueOnce(changed);
+    else linksEdges.mockResolvedValueOnce(page("last.md"));
+    const onError = vi.fn();
+    vi.stubGlobal("dohcDesktop", { linksEdges });
+    render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} onError={onError} />);
+    await screen.findAllByText("a.md");
+    await act(async () => { while (frames.pending) frames.runNext(); });
+    await waitFor(() => expect(linksEdges).toHaveBeenCalledTimes(4));
+    expect(linksEdges.mock.calls.map(([input]) => input.cursor)).toEqual([undefined, "cursor", undefined, "fresh-cursor"]);
+    if (repeated) {
+      await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+      expect(screen.getAllByText("a.md")).toBeTruthy();
+    } else {
+      await screen.findAllByText("last.md");
+      expect(screen.queryByText("a.md")).toBeNull();
+      expect(onError).not.toHaveBeenCalled();
     }
-    const { rerender } = render(<RefreshRace refreshKey="0" />);
-    await waitFor(() => expect(readWorkspaceGraph).toHaveBeenCalledOnce());
-
-    rerender(<RefreshRace refreshKey="1" />);
-    await waitFor(() => expect(readWorkspaceGraph).toHaveBeenCalledTimes(2));
-    expect(
-      screen.queryByRole("button", { name: "Open or focus stale.md" }),
-    ).toBeNull();
-
-    await act(async () => {
-      second.resolve(graph("current.md"));
-      await second.promise;
-    });
-    expect(
-      await screen.findByRole("button", { name: "Open or focus current.md" }),
-    ).toBeTruthy();
   });
 
-  it("enables mention overlays and routes heading and chat nodes", async () => {
-    const headingNode = {
-      path: "heading:object-plan:scope",
-      kind: "heading" as const,
-      filePath: "docs/plan.md",
-      headingAnchor: "scope",
-      title: "#Scope",
-      incoming: 1,
-      outgoing: 1,
-    };
-    const chatNode = {
-      path: "chat-thread:thread-1",
-      kind: "chat-thread" as const,
-      threadId: "thread-1",
-      channelId: "channel-1",
-      channelName: "planning",
-      channelSlug: "planning",
-      channelKind: "channel" as const,
-      title: "Planning discussion",
-      incoming: 0,
-      outgoing: 1,
-    };
-    const readWorkspaceGraph = vi.fn(
-      async (input: { includeChatMentions?: boolean }) => ({
-        nodes: input.includeChatMentions
-          ? [
-              {
-                path: "docs/plan.md",
-                kind: "file" as const,
-                filePath: "docs/plan.md",
-                title: "Plan",
-                incoming: 1,
-                outgoing: 0,
-              },
-              headingNode,
-              chatNode,
-            ]
-          : [],
-        edges: [],
-        unresolvedLinks: 0,
-        scannedFileCount: 1,
-        omittedFileCount: 0,
-        truncatedFileCount: 0,
-      }),
-    );
-    vi.stubGlobal("dohcDesktop", { readWorkspaceGraph });
-    const onOpenPath = vi.fn();
-    const onOpenChatThread = vi.fn();
-    render(
-      <GraphView
-        workspaceId="ws-graph"
-        activePath={null}
-        refreshKey="0"
-        chatMentionsAvailable
-        onOpenPath={onOpenPath}
-        onOpenChatThread={onOpenChatThread}
-      />,
-    );
-
-    await waitFor(() => expect(readWorkspaceGraph).toHaveBeenCalledTimes(1));
-    await userEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
-    await waitFor(() =>
-      expect(readWorkspaceGraph).toHaveBeenLastCalledWith({
-        workspaceId: "ws-graph",
-        includeChatMentions: true,
-      }),
-    );
-
-    const rows = await screen.findAllByTestId("graph-file-row");
-    await userEvent.click(
-      rows.find((row) => row.getAttribute("data-path") === headingNode.path)!,
-    );
-    expect(onOpenPath).toHaveBeenCalledWith("docs/plan.md", "scope");
-
-    await userEvent.click(
-      rows.find((row) => row.getAttribute("data-path") === chatNode.path)!,
-    );
-    expect(onOpenChatThread).toHaveBeenCalledWith(expect.objectContaining(chatNode));
+  it("requests one chat batch for drawn files and joins non-Markdown targets once", async () => {
+    const mention = {
+      attachment: { objectId: "svg", pathHint: "picture.svg" },
+      thread: { id: "thread", title: "Picture discussion" },
+    } as ChatFileMentionRecord;
+    const linksEdges = vi.fn(async () => ({ ...page("a.md"), entries: [
+      { source: "a.md", target: "picture.svg", kind: "markdown" as const, ordinal: 0 },
+    ] }));
+    const chatFileMentionsPage = vi.fn(async () => ({ entries: [mention] }));
+    vi.stubGlobal("dohcDesktop", { linksEdges, chatFileMentionsPage });
+    const { rerender } = render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} chatMentionsAvailable />);
+    await screen.findAllByText("a.md");
+    fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
+    await screen.findAllByText("Picture discussion");
+    expect(chatFileMentionsPage).toHaveBeenCalledOnce();
+    expect(chatFileMentionsPage).toHaveBeenCalledWith({ workspaceId: "ws" });
+    expect(screen.getByTestId("graph-link-count").textContent).toBe("2 links");
+    // Opening another file that draws the same files asks for nothing new.
+    for (const activePath of ["a.md", "picture.svg"]) {
+      rerender(<GraphView workspaceId="ws" activePath={activePath} refreshKey="0" onOpenPath={vi.fn()} chatMentionsAvailable />);
+      await screen.findAllByText("Picture discussion");
+    }
+    expect(chatFileMentionsPage).toHaveBeenCalledOnce();
   });
 
-  it("clears mention nodes when chat access is revoked even if the replacement fails", async () => {
-    const disabledGraph = deferred<WorkspaceGraphResult>();
-    const overlayGraph: WorkspaceGraphResult = {
-      nodes: [
-        {
-          path: "chat-thread:thread-sensitive",
-          kind: "chat-thread",
-          threadId: "thread-sensitive",
-          title: "Sensitive discussion",
-          incoming: 0,
-          outgoing: 0,
-        },
-      ],
-      edges: [],
-      unresolvedLinks: 0,
-      scannedFileCount: 0,
-      omittedFileCount: 0,
-      truncatedFileCount: 0,
-    };
-    const readWorkspaceGraph = vi.fn(
-      (input: { includeChatMentions?: boolean }) =>
-        input.includeChatMentions
-          ? Promise.resolve(overlayGraph)
-          : readWorkspaceGraph.mock.calls.length === 1
-            ? Promise.resolve(graph("safe.md"))
-            : disabledGraph.promise,
-    );
-    vi.stubGlobal("dohcDesktop", { readWorkspaceGraph });
-
-    const { rerender } = render(
-      <GraphView
-        workspaceId="ws-graph"
-        activePath={null}
-        refreshKey="0"
-        chatMentionsAvailable
-        onOpenPath={vi.fn()}
-      />,
-    );
-    await screen.findByRole("button", { name: "Open or focus safe.md" });
-    await userEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
-    expect(await screen.findAllByText("Sensitive discussion")).not.toHaveLength(0);
-
-    rerender(
-      <GraphView
-        workspaceId="ws-graph"
-        activePath={null}
-        refreshKey="0"
-        chatMentionsAvailable={false}
-        onOpenPath={vi.fn()}
-      />,
-    );
-
-    expect(screen.queryByText("Sensitive discussion")).toBeNull();
-    expect(screen.getByText("Building graph…")).toBeTruthy();
-
-    await act(async () => {
-      disabledGraph.reject(new Error("access revoked"));
-      try {
-        await disabledGraph.promise;
-      } catch {
-        // The component owns and renders this expected load failure.
-      }
-    });
-
-    expect(screen.queryByText("Sensitive discussion")).toBeNull();
-    expect(screen.getByText("access revoked")).toBeTruthy();
+  it("keeps the chat overlay while a refreshed file walk is pending", async () => {
+    const held = deferred<LinksEdgesResult>();
+    const linksEdges = vi.fn().mockResolvedValue(page("a.md"));
+    const chatFileMentionsPage = vi.fn(async () => ({ entries: [{
+      attachment: {objectId:"a.md",pathHint:"a.md"}, thread: {id:"thread",title:"Discussion"},
+    } as ChatFileMentionRecord] }));
+    vi.stubGlobal("dohcDesktop",{linksEdges,chatFileMentionsPage});
+    render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} chatMentionsAvailable />);
+    await screen.findAllByText("a.md");
+    fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
+    await screen.findAllByText("Discussion");
+    linksEdges.mockReturnValueOnce(held.promise);
+    fireEvent.click(screen.getByLabelText("Refresh graph"));
+    await screen.findByText("Gathering linked mentions");
+    expect(screen.getAllByText("Discussion")).toBeTruthy();
+    expect(chatFileMentionsPage).toHaveBeenCalledOnce();
+    await act(async()=>held.resolve(page("a.md")));
+    await waitFor(()=>expect(chatFileMentionsPage).toHaveBeenCalledTimes(2));
   });
+
+});
+
+function page(path: string, nextCursor: string | null = null): LinksEdgesResult {
+  return {versionId:"main",files:[{path,objectId:path,title:path}],entries:[],unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,nextCursor};
+}
+function stubFileGraph(mock: { linksEdges: (...args: never[]) => Promise<GraphFixture> }) {
+  vi.stubGlobal("dohcDesktop", { linksEdges: async () => {
+    const graph = await mock.linksEdges();
+    return {...page(""),files:graph.nodes.map(node=>({path:node.path,objectId:node.path,title:node.title})),
+      entries:graph.edges.map((edge,ordinal)=>({...edge,ordinal}))};
+  }});
+}
+
+it("paints the first chat page, continues once, and deduplicates attachments across pages", async()=>{
+  const overlay = vi.spyOn(graphData, "withChatMentions");
+  try {
+  const later=deferred<unknown>();
+  const row=(id:string,title:string)=>({attachment:{attachmentId:id,objectId:"a.md",pathHint:"a.md"},thread:{id,title}} as ChatFileMentionRecord);
+  const first=row("one","First discussion"), second=row("two","Second discussion");
+  const chatFileMentionsPage=vi.fn().mockResolvedValueOnce({entries:[first],nextCursor:"next"}).mockReturnValueOnce(later.promise);
+  vi.stubGlobal("dohcDesktop",{linksEdges:vi.fn(async()=>page("a.md")),chatFileMentionsPage});
+  render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} chatMentionsAvailable/>);
+  await screen.findAllByText("a.md");
+  fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
+  await screen.findAllByText("First discussion");
+  await waitFor(()=>expect(chatFileMentionsPage).toHaveBeenCalledTimes(2));
+  expect(chatFileMentionsPage.mock.calls.map(([input])=>input)).toEqual([{workspaceId:"ws"},{workspaceId:"ws",cursor:"next"}]);
+  expect(screen.getByText("Gathering linked mentions")).toBeTruthy();
+  await act(async()=>later.resolve({entries:[first,second],nextCursor:null}));
+  await screen.findAllByText("Second discussion");
+  expect(screen.getByTestId("graph-link-count").textContent).toBe("2 links");
+  expect(overlay.mock.lastCall?.[1]).toHaveLength(2);
+  expect(screen.queryByText("Gathering linked mentions")).toBeNull();
+  } finally {
+    overlay.mockRestore();
+  }
+});
+it("discards a continuation after the chat toggle is disabled",async()=>{
+  const later=deferred<unknown>();
+  const chatFileMentionsPage=vi.fn().mockResolvedValueOnce({entries:[],nextCursor:"next"}).mockReturnValueOnce(later.promise);
+  vi.stubGlobal("dohcDesktop",{linksEdges:vi.fn(async()=>page("a.md")),chatFileMentionsPage});
+  render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} chatMentionsAvailable/>);
+  await screen.findAllByText("a.md");
+  fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
+  await waitFor(()=>expect(chatFileMentionsPage).toHaveBeenCalledTimes(2));
+  fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
+  await act(async()=>later.resolve({entries:[{attachment:{attachmentId:"late",objectId:"a.md",pathHint:"a.md"},thread:{id:"late",title:"Late discussion"}}],nextCursor:"third"}));
+  expect(screen.queryByText("Late discussion")).toBeNull();
+  expect(chatFileMentionsPage).toHaveBeenCalledTimes(2);
+});
+
+it.each(["chat-mention-access-changed", "chat-mention-version-changed"])("clears chat rows for %s, restarts once, then reports a repeated change", async reason => {
+  const changed = deferred<unknown>(), restarted = deferred<unknown>();
+  const row = { attachment: { attachmentId: "old", objectId: "a.md", pathHint: "a.md" }, thread: { id: "old", title: "Old access" } };
+  const chatFileMentionsPage = vi.fn().mockResolvedValueOnce({entries:[row],nextCursor:"old-cursor"})
+    .mockReturnValueOnce(changed.promise).mockReturnValueOnce(restarted.promise);
+  const onError = vi.fn();
+  vi.stubGlobal("dohcDesktop",{linksEdges:vi.fn(async()=>page("a.md")),chatFileMentionsPage});
+  render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} onError={onError} chatMentionsAvailable/>);
+  await screen.findAllByText("a.md");
+  fireEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
+  await screen.findAllByText("Old access");
+  await waitFor(()=>expect(chatFileMentionsPage).toHaveBeenCalledTimes(2));
+  await act(async()=>changed.reject(new Error(`Error invoking remote method 'desktop:chat-file-mentions-page': ${String(ipcWireError(new DaemonRefusalError({code:"CONFLICT",message:reason,retry:"no"},null)))}`)));
+  await waitFor(()=>expect(chatFileMentionsPage).toHaveBeenCalledTimes(3));
+  expect(chatFileMentionsPage.mock.calls[2]![0]).toEqual({workspaceId:"ws"});
+  expect(screen.queryByText("Old access")).toBeNull();
+  expect(onError).not.toHaveBeenCalled();
+  await act(async()=>restarted.reject(new Error(`Error invoking remote method 'desktop:chat-file-mentions-page': ${String(ipcWireError(new DaemonRefusalError({code:"CONFLICT",message:reason,retry:"no"},null)))}`)));
+  expect(onError).toHaveBeenCalledOnce();
+  expect(chatFileMentionsPage).toHaveBeenCalledTimes(3);
+  expect(screen.getAllByText("a.md").length).toBeGreaterThan(0);
 });

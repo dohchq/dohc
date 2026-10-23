@@ -1,5 +1,6 @@
 import { flushTypingCheckpointsSync } from "./workspaces/outageTypingRecovery";
 import { isAbsolute } from "node:path";
+import { DISPATCH_STOP_LIMIT_MS } from "./shutdownBudgets";
 import {
   classifyShareHandoffArguments,
   receiveShareHandoffArguments,
@@ -40,6 +41,13 @@ const UPDATE_START_FALLBACK_MS = 10_000;
 // window loaded, or when it quits cleanly first. A build that crashes or
 // exits sooner on every start builds up the launch count.
 export const LAUNCH_SETTLED_MS = 30_000;
+
+// Resolves when the work settles or the limit passes, whichever comes first.
+function settledWithin(work: Promise<void>, limitMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const limit = new Promise<void>((resolve) => { timer = setTimeout(resolve, limitMs); });
+  return Promise.race([work.catch(() => undefined), limit]).finally(() => clearTimeout(timer));
+}
 
 interface CliServer {
   close(): Promise<void>;
@@ -106,6 +114,9 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
   // Windows session ends.
   launch: {
     finished(): void;
+    // The app ran LAUNCH_SETTLED_MS after its first window loaded, with no
+    // quit or session end first. Never called on the way out.
+    settled(): void;
   };
   beforeQuit(event: QuitEvent): void;
   beforeQuitWithoutWindows?(event: QuitEvent): void;
@@ -113,6 +124,10 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     budgetMs: number;
     deadlineExitCode: 0 | 1;
     beginEngineShutdown(): void;
+    // Stops new refusal Notice work at once; settles when accepted work is done.
+    stopNoticeRefusals(): Promise<void>;
+    // Admits no new agent wake at once; settles when the admitted one finishes or parks.
+    stopAutomationWakes(): Promise<void>;
     stopSearch(): Promise<void>;
     stopSitePreviews(): Promise<void>;
     settleYDocs(): Promise<void>;
@@ -123,10 +138,13 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     disposeDatabase(): Promise<void>;
     closeRelay(): Promise<void>;
     stopEngine(): Promise<void>;
+    // Writes how dohc's own shutdown ended, just before the process exits.
+    reportQuit(line: string): void;
   };
 }) {
   const { app, runtime, handoff, windows, workspaces, bootstrap, services, launch, shutdown } = dependencies;
   let quitting = false;
+  let sessionEnded = false;
   let bootstrapComplete = false;
   const pendingOpenPaths: string[] = [];
   let cliServer: CliServer | null = null;
@@ -138,15 +156,20 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
   app.on("will-quit", (event) => {
     if (quitting) return;
     quitting = true;
+    const shutdownStarted = Date.now();
     // Every ordinary quit reaches here, including Update and Restart's.
     launch.finished();
     event.preventDefault();
+    // Refusal Notices and agent wakes read workspaces, so they stop before any
+    // producer drains.
+    const noticeRefusalStop = shutdown.stopNoticeRefusals();
+    const automationWakeStop = shutdown.stopAutomationWakes();
     // Release opening-document backoff before producers drain. Accepted Y.Doc
     // writes keep retrying until settlement or the overall shutdown budget.
     shutdown.beginEngineShutdown();
     const searchStop = shutdown.stopSearch().catch(() => undefined);
     const sitePreviewStop = shutdown.stopSitePreviews();
-    const chatDispatchStop = services.dispatch.stop().catch(() => undefined);
+    const chatDispatchStop = settledWithin(services.dispatch.stop(), DISPATCH_STOP_LIMIT_MS);
     const cliServerStop = chatDispatchStop.then(() =>
       (cliServerStartup ?? Promise.resolve(cliServer))
         .then((server) => server?.close())
@@ -158,6 +181,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     const reportsFlush = shutdown.flushReports().catch(() => undefined);
     // Starting close early would let a live producer settle onto a closed store.
     const workspaceAuthorityStop = Promise.allSettled([
+      noticeRefusalStop,
+      automationWakeStop,
       engineYDocStop,
       chatDispatchStop,
       cliServerStop,
@@ -184,6 +209,9 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
       }),
     ]).finally(() => {
       clearTimeout(shutdownTimer);
+      shutdown.reportQuit(budgetExpired
+        ? `[desktop] quit: shutdown ran past its ${shutdown.budgetMs} ms budget`
+        : `[desktop] quit: shutdown finished in ${Date.now() - shutdownStarted} ms`);
       app.exit(budgetExpired ? shutdown.deadlineExitCode : 0);
     });
   });
@@ -259,6 +287,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     // Apply persisted zoom before creating the first window; overlap its IO
     // and renderer load with the daemon handshake.
     bootstrap.applySettings(await cachedSettingsRead);
+    // dohc's menu replaces Electron's default before any window shows.
+    workspaces.refreshNativeSurfaces();
     const window = windows.create();
     const windowLoaded = windows.whenLoaded(window);
     bootstrap.markFirstWindow();
@@ -304,7 +334,10 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     workspaces.refreshNativeSurfaces();
     void windowLoaded.then((loaded) => {
       if (!loaded) return;
-      setTimeout(() => launch.finished(), LAUNCH_SETTLED_MS).unref?.();
+      setTimeout(() => {
+        launch.finished();
+        if (!quitting && !sessionEnded) launch.settled();
+      }, LAUNCH_SETTLED_MS).unref?.();
       if (activatedWorkspace) windows.activate(window, activatedWorkspace);
       // Intents received during the last open await still need a drain after
       // activation. They are later intents and must win over launch paths.
@@ -354,6 +387,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
       app.on("browser-window-created", (_event, window) => {
         window.on("session-end", () => {
           try {flushTypingCheckpointsSync();} catch {/* Session end cannot be cancelled. */}
+          sessionEnded = true;
           launch.finished();
         });
       });

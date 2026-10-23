@@ -40,6 +40,31 @@ const WORKSPACE = "workspace-handle-1";
 const VERSION = "version-1";
 const PATH = "notes/live.txt";
 
+it.each(["journal", "owner-outbox"])("reports the actual acknowledgement lane through the provider (%s)", async lane => {
+  const engine = seedPlaintextEngine("seed"), acknowledged = vi.fn();
+  const provider = await openEngineYdocProviderSession({
+    transport: {...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (lane === "journal") return engine.sendRequest(request);
+        // An owner-outbox answer needs a claimed lineage; the loopback engine has none.
+        const params = request.params as {expectedLineageClaimId?: string | null};
+        const response = await engine.sendRequest(params?.expectedLineageClaimId === "lineage"
+          ? {...request, params: {...params, expectedLineageClaimId: null}} : request);
+        if (!response.result || typeof response.result !== "object") return response;
+        const claimed = {...response.result, lineageClaimId: "lineage", lineageOriginatedHere: true};
+        if (request.method !== YDOC_METHOD.recordUpdate) return {...response, result: claimed};
+        const {seq: _seq, ...owner} = claimed as typeof claimed & {seq?: number};
+        return {...response, result: {...owner,
+          ownerDraft: {outboxId: "outbox", sequence: 1, deliveryId: "delivery", updateDigest: "a".repeat(64), pendingBytes: 10, state: "active"}}};
+      }}, workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext",
+    onRemoteUpdate: () => {}, onLocalUpdateAcknowledged: acknowledged, scheduleSettle: () => () => {},
+  });
+  try {
+    await provider.applyLocalUpdate(plaintextUpdate(provider.initialUpdate, text => text.insert(0, "edit ")), {idempotencyKey: "edit-key", armSettle: false});
+    expect(acknowledged).toHaveBeenCalledExactlyOnceWith("edit-key", lane);
+  } finally {await provider.evict();}
+});
+
 describe("server automation draft declarations", () => {
   it.each([false, true])("retains the explicit server declaration option (%s)", async trustedAutomationDraft => {
     const engine = seedPlaintextEngine("seed");
@@ -105,14 +130,11 @@ describe("closing a settled revision", () => {
             closeFlags.push((request.params as { settle: boolean }).settle);
             if (closeFlags.length <= refusals) throw refusal;
           }
+          if (request.method === YDOC_METHOD.recordUpdate) return recordUnderClaim(engine, request, "owner-claim", true);
           const response = await engine.sendRequest(request);
           if (request.method === YDOC_METHOD.open || request.method === YDOC_METHOD.resync) {
             return { ...response, result: { ...(response.result as Record<string, JsonValue>),
               lineageClaimId: "owner-claim", lineageOriginatedHere: true } };
-          }
-          if (request.method === YDOC_METHOD.recordUpdate) {
-            return { ...response, result: { ...(response.result as Record<string, JsonValue>),
-              lineageClaimId: "owner-claim" } };
           }
           return response;
         },
@@ -155,6 +177,7 @@ describe("closing a settled revision", () => {
             if (settle && failSettle && failure !== "blocked target") throw refusal;
           }
           if (request.method === YDOC_METHOD.settle && failSettle && failure !== "blocked target") throw refusal;
+          if (request.method === YDOC_METHOD.recordUpdate) return recordUnderClaim(engine, request, "owner-claim", true);
           const response = await engine.sendRequest(request);
           if (request.method === YDOC_METHOD.settle && failSettle) {
             return { ...response, result: { ...(response.result as Record<string, JsonValue>), materialized: false } };
@@ -162,9 +185,6 @@ describe("closing a settled revision", () => {
           if (request.method === YDOC_METHOD.open || request.method === YDOC_METHOD.resync) {
             return { ...response, result: { ...(response.result as Record<string, JsonValue>),
               lineageClaimId: "owner-claim", lineageOriginatedHere: true } };
-          }
-          if (request.method === YDOC_METHOD.recordUpdate) {
-            return { ...response, result: { ...(response.result as Record<string, JsonValue>), lineageClaimId: "owner-claim" } };
           }
           return response;
         },
@@ -276,12 +296,13 @@ it("keeps owner draft durability distinct from native settlement and preserves i
   const transport: EngineTransport = {
     ...forwardYdocBlobEgress(engine), onEvent: handler => engine.onEvent(handler),
     async sendRequest(request) {
+      if (request.method === YDOC_METHOD.recordUpdate) {
+        const response = await recordUnderClaim(engine, request, "a".repeat(64));
+        return {...response,result:{lineageClaimId:"a".repeat(64),lineageOriginatedHere:false,ownerDraft:{outboxId:"outbox",sequence:2,deliveryId:"delivery",updateDigest:"b".repeat(64),pendingBytes:40,state:"active"}}};
+      }
       const response = await engine.sendRequest(request);
       if (request.method === YDOC_METHOD.open || request.method === YDOC_METHOD.resync) {
         return {...response,result:{...response.result as Record<string, JsonValue>,lineageClaimId:"a".repeat(64),ownerDraft:descriptor()}};
-      }
-      if (request.method === YDOC_METHOD.recordUpdate) {
-        return {...response,result:{lineageClaimId:"a".repeat(64),ownerDraft:{outboxId:"outbox",sequence:2,deliveryId:"delivery",updateDigest:"b".repeat(64),pendingBytes:40,state:"active"}}};
       }
       return response;
     },
@@ -613,6 +634,27 @@ function emitYdocBlob(
   }
 }
 
+// The loopback keeps no lineage claims. A transport that answers with a claim
+// plays the engine for it: it refuses an update made against another claim,
+// records the rest in the loopback's unclaimed lineage, and answers with the
+// claim it serves.
+async function recordUnderClaim(
+  engine: YdocLoopbackEngine,
+  request: Request,
+  claim: string | null,
+  lineageOriginatedHere = false,
+): Promise<Response> {
+  const params = request.params as Record<string, JsonValue>;
+  if (params.expectedLineageClaimId !== claim) {
+    throw new DaemonRefusalError({ code: "INVALID_PARAMS", message: "ydoc-lineage-stale", retry: "no" }, undefined);
+  }
+  const response = await engine.sendRequest({ ...request, params: { ...params, expectedLineageClaimId: null } });
+  return {
+    ...response,
+    result: { ...(response.result as Record<string, JsonValue>), lineageClaimId: claim, lineageOriginatedHere },
+  };
+}
+
 function plaintextUpdate(
   initialUpdate: Uint8Array,
   edit: (text: Y.Text) => void,
@@ -650,6 +692,7 @@ it("forwards committed owner deltas without resync or journaling, while daemon g
   const provider = await openEngineYdocProviderSession({
     transport: {...forwardYdocBlobEgress(engine),sendRequest: request => engine.sendRequest(request),onEvent: handler => engine.onEvent(event => {if (forward) handler(event);})},
     workspace: WORKSPACE,versionId: VERSION,path: PATH,contentKind: "plaintext",
+    largeSeed: {workspaceId: "workspace-1", maxBytes: original.length},
     onRemoteUpdate: remote,onResyncNeeded: gaps,scheduleSettle: () => () => undefined,
   });
   const owner = provider.nativeOwner!;
@@ -775,6 +818,68 @@ describe("seeding an absent lineage", () => {
     ).rejects.toThrow("without a valid seed client id");
     expect(recordedUpdates(engine, true)).toEqual([]);
     adapter.dispose();
+  });
+
+  describe("a seed past the in-band cap", () => {
+    const longPath = "notes/long.md";
+    const content = "# Long\n\n" + "A paragraph of a long note, written outside dohc.\n\n".repeat(1_100);
+    const largeSeed = { workspaceId: "workspace-1", maxBytes: 64 * 1024 };
+    const seedLongNote = () => {
+      const engine = new YdocLoopbackEngine();
+      engine.seedFile({ workspace: WORKSPACE, versionId: VERSION, path: longPath, content, contentKind: "richdoc" });
+      return engine;
+    };
+    const openLong = (adapter: YdocLiveAdapter, withLargeSeed: boolean) =>
+      adapter.openSession({
+        workspace: WORKSPACE,
+        versionId: VERSION,
+        path: longPath,
+        contentKind: "richdoc",
+        ...(withLargeSeed ? { largeSeed } : {}),
+      });
+
+    it("reads it as a blob within the open's limit and seeds the same document", async () => {
+      expect(Buffer.byteLength(content)).toBeGreaterThan(48 * 1024);
+      const engine = seedLongNote();
+      const adapter = new YdocLiveAdapter(engine);
+      await expect(openLong(adapter, false)).rejects.toThrow("ydoc-seed-too-large");
+
+      const session = await openLong(adapter, true);
+      expect(engine.requests.filter((request) => request.method === "versionedText.readBlob")).toHaveLength(1);
+      expect(recordedUpdates(engine, true)).toHaveLength(1);
+      const opened = new Y.Doc();
+      Y.applyUpdate(opened, session.initialUpdate);
+      expect(ydocProjection.yDocToMarkdown(opened)).toBe(
+        ydocProjection.yDocToMarkdown(ydocProjection.markdownToYDoc(content)),
+      );
+      await session.close({ settle: false });
+      adapter.dispose();
+    });
+
+    it("refuses a blob that does not match the digest the open named", async () => {
+      const engine = seedLongNote();
+      const blobReads = new Set<number>();
+      const transport: EngineTransport = {
+        helloAck: engine.helloAck,
+        onEvent: (handler) => engine.onEvent(handler),
+        onBlob: (handler) =>
+          engine.onBlob((blob) => {
+            if (!blobReads.has(blob.requestId)) return handler(blob);
+            const bytes = new Uint8Array(blob.bytes);
+            bytes[0] = bytes[0]! ^ 1;
+            handler({ ...blob, bytes });
+          }),
+        async sendRequest(request) {
+          if (request.method === "versionedText.readBlob") blobReads.add(request.id);
+          return engine.sendRequest(request);
+        },
+      };
+      const adapter = new YdocLiveAdapter(transport);
+      await expect(openLong(adapter, true)).rejects.toThrow("does not match the digest");
+      expect(recordedUpdates(engine, true)).toEqual([]);
+      expect(engine.activeSessionIds()).toEqual([]);
+      adapter.dispose();
+    });
   });
 });
 
@@ -1294,6 +1399,57 @@ describe("YdocLiveAdapter", () => {
     adapter.dispose();
   });
 
+  // The state before an edit is encoded only when the note already holds a
+  // U+FFFD. One that arrives remotely between two local edits must count.
+  it("counts a remote U+FFFD that lands between two local edits", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    await session.applyLocalTextEdit({ root: "plainText", index: 0, insert: "a" });
+    session.doc.transact(() => {
+      session.doc.getText("plainText").insert(1, "\uFFFD");
+    }, ENGINE_DELIVERED_ORIGIN);
+
+    await session.applyLocalTextEdit({ root: "plainText", index: 0, insert: "b" });
+    expect(session.doc.getText("plainText").toString()).toBe("ba\uFFFD");
+    expect(engine.recordedUpdates).toHaveLength(2);
+
+    await session.close({ settle: true });
+    adapter.dispose();
+  });
+
+  it("rejects a masked split after a remote U+FFFD lands between local edits", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    await session.applyLocalTextEdit({ root: "plainText", index: 0, insert: "a" });
+    session.doc.transact(() => {
+      session.doc.getText("plainText").insert(0, "\uFFFD\uFFFD😀");
+    }, ENGINE_DELIVERED_ORIGIN);
+
+    expect(() =>
+      session.applyLocalEdit((doc) => {
+        const text = doc.getText("plainText");
+        text.delete(0, 2);
+        text.insert(1, "x");
+      }),
+    ).toThrow(IllFormedUtf16EditError);
+    expect(engine.recordedUpdates).toHaveLength(1);
+
+    await session.close({ settle: true });
+    adapter.dispose();
+  });
+
   it("catches an opaque surrogate split with the net-new replacement backstop", async () => {
     const engine = seedPlaintextEngine();
     const adapter = new YdocLiveAdapter(engine);
@@ -1570,6 +1726,7 @@ describe("YdocLiveAdapter", () => {
     winner.getText("plainText").insert(0, "winning root");
     const winnerUpdate = Y.encodeStateAsUpdate(winner);
     let recordCount = 0;
+    let claim: string | null = null;
     const transport: EngineTransport = {
       ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
@@ -1586,9 +1743,10 @@ describe("YdocLiveAdapter", () => {
         }
         if (request.method === YDOC_METHOD.recordUpdate) {
           recordCount += 1;
-          return engine.sendRequest(request);
+          return recordUnderClaim(engine, request, claim);
         }
         if (request.method === YDOC_METHOD.resync) {
+          claim = "winning-claim";
           emitYdocBlob(engine, request.id, winnerUpdate);
           return {
             id: request.id,
@@ -1754,7 +1912,7 @@ describe("YdocLiveAdapter", () => {
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.recordUpdate) {
-          const response = await engine.sendRequest(request);
+          const response = await recordUnderClaim(engine, request, claimed ? "own-claim" : null, claimed);
           if (loseResponse) {
             loseResponse = false;
             claimed = true;
@@ -1860,12 +2018,14 @@ describe("YdocLiveAdapter", () => {
         if (request.method === YDOC_METHOD.recordUpdate) {
           records += 1;
           if (records > 1) throw new Error("ydoc-lineage-stale");
+          // The seed originates the losing claim on this device.
           const response = await engine.sendRequest(request);
           return {
             ...response,
             result: {
               ...(response.result as Record<string, unknown>),
               lineageClaimId: "losing-claim",
+              lineageOriginatedHere: true,
             },
           };
         }
@@ -1891,6 +2051,7 @@ describe("YdocLiveAdapter", () => {
       path: PATH,
       contentKind: "plaintext",
     });
+    expect(session.lineageClaimId).toBe("losing-claim");
     const losingDoc = session.doc;
     const replacements: Y.Doc[] = [];
     session.onLineageReplaced((doc) => replacements.push(doc));
@@ -1903,14 +2064,15 @@ describe("YdocLiveAdapter", () => {
       }),
     ).rejects.toMatchObject({ code: "lineage-changed" });
 
-    expect(session.doc).toBe(losingDoc);
-    expect(session.doc.getText("plainText").toString()).toBe(
-      "losing root preserved edit",
-    );
-    expect(session.doc.getText("plainText").toString()).not.toContain(
-      "winning root",
-    );
-    expect(replacements).toEqual([]);
+    // The losing document keeps the edit; the session hands over to the
+    // winner, which never receives it.
+    await vi.waitFor(() => expect(replacements).toHaveLength(1));
+    expect(session.doc).toBe(replacements[0]);
+    expect(losingDoc.getText("plainText").toString()).toBe("losing root preserved edit");
+    expect(session.doc.getText("plainText").toString()).toBe("winning root");
+    expect(session.lineageClaimId).toBe("winning-claim");
+    expect(session.missingLocalState).toBe(false);
+    expect(records).toBe(2);
 
     await session.close({ settle: false });
     adapter.dispose();
@@ -1947,16 +2109,7 @@ describe("YdocLiveAdapter", () => {
         }
         if (request.method === YDOC_METHOD.recordUpdate) {
           recordCount += 1;
-          if (recordCount === 1) {
-            const response = await engine.sendRequest(request);
-            return {
-              ...response,
-              result: {
-                ...(response.result as Record<string, unknown>),
-                lineageClaimId: "losing-claim",
-              },
-            };
-          }
+          if (recordCount === 1) return recordUnderClaim(engine, request, "losing-claim");
           throw busy;
         }
         if (request.method === YDOC_METHOD.resync) {
@@ -1991,6 +2144,9 @@ describe("YdocLiveAdapter", () => {
       path: PATH,
       contentKind: "plaintext",
     });
+    const losingDoc = session.doc;
+    const replacements: Y.Doc[] = [];
+    session.onLineageReplaced((doc) => replacements.push(doc));
 
     await expect(
       session.applyLocalTextEdit({
@@ -2005,10 +2161,277 @@ describe("YdocLiveAdapter", () => {
     await expect(session.resendMissingState()).rejects.toMatchObject({
       code: "lineage-changed",
     });
+    await vi.waitFor(() => expect(replacements).toHaveLength(1));
     expect(recordCount).toBe(3);
-    expect(session.doc.getText("plainText").toString()).toBe(
+    expect(losingDoc.getText("plainText").toString()).toBe(
       "losing root preserved edit",
     );
+    expect(session.doc.getText("plainText").toString()).toBe("winning root");
+    expect(session.missingLocalState).toBe(false);
+    adapter.dispose();
+  });
+
+  it("acknowledges nothing the engine answers under a claim the editor never held", async () => {
+    const engine = seedPlaintextEngine("losing root");
+    const winner = new Y.Doc();
+    winner.getText("plainText").insert(0, "winning root");
+    const winnerUpdate = Y.encodeStateAsUpdate(winner);
+    const handover = Promise.withResolvers<void>();
+    let claim: string | null = null;
+    let misanswer = false;
+    const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate && misanswer) {
+          misanswer = false;
+          claim = "foreign-claim";
+          const response = await recordUnderClaim(engine, request, null);
+          return { ...response, result: { ...(response.result as Record<string, JsonValue>), lineageClaimId: claim } };
+        }
+        if (request.method === YDOC_METHOD.recordUpdate) return recordUnderClaim(engine, request, claim);
+        if (request.method === YDOC_METHOD.resync && claim !== null) {
+          await handover.promise;
+          emitYdocBlob(engine, request.id, winnerUpdate);
+          return {
+            id: request.id,
+            result: { lineageClaimId: claim, lineageOriginatedHere: false, recoveredPaths: [], artifactAssets: [] },
+          };
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const adapter = new YdocLiveAdapter(transport);
+    const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext" });
+    const losingDoc = session.doc;
+    const acknowledged: string[] = [];
+    session.onLocalUpdateAcknowledged((id) => acknowledged.push(id));
+    const replacements: Y.Doc[] = [];
+    session.onLineageReplaced((doc) => replacements.push(doc));
+    misanswer = true;
+
+    await expect(
+      session.applyLocalTextEdit({ root: "plainText", index: "losing root".length, insert: " edit" }),
+    ).rejects.toMatchObject({ code: "lineage-changed" });
+
+    // Not acknowledged, still pending, and nothing of the other lineage merged.
+    expect(acknowledged).toEqual([]);
+    expect(session.missingLocalState).toBe(true);
+    expect(session.lineageClaimId).toBeNull();
+    expect(session.doc).toBe(losingDoc);
+    expect(losingDoc.getText("plainText").toString()).toBe("losing root edit");
+    expect(replacements).toEqual([]);
+
+    // Typing on the losing document before the handover is refused at once,
+    // without quarantining the session.
+    let typed: unknown;
+    try {
+      void session.applyLocalTextEdit({ root: "plainText", index: 0, insert: "more " });
+    } catch (error) {
+      typed = error;
+    }
+    expect(typed).toMatchObject({ code: "lineage-changed" });
+
+    handover.resolve();
+    await vi.waitFor(() => expect(replacements).toHaveLength(1));
+    expect(session.doc.getText("plainText").toString()).toBe("winning root");
+    expect(losingDoc.getText("plainText").toString()).toBe("more losing root edit");
+    expect(session.lineageClaimId).toBe("foreign-claim");
+    expect(session.missingLocalState).toBe(false);
+    expect(acknowledged).toEqual([]);
+
+    await session.applyLocalTextEdit({ root: "plainText", index: "winning root".length, insert: " fresh" });
+    expect(session.doc.getText("plainText").toString()).toBe("winning root fresh");
+    expect(acknowledged).toHaveLength(1);
+    await session.evict();
+    adapter.dispose();
+  });
+
+  it("retries its own edit under the claim the engine made from this history", async () => {
+    const engine = seedPlaintextEngine("idle");
+    let claim: string | null = null;
+    const sent: Array<{ key: Request["idempotencyKey"]; expected: JsonValue | undefined }> = [];
+    const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) {
+          sent.push({
+            key: request.idempotencyKey,
+            expected: (request.params as Record<string, JsonValue>).expectedLineageClaimId,
+          });
+          return recordUnderClaim(engine, request, claim, claim !== null);
+        }
+        const response = await engine.sendRequest(request);
+        if (request.method !== YDOC_METHOD.resync) return response;
+        return {
+          ...response,
+          result: { ...(response.result as Record<string, JsonValue>), lineageClaimId: claim, lineageOriginatedHere: claim !== null },
+        };
+      },
+    };
+    const adapter = new YdocLiveAdapter(transport);
+    const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext" });
+    const openedDoc = session.doc;
+    const replacements: Y.Doc[] = [];
+    session.onLineageReplaced((doc) => replacements.push(doc));
+    sent.length = 0;
+    // Sync claimed the lineage from this device's history before the editor
+    // heard of it.
+    claim = "own-claim";
+
+    await session.applyLocalTextEdit({ root: "plainText", index: "idle".length, insert: " edit" });
+
+    // The engine refused the unclaimed expectation; the resync proved the
+    // claim came from this history, so the same request went again under it.
+    expect(sent).toHaveLength(2);
+    expect(sent[0]).toEqual({ key: sent[1]!.key, expected: null });
+    expect(sent[1]!.expected).toBe("own-claim");
+    expect(session.lineageClaimId).toBe("own-claim");
+    expect(session.doc).toBe(openedDoc);
+    expect(replacements).toEqual([]);
+    await expect(session.settle()).resolves.toMatchObject({ content: "idle edit" });
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it("sends no queued edit of a lineage that changed, then records on the winner", async () => {
+    const engine = seedPlaintextEngine("losing root");
+    const winner = new Y.Doc();
+    winner.getText("plainText").insert(0, "winning root");
+    const winnerUpdate = Y.encodeStateAsUpdate(winner);
+    const firstEdit = Promise.withResolvers<void>();
+    let claim: string | null = null;
+    const records: Uint8Array[] = [];
+    let resyncs = 0;
+    const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) {
+          records.push(Buffer.from((request.params as { updateBase64: string }).updateBase64, "base64"));
+          if (records.length === 2) {
+            // A restore replaces the lineage while the first edit is in flight.
+            await firstEdit.promise;
+            claim = "winning-claim";
+          }
+          return recordUnderClaim(engine, request, claim);
+        }
+        if (request.method === YDOC_METHOD.resync) {
+          resyncs += 1;
+          if (claim === null) return engine.sendRequest(request);
+          emitYdocBlob(engine, request.id, winnerUpdate);
+          return {
+            id: request.id,
+            result: { lineageClaimId: claim, lineageOriginatedHere: false, recoveredPaths: [], artifactAssets: [] },
+          };
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const adapter = new YdocLiveAdapter(transport);
+    const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext" });
+    const losingDoc = session.doc;
+    const replacements: Y.Doc[] = [];
+    session.onLineageReplaced((doc) => replacements.push(doc));
+    const edits = [" one", " two", " three"].map((insert) =>
+      session.applyLocalTextEdit({ root: "plainText", index: losingDoc.getText("plainText").length, insert }),
+    );
+    await drain();
+    expect(records).toHaveLength(2);
+
+    firstEdit.resolve();
+    for (const edit of edits) await expect(edit).rejects.toMatchObject({ code: "lineage-changed" });
+    await vi.waitFor(() => expect(replacements).toHaveLength(1));
+
+    // The queued edits of the losing document never reached the engine.
+    expect(records).toHaveLength(2);
+    expect(resyncs).toBe(2);
+    expect(losingDoc.getText("plainText").toString()).toBe("losing root one two three");
+    expect(session.doc.getText("plainText").toString()).toBe("winning root");
+    expect(session.missingLocalState).toBe(false);
+
+    // The winner takes edits again: no quarantine, and the edit stands on
+    // the winner's own history.
+    await session.applyLocalTextEdit({ root: "plainText", index: "winning root".length, insert: " fresh" });
+    expect(records).toHaveLength(3);
+    const settled = new Y.Doc();
+    Y.applyUpdate(settled, winnerUpdate);
+    Y.applyUpdate(settled, records[2]!);
+    expect(settled.store.pendingStructs).toBeNull();
+    expect(settled.getText("plainText").toString()).toBe("winning root fresh");
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it("keeps a provider recording and settling after an edit meets a replaced history", async () => {
+    const engine = seedPlaintextEngine("base");
+    const handover = Promise.withResolvers<void>();
+    let claim: string | null = null;
+    let restoredResyncs = 0;
+    const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) return recordUnderClaim(engine, request, claim);
+        // Recovery's resync finds the new claim; the handover's waits.
+        if (request.method === YDOC_METHOD.resync && claim !== null && ++restoredResyncs > 1) await handover.promise;
+        const response = await engine.sendRequest(request);
+        if (request.method !== YDOC_METHOD.resync) return response;
+        return { ...response, result: { ...(response.result as Record<string, JsonValue>), lineageClaimId: claim, lineageOriginatedHere: false } };
+      },
+    };
+    const replacements: Y.Doc[] = [];
+    const provider = await openEngineYdocProviderSession({
+      transport, workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext",
+      onRemoteUpdate() {}, onLineageReplaced: (doc) => replacements.push(doc), scheduleSettle: settleScheduler().schedule,
+    });
+    const losingDoc = provider.doc;
+    // A restore replaced the history under the open editor.
+    claim = "restored-claim";
+    await expect(provider.applyLocalUpdate(plaintextUpdate(provider.initialUpdate, (text) => text.insert(4, " refused"))))
+      .rejects.toMatchObject({ code: "lineage-changed" });
+    // Typing on the losing document is refused before the handover lands.
+    expect(() => provider.applyLocalUpdate(plaintextUpdate(Y.encodeStateAsUpdate(losingDoc), (text) => text.insert(0, "more "))))
+      .toThrow(expect.objectContaining({ code: "lineage-changed" }));
+
+    const resynced = provider.resync!();
+    handover.resolve();
+    await resynced;
+    expect(replacements).toEqual([provider.doc]);
+    expect(losingDoc.getText("plainText").toString()).toBe("more base refused");
+    expect(provider.doc.getText("plainText").toString()).toBe("base");
+
+    // Neither refusal blocks the journal or the settle on the new history.
+    await provider.applyLocalUpdate(plaintextUpdate(Y.encodeStateAsUpdate(provider.doc), (text) => text.insert(4, " fresh")));
+    await provider.nativeOwner!.flush();
+    await expect(provider.settleNow()).resolves.toMatchObject({ content: "base fresh" });
+    await provider.close({ settle: false });
+  });
+
+  it("still quarantines a record whose outcome stays unknown", async () => {
+    const engine = seedPlaintextEngine("seed");
+    let failing = false;
+    const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (failing && request.method === YDOC_METHOD.recordUpdate) throw new Error("record answer lost");
+        if (failing && request.method === YDOC_METHOD.resync) throw new Error("resync answer lost");
+        return engine.sendRequest(request);
+      },
+    };
+    const adapter = new YdocLiveAdapter(transport);
+    const session = await adapter.openSession({ workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext" });
+    failing = true;
+
+    await expect(
+      session.applyLocalTextEdit({ root: "plainText", index: 0, insert: "lost " }),
+    ).rejects.toThrow("resync answer lost");
+    expect(() =>
+      session.applyLocalTextEdit({ root: "plainText", index: 0, insert: "next " }),
+    ).toThrow(YdocSessionQuarantinedError);
+    await session.close({ settle: false });
     adapter.dispose();
   });
 
@@ -2076,7 +2499,7 @@ describe("YdocLiveAdapter", () => {
           await recordHeld;
           return {
             id: request.id,
-            result: { seq: 1, lineageClaimId: null },
+            result: { seq: 1, lineageClaimId: null, lineageOriginatedHere: false },
           };
         }
         return engine.sendRequest(request);
@@ -2279,8 +2702,11 @@ describe("YdocLiveAdapter", () => {
         if (request.method === YDOC_METHOD.settle && blocked.held) {
           throw refusal;
         }
+        if (options?.replicated && request.method === YDOC_METHOD.recordUpdate) {
+          return recordUnderClaim(engine, request, "owner-claim", true);
+        }
         const response = await engine.sendRequest(request);
-        if (options?.replicated && (request.method === YDOC_METHOD.open || request.method === YDOC_METHOD.resync || request.method === YDOC_METHOD.recordUpdate)) {
+        if (options?.replicated && (request.method === YDOC_METHOD.open || request.method === YDOC_METHOD.resync)) {
           return { ...response, result: { ...(response.result as Record<string, JsonValue>), lineageClaimId: "owner-claim", lineageOriginatedHere: true } };
         }
         return response;
@@ -2389,6 +2815,99 @@ describe("YdocLiveAdapter", () => {
       expect(settled).toHaveLength(1);
       expect(settleErrors).toEqual([]);
       expect(scheduler.armed).toHaveLength(0);
+      await provider.close({ settle: false });
+    } finally { vi.useRealTimers(); }
+  });
+
+  // Native owner delivery holds the live settlement capacity while it reads or
+  // applies a frame, and an owner draft's resync needs the same capacity. The
+  // engine refuses the resync at once, and the slot frees without any action.
+  it("waits out occupied live capacity before a settle without surfacing a settle error", async () => {
+    vi.useFakeTimers();
+    try {
+      const engine = seedPlaintextEngine("seed");
+      const capacity = { held: true };
+      const refusal = new DaemonRefusalError({ code: "OVERLOADED", message: "live-settlement-capacity",
+        retry: "afterBackoff" }, new Error("daemon response"));
+      const transport: EngineTransport = {
+        ...forwardYdocBlobEgress(engine),
+        onEvent: handler => engine.onEvent(event => handler(event.name === YDOC_EVENT.remoteUpdate
+          ? { ...event, payload: { sessionId: (event.payload as { sessionId: string }).sessionId, resyncRequired: true } }
+          : event)),
+        async sendRequest(request) {
+          if (request.method === YDOC_METHOD.resync && capacity.held) throw refusal;
+          return engine.sendRequest(request);
+        },
+      };
+      const settleErrors: unknown[] = [];
+      const provider = await openEngineYdocProviderSession({ transport, workspace: WORKSPACE, versionId: VERSION,
+        path: PATH, contentKind: "plaintext", onRemoteUpdate: () => undefined,
+        onSettleError: error => settleErrors.push(error), scheduleSettle: settleScheduler().schedule });
+      const peer = new Y.Doc();
+      Y.applyUpdate(peer, provider.initialUpdate);
+      const vector = Y.encodeStateVector(peer);
+      peer.getText("plainText").insert(0, "remote ");
+      // The invalidation's own resync is refused, which leaves the session stale.
+      engine.applyRemoteUpdate(provider.nativeOwner!.sessionId, Y.encodeStateAsUpdate(peer, vector));
+      await vi.advanceTimersByTimeAsync(0);
+      const outcome: unknown[] = [];
+      provider.settleNow().then(result => outcome.push(result), error => outcome.push(error));
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(outcome).toEqual([]);
+      expect(settleErrors).toEqual([]);
+      capacity.held = false;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(outcome).toEqual([expect.objectContaining({ content: "remote seed" })]);
+      expect(settleErrors).toEqual([]);
+      expect(provider.doc.getText("plainText").toString()).toBe("remote seed");
+      peer.destroy();
+      await provider.close({ settle: false });
+    } finally { vi.useRealTimers(); }
+  });
+
+  // An owner draft's journal write and its recovery resync need the same
+  // capacity. A settle that replays edits left unsent can meet it mid-replay.
+  it("waits out occupied live capacity while a settle replays unsent edits, and sends each edit once", async () => {
+    vi.useFakeTimers();
+    try {
+      const engine = seedPlaintextEngine();
+      const refusal = new DaemonRefusalError({ code: "OVERLOADED", message: "live-settlement-capacity",
+        retry: "afterBackoff" }, new Error("daemon response"));
+      let refuse = (_key: string) => true;
+      const sent: string[] = [];
+      const transport: EngineTransport = {
+        ...forwardYdocBlobEgress(engine),
+        onEvent: handler => engine.onEvent(handler),
+        async sendRequest(request) {
+          if (request.method === YDOC_METHOD.recordUpdate) {
+            sent.push(request.idempotencyKey ?? "");
+            if (refuse(request.idempotencyKey ?? "")) throw refusal;
+          }
+          return engine.sendRequest(request);
+        },
+      };
+      const settleErrors: unknown[] = [];
+      const provider = await openEngineYdocProviderSession({ transport, workspace: WORKSPACE, versionId: VERSION,
+        path: PATH, contentKind: "plaintext", onRemoteUpdate: () => undefined,
+        onSettleError: error => settleErrors.push(error), scheduleSettle: settleScheduler().schedule });
+      await expect(provider.applyLocalUpdate(plaintextUpdate(provider.initialUpdate, text => text.insert(0, "first ")),
+        { idempotencyKey: "first" })).rejects.toBe(refusal);
+      await expect(provider.applyLocalUpdate(plaintextUpdate(Y.encodeStateAsUpdate(provider.doc),
+        text => text.insert(text.length, "second")), { idempotencyKey: "second" })).rejects.toBe(refusal);
+      // The replay lands the first edit, then the capacity is taken once.
+      let refused = false;
+      refuse = key => key === "second" && !refused && (refused = true);
+      sent.length = 0;
+      const outcome: unknown[] = [];
+      provider.settleNow().then(result => outcome.push(result), error => outcome.push(error));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(outcome).toEqual([]);
+      expect(settleErrors).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(outcome).toEqual([expect.objectContaining({ content: "first second" })]);
+      expect(settleErrors).toEqual([]);
+      // The retry resends only the edit the engine did not take.
+      expect(sent).toEqual(["first", "second", "second"]);
       await provider.close({ settle: false });
     } finally { vi.useRealTimers(); }
   });
@@ -2592,27 +3111,32 @@ describe("YdocLiveAdapter", () => {
   it("keeps resending while the store stays busy, and never settles without the text", async () => {
     // The poisoned-chain regression, and the ordering guard with it: no settle
     // may commit while the engine is still missing the text.
-    // Three refusals: the write, its recovery replay, and rung one's resend.
-    // Rung two then finds the store free.
-    const { provider, settled, scheduler } = await openAgainstABusyJournal(
-      "typed against a stubborn store",
-      3,
-    );
+    // Three refusals: the write, its recovery replay, and the settle's first
+    // resend. The settle waits out the busy store and resends.
+    vi.useFakeTimers();
+    try {
+      const { provider, settled, settleErrors, scheduler, methods } = await openAgainstABusyJournal(
+        "typed against a stubborn store",
+        3,
+      );
+      const writes = () => methods.filter(method => method === YDOC_METHOD.recordUpdate).length;
 
-    expect(scheduler.armed).toHaveLength(1);
-    scheduler.fire();
-    await drain();
-    // Rung one resent and was refused again. Nothing settled behind it.
-    expect(settled).toEqual([]);
+      expect(scheduler.armed).toHaveLength(1);
+      scheduler.fire();
+      await vi.advanceTimersByTimeAsync(0);
+      // The settle resent and was refused again. Nothing settled behind it.
+      expect(writes()).toBe(3);
+      expect(settled).toEqual([]);
 
-    // The contention clears; the next rung resends and the settle carries it.
-    expect(scheduler.armed).toHaveLength(1);
-    scheduler.fire();
-    await drain();
-    expect(settled).toHaveLength(1);
-    expect(settled[0]?.content).toContain("typed against a stubborn store");
+      // The contention clears; the settle resends and carries the text.
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(writes()).toBe(4);
+      expect(settled).toHaveLength(1);
+      expect(settled[0]?.content).toContain("typed against a stubborn store");
+      expect(settleErrors).toEqual([]);
 
-    await provider.close({ settle: false });
+      await provider.close({ settle: false });
+    } finally { vi.useRealTimers(); }
   });
 
   it("refuses to release a session still holding text the engine never got", async () => {

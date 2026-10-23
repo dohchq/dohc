@@ -32,13 +32,13 @@ async fn wait_until_capture_ready(
 ) {
     let deadline = tokio::time::Instant::now() + TEST_TIMEOUT;
     loop {
-        let status = transport
-            .call(
-                RequestContext::unbounded(),
-                request(id, "watcher.status", Some(handle.clone()), json!({})),
-            )
-            .await
-            .expect("watcher.status");
+        let status = call_with_busy_retry(
+            transport,
+            RequestContext::unbounded(),
+            request(id, "watcher.status", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("watcher.status");
         id += 1;
         if status.result["phase"] == json!("ready") {
             return;
@@ -286,7 +286,7 @@ async fn set_active_settles_live_ydoc_into_old_version_and_closes_session() {
         &handle,
         5,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": update }),
     )
     .await;
 
@@ -354,7 +354,7 @@ async fn version_fence_uses_the_latest_plaintext_settlement_as_its_preimage() {
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": first }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": first }),
     )
     .await;
     let first_settle = call(
@@ -373,7 +373,7 @@ async fn version_fence_uses_the_latest_plaintext_settlement_as_its_preimage() {
         &handle,
         5,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": second }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": second }),
     )
     .await;
     let fork = call(
@@ -977,7 +977,8 @@ async fn a_fork_cancelled_at_the_session_lock_answers_cancelled_and_creates_noth
     let transport = InProcessTransport::new(Arc::clone(&service));
     let opened = bounded(
         "workspace.open",
-        transport.call(
+        call_with_busy_retry(
+            &transport,
             RequestContext::unbounded(),
             request(
                 1,
@@ -1065,7 +1066,7 @@ async fn create_named_fences_live_ydoc_and_unannounced_disk_edits_into_fork() {
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": update }),
     )
     .await;
 
@@ -1238,7 +1239,7 @@ async fn set_active_leaves_sessions_for_unrelated_versions_open_and_unprojected(
         &handle,
         5,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": first }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": first }),
     )
     .await;
 
@@ -1262,7 +1263,7 @@ async fn set_active_leaves_sessions_for_unrelated_versions_open_and_unprojected(
         &handle,
         8,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": second }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": second }),
     )
     .await;
 }
@@ -1293,7 +1294,7 @@ async fn create_named_ignores_and_preserves_an_unrelated_richdoc_session() {
         &handle,
         4,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": first }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": first }),
     )
     .await;
 
@@ -1316,7 +1317,7 @@ async fn create_named_ignores_and_preserves_an_unrelated_richdoc_session() {
         &handle,
         6,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": second }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": second }),
     )
     .await;
 }
@@ -1365,7 +1366,7 @@ async fn create_named_from_an_inactive_version_leaves_its_live_session_open() {
         &handle,
         5,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": update }),
     )
     .await;
 }
@@ -1375,11 +1376,30 @@ async fn dropping_engine_service_releases_its_single_actor_attachment() {
     let scratch = ScratchDir::new().expect("scratch");
     let workspace_id = "ws-switch-barrier-drop-release";
     let transport = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
-    transport
-        .call(
+    call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace_id,
+            }),
+        ),
+    )
+    .await
+    .expect("initial open");
+    drop(transport);
+
+    for id in 2..42 {
+        let replacement = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
+        match call_with_busy_retry(
+            &replacement,
             RequestContext::unbounded(),
             request(
-                1,
+                id,
                 "workspace.open",
                 None,
                 json!({
@@ -1389,25 +1409,6 @@ async fn dropping_engine_service_releases_its_single_actor_attachment() {
             ),
         )
         .await
-        .expect("initial open");
-    drop(transport);
-
-    for id in 2..42 {
-        let replacement = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
-        match replacement
-            .call(
-                RequestContext::unbounded(),
-                request(
-                    id,
-                    "workspace.open",
-                    None,
-                    json!({
-                        "rootDir": scratch.path().to_string_lossy(),
-                        "workspaceId": workspace_id,
-                    }),
-                ),
-            )
-            .await
         {
             Ok(opened) => {
                 let handle: WorkspaceHandle =
@@ -1441,7 +1442,8 @@ fn dropping_engine_service_after_its_runtime_stops_releases_the_actor() {
         .build()
         .expect("scoped runtime");
     runtime
-        .block_on(transport.call(
+        .block_on(call_with_busy_retry(
+            &transport,
             RequestContext::unbounded(),
             request(
                 1,
@@ -1463,7 +1465,8 @@ fn dropping_engine_service_after_its_runtime_stops_releases_the_actor() {
         .expect("replacement runtime");
     for id in 2..42 {
         let replacement = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
-        match replacement_runtime.block_on(replacement.call(
+        match replacement_runtime.block_on(call_with_busy_retry(
+            &replacement,
             RequestContext::unbounded(),
             request(
                 id,
@@ -1506,21 +1509,21 @@ fn dropping_engine_service_in_the_final_runtime_future_releases_the_actor() {
         .expect("scoped runtime");
     runtime.block_on(async {
         let transport = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
-        transport
-            .call(
-                RequestContext::unbounded(),
-                request(
-                    1,
-                    "workspace.open",
-                    None,
-                    json!({
-                        "rootDir": scratch.path().to_string_lossy(),
-                        "workspaceId": workspace_id,
-                    }),
-                ),
-            )
-            .await
-            .expect("initial open");
+        call_with_busy_retry(
+            &transport,
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                }),
+            ),
+        )
+        .await
+        .expect("initial open");
         drop(transport);
     });
     drop(runtime);
@@ -1531,7 +1534,8 @@ fn dropping_engine_service_in_the_final_runtime_future_releases_the_actor() {
         .expect("replacement runtime");
     for id in 2..42 {
         let replacement = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
-        match replacement_runtime.block_on(replacement.call(
+        match replacement_runtime.block_on(call_with_busy_retry(
+            &replacement,
             RequestContext::unbounded(),
             request(
                 id,
@@ -1754,7 +1758,7 @@ async fn create_named_preflight_keeps_live_session_for_invalid_and_replayed_requ
         &handle,
         8,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": update }),
     )
     .await;
 }
@@ -1853,7 +1857,7 @@ async fn queued_create_named_revalidates_before_sweeping_sessions() {
         &handle,
         5,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": first_update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": first_update }),
     )
     .await;
     let scans_after_winner = probe.version_scan_count();
@@ -1878,7 +1882,7 @@ async fn queued_create_named_revalidates_before_sweeping_sessions() {
         &handle,
         6,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": second_update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": second_update }),
     )
     .await;
 }
@@ -1913,7 +1917,7 @@ async fn create_named_fences_a_live_richdoc_session_into_the_fork() {
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": first }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": first }),
     )
     .await;
     let created = call(
@@ -1948,7 +1952,7 @@ async fn create_named_fences_a_live_richdoc_session_into_the_fork() {
         &handle,
         6,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": second }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": second }),
     )
     .await;
     assert_eq!(closed.message, "ydoc-session-not-found");
@@ -1983,7 +1987,7 @@ async fn create_named_succeeds_after_a_normally_closed_richdoc_settled() {
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": update }),
     )
     .await;
     call(
@@ -2044,13 +2048,14 @@ async fn create_named_fails_closed_for_a_persisted_unsettled_plaintext_lineage()
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": update }),
     )
     .await;
     call(&transport, &handle, 4, "workspace.close", json!({})).await;
     let reopened = bounded(
         "workspace reopen",
-        transport.call(
+        call_with_busy_retry(
+            &transport,
             RequestContext::unbounded(),
             request(
                 5,
@@ -2110,7 +2115,7 @@ async fn create_named_fails_closed_for_a_persisted_unsettled_plaintext_lineage()
         &handle,
         9,
         "ydoc.recordUpdate",
-        json!({ "sessionId": healthy_session, "updateBase64": update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": healthy_session, "updateBase64": update }),
     )
     .await;
 }
@@ -2198,7 +2203,7 @@ async fn queued_same_target_set_active_rechecks_before_sweep_or_scan() {
         &handle,
         6,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": first_update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": first_update }),
     )
     .await;
     let scans_after_first = probe.version_scan_count();
@@ -2222,7 +2227,7 @@ async fn queued_same_target_set_active_rechecks_before_sweep_or_scan() {
         &handle,
         7,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": second_update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": second_update }),
     )
     .await;
 }

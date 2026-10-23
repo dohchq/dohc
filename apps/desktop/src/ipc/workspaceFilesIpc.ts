@@ -1,3 +1,6 @@
+import { CHANNELS } from "./channels";
+import { ListWorkspaceHeadingsPayload, ListWorkspaceHeadingsResult } from "./bridgeContract";
+import { extractWorkspaceHeadings, workspaceHeadingRecords } from "../workspaces/workspaceHeadings";
 import { basename, isAbsolute } from "node:path";
 import { validateUserReadPath } from "@dohc/workspace-core";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
@@ -85,6 +88,7 @@ export function createWorkspaceFilesIpc<
   workspaceFileListings: Pick<WorkspaceFileListingCache, "list">;
   workspaceFileMutations: WorkspaceFileMutationOwner<Event>;
   listOwnedWorkspaceFilesFor(workspace: Workspace): Promise<WorkspacePathListing>;
+  lookupOwnedWorkspaceFilesFor(workspace: Workspace, paths: readonly string[]): Promise<WorkspacePathListing>;
   readOwnedWorkspaceTextFor(
     workspace: Workspace,
     path: string,
@@ -105,6 +109,7 @@ export function createWorkspaceFilesIpc<
     workspaceFileListings,
     workspaceFileMutations,
     listOwnedWorkspaceFilesFor,
+    lookupOwnedWorkspaceFilesFor,
     readOwnedWorkspaceTextFor,
     assertWritableWorkspace,
     shareViewFiles,
@@ -266,7 +271,9 @@ export function createWorkspaceFilesIpc<
   return {
     listWorkspaceFiles: async (input, { operation }) => {
       const workspace = operation.workspace;
-      const listing = await workspaceFileListings.list({
+      const listing = input.filePath !== undefined
+        ? await lookupOwnedWorkspaceFilesFor(workspace, [input.filePath])
+        : await workspaceFileListings.list({
         workspaceId: workspace.workspaceId,
         attachmentId: workspace.attachmentId,
         allowCached: input.allowCached === true,
@@ -278,6 +285,7 @@ export function createWorkspaceFilesIpc<
 
     createWorkspaceFile: (input, { event }) => workspaceFileMutations.createFile(event, input),
     createWorkspaceFolder: (input, { event }) => workspaceFileMutations.createFolder(event, input),
+    duplicateWorkspaceFile: (input, {event}) => workspaceFileMutations.duplicateFile(event, input),
     moveWorkspacePath: (input, { event }) => workspaceFileMutations.movePath(event, input),
     deleteWorkspacePath: (input, { event }) => workspaceFileMutations.deletePath(event, input),
     undoHistoryOperation: (input, { event }) => workspaceFileMutations.undoHistoryOperation(event, input),
@@ -454,7 +462,8 @@ export function createWorkspaceFilesIpc<
       };
       // OS drag-in path: renderer-supplied absolute paths (see the trust-delta
       // note on the payload) re-validated by the drag-in screen — regular
-      // files only, never any registered workspace's .dohc metadata. The
+      // files and folders, never a link or any registered workspace's .dohc
+      // metadata. The
       // renderer-supplied targetDir is re-validated inside the import path
       // (resolveImportDestination) before any copy.
       const droppedPaths = input.droppedPaths;
@@ -608,4 +617,25 @@ export function createWorkspaceFilesIpc<
       if (error) throw new Error(error);
     },
   } satisfies OperationHandlers<typeof workspaceFileOperations, Event, Operation>;
+}
+
+export function registerWorkspaceHeadingsIpcHandlers<
+  Sender, Event extends { sender: Sender }, Workspace extends RegistryEntry,
+  Operation extends { workspace: Workspace },
+>(dependencies: {
+  registerHandler(channel: string, handler: (event: Event, payload: unknown) => unknown): void;
+  assertTrustedSender(event: Event): void;
+  withRendererWorkspaceOperation<Result>(sender: Sender, workspaceId: string, inactiveMessage: string,
+    work: (operation: Operation) => Result | Promise<Result>): Promise<Result>;
+  readOwnedWorkspaceTextFor(workspace: Workspace, path: string): Promise<ReadWorkspaceTextResult>;
+}): void {
+  dependencies.registerHandler(CHANNELS.listWorkspaceHeadings, async (event, payload) => {
+    dependencies.assertTrustedSender(event);
+    const input = ListWorkspaceHeadingsPayload.parse(payload);
+    return dependencies.withRendererWorkspaceOperation(event.sender, input.workspaceId,
+      "Heading read stopped because this window changed workspaces.", async operation => {
+        const source = await dependencies.readOwnedWorkspaceTextFor(operation.workspace, input.path);
+        return ListWorkspaceHeadingsResult.parse({ headings: workspaceHeadingRecords(extractWorkspaceHeadings(source.text)) });
+      });
+  });
 }

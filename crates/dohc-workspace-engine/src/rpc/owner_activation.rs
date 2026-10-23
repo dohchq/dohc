@@ -21,7 +21,7 @@ struct ActivationOutputGuard {
     retired: Option<RetiredActivations>,
     cancel: CancelSignal,
     deadline: Option<Instant>,
-    _reservation: Arc<dyn Send + Sync>,
+    reservation: std::sync::Mutex<Option<Arc<dyn Send + Sync>>>,
 }
 impl std::fmt::Debug for ActivationOutputGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -31,15 +31,15 @@ impl std::fmt::Debug for ActivationOutputGuard {
     }
 }
 impl OutputGuard for ActivationOutputGuard {
-    fn is_current(&self) -> bool {
-        self.with_current(&mut || {})
+    fn is_current_ignoring_cancel(&self) -> bool {
+        self.with_current(false, &mut || {})
     }
     /// The check and the output hold the retired set, as Phase A does to
     /// retire, so no output for the activation lands once it is retired.
-    fn with_current(&self, action: &mut dyn FnMut()) -> bool {
+    fn with_current(&self, cancellable: bool, action: &mut dyn FnMut()) -> bool {
         let mut output = || {
             if !self.connection.is_current()
-                || self.cancel.is_cancelled()
+                || (cancellable && self.cancel.is_cancelled())
                 || self.deadline.is_some_and(|limit| Instant::now() >= limit)
             {
                 return false;
@@ -60,6 +60,9 @@ impl OutputGuard for ActivationOutputGuard {
     }
     fn deadline(&self) -> Option<Instant> {
         self.deadline
+    }
+    fn release(&self) {
+        crate::lock(&self.reservation).take();
     }
 }
 
@@ -188,7 +191,7 @@ impl EngineService {
             retired: retired.clone(),
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
-            _reservation: reservation.clone(),
+            reservation: std::sync::Mutex::new(Some(reservation.clone())),
         };
         let cancellation = OperationCancellation::new(&ctx);
         let open = self.open(Some(&workspace))?;
@@ -221,14 +224,14 @@ impl EngineService {
             }
             (session.key, None)
         } else {
-            let db_path = open.db_path.clone();
+            let held = open.actor.location();
             let workspace_id = open.workspace_id.clone();
             let path = params.path.clone();
             let namespace = namespace.clone();
             let activation_id = params.activation_id.clone();
             let key = tokio::task::spawn_blocking(move || {
                 use rusqlite::OptionalExtension;
-                let store = dohc_engine_storage::EngineStore::open_read_only(&db_path).map_err(|_|workspace_unavailable())?;
+                let store = dohc_engine_storage::EngineStore::open_read_only(held.database_path()).map_err(|_|workspace_unavailable())?;
                 // A resume finds its document through the activation it retained, so one
                 // with no head, as once it parked, still answers whether it is ready.
                 // One whose retirement began finds none, before it takes the lease.
@@ -392,7 +395,7 @@ mod tests {
             retired: Some(retired.clone()),
             cancel: CancelSignal::new(),
             deadline: None,
-            _reservation: Arc::new(()),
+            reservation: std::sync::Mutex::new(Some(Arc::new(()))),
         };
         let (retiring, other) = (guard("retiring"), guard("other"));
         assert!(retiring.is_current() && other.is_current());
@@ -431,7 +434,7 @@ mod tests {
             retired: Some(retired.clone()),
             cancel: CancelSignal::new(),
             deadline: None,
-            _reservation: Arc::new(()),
+            reservation: std::sync::Mutex::new(Some(Arc::new(()))),
         });
         let wrote = Arc::new(AtomicBool::new(false));
         let (entered, paused) = channel();
@@ -439,7 +442,7 @@ mod tests {
         let writer = {
             let (guard, wrote) = (guard.clone(), wrote.clone());
             std::thread::spawn(move || {
-                guard.with_current(&mut || {
+                guard.with_current(true, &mut || {
                     entered.send(()).unwrap();
                     resumed.recv().unwrap();
                     wrote.store(true, Ordering::SeqCst);
@@ -476,7 +479,7 @@ mod tests {
         );
         assert!(phase_a.join().unwrap(), "Phase A ended after that write");
         let mut late = false;
-        assert!(!guard.with_current(&mut || late = true));
+        assert!(!guard.with_current(true, &mut || late = true));
         assert!(!late, "no write for the retired activation runs");
     }
 
@@ -504,6 +507,7 @@ mod tests {
             activation_id: activation.into(),
             source: ImportedOwnerSource {
                 version: 1,
+                reader_source: false,
                 relay_database_namespace: "capture-test".into(),
                 workspace_id: "workspace".into(),
                 main_version_id: "main".into(),
@@ -658,6 +662,7 @@ mod tests {
         }
         let source = ImportedOwnerSource {
             version: 1,
+            reader_source: false,
             relay_database_namespace: "release-test".into(),
             workspace_id: "workspace".into(),
             main_version_id: "main".into(),

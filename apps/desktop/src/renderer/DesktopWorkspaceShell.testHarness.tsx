@@ -18,6 +18,7 @@ import type {
   AgentRunStatusResult,
   CaptureRecoveryStatusResult,
   ReadCrashReportResult,
+  CollectionCopiesLeft,
   ListCollectionAutomationRunsResult,
   ListCollectionAutomationsResult,
   ListAutomationButtonsResult,
@@ -316,9 +317,12 @@ function makeBaseBridge(
   const directAnswerDelivery: ShareDirectWriteAnswerDelivery = { claim: async () => true, acknowledge: async () => true, release: async () => true };
   const directWritesPushedCallbacks = new Set<(event: ShareDirectWritesPushedEvent, delivery: ShareDirectWriteAnswerDelivery) => void>();
   const crashReportCallbacks = new Set<() => void>();
+  const collectionCopiesLeftCallbacks = new Set<() => void>();
+  const liveDraftRecoveryCallbacks = new Set<(event: { workspaceId: string }) => void>();
   const agentRunStateCallbacks = new Set<(event: AgentRunStateEvent) => void>();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommand) => void) | null = null;
+  const activatedCallbacks = new Set<(workspace: Workspace, file?: string) => void>();
   return {
     platform,
     typingRecovery: vi.fn(async () => ({failures: []})),
@@ -328,6 +332,7 @@ function makeBaseBridge(
     workspaceActivitySubscriberCount: () => activityCallbacks.size,
     emitSearchResults: (batch: SearchResultsEvent) => searchCallback?.(batch),
     getWorkspaceUiState: vi.fn(() => uiStatePromise),
+    openSystemPrivacySettings: vi.fn(async () => undefined),
     // The shell re-reads the registry to pick up a share's durable skip
     // record. Default: a workspace with nothing skipped.
     getWorkspaceRegistry: vi.fn(
@@ -449,8 +454,11 @@ function makeBaseBridge(
       source: "stored" as const,
     })),
     setTitlebarTheme: vi.fn(async () => undefined),
+    onAgentColorChanged: vi.fn(() => () => undefined),
     onUserSettingsChanged: vi.fn(() => () => {}),
     onChatDispatchNotices: vi.fn(() => () => {}),
+    onScheduleHostChanged: vi.fn(() => () => {}),
+    readScheduleHost: vi.fn(async () => ({ kind: "this-computer" as const })),
     // This computer's agent is idle until a test pushes a run.
     readAgentRunState: vi.fn(
       async ({ workspaceId }: { workspaceId: string }): Promise<AgentRunStateEvent> => ({ workspaceId, revision: 0, active: false }),
@@ -482,28 +490,20 @@ function makeBaseBridge(
       truncated: false as const,
       contentHash: "a".repeat(64),
     })),
-    // The linked-mentions panel bails without this, and its chat-mention read
-    // is an ENGINE CAPTURE call — so a fake that omits it makes every
-    // no-call pin on that read pass for the wrong reason.
-    getBacklinks: vi.fn(async () => ({ sources: [] as never[] })),
-    listChatFileMentions: vi.fn(async () => ({ mentions: [] as never[] })),
-    // Typed to the payload the shell really sends: `includeChatMentions` is
-    // the flag that decides whether main runs this read through
-    // requireEngineCapture, so a pin on it has to be able to read it back.
-    readWorkspaceGraph: vi.fn(async (_payload: {
-      workspaceId: string;
-      includeChatMentions?: boolean;
-    }) => ({
-      nodes: [
-        { path: "a.md", title: "A", incoming: 0, outgoing: 1 },
-        { path: "b.md", title: "B", incoming: 1, outgoing: 0 },
-      ],
-      edges: [{ source: "a.md", target: "b.md", kind: "wikilink" as const }],
-      unresolvedLinks: 0,
-      scannedFileCount: 2,
-      omittedFileCount: 0,
-      truncatedFileCount: 0,
-    })),
+    // About's Links reads these. Its read of the chats that link to a file is
+    // an ENGINE CAPTURE call, so a fake that omits it makes every no-call pin
+    // on that read pass for the wrong reason.
+    linksIn: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["linksIn"]>(async () => null),
+    linksResolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })),
+    chatFileMentionsPage: vi.fn(async () => ({ versionId: "main", subject: null, entries: [], unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: null })),
+    // About for a conversation reads the files it mentions.
+    chatLinks: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["chatLinks"]>(async ({ channelWireId }) => ({
+      versionId: "main", subject: { channelWireId }, entries: [], unchecked: [], complete: true, indexBuilding: false,
+      mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: null })),
+    linksEdges: vi.fn(async () => ({ versionId: "main", files: [
+      {objectId:"a.md",path:"a.md",title:"A"},{objectId:"b.md",path:"b.md",title:"B"}],
+      entries: [{source:"a.md",target:"b.md",kind:"wikilink" as const,ordinal:0}],
+      unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,nextCursor:null })),
     writeWorkspaceText: vi.fn(
       async (_payload: WriteWorkspaceTextPayload): Promise<WriteWorkspaceTextResult> => ({
         status: "written",
@@ -537,7 +537,7 @@ function makeBaseBridge(
       accepted: true,
       state: READY_UPDATE_STATE,
     })),
-    getDroppedFilePaths: vi.fn(() => []),
+    getDroppedFilePaths: vi.fn((_files: File[]): string[] => []),
     cloudStatus: vi.fn(async () => ({
       connected: true,
       email: "me@dohc.test",
@@ -673,6 +673,7 @@ function makeBaseBridge(
         menuCallback = null;
       };
     }),
+    closeThisWindow: vi.fn(async (): Promise<void> => undefined),
     listKeptCopies: vi.fn(async (): Promise<ListKeptCopiesResult> => ({ keptCopies: [], more: false })),
     saveKeptCopy: vi.fn(async () => ({ status: "gone" as const })),
     // Typed to the contract: the capture recovery tests swap the answer.
@@ -733,8 +734,35 @@ function makeBaseBridge(
       crashReportCallbacks.add(listener);
       return () => crashReportCallbacks.delete(listener);
     }),
+    readCollectionCopiesLeft: vi.fn(async (_payload: Record<string, never>): Promise<CollectionCopiesLeft> => ({ workspaces: [], recordUnreadable: false, sweepPending: false })),
+    removeCollectionCopiesLeft: vi.fn(async (_payload: Record<string, never>): Promise<CollectionCopiesLeft> => ({ workspaces: [], recordUnreadable: false, sweepPending: false })),
+    emitCollectionCopiesLeftChanged: () => {
+      for (const callback of [...collectionCopiesLeftCallbacks]) callback();
+    },
+    onCollectionCopiesLeftChanged: vi.fn((listener: () => void) => {
+      collectionCopiesLeftCallbacks.add(listener);
+      return () => collectionCopiesLeftCallbacks.delete(listener);
+    }),
     onUsageRecordStopped: vi.fn((_listener: () => void) => () => {}),
+    readWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: true })),
+    requestWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: true })),
+    restrictWorkspace: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: false })),
+    onWorkspaceTrustChanged: vi.fn((_listener: (event: { workspaceId: string; trusted: boolean }) => void) => () => {}),
+    emitLiveDraftRecoveryChanged: (workspaceId: string) => {
+      for (const callback of [...liveDraftRecoveryCallbacks]) callback({ workspaceId });
+    },
+    onLiveDraftRecoveryChanged: vi.fn((listener: (event: { workspaceId: string }) => void) => {
+      liveDraftRecoveryCallbacks.add(listener);
+      return () => liveDraftRecoveryCallbacks.delete(listener);
+    }),
     emitMenuCommand: (command: MenuCommand) => menuCallback?.(command),
+    emitWorkspaceActivated: (workspace: Workspace, file?: string) => {
+      for (const callback of [...activatedCallbacks]) callback(workspace, file);
+    },
+    onWorkspaceActivated: vi.fn((callback: (workspace: Workspace, file?: string) => void) => {
+      activatedCallbacks.add(callback);
+      return () => activatedCallbacks.delete(callback);
+    }),
     onUpdateState: vi.fn(() => () => {}),
     // Content search (E5.0): the shell subscribes on mount.
     onSearchResults: vi.fn((callback: (batch: SearchResultsEvent) => void) => {
@@ -1007,7 +1035,7 @@ export function makeShareBridge(
   for (const call of [
     "listChatChannels",
     "listChannelThreads",
-    "listChatFileMentions",
+    "chatFileMentionsPage",
     "syncDms",
   ] as const) {
     bridge[call].mockRejectedValue(

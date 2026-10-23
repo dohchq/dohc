@@ -1,8 +1,13 @@
+import { chatLinks as mcpChatLinks, listGroups as mcpListGroups } from "@dohc/mcp/tools";
+import { accessCliQueries, createAccessAcquisition, createAccessOwner } from "../access/accessOwner";
+import { createShareRosters } from "../automations/shareRoster";
+import { stageDeleteRecovery } from "../workspaces/workspaceDeleteRecovery";
+import { finishMoveRecovery } from "../workspaces/workspaceMoveRecovery";
 import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation } from "../workspaces/workspaceHistoryOperations";
 import { listChanges, readChange, readOperation, undoOperation } from "@dohc/mcp/tools";
 import { deleteWorkspacePathByHand } from "../workspaces/workspaceFileMoves";
 import { readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { createApp, deleteWorkspacePath, importData, listFileChats, moveWorkspacePath, replyToChat, startFileChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
@@ -63,6 +68,7 @@ import {
   type CliWorkspaceContext,
 } from "./cliServer";
 import { agentWriteAuthor } from "./desktopCliServer";
+import { openedLocalState } from "../testing/preparedLocalState";
 
 const WORKSPACE_ID = "workspace-cli-server";
 const SERVER_NOW_MS = Date.parse("2026-07-10T04:05:06.000Z");
@@ -402,6 +408,7 @@ describe("CLI socket server", () => {
           return { results: [], saturated: true };
         },
         listUnreadFileThreads,
+        collectionsWaiting: async () => false,
       },
       async fileObjectIdForPath(path) {
         return path === "tracked.md" ? "object_tracked" : null;
@@ -449,6 +456,7 @@ describe("CLI socket server", () => {
           writeTargets.push(target);
         },
         scanChatDispatch: async () => undefined,
+        betweenDispatchScans: (_workspaceId, write) => write(),
         notifyRenderer: () => undefined,
       }),
       localUserDisplayName: () => "Sam",
@@ -500,12 +508,47 @@ describe("CLI socket server", () => {
     await rm(tempRoot, { recursive: true, force: true });
   });
 
+  it("uses the Access owner's paced window on read-only sockets and refuses caller scope", async () => {
+    let now = 100_000;
+    const workspace = { workspaceId: context.workspaceId, rootPath: workspaceRoot, remote: { ownerUserId: "owner", serverUrl: "server" } } as import("../workspaces/registryStore").RegistryEntry;
+    const listRoster = vi.fn(async () => ({ kind: "answered" as const, listing: { grants: [], links: [], formerGrants: [], endedGrants: [] } }));
+    const rosters = createShareRosters({ findWorkspace: id => id === workspace.workspaceId ? workspace : null,
+      saveRoster: vi.fn(), markRosterPulled: vi.fn(), listRoster, localUserId: async () => "owner",
+      localPersonId: async () => null, syncHistory: async () => "synced", logError: vi.fn(), nowMs: () => now });
+    const acquisition = createAccessAcquisition({ roster: id => rosters.requestRefresh(id), received: async () => "paced" });
+    const owner = createAccessOwner<string>({ resolve: async (_workspace, ref) => ({ ref, visibility: "visible" }),
+      roster: () => rosters.observation(workspace.workspaceId), received: () => ({ inventory: null, checkedAtMs: null, freshness: "unknown" }),
+      account: () => null, scope: id => id, assertCurrent: vi.fn(), permissions: vi.fn(), refresh: id => acquisition.request(id) });
+    context.access = accessCliQueries(owner, work => Promise.resolve(work(context.workspaceId)));
+    context.readOnly = true; registryWorkspace.readOnly = true;
+    const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessRefresh", args: { cwd: workspaceRoot, actor: "agent" } };
+    try {
+      expect(await rawRequest(request)).toMatchObject({ ok: true, result: { status: "requested" } });
+      expect(await rawRequest(request)).toMatchObject({ ok: true, result: { status: "paced" } });
+      expect(await owner.refresh(context.workspaceId)).toEqual({ status: "paced" });
+      expect(listRoster).toHaveBeenCalledExactlyOnceWith(workspace);
+      for (const extra of [{ workspaceId: "other" }, { accountId: "other" }]) {
+        expect(await rawRequest({ ...request, args: { ...request.args, ...extra } })).toMatchObject({ ok: false });
+      }
+      expect(await rawRequest({ ...request, args: { ...request.args, cwd: tempRoot } })).toMatchObject({ ok: false });
+      expect(listRoster).toHaveBeenCalledOnce();
+      now += 60_000;
+      expect(await rawRequest(request)).toMatchObject({ ok: true, result: { status: "requested" } });
+      expect(listRoster).toHaveBeenCalledTimes(2);
+      context.access = undefined;
+      for (const accessRequest of [request,
+        { ...request, verb: "accessObject", args: { ...request.args, ref: { kind: "file", objectId: "file" } } },
+        { ...request, verb: "accessSharing", args: { ...request.args, lane: "received" } },
+      ]) expect(await rawRequest(accessRequest)).toMatchObject({ ok: false, error: "dohc: Access observations are unavailable." });
+    } finally { rosters.close(workspace.workspaceId); }
+  });
+
   it("confines Access to the registered workspace and schema-parses every answer without secret fields", async () => {
     const secret = { credentials: "secret", bearerUrl: "secret", invitationUrl: "secret", shareCode: "secret" };
     const answer = { ...secret, ref: { kind: "path", path: "Notes/a.md", versionId: null }, rows: [], visibility: "visible",
       unknownReason: null, coverage: { kind: "granted", complete: true, observation: "interval", ...secret }, checkedAtMs: 1, freshness: "stale", nextCursor: null };
     const object = vi.fn(async () => answer as never), sharing = vi.fn(async () => ({ ...answer, ref: null }) as never);
-    context.access = { object, sharing }; context.readOnly = true;
+    context.access = { object, sharing, refresh: vi.fn() }; context.readOnly = true;
     const response = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessObject",
       args: { cwd: workspaceRoot, actor: "agent", ref: { kind: "path", path: "Notes/a.md" } } });
     expect(response).toMatchObject({ ok: true, result: { freshness: "stale", coverage: { complete: true } } });
@@ -519,6 +562,72 @@ describe("CLI socket server", () => {
     expect(await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessObject",
       args: { cwd: workspaceRoot, actor: "agent", ref: { kind: "path", path: "../outside.md" } } })).toMatchObject({ ok: false });
     expect(object).toHaveBeenCalledOnce();
+  });
+
+  it("keeps CLI and MCP group listings available when one wire lookup rejects", async () => {
+    const listed = await invoke("groups", { cwd: workspaceRoot, actor: "agent" });
+    const original = store!.getChannelWireId.bind(store);
+    const failedWire = listed.groups[0]!.channelWireId;
+    vi.spyOn(store!, "getChannelWireId").mockImplementation(async input => {
+      const wire = await original(input);
+      if (wire === failedWire) throw Error("channel disappeared");
+      return wire;
+    });
+    const groups = await invoke("groups", { cwd: workspaceRoot, actor: "agent" });
+    expect(groups.groups[0]).toMatchObject({ channelWireId: null });
+    const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: value => invoke(value.verb, value.args) };
+    const full = await mcpListGroups(ctx);
+    expect(full).toMatchObject({ ok: true });
+    if (!full.ok) throw Error(full.reason);
+    expect(full.groups.some(group => group.channelWireId === null)).toBe(true);
+    const read = vi.fn<NonNullable<CliServerOptions["chatLinks"]>>(async () => null);
+    serverOptions.chatLinks = read;
+    expect(await invoke("chatLinks", { cwd: workspaceRoot, actor: "agent", group: listed.groups[0]!.name })).toBeNull();
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("syncs a joined shared channel before resolving the Links group operand", async () => {
+    expect(await store!.findChannelBySlug({ workspaceId: WORKSPACE_ID, slug: "joined" })).toBeNull();
+    let channelWireId: string | null = null;
+    onReadEffect = async () => {
+      const channel = await store!.createChannel({
+        workspaceId: WORKSPACE_ID, name: "Joined",
+      });
+      channelWireId = await store!.getChannelWireId({ workspaceId: WORKSPACE_ID, channelId: channel.id });
+      await makeChannelReadOnly(channel.id);
+    };
+    const read = vi.fn<NonNullable<CliServerOptions["chatLinks"]>>(async () => null);
+    serverOptions.chatLinks = read;
+
+    expect(await invoke("chatLinks", { cwd: workspaceRoot, actor: "agent", group: "joined" })).toBeNull();
+    expect(channelWireId).toBeTruthy();
+    expect(calls.reads).toBe(1);
+    expect(readTargets).toEqual([{ channelId: "joined" }]);
+    expect(read).toHaveBeenCalledExactlyOnceWith(registryWorkspace, { channelWireId, cursor: undefined });
+  });
+
+  it("discovers chat wire IDs through CLI and MCP before asking for Links", async () => {
+    const groups = await invoke("groups", { cwd: workspaceRoot, actor: "agent" });
+    const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: value => invoke(value.verb, value.args) };
+    const full = await mcpListGroups(ctx);
+    expect(full.ok).toBe(true);
+    if (!full.ok) throw Error(full.reason);
+    const channelWireId = groups.groups[0]!.channelWireId;
+    expect(channelWireId).toBeTruthy();
+    expect(full.groups.some(group => group.channelWireId === channelWireId)).toBe(true);
+    const read = vi.fn<NonNullable<CliServerOptions["chatLinks"]>>(async () => null);
+    serverOptions.chatLinks = read;
+    const group = groups.groups[0]!;
+    for (const target of [group.name, group.id, group.id.slice(0, -1)]) {
+      const cli = await executeCli({
+        argv: ["chat", "links", target], cwd: workspaceRoot, env: {},
+        request: value => invoke(value.verb, value.args),
+      });
+      expect(cli.exitCode).toBe(0);
+    }
+    expect(await mcpChatLinks(ctx, { channelWireId: channelWireId! })).toBeNull();
+    expect(read).toHaveBeenCalledTimes(4);
+    for (const [, input] of read.mock.calls) expect(input.channelWireId).toBe(channelWireId);
   });
 
   it("labels success without changing token admission, read-only authority, actor gates or results", async () => {
@@ -734,14 +843,14 @@ describe("CLI socket server", () => {
 
   it("lists and reads changes at CLI and MCP after an Undo adds compensation moments", async () => {
     const operation = { workspace: { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot }, signal: new AbortController().signal, assertCurrent: vi.fn() };
-    await mkdir(join(workspaceRoot, ".dohc"), { recursive: true });
+    await openedLocalState(operation.workspace);
     await mkdir(join(workspaceRoot, "folder"));
     await writeFile(join(workspaceRoot, "folder/tracked.txt"), "original");
     const fixture = momentFixtures(WORKSPACE_ID, "tracked", SERVER_NOW_MS);
     fixture.summary.path = fixture.detail.path = "folder/tracked.txt";
     let changes = [fixture.summary];
     let details = [fixture.detail];
-    const history = {
+    const history = {readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),
       readHistoryPage: vi.fn(async () => ({ moments: [{ momentId: fixture.summary.id, operation: "delete", path: "folder/tracked.txt" }], nextCursor: null }) as never),
       undoHistoryOperation: vi.fn(async (input: { operationId: string }) => {
         const compensation = momentFixtures(WORKSPACE_ID, "undo", SERVER_NOW_MS + 1);
@@ -753,7 +862,7 @@ describe("CLI socket server", () => {
         details = [compensation.detail, ...details, malformed.detail];
         await mkdir(join(workspaceRoot, "folder"), { recursive: true });
         await writeFile(join(workspaceRoot, "folder/tracked.txt"), "original");
-        return { operationId: input.operationId, versionId: "main", momentCount: 1, compensationOperationId: "dohc-operation:undo:hash", materialized: true, deduped: false };
+        return { operationId: input.operationId, versionId: "main", momentCount: 1, notRestored: [], compensationOperationId: "dohc-operation:undo:hash", materialized: true, deduped: false };
       }),
     };
     const removed = await deleteWorkspacePathByHand(operation, "folder", { kind: "human", humanId: "local:owner" }, {
@@ -785,21 +894,45 @@ describe("CLI socket server", () => {
     expect(history.undoHistoryOperation).toHaveBeenCalledOnce();
   });
 
-  it("refuses non-delete Undo through socket, CLI and MCP without an engine Undo", async () => {
+  it("duplicates through CLI with agent authority, request replay, and path floors", async () => {
+    const duplicateFile = vi.fn<NonNullable<CliWorkspaceContext["duplicateFile"]>>(async () => ({ok: true, path: "copy.md", materialized: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: {available: true}}));
+    context.duplicateFile = duplicateFile;
+    const args = {cwd: workspaceRoot, actor: "agent" as const, path: "source.md", requestId: "duplicate-once"};
+    expect(await invoke("fileDuplicate", args)).toMatchObject({ok: true});
+    expect(await invoke("fileDuplicate", args)).toMatchObject({ok: true});
+    expect(duplicateFile).toHaveBeenCalledOnce();
+    expect(await executeCli({argv: ["file", "duplicate", "source.md", "--json"], cwd: workspaceRoot, request: request => invoke(request.verb, request.args)})).toMatchObject({exitCode: 0});
+    duplicateFile.mockClear();
+    expect(await invoke("fileDuplicate", {...args, actor: "human"})).toMatchObject({ok: false});
+    for (const path of ["../escape.md", ".env", ".dohc/private.md"]) expect(await invoke("fileDuplicate", {...args, path, requestId: path})).toMatchObject({ok: false});
+    context.readOnly = true;
+    expect(await invoke("fileDuplicate", {...args, requestId: "readonly"})).toMatchObject({ok: false});
+    expect(duplicateFile).not.toHaveBeenCalled();
+  });
+
+  it("undoes a move through socket, CLI and MCP with one compensation", async () => {
     const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
-    const history = { readHistoryPage: vi.fn(async () => ({ moments: [{ momentId: "move", operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn() };
+    await writeFile(join(workspaceRoot, "a.txt"), "move body");
+    const plan = await stageDeleteRecovery(operationId, join(workspaceRoot, "a.txt"), "a.txt", ["a.txt"]);
+    await rename(join(workspaceRoot, "a.txt"), join(workspaceRoot, "b.txt"));
+    await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: workspaceRoot });
+    await finishMoveRecovery({ workspaceId: WORKSPACE_ID, rootPath: workspaceRoot }, plan, "a.txt", "b.txt", false);
+    const history = {readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: [{ momentId: "move", operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null }) as never),
+      undoHistoryOperation: vi.fn(async () => { await rename(join(workspaceRoot, "b.txt"), join(workspaceRoot, "a.txt"));
+        return { operationId, versionId: "main", deduped: false, materialized: true, momentCount: 1, notRestored: [], compensationOperationId: operationId }; }) };
     const operation = { workspace: { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot, get readOnly() { return context.readOnly; }, shareView: undefined as unknown }, signal: new AbortController().signal, assertCurrent: vi.fn() };
     context.historyOperation = input => readWorkspaceHistoryOperation(operation, input, history);
     context.historyUndo = (input, origin) => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history, agent: true });
     const args = { cwd: workspaceRoot, actor: "agent" as const, operationId };
-    const unsupported = { ok: false as const, reason: "Cannot undo this change yet. Only a delete can be undone." };
-    expect(await invoke("historyUndo", args)).toEqual(unsupported);
+    const restored = { ok: true, tracked: { state: "restored", momentCount: 1 }, restored: [], remaining: [] };
+    expect(await invoke("historyUndo", args)).toEqual(restored);
     const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: request => invoke(request.verb, request.args) };
-    expect(await undoOperation(ctx, { operationId })).toEqual(unsupported);
+    expect(await undoOperation(ctx, { operationId })).toEqual(restored);
     expect(await readOperation(ctx, { operationId })).toMatchObject({ ok: true, members: [{ operation: "rename" }] });
     expect(await executeCli({ argv: ["history", "undo", operationId], cwd: workspaceRoot, request: request => invoke(request.verb, request.args) }))
-      .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: " + unsupported.reason + "\n" });
-    expect(history.undoHistoryOperation).not.toHaveBeenCalled();
+      .toEqual({ exitCode: 0, stdout: "History: restored\n", stderr: "" });
+    expect(await readFile(join(workspaceRoot, "a.txt"), "utf8")).toBe("move body");
+    expect(history.undoHistoryOperation).toHaveBeenCalledOnce();
     context.historyUndo = vi.fn(context.historyUndo);
     expect(await invoke("historyUndo", { ...args, actor: "human" })).toMatchObject({ ok: false, reason: 'An Undo through the CLI socket is recorded as an agent\'s; send actor "agent".' });
     expect(context.historyUndo).not.toHaveBeenCalled();
@@ -818,10 +951,10 @@ describe("CLI socket server", () => {
   it("returns missing-delete recovery words through the socket, CLI and MCP", async () => {
     const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
     const operation = { workspace: { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot }, signal: new AbortController().signal, assertCurrent: vi.fn() };
-    const history = { readHistoryPage: vi.fn(async () => ({ moments: [{ operation: "delete", path: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn() };
+    const history = {readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: [{ operation: "delete", path: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn() };
     context.historyOperation = input => readWorkspaceHistoryOperation(operation, input, history);
     context.historyUndo = (input, origin) => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history, agent: true });
-    const refusal = { ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." };
+    const refusal = { ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History, the system trash, or .dohc/local/trash." };
     expect(await invoke("historyUndo", { cwd: workspaceRoot, actor: "agent", operationId })).toEqual(refusal);
     const request = (request: import("@dohc/cli/protocol").CliRequestWithoutToken) => invoke(request.verb, request.args);
     expect(await undoOperation({ root: workspaceRoot, home: stateDir, request }, { operationId })).toEqual(refusal);
@@ -832,14 +965,14 @@ describe("CLI socket server", () => {
   it("keeps MCP moves and deletes relative to a subfolder cwd under the agent's name", async () => {
     const cwd = join(workspaceRoot, "app");
     await mkdir(cwd);
-    const movePath = vi.fn<NonNullable<CliWorkspaceContext["movePath"]>>(async input => ({ ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", fromPath: input.fromPath, toPath: input.toPath }));
+    const movePath = vi.fn<NonNullable<CliWorkspaceContext["movePath"]>>(async input => ({ ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: { available: true }, fromPath: input.fromPath, toPath: input.toPath }));
     const deletePath = vi.fn<NonNullable<CliWorkspaceContext["deletePath"]>>(async path => ({
       ok: false, deleted: [`${path}/a.txt`], path: `${path}/b.txt`, reason: `History could not record the delete of ${path}/b.txt.`,
     }));
     context.movePath = movePath;
     context.deletePath = deletePath;
     const ctx: ToolContext = { root: cwd, home: stateDir, request: request => invoke(request.verb, request.args) };
-    expect(await moveWorkspacePath(ctx, { fromPath: "a.txt", toPath: "b.txt" }, "Client")).toEqual({ ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", fromPath: "a.txt", toPath: "b.txt" });
+    expect(await moveWorkspacePath(ctx, { fromPath: "a.txt", toPath: "b.txt" }, "Client")).toEqual({ ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: { available: true }, fromPath: "a.txt", toPath: "b.txt" });
     expect(await deleteWorkspacePath(ctx, { path: "notes" })).toEqual({
       ok: false, deleted: ["notes/a.txt"], path: "notes/b.txt", reason: "History could not record the delete of notes/b.txt.",
     });
@@ -867,7 +1000,7 @@ describe("CLI socket server", () => {
 
   it.each(["fileMove", "fileDelete"] as const)("hides realpath host errors before %s dispatch", async verb => {
     context.rootPath = join(workspaceRoot, "missing-root");
-    context.movePath = async input => ({ ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", ...input });
+    context.movePath = async input => ({ ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: { available: true }, ...input });
     context.deletePath = async path => ({ ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: { available: true }, path, trashed: true });
     const args = { cwd: workspaceRoot, actor: "agent" as const, requestId: "realpath" };
     const result = verb === "fileMove" ? await invoke(verb, { ...args, fromPath: "a", toPath: "b" })
@@ -2088,6 +2221,63 @@ describe("CLI socket server", () => {
       ok: false,
       reason: "kept copies are not available in this workspace",
     });
+  });
+
+  it("lists and deletes old file copies for an agent only with the late-write risk accepted", async () => {
+    let copies = [{ id: 3, revision: 10 }, { id: 4, revision: 11 }];
+    const deleted: { id: number; revision: number }[][] = [];
+    context.retainedCopies = {
+      async list() {
+        return { copies, more: false, total: { count: copies.length, bytes: copies.length * 1024 } };
+      },
+      async delete(requested) {
+        deleted.push([...requested]);
+        copies = copies.filter(copy => !requested.some(gone => gone.id === copy.id));
+        return { deleted: requested.length, skipped: 0, failed: 0, remaining: { count: copies.length, bytes: copies.length * 1024 } };
+      },
+    };
+
+    await expect(invoke("retainedCopies", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual({
+      ok: true,
+      copies: [{ id: 3, revision: 10 }, { id: 4, revision: 11 }],
+      more: false,
+      total: { count: 2, bytes: 2048 },
+    });
+    for (const args of [
+      { cwd: workspaceRoot, actor: "agent", copies: [{ id: 3, revision: 10 }] },
+      { cwd: workspaceRoot, actor: "agent", copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: false },
+      { cwd: workspaceRoot, actor: "agent", copies: Array.from({ length: 101 }, (_, id) => ({ id, revision: 0 })), acceptLateWriteRisk: true },
+    ]) {
+      const response = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "deleteRetainedCopies", args });
+      expect(response.ok, JSON.stringify(args).slice(0, 80)).toBe(false);
+    }
+    expect(deleted).toEqual([]);
+    await expect(invoke("deleteRetainedCopies", {
+      cwd: workspaceRoot, actor: "agent", copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: true,
+    })).resolves.toEqual({ ok: true, deleted: 1, skipped: 0, failed: 0, remaining: { count: 1, bytes: 1024 } });
+    expect(deleted).toEqual([[{ id: 3, revision: 10 }]]);
+
+    delete context.retainedCopies;
+    const unavailable = { ok: false, reason: "Old file copies are kept only in the owning workspace. Open it to continue." };
+    await expect(invoke("retainedCopies", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual(unavailable);
+    await expect(invoke("deleteRetainedCopies", {
+      cwd: workspaceRoot, actor: "agent", copies: [{ id: 4, revision: 11 }], acceptLateWriteRisk: true,
+    })).resolves.toEqual(unavailable);
+  });
+
+  it("answers whether Collection updates wait with the engine's own answer", async () => {
+    const answers = [true, false];
+    context.daemonReads.collectionsWaiting = async () => {
+      const answer = answers.shift();
+      if (answer === undefined) throw new Error("engine stopped");
+      return answer;
+    };
+    for (const waiting of [true, false]) {
+      await expect(invoke("collectionsWaiting", { cwd: workspaceRoot, actor: "agent" }))
+        .resolves.toEqual({ ok: true, waiting });
+    }
+    await expect(invoke("collectionsWaiting", { cwd: workspaceRoot, actor: "agent" }))
+      .resolves.toMatchObject({ ok: false });
   });
 
   it("reads and edits documents with provenance the door derives", async () => {
@@ -4748,6 +4938,7 @@ describe("CLI socket server", () => {
     let daemonCalls = 0;
     const defaultDaemonReads = context.daemonReads;
     context.daemonReads = {
+      collectionsWaiting: defaultDaemonReads.collectionsWaiting,
       async queryChatMessagesGranular() {
         daemonCalls += 1;
         const row = {
@@ -4842,6 +5033,7 @@ describe("CLI socket server", () => {
     let daemonCalls = 0;
     const defaultDaemonReads = context.daemonReads;
     context.daemonReads = {
+      collectionsWaiting: defaultDaemonReads.collectionsWaiting,
       async queryChatMessagesGranular() {
         daemonCalls += 1;
         return { results: [], saturated: false };
@@ -4887,6 +5079,7 @@ describe("CLI socket server", () => {
     let unreadCalls = 0;
     const defaultDaemonReads = context.daemonReads;
     context.daemonReads = {
+      collectionsWaiting: defaultDaemonReads.collectionsWaiting,
       async queryChatMessagesGranular() {
         return { results: [], saturated: false };
       },

@@ -17,8 +17,7 @@ use dohc_engine_collab::live_update_application::{ApplicationHostCoordinate, Imp
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
     transport::{
-        ConnectionOwner, EngineService as _, EngineTransport, InProcessTransport, OutputGuard,
-        RequestContext,
+        ConnectionOwner, EngineService as _, InProcessTransport, OutputGuard, RequestContext,
     },
     wire::WorkspaceHandle,
 };
@@ -33,6 +32,79 @@ use serde_json::{Value, json};
 
 const BEARER: &str = "relay-test-token";
 const WORKSPACE: &str = "hosted-ws";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_departed_reader_hold_does_not_stop_native_parking_or_the_hosted_pass() {
+    use dohc_engine_collab::{ContentKind, DocKey, Ydoc};
+    use dohc_engine_storage::{EngineStore, NoFaults};
+    let data: Value = serde_json::from_str(include_str!(
+        "../../dohc-engine-collab/tests/reader-resolver.json"
+    ))
+    .unwrap();
+    let source = data["source"].as_str().unwrap();
+    let mut relay = HostedRelay::default();
+    relay.log.push(json!({
+        "relaySeq": 1, "workspaceId": WORKSPACE, "originId": "owner", "originSeq": 0,
+        "opKind": "workspace.init", "payload": {}, "recordedAtMs": 1_001,
+    }));
+    relay.create("owner", 1, "doc-a", "a.md", source);
+    relay.create("owner", 2, "doc-z", "z.txt", "Native note");
+    relay.share("doc-a", "a.md");
+    relay.share("doc-z", "z.txt");
+    let relay = FakeRelay::start(relay);
+    let scratch = ScratchDir::new().unwrap();
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    host.create().await;
+    host.sync().await;
+    let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 2_000).unwrap();
+    let key = DocKey::new(WORKSPACE, "main", "doc-a").unwrap();
+    let checkpoint = base64::engine::general_purpose::STANDARD
+        .decode(data["claimedCheckpoint"].as_str().unwrap())
+        .unwrap();
+    dohc_engine_collab::claim_base_at_relay(
+        &mut store,
+        &key,
+        ContentKind::Richdoc,
+        &checkpoint,
+        &dohc_engine_collab::BaseRelayCoordinate {
+            origin_id: "owner".into(),
+            origin_seq: 3,
+            relay_seq: 4,
+        },
+        &NoFaults,
+        2_001,
+    )
+    .unwrap();
+    let doc = Ydoc::wire();
+    doc.apply(&checkpoint).unwrap();
+    let update = doc.richdoc_append_paragraph("Unsettled reader body");
+    store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_collab::record_update_in_tx(tx, &key, &update, None, None, 2_002)
+        })
+        .unwrap();
+    drop(store);
+    {
+        let mut relay = relay.relay();
+        relay.unshare("doc-a");
+        relay.unshare("doc-z");
+    }
+    let pass = host.pull().await;
+    assert_eq!(pass["departed"], json!(["doc-a"]), "{pass}");
+    assert_eq!(document_state(&scratch, "doc-a").as_deref(), Some("ready"));
+    assert_eq!(document_state(&scratch, "doc-z").as_deref(), Some("parked"));
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("a.md")).unwrap(),
+        source
+    );
+    assert!(!scratch.path().join("z.txt").exists());
+}
 
 struct TestRequest {
     method: String,
@@ -84,7 +156,10 @@ struct HostedRelay {
     revision: usize,
     epoch_log_floor: i64,
     requests: Vec<String>,
+    /// Every push that carried ops.
     pushed: Vec<Value>,
+    /// Every empty push: the origin probe each `sync.createHostedReplica` sends.
+    probes: Vec<Value>,
     /// Answer pushes with an origin maximum past what was sent.
     diverge: bool,
 }
@@ -313,11 +388,20 @@ impl HostedRelay {
             ("POST", "log") => {
                 let body: Value = serde_json::from_slice(&request.body).expect("push JSON");
                 let ops = body["ops"].as_array().expect("push ops").clone();
-                let last = ops
-                    .last()
-                    .and_then(|op| op["originSeq"].as_i64())
+                let origin = body["originId"].clone();
+                if ops.is_empty() {
+                    self.probes.push(body);
+                } else {
+                    self.pushed.push(body);
+                }
+                let last = self
+                    .pushed
+                    .iter()
+                    .filter(|push| push["originId"] == origin)
+                    .flat_map(|push| push["ops"].as_array().expect("push ops"))
+                    .filter_map(|op| op["originSeq"].as_i64())
+                    .max()
                     .unwrap_or(-1);
-                self.pushed.push(body);
                 TestResponse::json(
                     200,
                     json!({
@@ -561,27 +645,27 @@ async fn open_workspace(
     relay: &FakeRelay,
 ) -> WorkspaceHandle {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE,
-                    "captureMode": "none",
-                    "relay": {
-                        "baseUrl": relay.base_url,
-                        "bearerToken": BEARER,
-                        "allowInsecureLoopbackForTests": true,
-                    },
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE,
+                "captureMode": "none",
+                "relay": {
+                    "baseUrl": relay.base_url,
+                    "bearerToken": BEARER,
+                    "allowInsecureLoopbackForTests": true,
+                },
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle")
 }
 
@@ -744,6 +828,24 @@ async fn a_hosted_replica_pulls_its_documents_and_pushes_live_writes_to_the_host
         json!({"hosted": true}),
         "the same coordinate answers the same"
     );
+    {
+        let relay = relay.relay();
+        assert_eq!(
+            relay.requests,
+            vec![format!("POST /sync/{WORKSPACE}/hosted/log"); 2],
+            "each create probes the hosted log, and nothing else"
+        );
+        let origins = relay
+            .probes
+            .iter()
+            .map(|probe| {
+                assert_eq!(probe["ops"], json!([]));
+                probe["originId"].as_str().expect("probe origin").to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert!(origins[0].starts_with("service-host:host_"), "{origins:?}");
+        assert_eq!(origins[0], origins[1], "the replica keeps its origin");
+    }
 
     // The first pass learns the scope and applies nothing.
     let learned = host.pull().await;
@@ -828,6 +930,43 @@ async fn a_hosted_replica_pulls_its_documents_and_pushes_live_writes_to_the_host
             "{method}"
         );
     }
+}
+
+/// #2088: the relay holds more of the replica's origin than the replica
+/// numbered, as after its store lost pushed commits. The next attach's
+/// create refuses, and nothing past its probe reaches the relay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn create_refuses_a_replica_whose_relay_holds_more_of_its_origin() {
+    let relay = rotated_relay();
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    assert_eq!(host.create().await, json!({"hosted": true}));
+    relay.relay().diverge = true;
+    host.id += 1;
+    let refused = call_error(
+        &host.transport,
+        &host.handle,
+        host.id,
+        "sync.createHostedReplica",
+        json!({"workspaceId": WORKSPACE, "replicationEpoch": "epoch-2", "streamIdentity": "stream-2"}),
+    )
+    .await;
+    assert_eq!(
+        (refused.code, refused.message.as_str()),
+        (ErrorCode::InvalidParams, "relay-origin-diverged")
+    );
+    let relay = relay.relay();
+    assert_eq!(
+        relay.requests,
+        vec![format!("POST /sync/{WORKSPACE}/hosted/log"); 2]
+    );
+    assert!(relay.pushed.is_empty());
 }
 
 const HOSTED_FEED_ONLY: &str = "invalid-input: a hosted replica uses only its hosted feed";
@@ -2290,7 +2429,7 @@ async fn held_return_interrupted_after_unparking_writes_its_file_after_a_restart
             .encode(dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "settled "));
         host.call(
             "ydoc.recordUpdate",
-            json!({"sessionId": session, "updateBase64": edit}),
+            json!({ "expectedLineageClaimId": null, "sessionId": session, "updateBase64": edit}),
         )
         .await;
         host.call("ydoc.settle", json!({"sessionId": session}))
@@ -2402,7 +2541,7 @@ async fn a_departed_document_keeps_its_head_until_its_session_settles() {
         .encode(dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "unsettled "));
     host.call(
         "ydoc.recordUpdate",
-        json!({"sessionId": session, "updateBase64": edit}),
+        json!({ "expectedLineageClaimId": null, "sessionId": session, "updateBase64": edit}),
     )
     .await;
     // Nothing waits for the relay, so only the session keeps doc-b.
@@ -2488,13 +2627,13 @@ impl LiveHost {
     async fn call(&self, method: &str, params: Value) -> Result<Value, WireError> {
         let mut ctx = RequestContext::unbounded();
         ctx.connection = Some(self.owner.handle());
-        self.service
-            .call(
-                ctx,
-                request(900, method, Some(self.workspace.clone()), params),
-            )
-            .await
-            .map(|response| response.response.result)
+        service_call_with_busy_retry(
+            &self.service,
+            ctx,
+            request(900, method, Some(self.workspace.clone()), params),
+        )
+        .await
+        .map(|response| response.response.result)
     }
 
     /// Register `object_id` under the lineage [`journal_live_update`] names.
@@ -2526,8 +2665,7 @@ impl LiveHost {
             json!({"registrationId": registration, "deliveryId": "probe",
                 "updateDigest": "00".repeat(32)}),
         );
-        self.service
-            .call(ctx, read)
+        service_call_with_busy_retry(&self.service, ctx, read)
             .await
             .map(|response| response.output_guard.expect("output guard"))
     }
@@ -2622,7 +2760,7 @@ async fn a_document_held_while_live_loses_its_registration_and_session_in_the_sa
         &host.handle,
         host.id,
         "ydoc.recordUpdate",
-        json!({"sessionId": sessions[0], "updateBase64": edit("closed ")}),
+        json!({ "expectedLineageClaimId": null, "sessionId": sessions[0], "updateBase64": edit("closed ")}),
     )
     .await;
 
@@ -2664,7 +2802,7 @@ async fn a_document_held_while_live_loses_its_registration_and_session_in_the_sa
         &host.handle,
         host.id,
         "ydoc.recordUpdate",
-        json!({"sessionId": reopened, "updateBase64": edit("closed ")}),
+        json!({ "expectedLineageClaimId": null, "sessionId": reopened, "updateBase64": edit("closed ")}),
     )
     .await;
     relay.relay().rename(
@@ -2687,7 +2825,7 @@ async fn a_document_held_while_live_loses_its_registration_and_session_in_the_sa
     assert!(live.registered(&registration_b).await);
     host.call(
         "ydoc.recordUpdate",
-        json!({"sessionId": sessions[1], "updateBase64": edit("still open ")}),
+        json!({ "expectedLineageClaimId": null, "sessionId": sessions[1], "updateBase64": edit("still open ")}),
     )
     .await;
 }
@@ -2802,7 +2940,7 @@ async fn a_commit_cancelled_after_it_lands_answers_committed_once_its_close_runs
         &host.handle,
         host.id,
         "ydoc.recordUpdate",
-        json!({"sessionId": session, "updateBase64": edit}),
+        json!({ "expectedLineageClaimId": null, "sessionId": session, "updateBase64": edit}),
     )
     .await;
 }
@@ -2865,8 +3003,7 @@ impl SessionHost {
     async fn call(&mut self, method: &str, params: Value) -> Result<Value, WireError> {
         self.id += 1;
         let call = request(self.id, method, Some(self.workspace.clone()), params);
-        self.service
-            .call(self.context(), call)
+        service_call_with_busy_retry(&self.service, self.context(), call)
             .await
             .map(|response| response.response.result)
     }
@@ -2943,6 +3080,7 @@ fn retain_activation(scratch: &ScratchDir, object_id: &str, path: &str, text: &s
     let full_state_digest = dohc_engine_storage::put_binary_blob(&tx, &full_state).expect("state");
     let source = ImportedOwnerSource {
         version: 1,
+        reader_source: false,
         relay_database_namespace: "hosted-relay".into(),
         workspace_id: WORKSPACE.into(),
         main_version_id: "main".into(),

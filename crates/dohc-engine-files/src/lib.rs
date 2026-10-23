@@ -49,11 +49,11 @@ pub use bounds::{
 };
 pub use capture::{
     BatchIngestResult, CaptureApplyResult, CaptureError, CaptureSink, CapturedIngest,
-    HeldObservation, IngestOutcome, apply_reconcile_plan, apply_reconcile_plan_cancellable,
-    apply_then_ack,
+    HeldObservation, ImportPriority, IngestOutcome, RespelledRetire, RetireOutcome,
+    apply_reconcile_plan, apply_reconcile_plan_cancellable, apply_then_ack,
 };
 pub use diff::{ManifestEntry, ScanDiff, ScanManifest, diff_scans};
-pub use error::FilesError;
+pub use error::{FilesError, PRIVACY_DENIED, privacy_denied};
 pub use hash::{HashOutcome, HashPool, PoolGauge};
 pub use materialize::{
     AtomicReplacer, CheckThenRenameFailed, DurabilityPolicy, JobOutcome, JobResult, KeptCopySave,
@@ -61,9 +61,10 @@ pub use materialize::{
     ProjectionTargetKind, ProjectionTargetStamp, ProjectionTargetState, ReplaceBackoff, StdBackoff,
     StdReplacer, backoff_delay, materialize_one, materialize_secret_delete_one,
     materialize_secret_one, materialize_write_conflict, move_file_no_replace, path_is_displaced,
-    probe_projection_target, recover_displacements, recover_path_displacements,
-    remove_empty_directory_target, remove_file_holding, run_pending_jobs, save_kept_displacement,
-    workspace_lacks_atomic_placement, workspace_recovery_unavailable,
+    path_is_held, placement_is_held_in, probe_projection_target, recover_displacements,
+    recover_path_displacements, remove_empty_directory_target, remove_file_holding,
+    run_pending_jobs, save_kept_displacement, workspace_lacks_atomic_placement,
+    workspace_recovery_unavailable,
 };
 pub use policy::{
     MAX_CANONICAL_WORKSPACE_PATH_BYTES, PathClassification,
@@ -72,7 +73,8 @@ pub use policy::{
 };
 pub use reconcile::{
     AbsenceProbe, CaptureOp, DEGRADED_RESCAN_BACKOFF, IngestReason, MAX_QUARANTINED_PATHS,
-    ReconcileController, ReconcilePlan, ReconcileRun, ScanGeneration, StdAbsenceProbe,
+    ReconcileController, ReconcilePlan, ReconcileRun, Respelling, ScanGeneration, StdAbsenceProbe,
+    stored_under_other_spelling,
 };
 pub use scan::{
     FailedPath, FileEntry, ScanIoFaultInjector, ScanIoOperation, ScanListing, ScanOutcome, Scanner,

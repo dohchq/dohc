@@ -3,11 +3,13 @@ import { AgentBadge } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
 import { LegendList, type LegendListRef, type OnViewableItemsChanged } from "@legendapp/list/react";
 import { formatChatDay, formatChatTime, formatClock, formatClockDigits, sameChatDay } from "../time";
-import { ChatAvatar } from "./ChatAvatar";
+import { AgentName, ChatAvatar } from "./ChatAvatar";
+import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
 import { ComposerSendButton } from "./ComposerSendButton";
-import { basenameOf } from "../path";
+import { Ref } from "../ui/Ref";
 import { SkeletonRows } from "../ui/SkeletonRows";
-import { Database, File, FileText, Image, SmilePlus } from "lucide-react";
+import { isComposingKey, isSendKey } from "../ui/keys";
+import { SmilePlus } from "lucide-react";
 import {
   memo,
   useCallback,
@@ -30,7 +32,7 @@ import {
   findMentions,
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
-import { chatFileKind, extractChatFileReferenceTokens } from "./chatFileMentions";
+import { extractChatFileReferenceTokens } from "./chatFileMentions";
 import type { ChatFileReferenceToken } from "./chatFileMentions";
 
 // Shared Chats rendering (PR 13, WS-E): the file-rail LinkedChats panel and
@@ -126,14 +128,6 @@ function resolveFileMentionNavigationTargets(
   return targets;
 }
 
-const FILE_KIND_ICONS = { text: FileText, data: Database, image: Image, file: File } as const;
-
-// The glyph on a file chip, shared by mentions and attachments.
-export function ChatFileIcon(props: { path: string; className?: string }) {
-  const Icon = FILE_KIND_ICONS[chatFileKind(props.path)];
-  return <Icon size={11} aria-hidden className={props.className} />;
-}
-
 // Renders a message body with @-mention chips. A mention that resolves to a
 // known candidate gets a calm inline chip; everything else is plain text, so
 // the message reads exactly as written. Whitespace/newlines are preserved by
@@ -171,45 +165,17 @@ export function MentionText(props: {
     const fileToken = fileTokens[fileIndex];
     if (fileToken && (!mention || fileToken.start < mention.start)) {
       if (fileToken.start > cursor) content.push(props.body.slice(cursor, fileToken.start));
-      const testId = props.testId ? `${props.testId}-file-mention` : undefined;
-      const chipContent = (
-        <>
-          <ChatFileIcon path={fileToken.path} />
-          {basenameOf(fileToken.path)}
-          {fileToken.headingAnchor ? `#${fileToken.headingAnchor}` : ""}
-        </>
-      );
-      const className = "inline-flex items-center gap-1 rounded bg-line/50 px-1 text-muted";
       const navigationTarget = fileTargets.get(fileReferenceKey(fileToken)) ?? fileToken;
-      content.push(props.onOpenPath ? (
-        <button
-          type="button"
+      const onOpenPath = props.onOpenPath;
+      content.push(
+        <Ref
           key={`file:${fileToken.start}`}
-          data-testid={testId}
-          aria-label={`Open ${fileToken.path}${
-            fileToken.headingAnchor ? ` at #${fileToken.headingAnchor}` : ""
-          }`}
-          className={`${className} cursor-pointer hover:bg-hover hover:text-ink`}
-          title={fileToken.text}
-          onClick={() =>
-            props.onOpenPath?.(
-              navigationTarget.path,
-              navigationTarget.headingAnchor,
-            )
-          }
-        >
-          {chipContent}
-        </button>
-      ) : (
-        <span
-          key={`file:${fileToken.start}`}
-          data-testid={testId}
-          className={className}
-          title={fileToken.text}
-        >
-          {chipContent}
-        </span>
-      ));
+          path={fileToken.path}
+          heading={fileToken.headingAnchor}
+          testId={props.testId ? `${props.testId}-file-mention` : undefined}
+          onOpen={onOpenPath ? () => onOpenPath(navigationTarget.path, navigationTarget.headingAnchor) : undefined}
+        />,
+      );
       cursor = fileToken.end;
       fileIndex += 1;
       continue;
@@ -475,7 +441,7 @@ export function MessageReactions(props: {
       <input aria-label="Search emoji or paste any emoji" placeholder="Search or paste an emoji" value={query}
         onChange={(event) => { setQuery(event.currentTarget.value); setVisibleCount(96); }}
         className="mb-2 w-full rounded-md border border-line bg-bg px-2 py-1.5 text-[13px] text-ink"
-        onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); if (choices[0]) { toggle(choices[0], byEmoji.some((group) => group.emoji === choices[0] && group.mine)); setPickerOpen(false); triggerRef.current?.focus(); } } }} />
+        onKeyDown={(event) => { if (event.key === "Enter" && !isComposingKey(event)) { event.preventDefault(); if (choices[0]) { toggle(choices[0], byEmoji.some((group) => group.emoji === choices[0] && group.mine)); setPickerOpen(false); triggerRef.current?.focus(); } } }} />
       <div className="grid h-56 content-start grid-cols-8 gap-0.5 overflow-y-auto">
       {choices.slice(0, visibleCount).map((emoji) => {
         const mine = index.has(emoji) ? (byEmoji[index.get(emoji) as number]?.mine ?? false) : false;
@@ -769,6 +735,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
             New
           </span>
         ) : null}
+        <AgentColorScope name={chatAuthorLabel(message)} kind={message.authorKind} presentation={message.presentation}>
         <div className="group -mx-2 flex gap-2.5 rounded-lg px-2 hover:bg-hover">
           {/* A continued message's time sits in the avatar's column, ending at
               its edge, so "12:45" fits at every hour. The full time is its
@@ -787,11 +754,13 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                 <span className="sr-only">{formatClock(message.createdAtMs)}</span>
               </>
             ) : (
-              <ChatAvatar presentation={message.presentation}
-                name={message.authorDisplayName}
-                kind={message.authorKind}
-                size="comment"
-              />
+              <AgentColorAvatar>
+                <ChatAvatar presentation={message.presentation}
+                  name={message.authorDisplayName}
+                  kind={message.authorKind}
+                  size="comment"
+                />
+              </AgentColorAvatar>
             )}
           </span>
           <div className="relative min-w-0 flex-1 pr-6">
@@ -800,13 +769,13 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                 <span
                   data-testid={`${props.testIdPrefix}-message-author`}
                   data-author-kind={message.authorKind}
-                  className={`shrink-0 text-[13px] font-semibold ${
-                    isAgent ? "text-agent" : "text-ink"
-                  }`}
+                  className="shrink-0 text-[13px] font-semibold text-ink"
                 >
-                  {chatAuthorLabel(message)}
+                  <AgentName kind={message.authorKind} presentation={message.presentation}>
+                    <AgentColorName>{chatAuthorLabel(message)}</AgentColorName>
+                  </AgentName>
                 </span>
-                {isAgent ? <AgentBadge testIdPrefix={props.testIdPrefix} author={message} viewerAuthorId={props.reactionControls?.viewerAuthorId} /> : null}
+                {isAgent ? <AgentBadge testIdPrefix={props.testIdPrefix} author={message} viewerAuthorId={props.reactionControls?.viewerAuthorId} presentation={message.presentation} /> : null}
                 {message.authorKind === "automation" ? (
                   <AutomationBadge
                     testIdPrefix={props.testIdPrefix}
@@ -848,6 +817,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
             ) : null}
           </div>
         </div>
+        </AgentColorScope>
       </li>
     );
   }, [props, candidates, reactionsByMessage]);
@@ -943,9 +913,10 @@ export function ChatComposer(props: {
         placeholder={props.placeholder}
         onChange={(event) => props.onChange(event.target.value)}
         onKeyDown={(event) => {
-          // isComposing: Enter during IME composition (CJK input) confirms
-          // the composed characters — it must never submit the message.
-          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+          // During IME composition (CJK input), Enter confirms the composed
+          // characters and Escape cancels them; neither sends or backs out.
+          if (isComposingKey(event)) return;
+          if (isSendKey(event)) {
             event.preventDefault();
             props.onSend();
           } else if (event.key === "Escape" && props.onEscape) {

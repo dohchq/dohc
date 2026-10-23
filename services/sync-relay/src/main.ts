@@ -1,7 +1,6 @@
 import {parsePublicEditRelease} from "@dohc/security-contract";
-import {accountDisplayName} from "./discussionRoutes";
+import {accountDisplayName} from "./accountDisplayName";
 import { APP_PUBLICATION_MAX_FILES, APP_PUBLICATION_MAX_METADATA_BYTES, APP_PUBLICATION_MAX_BUNDLE_BYTES } from "@dohc/security-contract/app-publication";
-import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { SIGN_UP_INVITE_PATH, signUpInviteKey } from "@dohc/workspace-auth/signUp";
 import { tmpdir } from "node:os";
@@ -20,6 +19,7 @@ import { createVerifiedEmailLookups } from "./verifiedEmailLookups";
 import {ACCOUNT_DELETION_PATH, ACCOUNT_DELETION_KEY_HEADER, accountDeletionKey, accountDeletionFenceKey} from "@dohc/workspace-auth/accountDeletion";
 import {createAccountDeletionRoute, fencePendingAccountDeletions} from "./accountDeletionRoute";
 import type {StorageContext} from "./storage/context";
+import {startLiveJournalCheck} from "./storage/liveJournalCheck";
 import { createSignUpInviteRoute } from "./signUpInviteRoute";
 import { errorBody, errorResponse, notFound } from "./errors";
 import { RELAY_API_VERSIONS, relayApiVersionRefusal } from "./apiVersion";
@@ -40,7 +40,7 @@ import {liveValidation} from "./liveValidation.js";
 import {readRelayDeviceDeliveryConfig} from "./deviceLiveHostConfig";
 import {parseDeviceControlLimits} from "@dohc/live-session-contract/device-control";
 import { startPublicationOperator } from "./appPublicationOperator";
-import { operatorSocketPath } from "./appPublicationOperatorProtocol";
+import { operatorSecretPath, operatorSocketPath } from "./appPublicationOperatorProtocol";
 import { openRelayDeployment } from "./relayDeployment";
 import { guardRelayResponses } from "./relayResponseStanding";
 import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots } from "./serviceLiveHost";
@@ -262,17 +262,6 @@ if (projectionOptIn !== undefined && !["0", "1"].includes(projectionOptIn)) fata
 if (projectionOptIn !== undefined && !isDevOrTest) fatal("FATAL: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION is allowed only in development/test.");
 if (projectionOptIn === "1") console.warn("WARNING: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION=1 permits document projection without OS memory isolation on non-Linux platforms.");
 if (!isDevOrTest && !projectionExecutable) fatal("FATAL: Document sharing requires DOHC_RELAY_ENGINE_EXECUTABLE outside development/test.");
-const documentProjection = projectionExecutable ? await startEngineProjection({engineExecutable: projectionExecutable,
-  allowUnisolatedProjection: projectionOptIn === "1"}).catch((error: unknown) => fatal(
-    `FATAL: Document projection could not start: ${error instanceof Error ? error.message : "unknown engine failure"}`)) : undefined;
-const storageOptions = { workspaceQuotaBytes, ...(namedLiveConfig ? { liveTickets: { ...namedLiveConfig.tickets, now: Date.now } } : {}) };
-const deployment = deploymentConfig ? openRelayDeployment(deploymentConfig, storageOptions) : undefined;
-const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, storageOptions);
-// Worker files are disposable materializations. The relay database retains authority and recovery history.
-const datasetDirectory = deployment?.datasetDirectory ?? await mkdtemp(join(tmpdir(), "dohc-relay-datasets-"));
-const datasetHost = await storage.createDatasetHost({directory: datasetDirectory, limits: appPublicationLimits ?? {
-  maxFiles: APP_PUBLICATION_MAX_FILES, maxMetadataBytes: APP_PUBLICATION_MAX_METADATA_BYTES, maxBundleBytes: APP_PUBLICATION_MAX_BUNDLE_BYTES,
-}, maxParticipantsPerGrant: appBackendMaxParticipantsPerGrant, compileOperations: compileDatasetOperations, startupExclusive: Boolean(deployment), onShutdownError(error) { console.error("[sync-relay] dataset shutdown failed", error); }});
 
 // Production auth intentionally reuses workspace-api's Better Auth database
 // and BETTER_AUTH_SECRET. A bearer token minted by workspace-api's desktop
@@ -292,7 +281,8 @@ let lookupUserDisplayName: (
 ) => Promise<string | null> | string | null;
 const resolveAccountActor: ResolveActor = testAuthSeam
   ? createTestActorResolver()
-  : (() => {
+  : await (async () => {
+      const { createWorkspaceAuth } = await import("@dohc/workspace-auth/betterAuth");
       pool = new Pool({
         connectionString: process.env.POSTGRES_URL ?? defaultPostgresUrl,
       });
@@ -310,6 +300,18 @@ const resolveAccountActor: ResolveActor = testAuthSeam
       });
       return createSessionActorResolver(auth);
   })();
+
+const documentProjection = projectionExecutable ? await startEngineProjection({engineExecutable: projectionExecutable,
+  allowUnisolatedProjection: projectionOptIn === "1"}).catch((error: unknown) => fatal(
+    `FATAL: Document projection could not start: ${error instanceof Error ? error.message : "unknown engine failure"}`)) : undefined;
+const storageOptions = { workspaceQuotaBytes, ...(namedLiveConfig ? { liveTickets: { ...namedLiveConfig.tickets, now: Date.now } } : {}) };
+const deployment = deploymentConfig ? openRelayDeployment(deploymentConfig, storageOptions) : undefined;
+const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, storageOptions);
+// Worker files are disposable materializations. The relay database retains authority and recovery history.
+const datasetDirectory = deployment?.datasetDirectory ?? await mkdtemp(join(tmpdir(), "dohc-relay-datasets-"));
+const datasetHost = await storage.createDatasetHost({directory: datasetDirectory, limits: appPublicationLimits ?? {
+  maxFiles: APP_PUBLICATION_MAX_FILES, maxMetadataBytes: APP_PUBLICATION_MAX_METADATA_BYTES, maxBundleBytes: APP_PUBLICATION_MAX_BUNDLE_BYTES,
+}, maxParticipantsPerGrant: appBackendMaxParticipantsPerGrant, compileOperations: compileDatasetOperations, startupExclusive: Boolean(deployment), onShutdownError(error) { console.error("[sync-relay] dataset shutdown failed", error); }});
 
 const resolveActor = resolveAccountActor;
 if (automationsOn && (!deployment || !linkKey || !process.env.DOHC_RELAY_SERVICE_HOST_ROOT || !process.env.DOHC_RELAY_ENGINE_EXECUTABLE || !process.env.DOHC_RELAY_PUBLIC_ORIGIN)) {
@@ -611,6 +613,7 @@ const ownerAdmissionRun = ownerAdmission && deviceControl && deployment ? startO
   onError: error => console.error("[sync-relay] private owner delivery:",error)}) : undefined;
 const stopOwnerAdmission = () => {void ownerAdmissionRun?.close().catch(error => console.error("[sync-relay] private owner delivery shutdown:",error));};
 server.once("close",stopOwnerAdmission);
+server.once("close",()=>relayApplication.dispose());
 process.once("SIGINT",stopOwnerAdmission);
 process.once("SIGTERM",stopOwnerAdmission);
 const serviceHostConfig = process.env.DOHC_RELAY_SERVICE_HOST_CONFIG;
@@ -662,8 +665,8 @@ if (namedLiveConfig) {
     const hosts = new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(","));
     linkLive = createNamedLiveRoutes({kind: "link", storage, hosts, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
       frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
-      sessions: createLinkLiveBrowserResolver({storage, linkKey: linkKey!}), tickets, captureNative, membership, admission, sessionHostBlocked});
-    linkLiveHttp = createLinkLiveHttp({storage, hosts, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport, linkKey: linkKey!, sessionHostBlocked});
+      sessions: createLinkLiveBrowserResolver({storage, linkKey: linkKey!, publicEditRelease}), tickets, captureNative, membership, admission, sessionHostBlocked});
+    linkLiveHttp = createLinkLiveHttp({storage, hosts, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport, linkKey: linkKey!, publicEditRelease, sessionHostBlocked});
     server.once("close", linkLive.close); process.once("SIGINT", linkLive.close); process.once("SIGTERM", linkLive.close);
   }
   if (desktopEditorLimits) {
@@ -692,7 +695,7 @@ if (namedLiveConfig) {
   server.once("close", namedLive.close);
   process.once("SIGINT", namedLive.close); process.once("SIGTERM", namedLive.close);
 }
-const publicationOperator = await startPublicationOperator(storage, operatorSocketPath());
+const publicationOperator = await startPublicationOperator(storage, operatorSocketPath(), operatorSecretPath());
 
 // A server that does not run automations keeps no copies of workspaces.
 const automationRoot = process.env.DOHC_RELAY_SERVICE_HOST_ROOT ? join(process.env.DOHC_RELAY_SERVICE_HOST_ROOT, "automations") : undefined;
@@ -713,7 +716,12 @@ automations = automationServer && automationReplicaKey && automationRoot ? await
   onError: (context, error) => console.error(`[sync-relay] automations: ${context}:`, error),
 }) : undefined;
 
+let journalCheck: ReturnType<typeof startLiveJournalCheck> | undefined;
+const stopJournalCheck = () => journalCheck?.close();
+process.once("SIGINT", stopJournalCheck); process.once("SIGTERM", stopJournalCheck);
+server.once("close", stopJournalCheck);
 server.listen(requestedPort, host, () => {
+  journalCheck = startLiveJournalCheck((storage as StorageContext).db);
   void (async () => {
     for (const job of pendingDeletions.splice(0)) await deletions.purge(job.user_id,job.email).catch(() => console.error("[sync-relay] Account deletion remains pending."));
   })();
@@ -727,6 +735,7 @@ server.listen(requestedPort, host, () => {
 installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
   onClosed: async () => {
+    stopJournalCheck();
     await publicationOperator.close();
     await documentProjection?.close();
     await ownerAdmissionRun?.close();

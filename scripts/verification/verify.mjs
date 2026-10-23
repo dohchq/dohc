@@ -18,6 +18,7 @@ import { readGit } from "../../tools/rust-engine-program/git-read.mjs";
 import { clippy, fmtCheck, nextest } from "../../tools/rust-engine-program/gate-commands.mjs";
 import { finishRustEvidence, refreshRustReuse, rustIdentity } from "./rust-reuse.mjs";
 import { pauseHold, queueRoot, sharedFailures, verifyThroughQueue } from "./queue.mjs";
+import { linuxDistro, linuxRustJob } from "./linux.mjs";
 
 // Windows reports a console program that could not start as STATUS_DLL_INIT_FAILED. The job relay
 // (windows-job.ps1 and windows-command.mjs) exits with 0xD0C5 when its command never started.
@@ -216,16 +217,18 @@ export async function verify(args) {
     // and when no changed file narrows it, as for packages. Otherwise it runs only the tests that read the source tree.
     const repositoryTests = !gates.js ? undefined
       : keepGoing || !files.length || selectsRepositoryTests(files, workflow) ? "test:repo" : "test:repo:tree";
-    return { baseCommit, files, workflow, requiredGates, gates, repositoryTests };
+    // On a host that names a WSL distro, Rust is also checked there. Reused Rust evidence covers renderer changes only, so it needs none.
+    const linux = gates.rust && !reuseRust ? linuxDistro() : null;
+    return { baseCommit, files, workflow, requiredGates, gates, repositoryTests, linux };
   }
   if (mode === "plan") {
-    const {baseCommit, files, gates, repositoryTests} = selection();
+    const {baseCommit, files, gates, repositoryTests, linux} = selection();
     // Package tests run for the affected packages only; --full and changes outside packages run every package.
     const workspace = gates.js && !full ? readWorkspacePackages(repoRoot) : null;
     const packages = workspace && affectedPackages(files, workspace, packageReferences(repoRoot, workspace));
     // The JavaScript gate runs the affected packages' tests and the selected repository tests, then these proofs.
     const javascript = gates.js ? {needs: ["postgres", "engine", "desktop"], packages: packages ?? "all", repositoryTests, proofs: ["self-host-native", "accounts", ...desktopProofTags().required]} : null;
-    console.log(JSON.stringify({base, baseCommit, files, gates, javascript}, null, 2));
+    console.log(JSON.stringify({base, baseCommit, files, gates, javascript, linux}, null, 2));
     return;
   }
   let treeState;
@@ -298,11 +301,12 @@ export async function verify(args) {
   try {
     if (mode === "pr") process.env.CARGO_INCREMENTAL = "0";
     desktopEnvironment = {...process.env, DOHC_TEST_ENGINE_BINARY: stagedEnginePath};
-    const {workflow, gates, repositoryTests} = await measure("selection", () => {
+    const {workflow, gates, repositoryTests, linux} = await measure("selection", () => {
       treeState = createTreeReader();
       const selected = selection();
       Object.assign(report, {baseCommit: selected.baseCommit, files: selected.files, requiredGates: selected.requiredGates, gates: selected.gates,
-        repositoryTests: selected.repositoryTests, commit: git(["rev-parse", "HEAD"]), dirty: git(["status", "--porcelain"]) !== ""});
+        repositoryTests: selected.repositoryTests, ...(selected.linux ? {linux: {distro: selected.linux}} : {}),
+        commit: git(["rev-parse", "HEAD"]), dirty: git(["status", "--porcelain"]) !== ""});
       // A detached HEAD names no branch. symbolic-ref would fail there, and git() retries a failure.
       try { const ref = git(["rev-parse", "--symbolic-full-name", "HEAD"]); branch = ref.startsWith("refs/") ? ref : null; } catch { /* No branch. */ }
       recordTree("start");
@@ -433,6 +437,28 @@ export async function verify(args) {
         throw error;
       }
     }
+    // Rust in the host's WSL distro, beside the Windows job: clippy and the compiler owner's tests for a PR,
+    // the whole Rust job for a full run.
+    async function linuxJob() {
+      if (!linux) return;
+      const linuxOutput = join(output, "rust-linux");
+      const mode = full ? "gate" : "pr";
+      let receipt;
+      let scope;
+      try {
+        await checkedStep({ name: "rust-linux", distro: linux, mode, log: join(linuxOutput, "wsl-run.log"), report: join(linuxOutput, "result.json") }, async () => {
+          ({ receipt, scope } = await linuxRustJob({ distro: linux, head: report.commit, base: report.baseCommit, output: linuxOutput, full,
+            signal: cancellation.signal, request: grant?.request, attempt: grant?.attempt }));
+          if (receipt.verdict !== "PASS") throw new Error(`Rust failed on Linux: ${receipt.error ?? "read its receipt"}`);
+        });
+      } finally {
+        const linuxStep = row => ({ ...row, step: row.step === "rust" ? "rust-linux" : `rust-linux ${row.step}` });
+        flaky.push(...(receipt?.flaky ?? []).map(linuxStep));
+        failed.push(...(receipt?.failed ?? []).map(linuxStep));
+        report.linux = { distro: linux, mode, result: join(linuxOutput, "result.json"), verdict: receipt?.verdict ?? null, memoryPeak: scope?.memoryPeak ?? null };
+        save();
+      }
+    }
     async function javascriptJob() {
       async function integrationProofs(env, checkpoint) {
         const proofStep = (name, command, commandArgs, env) => step(name, command, commandArgs, env, checkpoint);
@@ -477,6 +503,8 @@ export async function verify(args) {
             report.statesPage = `not run: the states page compares pixels on win32 only, and this host is ${process.platform}`; save();
           }
         }
+        // Desktop specs that open a browser page use the same pinned browser as the PR gate's account proof.
+        if (mode === "e2e") await proofStep("browser-install", ...pnpm(["exec", "playwright", "install", "chromium"]), env);
         const tags = mode === "pr" ? desktopProofTags() : {selected: ["@verification-smoke"], required: ["@verification-smoke"]};
         const forwarded = mode === "e2e" ? args.slice(1).filter((arg) => arg !== "--") : ["--grep", tags.selected.join("|")];
         const jsonReport = join(output, "playwright.json");
@@ -518,18 +546,19 @@ export async function verify(args) {
       }
     }
     // A job's failure stops the other job unless the run keeps going. Every expected step that never starts, in either job, is reported as not run.
-    if (mode === "pr") Object.assign(jobSteps, { rust: !gates.rust ? [] : reuseRust ? ["rust-reuse"] : ["rust", "rust-verdict"], js: gates.js ? ["typecheck", "tests"] : [] });
+    if (mode === "pr") Object.assign(jobSteps, { rust: !gates.rust ? [] : reuseRust ? ["rust-reuse"] : ["rust", "rust-verdict"], linux: linux ? ["rust-linux"] : [], js: gates.js ? ["typecheck", "tests"] : [] });
     const stopOther = job => error => {
       cancellation.stop(error?.step ?? job, error);
       throw error;
     };
     const rustWork = rustJob().catch(stopOther("rust"));
     const rustSettled = rustWork.then(() => {}, () => {});
-    const [rustResult, javascriptResult] = await Promise.allSettled([rustWork, javascriptJob().catch(stopOther("js"))]);
+    const [rustResult, linuxResult, javascriptResult] = await Promise.allSettled([rustWork, linuxJob().catch(stopOther("rust-linux")), javascriptJob().catch(stopOther("js"))]);
     if (cancellation.stopped) throw cancellation.stopped.error;
     await cancellation.checkpoint();
     if (javascriptResult.status === "rejected") throw javascriptResult.reason;
     if (rustResult.status === "rejected") throw rustResult.reason;
+    if (linuxResult.status === "rejected") throw linuxResult.reason;
     if (desktop) await measure("prepared-build:finish", () => assertPrepared(preparedOptions));
     await checkTree("finish");
     report.verdict = "PASS";
@@ -590,7 +619,7 @@ export async function verify(args) {
       if (report.repositoryTests === "test:repo:tree") console.log("[verification] repository tests: tree set only (no tooling change). --full runs every repository test.");
       if (report.stopped?.notRun.length) console.log(`[verification] Stopped after ${report.stopped.after} failed. These steps did not finish, so coverage is partial (--keep-going runs them):\n${report.stopped.notRun.map(name => `  ${name}`).join("\n")}`);
       if (report.slowest.length) console.log(`[verification] slowest tests:\n${report.slowest.slice(0, 5).map(row => `  ${row.seconds}s ${row.step}: ${row.test}`).join("\n")}`);
-      if (flaky.length) console.log(`[verification] ${flaky.length} flaky test(s) passed only on retry. Each one is a defect to fix:\n${flaky.map(row => `  ${row.step}: ${row.test}${row.passedAlone ? " (failed both tries, passed alone)" : ""}`).join("\n")}`);
+      if (flaky.length) console.log(`[verification] ${flaky.length} flaky test(s) passed only on retry. Each one is a defect to fix:\n${flaky.map(row => `  ${row.step}: ${row.test}${row.passedAlone ? " (failed both tries, passed alone)" : ""}${row.error ? `\n    first try: ${row.error.split("\n")[0]}` : ""}`).join("\n")}`);
       const shared = report.shared ?? [];
       if (shared.length) console.log(`[verification] ${shared.length === 1 ? "1 failed test" : `${shared.length} failed tests`} also failed on other branches in the last day. A failure that other branches share often comes from main or a flaky test, not from this change. Check origin/main and the nightly before you change this branch to fix ${shared.length === 1 ? "it" : "them"}:\n${shared.map(row => `  ${row.step}: ${row.test} (also ${row.branches.join(", ")})`).join("\n")}`);
       if (rerun.length) console.log(`[verification] Rerun the failed tests locally before resubmitting. Set DOHC_REQUIRE_POSTGRES=1 and DOHC_REQUIRE_ENGINE_E2E=1, as the gate does, so a missing database or engine fails instead of skipping:\n${rerun.map(command => `  ${command}`).join("\n")}`);

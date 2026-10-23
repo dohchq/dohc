@@ -1,9 +1,10 @@
+import { relayShareOperations } from "../ipc/shareOperations";
+import { registerOperations } from "../ipc/operationTable";
 import { readdir } from "node:fs/promises";
 import type { SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import type { LiveDaemonWorkspace } from "../../e2e/helpers/daemonSeed";
 import { createPresencePollRegistry } from "../collab/presencePollRegistry";
-import { CHANNELS } from "../ipc/channels";
-import { registerRelaySharesIpcHandlers } from "../ipc/relaySharesIpc";
+import { createRelaySharesIpcHandlers } from "../ipc/relaySharesIpc";
 import { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type { ShareMountRecord } from "../workspaces/registryStore";
 import {
@@ -25,6 +26,7 @@ import { fetchShareViewInfo } from "../workspaces/shareViewInfo";
 import { withExclusiveWorkspaceOperation } from "../workspaces/workspaceAssets";
 import { createCaptureLiveStores } from "../workspaces/workspaceEngineCaptureLiveStore";
 import { createWorkspaceFileMutationOwner } from "../workspaces/workspaceFileMutationOwner";
+import { readLocalStateFrom } from "../workspaces/workspaceLocalState";
 
 // Registry persistence and renderer notifications are local ports. Mount commands,
 // projection, file admission, relay requests, and engine storage use their owners.
@@ -37,6 +39,8 @@ export function createRealShareMountHarness(input: {
     ...input.daemon.workspace,
     shareMounts: [] as ShareMountRecord[],
   };
+  // Writers of `.dohc/local` ask the engine's open, as the desktop's do.
+  readLocalStateFrom(input.daemon.sessions);
   const received = createReceivedShareEngineAccess({
     sessions: () => input.daemon.sessions,
     relayClient: () => input.daemon.relay,
@@ -99,7 +103,7 @@ export function createRealShareMountHarness(input: {
     removeMount: (owner, target) => commands.filesLifecycle.removeMount(owner, target),
   });
   const mutations = createWorkspaceFileMutationOwner({
-    historyFor: () => ({ readHistoryPage: async () => { throw new Error("Unexpected History read"); }, undoHistoryOperation: async () => { throw new Error("Unexpected Undo"); } }),
+    historyFor: () => ({ readHistoryOperation: async () => {throw new Error("Unexpected History kind read");}, readHistoryPage: async () => { throw new Error("Unexpected History read"); }, undoHistoryOperation: async () => { throw new Error("Unexpected Undo"); } }),
     assertTrustedSender: () => undefined,
     withRendererWorkspaceOperation: async (_event, workspaceId, work) => {
       if (workspaceId !== workspace.workspaceId) throw new Error("Wrong host workspace");
@@ -119,10 +123,7 @@ export function createRealShareMountHarness(input: {
   });
   type Event = { sender: { id: number } };
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
-  registerRelaySharesIpcHandlers({
-    registerHandler: (channel, handler) => { handlers.set(channel, handler); },
-    assertTrustedSender: () => undefined,
-    withRendererWorkspaceOperation: unexpected,
+  const ownerHandlers = createRelaySharesIpcHandlers({
     remoteForWorkspace: unexpected,
     currentCredentialGeneration: unexpected,
     currentCredentials: unexpected,
@@ -136,6 +137,14 @@ export function createRealShareMountHarness(input: {
     sharesChanged: unexpected,
     reconcileReceivedShares: unexpected,
   });
+  registerOperations({
+    handle: (channel, handler) => { handlers.set(channel, handler); },
+    assertTrustedSender: () => undefined,
+    withActiveWorkspace: async (_event: Event, workspaceId, message, work) => {
+      if (workspaceId !== workspace.workspaceId) throw new Error(message);
+      return work({workspace, assertCurrent});
+    },
+  }, relayShareOperations, ownerHandlers);
   return {
     workspace,
     mount: (shareCode: string) => commands.mount({ workspace, shareCode, assertCurrent }),
@@ -146,7 +155,7 @@ export function createRealShareMountHarness(input: {
       expectedContentHash: "0".repeat(64),
     }),
     reshare: async (path: string) => {
-      const handler = handlers.get(CHANNELS.createRelayShare);
+      const handler = handlers.get(relayShareOperations.createRelayShare.channel);
       if (!handler) throw new Error("Missing create-share handler");
       return handler({ sender: { id: 1 } }, {
         workspaceId: workspace.workspaceId, recipientEmail: "third-party@dohc.test",

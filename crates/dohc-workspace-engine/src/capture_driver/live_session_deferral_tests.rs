@@ -31,6 +31,7 @@ fn apply_context<'a>(
         provenance: CaptureProvenance::default(),
         events: EngineEvents::default(),
         apply_probe: None,
+        import_priority: None,
     }
 }
 
@@ -667,7 +668,7 @@ impl Harness {
             &self.self_writes,
         );
         context.author_json = self.author_json.clone();
-        apply_bound_run_with_handle(context, files, run, &CancellationToken::new())
+        apply_run(context, files, run, &CancellationToken::new())
             .await
             .clean
     }
@@ -731,10 +732,9 @@ async fn a_held_head_capture_would_not_overwrite_is_tracked_without_degrading() 
 }
 
 // A file capture already recorded changes on disk while a live session holds
-// it: nothing records that text, so capture stays unsettled instead of
-// reporting the file captured.
+// it. Capture leaves the outside bytes on disk and waits for lease release.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_held_recorded_file_changed_on_disk_keeps_capture_unsettled() {
+async fn a_held_recorded_file_changed_on_disk_defers_without_degrading() {
     let harness = Harness::new();
     let path = "notes/existing.md";
     std::fs::write(harness.root.join(path), "Before.\n").expect("existing file");
@@ -756,11 +756,181 @@ async fn a_held_recorded_file_changed_on_disk_keeps_capture_unsettled() {
         .expect("outside write");
     files.handle().request_rescan();
     assert!(
-        !harness.capture(&files.handle()).await,
-        "the change is not recorded"
+        harness.capture(&files.handle()).await,
+        "the change waits without failing capture"
     );
-    assert!(harness.status.degraded());
+    assert!(!harness.status.degraded());
+    assert_eq!(files.handle().stats().await.expect("stats").deferred, 1);
+    assert_eq!(harness.status.deferred_writes(), vec![path]);
+
+    files.close().await;
+    harness.close();
+}
+
+// dohc#2342. A file capture recorded is deleted outside dohc while its
+// document is open. The session still holds the head and refuses every save
+// over the missing file, so capture leaves the head alone. Capture is waiting,
+// not failing, so it stays clean. The release alone brings the delete back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deleted_file_a_live_session_holds_is_retired_once_released() {
+    let harness = Harness::new();
+    let path = "notes/existing.md";
+    std::fs::write(harness.root.join(path), "Before.\n").expect("existing file");
+    let files = FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+        .await
+        .expect("files actor");
+    let files = FilesActorCloseGuard::new(files);
+    assert!(
+        harness.capture(&files.handle()).await,
+        "the file is captured first"
+    );
+    let object_id = derive_capture_object_id(WORKSPACE_ID, "main", path);
+    let lease = harness
+        .leases
+        .acquire(&harness.key(&object_id))
+        .expect("a person opens the file");
+    let mut releases_seen = harness.leases.release_generation(WORKSPACE_ID);
+
+    std::fs::remove_file(harness.root.join(path)).expect("deleted outside dohc");
+    files.handle().request_rescan();
+    assert!(
+        harness.capture(&files.handle()).await,
+        "the held delete is not a failed capture"
+    );
+    assert!(!harness.status.degraded());
+    let stats = files.handle().stats().await.expect("stats");
+    assert_eq!((stats.deferred, stats.quarantined), (1, 0));
+    assert!(
+        !stats.dirty,
+        "the layer is quiescent while the session lasts"
+    );
+    assert_eq!(
+        head_count(&harness.db, path),
+        1,
+        "the session still holds it"
+    );
+
+    drop(lease);
+    offer_unrecorded_after_release(
+        &harness.leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(head_count(&harness.db, path), 0, "retired once released");
     assert_eq!(files.handle().stats().await.expect("stats").deferred, 0);
+
+    files.close().await;
+    harness.close();
+}
+
+// The same wait when the delete lands between the scan and the apply: capture
+// planned to record a change to the held file and finds it gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_file_deleted_between_scan_and_apply_is_retired_once_released() {
+    let harness = Harness::new();
+    let path = "notes/existing.md";
+    std::fs::write(harness.root.join(path), "Before.\n").expect("existing file");
+    let files = FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+        .await
+        .expect("files actor");
+    let files = FilesActorCloseGuard::new(files);
+    assert!(
+        harness.capture(&files.handle()).await,
+        "the file is captured first"
+    );
+    let object_id = derive_capture_object_id(WORKSPACE_ID, "main", path);
+    let lease = harness
+        .leases
+        .acquire(&harness.key(&object_id))
+        .expect("a person opens the file");
+    let mut releases_seen = harness.leases.release_generation(WORKSPACE_ID);
+
+    std::fs::write(harness.root.join(path), "Changed outside.\n").expect("outside write");
+    files.handle().request_rescan();
+    let run = reconcile_if_dirty_bound(&harness.root, &files.handle(), CancellationToken::new())
+        .await
+        .expect("scan");
+    assert!(
+        matches!(&run.run, ReconcileRun::Completed(plan)
+            if matches!(plan.ops.as_slice(), [CaptureOp::Ingest { .. }])),
+        "the scan plans to record the change"
+    );
+    std::fs::remove_file(harness.root.join(path)).expect("deleted before the apply");
+    let clean = apply_bound_run_with_handle(
+        apply_context(
+            &harness.root,
+            &harness.actor,
+            &harness.leases,
+            &harness.status,
+            &harness.self_writes,
+        ),
+        &files.handle(),
+        run,
+        &CancellationToken::new(),
+    )
+    .await
+    .clean;
+    assert!(clean, "the held delete is not a failed capture");
+    assert!(!harness.status.degraded());
+    let stats = files.handle().stats().await.expect("stats");
+    assert_eq!((stats.deferred, stats.quarantined), (1, 0));
+    assert_eq!(
+        head_count(&harness.db, path),
+        1,
+        "the session still holds it"
+    );
+
+    drop(lease);
+    offer_unrecorded_after_release(
+        &harness.leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(head_count(&harness.db, path), 0, "retired once released");
+
+    files.close().await;
+    harness.close();
+}
+
+// An engine-internal attempt's lease wakes nothing when it ends, so a retire
+// it blocks stays an ordinary failure that capture retries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deleted_file_an_internal_attempt_holds_fails_and_is_retried() {
+    let harness = Harness::new();
+    let path = "notes/existing.md";
+    std::fs::write(harness.root.join(path), "Before.\n").expect("existing file");
+    let files = FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+        .await
+        .expect("files actor");
+    let files = FilesActorCloseGuard::new(files);
+    assert!(
+        harness.capture(&files.handle()).await,
+        "the file is captured first"
+    );
+    let object_id = derive_capture_object_id(WORKSPACE_ID, "main", path);
+    let internal = harness
+        .leases
+        .acquire_internal(&harness.key(&object_id))
+        .expect("an internal attempt holds the file");
+
+    std::fs::remove_file(harness.root.join(path)).expect("deleted outside dohc");
+    files.handle().request_rescan();
+    assert!(!harness.capture(&files.handle()).await);
+    assert!(harness.status.degraded());
+    let stats = files.handle().stats().await.expect("stats");
+    assert_eq!(stats.deferred, 0);
+    assert!(stats.dirty, "capture retries the retire");
+    assert_eq!(head_count(&harness.db, path), 1);
+
+    drop(internal);
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(head_count(&harness.db, path), 0, "the retry retires it");
 
     files.close().await;
     harness.close();
@@ -795,8 +965,8 @@ async fn unsettled_typing_on_a_held_file_is_kept_beside_the_outside_edit() {
     std::fs::write(harness.root.join(path), outside).expect("outside write");
     files.handle().request_rescan();
     assert!(
-        !harness.capture(&files.handle()).await,
-        "the held file is not recorded"
+        harness.capture(&files.handle()).await,
+        "the held file waits without failing capture"
     );
 
     drop(lease);
@@ -1627,15 +1797,15 @@ async fn a_changed_file_whose_head_was_deleted_is_deferred_while_held() {
 
     // An agent writes the first file's bytes back before the editor saves.
     // They match what capture once recorded at the path, but nothing records
-    // them now, so capture stays unsettled.
+    // them now, so capture defers them.
     std::fs::write(harness.root.join(NEW_FILE), "First file.\n").expect("outside write");
     files.handle().request_rescan();
     assert!(
-        !harness.capture(&files.handle()).await,
-        "the write is not recorded yet"
+        harness.capture(&files.handle()).await,
+        "the write waits without failing capture"
     );
-    assert!(harness.status.degraded());
-    assert_eq!(files.handle().stats().await.expect("stats").deferred, 0);
+    assert!(!harness.status.degraded());
+    assert_eq!(files.handle().stats().await.expect("stats").deferred, 1);
     assert_eq!(head_count(&harness.db, NEW_FILE), 0);
 
     drop(lease);
@@ -1653,11 +1823,10 @@ async fn a_changed_file_whose_head_was_deleted_is_deferred_while_held() {
 
 // A person creates a file and opens it, and capture defers it. Before the
 // editor's first settle, an agent writes text to the file. The session would
-// refuse those bytes when it settles, so nothing would record them: capture
-// stays unsettled, and records them with the agent as author once the editor
-// lets go.
+// refuse those bytes when it settles. Capture waits cleanly and records them
+// with the agent as author once the editor lets go.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_outside_write_to_a_held_new_file_keeps_capture_unsettled_until_recorded() {
+async fn an_outside_write_to_a_held_new_file_defers_until_recorded() {
     let mut harness = Harness::new();
     std::fs::write(harness.root.join(NEW_FILE), "").expect("new file");
     let object_id = derive_capture_object_id(WORKSPACE_ID, "main", NEW_FILE);
@@ -1680,13 +1849,14 @@ async fn an_outside_write_to_a_held_new_file_keeps_capture_unsettled_until_recor
     std::fs::write(harness.root.join(NEW_FILE), "Written by the agent.\n").expect("outside write");
     files.handle().request_rescan();
     assert!(
-        !harness.capture(&files.handle()).await,
-        "the write is not recorded yet"
+        harness.capture(&files.handle()).await,
+        "the write waits without failing capture"
     );
-    assert!(harness.status.degraded());
-    assert_eq!(files.handle().stats().await.expect("stats").deferred, 0);
+    assert!(!harness.status.degraded());
+    assert_eq!(files.handle().stats().await.expect("stats").deferred, 1);
     assert_eq!(head_count(&harness.db, NEW_FILE), 0);
 
+    harness.author_json = None;
     drop(lease);
     files.handle().request_rescan();
     assert!(
@@ -1705,6 +1875,226 @@ async fn an_outside_write_to_a_held_new_file_keeps_capture_unsettled_until_recor
         .expect("the write's head and moment");
     assert_eq!(recorded, (NEW_FILE.to_owned(), Some(author.to_owned())));
 
+    files.close().await;
+    harness.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn undo_reconcile_on_another_file_keeps_live_deferred_writes() {
+    let harness = Harness::new();
+    std::fs::write(harness.root.join(NOTE), SEED).unwrap();
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .unwrap(),
+    );
+    assert!(harness.capture(&files.handle()).await);
+    std::fs::write(harness.root.join("notes/other.md"), "Other.\n").unwrap();
+    files.handle().request_rescan();
+    let run = reconcile_if_dirty_bound(&harness.root, &files.handle(), CancellationToken::new())
+        .await
+        .unwrap();
+    let mut context = apply_context(
+        &harness.root,
+        &harness.actor,
+        &harness.leases,
+        &harness.status,
+        &harness.self_writes,
+    );
+    let operation = "dohc-operation:unrelated";
+    context.provenance.correlation_id = Some(operation.into());
+    assert!(
+        apply_bound_run_with_handle(context, &files.handle(), run, &CancellationToken::new())
+            .await
+            .clean
+    );
+    let object = derive_capture_object_id(WORKSPACE_ID, "main", NOTE);
+    let _lease = harness.leases.acquire(&harness.key(&object)).unwrap();
+    std::fs::write(harness.root.join(NOTE), OUTSIDE).unwrap();
+    files.handle().request_rescan();
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(harness.status.deferred_writes(), vec![NOTE]);
+    let excluded = std::collections::HashSet::new();
+    reconcile_full_for_switch(
+        &harness.root,
+        &harness.actor,
+        WORKSPACE_ID,
+        &harness.leases,
+        &harness.status,
+        &harness.self_writes,
+        None,
+        Some((operation, &excluded)),
+        CaptureProvenance::default(),
+        EngineEvents::default(),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        harness.status.deferred_writes(),
+        vec![NOTE],
+        "undo's partial scan must not replace the live list"
+    );
+    files.close().await;
+    harness.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deferred_write_author_follows_the_observed_bytes_not_the_next_run() {
+    for recorded in [false, true] {
+        for changed in [false, true] {
+            let mut harness = Harness::new();
+            std::fs::write(harness.root.join(NEW_FILE), SEED).unwrap();
+            let files = FilesActorCloseGuard::new(
+                FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+                    .await
+                    .unwrap(),
+            );
+            if recorded {
+                assert!(harness.capture(&files.handle()).await);
+            }
+            let object = derive_capture_object_id(WORKSPACE_ID, "main", NEW_FILE);
+            let lease = harness.leases.acquire(&harness.key(&object)).unwrap();
+            let first = r#"[{"kind":"agent","agentId":"first","onBehalfOf":"local"}]"#;
+            let next = r#"[{"kind":"agent","agentId":"next","onBehalfOf":"local"}]"#;
+            harness.author_json = Some(first.into());
+            std::fs::write(harness.root.join(NEW_FILE), OUTSIDE).unwrap();
+            files.handle().request_rescan();
+            assert!(harness.capture(&files.handle()).await);
+            harness.author_json = Some(next.into());
+            if changed {
+                std::fs::write(harness.root.join(NEW_FILE), FOREIGN).unwrap();
+            }
+            std::fs::write(harness.root.join("notes/other.md"), "Other.\n").unwrap();
+            files.handle().request_rescan();
+            assert!(harness.capture(&files.handle()).await);
+            harness.author_json = None;
+            drop(lease);
+            files.handle().request_rescan();
+            assert!(harness.capture(&files.handle()).await);
+            let observer = rusqlite::Connection::open(&harness.db).unwrap();
+            for (path, author) in [
+                (NEW_FILE, if changed { next } else { first }),
+                ("notes/other.md", next),
+            ] {
+                let actual: Option<String> = observer.query_row(
+                    "SELECT m.author_json FROM snapshots s JOIN moments m ON m.moment_id=s.latest_moment_id WHERE s.workspace_id=?1 AND s.path=?2",
+                    [WORKSPACE_ID, path], |row| row.get(0)).unwrap();
+                assert_eq!(
+                    actual.as_deref(),
+                    Some(author),
+                    "recorded={recorded}, changed={changed}, path={path}"
+                );
+            }
+            assert_eq!(
+                head_text(&harness.db, NEW_FILE),
+                if changed { FOREIGN } else { OUTSIDE }
+            );
+            assert!(harness.status.deferred_writes().is_empty());
+            drop(observer);
+            files.close().await;
+            harness.close();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreadable_scan_keeps_a_deferred_writes_author_until_release() {
+    for (recorded, unconfirmed_removed) in [(false, false), (true, false), (true, true)] {
+        let mut harness = Harness::new();
+        std::fs::write(harness.root.join(NEW_FILE), SEED).unwrap();
+        let files = FilesActorCloseGuard::new(
+            FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+                .await
+                .unwrap(),
+        );
+        if recorded {
+            assert!(harness.capture(&files.handle()).await);
+        }
+        let object = derive_capture_object_id(WORKSPACE_ID, "main", NEW_FILE);
+        let lease = harness.leases.acquire(&harness.key(&object)).unwrap();
+        let author = r#"[{"kind":"agent","agentId":"first","onBehalfOf":"local"}]"#;
+        harness.author_json = Some(author.into());
+        std::fs::write(harness.root.join(NEW_FILE), OUTSIDE).unwrap();
+        files.handle().request_rescan();
+        assert!(harness.capture(&files.handle()).await);
+        harness.author_json = None;
+
+        files.handle().request_rescan();
+        let mut run =
+            reconcile_if_dirty_bound(&harness.root, &files.handle(), CancellationToken::new())
+                .await
+                .unwrap();
+        let ReconcileRun::Completed(plan) = &mut run.run else {
+            panic!("the waiting write requires another observation");
+        };
+        // Model a scan read failure without relying on platform permissions.
+        // Unconfirmed removals also appear in degraded_paths.
+        plan.ops.clear();
+        plan.degraded = true;
+        plan.degraded_paths.push(NEW_FILE.into());
+        if unconfirmed_removed {
+            plan.unconfirmed_removed.push(NEW_FILE.into());
+        }
+        assert!(
+            !apply_run(
+                apply_context(
+                    &harness.root,
+                    &harness.actor,
+                    &harness.leases,
+                    &harness.status,
+                    &harness.self_writes,
+                ),
+                &files.handle(),
+                run,
+                &CancellationToken::new(),
+            )
+            .await
+            .clean
+        );
+
+        drop(lease);
+        files.handle().request_rescan();
+        assert!(harness.capture(&files.handle()).await);
+        let observer = rusqlite::Connection::open(&harness.db).unwrap();
+        let actual: Option<String> = observer.query_row(
+            "SELECT m.author_json FROM snapshots s JOIN moments m ON m.moment_id=s.latest_moment_id WHERE s.workspace_id=?1 AND s.path=?2",
+            [WORKSPACE_ID, NEW_FILE], |row| row.get(0)).unwrap();
+        assert_eq!(
+            actual.as_deref(),
+            Some(author),
+            "recorded={recorded}, unconfirmed_removed={unconfirmed_removed}"
+        );
+        assert_eq!(head_text(&harness.db, NEW_FILE), OUTSIDE);
+        assert!(harness.status.deferred_writes().is_empty());
+        drop(observer);
+        files.close().await;
+        harness.close();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unrecorded_file_an_internal_attempt_holds_fails_and_retries() {
+    let harness = Harness::new();
+    std::fs::write(harness.root.join(NEW_FILE), OUTSIDE).unwrap();
+    let object = derive_capture_object_id(WORKSPACE_ID, "main", NEW_FILE);
+    let lease = harness
+        .leases
+        .acquire_internal(&harness.key(&object))
+        .unwrap();
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .unwrap(),
+    );
+    assert!(!harness.capture(&files.handle()).await);
+    assert!(harness.status.deferred_writes().is_empty());
+    assert_eq!(head_count(&harness.db, NEW_FILE), 0);
+    assert_eq!(files.handle().stats().await.unwrap().deferred, 0);
+    drop(lease);
+    files.handle().request_rescan();
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(head_text(&harness.db, NEW_FILE), OUTSIDE);
     files.close().await;
     harness.close();
 }
@@ -1878,7 +2268,7 @@ async fn fix1_no_hold_placement_replay_cost() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_lease_release_reoffers_quarantined_outside_writes() {
+async fn a_lease_release_reoffers_deferred_outside_writes() {
     let harness = Harness::new();
     std::fs::write(harness.root.join(NEW_FILE), "Written outside the editor.\n").unwrap();
     let object_id = derive_capture_object_id(WORKSPACE_ID, "main", NEW_FILE);
@@ -1888,11 +2278,13 @@ async fn a_lease_release_reoffers_quarantined_outside_writes() {
         .unwrap();
     let files = FilesActorCloseGuard::new(files);
     for _ in 0..dohc_engine_files::DEGRADED_RESCAN_BACKOFF {
-        assert!(!harness.capture(&files.handle()).await);
+        assert!(harness.capture(&files.handle()).await);
     }
     let parked = files.handle().stats().await.unwrap();
     assert!(!parked.dirty);
-    assert_eq!((parked.deferred, parked.quarantined), (0, 1));
+    assert_eq!((parked.deferred, parked.quarantined), (1, 0));
+    assert!(!harness.status.degraded());
+    assert_eq!(harness.status.deferred_writes(), vec![NEW_FILE]);
     let mut releases_seen = harness.leases.release_generation(WORKSPACE_ID);
     drop(lease);
     offer_unrecorded_after_release(
@@ -1908,11 +2300,464 @@ async fn a_lease_release_reoffers_quarantined_outside_writes() {
     let recovered = files.handle().stats().await.unwrap();
     files.close().await;
     harness.close();
-    assert!(
-        offered,
-        "releasing the lease must wake its quarantined write"
-    );
+    assert!(offered, "releasing the lease must wake its deferred write");
     assert!(clean);
     assert_eq!(captured, 1);
     assert_eq!((recovered.deferred, recovered.quarantined), (0, 0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recorded_outside_write_is_captured_once_after_session_release() {
+    recorded_outside_write_after_release(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_captures_a_deferred_outside_write_once() {
+    recorded_outside_write_after_release(true).await;
+}
+
+// #2413 will publish link-rewrite jobs through this same placement boundary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn placement_against_a_deferred_writes_old_base_conflicts_without_overwriting() {
+    let harness = Harness::new();
+    std::fs::write(harness.root.join(NOTE), SEED).unwrap();
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .unwrap(),
+    );
+    assert!(harness.capture(&files.handle()).await);
+    let object_id = derive_capture_object_id(WORKSPACE_ID, "main", NOTE);
+    let lease = harness.leases.acquire(&harness.key(&object_id)).unwrap();
+    std::fs::write(harness.root.join(NOTE), OUTSIDE).unwrap();
+    files.handle().request_rescan();
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(harness.status.deferred_writes(), vec![NOTE]);
+    assert_eq!(
+        dohc_engine_files::materialize::write_precondition_sha256(&harness.root, NOTE).unwrap(),
+        Some(dohc_engine_storage::hex_sha256(OUTSIDE.as_bytes()))
+    );
+    let rewritten = "Rewritten document from the old base.\n";
+    let mut store = dohc_engine_storage::EngineStore::open(&harness.db, 1).unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            let sha = dohc_engine_storage::hex_sha256(rewritten.as_bytes());
+            tx.execute(
+                "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                rusqlite::params![sha, rewritten.len() as i64, rewritten],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            dohc_engine_storage::enqueue_job(
+                tx,
+                &dohc_engine_storage::MaterializationJobSpec {
+                    job_id: "deferred-preimage-placement".into(),
+                    workspace_id: WORKSPACE_ID.into(),
+                    target_path: NOTE.into(),
+                    content_sha256: sha,
+                    preimage: dohc_engine_storage::Preimage::Present(
+                        dohc_engine_storage::hex_sha256(SEED.as_bytes()),
+                    ),
+                    target_generation: 1000,
+                    now_ms: 2,
+                },
+            )?;
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        })
+        .unwrap();
+    drop(store);
+    harness
+        .actor
+        .materialize_replay_pending(harness.root.clone(), WORKSPACE_ID.into(), 3)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(harness.root.join(NOTE)).unwrap(),
+        OUTSIDE
+    );
+    let observer = rusqlite::Connection::open(&harness.db).unwrap();
+    let status: String = observer
+        .query_row(
+            "SELECT status FROM materialization_jobs WHERE job_id='deferred-preimage-placement'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "conflict");
+    let conflicts: Vec<_> = std::fs::read_dir(harness.root.join("notes"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.to_string_lossy().ends_with(".conflict"))
+        .collect();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(std::fs::read_to_string(&conflicts[0]).unwrap(), rewritten);
+    drop(observer);
+    drop(lease);
+    files.close().await;
+    harness.close();
+}
+
+async fn recorded_outside_write_after_release(restart: bool) {
+    let harness = Harness::new();
+    std::fs::write(harness.root.join(NOTE), SEED).unwrap();
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .unwrap(),
+    );
+    assert!(harness.capture(&files.handle()).await);
+    let object_id = derive_capture_object_id(WORKSPACE_ID, "main", NOTE);
+    let lease = harness.leases.acquire(&harness.key(&object_id)).unwrap();
+    std::fs::write(harness.root.join(NOTE), OUTSIDE).unwrap();
+    files.handle().request_rescan();
+    assert!(harness.capture(&files.handle()).await);
+    assert!(!harness.status.degraded());
+    assert_eq!(harness.status.deferred_writes(), vec![NOTE]);
+    let stats = files.handle().stats().await.unwrap();
+    assert_eq!((stats.deferred, stats.quarantined), (1, 0));
+    let mut releases_seen = harness.leases.release_generation(WORKSPACE_ID);
+    drop(lease); // Both an orderly close and a crashed session release the lease.
+    if restart {
+        files.close().await;
+        harness.supervisor.close(&harness.db).unwrap();
+        let actor = harness.supervisor.open(&harness.db, 1).unwrap().actor;
+        let leases = LeaseRegistry::new();
+        let files = FilesActorCloseGuard::new(
+            FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+                .await
+                .unwrap(),
+        );
+        let run =
+            reconcile_if_dirty_bound(&harness.root, &files.handle(), CancellationToken::new())
+                .await
+                .unwrap();
+        assert!(
+            apply_run(
+                apply_context(
+                    &harness.root,
+                    &actor,
+                    &leases,
+                    &harness.status,
+                    &harness.self_writes
+                ),
+                &files.handle(),
+                run,
+                &CancellationToken::new(),
+            )
+            .await
+            .clean
+        );
+        files.close().await;
+    } else {
+        offer_unrecorded_after_release(
+            &harness.leases,
+            WORKSPACE_ID,
+            &mut releases_seen,
+            &files.handle(),
+        )
+        .await;
+        assert!(files.handle().stats().await.unwrap().dirty);
+        assert!(harness.capture(&files.handle()).await);
+        files.handle().request_rescan();
+        assert!(harness.capture(&files.handle()).await);
+        files.close().await;
+    }
+    assert!(harness.status.deferred_writes().is_empty());
+    let observer = rusqlite::Connection::open(&harness.db).unwrap();
+    let texts: Vec<String> = observer.prepare(
+        "SELECT after_blob_sha256 FROM moments WHERE workspace_id=?1 AND path=?2 ORDER BY moment_order"
+    ).unwrap().query_map([WORKSPACE_ID, NOTE], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+    assert_eq!(
+        texts,
+        vec![
+            dohc_engine_storage::hex_sha256(SEED.as_bytes()),
+            dohc_engine_storage::hex_sha256(OUTSIDE.as_bytes())
+        ]
+    );
+    assert_eq!(
+        std::fs::read_to_string(harness.root.join(NOTE)).unwrap(),
+        OUTSIDE
+    );
+    drop(observer);
+    harness.close();
+}
+
+// A rename that changes only case reaches peers as a retire of the old
+// spelling and an ingest of the new one, and a peer whose disk ignores case
+// must receive them in that order: written first, `Notes.md` would be the
+// file the later retire of `notes.md` deletes. While an editor holds
+// `notes.md` open its retire waits, so the ingest of `Notes.md` waits with
+// it. Skips where the disk keeps case apart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_respelled_file_waits_for_its_open_old_spelling_to_retire() {
+    respelled_file_waits_for_its_lease(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_quarantined_respell_is_ingested_once_after_the_old_spellings_lease_releases() {
+    respelled_file_waits_for_its_lease(true).await;
+}
+
+async fn respelled_file_waits_for_its_lease(quarantine: bool) {
+    let store_scratch = ScratchDir::new().expect("store scratch");
+    let capture_scratch = ScratchDir::new().expect("capture scratch");
+    let root = capture_scratch.path().to_path_buf();
+    std::fs::write(root.join("notes.md"), SEED).expect("write file");
+    if !root.join("NOTES.md").exists() {
+        eprintln!("SKIP: this disk keeps case apart");
+        return;
+    }
+    let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine database path");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    let leases = LeaseRegistry::new();
+    let files = FilesActor::spawn_async(root.clone(), ScanBounds::default())
+        .await
+        .expect("files actor");
+    let files = FilesActorCloseGuard::new(files);
+    let status = Arc::new(DriverStatus::default());
+    let self_writes = SelfWriteSuppression::default();
+    let mut releases_seen = leases.release_generation(WORKSPACE_ID);
+    let pass = || async {
+        let run = reconcile_if_dirty_bound(&root, &files.handle(), CancellationToken::new())
+            .await
+            .expect("reconcile");
+        apply_bound_run_with_handle(
+            apply_context(&root, &actor, &leases, &status, &self_writes),
+            &files.handle(),
+            run,
+            &CancellationToken::new(),
+        )
+        .await;
+    };
+    pass().await;
+    assert_eq!(head_count(&db, "notes.md"), 1);
+
+    let key = DocKey::new(
+        WORKSPACE_ID,
+        "main",
+        derive_capture_object_id(WORKSPACE_ID, "main", "notes.md"),
+    )
+    .expect("old spelling key");
+    let lease = leases.acquire(&key).expect("an editor holds notes.md");
+    std::fs::rename(root.join("notes.md"), root.join("Notes.md")).expect("respell");
+    files.handle().request_rescan();
+    pass().await;
+    if quarantine {
+        for _ in 1..dohc_engine_files::DEGRADED_RESCAN_BACKOFF {
+            pass().await;
+        }
+        let parked = files.handle().stats().await.expect("parked stats");
+        assert!(!parked.dirty);
+        assert_eq!((parked.deferred, parked.quarantined), (0, 2));
+    }
+    assert_eq!(
+        head_count(&db, "notes.md"),
+        1,
+        "the open file is not retired"
+    );
+    assert_eq!(head_count(&db, "Notes.md"), 0, "the new spelling waits");
+
+    drop(lease);
+    offer_unrecorded_after_release(&leases, WORKSPACE_ID, &mut releases_seen, &files.handle())
+        .await;
+    assert!(files.handle().stats().await.expect("offered stats").dirty);
+    pass().await;
+    assert_eq!(head_count(&db, "notes.md"), 0);
+    assert_eq!(head_count(&db, "Notes.md"), 1);
+    let recovered = files.handle().stats().await.expect("recovered stats");
+    assert_eq!((recovered.deferred, recovered.quarantined), (0, 0));
+    files.handle().request_rescan();
+    pass().await;
+    let moments: Vec<(String, String)> = rusqlite::Connection::open(&db)
+        .expect("open database observer")
+        .prepare(
+            "SELECT path, operation FROM moments WHERE workspace_id = ?1 ORDER BY moment_order",
+        )
+        .expect("prepare")
+        .query_map([WORKSPACE_ID], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("moments")
+        .collect::<Result<_, _>>()
+        .expect("moments");
+    let respelled: Vec<_> = moments
+        .iter()
+        .skip(1)
+        .map(|(path, operation)| (path.as_str(), operation.as_str()))
+        .collect();
+    assert_eq!(
+        respelled,
+        [("notes.md", "delete"), ("Notes.md", "write")],
+        "{moments:?}"
+    );
+
+    files.close().await;
+    supervisor.close(&db).expect("close actor");
+}
+
+// A file a peer synced has a head capture does not own, so its absence never
+// retires it. A respell is not an absence: the file is still there under the
+// new spelling. Renamed only by case, the synced head retires at its old
+// spelling and the new spelling is captured, so peers keep one file instead
+// of two heads that share it. Skips where the disk keeps case apart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_respelled_synced_file_leaves_one_head() {
+    let store_scratch = ScratchDir::new().expect("store scratch");
+    let capture_scratch = ScratchDir::new().expect("capture scratch");
+    let root = capture_scratch.path().to_path_buf();
+    std::fs::write(root.join("notes.md"), SEED).expect("write file");
+    if !root.join("NOTES.md").exists() {
+        eprintln!("SKIP: this disk keeps case apart");
+        return;
+    }
+    let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine database path");
+    {
+        let mut store = dohc_engine_storage::EngineStore::open(&db, 1).expect("open store");
+        let mut versions = dohc_engine_domain::VersionedTextStore::new(&mut store);
+        versions
+            .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+            .expect("main version");
+        versions
+            .write_text(
+                &dohc_engine_domain::WriteText {
+                    workspace_id: WORKSPACE_ID.into(),
+                    version_id: "main".into(),
+                    object_id: "synced".into(),
+                    path: "notes.md".into(),
+                    text: SEED.into(),
+                    moment_id: "synced-write".into(),
+                    metadata_origin: "sync".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("synced head");
+    }
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    let leases = LeaseRegistry::new();
+    let files = FilesActor::spawn_async(root.clone(), ScanBounds::default())
+        .await
+        .expect("files actor");
+    let files = FilesActorCloseGuard::new(files);
+    let status = Arc::new(DriverStatus::default());
+    let self_writes = SelfWriteSuppression::default();
+    let pass = || async {
+        let run = reconcile_if_dirty_bound(&root, &files.handle(), CancellationToken::new())
+            .await
+            .expect("reconcile");
+        apply_bound_run_with_handle(
+            apply_context(&root, &actor, &leases, &status, &self_writes),
+            &files.handle(),
+            run,
+            &CancellationToken::new(),
+        )
+        .await;
+    };
+    pass().await;
+    assert_eq!(head_count(&db, "notes.md"), 1);
+
+    std::fs::rename(root.join("notes.md"), root.join("Notes.md")).expect("respell");
+    files.handle().request_rescan();
+    pass().await;
+    assert_eq!(head_count(&db, "notes.md"), 0, "the synced head retires");
+    assert_eq!(head_count(&db, "Notes.md"), 1);
+    let moments: Vec<(String, String)> = rusqlite::Connection::open(&db)
+        .expect("open database observer")
+        .prepare(
+            "SELECT path, operation FROM moments WHERE workspace_id = ?1 ORDER BY moment_order",
+        )
+        .expect("prepare")
+        .query_map([WORKSPACE_ID], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("moments")
+        .collect::<Result<_, _>>()
+        .expect("moments");
+    let respelled: Vec<_> = moments
+        .iter()
+        .skip(1)
+        .map(|(path, operation)| (path.as_str(), operation.as_str()))
+        .collect();
+    assert_eq!(
+        respelled,
+        [("notes.md", "delete"), ("Notes.md", "write")],
+        "{moments:?}"
+    );
+
+    files.close().await;
+    supervisor.close(&db).expect("close actor");
+}
+
+// A folder renamed only by case is not a proven respell, so its files keep
+// their old handling: the old spellings stay tracked and peers receive no
+// delete, even once an editor that held one of them lets go. A delete after
+// the new spelling's write would remove the file at a peer whose disk
+// ignores case. Skips where the disk keeps case apart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_respelled_folder_sends_no_delete_after_its_write() {
+    let store_scratch = ScratchDir::new().expect("store scratch");
+    let capture_scratch = ScratchDir::new().expect("capture scratch");
+    let root = capture_scratch.path().to_path_buf();
+    std::fs::create_dir(root.join("Drafts")).expect("folder");
+    std::fs::write(root.join("Drafts/plan.md"), SEED).expect("write file");
+    if !root.join("DRAFTS/plan.md").exists() {
+        eprintln!("SKIP: this disk keeps case apart");
+        return;
+    }
+    let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine database path");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+    let leases = LeaseRegistry::new();
+    let files = FilesActor::spawn_async(root.clone(), ScanBounds::default())
+        .await
+        .expect("files actor");
+    let files = FilesActorCloseGuard::new(files);
+    let status = Arc::new(DriverStatus::default());
+    let self_writes = SelfWriteSuppression::default();
+    let mut releases_seen = leases.release_generation(WORKSPACE_ID);
+    let pass = || async {
+        let run = reconcile_if_dirty_bound(&root, &files.handle(), CancellationToken::new())
+            .await
+            .expect("reconcile");
+        apply_bound_run_with_handle(
+            apply_context(&root, &actor, &leases, &status, &self_writes),
+            &files.handle(),
+            run,
+            &CancellationToken::new(),
+        )
+        .await;
+    };
+    pass().await;
+    assert_eq!(head_count(&db, "Drafts/plan.md"), 1);
+
+    let key = DocKey::new(
+        WORKSPACE_ID,
+        "main",
+        derive_capture_object_id(WORKSPACE_ID, "main", "Drafts/plan.md"),
+    )
+    .expect("old spelling key");
+    let lease = leases
+        .acquire(&key)
+        .expect("an editor holds Drafts/plan.md");
+    std::fs::rename(root.join("Drafts"), root.join("drafts")).expect("respell folder");
+    files.handle().request_rescan();
+    pass().await;
+    drop(lease);
+    offer_unrecorded_after_release(&leases, WORKSPACE_ID, &mut releases_seen, &files.handle())
+        .await;
+    files.handle().request_rescan();
+    pass().await;
+    let deletes: Vec<String> = rusqlite::Connection::open(&db)
+        .expect("open database observer")
+        .prepare("SELECT path FROM moments WHERE workspace_id = ?1 AND operation = 'delete'")
+        .expect("prepare")
+        .query_map([WORKSPACE_ID], |row| row.get(0))
+        .expect("moments")
+        .collect::<Result<_, _>>()
+        .expect("moments");
+    assert_eq!(deletes, Vec::<String>::new());
+
+    files.close().await;
+    supervisor.close(&db).expect("close actor");
 }

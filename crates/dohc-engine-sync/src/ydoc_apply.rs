@@ -12,6 +12,7 @@ use dohc_engine_domain::{
     ConflictFileState, DomainError, WriteText, enqueue_write, select_snapshot_by_path_in_tx,
     write_projected_text_in_tx,
 };
+use dohc_engine_storage::text;
 use dohc_engine_storage::{
     EngineStore, FaultInjector, Preimage, StorageError, TxnOutcome, get_binary_blob, hex_sha256,
 };
@@ -3758,7 +3759,7 @@ fn projection_held_in_tx(
     key: &DocKey,
     content: &str,
 ) -> Result<bool, SyncError> {
-    if dohc_engine_collab::seed_only_lineage_source(tx, key)
+    if dohc_engine_collab::pristine_seed_lineage_source(tx, key)
         .map_err(map_collab_hard_error)?
         .is_some()
     {
@@ -3818,23 +3819,29 @@ fn pristine_empty_seed_in_tx(
     {
         return Ok(false);
     }
-    let pristine: bool = tx
+    let pristine: Option<String> = tx
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM ydoc_docs d JOIN blobs b ON b.sha256=d.seed_source_sha256 \
+            "SELECT b.sha256 FROM ydoc_docs d JOIN blobs b ON b.sha256=d.seed_source_sha256 \
          WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3 \
-           AND b.text='' AND (d.settle_seq=0 OR EXISTS(SELECT 1 FROM moments m \
+           AND (d.settle_seq=0 OR EXISTS(SELECT 1 FROM moments m \
              WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 \
                AND m.moment_order=d.settle_seq AND m.after_blob_sha256=b.sha256)) \
            AND (d.last_settled_sha IS NULL OR d.last_settled_sha=b.sha256) \
            AND (SELECT COUNT(*) FROM ydoc_updates u WHERE u.workspace_id=?1 \
              AND u.version_id=?2 AND u.object_id=?3)=1 \
            AND NOT EXISTS(SELECT 1 FROM ydoc_snapshots s WHERE s.workspace_id=?1 \
-             AND s.version_id=?2 AND s.object_id=?3 AND s.up_to_seq<>0))",
+             AND s.version_id=?2 AND s.object_id=?3 AND s.up_to_seq<>0)",
             params![key.workspace_id, key.version_id, key.object_id],
             |row| row.get(0),
         )
+        .optional()
         .map_err(SyncError::corrupt)?;
     Ok(pristine
+        .as_deref()
+        .map(|sha| text::equals(tx, sha, ""))
+        .transpose()
+        .map_err(SyncError::corrupt)?
+        .unwrap_or(false)
         && project_ydoc_with_store(tx, key, doc, ContentKind::Richdoc)?
             .content
             .is_empty())
@@ -4478,12 +4485,7 @@ fn preserve_incomplete_base_in_tx(
         let preserved = if open {
             local.clone()
         } else {
-            tx.query_row(
-                "SELECT text FROM blobs WHERE sha256=?1",
-                [&external.unwrap().blob_sha256],
-                |row| row.get(0),
-            )
-            .map_err(SyncError::corrupt)?
+            text::read(tx, &external.unwrap().blob_sha256).map_err(SyncError::corrupt)?
         };
         let recovery = crate::ydoc_recovery::recover_lineage_in_tx(
             tx,
@@ -4508,10 +4510,10 @@ fn preserve_incomplete_base_in_tx(
     if let Some(conflict_id) = open_sync_conflict_id(tx, key)? {
         let prior: Option<String> = tx
             .query_row(
-                "SELECT b.text FROM conflicts c JOIN blobs b ON b.sha256=c.incoming_blob_sha256 \
+                "SELECT b.sha256 FROM conflicts c JOIN blobs b ON b.sha256=c.incoming_blob_sha256 \
             WHERE c.workspace_id=?1 AND c.conflict_id=?2",
                 params![key.workspace_id, conflict_id],
-                |row| row.get(0),
+                |row| text::from_row(tx, row, 0),
             )
             .optional()
             .map_err(SyncError::corrupt)?;
@@ -5517,11 +5519,7 @@ fn put_projection_text_blob(
     content: &str,
     sha256: &str,
 ) -> Result<(), SyncError> {
-    tx.execute(
-        "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
-        params![sha256, content.len() as i64, content],
-    )
-    .map_err(SyncError::persist)?;
+    text::insert(tx, sha256, content.len() as i64, content, true).map_err(SyncError::persist)?;
     Ok(())
 }
 
@@ -5656,11 +5654,11 @@ pub fn validate_scene_asset_with_store(
 /// last settle or capture left on disk.
 fn local_snapshot_text(conn: &Connection, key: &DocKey) -> Result<Option<String>, SyncError> {
     conn.query_row(
-        "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256 = s.blob_sha256 \
+        "SELECT b.sha256 FROM snapshots s JOIN blobs b ON b.sha256 = s.blob_sha256 \
          WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.object_id = ?3 \
            AND s.content_kind = 'text'",
         params![key.workspace_id, key.version_id, key.object_id],
-        |row| row.get::<_, Option<String>>(0),
+        |row| text::optional_from_row(conn, row, 0),
     )
     .optional()
     .map(Option::flatten)
@@ -5676,15 +5674,47 @@ pub fn project_ydoc_with_store(
     doc: &dohc_engine_collab::Ydoc,
     content_kind: dohc_engine_collab::ContentKind,
 ) -> Result<dohc_engine_collab::Projection, SyncError> {
+    project_ydoc_inner(conn, key, doc, content_kind, None, false)
+}
+
+pub fn project_ydoc_with_reader(
+    conn: &Connection,
+    key: &DocKey,
+    doc: &dohc_engine_collab::Ydoc,
+    content_kind: dohc_engine_collab::ContentKind,
+    resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
+) -> Result<dohc_engine_collab::Projection, SyncError> {
+    project_ydoc_inner(conn, key, doc, content_kind, resolver, true)
+}
+
+fn project_ydoc_inner(
+    conn: &Connection,
+    key: &DocKey,
+    doc: &dohc_engine_collab::Ydoc,
+    content_kind: dohc_engine_collab::ContentKind,
+    resolver: Option<&dohc_engine_collab::reader_resolver::ReaderResolver>,
+    resolve_witness: bool,
+) -> Result<dohc_engine_collab::Projection, SyncError> {
     if content_kind != dohc_engine_collab::ContentKind::Scene {
         let mut projection = doc
             .project(content_kind)
             .map_err(|error| map_projection_error(error, "ydoc projection is invalid"))?;
-        if content_kind == dohc_engine_collab::ContentKind::Richdoc
-            && let Some(source) =
+        if content_kind == dohc_engine_collab::ContentKind::Richdoc {
+            let source = if resolve_witness && doc.has_reader_source() {
+                dohc_engine_collab::reader_resolver::resolve(
+                    conn,
+                    key,
+                    doc,
+                    &projection.content,
+                    resolver,
+                )
+                .map_err(map_collab_hard_error)?
+            } else {
                 doc.settled_markdown_source(&projection.content, || local_snapshot_text(conn, key))?
-        {
-            projection.content = source;
+            };
+            if let Some(source) = source {
+                projection.content = source;
+            }
         }
         return Ok(projection);
     }
@@ -7593,12 +7623,12 @@ fn last_settled_text_in_tx(
     key: &DocKey,
 ) -> Result<Option<String>, SyncError> {
     tx.query_row(
-        "SELECT b.text FROM ydoc_docs d JOIN blobs b \
+        "SELECT b.sha256 FROM ydoc_docs d JOIN blobs b \
          ON b.sha256=COALESCE(d.last_settled_sha, \
            CASE WHEN d.settle_seq=0 THEN d.seed_source_sha256 END) \
          WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3",
         params![key.workspace_id, key.version_id, key.object_id],
-        |row| row.get::<_, Option<String>>(0),
+        |row| text::optional_from_row(tx, row, 0),
     )
     .optional()
     .map(Option::flatten)
@@ -7710,6 +7740,10 @@ fn validate_retryable_ydoc_identity(
 
 pub(crate) fn map_collab_hard_error(error: CollabError) -> SyncError {
     match error {
+        CollabError::MarkdownReaderPending(pending) => SyncError::MarkdownReaderPending(pending),
+        CollabError::MarkdownReaderUnavailable => SyncError::RetryableState {
+            reason: "dohc could not verify this file. Try again.",
+        },
         CollabError::OwnerOutboxFrozen => SyncError::LiveDocumentBindingActive,
         CollabError::RestoreFenced => SyncError::RetryableState {
             reason: "live document is stopped",

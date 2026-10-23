@@ -1,4 +1,5 @@
 import { AgentNameControl } from "./AgentNameControl";
+import { isComposingKey } from "../ui/keys";
 import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
 import { AgentToolPicker } from "./AgentToolPicker";
 import { useRequestSequence } from "../useRequestSequence";
@@ -148,7 +149,7 @@ export function RunnerSettingsCard(props: {
 
   const handleInputKeyDown = useCallback(
     (event: KeyboardEvent<HTMLInputElement>) => {
-      if (event.key === "Enter") event.currentTarget.blur();
+      if (event.key === "Enter" && !isComposingKey(event)) event.currentTarget.blur();
     },
     [],
   );

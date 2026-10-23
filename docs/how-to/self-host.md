@@ -35,7 +35,16 @@ The release includes the isolated app runtime. The release build checks its comp
 
 ## Prepare the host
 
+The amd64 image includes the Markdown reader runtime. Other architectures leave the reader unavailable.
+To override `DOHC_ENGINE_READER_CONFIG`, point its runtime, bundle and manifest paths at root-owned regular files.
+Keep those files and their parent directories unwritable by the service user and other accounts.
+
 Install Docker Engine with Linux container support, Docker Compose 2.24.4 or newer, and Node.js 24.16 or newer.
+Development read replicas require Linux 5.19 or later with Landlock ABI 2 or later enabled.
+Other hosts refuse replicas. The relay must run under Docker's default seccomp profile or an equivalent outer filter.
+Replicas refuse startup when `/proc/self/status` reports no seccomp filter. Replicas remain disabled by default.
+`check:self-host --running` reports whether the running container can apply the sandbox.
+Replicas use the separate `/replicas` volume. Backups and deployment archives skip this disposable data.
 Have an SMTP service ready for verification and password reset emails.
 The SMTP service must support TLS.
 
@@ -176,10 +185,10 @@ A pending invite exists when someone shares work with an email address that has 
 Revoking that share removes the invite.
 The server ignores case and surrounding spaces when it compares addresses.
 
-With a list, the sign-up page asks for no password.
-The server emails a link instead, and the person chooses their password there.
+With a list, the sign-up page asks for no name or password.
+The server emails a link instead, and the person chooses their name and password there.
 Opening that link also verifies the address and signs out every session of the account.
-Until then, nobody can sign in to the account.
+Until then, nobody can sign in to the account, and nobody else can choose the name other people see.
 An existing account that never verified its address works the same way: select **Forgot your password?** to get the link.
 When the server starts with a list, it signs out everyone whose email is not verified.
 To sign in again, they choose a password from an emailed link.
@@ -499,6 +508,10 @@ It immediately refuses serving, new launches, and writes, including requests fro
 The command uses a private socket inside the running relay container. Other publications, sync, and sharing keep running.
 Use Compose's `--env-file`, `-f`, or `--project-name` options when selecting a custom deployment.
 Exit codes are 0 for success, 2 for bad input, 3 for not found, and 1 for connection or operation failures.
+The operator socket requires a secret from `/continuity/publication-operator.secret`, beside the deployment configuration.
+The relay creates this file with mode 0600. The takedown command reads it automatically.
+Run the command with access to the continuity volume. Replica children cannot read the secret.
+
 The client times out after 10 seconds. Retries preserve the first takedown record.
 
 Restoring a backup taken before the takedown brings that publication back.

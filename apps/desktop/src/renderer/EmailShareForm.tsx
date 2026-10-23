@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { isComposingKey } from "./ui/keys";
 import type { CreateRelaySharePayload, CreateRelayShareResult, ShareAccess } from "../ipc/bridgeContract";
 import { AutomationShareNote, useAutomationShareCheck } from "./automationShareCheck";
 import type { RelayShareTarget } from "./RelayShareDialog";
@@ -126,6 +127,11 @@ export function EmailShareForm(props: {
             >
               {ACCESS_OPTIONS.find((option) => option.value === access)?.helper}
             </p>
+            {access === "edit" && (
+              <p className="m-0 text-[11px] leading-relaxed text-subtle">
+                People who can edit can see the full History.
+              </p>
+            )}
           </div>
 
           <p className="m-0 text-xs leading-relaxed text-muted">
@@ -149,7 +155,7 @@ export function EmailShareForm(props: {
                 edit(() => setEmail(next));
               }}
               onKeyDown={(event) => {
-                if (event.key === "Enter") void createShare();
+                if (event.key === "Enter" && !isComposingKey(event)) void createShare();
               }}
               placeholder="name@example.com"
               spellCheck={false}

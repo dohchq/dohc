@@ -89,6 +89,7 @@ fn commit_report(store: &mut EngineStore, report_id: Option<String>) {
             replication_epoch: "epoch".into(),
             stream_identity: "stream".into(),
             settlement_report_id: report_id,
+            ordinary_pull: None,
         },
         &NoFaults,
         &crate::NoLiveLeases,

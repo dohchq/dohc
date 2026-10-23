@@ -23,6 +23,8 @@ import {
 
 export type { EngineRemovalInProgress };
 
+const NO_DRAFT_IDS: readonly number[] = [];
+
 // The engine Y.Doc editor hook for live files. Given a workspace, path, and
 // format kind, it opens a live engine Y.Doc session in main over IPC and binds
 // a mirror Y.Doc to the format editor. Solo editing runs through the engine; a
@@ -114,12 +116,25 @@ export type UseEngineDoc = {
   // A local update exceeded the permanent transport limit, or main refused a
   // delivery outright. The rejected document is retained for recovery only.
   permanentFailureWhileEditing: boolean;
+  // The file changed outside dohc while this session held it: "saved" when
+  // the document had no unsaved edits then, "unsaved" when it had.
+  changedOutside: "saved" | "unsaved" | null;
+  // A close released the file, but capture has not recorded the version
+  // changed outside dohc yet, so the document did not open again.
+  outsideWriteWaiting: boolean;
+  // Asked right before a reload: edits main has not confirmed yet.
+  unsavedEditsPending: () => boolean;
   // The live session became read-only after it opened. Unconfirmed local
   // edits are retained for recovery; a clean access stop creates no draft.
   readOnlyWhileEditing: boolean;
   // The recovery row that read-only transition created, if it still exists.
   readOnlyDraftId: number | null;
   readOnlyCause: ReadOnlyTransitionCause | null;
+  // Try again for a history replacement that could not set the earlier edits
+  // aside. The editor stays frozen until it succeeds.
+  retryReplacement: (() => void) | null;
+  // The recovery rows holding edits a finished history replacement set aside.
+  replacedDraftIds: readonly number[];
   // An open lost to a delete or move interval. This is not a terminal outcome:
   // the operation can still fail, so the caller stays read-only and retries.
   removalInProgress: EngineRemovalInProgress | null;
@@ -298,9 +313,15 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   const readOnlyCause = !input.enabled
     ? input.accessEnded && history?.bound ? "access-ended" : history?.cause ?? null
     : readOnlyWhileEditing ? settled!.readOnlyTransition!.cause : null;
+  const retryReplacement = readOnlyWhileEditing ? settled!.readOnlyTransition!.retry ?? null : null;
   const permanentFailureWhileEditing =
     outcome?.kind === "bound" &&
     settled?.permanentFailure?.token === outcome.token;
+  const outsideWriteWaiting = outcome?.kind === "outside-write-waiting";
+  const changedOutside =
+    outcome?.kind === "bound" && settled?.changedOutside?.token === outcome.token
+      ? settled.changedOutside.unsaved ? "unsaved" : "saved"
+      : null;
   const recoveryAssets =
     settled?.sceneRecoveryAssets != null &&
     outcome?.kind === "bound" &&
@@ -332,9 +353,14 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     deletedDraftId,
     recoveryAssets,
     permanentFailureWhileEditing,
+    changedOutside,
+    outsideWriteWaiting,
+    unsavedEditsPending: () => committedRequestRef.current?.lease?.unsavedEditsPending() ?? false,
     readOnlyWhileEditing,
     readOnlyDraftId,
     readOnlyCause,
+    retryReplacement,
+    replacedDraftIds: settled?.replacedDraftIds ?? NO_DRAFT_IDS,
     removalInProgress,
     artifactAssets,
     readArtifactAsset,

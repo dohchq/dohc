@@ -10,7 +10,7 @@ import type { LocalDatasetHost } from "../workspaces/localDatasetHost";
 
 export function createLocalOwnerAppPublicationHandler<Workspace extends { workspaceId: string }, Operation extends { workspace: Workspace; signal: AbortSignal; session?: { generation: number }; scope?: string; assertCurrent(): void }>(deps: {
   datasetForWorkspace(workspace: Workspace, signal: AbortSignal): Promise<Pick<LocalDatasetHost, "approvedArtifacts" | "apps">>;
-  flushCapture(workspace: Workspace): Promise<void>;
+  flushCapture(workspace: Workspace): Promise<{ deferredWrites: readonly string[] }>;
   withAdapter<T>(workspace: Workspace, work: (adapter: VersionedLiveAdapter) => Promise<T>): Promise<T | null>;
   compile(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
   launchLocalDataset?(workspace: Workspace, publicationId: string, signal: AbortSignal): Promise<string>;
@@ -64,9 +64,9 @@ export function createLocalOwnerAppPublicationHandler<Workspace extends { worksp
     if (pending.size + preparing.size >= 8) throw new Error("Too many apps await approval. Cancel another preparation and try again.");
     preparing.add(callerKey);
     try {
-      await deps.flushCapture(operation.workspace); current();
+      const capture = await deps.flushCapture(operation.workspace); current();
       const prepared = await deps.withAdapter(operation.workspace, adapter => prepareLocalAppPublication(input, {
-        adapter, signal: operation.signal, assertCurrent: current, compile: deps.compile,
+        adapter, signal: operation.signal, assertCurrent: current, compile: deps.compile, deferredWrites: capture.deferredWrites,
         resolveDatasetRevision: async binding => {
           const local = await deps.datasetForWorkspace(operation.workspace, operation.signal); current();
           const approved = local.approvedArtifacts(binding.datasetId);

@@ -14,9 +14,11 @@ const DOCUMENT_WRITE_TOOLS = [
   "dohc_stop_workspace_sync",
   "dohc_dataset",
   "dohc_save_kept_copy",
+  "dohc_delete_retained_copies",
   "dohc_publish_app",
   "dohc_write_file",
   "dohc_create_directory",
+  "dohc_duplicate_file",
   "dohc_move_path",
   "dohc_delete_path",
   "dohc_create_app",
@@ -242,6 +244,37 @@ describe("MCP tool results", () => {
     const result = await client.callTool({ name: "dohc_list_changes", arguments: { path: "notes/plan.md", limit: 5 } });
     expect(result.isError).not.toBe(true);
     expect(requests).toEqual([{ cwd: "/workspace", actor: "agent", path: "notes/plan.md", limit: 5 }]);
+  });
+
+  it("lists old file copies and deletes them only with the late-write risk accepted", async () => {
+    const requests: { verb: string; args: unknown }[] = [];
+    const { client } = await connectedToolNames({
+      root: "/workspace", home: "/home",
+      request: async (request) => {
+        requests.push({ verb: request.verb, args: request.args });
+        return request.verb === "retainedCopies"
+          ? { ok: true, copies: [{ id: 3, revision: 10 }], more: false, total: { count: 1, bytes: 9 } }
+          : { ok: true, deleted: 1, skipped: 0, failed: 0, remaining: { count: 0, bytes: 0 } };
+      },
+    });
+    const listed = await client.callTool({ name: "dohc_list_retained_copies", arguments: {} });
+    expect(listed.structuredContent).toEqual({ ok: true, copies: [{ id: 3, revision: 10 }], more: false, total: { count: 1, bytes: 9 } });
+    for (const acceptLateWriteRisk of [undefined, false]) {
+      const refused = await client.callTool({
+        name: "dohc_delete_retained_copies",
+        arguments: { copies: [{ id: 3, revision: 10 }], ...(acceptLateWriteRisk === undefined ? {} : { acceptLateWriteRisk }) },
+      });
+      expect(refused.isError).toBe(true);
+    }
+    const deleted = await client.callTool({
+      name: "dohc_delete_retained_copies",
+      arguments: { copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: true },
+    });
+    expect(deleted.isError).not.toBe(true);
+    expect(requests).toEqual([
+      { verb: "retainedCopies", args: { cwd: "/workspace", actor: "agent" } },
+      { verb: "deleteRetainedCopies", args: { cwd: "/workspace", actor: "agent", copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: true } },
+    ]);
   });
 
   it("reports authorization refusals as tool errors", async () => {
@@ -485,4 +518,12 @@ describe("share copy profile admission", () => {
     expect(await getShareCopyDetails({ root: "/workspace", home: "/state", request }, { ...input, [key]: "other" })).toMatchObject({ ok: false });
     expect(request).not.toHaveBeenCalled();
   });
+});
+
+it("keeps an absent incoming subject as JSON null", async () => {
+  const { client } = await connectedToolNames({ root: "/tmp/links", home: "/tmp/home", request: async () => null });
+  const result = await client.callTool({ name: "dohc_links_in", arguments: { subject: { path: "missing.md" } } });
+  expect(result.content).toEqual([{ type: "text", text: "null" }]);
+  expect(result.structuredContent).toBeUndefined();
+  expect(result.isError).not.toBe(true);
 });

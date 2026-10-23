@@ -24,6 +24,7 @@ const buildOptions = {
 export function buildRelay(outdir) {
   return build({
     ...buildOptions,
+    splitting: true,
     entryPoints: { main: entry, liveValidationWorker: fileURLToPath(new URL("../src/liveValidationWorker.ts", import.meta.url)), "device-host-connect": connectEntry, "app-publication-takedown": takedownEntry, "relay-deployment": deploymentEntry, "device-host-credential": credentialEntry, "relay-snapshot": snapshotEntry },
     outdir,
   });

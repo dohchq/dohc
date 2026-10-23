@@ -1,6 +1,7 @@
 import { renderCliResult } from "./render";
 import { describe, expect, it } from "vitest";
 import {
+  CLI_CAPABILITIES,
   CLI_PROTOCOL_VERSION,
   MAX_FILE_WRITE_FILES,
   cliRequestSchema,
@@ -417,6 +418,8 @@ describe("document request schemas", () => {
 
 it("preserves a group's purpose and each thread's lane", () => {
   const group = { id: "c:team", name: "Team", slug: "team", kind: "group", purpose: "Plan the launch" };
+  const listed = { ...group, channelWireId: "wire" };
+  expect(parseCliResult("groups", { groups: [listed] })).toEqual({ groups: [listed] });
   expect(parseCliResult("groups", { groups: [group] })).toEqual({ groups: [group] });
   const threads = ["posts", "chat"].map((lane, index) => ({
     id: `t:${index}`, title: lane, lane, commentCount: 0, openDecisionCount: 0, unread: false, updatedAtMs: 1,
@@ -446,4 +449,35 @@ it.each(["accessObject", "accessSharing"] as const)("preserves withheld answers 
     unknownReason: null, nextCursor: null, coverage: { kind: "unavailable", complete: false, observation: "interval" } };
   expect(JSON.parse(renderCliResult(verb, parseCliResult(verb, answer)))).toMatchObject({ visibility: "hidden", unknownReason: null });
   expect(() => parseCliResult(verb, { ...answer, unknownReason: "unreadable" })).toThrow();
+});
+
+it("maps Access refresh and accepts only actionable request outcomes", () => {
+  const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessRefresh", args: argsBase };
+  expect(cliRequestSchema.safeParse(request).success).toBe(true);
+  expect(CLI_CAPABILITIES.accessRefresh).toEqual(["access.refresh"]);
+  for (const extra of [{ workspaceId: "other" }, { accountId: "other" }, { reason: "sharing-open" }]) {
+    expect(cliRequestSchema.safeParse({ ...request, args: { ...request.args, ...extra } }).success).toBe(false);
+  }
+  for (const status of ["requested", "joined", "paced"] as const) {
+    expect(parseCliResult("accessRefresh", { status, bearerUrl: "secret" })).toEqual({ status });
+    expect(JSON.parse(renderCliResult("accessRefresh", { status }))).toEqual({ status });
+  }
+  for (const reason of ["signed-out", "unreadable"] as const) {
+    expect(parseCliResult("accessRefresh", { status: "unavailable", reason })).toEqual({ status: "unavailable", reason });
+  }
+  expect(() => parseCliResult("accessRefresh", { status: "finished" })).toThrow();
+  expect(() => parseCliResult("accessRefresh", { status: "unavailable" })).toThrow();
+});
+
+it("accepts one Links target shape for CLI or MCP, and older group listings", () => {
+  const base = { token: "a".repeat(64), protocolVersion: CLI_PROTOCOL_VERSION, verb: "chatLinks" };
+  const args = { cwd: "/workspace", actor: "agent", cursor: "sealed" };
+  for (const target of [{ group: "general" }, { channelWireId: "wire" }]) {
+    expect(cliRequestSchema.safeParse({ ...base, args: { ...args, ...target } }).success).toBe(true);
+  }
+  for (const target of [{}, { group: "general", channelWireId: "wire" }]) {
+    expect(cliRequestSchema.safeParse({ ...base, args: { ...args, ...target } }).success).toBe(false);
+  }
+  const group = { id: "channel-old", name: "Old", slug: "old", kind: "group", threadCount: 0, threads: [] };
+  expect(parseCliResult("groupsFull", { ok: true, groups: [group] })).toEqual({ ok: true, groups: [group] });
 });

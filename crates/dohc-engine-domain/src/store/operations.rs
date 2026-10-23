@@ -1,7 +1,7 @@
 use super::{
     alias_object_id, blob_text, get_moment, get_snapshot, hash_fields, lookup_request,
-    record_request, rename_text_in_tx, validate_identifier, validate_moment_metadata,
-    validate_plaintext_storable_path, write_history_text_in_tx,
+    rename_text_in_tx, validate_identifier, validate_plaintext_storable_path,
+    write_history_text_in_tx,
 };
 use crate::{DomainError, MomentRecord, RenameTextFile, WriteText};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -127,6 +127,22 @@ fn preflight_originals_in(
                 reason: "multiple changes to one object",
             });
         }
+        let current = get_snapshot(conn, ws, version, &effect.object_id)?;
+        if effect.operation == "write"
+            && super::is_duplicate_in(conn, ws, operation, effect.moment_order)?
+        {
+            if !current.as_ref().is_some_and(|head| {
+                head.path == effect.path && head.latest_moment_id == effect.moment_id
+            }) || alias_object_id(conn, ws, version, &effect.path)?.as_deref()
+                != Some(effect.object_id.as_str())
+            {
+                return Err(DomainError::UndoRefused {
+                    path: effect.path.clone(),
+                    reason: "copy changed after Duplicate",
+                });
+            }
+            continue;
+        }
         let old = if effect.operation == "rename" {
             effect
                 .before_path
@@ -138,7 +154,7 @@ fn preflight_originals_in(
             &effect.path
         };
         validate_plaintext_storable_path(old)?;
-        if alias_object_id(conn, ws, version, old)?.is_some() {
+        if effect.operation != "write" && alias_object_id(conn, ws, version, old)?.is_some() {
             return Err(DomainError::UndoRefused {
                 path: old.into(),
                 reason: "old path occupied",
@@ -171,6 +187,24 @@ fn preflight_originals_in(
                 }
             }
             "delete" if current.is_none() => {
+                let source =
+                    get_moment(conn, ws, &effect.moment_id)?.ok_or(DomainError::FileNotFound)?;
+                let available = source.before_present
+                    && if source.before_content_kind == "binary" {
+                        source.before_binary_sha256.is_some()
+                    } else {
+                        match source.before_blob_sha256.as_deref() {
+                            Some(sha) => blob_text(conn, sha)?.is_some(),
+                            None => false,
+                        }
+                    };
+                if !available {
+                    return Err(DomainError::UndoRefused {
+                        path: effect.path.clone(),
+                        reason: "retained content unavailable",
+                    });
+                }
+
                 let latest: i64 = conn
                     .query_row(
                         "SELECT MAX(moment_order) FROM moments
@@ -183,6 +217,19 @@ fn preflight_originals_in(
                     return Err(DomainError::UndoRefused {
                         path: effect.path.clone(),
                         reason: "object changed after delete",
+                    });
+                }
+            }
+            "write"
+                if originals.iter().filter(|m| m.operation == "rename").count() == 1
+                    && originals
+                        .iter()
+                        .any(|m| m.operation == "rename" && m.object_id != effect.object_id) =>
+            {
+                if current.is_none() {
+                    return Err(DomainError::UndoRefused {
+                        path: effect.path.clone(),
+                        reason: "linking document removed",
                     });
                 }
             }
@@ -210,13 +257,26 @@ pub fn undo_correlation_id(ws: &str, operation: &str, request: &str) -> String {
     )
 }
 
-fn undo_request_fingerprint(ws: &str, operation: &str, author: Option<&str>) -> String {
-    hash_fields(&[
-        b"history.undo",
-        ws.as_bytes(),
-        operation.as_bytes(),
-        author.unwrap_or("").as_bytes(),
-    ])
+pub fn undo_request_fingerprint(
+    conn: &Connection,
+    ws: &str,
+    operation: &str,
+    author: Option<&str>,
+) -> Result<String, DomainError> {
+    let duplicate: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM engine_requests r JOIN moments m ON m.moment_order=r.result_seq WHERE r.request_id=?1 AND r.kind='file-duplicate' AND m.workspace_id=?2 AND m.metadata_correlation_id=?3)",
+        params![format!("duplicate_{operation}"), ws, operation], |row| row.get(0),
+    ).map_err(DomainError::sql_corrupt)?;
+    Ok(if duplicate {
+        hash_fields(&[b"history.undo", ws.as_bytes(), operation.as_bytes()])
+    } else {
+        hash_fields(&[
+            b"history.undo",
+            ws.as_bytes(),
+            operation.as_bytes(),
+            author.unwrap_or("").as_bytes(),
+        ])
+    })
 }
 
 fn checked_undo_request_in(
@@ -231,20 +291,10 @@ fn checked_undo_request_in(
     let Some(recorded) = lookup_request(conn, request)? else {
         return Ok(None);
     };
-    if recorded.payload_hash != undo_request_fingerprint(ws, operation, author) {
+    if recorded.payload_hash != undo_request_fingerprint(conn, ws, operation, author)? {
         return Err(DomainError::IdempotencyKeyReuseMismatch);
     }
     Ok(Some(recorded))
-}
-
-pub fn undo_request_is_replay_in(
-    conn: &Connection,
-    ws: &str,
-    operation: &str,
-    request: &str,
-    author: Option<&str>,
-) -> Result<bool, DomainError> {
-    Ok(checked_undo_request_in(conn, ws, operation, request, author)?.is_some())
 }
 
 pub fn replayed_undo_operation_in(
@@ -254,157 +304,235 @@ pub fn replayed_undo_operation_in(
     request: &str,
     author: Option<&str>,
 ) -> Result<Option<(String, Vec<OperationMoment>)>, DomainError> {
-    let Some(recorded) = checked_undo_request_in(conn, ws, operation, request, author)? else {
+    if checked_undo_request_in(conn, ws, operation, request, author)?.is_none() {
         return Ok(None);
-    };
-    let version: String = conn
+    }
+    let kind: String = conn
         .query_row(
-            "SELECT version_id FROM moments WHERE workspace_id=?1 AND moment_order=?2",
-            params![ws, recorded.result_seq],
+            "SELECT kind FROM engine_requests WHERE request_id=?1",
+            [request],
             |r| r.get(0),
         )
         .map_err(DomainError::sql_corrupt)?;
-    let moments = raw_operation_moments_in(
-        conn,
-        ws,
-        &version,
-        &undo_correlation_id(ws, operation, request),
-    )?;
-    if moments.is_empty() {
-        return Err(DomainError::StateCorrupt {
-            reason: "Undo lost result",
-        });
+    if kind == "history-undo-pending" {
+        return Ok(None);
     }
-    Ok(Some((version, moments)))
+    if kind == "history-undo-complete" {
+        let version: String = conn
+            .query_row(
+                "SELECT version_id FROM history_undo_plans WHERE request_id=?1",
+                [request],
+                |r| r.get(0),
+            )
+            .map_err(DomainError::sql_corrupt)?;
+        return Ok(Some((
+            version.clone(),
+            undo_compensation_moments_in(conn, ws, &version, operation, request)?,
+        )));
+    }
+    Err(DomainError::StateCorrupt {
+        reason: "Undo request kind",
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn undo_operation_in_tx<F>(
+pub fn undo_member_in_tx<F>(
     tx: &Transaction<'_>,
     ws: &str,
     version: &str,
-    operation: &str,
-    request: &str,
+    correlation: &str,
     author: Option<&str>,
     now: i64,
+    effect: OperationMoment,
+    write_inverse: Option<&str>,
     mut after: F,
-) -> Result<(Vec<OperationMoment>, bool), DomainError>
+) -> Result<MomentRecord, DomainError>
 where
     F: FnMut(&Transaction<'_>, &MomentRecord) -> Result<(), DomainError>,
 {
-    validate_operation_id(operation)?;
-    validate_identifier(request, "request_id")?;
-    validate_moment_metadata("restore", Some("Undo"), Some(operation), author)?;
-    let correlation = undo_correlation_id(ws, operation, request);
-    let fingerprint = undo_request_fingerprint(ws, operation, author);
-    if let Some((_, moments)) = replayed_undo_operation_in(tx, ws, operation, request, author)? {
-        return Ok((moments, true));
-    }
-    let originals = preflight_undo_operation_in(tx, ws, version, operation)?;
-    let mut last_order = -1;
-    for effect in originals {
-        let id = format!(
-            "undo-{}",
-            hash_fields(&[correlation.as_bytes(), effect.moment_id.as_bytes()])
-        );
-        let moment = if effect.operation == "rename" {
-            rename_text_in_tx(
-                tx,
-                &RenameTextFile {
-                    workspace_id: ws.into(),
-                    version_id: version.into(),
-                    from_path: effect.path,
-                    to_path: effect.before_path.unwrap(),
-                    moment_id: id,
-                    request_id: None,
-                    metadata_origin: "restore".into(),
-                    metadata_summary: Some("Undo".into()),
-                    metadata_correlation_id: Some(correlation.clone()),
-                    author_json: author.map(str::to_owned),
-                    now_ms: now,
-                },
-                |_, _| Ok(()),
-            )?
-            .moment
-        } else {
-            let source = get_moment(tx, ws, &effect.moment_id)?.ok_or(DomainError::FileNotFound)?;
-            if !source.before_present {
-                return Err(DomainError::UndoRefused {
-                    path: effect.path,
-                    reason: "retained content unavailable",
-                });
-            }
-            if source.before_content_kind == "binary" {
-                let sha =
-                    source
-                        .before_binary_sha256
-                        .as_deref()
-                        .ok_or(DomainError::UndoRefused {
-                            path: effect.path.clone(),
-                            reason: "retained content unavailable",
-                        })?;
-                tx.execute("INSERT INTO path_aliases(workspace_id,version_id,path,object_id) VALUES (?1,?2,?3,?4)",params![ws,version,effect.path,effect.object_id]).map_err(DomainError::sql_persist)?;
-                crate::conflicts::persist_binary_head_in_tx(
-                    tx,
-                    &crate::conflicts::PersistBinaryHead {
-                        workspace_id: ws,
-                        version_id: version,
-                        object_id: &effect.object_id,
-                        path: &effect.path,
-                        binary_sha256: sha,
-                        moment_id: &id,
-                        metadata_origin: "restore",
-                        metadata_summary: Some("Undo"),
-                        metadata_correlation_id: Some(&correlation),
-                        author_json: author,
-                        now_ms: now,
-                    },
-                    None,
-                )?;
-                get_moment(tx, ws, &id)?.ok_or(DomainError::StateCorrupt {
-                    reason: "binary inverse lost moment",
-                })?
-            } else {
-                let text = blob_text(
-                    tx,
-                    source
-                        .before_blob_sha256
-                        .as_deref()
-                        .ok_or(DomainError::StateCorrupt {
-                            reason: "delete has no preimage",
-                        })?,
-                )?
+    let id = undo_member_moment_id(correlation, &effect.moment_id);
+    let moment = if effect.operation == "write"
+        && super::is_duplicate_in(
+            tx,
+            ws,
+            &get_moment(tx, ws, &effect.moment_id)?
+                .ok_or(DomainError::FileNotFound)?
+                .metadata_correlation_id
+                .unwrap_or_default(),
+            effect.moment_order,
+        )? {
+        let current = get_snapshot(tx, ws, version, &effect.object_id)?;
+        if !current.as_ref().is_some_and(|head| {
+            head.path == effect.path && head.latest_moment_id == effect.moment_id
+        }) {
+            return Err(DomainError::UndoRefused {
+                path: effect.path,
+                reason: "copy changed after Duplicate",
+            });
+        }
+        super::delete_text_in_tx_checked(
+            tx,
+            &crate::DeleteTextFile {
+                workspace_id: ws.into(),
+                version_id: version.into(),
+                path: effect.path,
+                moment_id: id,
+                request_id: None,
+                metadata_origin: "restore".into(),
+                metadata_summary: Some("Undo Duplicate".into()),
+                metadata_correlation_id: Some(correlation.into()),
+                author_json: author.map(str::to_owned),
+                now_ms: now,
+            },
+            Some(&effect.object_id),
+            None,
+        )?
+        .moment
+    } else if effect.operation == "rename" {
+        rename_text_in_tx(
+            tx,
+            &RenameTextFile {
+                workspace_id: ws.into(),
+                version_id: version.into(),
+                from_path: effect.path,
+                to_path: effect.before_path.unwrap(),
+                moment_id: id,
+                request_id: None,
+                metadata_origin: "restore".into(),
+                metadata_summary: Some("Undo".into()),
+                metadata_correlation_id: Some(correlation.to_owned()),
+                author_json: author.map(str::to_owned),
+                now_ms: now,
+            },
+            |_, _| Ok(()),
+        )?
+        .moment
+    } else if effect.operation == "write" {
+        let head =
+            get_snapshot(tx, ws, version, &effect.object_id)?.ok_or(DomainError::UndoRefused {
+                path: effect.path.clone(),
+                reason: "linking document removed",
+            })?;
+        super::write_text_in_tx(
+            tx,
+            &WriteText {
+                workspace_id: ws.into(),
+                version_id: version.into(),
+                object_id: effect.object_id,
+                path: head.path,
+                text: write_inverse
+                    .ok_or(DomainError::StateCorrupt {
+                        reason: "missing link inverse",
+                    })?
+                    .into(),
+                moment_id: id,
+                request_id: None,
+                metadata_origin: "restore".into(),
+                metadata_summary: Some("Undo".into()),
+                metadata_correlation_id: Some(correlation.into()),
+                author_json: author.map(str::to_owned),
+                now_ms: now,
+            },
+        )?
+        .moment
+    } else {
+        // Retained content can disappear after the off-actor preflight.
+        let source = get_moment(tx, ws, &effect.moment_id)?.ok_or(DomainError::FileNotFound)?;
+        if !source.before_present {
+            return Err(DomainError::UndoRefused {
+                path: effect.path,
+                reason: "retained content unavailable",
+            });
+        }
+        if source.before_content_kind == "binary" {
+            let sha = source
+                .before_binary_sha256
+                .as_deref()
                 .ok_or(DomainError::UndoRefused {
                     path: effect.path.clone(),
                     reason: "retained content unavailable",
                 })?;
-                write_history_text_in_tx(
-                    tx,
-                    &WriteText {
-                        workspace_id: ws.into(),
-                        version_id: version.into(),
-                        object_id: effect.object_id,
-                        path: effect.path,
-                        text,
-                        moment_id: id,
-                        request_id: None,
-                        metadata_origin: "restore".into(),
-                        metadata_summary: Some("Undo".into()),
-                        metadata_correlation_id: Some(correlation.clone()),
-                        author_json: author.map(str::to_owned),
-                        now_ms: now,
-                    },
-                    &source.moment_id,
-                )?
-                .moment
-            }
-        };
-        after(tx, &moment)?;
-        last_order = moment.moment_order;
-    }
-    record_request(tx, Some(request), &fingerprint, last_order, now)?;
-    Ok((
-        raw_operation_moments_in(tx, ws, version, &correlation)?,
-        false,
-    ))
+            tx.execute("INSERT INTO path_aliases(workspace_id,version_id,path,object_id) VALUES (?1,?2,?3,?4)",params![ws,version,effect.path,effect.object_id]).map_err(DomainError::sql_persist)?;
+            crate::conflicts::persist_binary_head_in_tx(
+                tx,
+                &crate::conflicts::PersistBinaryHead {
+                    workspace_id: ws,
+                    version_id: version,
+                    object_id: &effect.object_id,
+                    path: &effect.path,
+                    binary_sha256: sha,
+                    moment_id: &id,
+                    metadata_origin: "restore",
+                    metadata_summary: Some("Undo"),
+                    metadata_correlation_id: Some(correlation),
+                    author_json: author,
+                    now_ms: now,
+                },
+                None,
+            )?;
+            get_moment(tx, ws, &id)?.ok_or(DomainError::StateCorrupt {
+                reason: "binary inverse lost moment",
+            })?
+        } else {
+            let text = blob_text(
+                tx,
+                source
+                    .before_blob_sha256
+                    .as_deref()
+                    .ok_or(DomainError::StateCorrupt {
+                        reason: "delete has no preimage",
+                    })?,
+            )?
+            .ok_or(DomainError::UndoRefused {
+                path: effect.path.clone(),
+                reason: "retained content unavailable",
+            })?;
+            write_history_text_in_tx(
+                tx,
+                &WriteText {
+                    workspace_id: ws.into(),
+                    version_id: version.into(),
+                    object_id: effect.object_id,
+                    path: effect.path,
+                    text,
+                    moment_id: id,
+                    request_id: None,
+                    metadata_origin: "restore".into(),
+                    metadata_summary: Some("Undo".into()),
+                    metadata_correlation_id: Some(correlation.to_owned()),
+                    author_json: author.map(str::to_owned),
+                    now_ms: now,
+                },
+                &source.moment_id,
+            )?
+            .moment
+        }
+    };
+    after(tx, &moment)?;
+    Ok(moment)
+}
+
+pub fn undo_progress_key(request: &str) -> String {
+    format!("undo-progress_{}", hash_fields(&[request.as_bytes()]))
+}
+pub fn undo_compensation_moments_in(
+    conn: &Connection,
+    ws: &str,
+    version: &str,
+    operation: &str,
+    request: &str,
+) -> Result<Vec<OperationMoment>, DomainError> {
+    raw_operation_moments_in(
+        conn,
+        ws,
+        version,
+        &undo_correlation_id(ws, operation, request),
+    )
+}
+
+pub fn undo_member_moment_id(correlation: &str, moment: &str) -> String {
+    format!(
+        "undo-{}",
+        hash_fields(&[correlation.as_bytes(), moment.as_bytes()])
+    )
 }

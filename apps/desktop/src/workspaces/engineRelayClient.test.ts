@@ -1,3 +1,4 @@
+import { existsSync, mkdirSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -29,11 +30,11 @@ import {
 import {
   allowInsecureLoopbackRelayForTests,
   EngineRelayClient,
-  INSECURE_LOOPBACK_RELAY_TEST_ENV,
   MixedRelayTransportError,
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
+import { INSECURE_LOOPBACK_RELAY_TEST_ENV } from "./cloudConfiguration";
 import {
   mountRootFor,
   mountStoreWorkspaceIdFor,
@@ -64,6 +65,7 @@ const EDIT_SELECTOR = {
 } as const;
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
+import { readLocalStateFrom } from "./workspaceLocalState";
 
 class MockDaemon implements EngineDaemonClient {
   readonly requests: Request[] = [];
@@ -80,8 +82,14 @@ class MockDaemon implements EngineDaemonClient {
     }
     const result = (() => {
       switch (request.method) {
-        case "workspace.open":
-          return { workspace: "ws-mock" };
+        case "workspace.open": {
+          // As the engine's open does, make `.dohc/local` and say so.
+          const { rootDir } = request.params as { rootDir: string };
+          if (existsSync(rootDir)) {
+            mkdirSync(join(rootDir, ".dohc", "local"), { recursive: true, mode: 0o700 });
+          }
+          return { workspace: "ws-mock", localStateReady: true };
+        }
         case "workspace.close":
           return { closed: true };
         case "sync.push":
@@ -136,6 +144,8 @@ class MockDaemon implements EngineDaemonClient {
           };
         case "sync.resetClaimRefusal":
           return { reset: true };
+        case "sync.collectionsWaiting":
+          return { waiting: true };
         case "sync.claim":
           return { claimed: true };
         case "sync.adoptJoinIdentity":
@@ -214,6 +224,8 @@ async function harness(daemon = new MockDaemon(), onRefusalsChanged?: () => void
   const sessions = new EngineWorkspaceSessions(source, {
     transportRebindAttempts: 1,
   });
+  // Writers of `.dohc/local` ask the engine's open, as the desktop's do.
+  readLocalStateFrom(sessions);
   const live = new EngineRelayClient({
     sessions,
     routes,
@@ -395,6 +407,7 @@ describe("EngineRelayClient", () => {
     });
     await expect(client.claim()).resolves.toBeUndefined();
     await expect(client.probe()).resolves.toEqual({ hasContent: true });
+    await expect(client.collectionsWaiting()).resolves.toBe(true);
 
     const open = daemon.requests.find(
       (request) => request.method === "workspace.open",
@@ -415,6 +428,7 @@ describe("EngineRelayClient", () => {
       "sync.recoverOrigin",
       "sync.claim",
       "sync.probe",
+      "sync.collectionsWaiting",
     ]);
     expectStatefulRequestsScoped(daemon.requests);
     expect(
@@ -437,6 +451,7 @@ describe("EngineRelayClient", () => {
       },
       { method: "sync.claim", params: { workspaceId: "workspace-a" } },
       { method: "sync.probe", params: { workspaceId: "workspace-a" } },
+      { method: "sync.collectionsWaiting", params: { workspaceId: "workspace-a" } },
     ]);
     await sessions.closeAll();
   });
@@ -1199,6 +1214,7 @@ describe("EngineRelayClient", () => {
     const outcome = await refreshStandaloneShareThroughOwnerForTest({
       rootDir: rootPath,
       workspaceId: "workspace-a",
+      attachmentId,
       relay,
       shareId: "share-view",
       store,
@@ -1265,6 +1281,7 @@ describe("EngineRelayClient", () => {
     await refreshStandaloneShareThroughOwnerForTest({
       rootDir: rootPath,
       workspaceId: "workspace-a",
+      attachmentId,
       relay,
       shareId: "share-view",
       store,
@@ -1589,6 +1606,7 @@ describe("EngineRelayClient", () => {
       refreshStandaloneShareThroughOwnerForTest({
         rootDir: rootPath,
         workspaceId: "workspace-a",
+        attachmentId,
         relay,
         shareId: "share-view",
         store,
@@ -1721,6 +1739,7 @@ describe("EngineRelayClient", () => {
       refreshStandaloneShareThroughOwnerForTest({
         rootDir: rootPath,
         workspaceId: "workspace-a",
+        attachmentId,
         relay,
         shareId: "share-revoked",
         store,
@@ -2690,6 +2709,51 @@ describe("RelayConfiguredDaemonClientSource capability forwarding", () => {
     expect(wrapped.onEvent).toBeUndefined();
     expect(wrapped.onBlob).toBeUndefined();
     expect(wrapped.cancelRequest).toBeUndefined();
+  });
+});
+
+describe("RelayConfiguredDaemonClientSource unfinished ordinary pulls", () => {
+  async function openParams(
+    source: RelayConfiguredDaemonClientSource,
+    inner: MockDaemon,
+    params: Record<string, JsonValue> = {},
+  ): Promise<JsonValue | undefined> {
+    await source.currentClient().sendRequest({
+      id: 1,
+      method: "workspace.open",
+      params: { rootDir: "/root", workspaceId: "ws", ...params },
+    });
+    return inner.requests.at(-1)?.params;
+  }
+
+  it("lets a full owner open of a workspace with no ordinary sync abandon one", async () => {
+    const inner = new MockDaemon();
+    const source = new RelayConfiguredDaemonClientSource(
+      { currentClient: () => inner },
+      new RelayTransportRouteGuard(),
+      workspaceId => workspaceId === "ws",
+    );
+    expect(await openParams(source, inner)).toMatchObject({ abandonOrdinaryPull: true });
+    const temporaryOpens: Record<string, JsonValue>[] = [
+      { captureMode: "none" },
+      { skipStartupMaintenance: true },
+      { storeMode: "passive" },
+    ];
+    for (const temporary of temporaryOpens) {
+      expect(await openParams(source, inner, temporary)).not.toHaveProperty("abandonOrdinaryPull");
+    }
+  });
+
+  it("keeps one while ordinary sync is configured or the open carries a relay", async () => {
+    const inner = new MockDaemon();
+    const routes = new RelayTransportRouteGuard();
+    const synced = new RelayConfiguredDaemonClientSource({ currentClient: () => inner }, routes, () => false);
+    expect(await openParams(synced, inner)).not.toHaveProperty("abandonOrdinaryPull");
+    routes.bind({ workspaceId: "ws", rootPath: "/root", relay: { baseUrl: "https://relay.test", token: "token" } });
+    const routed = new RelayConfiguredDaemonClientSource({ currentClient: () => inner }, routes, () => true);
+    const params = await openParams(routed, inner);
+    expect(params).toHaveProperty("relay");
+    expect(params).not.toHaveProperty("abandonOrdinaryPull");
   });
 });
 

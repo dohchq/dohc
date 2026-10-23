@@ -129,7 +129,7 @@ pub fn read_applied_sync(
             through,
             &mut budget,
             accepted_history::CHECKPOINT_EVENTS as usize,
-            false,
+            accepted_history::HistoryPurpose::Native,
         )?;
         check_cancel(&is_current)?;
         let host_vector = history

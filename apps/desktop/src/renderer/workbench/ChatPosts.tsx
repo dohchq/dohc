@@ -13,12 +13,13 @@ import type {
 } from "../../ipc/bridgeContract";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { basenameOf } from "../path";
+import { Ref } from "../ui/Ref";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { formatChatTime, formatClockDigits, formatShortTime } from "../time";
 import { CopyButton } from "../ui/CopyButton";
-import { ChatAvatar } from "./ChatAvatar";
+import { AgentName, ChatAvatar } from "./ChatAvatar";
+import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
 import {
-  ChatFileIcon,
   MentionText,
   MessageReactions,
   TOOLBAR_BUTTON,
@@ -29,11 +30,6 @@ import {
 import { SaveAsFileActions, titleRepeatsFirstLine } from "./PostCard";
 import { runnerProgram, type ChatsNav } from "./ChatsView";
 import { buildThreadCommentTree, type ThreadCommentNode } from "./threadCommentTree";
-
-function pathBasename(pathHint: string | undefined): string {
-  if (!pathHint) return "attachment";
-  return basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "attachment";
-}
 
 // "4s", "1m 20s", "2h 5m".
 function formatRunDuration(ms: number): string {
@@ -189,50 +185,24 @@ function AttachmentChip(props: {
   attachment: ChatAttachmentRecord;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
 }) {
-  const label = pathBasename(props.attachment.pathHint);
-  const title = `${props.attachment.pathHint ?? label}${
-    props.attachment.headingText ? `#${props.attachment.headingText}` : ""
-  }`;
-  const className =
-    "inline-flex items-center gap-1 rounded-full border border-line bg-panel-2 px-2 py-0.5 font-mono text-[10px] text-muted";
-  const content = (
-    <>
-      <ChatFileIcon path={props.attachment.pathHint ?? ""} className="shrink-0" />
-      <span className="max-w-56 truncate">{label}</span>
-      {props.attachment.headingText ? (
-        <span className="max-w-48 truncate text-subtle">
-          #{props.attachment.headingText}
-        </span>
-      ) : null}
-    </>
-  );
-  if (props.attachment.pathHint && props.onOpenPath) {
-    return (
-      <button
-        type="button"
-        data-testid="chats-attachment-chip"
-        title={title}
-        onClick={() => {
-          const path = props.attachment.pathHint ?? "";
-          if (props.attachment.headingAnchor) {
-            props.onOpenPath?.(path, props.attachment.headingAnchor);
-          } else {
-            props.onOpenPath?.(path);
-          }
-        }}
-        className={`${className} cursor-pointer hover:border-muted/50 hover:text-ink dohc-focus-visible`}
-      >
-        {content}
-      </button>
-    );
-  }
+  const { pathHint, headingAnchor, headingText } = props.attachment;
+  const onOpenPath = props.onOpenPath;
+  // A shared view can hold an attachment whose path it may not read: the
+  // chip names it only as an attachment and opens nothing.
+  if (!pathHint) return <Ref path="" title="attachment" testId="chats-attachment-chip" />;
   return (
-    <span
-      data-testid="chats-attachment-chip"
-      className={className}
-    >
-      {content}
-    </span>
+    <Ref
+      path={pathHint}
+      heading={headingText}
+      // An attachment is named by what it shows, the file and its heading.
+      label={`${basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "attachment"}${
+        headingText ? `#${headingText}` : ""
+      }`}
+      testId="chats-attachment-chip"
+      onOpen={onOpenPath
+        ? () => (headingAnchor ? onOpenPath(pathHint, headingAnchor) : onOpenPath(pathHint))
+        : undefined}
+    />
   );
 }
 
@@ -551,6 +521,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             ↳ replying to {chatAuthorLabel(parent)}
           </button>
         ) : null}
+        <AgentColorScope name={chatAuthorLabel(comment)} kind={comment.authorKind} presentation={comment.presentation}>
         <div
           data-testid="chats-comment-bubble"
           className="group relative -ml-[46px] -mr-2 rounded-lg py-1 pl-[46px] pr-2 transition-colors duration-75 hover:bg-hover"
@@ -572,11 +543,13 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 {formatClockDigits(comment.createdAtMs)}
               </time>
             ) : (
-              <ChatAvatar presentation={comment.presentation}
-                name={comment.authorDisplayName}
-                kind={comment.authorKind}
-                size="comment"
-              />
+              <AgentColorAvatar>
+                <ChatAvatar presentation={comment.presentation}
+                  name={comment.authorDisplayName}
+                  kind={comment.authorKind}
+                  size="comment"
+                />
+              </AgentColorAvatar>
             )}
           </span>
           {/* A continued comment keeps its author and time for screen
@@ -585,13 +558,13 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             <span
               data-testid="chats-message-author"
               data-author-kind={comment.authorKind}
-              className={`text-[13px] font-semibold ${
-                isAgent ? "text-agent" : "text-ink"
-              }`}
+              className="text-[13px] font-semibold text-ink"
             >
-              {chatAuthorLabel(comment)}
+              <AgentName kind={comment.authorKind} presentation={comment.presentation}>
+                <AgentColorName>{chatAuthorLabel(comment)}</AgentColorName>
+              </AgentName>
             </span>
-            {isAgent && !continues ? <AgentBadge testIdPrefix="chats-comment" author={comment} viewerAuthorId={reactionControls.viewerAuthorId} /> : null}
+            {isAgent && !continues ? <AgentBadge testIdPrefix="chats-comment" author={comment} viewerAuthorId={reactionControls.viewerAuthorId} presentation={comment.presentation} /> : null}
             {comment.authorKind === "automation" && !continues ? (
               <AutomationBadge
                 testIdPrefix="chats-comment"
@@ -698,6 +671,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             }
           />
         </div>
+        </AgentColorScope>
         {runRecords[comment.id] ? (
           <RunLine
             run={runRecords[comment.id]}
@@ -722,6 +696,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   };
   return (
     <>
+      <AgentColorScope name={chatAuthorLabel(openingMessage)} kind={openingMessage.authorKind} presentation={openingMessage.presentation}>
       <article
         ref={(node) => setMessageNode(openingMessage.id, node)}
         data-testid="chats-message"
@@ -741,23 +716,25 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             ? "My agent · thread"
             : `#${nav.channel.name} · thread`}
         </p>
-        <ChatAvatar presentation={openingMessage.presentation}
-          name={openingMessage.authorDisplayName}
-          kind={openingMessage.authorKind}
-          size="row"
-        />
+        <AgentColorAvatar>
+          <ChatAvatar presentation={openingMessage.presentation}
+            name={openingMessage.authorDisplayName}
+            kind={openingMessage.authorKind}
+            size="row"
+          />
+        </AgentColorAvatar>
         <div className="min-w-0 flex-1">
           <span className="flex items-baseline gap-1.5 leading-[18px]">
             <span
               data-testid="chats-message-author"
               data-author-kind={openingMessage.authorKind}
-              className={`truncate text-[13px] font-semibold ${
-                openingIsAgent ? "text-agent" : "text-ink"
-              }`}
+              className="truncate text-[13px] font-semibold text-ink"
             >
-              {chatAuthorLabel(openingMessage)}
+              <AgentName kind={openingMessage.authorKind} presentation={openingMessage.presentation}>
+                <AgentColorName>{chatAuthorLabel(openingMessage)}</AgentColorName>
+              </AgentName>
             </span>
-            {openingIsAgent ? <AgentBadge testIdPrefix="chats-message" author={openingMessage} viewerAuthorId={reactionControls.viewerAuthorId} /> : null}
+            {openingIsAgent ? <AgentBadge testIdPrefix="chats-message" author={openingMessage} viewerAuthorId={reactionControls.viewerAuthorId} presentation={openingMessage.presentation} /> : null}
             {openingMessage.authorKind === "automation" ? (
               <AutomationBadge
                 testIdPrefix="chats-message"
@@ -867,6 +844,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           />
         </div>
       </article>
+      </AgentColorScope>
 
       <div
         data-testid="chats-comments-divider"

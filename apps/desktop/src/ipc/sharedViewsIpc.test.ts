@@ -1,3 +1,5 @@
+import { symlink } from "node:fs/promises";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WatcherStatusResult } from "@dohc/workspace-engine-client";
 import { RelayUnauthorizedError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
@@ -9,6 +11,9 @@ import { SharePinInvalidError } from "../workspaces/shareViewRecords";
 import { buildShareCode } from "../workspaces/syncCode";
 import { deferred } from "../testing/deferred";
 import { createSharedViewsIpcHarness as harness, credentials, info, outcome, ready } from "../testing/sharedViewsIpcHarness";
+import { canonicalWorkspaceRoot, createWorkspaceFolder } from "../workspaces/createWorkspaceFolder";
+import { assertActiveWorkspaceOperationLease } from "../workspaces/workspaceAssets";
+import { createTestScratch } from "../workspaces/testTemp";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -23,6 +28,28 @@ it.each(["background", "manual"] as const)("binds the %s shared-view refresh bef
   await expect(h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { ...payload, workspaceId: "other" }))
     .rejects.toThrow("window changed workspaces");
   services.forEach(service => expect(service).not.toHaveBeenCalled());
+});
+
+it("opens a share into a folder chosen through a link and refreshes it under the folder's real path", async () => {
+  const real = await createTestScratch("dohc-share-real-");
+  const chosen = join(await createTestScratch("dohc-share-link-"), "received");
+  await symlink(real, chosen, process.platform === "win32" ? "junction" : "dir");
+  const homeDir = await createTestScratch("dohc-share-home-");
+  const h = await harness({ rootPath: await createTestScratch("dohc-share-existing-"), canonicalizeRoot: canonicalWorkspaceRoot });
+  h.roots.approveRoot(chosen);
+  h.createFolder.mockImplementation(input => createWorkspaceFolder({ ...input, homeDir, kind: "personal", computer: { installId: "install-here", label: "This Mac" } }));
+  // The real share files refuse a lease taken on another spelling of the root.
+  h.reconcile.mockImplementation(async lease => {
+    assertActiveWorkspaceOperationLease(canonicalWorkspaceRoot(real), lease);
+    return { kind: "refresh", outcome };
+  });
+
+  await expect(h.invoke(sharedViewAccessOperations.openSharedView.channel, { ...h.openPayload, rootPath: chosen }))
+    .resolves.toBeTruthy();
+
+  const opened = [...h.registry.values()].filter(entry => entry.workspaceId !== h.workspace.workspaceId);
+  expect(opened.map(entry => entry.rootPath)).toEqual([canonicalWorkspaceRoot(real)]);
+  expect(h.reconcile).toHaveBeenCalledOnce();
 });
 
 it.each(["accept", "refresh"])("%s saves only a nonempty relay owner id", async operation => {
@@ -313,6 +340,17 @@ describe("registered received-view handlers", () => {
     expect(h.relayFor).toHaveBeenCalledWith(expect.objectContaining({ attachmentId: expect.any(Symbol) }));
     expect(h.recordIdentity).toHaveBeenCalledWith({ grantedSelector: info.selector });
     expect(h.open).toHaveBeenCalledWith(expect.objectContaining({ shareView: expect.objectContaining({ grantedSelector: info.selector }) }));
+  });
+
+  it("waits for daemon startup before creating a shared view", async () => {
+    const h = await harness(); const startup = deferred(); const waiting = deferred();
+    h.startup.mockImplementation(() => { waiting.resolve(); return startup.promise; });
+    const result = h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload);
+    await waiting.promise;
+    expect(h.steps).toEqual(["preflight"]); expect(h.mkdir).not.toHaveBeenCalled();
+    startup.resolve();
+    await expect(result).resolves.toMatchObject({ workspace: { rootPath: h.openPayload.rootPath } });
+    expect(h.steps.slice(0, 3)).toEqual(["preflight", "mkdir", "create"]);
   });
 
   it("rolls back a failed first refresh before opening activity", async () => {
@@ -666,7 +704,7 @@ describe("background share pulls", () => {
     await h.authorities.retireBinding(h.authorities.currentBinding("existing"), { removeBinding: () => { h.registry.delete("existing"); } });
     if (rejected) await rejected;
     expect(h.closed.size).toBe(0);
-    await expect(h.invoke(channel, payload)).rejects.toThrow("retired");
+    await expect(h.invoke(channel, payload)).rejects.toThrow("This workspace was closed. Open it again.");
     noLocalWork(h);
   });
   it("aborts a hung probe and releases its timeout when the sender closes", async () => {

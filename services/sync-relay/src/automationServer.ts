@@ -8,7 +8,7 @@ import { cutText } from "@dohc/automation-executor/automation-chat";
 import { automationFailedNoticeId, type ReportedRun } from "@dohc/automation-executor/automation-failed-notice";
 import { reportAutomationFailure } from "@dohc/automation-executor/automation-failure-reporting";
 import { whoChangedLast, type AutomationsFileHistory } from "@dohc/automation-executor/automation-history";
-import { createAutomationRunStore, type MetadataDirResolver } from "@dohc/automation-executor/automation-run-store";
+import { createAutomationRunStore, type AutomationStoreFolder } from "@dohc/automation-executor/automation-run-store";
 import {
   CollectionAutomations,
   type CollectionAutomationsOptions,
@@ -195,14 +195,9 @@ const runsOn = (host: RelayAutomationHost | null): host is RelayAutomationHost =
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
-/** A metadata folder that is always this one: the replica made it beside its workspace. */
-function metadataDirOf(dir: string): MetadataDirResolver {
-  function resolve(rootPath: string): Promise<string>;
-  function resolve(rootPath: string, options: { create: false }): Promise<string | null>;
-  async function resolve(): Promise<string | null> {
-    return dir;
-  }
-  return resolve;
+/** The run store's folder, always this one: the replica made it beside its workspace. */
+function storeFolderOf(dir: string): AutomationStoreFolder {
+  return { forWrite: async () => dir, read: (work) => work(dir) };
 }
 
 export async function startAutomationServer(options: AutomationServerOptions) {
@@ -542,7 +537,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
   function executorOptions(ws: WorkspaceState, self: () => Hosted): CollectionAutomationsOptions {
     const { replica, adapter } = ws;
     const { workspaceId, ownerUserId } = replica;
-    const runStore = createAutomationRunStore(replica.root, metadataDirOf(replica.metadataDir));
+    const runStore = createAutomationRunStore(storeFolderOf(replica.metadataDir));
     const chat = replicaAutomationChat({ runStore, replica, store: replicaChatStore(replica), storage, nowMs, ownerName: () => ownerName(ws) });
     // A canonical sync changes the replica's draft revision. Keep it outside
     // another write's preparation and settlement, including background retries.

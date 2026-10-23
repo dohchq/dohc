@@ -890,7 +890,9 @@ mod tests {
         let mut f = Fixture::new().await;
         let db = f._scratch.path().join(".dohc/engine/engine.db");
         let mut raw = rusqlite::Connection::open(&db).unwrap();
-        let tx = raw.transaction().unwrap();
+        let tx = raw
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
         dohc_engine_domain::write_projected_text_in_tx(
             &tx,
             dohc_engine_domain::ProjectedWriteText {
@@ -1488,7 +1490,9 @@ mod tests {
         let mut f = Fixture::new().await;
         let mut raw =
             rusqlite::Connection::open(f._scratch.path().join(".dohc/engine/engine.db")).unwrap();
-        let tx = raw.transaction().unwrap();
+        let tx = raw
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
         dohc_engine_domain::write_projected_text_in_tx(
             &tx,
             dohc_engine_domain::ProjectedWriteText {
@@ -1571,7 +1575,9 @@ mod tests {
         std::fs::write(f._scratch.path().join("tasks/sibling.md"), "# Sibling\n").unwrap();
         let db = f._scratch.path().join(".dohc/engine/engine.db");
         let mut raw = rusqlite::Connection::open(&db).unwrap();
-        let tx = raw.transaction().unwrap();
+        let tx = raw
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
         for (object, path, text) in [
             (
                 "schema",
@@ -1615,13 +1621,14 @@ mod tests {
         // Restore fences its own document, while a sibling editor retains its lease.
         let opened = f.control("ydoc.open", json!({"versionId":"main","path":"tasks/sibling.md","contentKind":"richdoc","seedFromArtifact":false})).await;
         let session = opened.response.result["sessionId"].clone();
+        let claim = opened.response.result["lineageClaimId"].clone();
         drop(opened);
         let sibling = Ydoc::wire();
         sibling
             .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# Sibling\n")
             .unwrap();
         drop(f.control("ydoc.recordUpdate", json!({
-            "sessionId":session,"seed":true,
+            "sessionId":session,"seed":true,"expectedLineageClaimId":claim,
             "updateBase64":base64::engine::general_purpose::STANDARD.encode(sibling.encode_full_state())
         })).await);
         let raw = rusqlite::Connection::open(&db).unwrap();

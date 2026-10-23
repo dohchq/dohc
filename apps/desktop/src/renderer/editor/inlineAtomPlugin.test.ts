@@ -1,7 +1,8 @@
 import { Schema } from '@tiptap/pm/model'
-import { Plugin, PluginKey } from '@tiptap/pm/state'
+import { EditorState, Plugin, PluginKey } from '@tiptap/pm/state'
+import type { DecorationSet } from '@tiptap/pm/view'
 import { describe, it, expect } from 'vitest'
-import { codeBlock, codeMarkText, doc, paragraph } from './testDocs'
+import { codeBlock, codeMarkText, doc, paragraph, randomEdit, seededRandom } from './testDocs'
 import {
   computeAtomRanges,
   inlineAtomKey,
@@ -100,5 +101,30 @@ describe('computeAtomRanges — code is verbatim', () => {
     expect(plugin).toBeInstanceOf(Plugin)
     expect(inlineAtomKey).toBeInstanceOf(PluginKey)
     expect(plugin.spec.key).toBe(inlineAtomKey)
+  })
+})
+
+describe('makeInlineAtomPlugin — edits', () => {
+  it('matches a full scan after every edit while rescanning only changed blocks', () => {
+    const random = seededRandom(2522)
+    let state = EditorState.create({
+      doc: doc(
+        paragraph('Logged {hours: 6} today'),
+        paragraph('plain text'),
+        codeBlock('{hours: 1}'),
+        paragraph('{done: true} and {left: 2}'),
+      ),
+      plugins: [makeInlineAtomPlugin()],
+    })
+    for (let step = 0; step < 400; step += 1) {
+      state = state.apply(randomEdit(state, random, ['{', '}', 'n', ': ', '7', ' ', '{x: 1}']))
+      const shown = (inlineAtomKey.getState(state) as DecorationSet)
+        .find()
+        .map((decoration) => ({ from: decoration.from, to: decoration.to }))
+        .sort((a, b) => a.from - b.from)
+      expect(shown, `step ${step}`).toEqual(
+        computeAtomRanges(state.doc).map(({ from, to }) => ({ from, to })),
+      )
+    }
   })
 })

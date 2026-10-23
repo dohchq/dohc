@@ -594,6 +594,31 @@ export function openTab(
     : { ...next, activeEditorGroup: target };
 }
 
+// History opens one diff tab per group and points it at each change the
+// person opens, so walking back through changes does not fill the tab strip.
+// A change already open in the group is activated where it is.
+export function openMomentDiff(
+  state: WorkbenchState,
+  momentId: string,
+  targetGroupId: string = state.activeEditorGroup,
+): WorkbenchState {
+  const path = momentDiffTabPath(momentId);
+  const group = state.editorGroups.find((candidate) => candidate.id === targetGroupId);
+  if (!group || group.tabs.some((tab) => tab.path === path)) return openTab(state, path, targetGroupId);
+  // The active tab when it is a diff, else the group's first diff tab.
+  const reused = [group.activeTab, ...group.tabs.map((tab) => tab.path)]
+    .find((tabPath) => tabPath !== null && parseTab(tabPath).kind === "momentDiff");
+  if (!reused) return openTab(state, path, targetGroupId);
+  return focusEditorGroup(
+    replaceGroup(state, group.id, (current) => ({
+      ...current,
+      tabs: current.tabs.map((tab) => (tab.path === reused ? { path } : tab)),
+      activeTab: path,
+    })),
+    group.id,
+  );
+}
+
 export function activateTab(
   state: WorkbenchState,
   groupId: string,
@@ -609,6 +634,15 @@ export function activateTab(
   return next.activeEditorGroup === groupId
     ? next
     : { ...next, activeEditorGroup: groupId };
+}
+
+// The tab after or before the group's active tab, wrapping at the ends.
+export function adjacentTabPath(group: EditorGroup, step: 1 | -1): string | null {
+  const { tabs } = group;
+  const index = tabs.findIndex((tab) => tab.path === group.activeTab);
+  // With no active tab, next is the first tab and previous the last.
+  const from = index === -1 && step === -1 ? 0 : index;
+  return tabs[(from + step + tabs.length) % tabs.length]?.path ?? null;
 }
 
 // Close a tab. When the group's active tab closes, the tab that enters its

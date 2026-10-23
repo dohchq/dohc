@@ -345,7 +345,7 @@ mod tests {
     }
 
     impl crate::transport::OutputGuard for OwnedInput {
-        fn is_current(&self) -> bool {
+        fn is_current_ignoring_cancel(&self) -> bool {
             true
         }
         fn cancel_signal(&self) -> CancelSignal {

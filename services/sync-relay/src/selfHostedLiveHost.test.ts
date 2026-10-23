@@ -1,7 +1,7 @@
-import {mkdtemp, mkdir, readFile, readdir, rm, writeFile} from "node:fs/promises";
+import {mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile} from "node:fs/promises";
 import {existsSync} from "node:fs";
 import {createHash} from "node:crypto";
-import {basename, join} from "node:path";
+import {basename, dirname, join} from "node:path";
 import {tmpdir} from "node:os";
 import {afterEach, expect, it, vi} from "vitest";
 import {startSelfHostedLiveHost, deleteSelfHostedWorkspaceRoots} from "./selfHostedLiveHost";
@@ -13,7 +13,7 @@ import {fixture as ticketFixture, binding, scope} from "./liveTickets.test-helpe
 import {createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import {createNamedFrameChanges} from "./liveHostChanges";
 import {hasRelayWriteObservers, notifyRelayWrite} from "./relayWriteChanges";
-import {serviceHostDocumentEnabled} from "./storage/serviceHostEnrollment";
+import {serviceHostDocumentEnabled, SERVICE_HOST_MAX_WORKSPACES} from "./storage/serviceHostEnrollment";
 import type {StorageContext} from "./storage/context";
 
 // While `error` is set, opening a divergence marker fails, as on a full disk.
@@ -253,6 +253,19 @@ it("starts one empty daemon and attaches the first shared document's workspace t
   expect(first.workspaces[0]!.hostedReplication).toMatchObject({identity: {replicationEpoch: "epoch", streamIdentity: "stream"},
     relay: {baseUrl: "https://relay.test"}});
   expect(bearer(first.workspaces[0]!)).toMatch(/^dohc-service-v1\./);
+});
+
+// The service host refuses a configuration path that resolves elsewhere, and
+// macOS keeps its temporary folder behind a link.
+it.skipIf(process.platform === "win32")("writes the daemon's configuration in the real temporary folder when TMPDIR is a link", async () => {
+  const f = await fixture({empty: true});
+  await vi.waitFor(() => expect(f.host.unavailable).toBe(false), {timeout: 10_000});
+  const real = await mkdtemp(join(tmpdir(), "dohc-self-host-temp-")), linked = `${real}-link`;
+  await symlink(real, linked);
+  cleanup.push(async () => {vi.unstubAllEnvs(); await rm(linked, {force: true}); await rm(real, {recursive: true, force: true});});
+  vi.stubEnv("TMPDIR", linked);
+  f.add(); await f.waitStarted(1);
+  expect(dirname(dirname(f.starts[0]!.configPath))).toBe(real);
 });
 
 it("adds and removes documents on the running daemon while the sibling stays hosted", async () => {
@@ -620,7 +633,7 @@ it("keeps a diverged store detached and reported after the relay restarts", asyn
   cleanup.push(() => restarted.close());
   expect(restarted.diverged(f.enrollment()!)).toBe(true);
   expect(onError.mock.calls).toEqual([[expect.objectContaining({message: `The live editing copy in store ${store} diverged from the relay earlier. It stays detached. ` +
-    `Recovery is not automatic yet. The store and every edit in it are kept. Keep ${marker}: without it the next relay start attaches the store again, and edits made before it detaches again stay only in the store.`})]]);
+    `Recovery is not automatic yet. The store and every edit in it are kept. Keep ${marker}. Without it the next relay start attaches the store again and checks it against the relay before anyone can edit.`})]]);
   const routes = createServiceHostEnrollmentRoutes({storage: f.storage, history: f.history, host: restarted,
     resolveActor: async () => ({workspaceId: scope.workspaceId, userId: "owner-1"})});
   const response = await routes(new Request(`https://relay.test/sync/${scope.workspaceId}/live-host`, {headers: {authorization: "Bearer account-token"}}));
@@ -931,9 +944,11 @@ it("drains the workspace of a renamed last document and keeps its store and its 
 
 // Proves: a page of stopped documents that stay gives way to the next, so
 // every one of them reaches its replica and is released. Every store stays,
-// and no update asks for more workspaces than the engine opens.
+// and an update names one page of departing workspaces at most, beside the
+// hosted one. One page and one more workspace prove it; each workspace costs
+// durable writes, and the storage tests cover many pages.
 it("reaches stopped documents past a page of ones that stay and keeps every store", async () => {
-  const workspaces = Array.from({length: 130}, (_, index) => `stopped-${String(index).padStart(3, "0")}`);
+  const workspaces = Array.from({length: SERVICE_HOST_MAX_WORKSPACES + 1}, (_, index) => `stopped-${String(index).padStart(3, "0")}`);
   const last = storeName(workspaces.at(-1)!), stale = "e".repeat(64);
   const f = await fixture({pending: ["object-stopped"], seed: async (data, relay) => {
     const stopped = relay.raw.prepare(`INSERT INTO sync_relay_service_host_enrollments(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,owner_stop,enabled,retired,created_at_ms,updated_at_ms,accounted_bytes)
@@ -953,11 +968,11 @@ it("reaches stopped documents past a page of ones that stay and keeps every stor
   expect(await readFile(join(f.data, last, "marker"), "utf8")).toBe(last);
   expect(await readFile(join(f.data, stale, "marker"), "utf8")).toBe(stale);
   await vi.waitFor(() => expect(f.updates.some(update => update.departing.some(row => row.workspaceId === workspaces.at(-1)))).toBe(true), {timeout: 10_000});
-  expect(undrained()).toHaveLength(131);
+  expect(undrained()).toHaveLength(workspaces.length + 1);
   f.pending.delete("object-stopped");
   await vi.waitFor(() => expect(undrained()).toEqual([scope.workspaceId]), {timeout: 20_000});
   expect(f.onError).not.toHaveBeenCalled();
-  expect(Math.max(...f.updates.map(update => update.workspaces.length))).toBeLessThanOrEqual(64);
+  expect(Math.max(...f.updates.map(update => update.workspaces.length))).toBeLessThanOrEqual(SERVICE_HOST_MAX_WORKSPACES + 1);
   expect(await readFile(join(f.data, last, "marker"), "utf8")).toBe(last);
   expect(existsSync(join(f.data, storeName(workspaces[0]!)))).toBe(true);
 });

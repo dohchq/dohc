@@ -28,17 +28,7 @@ export async function startSharedDatasetBrowser(input: { relayUrl: string; excha
   if (!existsSync(join(viewerAssetsDir, "index.html"))) {
     throw new Error(`Missing share-web viewer build at ${viewerAssetsDir}. Run pnpm --filter @dohc/share-web build (or pnpm qa:prepare) before desktop e2e tests.`);
   }
-  const certificateScript = `$rsa=[System.Security.Cryptography.RSA]::Create(2048)
-$req=[System.Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=dohc-dataset-test',$rsa,[System.Security.Cryptography.HashAlgorithmName]::SHA256,[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
-$san=[System.Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
-$san.AddDnsName('viewer.example.com');$san.AddDnsName('*.example.net')
-$req.CertificateExtensions.Add($san.Build())
-$cert=$req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddMinutes(-5),[DateTimeOffset]::UtcNow.AddHours(1))
-[Convert]::ToBase64String($cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx,''))
-[Convert]::ToBase64String($cert.RawData)
-$cert.Dispose();$rsa.Dispose()`;
-  const [pfxText, certText] = execFileSync("pwsh.exe", ["-NoProfile", "-NonInteractive", "-Command", certificateScript], { encoding: "utf8", windowsHide: true }).trim().split(/\r?\n/);
-  const cert = new X509Certificate(Buffer.from(certText!, "base64"));
+  const { tls, cert } = testCertificate();
   const spki = createHash("sha256").update(cert.publicKey.export({ type: "spki", format: "der" })).digest("base64");
   const failures: string[] = [];
   const application = createShareWebApplication({ relayUrl: input.relayUrl, publicRelayUrl: input.relayUrl,
@@ -46,7 +36,7 @@ $cert.Dispose();$rsa.Dispose()`;
     viewerAssetsDir,
     appLaunch: { viewerOrigin: sharedDatasetViewerOrigin, appDomain: "example.net" },
     ...(input.editLinks ? editLinkOptions : {}) });
-  const server = https.createServer({ pfx: Buffer.from(pfxText!, "base64"), passphrase: "" }, async (request, response) => {
+  const server = https.createServer(tls, async (request, response) => {
     try {
       const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
       const headers = new Headers();
@@ -66,4 +56,29 @@ $cert.Dispose();$rsa.Dispose()`;
       `--host-resolver-rules=MAP viewer.example.com 127.0.0.1:${address.port},MAP *.example.net 127.0.0.1:${address.port}`, "--no-proxy-server"] });
     return { browser, failures, handle: application.handle, async close() { try { await browser.close(); } finally { await closeServer(); } } };
   } catch (error) { await closeServer(); throw error; }
+}
+
+/** A certificate for the viewer and app hosts. Windows makes it with PowerShell, other hosts with OpenSSL. */
+function testCertificate(): { tls: https.ServerOptions; cert: X509Certificate } {
+  if (process.platform !== "win32") {
+    const config = "[req]\ndistinguished_name=dn\nx509_extensions=leaf\nprompt=no\n[dn]\nCN=dohc-dataset-test\n" +
+      "[leaf]\nsubjectAltName=DNS:viewer.example.com,DNS:*.example.net\n";
+    const pem = execFileSync("/usr/bin/openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+      "-config", "/dev/stdin", "-keyout", "/dev/stdout", "-out", "/dev/stdout"], { input: config, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
+    const key = /-----BEGIN PRIVATE KEY-----[\s\S]+?-----END PRIVATE KEY-----/u.exec(pem)?.[0];
+    const certPem = /-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/u.exec(pem)?.[0];
+    if (!key || !certPem) throw new Error("OpenSSL did not print a key and certificate.");
+    return { tls: { key, cert: certPem }, cert: new X509Certificate(certPem) };
+  }
+  const certificateScript = `$rsa=[System.Security.Cryptography.RSA]::Create(2048)
+$req=[System.Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=dohc-dataset-test',$rsa,[System.Security.Cryptography.HashAlgorithmName]::SHA256,[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+$san=[System.Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
+$san.AddDnsName('viewer.example.com');$san.AddDnsName('*.example.net')
+$req.CertificateExtensions.Add($san.Build())
+$cert=$req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddMinutes(-5),[DateTimeOffset]::UtcNow.AddHours(1))
+[Convert]::ToBase64String($cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx,''))
+[Convert]::ToBase64String($cert.RawData)
+$cert.Dispose();$rsa.Dispose()`;
+  const [pfxText, certText] = execFileSync("pwsh.exe", ["-NoProfile", "-NonInteractive", "-Command", certificateScript], { encoding: "utf8", windowsHide: true }).trim().split(/\r?\n/);
+  return { tls: { pfx: Buffer.from(pfxText!, "base64"), passphrase: "" }, cert: new X509Certificate(Buffer.from(certText!, "base64")) };
 }

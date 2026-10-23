@@ -152,11 +152,11 @@ export function createReceivedShareAcquisition(dependencies: {
       return { inventory: saved?.inventory ?? null, checkedAtMs: saved?.listedAtMs ?? null,
         freshness: saved ? "stale" : "unknown" };
     },
-    refresh(): Promise<void> {
+    refresh(): Promise<import("@dohc/workspace-contracts/access").AccessRefreshResult["status"]> {
       const scope = dependencies.scope();
-      if (!scope) return Promise.resolve();
-      if (pending && same(scope, pending.scope)) return pending.promise;
-      if (attempt && same(scope, attempt.scope) && nowMs() - attempt.atMs < 60_000) return Promise.resolve();
+      if (!scope) return Promise.resolve("unavailable");
+      if (pending && same(scope, pending.scope)) return pending.promise.then(() => "joined");
+      if (attempt && same(scope, attempt.scope) && nowMs() - attempt.atMs < 60_000) return Promise.resolve("paced");
       attempt = { scope, atMs: nowMs() };
       const checkedAtMs = wallNowMs();
       const capturedInvalidation = invalidation;
@@ -183,7 +183,7 @@ export function createReceivedShareAcquisition(dependencies: {
         }
       })();
       pending = { scope, token, promise };
-      return promise;
+      return promise.then(() => "requested");
     },
   };
 }

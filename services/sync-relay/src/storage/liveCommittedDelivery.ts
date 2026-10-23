@@ -126,6 +126,7 @@ export interface RestoreOwnerOriginCapture {
   assertCurrent(): void;
 }
 export interface RestoreHistoryCapture<Target extends "selected" | "accepted"> {
+  artifact(digest: string): Uint8Array | undefined;
   readonly target: Target;
   readonly binding: LiveObjectBinding;
   readonly checkpoint: {cursor: number; bytes: Uint8Array; digest: string};
@@ -1332,7 +1333,25 @@ export class LiveCommittedDeliveryStore {
       integrity((history.proof.terminal?.updateDigest ?? authority.baselineDigest) === point.receiptDigest);
       return {operation, binding, historyInput, ...history, point};
     });
+    const chargedArtifacts = new Set<string>();
     const capture: RestoreHistoryCapture<Target> = Object.freeze({target, binding: structuredClone(saved.binding), checkpoint: saved.checkpoint,
+      artifact: (digest: string) => this.#storage.readTx(() => {
+        capture.assertCurrent();
+        parseLiveUpdateDigest(digest);
+        const row = this.#storage.db.prepare(`SELECT b.sha256,b.byte_length,length(b.content) AS actual FROM sync_relay_object_moments m
+          JOIN sync_relay_blobs b ON b.workspace_id=m.workspace_id AND b.sha256=m.blob_sha256
+          WHERE m.workspace_id=? AND m.version_id=? AND m.object_id=? AND m.path=? AND m.content_kind='text' AND m.blob_sha256=?
+          AND b.byte_length<=2097152 ORDER BY m.relay_seq LIMIT 1`)
+          .get(saved.binding.workspaceId,saved.binding.mainVersionId,saved.binding.objectId,saved.binding.currentPath,digest);
+        if (!row) return undefined;
+        integrity(row.byte_length===row.actual);
+        if (!chargedArtifacts.has(digest)) {budget.chargeBytes(authorityInteger(row.actual)); chargedArtifacts.add(digest);}
+        const blob = this.#storage.db.prepare("SELECT content FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?")
+          .get(saved.binding.workspaceId,digest);
+        integrity(blob?.content instanceof Uint8Array && blob.content.length===row.byte_length &&
+          createHash("sha256").update(blob.content).digest("hex")===digest);
+        return new Uint8Array(blob.content);
+      }),
       events: saved.events, proof: saved.proof, point: saved.point,
       nativeReceipt: structuredClone(saved.operation.nativeReceipt!), assertCurrent: () => {
         this.#storage.captureStanding();

@@ -2,13 +2,14 @@ import { shortcutKeys } from "../../shortcuts/shortcutRegistry";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
 import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
-import { AlertTriangle, Bot, CheckCircle2, Globe2, MessageSquare, MoreHorizontal, SearchX } from "lucide-react";
+import { AlertTriangle, Bot, CheckCircle2, Diff, Globe2, Merge, MessageSquare, MoreHorizontal, Plus, SearchX } from "lucide-react";
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import type {
   ActorPresentation,
   ChannelThreadRecord,
   ChatChannelRecord,
+  ChatFileMentionRecord,
   ChatMessageRecord,
   ChatThreadRecord,
   CloudStatusResult,
@@ -38,6 +39,7 @@ import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
 import { OverlayFrame } from "../Overlay";
 import { CollectionUnavailable } from "../TransactionalCollectionPage";
 import { CloudSyncSettings, ProtectedFilesRow, type CloudSettings } from "../settings/CloudSyncSettings";
+import { KeyboardSettings } from "../settings/KeyboardSettings";
 import { ColorControl, HueControl, SettingRow, StepperControl, SwitchControl, TextControl, ThemeControl } from "../settings/SettingRow";
 import { PreferredNameControl } from "../settings/PreferredNameControl";
 import { SettingsNav } from "../settings/SettingsNav";
@@ -49,6 +51,7 @@ import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, RetryRow, Se
 import { ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
 import { MENU_FRAME, MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { MoreMenu } from "../ui/MoreMenu";
+import { Ref } from "../ui/Ref";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { SAVE_STATE, StateMark, type SaveStateKey } from "../ui/StateMark";
@@ -56,6 +59,7 @@ import { FolderChip, Step } from "../ui/Step";
 import { Titlebar } from "../Titlebar";
 import { ActivityBar } from "../workbench/ActivityBar";
 import { AgentBadge } from "../workbench/AgentBadge";
+import { AgentColorContext, AgentColorSwatches } from "../workbench/AgentColorPicker";
 import { AppRows } from "../workbench/AppsView";
 import { chatTabPath, collectionTabPath, HISTORY_TAB_PATH, siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
 import { AutomationBadge } from "../workbench/AutomationBadge";
@@ -80,15 +84,21 @@ import {
   AboutChatRow,
   AboutHeader,
   AboutHistoryView,
+  AboutLinksView,
   AboutSection,
   type AccessReason,
   type AccessSetup,
   type AccessView,
+  type ChatLinksView,
+  type LinksView,
 } from "../workbench/About";
 import type { AboutConversation } from "../workbench/aboutConversation";
+import { AboutConversationLinksView, type ConversationLinksView, type MentionedFile } from "../workbench/AboutConversationPanel";
 import type { PresencePeer } from "../collab/presenceChannel";
 import { SharingPanel, type ShareMount, type SharingActions, type SkipView } from "../workbench/SharingView";
 import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "../shell/useCaptureRecoveryNotices";
+import { DismissConfirm, RecoveryList } from "../RecoveryList";
+import type { OrphanedDraftRow } from "../orphanedDrafts";
 import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
 import { closeStatesPage } from "./statesRoute";
 
@@ -115,6 +125,8 @@ import { closeStatesPage } from "./statesRoute";
 const SAMPLE_ADA: ActorPresentation = { group: "states-ada", hue: "teal", self: false };
 const SAM_PALETTE_SLOT = 1;
 const SAMPLE_SAM: ActorPresentation = { ...relayPresentation(SAM_PALETTE_SLOT), group: "states-sam" };
+const SAMPLE_NOVA: ActorPresentation = { group: "states-nova", hue: null, self: false };
+const SAMPLE_ORBIT: ActorPresentation = { group: "states-orbit", hue: "plum", self: false };
 
 const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
 
@@ -583,6 +595,12 @@ function recoveryNotice(id: string, shared: boolean) {
     onDismiss: noop,
   };
 }
+// Set-aside edits with their workspace's name: one that survives a restart,
+// and one that lives only in this window.
+const SET_ASIDE_ROWS: OrphanedDraftRow[] = [
+  { workspaceId: "states", workspaceLabel: "Trip planning", path: RECOVERY_PATH, persisted: true, draft: { id: 1, text: "# Plan\n", capturedAtMs: 0 } },
+  { workspaceId: "states", workspaceLabel: "Trip planning", path: "trip/.env", persisted: false, draft: { id: 2, text: "KEY=1\n", capturedAtMs: 0 } },
+];
 const RECOVERY_MOMENT: EngineMomentRecord = {
   id: "moment-capture-recovery",
   versionId: "main",
@@ -629,6 +647,28 @@ const TIMELINE_MIXED: TimelineEntry[] = [
   timelineVersion("main", "main", "Main", new Date(2026, 6, 7, 18, 0).getTime()),
   timelineChange(TIMELINE_GUESTS, "Guests", 1, null, null),
 ];
+// One afternoon in History, one line per change: Nova's three edits to one
+// file fold into one row, a person's edit shows their face, and the machine's
+// show their origin. Local times, as above.
+const storyAt = (hour: number, minute: number) => new Date(2026, 6, 8, hour, minute).getTime();
+function storyMoment(id: string, recordedAtMs: number, fields: Partial<EngineMomentRecord> = {}): EngineMomentRecord {
+  return { id, versionId: "main", path: "notes/product-plan.md", recordedAtMs, operation: "write", origin: "ydoc", momentOrder: 0, ...fields };
+}
+const novaEdit = (id: string, recordedAtMs: number) => storyMoment(id, recordedAtMs, {
+  agentAuthorName: "Nova", authors: [{ kind: "agent", agentId: "nova", agentRunId: "run-nova", onBehalfOf: "ice" }],
+  authorPresentations: [{ group: "states-nova", hue: null, self: false }],
+});
+const STORY_RUN = [novaEdit("story-nova-3", storyAt(14, 51)), novaEdit("story-nova-2", storyAt(14, 47)), novaEdit("story-nova-1", storyAt(14, 44))];
+const TIMELINE_STORY: TimelineEntry[] = [
+  ...STORY_RUN,
+  storyMoment("story-sam", storyAt(14, 40), { path: "research/competitors.md", origin: "sync", namedAuthor: { userId: "sam", label: "Sam Rivera" },
+    authors: [{ kind: "named", userId: "sam", grantId: "grant-sam", grantGeneration: 1 }], authorPresentations: [SAMPLE_SAM] }),
+  storyMoment("story-local", storyAt(14, 31), { path: "data/funnel.csv", origin: "local-file" }),
+  storyMoment("story-restore", storyAt(14, 12), { origin: "restore", summary: "Restored notes/product-plan.md" }),
+  storyMoment("story-env", storyAt(13, 20), { path: ".env", origin: "local-file", protected: true }),
+  storyMoment("story-unknown", storyAt(12, 58), { origin: "unknown" }),
+].map((moment) => ({ kind: "file", moment }));
+
 // Budget's definition labels its operation; Guests' is not loaded here.
 const TIMELINE_COLLECTIONS = new Map([
   [TIMELINE_BUDGET, { name: "Budget", operationLabels: new Map([["addGuest", "Add guest"]]), openHistory: noop }],
@@ -711,6 +751,21 @@ const ABOUT_CHAT_ACCESS: AccessAnswer = {
       selector: { kind: "chat", channelWireId: "wire-general" }, access: "read-only" }),
   ],
 };
+// The files #general mentions: the funnel by Nova, the landscape by Sam, and
+// the plan by both.
+const mentionedBy = (displayName: string, presentation: ActorPresentation, kind: "human" | "agent" = "human") =>
+  ({ kind, displayName, presentation });
+const ABOUT_MENTIONED: MentionedFile[] = [
+  { objectId: "states-funnel", path: "data/funnel.csv", authors: [mentionedBy("Nova", SAMPLE_NOVA, "agent")] },
+  { objectId: "states-competitors", path: "research/competitors.md", authors: [mentionedBy("Sam Rivera", SAMPLE_SAM)] },
+  { objectId: "states-plan", path: ABOUT_PATH, authors: [mentionedBy("Sam Rivera", SAMPLE_SAM), mentionedBy("Nova", SAMPLE_NOVA, "agent")] },
+];
+const ABOUT_MENTIONS: Extract<ConversationLinksView, { status: "ready" }> = {
+  status: "ready", files: ABOUT_MENTIONED, more: false, building: false, partial: false,
+};
+function ConversationLinks(props: { view: ConversationLinksView }) {
+  return <AboutConversationLinksView view={props.view} expanded onToggle={noop} onOpenFile={noop} onMore={noop} onRetry={noop} />;
+}
 
 // A group's feed and a thread, from the drawing's #general.
 const CHAT_AT = new Date(2026, 6, 8, 14, 43).getTime();
@@ -852,6 +907,15 @@ const CHAT_RUN: ChatMessageRecord[] = [
   { id: "run-2", threadId: "about-chat", ...SAM, body: "Can we cut the last paragraph?", createdAtMs: CHAT_RUN_AT + 2 * 60_000 },
 ];
 
+// A person, an agent in the default olive, and an agent with a chosen color.
+const AGENT_COLOR_CHAT: ChatMessageRecord[] = [
+  { id: "color-sam", threadId: "about-chat", ...SAM, body: "Can you two check the funnel numbers?", createdAtMs: CHAT_RUN_AT },
+  { id: "color-nova", threadId: "about-chat", authorKind: "agent", authorDisplayName: "Nova", presentation: SAMPLE_NOVA,
+    body: "The signups match last week.", createdAtMs: CHAT_RUN_AT + 60_000 },
+  { id: "color-orbit", threadId: "about-chat", authorKind: "agent", authorDisplayName: "Orbit", presentation: SAMPLE_ORBIT,
+    body: "Checkout dropped 4%.", createdAtMs: CHAT_RUN_AT + 2 * 60_000 },
+];
+
 // Its second message hovered, so "12:45" shows in the avatar's column.
 function ChatRunSpecimen() {
   return (
@@ -862,6 +926,43 @@ function ChatRunSpecimen() {
         </div>
       </AboutPanelSpecimen>
     </div>
+  );
+}
+
+// The drawing's document, linked from the meeting notes twice and from the
+// research, and named in #general.
+const aboutLink = (source: string, title: string, line: number, snippet: string, ordinal = 0) => {
+  const start = snippet.indexOf("[[");
+  const end = snippet.indexOf("]]") + 2;
+  return { source, title, ordinal, span: [start, end] as [number, number], line, snippet, highlightStart: start, highlightEnd: end };
+};
+const ABOUT_LINK_ROWS = [
+  aboutLink("notes/meeting-2026-07-08.md", "Meeting 2026-07-08", 4, "Agreed to ship the beta from [[product-plan]] on Friday."),
+  aboutLink("notes/meeting-2026-07-08.md", "Meeting 2026-07-08", 12, "Sam owns the pricing section of [[product-plan]].", 1),
+  aboutLink("research/competitors.md", "Competitor landscape", 7,
+    "Their launch list is shorter than the one in [[product-plan]], and their pricing has three tiers."),
+];
+const ABOUT_LINKS: Extract<LinksView, { status: "ready" }> = { status: "ready", rows: ABOUT_LINK_ROWS, next: "states-next", gathering: 0 };
+const ABOUT_CHAT_LINK: ChatFileMentionRecord = {
+  attachment: {
+    attachmentId: "states-attachment", threadId: "states-thread", messageId: "states-message", targetKind: "file",
+    objectId: "states-plan", pathHint: ABOUT_PATH, createdAtMs: new Date(2026, 6, 8, 9, 12).getTime(),
+  },
+  message: {
+    id: "states-message", authorDisplayName: "Sam Rivera", createdAtMs: new Date(2026, 6, 8, 9, 12).getTime(),
+    preview: "Can we get the launch checklist into shape before Friday? It's in product-plan.md.",
+  },
+  thread: { id: "states-thread", title: "Launch checklist", createdAtMs: CHAT_AT, updatedAtMs: CHAT_AT },
+  channelKind: "channel", channelName: "general",
+};
+const ABOUT_CHAT_LINKS: Extract<ChatLinksView, { status: "ready" }> = { status: "ready", rows: [ABOUT_CHAT_LINK], next: null, gathering: 0 };
+
+function LinksSpecimen(props: { links: LinksView | null; chats?: ChatLinksView | null }) {
+  return (
+    <AboutPanelSpecimen>
+      <AboutLinksView links={props.links} chats={props.chats ?? null} expanded onToggle={noop} onOpenLink={noop}
+        onOpenChat={noop} onMoreLinks={noop} onMoreChats={noop} onRetryLinks={noop} onRetryChats={noop} />
+    </AboutPanelSpecimen>
   );
 }
 
@@ -1000,7 +1101,7 @@ function DialogSpecimen(props: { theme: "light" | "dark" }) {
           confirmTestId={`states-dialog-confirm-${props.theme}`}
         >
           <p className="m-0 mt-2 text-[13px] text-muted">
-            They move to the system trash, or this workspace's .dohc/trash if that fails, and you can
+            They move to the system trash, or this workspace's .dohc/local/trash if that fails, and you can
             restore them.
           </p>
         </ConfirmDialogCard>
@@ -1084,8 +1185,9 @@ const versionRows: MenuEntry[] = [
 const radioMenuItems: MenuEntry[] = [
   ...versionRows,
   { id: "try", label: "Try in a version…", icon: <Bot size={14} aria-hidden />, onSelect: noop },
-  { id: "compare", label: "Compare with Main", onSelect: noop },
-  { id: "merge", label: "Merge into Main…", disabled: true, onSelect: noop },
+  { id: "new", label: "New version…", icon: <Plus size={14} aria-hidden />, onSelect: noop },
+  { id: "compare", label: "Compare with Main", icon: <Diff size={14} aria-hidden />, onSelect: noop },
+  { id: "merge", label: "Merge into Main…", icon: <Merge size={14} aria-hidden />, disabled: true, onSelect: noop },
 ];
 const fieldMenuItems: MenuEntry[] = [
   ...versionRows,
@@ -1097,7 +1199,6 @@ const fieldMenuItems: MenuEntry[] = [
       onChange: noop,
       onSubmit: noop,
       onCancel: noop,
-      hint: "Press Enter to create and start working in it.",
     },
   },
 ];
@@ -1376,6 +1477,11 @@ function Pane(props: { theme: "light" | "dark" }) {
             <ChatAvatar presentation={neutralPresentation} key={size} name="Agent" kind="agent" size={size} />
           ))}
         </Specimen>
+        <Specimen label="coloured agent: post, row, comment, strip">
+          {avatarSizes.map((size) => (
+            <ChatAvatar presentation={SAMPLE_ORBIT} key={size} name="Orbit" kind="agent" size={size} />
+          ))}
+        </Specimen>
         <Specimen label="automation: post, row, comment, strip">
           {avatarSizes.map((size) => (
             <ChatAvatar presentation={neutralPresentation} key={size} name="Nightly digest" kind="automation" size={size} />
@@ -1431,11 +1537,14 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="hue-control" title="Hue control">
-        <Specimen label="person, olive chosen">
-          <HueControl label="Your color" value="olive" shape="person" onChange={noop} />
+        <Specimen label="person, rose chosen">
+          <HueControl label="Your color" value="rose" shape="person" onChange={noop} />
         </Specimen>
-        <Specimen label="agent, none chosen">
+        <Specimen label="agent, Default chosen">
           <HueControl label="Your agent's color" value={null} shape="agent" onChange={noop} />
+        </Specimen>
+        <Specimen label="agent, teal chosen">
+          <HueControl label="Your agent's color" value="teal" shape="agent" onChange={noop} />
         </Specimen>
       </Section>
 
@@ -1596,7 +1705,7 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="menu-field" title="Menu with a name field">
-        <Specimen label="field: focus, hint">
+        <Specimen label="field: focus, Enter at its end">
           <div className="flex h-52 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
             <MenuSpecimen label="Versions" items={fieldMenuItems} width={240} testId={`states-menu-field-${theme}`} />
           </div>
@@ -1715,6 +1824,21 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="history-timeline" title="History timeline">
+        <Specimen label="one line per change: an agent's folded edits, holding the open one; a person; origins; a protected file">
+          <div className="flex h-[300px] w-[240px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={TIMELINE_STORY} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
+              openMomentId="story-nova-2" onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="the agent's run, listed: its earlier edit open; count hovered">
+          <ul className="m-0 w-[240px] list-none rounded-lg border border-line bg-panel p-1">
+            <li data-force-state="hover" data-force-target="[data-testid=engine-moment-run-toggle]">
+              <MomentRow moment={STORY_RUN[0]!} fold={{ count: 3, expanded: true, onToggle: noop }} onOpenMoment={noop} />
+              <MomentRow moment={STORY_RUN[1]!} nested="run" selected onOpenMoment={noop} />
+              <MomentRow moment={STORY_RUN[2]!} nested="run" onOpenMoment={noop} />
+            </li>
+          </ul>
+        </Specimen>
         <Specimen label="files, versions and Collections, with day headings">
           <div className="flex h-[500px] w-[300px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
             <EngineHistoryView entries={TIMELINE_MIXED} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
@@ -1898,7 +2022,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         ))}
       </Section>
 
-      <Section part="capture-recovery" title="Typing kept in History">
+      <Section part="capture-recovery" title="Text kept in History">
         <Specimen label="toast">
           <div className={SHADOW_ROOM}>
             <WorkspaceErrorToast error={RECOVERY_TOAST} onAction={noop} onHide={noop} />
@@ -1913,11 +2037,28 @@ function Pane(props: { theme: "light" | "dark" }) {
           </div>
         </Specimen>
         <Specimen label="History at its default width: the recovery change">
-          <ul className="m-0 w-[240px] list-none rounded-lg border border-line bg-panel p-0">
-            <li className="border-b border-line last:border-b-0">
+          <ul className="m-0 w-[240px] list-none rounded-lg border border-line bg-panel p-1">
+            <li>
               <MomentRow moment={RECOVERY_MOMENT} onOpenMoment={noop} />
             </li>
           </ul>
+        </Specimen>
+      </Section>
+
+      <Section part="recovery-row" title="Set-aside edits">
+        <Specimen label="rows with their workspace: kept across a restart; only in this window">
+          <div className="w-[440px] rounded-lg border border-line bg-panel px-3">
+            <RecoveryList rows={SET_ASIDE_ROWS} showWorkspace />
+          </div>
+        </Specimen>
+        <Specimen label="Dismiss asks first, at the row's height">
+          <div className="flex w-[440px] items-center justify-between gap-2 rounded-lg border border-line bg-panel px-3 py-1.5 text-[11px]">
+            <span className="min-w-0 flex-1 truncate font-mono text-muted">{SET_ASIDE_ROWS[0]!.path}</span>
+            <div className="flex shrink-0 items-center gap-2">
+              <CopyButton testId={`states-recovery-copy-${theme}`} getText={() => null} />
+              <DismissConfirm dismissing={false} onDismiss={noop} onKeep={noop} />
+            </div>
+          </div>
         </Specimen>
       </Section>
 
@@ -1988,6 +2129,31 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       {/* Its rows' menus rest; the menu part draws an open one. */}
+      <Section part="about-links" title="About: Links">
+        <Specimen label="files that link here, a chat that does, and more to read">
+          <LinksSpecimen links={ABOUT_LINKS} chats={ABOUT_CHAT_LINKS} />
+        </Specimen>
+        <Specimen label="a link hovered, and keyboard focus on a chat's link">
+          <div data-force-state="hover" data-force-target='[data-line="12"]'>
+            <div data-force-state="focus focus-visible" data-force-target='[data-testid="chat-file-mention"]'>
+              <LinksSpecimen links={{ ...ABOUT_LINKS, next: null }} chats={ABOUT_CHAT_LINKS} />
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="gathering while the workspace's link index builds">
+          <LinksSpecimen links={{ ...ABOUT_LINKS, rows: ABOUT_LINK_ROWS.slice(0, 1), next: null, gathering: 1 }} />
+        </Specimen>
+        <Specimen label="nothing links here yet">
+          <LinksSpecimen links={{ ...ABOUT_LINKS, rows: [], next: null }} chats={{ ...ABOUT_CHAT_LINKS, rows: [] }} />
+        </Specimen>
+        <Specimen label="failed reads: words in Notices">
+          <LinksSpecimen links={{ status: "failed" }} />
+        </Specimen>
+        <Specimen label="a file shared with you">
+          <LinksSpecimen links={null} />
+        </Specimen>
+      </Section>
+
       <Section part="sharing" title="Sharing" menusAtRest>
         <Specimen label="both lists, a conflict, and changes waiting">
           <SharingSpecimen granted={ready(SHARING_GRANTED)} received={ready(SHARING_RECEIVED)} conflictCount={2} />
@@ -2206,6 +2372,34 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
+      {/* The page at Settings' content width, whatever this host's keys. */}
+      <Section part="settings-keyboard" title="Settings: Keyboard">
+        <Specimen label="Windows keys">
+          <div className="w-[640px]">
+            <KeyboardSettings platform="win32" devTools={false} />
+          </div>
+        </Specimen>
+        <Specimen label="macOS keys, with dev tools">
+          <div className="w-[640px]">
+            <KeyboardSettings platform="darwin" devTools />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* Privacy's rows in the narrowest pane, an 840px window's, and the widest. */}
+      <Section part="settings-privacy" title="Settings: Privacy">
+        <Specimen label="narrowest pane: Diagnostics' buttons under its text; usage reports changed, keyboard focus on its switch">
+          <div className="w-[504px]" data-force-state="focus focus-visible" data-force-target='[role="switch"][aria-label="Send usage reports"]'>
+            <PrivacyRowsSpecimen />
+          </div>
+        </Specimen>
+        <Specimen label="widest pane: every control beside its text">
+          <div className="w-[640px]">
+            <PrivacyRowsSpecimen />
+          </div>
+        </Specimen>
+      </Section>
+
       <Section part="rails" title="Rails">
         <Specimen label="activity bar: Chats beside Files, selected; Search hovered; Graph focused">
           <div className="flex h-[400px] overflow-hidden rounded-lg border border-line">
@@ -2269,9 +2463,10 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="about-conversation" title="About a conversation">
-        <Specimen label="a Group: who is here, and its access checked">
+        <Specimen label="a Group: who is here, the files it mentions, and its access checked">
           <AboutPanelSpecimen>
             <AboutHeader subject={ABOUT_GROUP} />
+            <ConversationLinks view={ABOUT_MENTIONS} />
             <AboutAccessView view={{ status: "ready", answer: ABOUT_CHAT_ACCESS }} expanded onToggle={noop} onRetry={noop}
               onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
           </AboutPanelSpecimen>
@@ -2279,13 +2474,15 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="a person, with Access closed">
           <AboutPanelSpecimen>
             <AboutHeader subject={{ ...ABOUT_GROUP, kind: "person", name: "Sam Rivera", present: ABOUT_PRESENT.slice(0, 1) }} />
+            <ConversationLinks view={{ ...ABOUT_MENTIONS, files: ABOUT_MENTIONED.slice(1, 2) }} />
             <AboutAccessView view={{ status: "loading" }} expanded={false} onToggle={noop} onRetry={noop} onMore={noop}
               setup={ACCESS_UNEXPLAINED} noun="chat" />
           </AboutPanelSpecimen>
         </Specimen>
-        <Specimen label="an agent, alone: no share includes it">
+        <Specimen label="an agent, alone: no file mentioned and no share includes it">
           <AboutPanelSpecimen>
             <AboutHeader subject={{ ...ABOUT_GROUP, kind: "agent", name: "Nova", present: [] }} />
+            <ConversationLinks view={{ ...ABOUT_MENTIONS, files: [] }} />
             <AboutAccessView view={{ status: "ready", answer: { ...ABOUT_CHAT_ACCESS, rows: [] } }} expanded onToggle={noop}
               onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
           </AboutPanelSpecimen>
@@ -2296,6 +2493,35 @@ function Pane(props: { theme: "light" | "dark" }) {
               onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
             <AboutAccessView view={{ status: "ready", answer: { ...ABOUT_ACCESS_UNKNOWN, visibility: "missing", unknownReason: null } }} expanded
               onToggle={noop} onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
+          </AboutPanelSpecimen>
+        </Specimen>
+      </Section>
+
+      <Section part="about-conversation-links" title="About a conversation: Links">
+        <Specimen label="a file hovered, keyboard focus on another, and more to read">
+          <div data-force-state="hover" data-force-target='[data-path="data/funnel.csv"]'>
+            <div data-force-state="focus focus-visible" data-force-target={`[data-path="${ABOUT_PATH}"]`}>
+              <AboutPanelSpecimen>
+                <ConversationLinks view={{ ...ABOUT_MENTIONS, more: true }} />
+              </AboutPanelSpecimen>
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="gathering while the conversation's link index builds">
+          <AboutPanelSpecimen>
+            <ConversationLinks view={{ ...ABOUT_MENTIONS, files: ABOUT_MENTIONED.slice(0, 1), building: true, partial: true }} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="a list that may be missing files">
+          <AboutPanelSpecimen>
+            <ConversationLinks view={{ ...ABOUT_MENTIONS, files: ABOUT_MENTIONED.slice(0, 2), partial: true }} />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="loading, a failed read with its words in Notices, then a conversation dohc does not list">
+          <AboutPanelSpecimen>
+            <ConversationLinks view={{ status: "loading" }} />
+            <ConversationLinks view={{ status: "failed" }} />
+            <ConversationLinks view={{ status: "unlisted" }} />
           </AboutPanelSpecimen>
         </Specimen>
       </Section>
@@ -2376,6 +2602,27 @@ function Pane(props: { theme: "light" | "dark" }) {
             <AgentOfferComposer state="paused" surface="stream" id={`states-agent-stream-narrow-${theme}`} width="w-[300px]" />
             <AgentOfferComposer state="no-command" surface="stream" id={`states-agent-stream-narrow-setup-${theme}`} width="w-[300px]" />
           </div>
+        </Specimen>
+      </Section>
+
+      {/* A workspace CSV past the preview's cap: the count, then Import to
+          SQLite, which runs the tab row's import and is busy as it is. */}
+      <Section part="csv-bound" title="CSV offer">
+        <Specimen label="at rest">
+          <CsvPreviewBound rowCount={1240} onImport={noop} />
+        </Specimen>
+        <Specimen label="hovered">
+          <div data-force-state="hover" data-force-target="button">
+            <CsvPreviewBound rowCount={1240} onImport={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="keyboard focus">
+          <div data-force-state="focus-visible" data-force-target="button">
+            <CsvPreviewBound rowCount={1240} onImport={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="busy: the import running">
+          <CsvPreviewBound rowCount={1240} onImport={noop} importing />
         </Specimen>
       </Section>
 
@@ -2736,10 +2983,60 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. */}
+      {/* Last, so the parts above keep their places. A new part goes after. */}
       <Section part="chat-messages" title="Chat messages">
         <Specimen label="a file's chats in About: a run, its second message hovered at 12:45 PM">
           <ChatRunSpecimen />
+        </Specimen>
+      </Section>
+
+      <Section part="ref" title="Reference">
+        <Specimen label="rest, hover, keyboard focus, selected, missing">
+          <Ref path="data/funnel.csv" onOpen={noop} />
+          <span data-force-state="hover" data-force-target="button"><Ref path="data/funnel.csv" onOpen={noop} /></span>
+          <span data-force-state="focus-visible" data-force-target="button"><Ref path="data/funnel.csv" onOpen={noop} /></span>
+          <Ref path="data/funnel.csv" selected onOpen={noop} />
+          <Ref path="research/competitors.md" missing onOpen={noop} />
+        </Specimen>
+        <Specimen label="a title, with and without its folder; a heading">
+          <Ref path="research/competitors.md" title="Competitor landscape" />
+          <Ref path="research/competitors.md" title="Competitor landscape" folder />
+          <Ref path="research/competitors.md" heading="pricing" />
+        </Specimen>
+        <Specimen label="a long name in a narrow row" className="w-56">
+          <Ref path={STRIP_LONG} folder />
+        </Specimen>
+        <Specimen label="in a sentence">
+          <p className="m-0 w-[420px] text-[14px] leading-[22px] text-ink">
+            Numbers are in <Ref path="data/funnel.csv" onOpen={noop} /> and the flow is sketched in{" "}
+            <Ref path="sketches/flow.excalidraw" onOpen={noop} />.
+          </p>
+        </Specimen>
+        <Specimen label="kind">
+          <div className="flex w-[420px] flex-wrap gap-1.5">
+            {KINDS.map((kind) => (
+              <Ref key={kind.displayKind} path={KIND_SAMPLES[kind.displayKind]} kind={kind} />
+            ))}
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="agent-color" title="Agent color">
+        <Specimen label="a person and two agents, Default and plum; keyboard focus on the plum agent's avatar">
+          <div data-force-state="focus-visible" data-force-target='[data-message-id="color-orbit"] [data-testid="agent-color-trigger"]'>
+            <AgentColorContext.Provider value={noop}>
+              <AboutPanelSpecimen>
+                <div className="flex h-[220px] flex-col">
+                  <ChatMessageList testIdPrefix={`states-agent-color-${theme}`} messages={AGENT_COLOR_CHAT} loading={false} emptyLabel="No messages yet." />
+                </div>
+              </AboutPanelSpecimen>
+            </AgentColorContext.Provider>
+          </div>
+        </Specimen>
+        <Specimen label="open, plum chosen, keyboard focus on Default">
+          <div className={`w-fit ${SHADOW_ROOM}`} data-force-state="focus-visible" data-force-target='[aria-label="Default"]'>
+            <AgentColorSwatches label="Color for Orbit" value="plum" onChange={noop} />
+          </div>
         </Specimen>
       </Section>
     </section>
@@ -2889,6 +3186,43 @@ function ZoomSpecimen(props: { percent: number; atMost?: boolean }) {
       reset={{ label: "Reset to 100%", to: "100%", keys: shortcutKeys("zoom-reset", "win32"), onClick: noop }}
       increase={{ label: "Zoom in", keys: shortcutKeys("zoom-in", "win32"), disabled: props.atMost, onClick: noop }}
     />
+  );
+}
+
+const TRUST_OPTIONS = [
+  { value: "trusted", label: "Trusted" },
+  { value: "restricted", label: "Restricted Mode" },
+];
+const DIAGNOSTICS_BUTTON =
+  "rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink";
+
+// Privacy's rows as Settings draws them: a segmented control, two switches,
+// and Diagnostics' three buttons, the widest controls in Settings.
+function PrivacyRowsSpecimen() {
+  return (
+    <>
+      <SettingRow title="Workspace trust" description="A trusted workspace runs its apps' dev and build commands, and starts agents, on this computer.">
+        <div className="shrink-0 whitespace-nowrap">
+          <SegmentedControl label="Workspace trust" value="trusted" options={TRUST_OPTIONS} onChange={noop} />
+        </div>
+      </SettingRow>
+      <SettingRow
+        title="Send usage reports"
+        description="Counts when you open dohc, create or open a workspace, share, publish an app, or send a chat message. Includes a random ID for this installation. No names, content, or links."
+        modified
+        onReset={noop}
+      >
+        <SwitchControl label="Send usage reports" checked={false} onChange={noop} />
+      </SettingRow>
+      <SettingRow title="Send error reports" description="Sends an error's type and where in dohc's code it happened. No messages, file names, or other paths.">
+        <SwitchControl label="Send error reports" checked onChange={noop} />
+      </SettingRow>
+      <SettingRow title="Diagnostics" description="Version, system, report settings, and recent problems. They stay on this computer until you copy or save them.">
+        <button type="button" className={DIAGNOSTICS_BUTTON}>Show</button>
+        <CopyButton label="Copy diagnostics" getText={() => ""} />
+        <button type="button" className={DIAGNOSTICS_BUTTON}>Save…</button>
+      </SettingRow>
+    </>
   );
 }
 

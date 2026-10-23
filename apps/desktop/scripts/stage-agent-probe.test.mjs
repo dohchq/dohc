@@ -38,11 +38,11 @@ test("agent probe staging refuses unsupported targets and incomplete closures", 
 test("packaged agent probe runs on the compiler's pinned Node and checks its closure",
   { skip: process.platform !== "win32" || process.arch !== "x64", timeout: 120000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), "dohc-agent-probe-packaged-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   const sourceRoot = join(root, "source");
   const compilerRoot = join(sourceRoot, "resources/app-compiler");
   await mkdir(compilerRoot, { recursive: true });
-  await writeFile(join(compilerRoot, "node.exe"), await readPinnedCompilerNode({ stagedNodePath: join(desktopRoot, "resources/app-compiler/node.exe") }));
+  await writeFile(join(compilerRoot, "node.exe"), await readPinnedCompilerNode({ platform: "win32", arch: "x64", stagedNodePaths: [join(desktopRoot, "resources/app-compiler/node.exe")] }));
   const staged = join(sourceRoot, "resources/agent-probe");
   assert.equal((await stageAgentProbe({ destination: staged, compilerRoot })).changed, true);
   assert.equal((await stageAgentProbe({ destination: staged, compilerRoot })).changed, false);
@@ -53,18 +53,22 @@ test("packaged agent probe runs on the compiler's pinned Node and checks its clo
   await requireAgentProbe(probeRoot, packagedCompiler);
   const owner = windowsProbeOwner(resourcesRoot);
   assert.equal(owner.node, join(packagedCompiler, "node.exe"));
-  const tool = join(root, "tool.cmd");
-  await writeFile(tool, "@echo off\r\necho tool 9.8.7\r\n");
-  const result = await runProbeProcess(resolveSpawnCommand(tool, ["--version"], { cwd: homedir() }), new AbortController().signal, owner);
-  assert.deepEqual(result, { exitCode: 0, stdout: "tool 9.8.7\r\n", stderr: "" });
+  // Tamper before running the probe to avoid rewriting a just-executed node.exe.
   const relayPath = join(probeRoot, "agentProbeRelay.mjs"), relay = await readFile(relayPath);
   await writeFile(relayPath, "changed");
   await assert.rejects(requireAgentProbe(probeRoot, packagedCompiler), /asset changed/);
   await writeFile(relayPath, relay);
-  await writeFile(join(packagedCompiler, "node.exe"), "not Node");
+  const node = await readFile(owner.node);
+  await writeFile(owner.node, "not Node");
   await assert.rejects(requireAgentProbe(probeRoot, packagedCompiler), /Node identity/);
-  await rm(join(packagedCompiler, "node.exe"));
+  await rm(owner.node);
   assert.throws(() => windowsProbeOwner(resourcesRoot), /missing/);
+  await writeFile(owner.node, node);
+  await requireAgentProbe(probeRoot, packagedCompiler);
+  const tool = join(root, "tool.cmd");
+  await writeFile(tool, "@echo off\r\necho tool 9.8.7\r\n");
+  const result = await runProbeProcess(resolveSpawnCommand(tool, ["--version"], { cwd: homedir() }), new AbortController().signal, owner);
+  assert.deepEqual(result, { exitCode: 0, stdout: "tool 9.8.7\r\n", stderr: "" });
 });
 
 test("agent probe staging recompiles when only its compile recipe changes",
@@ -73,10 +77,10 @@ test("agent probe staging recompiles when only its compile recipe changes",
   t.after(() => rm(root, { recursive: true, force: true }));
   const compilerRoot = join(root, "app-compiler"), destination = join(root, "agent-probe");
   await mkdir(compilerRoot, { recursive: true });
-  await writeFile(join(compilerRoot, "node.exe"), await readPinnedCompilerNode({ stagedNodePath: join(desktopRoot, "resources/app-compiler/node.exe") }));
+  await writeFile(join(compilerRoot, "node.exe"), await readPinnedCompilerNode({ platform: "win32", arch: "x64", stagedNodePaths: [join(desktopRoot, "resources/app-compiler/node.exe")] }));
   // Copies of the real stager read the C# and relay bytes from desktopRoot, so only the recipe differs.
   const stager = (await readFile(new URL("./stage-agent-probe.mjs", import.meta.url), "utf8"))
-    .replace("\"./stage-app-compiler.mjs\"", JSON.stringify(new URL("./stage-app-compiler.mjs", import.meta.url).href));
+    .replace("\"./pinned-node.mjs\"", JSON.stringify(new URL("./pinned-node.mjs", import.meta.url).href));
   const unoptimized = stager.replace("\"/optimize+\"", "\"/optimize-\"");
   assert.notEqual(unoptimized, stager);
   const loadStager = async (name, text) => {

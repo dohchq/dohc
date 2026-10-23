@@ -1,4 +1,5 @@
 import { stopEditorMouseEvent } from "./pmHelpers";
+import { isComposingKey } from "../ui/keys";
 import type { Node } from "@tiptap/pm/model";
 import { NodeSelection, Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
@@ -295,6 +296,7 @@ function buildCalloutHeader(
   input.addEventListener("mousedown", (event) => event.stopPropagation());
   input.addEventListener("keydown", (event) => {
     event.stopPropagation();
+    if (isComposingKey(event)) return;
     if (event.key === "Enter") {
       event.preventDefault();
       input.blur();
@@ -345,8 +347,9 @@ function buildCalloutChromeDecorations(doc: Node): DecorationSet {
   // set/order of callouts remints, which is rare mid-title-edit.
   let ordinal = 0;
 
+  // A textblock holds only inline content, so the walk never enters one.
   doc.descendants((node, pos) => {
-    if (node.type.name !== "callout") return;
+    if (node.type.name !== "callout") return !node.isTextblock;
     const index = ordinal++;
     const type = String(node.attrs.calloutType ?? "note");
     const fold = normalizeCalloutFoldAttr(node.attrs.fold);
@@ -378,7 +381,7 @@ function buildCalloutChromeDecorations(doc: Node): DecorationSet {
 // caret from being yanked mid-edit.
 function reconcileTitleInputs(view: EditorView): void {
   view.state.doc.descendants((node, pos) => {
-    if (node.type.name !== "callout") return;
+    if (node.type.name !== "callout") return !node.isTextblock;
     const dom = view.nodeDOM(pos);
     if (!(dom instanceof HTMLElement)) return;
     const input = dom.querySelector<HTMLInputElement>(".dohc-callout-title-input");

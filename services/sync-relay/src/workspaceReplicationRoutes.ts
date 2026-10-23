@@ -5,6 +5,7 @@ import {
   type DiscussionActivityHub,
 } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
+import { cacheLogAuthorNames } from "./logAuthorNameCache";
 import type { ReplicaWatches } from "./replicaWatches";
 import { assertChatAuthorship, assertClientLogProvenance, parseAuthenticatedLogOps, type LogAuthorNameLookup } from "./relayLogInputs";
 import { parseCursor, parseLimit, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
@@ -53,6 +54,7 @@ export function createWorkspaceReplicationRoutes(
   lookupUserDisplayName?: LogAuthorNameLookup,
   onLogRead?: (request: Request, workspaceId: string, rows: readonly SyncRelayLogRow[]) => void,
 ) {
+  const accountNames = lookupUserDisplayName && cacheLogAuthorNames(lookupUserDisplayName, nowMs);
   async function respondToWorkspaceRegistration(
     request: Request,
     actor: { userId: string },
@@ -143,7 +145,7 @@ export function createWorkspaceReplicationRoutes(
       // before it writes any operation.
       assertChatAuthorship(input.ops, actor.userId);
       assertClientLogProvenance(originId, input.ops, {deferMomentRefusal: true, serviceHost: route.serviceHost !== undefined});
-      const ops = await parseAuthenticatedLogOps(input.ops, actor.userId, lookupUserDisplayName);
+      const ops = await parseAuthenticatedLogOps(input.ops, actor.userId, accountNames);
       await route.serviceHost?.screen(originId, ops);
       await storage.prepareLogAppend({workspaceId:route.workspaceId,originId,ops},request.signal);
       const result = storage.appendLogBatch({

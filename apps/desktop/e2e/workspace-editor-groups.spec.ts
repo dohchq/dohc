@@ -12,18 +12,20 @@ import {
 
 type Rgb = [number, number, number];
 
-// A CSS color as the page resolves it.
+// A CSS color as the page paints it over Canvas, the fill forced colors give
+// every surface. macOS resolves the forced Highlight with alpha.
 async function resolveColor(page: Page, css: string): Promise<Rgb> {
-  const rgb = await page.evaluate((value) => {
+  const [color, canvas] = await page.evaluate((value) => [value, "Canvas"].map((entry) => {
     const probe = document.createElement("span");
-    probe.style.color = value;
+    probe.style.color = entry;
     document.body.append(probe);
-    const color = getComputedStyle(probe).color;
+    const resolved = getComputedStyle(probe).color;
     probe.remove();
-    return color;
-  }, css);
-  const [r, g, b] = rgb.match(/\d+/g)!.map(Number);
-  return [r, g, b];
+    return resolved;
+  }), css);
+  const [r, g, b, alpha = 1] = color.match(/[\d.]+/g)!.map(Number);
+  const backdrop = canvas.match(/[\d.]+/g)!.map(Number);
+  return [r, g, b].map((channel, index) => Math.round(channel * alpha + backdrop[index] * (1 - alpha))) as Rgb;
 }
 
 function near(actual: Rgb, expected: Rgb): boolean {
@@ -151,7 +153,7 @@ test("editor groups keep mixed surfaces visible, resize, and collapse", async ()
 
     const lastTab = rightGroup.getByTestId(editorTabTestId("brief.md"));
     await lastTab.focus();
-    await page.keyboard.press(process.platform === "darwin" ? "Meta+w" : "Control+w");
+    await page.keyboard.press("ControlOrMeta+w");
     await expect(rightGroup).toHaveCount(0);
     await expect(leftGroup).toBeFocused();
     await expect(page.getByTestId(editorTabTestId("brief.md"))).toBeVisible();

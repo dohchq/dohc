@@ -83,6 +83,15 @@ struct CaptureMoveFileParams {
     to_path: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CaptureDuplicateParams {
+    hold_id: String,
+    from_path: String,
+    to_path: String,
+    author: Option<Value>,
+}
+
 static NEXT_CAPTURE_HOLD: AtomicU64 = AtomicU64::new(1);
 
 /// Whether the hold is still running. An expired hold ends here, before its
@@ -297,6 +306,73 @@ async fn flush_through(
 }
 
 impl EngineService {
+    pub(super) async fn capture_duplicate_file(
+        &self,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: CaptureDuplicateParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        if !open.is_local_owner() {
+            return Err(WireError::new(
+                ErrorCode::Forbidden,
+                "Duplicate needs the owning handle",
+            ));
+        }
+        let operation = capture_operation_id(&open, Some(&params.hold_id))?.ok_or_else(|| {
+            WireError::new(
+                ErrorCode::InvalidParams,
+                "Duplicate needs an admitted operation",
+            )
+        })?;
+        let from = tracked_relative_path(&params.from_path)?;
+        let to = tracked_relative_path(&params.to_path)?;
+        let author = validated_author(params.author.as_ref())?;
+        let version = open
+            .actor
+            .active_version(open.workspace_id.clone())
+            .await
+            .map_err(map_runtime)?
+            .version_id;
+        let result = open
+            .actor
+            .duplicate_file(
+                dohc_engine_domain::DuplicateFile {
+                    workspace_id: open.workspace_id.clone(),
+                    version_id: version,
+                    from_path: from,
+                    to_path: to.clone(),
+                    operation_id: operation.clone(),
+                    author_json: author,
+                    now_ms: now_ms()?,
+                },
+                open.root.clone(),
+                Arc::new(dohc_engine_storage::NoFaults),
+            )
+            .await
+            .map_err(map_runtime)?;
+        let placed = open
+            .actor
+            .history_undo_place(
+                open.workspace_id.clone(),
+                dohc_engine_runtime::HistoryUndoResult {
+                    operation_id: operation.clone(),
+                    version_id: result.version_id,
+                    moments: result.moments,
+                    compensation_operation_id: operation,
+                    deduped: false,
+                    materialized: false,
+                    not_restored: vec![],
+                },
+                open.root.clone(),
+                Arc::new(self.self_writes.scoped(&open.root)),
+                now_ms()?,
+                |_| {},
+            )
+            .await;
+        Ok(json!({ "path": to, "materialized": placed.materialized }))
+    }
+
     pub(super) async fn capture_retry_held(
         &self,
         ctx: &RequestContext,
@@ -365,6 +441,11 @@ impl EngineService {
             .await
             .map_err(map_runtime)?;
         let held_files = held_files_json(&holds);
+        let retained_copies = crate::rpc::retained_copies::summary_json(
+            crate::rpc::retained_copies::retained_summary(&open)
+                .await
+                .unwrap_or_default(),
+        );
         let guard = lock(&open.capture);
         Ok(match guard.as_ref() {
             Some(driver) => {
@@ -381,7 +462,9 @@ impl EngineService {
                     "keptFiles": kept_files,
                     "captureRecoveries": capture_recoveries,
                     "heldFiles": held_files,
+                    "deferredWrites": driver.status().deferred_writes(),
                     "recoveryUnavailable": recovery_unavailable,
+                    "retainedCopies": retained_copies,
                 })
             }
             // The driver is only absent mid-teardown; report an honest
@@ -395,7 +478,9 @@ impl EngineService {
                 "keptFiles": kept_files,
                 "captureRecoveries": capture_recoveries,
                 "heldFiles": held_files,
-                    "recoveryUnavailable": recovery_unavailable,
+                "deferredWrites": [],
+                "recoveryUnavailable": recovery_unavailable,
+                "retainedCopies": retained_copies,
             }),
         })
     }
@@ -441,6 +526,8 @@ impl EngineService {
             "running": outcome.running,
             "degraded": outcome.degraded,
             "heldFiles": held_files,
+            "deferredWrites": lock(&open.capture).as_ref()
+                .map(|driver| driver.status().deferred_writes()).unwrap_or_default(),
         }))
     }
 
@@ -680,6 +767,24 @@ impl EngineService {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn duplicate_refuses_forged_operation_and_hold_ids() {
+        assert!(serde_json::from_value::<super::CaptureDuplicateParams>(serde_json::json!({"holdId":"hold-forged","fromPath":"a.md","toPath":"b.md","operationId":"dohc-operation:forged"})).is_err());
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let supervisor = Box::leak(Box::new(dohc_engine_runtime::WorkspaceSupervisor::new()));
+        let service = crate::EngineService::with_supervisor(supervisor);
+        let opened = service.workspace_open(&dohc_engine_protocol::transport::RequestContext::unbounded(), serde_json::json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":"duplicate-forged","captureMode":"none"})).await.unwrap();
+        let handle: dohc_engine_protocol::wire::WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).unwrap();
+        let result = service
+            .capture_duplicate_file(
+                Some(handle.clone()),
+                serde_json::json!({"holdId":"hold-forged","fromPath":"a.md","toPath":"b.md"}),
+            )
+            .await;
+        assert!(result.is_err(), "an arbitrary id never admits a Duplicate");
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
     use crate::EngineService;
     use crate::capture_driver;
     use crate::lock;

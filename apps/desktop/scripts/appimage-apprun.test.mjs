@@ -18,8 +18,8 @@ test("the AppImage launcher refuses to start without the sandbox instead of disa
   t.after(() => rm(root, { recursive: true, force: true }));
   const appDir = join(root, "AppDir"), record = join(root, "argv.txt");
   await mkdir(appDir);
-  await writeFile(join(appDir, "AppRun"), generateAppRunScript({ ExecutableName: "dohc", ProductFilename: "dohc", ProductName: "dohc" }), { mode: 0o755 });
-  await writeFile(join(appDir, "dohc"), `#!/bin/sh\nprintf '%s\\n' "$@" > '${record}'\n`, { mode: 0o755 });
+  await writeFile(join(appDir, "AppRun"), generateAppRunScript({ ExecutableName: "dohc-desktop", ProductFilename: "dohc", ProductName: "dohc" }), { mode: 0o755 });
+  await writeFile(join(appDir, "dohc-desktop"),`#!/bin/sh\nprintf '%s\\n' "$@" > '${record}'\n`, { mode: 0o755 });
   const bash = spawnSync("sh", ["-c", "command -v bash"], { encoding: "utf8" }).stdout.trim();
   const launch = async (unshare, args) => {
     await rm(record, { force: true });
@@ -36,7 +36,7 @@ test("the AppImage launcher refuses to start without the sandbox instead of disa
     assert.deepEqual([refused.started, refused.argv], [false, null]);
     // Without zenity, kdialog or Xdialog, the launcher prints the reason.
     if (!["zenity", "kdialog", "Xdialog"].some(name => spawnSync("test", ["-x", `/usr/bin/${name}`]).status === 0)) {
-      assert.match(refused.stdout, /can't start its security sandbox because it can't create user namespaces on this system\. Allow this AppImage/);
+      assert.match(refused.stdout, /can't start its security sandbox because it can't create user namespaces on this system\. On Ubuntu or Debian, install the dohc \.deb package instead\. Elsewhere, allow this AppImage/);
     }
   }
   const started = async (unshare, args) => { const { started, argv } = await launch(unshare, args); return { started, argv }; };

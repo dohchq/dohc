@@ -98,7 +98,8 @@ function logOpForDigest(
 ): Record<string, unknown> | undefined {
   return log.ops?.find(
     (op) =>
-      op.opKind === "moment.append" && op.payload?.payloadAfterBlobSha256 === digest,
+      op.opKind === "file.current" &&
+      (op.payload?.file as Record<string, unknown> | undefined)?.blobSha256 === digest,
   )?.payload;
 }
 
@@ -208,7 +209,7 @@ test(
       const linkLogResponse = await readViewLink(
         relay.baseUrl,
         capability,
-        "/sync/link/log?since=0&limit=500",
+        "/sync/link/log?since=0&limit=500&current=true",
       );
       expect(linkLogResponse.status).toBe(200);
       const linkLog = JSON.parse(linkLogResponse.body) as LinkLog;
@@ -247,13 +248,20 @@ test(
       const convergedLogResponse = await readViewLink(
         relay.baseUrl,
         capability,
-        "/sync/link/log?since=0&limit=500",
+        "/sync/link/log?since=0&limit=500&current=true",
       );
       expect(convergedLogResponse.status).toBe(200);
       const convergedLog = JSON.parse(convergedLogResponse.body) as LinkLog;
       const convergedOp = logOpForDigest(convergedLog, sha256Hex(RECORD_V2));
       expect(convergedOp).toBeDefined();
-      expect(convergedOp?.payloadBeforeBlobSha256).toBe(sha256Hex(RECORD_V1));
+      expect(convergedOp).not.toHaveProperty("payloadBeforeBlobSha256");
+      expect(logOpForDigest(convergedLog, sha256Hex(RECORD_V1))).toBeUndefined();
+      const oldBlob = await readViewLink(
+        relay.baseUrl,
+        capability,
+        `/sync/link/blobs/${sha256Hex(RECORD_V1)}`,
+      );
+      expect(oldBlob.status).toBe(404);
       const convergedBlob = await readViewLink(
         relay.baseUrl,
         capability,
@@ -262,8 +270,9 @@ test(
       expect(convergedBlob.status).toBe(200);
       expect(convergedBlob.body).toBe(RECORD_V2);
 
-      // Revocation stops every collection operation over the share: the link
-      // and the named grant become byte-identical to never-valid.
+      // Revocation stops every collection operation over the share. The link
+      // becomes byte-identical to never-valid; the named grant tells its
+      // former recipient that access was removed.
       const revoke = await relayJson(
         relay.baseUrl,
         GRANTER_TOKEN,
@@ -278,13 +287,23 @@ test(
       expect(await readViewLink(relay.baseUrl, capability, "/sync/link/share")).toEqual(
         neverValidRead,
       );
-      expect(
-        await relayJson(
-          relay.baseUrl,
-          RECIPIENT_TOKEN,
-          `/sync/shares/${shareId}/log?since=0&limit=500`,
-        ),
-      ).toEqual(missingNamedShare);
+      // #1438 explains removal to a former recipient; a share they never had stays opaque.
+      const namedAfterEnd = await relayJson(
+        relay.baseUrl,
+        RECIPIENT_TOKEN,
+        `/sync/shares/${shareId}/log?since=0&limit=500`,
+      );
+      expect(namedAfterEnd.status).toBe(404);
+      expect(JSON.parse(namedAfterEnd.body)).toEqual({
+        ok: false,
+        error: "The owner removed your access.",
+        code: "share_access_removed",
+      });
+      expect(JSON.parse(missingNamedShare.body)).toEqual({
+        ok: false,
+        error: "not found",
+        code: "not_found",
+      });
     } finally {
       await relay?.stop();
       await temp.cleanup();

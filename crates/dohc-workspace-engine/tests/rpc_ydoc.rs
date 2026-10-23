@@ -177,6 +177,7 @@ async fn captured_seeds_are_uncredited_but_headless_recovery_keeps_the_marker() 
         let doc = Ydoc::wire();
         if flow != "created-empty-document" {
             call(&transport, &handle, 4, "ydoc.recordUpdate", json!({
+            "expectedLineageClaimId": opened["lineageClaimId"],
             "sessionId":opened["sessionId"],
             "updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"starting state")),
             "seed":true
@@ -185,6 +186,7 @@ async fn captured_seeds_are_uncredited_but_headless_recovery_keeps_the_marker() 
         if flow == "recovered-edit" {
             // Recovery replays edits separately from the acknowledged starting state.
             call(&transport, &handle, 5, "ydoc.recordUpdate", json!({
+                "expectedLineageClaimId": opened["lineageClaimId"],
                 "sessionId":opened["sessionId"],
                 "updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(14," edit"))
             })).await;
@@ -759,6 +761,7 @@ async fn default_close_settles_and_releases_a_seeded_image_scene_after_an_edit()
         73,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": opened["lineageClaimId"],
             "sessionId": opened["sessionId"],
             "updateBase64": base64::engine::general_purpose::STANDARD
                 .encode(edited.initial_update)
@@ -1781,6 +1784,7 @@ async fn scene_open_defers_missing_authoritative_asset_then_recovers_and_survive
         103,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": opened["lineageClaimId"],
             "sessionId": opened["sessionId"],
             "updateBase64": image_scene_update_with_asset_record(
                 "image-file",
@@ -1923,6 +1927,7 @@ async fn scene_open_rejects_forged_asset_namespace_without_a_writable_fallback()
         123,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": opened["lineageClaimId"],
             "sessionId": opened["sessionId"],
             "updateBase64": image_scene_update_with_asset_record(
                 "image-file", "image/png", "unrelated/user-image.png", &sha256
@@ -2013,6 +2018,7 @@ async fn scene_join_authorizes_a_tombstoned_image_for_remote_undo_only() {
         203,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": first["lineageClaimId"],
             "sessionId": first["sessionId"],
             "updateBase64": base64::engine::general_purpose::STANDARD.encode(deleted)
         }),
@@ -2062,6 +2068,7 @@ async fn scene_join_authorizes_a_tombstoned_image_for_remote_undo_only() {
         207,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": joined["lineageClaimId"],
             "sessionId": joined["sessionId"],
             "updateBase64": base64::engine::general_purpose::STANDARD.encode(undo)
         }),
@@ -2133,6 +2140,7 @@ async fn scene_open_rejects_text_sha_and_mime_asset_authority_without_a_writable
             162,
             "ydoc.recordUpdate",
             json!({
+                "expectedLineageClaimId": opened["lineageClaimId"],
                 "sessionId": opened["sessionId"],
                 "updateBase64": image_scene_update_with_asset_record(
                     "image-file", record_mime, &asset_ref, &expected_sha
@@ -2415,24 +2423,41 @@ async fn stage_headless_session_over_an_empty_artifact(
 async fn wait_for_capture_to_defer_under_live_session(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,
+    path: &str,
     id_base: u64,
 ) {
     let mut last_flush = Value::Null;
+    let mut last_status = Value::Null;
     for attempt in 0..40 {
         tokio::time::sleep(Duration::from_millis(200)).await;
         last_flush = call(
             transport,
             handle,
-            id_base + attempt,
+            id_base + attempt * 2,
             "capture.flush",
             json!({}),
         )
         .await;
-        if last_flush["settled"] == json!(false) && last_flush["degraded"] == json!(true) {
+        last_status = call(
+            transport,
+            handle,
+            id_base + attempt * 2 + 1,
+            "watcher.status",
+            json!({}),
+        )
+        .await;
+        if last_flush["settled"] == json!(true)
+            && last_flush["degraded"] == json!(false)
+            && last_status["deferredWrites"]
+                .as_array()
+                .is_some_and(|paths| paths.iter().any(|entry| entry.as_str() == Some(path)))
+        {
             return;
         }
     }
-    panic!("capture did not report its deferred live-session write: {last_flush}");
+    panic!(
+        "capture did not report its healthy deferred live-session write: {last_flush}; {last_status}"
+    );
 }
 
 /// Capture defers an empty new file a live session holds: the file is the
@@ -2645,6 +2670,7 @@ async fn ydoc_blob_egress_roundtrips_a_state_above_the_old_json_cap() {
         3,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": base64::engine::general_purpose::STANDARD.encode(&first_update)
         }),
@@ -2656,6 +2682,7 @@ async fn ydoc_blob_egress_roundtrips_a_state_above_the_old_json_cap() {
         4,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": base64::engine::general_purpose::STANDARD.encode(&second_update)
         }),
@@ -2791,6 +2818,7 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
         6,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": plaintext_update("settled text")
         }),
@@ -2919,6 +2947,7 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
         13,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": reopened_session,
             "updateBase64": plaintext_update("settled text")
         }),
@@ -2976,7 +3005,7 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
         &handle,
         16,
         "ydoc.recordUpdate",
-        json!({ "sessionId": rich_session, "updateBase64": rich_update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": rich_session, "updateBase64": rich_update }),
     )
     .await;
     assert_eq!(recorded["seq"], json!(1));
@@ -3060,6 +3089,7 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
         23,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": poisoned_session,
             "updateBase64": plaintext_update("poisoned default body")
         }),
@@ -3275,6 +3305,7 @@ async fn a_rival_write_on_a_live_session_path_refuses_session_busy() {
         3,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": plaintext_update("session text")
         }),
@@ -3325,6 +3356,73 @@ async fn a_rival_write_on_a_live_session_path_refuses_session_busy() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_seed_past_the_inband_cap_opens_as_a_blob_within_the_client_limit() {
+    // A note past 48 KiB used to refuse every open without a lineage,
+    // including each reopen after a settled close pruned it, so it was never
+    // live again (#2521).
+    let scratch = ScratchDir::new().expect("scratch");
+    let text = "A paragraph of a long note, written outside dohc.\n\n".repeat(1_100);
+    assert!(text.len() > 48 * 1024 && text.len() < 64 * 1024);
+    write_file(scratch.path(), "notes/long.md", text.as_bytes());
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let workspace_id = "ws-rpc-ydoc-large-seed";
+    let handle = open_workspace(&transport, &scratch, workspace_id, 1).await;
+    let open = |limit: Option<usize>| {
+        let mut params = json!({
+            "versionId": "main",
+            "path": "notes/long.md",
+            "contentKind": "richdoc"
+        });
+        if let Some(limit) = limit {
+            params["seedLimitBytes"] = json!(limit);
+        }
+        params
+    };
+
+    for (id, limit) in [(2, None), (3, Some(text.len() - 1))] {
+        let refused = call_error(&transport, &handle, id, "ydoc.open", open(limit)).await;
+        assert_eq!(refused.code, ErrorCode::InvalidParams);
+        assert_eq!(refused.message, "ydoc-seed-too-large");
+    }
+
+    let opened = call(&transport, &handle, 4, "ydoc.open", open(Some(64 * 1024))).await;
+    assert_eq!(opened["lineage"], json!("absent"));
+    assert_eq!(opened["head"], json!("present"));
+    assert!(opened.get("seedContent").is_none());
+    assert!(opened["seedClientId"].is_u64());
+    let sha256 = dohc_engine_storage::hex_sha256(text.as_bytes());
+    assert_eq!(opened["seedBlobSha256"], json!(sha256));
+
+    let seed = service_call_with_busy_retry(
+        service.as_ref(),
+        RequestContext::unbounded().with_capability("blobs"),
+        request(
+            5,
+            "versionedText.readBlob",
+            Some(handle.clone()),
+            json!({ "workspaceId": workspace_id, "sha256": sha256 }),
+        ),
+    )
+    .await
+    .expect("the seed blob reads");
+    assert_eq!(seed.response.result["bytesBase64"], Value::Null);
+    let egress = seed.blob_egress.expect("over-cap seed egress");
+    assert_eq!(egress.bytes, text.as_bytes());
+
+    call(
+        &transport,
+        &handle,
+        6,
+        "ydoc.evict",
+        json!({ "sessionId": opened["sessionId"] }),
+    )
+    .await;
+    call(&transport, &handle, 7, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_content() {
     // AUDIT-SILENTSAVE. Three dogfood journeys watched a doc read "Saved" in
     // the editor while its.md sat at zero bytes: the settle refused
@@ -3367,6 +3465,7 @@ async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_content
         3,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": plaintext_update(&huge)
         }),
@@ -3402,6 +3501,7 @@ async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_content
         5,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": plaintext_update("APPENDED TAIL\n")
         }),
@@ -3436,37 +3536,6 @@ async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_content
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
-    async fn call_after_backfill(
-        transport: &InProcessTransport<EngineService>,
-        workspace: &WorkspaceHandle,
-        id: u64,
-        method: &str,
-        params: Value,
-    ) -> Value {
-        tokio::time::timeout(Duration::from_secs(60), async {
-            loop {
-                match transport
-                    .call(
-                        RequestContext::unbounded(),
-                        request(id, method, Some(workspace.clone()), params.clone()),
-                    )
-                    .await
-                {
-                    Ok(response) => break response.result,
-                    Err(error)
-                        if error.code == ErrorCode::Overloaded
-                            && error.message == "engine-store-busy" =>
-                    {
-                        tokio::time::sleep(Duration::from_millis(20)).await;
-                    }
-                    Err(error) => panic!("{method} failed: {error:?}"),
-                }
-            }
-        })
-        .await
-        .expect("capture backfill must admit the request")
-    }
-
     // AUDIT-SILENTSAVE round 5. This is the race that made
     // `a_settle_past_the_inband_cap…` fail under `cargo test --workspace`
     // while passing in isolation — the capture pass only gets scheduled
@@ -3504,10 +3573,10 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": plaintext_update(&huge) }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": plaintext_update(&huge) }),
     )
     .await;
-    let settled = call_after_backfill(
+    let settled = call(
         &transport,
         &handle,
         4,
@@ -3592,7 +3661,7 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
 
     // And the close — which settles by default — succeeds instead of failing
     // ConflictStaleTarget against a head capture moved underneath it.
-    call_after_backfill(
+    call(
         &transport,
         &handle,
         7,
@@ -3640,6 +3709,7 @@ async fn a_zero_byte_precreated_file_settles_the_first_typed_edit_to_disk() {
         3,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": plaintext_update(typed)
         }),
@@ -3733,6 +3803,7 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
         5,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": plaintext_update(typed)
         }),
@@ -3761,6 +3832,7 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
         7,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": plaintext_update("More typing. ")
         }),
@@ -3823,7 +3895,7 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
     // Content the session never saw lands on the path. Capture observes it,
     // but the live lease keeps the head unchanged until the session ends.
     write_file(scratch.path(), &path, b"written by something else\n");
-    wait_for_capture_to_defer_under_live_session(&transport, &handle, 100).await;
+    wait_for_capture_to_defer_under_live_session(&transport, &handle, &path, 100).await;
     let ingested = call(
         &transport,
         &handle,
@@ -3844,6 +3916,7 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
         4,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": plaintext_update("typed over the rival")
         }),
@@ -3926,6 +3999,7 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
         9,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": reopened_id,
             "updateBase64": keystroke
         }),
@@ -3955,6 +4029,728 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
     .await;
 
     call(&transport, &handle, 7, "workspace.close", json!({})).await;
+}
+
+/// Settle `session_id` and require the engine to refuse it without writing
+/// `path`, which was deleted outside dohc.
+async fn assert_settle_refuses_over_deleted_file(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    scratch: &ScratchDir,
+    id: u64,
+    path: &str,
+    session_id: &str,
+) {
+    let refused = call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            id,
+            "ydoc.settle",
+            Some(handle.clone()),
+            json!({ "sessionId": session_id, "summary": "type" }),
+        ),
+    )
+    .await
+    .expect_err("a settle over a file deleted outside dohc must refuse");
+    assert_eq!(refused.message, "conflict-stale-target", "{path}");
+    assert!(
+        !scratch.path().join(path).exists(),
+        "the refused settle must not write {path} back"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_settle_after_an_external_delete_refuses_and_the_file_stays_deleted() {
+    // dohc#2301. The desktop records a delete made outside dohc, and forgets
+    // it when a later settle of a document that was open before the delete
+    // answers `materialized: true`. It reads that answer as proof the file
+    // is back, which holds only if the engine never writes a deleted file
+    // back. One document here settled before the delete and one did not, so
+    // each settle expects a different head. Capture sees both deletes but
+    // keeps both heads while the sessions hold them, so each settle finds
+    // the head it expects and no file. Waiting for the sessions is not a
+    // capture failure, so capture settles healthy (dohc#2342).
+    let scratch = ScratchDir::new().expect("scratch");
+    let files = [
+        ("notes/settled.md", "settled before the delete\n"),
+        ("notes/unsettled.md", "opened before the delete\n"),
+    ];
+    for (path, text) in files {
+        write_file(scratch.path(), path, text.as_bytes());
+    }
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-external-delete", 1).await;
+
+    let mut sessions = Vec::new();
+    for (id, (path, _)) in (10..).step_by(10).zip(files) {
+        let opened = call(
+            &transport,
+            &handle,
+            id,
+            "ydoc.open",
+            json!({ "versionId": "main", "path": path, "contentKind": "plaintext" }),
+        )
+        .await;
+        assert_eq!(opened["head"], json!("present"), "{path}");
+        let session_id = opened["sessionId"].as_str().expect("session id").to_owned();
+        call(
+            &transport,
+            &handle,
+            id + 1,
+            "ydoc.recordUpdate",
+            json!({
+                "expectedLineageClaimId": null,
+                "sessionId": session_id,
+                "updateBase64": plaintext_update("typed before the delete ")
+            }),
+        )
+        .await;
+        sessions.push((path, session_id));
+    }
+    let settled = call(
+        &transport,
+        &handle,
+        30,
+        "ydoc.settle",
+        json!({ "sessionId": sessions[0].1, "summary": "type" }),
+    )
+    .await;
+    assert_eq!(settled["materialized"], json!(true));
+
+    for (path, _) in files {
+        std::fs::remove_file(scratch.path().join(path)).expect("delete outside dohc");
+    }
+    wait_for_capture_to_settle_around_live_session(&transport, &handle, 100).await;
+    for (id, (path, text)) in (200..).zip(files) {
+        let head = call(
+            &transport,
+            &handle,
+            id,
+            "versionedText.read",
+            json!({ "versionId": "main", "path": path }),
+        )
+        .await;
+        let expected = if path == sessions[0].0 {
+            settled["content"].clone()
+        } else {
+            json!(text)
+        };
+        assert_eq!(
+            head["text"], expected,
+            "the live session must keep {path}'s head"
+        );
+    }
+
+    for (id, (path, session_id)) in (300..).step_by(10).zip(&sessions) {
+        call(
+            &transport,
+            &handle,
+            id,
+            "ydoc.recordUpdate",
+            json!({
+                "expectedLineageClaimId": null,
+                "sessionId": session_id,
+                "updateBase64": plaintext_update("typed after the delete ")
+            }),
+        )
+        .await;
+        assert_settle_refuses_over_deleted_file(
+            &transport,
+            &handle,
+            &scratch,
+            id + 1,
+            path,
+            session_id,
+        )
+        .await;
+        call(
+            &transport,
+            &handle,
+            id + 2,
+            "ydoc.evict",
+            json!({ "sessionId": session_id }),
+        )
+        .await;
+    }
+    call(&transport, &handle, 400, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_files_settle_after_an_external_delete_does_not_recreate_it() {
+    // dohc#2301, for a document the test above cannot reach. New File
+    // leaves an empty file and opens a session on it before capture records
+    // a head, so the session has no head to expect. When the empty file was
+    // deleted outside dohc before the first settle, that settle found no
+    // head and no file, took the pair for a document being created, and
+    // wrote the deleted file back with `materialized: true`.
+    let scratch = ScratchDir::new().expect("scratch");
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-new-file-deleted", 1).await;
+
+    let (path, opened) =
+        stage_headless_session_over_an_empty_artifact(&transport, &handle, &scratch, "deleted")
+            .await;
+    let session_id = opened["sessionId"].as_str().expect("session id");
+    call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.recordUpdate",
+        json!({
+            "expectedLineageClaimId": null,
+            "sessionId": session_id,
+            "updateBase64": plaintext_update("typed into the new file")
+        }),
+    )
+    .await;
+
+    std::fs::remove_file(scratch.path().join(&path)).expect("delete outside dohc");
+    assert_settle_refuses_over_deleted_file(&transport, &handle, &scratch, 3, &path, session_id)
+        .await;
+
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.evict",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    call(&transport, &handle, 5, "workspace.close", json!({})).await;
+}
+
+/// Open a session that continues `object_id` at `path`, as the desktop's
+/// replacement does after the engine restarts, and type into it. The
+/// replacement finds no head: capture retires a recorded head once no session
+/// holds it, and New File's head was never recorded.
+async fn open_continuation_and_type(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    id: u64,
+    path: &str,
+    object_id: &Value,
+) -> String {
+    let opened = call(
+        transport,
+        handle,
+        id,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": path,
+            "contentKind": "plaintext",
+            "expectedObjectId": object_id
+        }),
+    )
+    .await;
+    assert_eq!(opened["head"], json!("absent"), "{path}");
+    let session_id = opened["sessionId"].as_str().expect("session id").to_owned();
+    call(
+        transport,
+        handle,
+        id + 1,
+        "ydoc.recordUpdate",
+        json!({
+            "expectedLineageClaimId": null,
+            "sessionId": session_id,
+            "updateBase64": plaintext_update("typed after the restart ")
+        }),
+    )
+    .await;
+    session_id
+}
+
+/// Require that capture has retired `path`, deleted outside dohc.
+async fn assert_retired(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    id: u64,
+    path: &str,
+) {
+    // The watcher reports ready only after the startup scan's changes have
+    // applied, and that scan retires a file deleted while the engine was down.
+    let retired = call(
+        transport,
+        handle,
+        id,
+        "versionedText.read",
+        json!({ "versionId": "main", "path": path }),
+    )
+    .await;
+    assert_eq!(retired["text"], Value::Null, "capture must retire {path}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replacement_session_after_a_restart_does_not_recreate_a_deleted_file() {
+    // dohc#2301, across an engine restart. What a session expects dies with
+    // the engine. The desktop then opens a replacement that names the object
+    // it continues, and replays its text. The replacement finds no head and
+    // no file, so the engine's own record says whether the file existed: the
+    // open that found New File's empty file, or the moments of a recorded
+    // file. The replacement's settle must refuse, and so must a later open
+    // that resumes the replacement's Y.Doc state.
+    const WS: &str = "ws-rpc-ydoc-restart-deleted";
+    const RECORDED: &str = "notes/recorded.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    write_file(scratch.path(), RECORDED, b"recorded before the restart\n");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, WS, 1).await;
+
+    // New File, typing, and a delete outside dohc that the first save
+    // refuses. The recorded file is deleted later, while the engine is down.
+    let (new_path, opened_new) =
+        stage_headless_session_over_an_empty_artifact(&transport, &handle, &scratch, "restart")
+            .await;
+    let opened_recorded = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": RECORDED, "contentKind": "plaintext" }),
+    )
+    .await;
+    assert_eq!(opened_recorded["head"], json!("present"));
+    let documents = [
+        (new_path.as_str(), &opened_new),
+        (RECORDED, &opened_recorded),
+    ];
+    for (id, (_, opened)) in (10..).step_by(10).zip(documents) {
+        call(
+            &transport,
+            &handle,
+            id,
+            "ydoc.recordUpdate",
+            json!({
+                "expectedLineageClaimId": null,
+                "sessionId": opened["sessionId"],
+                "updateBase64": plaintext_update("typed before the restart ")
+            }),
+        )
+        .await;
+    }
+    std::fs::remove_file(scratch.path().join(&new_path)).expect("delete outside dohc");
+    let new_session = opened_new["sessionId"].as_str().expect("session id");
+    assert_settle_refuses_over_deleted_file(
+        &transport,
+        &handle,
+        &scratch,
+        30,
+        &new_path,
+        new_session,
+    )
+    .await;
+    for (id, (_, opened)) in (40..).zip(documents) {
+        call(
+            &transport,
+            &handle,
+            id,
+            "ydoc.evict",
+            json!({ "sessionId": opened["sessionId"] }),
+        )
+        .await;
+    }
+    call(&transport, &handle, 50, "workspace.close", json!({})).await;
+    drop(transport);
+    std::fs::remove_file(scratch.path().join(RECORDED)).expect("delete while dohc is down");
+
+    let restarted = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&restarted, &scratch, WS, 100).await;
+    assert_retired(&restarted, &handle, 200, RECORDED).await;
+
+    for (id, (path, opened)) in (300..).step_by(10).zip(documents) {
+        let session_id =
+            open_continuation_and_type(&restarted, &handle, id, path, &opened["objectId"]).await;
+        assert_settle_refuses_over_deleted_file(
+            &restarted,
+            &handle,
+            &scratch,
+            id + 2,
+            path,
+            &session_id,
+        )
+        .await;
+        call(
+            &restarted,
+            &handle,
+            id + 3,
+            "ydoc.evict",
+            json!({ "sessionId": session_id }),
+        )
+        .await;
+    }
+
+    // An open that names no object but resumes the document's Y.Doc state,
+    // here the replacement's replayed text, continues the document too.
+    let resumed = call(
+        &restarted,
+        &handle,
+        400,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": new_path, "contentKind": "plaintext" }),
+    )
+    .await;
+    assert_eq!(resumed["lineage"], json!("existing"));
+    let resumed = resumed["sessionId"].as_str().expect("session id");
+    assert_settle_refuses_over_deleted_file(&restarted, &handle, &scratch, 401, &new_path, resumed)
+        .await;
+    call(
+        &restarted,
+        &handle,
+        402,
+        "ydoc.evict",
+        json!({ "sessionId": resumed }),
+    )
+    .await;
+    call(&restarted, &handle, 403, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replacement_after_a_restart_does_not_recreate_a_file_whose_write_went_unreported() {
+    // dohc#2311. Documents with no file. One's first save writes the file,
+    // and the engine dies before its answer reaches the desktop. Another's
+    // close writes it, and the close's answer is lost or says nothing. The
+    // desktop never learns either file existed. Both files are deleted
+    // outside dohc while the engine is down, and capture retires them. The
+    // replacements must not write them back: the engine's moments say they
+    // existed. A drawing's retire keeps its Y.Doc rows, so even a fresh
+    // open resumes it, as a close debt's payment or a reopen does, and must
+    // not write it back either. A document that never had a file still gets
+    // one from its replacement, and a fresh open at a path whose file was
+    // deleted and retired is a new document, whose first save creates the
+    // file.
+    const WS: &str = "ws-rpc-ydoc-unreported-write";
+    const SETTLED: &str = "notes/settled.md";
+    const CLOSED: &str = "notes/closed.md";
+    const DRAFT: &str = "notes/draft.md";
+    const RETIRED: &str = "notes/retired.md";
+    const DRAWING: &str = "drawings/kept.excalidraw";
+    let scratch = ScratchDir::new().expect("scratch");
+    let drawing = serde_json::to_string(&json!({
+        "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+        "elements": [{ "id": "box", "type": "rectangle", "version": 1, "versionNonce": 1,
+            "isDeleted": false, "x": 0, "y": 0, "width": 10, "height": 10, "index": "a0" }],
+        "appState": {},
+        "files": {}
+    }))
+    .expect("scene");
+    write_file(scratch.path(), DRAWING, drawing.as_bytes());
+    let open_drawing = json!({ "versionId": "main", "path": DRAWING, "contentKind": "scene",
+        "seedFromArtifact": true });
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, WS, 1).await;
+
+    let mut sessions = BTreeMap::new();
+    for (id, path) in (10..).step_by(10).zip([SETTLED, CLOSED, DRAFT, RETIRED]) {
+        let opened = call(
+            &transport,
+            &handle,
+            id,
+            "ydoc.open",
+            json!({ "versionId": "main", "path": path, "contentKind": "plaintext" }),
+        )
+        .await;
+        assert_eq!(opened["head"], json!("absent"), "{path}");
+        assert_eq!(opened["lineage"], json!("absent"), "{path}");
+        call(
+            &transport,
+            &handle,
+            id + 1,
+            "ydoc.recordUpdate",
+            json!({
+                "expectedLineageClaimId": null,
+                "sessionId": opened["sessionId"],
+                "updateBase64": plaintext_update("typed before the restart ")
+            }),
+        )
+        .await;
+        sessions.insert(path, opened);
+    }
+    for (id, path) in (100..).zip([SETTLED, RETIRED]) {
+        let written = call(
+            &transport,
+            &handle,
+            id,
+            "ydoc.settle",
+            json!({ "sessionId": sessions[path]["sessionId"], "summary": "type" }),
+        )
+        .await;
+        assert_eq!(written["materialized"], json!(true), "{path}");
+    }
+    call(
+        &transport,
+        &handle,
+        110,
+        "ydoc.close",
+        json!({ "sessionId": sessions[CLOSED]["sessionId"] }),
+    )
+    .await;
+    for (id, path) in (120..).zip([SETTLED, DRAFT, RETIRED]) {
+        call(
+            &transport,
+            &handle,
+            id,
+            "ydoc.evict",
+            json!({ "sessionId": sessions[path]["sessionId"] }),
+        )
+        .await;
+    }
+    let drawn = call(&transport, &handle, 130, "ydoc.open", open_drawing.clone()).await;
+    assert_eq!(drawn["head"], json!("present"));
+    call(
+        &transport,
+        &handle,
+        131,
+        "ydoc.evict",
+        json!({ "sessionId": drawn["sessionId"] }),
+    )
+    .await;
+    call(&transport, &handle, 140, "workspace.close", json!({})).await;
+    drop(transport);
+    let written = [SETTLED, CLOSED, RETIRED, DRAWING];
+    for path in written {
+        std::fs::remove_file(scratch.path().join(path)).expect("delete while dohc is down");
+    }
+
+    let restarted = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&restarted, &scratch, WS, 200).await;
+    for (id, path) in (300..).zip(written) {
+        assert_retired(&restarted, &handle, id, path).await;
+    }
+
+    for (id, path) in (400..).step_by(10).zip([SETTLED, CLOSED]) {
+        let session_id =
+            open_continuation_and_type(&restarted, &handle, id, path, &sessions[path]["objectId"])
+                .await;
+        assert_settle_refuses_over_deleted_file(
+            &restarted,
+            &handle,
+            &scratch,
+            id + 2,
+            path,
+            &session_id,
+        )
+        .await;
+        call(
+            &restarted,
+            &handle,
+            id + 3,
+            "ydoc.evict",
+            json!({ "sessionId": session_id }),
+        )
+        .await;
+    }
+
+    let resumed = call(&restarted, &handle, 450, "ydoc.open", open_drawing).await;
+    assert_eq!(resumed["head"], json!("absent"));
+    assert_eq!(resumed["lineage"], json!("existing"));
+    let resumed = resumed["sessionId"].as_str().expect("session id");
+    assert_settle_refuses_over_deleted_file(&restarted, &handle, &scratch, 451, DRAWING, resumed)
+        .await;
+    call(
+        &restarted,
+        &handle,
+        452,
+        "ydoc.evict",
+        json!({ "sessionId": resumed }),
+    )
+    .await;
+
+    let draft = open_continuation_and_type(
+        &restarted,
+        &handle,
+        500,
+        DRAFT,
+        &sessions[DRAFT]["objectId"],
+    )
+    .await;
+    let fresh = call(
+        &restarted,
+        &handle,
+        510,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": RETIRED, "contentKind": "plaintext" }),
+    )
+    .await;
+    assert_eq!(fresh["head"], json!("absent"));
+    assert_eq!(fresh["lineage"], json!("absent"));
+    let fresh = fresh["sessionId"].as_str().expect("session id");
+    call(
+        &restarted,
+        &handle,
+        511,
+        "ydoc.recordUpdate",
+        json!({
+            "expectedLineageClaimId": null,
+            "sessionId": fresh,
+            "updateBase64": plaintext_update("a new document ")
+        }),
+    )
+    .await;
+    for (id, (path, session_id)) in (520..)
+        .step_by(10)
+        .zip([(DRAFT, draft.as_str()), (RETIRED, fresh)])
+    {
+        let created = call(
+            &restarted,
+            &handle,
+            id,
+            "ydoc.settle",
+            json!({ "sessionId": session_id, "summary": "type" }),
+        )
+        .await;
+        assert_eq!(created["materialized"], json!(true), "{path}");
+        assert!(scratch.path().join(path).exists(), "{path} was created");
+        call(
+            &restarted,
+            &handle,
+            id + 1,
+            "ydoc.close",
+            json!({ "sessionId": session_id }),
+        )
+        .await;
+    }
+    call(&restarted, &handle, 600, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_document_at_a_retired_path_reopened_before_its_first_save_is_refused() {
+    // A known limit, pinned. With no head, a document's object comes from its
+    // path, so an earlier file's moments at the path count for a new document
+    // there. Journaled, then reopened before its first save, the new document
+    // is refused as if its file had been deleted outside dohc. Save it again
+    // then puts back an empty file, as for New File, and the save writes it.
+    const WS: &str = "ws-rpc-ydoc-retired-path-reused";
+    const PATH: &str = "notes/reused.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    write_file(scratch.path(), PATH, b"an earlier file\n");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, WS, 1).await;
+    call(&transport, &handle, 2, "workspace.close", json!({})).await;
+    drop(transport);
+    std::fs::remove_file(scratch.path().join(PATH)).expect("delete while dohc is down");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, WS, 10).await;
+    assert_retired(&transport, &handle, 20, PATH).await;
+
+    let opened = call(
+        &transport,
+        &handle,
+        30,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": PATH, "contentKind": "plaintext" }),
+    )
+    .await;
+    assert_eq!(opened["lineage"], json!("absent"));
+    call(
+        &transport,
+        &handle,
+        31,
+        "ydoc.recordUpdate",
+        json!({
+            "expectedLineageClaimId": null,
+            "sessionId": opened["sessionId"],
+            "updateBase64": plaintext_update("a new document ")
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        32,
+        "ydoc.evict",
+        json!({ "sessionId": opened["sessionId"] }),
+    )
+    .await;
+    let reopened =
+        open_continuation_and_type(&transport, &handle, 40, PATH, &opened["objectId"]).await;
+    assert_settle_refuses_over_deleted_file(&transport, &handle, &scratch, 42, PATH, &reopened)
+        .await;
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(scratch.path().join(PATH))
+        .expect("Save it again's empty file");
+    let saved = call(
+        &transport,
+        &handle,
+        50,
+        "ydoc.settle",
+        json!({ "sessionId": reopened, "summary": "type" }),
+    )
+    .await;
+    assert_eq!(saved["materialized"], json!(true));
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(PATH)).expect("saved file"),
+        saved["content"].as_str().expect("content")
+    );
+    call(
+        &transport,
+        &handle,
+        51,
+        "ydoc.close",
+        json!({ "sessionId": reopened }),
+    )
+    .await;
+    call(&transport, &handle, 52, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_open_under_another_spelling_of_a_files_name_does_not_record_it() {
+    // A case-insensitive volume, the default on macOS and Windows, opens
+    // notes/caseOnly.md for notes/CASEONLY.md. That file belongs to another
+    // document, so the open must not record it as this document's. New File's
+    // file, found under its own name, is recorded.
+    let scratch = ScratchDir::new().expect("scratch");
+    write_file(scratch.path(), "notes/caseOnly.md", b"another document\n");
+    let case_insensitive = scratch.path().join("notes/CASEONLY.md").exists();
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-case-spelling", 1).await;
+    let (_, new_file) =
+        stage_headless_session_over_an_empty_artifact(&transport, &handle, &scratch, "seen").await;
+    let respelled = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": "notes/CASEONLY.md", "contentKind": "plaintext" }),
+    )
+    .await;
+    assert_eq!(respelled["head"], json!("absent"));
+    for (id, opened) in (3..).zip([&new_file, &respelled]) {
+        call(
+            &transport,
+            &handle,
+            id,
+            "ydoc.evict",
+            json!({ "sessionId": opened["sessionId"] }),
+        )
+        .await;
+    }
+    call(&transport, &handle, 5, "workspace.close", json!({})).await;
+
+    let store = EngineStore::open(&engine_db_path(&scratch).expect("engine database"), 6)
+        .expect("open store");
+    let seen = |object_id: &Value| -> bool {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM ydoc_files_seen WHERE object_id = ?1)",
+                    [object_id.as_str().expect("object id")],
+                    |row| row.get(0),
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .expect("read the record")
+    };
+    assert!(seen(&new_file["objectId"]), "New File's file is recorded");
+    assert!(
+        !seen(&respelled["objectId"]),
+        "another spelling's file is not recorded (case-insensitive volume: {case_insensitive})"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3992,6 +4788,7 @@ async fn creating_a_new_file_through_a_ydoc_session_settles_to_disk() {
         3,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": plaintext_update("fresh content")
         }),
@@ -4134,7 +4931,7 @@ async fn settle_recovers_after_a_transient_replace_failure() {
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": first }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": first }),
     )
     .await;
     call(
@@ -4165,7 +4962,7 @@ async fn settle_recovers_after_a_transient_replace_failure() {
         &handle,
         5,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": second }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": second }),
     )
     .await;
     let failed = transport
@@ -4274,7 +5071,7 @@ async fn changed_settle_replays_the_pending_job_left_by_a_transient_failure() {
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": first }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": first }),
     )
     .await;
     call(
@@ -4297,7 +5094,7 @@ async fn changed_settle_replays_the_pending_job_left_by_a_transient_failure() {
         &handle,
         5,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": second }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": second }),
     )
     .await;
     transport
@@ -4326,7 +5123,7 @@ async fn changed_settle_replays_the_pending_job_left_by_a_transient_failure() {
         &handle,
         7,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": third }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": third }),
     )
     .await;
     let settled = call(
@@ -4388,7 +5185,7 @@ async fn a_delete_cancels_the_paths_pending_job_so_replay_cannot_resurrect_it() 
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": first }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": first }),
     )
     .await;
     call(
@@ -4419,7 +5216,7 @@ async fn a_delete_cancels_the_paths_pending_job_so_replay_cannot_resurrect_it() 
         &handle,
         5,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": second }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": second }),
     )
     .await;
     let failed = transport
@@ -4576,7 +5373,7 @@ async fn an_inactive_versions_delete_does_not_cancel_the_active_versions_pending
         &handle,
         5,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": first }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": first }),
     )
     .await;
     call(
@@ -4599,7 +5396,7 @@ async fn an_inactive_versions_delete_does_not_cancel_the_active_versions_pending
         &handle,
         7,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": second }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": second }),
     )
     .await;
     transport
@@ -4873,14 +5670,27 @@ async fn a_live_lease_defers_capture_until_the_dirty_session_settles() {
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": plaintext_update(TYPED) }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": plaintext_update(TYPED) }),
     )
     .await;
 
     // The disk gets the doc's exact projection. Capture observes it, but the
     // live lease keeps the head at the session's base.
     write_file(scratch.path(), PATH, TYPED.as_bytes());
-    wait_for_capture_to_defer_under_live_session(&transport, &handle, 2_000).await;
+    wait_for_capture_to_defer_under_live_session(&transport, &handle, PATH, 2_000).await;
+    for method in ["capture.flush", "capture.reconcile"] {
+        let capture = call(&transport, &handle, 2_050, method, json!({})).await;
+        if method == "capture.flush" {
+            assert_eq!(capture["settled"], json!(true), "{method}");
+        }
+        assert_eq!(capture["degraded"], json!(false), "{method}");
+        assert_eq!(
+            capture["deferredWrites"],
+            json!([PATH]),
+            "{method} must expose waiting source"
+        );
+    }
+    wait_for_capture_to_defer_under_live_session(&transport, &handle, PATH, 2_060).await;
     let captured = call(
         &transport,
         &handle,
@@ -4997,7 +5807,7 @@ async fn an_uncoverable_dirty_session_evicts_and_the_reopen_resurrects_it() {
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": plaintext_update("what the user typed") }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": plaintext_update("what the user typed") }),
     )
     .await;
 
@@ -5151,6 +5961,7 @@ async fn record_update_refuses_a_replaced_lineage_until_resync_refreshes_the_ses
         3,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": created["lineageClaimId"],
             "sessionId": created_session,
             "updateBase64": plaintext_update("base"),
         }),
@@ -5245,6 +6056,7 @@ async fn record_update_refuses_a_replaced_lineage_until_resync_refreshes_the_ses
                 "ydoc.recordUpdate",
                 Some(handle.clone()),
                 json!({
+                    "expectedLineageClaimId": first_claim,
                     "sessionId": session_id,
                     "updateBase64": plaintext_update(" stale"),
                 }),
@@ -5277,12 +6089,40 @@ async fn record_update_refuses_a_replaced_lineage_until_resync_refreshes_the_ses
         "mismatch resync must not consume the queued foreign base"
     );
 
+    // The resync moved the session to the replacement. An edit made on the
+    // document of the claim it replaced still cannot enter it.
+    let before_old_client_record = settle_fingerprint(&scratch, WORKSPACE_ID);
+    let old_client = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                12,
+                "ydoc.recordUpdate",
+                Some(handle.clone()),
+                json!({
+                    "expectedLineageClaimId": first_claim,
+                    "sessionId": session_id,
+                    "updateBase64": plaintext_update(" old client"),
+                }),
+            ),
+        )
+        .await
+        .expect_err("an edit on the replaced claim must refuse after resync");
+    assert_eq!(old_client.code, ErrorCode::InvalidParams);
+    assert_eq!(old_client.message, "ydoc-lineage-stale");
+    assert_eq!(
+        settle_fingerprint(&scratch, WORKSPACE_ID),
+        before_old_client_record,
+        "the refusal must not mutate durable state"
+    );
+
     let recorded = call(
         &transport,
         &handle,
         8,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": replacement_claim,
             "sessionId": session_id,
             "updateBase64": plaintext_update(" fresh"),
         }),
@@ -5298,6 +6138,7 @@ async fn record_update_refuses_a_replaced_lineage_until_resync_refreshes_the_ses
                 "ydoc.recordUpdate",
                 Some(handle.clone()),
                 json!({
+                    "expectedLineageClaimId": replacement_claim,
                     "sessionId": session_id,
                     "updateBase64": plaintext_update(" forged"),
                     "lineageClaimId": first_claim,
@@ -5371,6 +6212,7 @@ async fn assert_close_drains_deferred_winning_lineage(winner_seed: &str, expect_
         3,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session_id,
             "updateBase64": plaintext_update("loser from B"),
         }),
@@ -5593,6 +6435,7 @@ async fn a_declared_seed_only_session_closes_without_writing() {
             id + 2,
             "ydoc.recordUpdate",
             json!({
+                "expectedLineageClaimId": null,
                 "sessionId": session_id,
                 "updateBase64": richdoc_update(&Ydoc::wire(), seed_paragraph),
                 "seed": true
@@ -5659,7 +6502,7 @@ async fn a_declared_seed_only_session_closes_without_writing() {
 /// close must settle to disk exactly as before the skip existed.
 ///
 /// Mutation kill: make the settle skip unconditional (drop the single-update
-/// proof from `seed_only_lineage_source`) and this test goes red — the edit
+/// proof from `pristine_seed_lineage_source`) and this test goes red — the edit
 /// never reaches the file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_real_edit_after_the_seed_still_settles_to_disk() {
@@ -5690,7 +6533,7 @@ async fn a_real_edit_after_the_seed_still_settles_to_disk() {
         &handle,
         4,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": seed_update, "seed": true }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": seed_update, "seed": true }),
     )
     .await;
     assert_eq!(recorded["seq"], json!(1));
@@ -5699,7 +6542,7 @@ async fn a_real_edit_after_the_seed_still_settles_to_disk() {
         &handle,
         5,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": edit_update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": edit_update }),
     )
     .await;
     assert_eq!(recorded["seq"], json!(2));
@@ -5747,6 +6590,7 @@ async fn an_edited_document_can_reseed_and_close_without_another_edit() {
     let object = opened["objectId"].as_str().expect("object");
     let doc = Ydoc::wire();
     call(&transport, &handle, 3, "ydoc.recordUpdate", json!({
+        "expectedLineageClaimId": null,
         "sessionId": session, "updateBase64": richdoc_update(&doc, "Original paragraph."), "seed": true
     })).await;
     call(
@@ -5755,6 +6599,7 @@ async fn an_edited_document_can_reseed_and_close_without_another_edit() {
         4,
         "ydoc.recordUpdate",
         json!({
+            "expectedLineageClaimId": null,
             "sessionId": session, "updateBase64": richdoc_update(&doc, "One edit.")
         }),
     )
@@ -5791,6 +6636,7 @@ async fn an_edited_document_can_reseed_and_close_without_another_edit() {
     );
     let session = reopened["sessionId"].as_str().expect("reopened session");
     call(&transport, &handle, 8, "ydoc.recordUpdate", json!({
+        "expectedLineageClaimId": null,
         "sessionId": session, "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state()), "seed": true
     })).await;
     call(
@@ -5869,6 +6715,7 @@ async fn reseeded_engine_heads_require_materialized_unchanged_seed_content_befor
         let object = opened["objectId"].as_str().expect("object");
         let doc = Ydoc::wire();
         call(&transport, &handle, 3, "ydoc.recordUpdate", json!({
+            "expectedLineageClaimId": null,
             "sessionId": session, "updateBase64": richdoc_update(&doc, "Original paragraph."), "seed": true
         })).await;
         call(
@@ -5877,6 +6724,7 @@ async fn reseeded_engine_heads_require_materialized_unchanged_seed_content_befor
             4,
             "ydoc.recordUpdate",
             json!({
+                "expectedLineageClaimId": null,
                 "sessionId": session, "updateBase64": richdoc_update(&doc, "Saved edit.")
             }),
         )
@@ -5901,6 +6749,7 @@ async fn reseeded_engine_heads_require_materialized_unchanged_seed_content_befor
         .await;
         let session = reopened["sessionId"].as_str().expect("reopened session");
         call(&transport, &handle, 7, "ydoc.recordUpdate", json!({
+            "expectedLineageClaimId": null,
             "sessionId": session, "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state()), "seed": true
         })).await;
         let connection = rusqlite::Connection::open(engine_db_path(&scratch).expect("db path"))
@@ -5937,6 +6786,7 @@ async fn reseeded_engine_heads_require_materialized_unchanged_seed_content_befor
                     8,
                     "ydoc.recordUpdate",
                     json!({
+                        "expectedLineageClaimId": null,
                         "sessionId": session, "updateBase64": richdoc_update(&doc, "Still unsaved.")
                     }),
                 )
@@ -5990,7 +6840,7 @@ async fn reseeded_engine_heads_require_materialized_unchanged_seed_content_befor
 /// records nothing — closes.
 ///
 /// Mutation kill: drop the exactly-one-update requirement from
-/// `seed_only_lineage_source` and this test goes red — the resumed lineage
+/// `pristine_seed_lineage_source` and this test goes red — the resumed lineage
 /// prunes without ever writing the edit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn replayed_prior_session_ops_still_settle_on_close() {
@@ -6018,7 +6868,7 @@ async fn replayed_prior_session_ops_still_settle_on_close() {
         3,
         "ydoc.recordUpdate",
         Some(handle.clone()),
-        json!({ "sessionId": session_id, "updateBase64": seed_update, "seed": true }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": seed_update, "seed": true }),
     );
     seed_request.idempotency_key = Some("original-seed".into());
     let seed_result = transport
@@ -6042,7 +6892,7 @@ async fn replayed_prior_session_ops_still_settle_on_close() {
         &handle,
         4,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": edit_update }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": edit_update }),
     )
     .await;
     // The crash stand-in: the session ends with the lineage dirty on purpose.
@@ -6116,7 +6966,7 @@ async fn a_seed_declared_after_the_first_update_refuses() {
         &handle,
         3,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": seed_update, "seed": true }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": seed_update, "seed": true }),
     )
     .await;
     let refused = call_error(
@@ -6124,7 +6974,7 @@ async fn a_seed_declared_after_the_first_update_refuses() {
         &handle,
         4,
         "ydoc.recordUpdate",
-        json!({ "sessionId": session_id, "updateBase64": late_update, "seed": true }),
+        json!({ "expectedLineageClaimId": null, "sessionId": session_id, "updateBase64": late_update, "seed": true }),
     )
     .await;
     assert_eq!(refused.code, ErrorCode::InvalidParams);
@@ -6151,7 +7001,7 @@ async fn author_threshold_queues_settlement_after_admission_without_explicit_set
             .await;
     let opened = call(&transport, &handle, 2, "ydoc.open", json!({"versionId":"main","path":"authors.txt","contentKind":"plaintext","seedFromArtifact":false})).await;
     let doc = Ydoc::wire();
-    call(&transport, &handle, 3, "ydoc.recordUpdate", json!({"sessionId":opened["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"a")),"actorOriginId":"first","attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}})).await;
+    call(&transport, &handle, 3, "ydoc.recordUpdate", json!({ "expectedLineageClaimId": opened["lineageClaimId"], "sessionId":opened["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"a")),"actorOriginId":"first","attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}})).await;
     let raw = rusqlite::Connection::open(&db).expect("coverage fixture");
     let mut folded = vec![json!({"kind":"agent","agentId":"first","onBehalfOf":"person"})];
     while json!(&folded).to_string().len()
@@ -6166,7 +7016,7 @@ async fn author_threshold_queues_settlement_after_admission_without_explicit_set
     )
     .expect("folded interval fixture");
     drop(raw);
-    call(&transport, &handle, 4, "ydoc.recordUpdate", json!({"sessionId":opened["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(1,"b")),"actorOriginId":"threshold","attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}})).await;
+    call(&transport, &handle, 4, "ydoc.recordUpdate", json!({ "expectedLineageClaimId": opened["lineageClaimId"], "sessionId":opened["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(1,"b")),"actorOriginId":"threshold","attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}})).await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let raw = rusqlite::Connection::open(&db).expect("inspect");
@@ -6231,6 +7081,7 @@ async fn record_update_preserves_existing_human_automation_context() {
     .await;
     let doc = Ydoc::wire();
     call(&transport, &handle, 3, "ydoc.recordUpdate", json!({
+        "expectedLineageClaimId": opened["lineageClaimId"],
         "sessionId": opened["sessionId"],
         "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "forged")),
         "actorOriginId": "someone-else",
@@ -6284,7 +7135,7 @@ async fn attributed_declared_seed_does_not_credit_opening() {
         "ordinary opening has a captured seed source"
     );
     let doc = Ydoc::wire();
-    call(&transport,&handle,3,"ydoc.recordUpdate",json!({"sessionId":opened["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"seed")),"seed":true,"actorOriginId":"opener","attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}})).await;
+    call(&transport,&handle,3,"ydoc.recordUpdate",json!({ "expectedLineageClaimId": opened["lineageClaimId"], "sessionId":opened["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0,"seed")),"seed":true,"actorOriginId":"opener","attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}})).await;
     call(
         &transport,
         &handle,

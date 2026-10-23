@@ -6,11 +6,13 @@ import { deferred } from "../../testing/deferred";
 import { Explorer, type ExplorerProps } from "./Explorer";
 
 const moveWorkspacePath = vi.fn();
+const showExplorerMenu = vi.fn();
 
 beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn();
   moveWorkspacePath.mockResolvedValue({ path: "" });
-  window.dohcDesktop = { moveWorkspacePath } as unknown as DohcDesktopBridge;
+  showExplorerMenu.mockResolvedValue(null);
+  window.dohcDesktop = { moveWorkspacePath, showExplorerMenu } as unknown as DohcDesktopBridge;
 });
 
 afterEach(() => {
@@ -78,6 +80,34 @@ async function renameTo(path: string, name: string): Promise<void> {
 }
 
 describe("Explorer rename", () => {
+  it("keeps renaming through an Enter or Escape that an input method owns", async () => {
+    render(<Explorer {...explorerProps()} />);
+    const input = await beginRename("report.csv");
+    fireEvent.change(input, { target: { value: "旅" } });
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(input, { key: "Escape", keyCode: 229 });
+    await act(async () => {});
+    expect(screen.getByTestId("tree-edit-input")).toBe(input);
+    expect(moveWorkspacePath).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() =>
+      expect(moveWorkspacePath).toHaveBeenCalledWith(expect.objectContaining({ fromPath: "report.csv", toPath: "旅.csv" })),
+    );
+  });
+
+  it("leaves a right-click in the name field to the text menu and keeps the rename open", async () => {
+    render(<Explorer {...explorerProps()} />);
+    const input = await beginRename("notes.md");
+    // An uncancelled event is what lets Electron open main's text menu.
+    expect(fireEvent.contextMenu(input)).toBe(true);
+    await act(async () => {});
+    expect(showExplorerMenu).not.toHaveBeenCalled();
+    expect(screen.getByTestId("tree-edit-input")).toBe(input);
+    // The tree around the field keeps its own menu.
+    fireEvent.contextMenu(screen.getByTestId("file-tree"));
+    await waitFor(() => expect(showExplorerMenu).toHaveBeenCalledOnce());
+  });
+
   it("gives a new name without an extension the file's own extension", async () => {
     render(<Explorer {...explorerProps()} />);
     await renameTo("report.csv", "summary");
@@ -166,6 +196,18 @@ it.each(["Enter", "Escape"])("returns to the tree row after rename %s", async (k
   expect(document.activeElement).toBe(input);
   fireEvent.keyDown(input, { key });
   await waitFor(() => expect(document.activeElement).toBe(screen.getAllByTestId("tree-row").find((node) => node.dataset.path === "notes.md")));
+});
+// Focus returns to the renamed row during the same keydown. A browser presses
+// that row with the key's default action, which opened the new path before
+// the move made it, and the editor stayed on "no longer available".
+it("keeps the key that ends a rename from pressing the row focus returns to", async () => {
+  for (const key of ["Enter", "Escape"]) {
+    const { unmount } = render(<Explorer {...explorerProps()} />);
+    const input = await beginRename("notes.md");
+    fireEvent.change(input, { target: { value: "plan.md" } });
+    expect(fireEvent.keyDown(input, { key }), key).toBe(false);
+    unmount();
+  }
 });
 it("follows the renamed row through its optimistic path change", async () => {
   render(<Explorer {...explorerProps()} />);

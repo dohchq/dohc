@@ -8,33 +8,34 @@ import {
   useState,
   type RefObject,
 } from "react";
-import type { WorkspaceGraphResult } from "../../ipc/bridgeContract";
+import type { ChatFileMentionRecord } from "../../ipc/bridgeContract";
+import { graphWalk, degrees, emptyGraph, withChatMentions, type GraphData, type GraphNode } from "./graphData";
 import { bridge } from "../bridge";
-import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
+import { isChatMentionPageChanged } from "../../ipc/errorWords";
 import { ipcErrorMessage } from "../ipcError";
 
-type WorkspaceGraphNode = WorkspaceGraphResult["nodes"][number];
+type WorkspaceGraphNode = GraphNode;
 
 type GraphState =
   | {
       workspaceId: string;
       chatMentionsEnabled: boolean;
       status: "loading";
-      graph: WorkspaceGraphResult | null;
+      graph: GraphData | null;
       error: null;
     }
   | {
       workspaceId: string;
       chatMentionsEnabled: boolean;
       status: "ready";
-      graph: WorkspaceGraphResult;
+      graph: GraphData;
       error: null;
     }
   | {
       workspaceId: string;
       chatMentionsEnabled: boolean;
       status: "error";
-      graph: WorkspaceGraphResult | null;
+      graph: GraphData | null;
       error: string;
     };
 
@@ -51,7 +52,7 @@ type ForceNode = GraphPoint & {
   dragging: boolean;
 };
 
-type VisibleGraphEdge = WorkspaceGraphResult["edges"][number];
+type VisibleGraphEdge = GraphData["edges"][number];
 
 type GraphPositionSink = (
   nodes: readonly ForceNode[],
@@ -67,14 +68,7 @@ type GraphDrag = {
   moved: boolean;
 };
 
-const EMPTY_GRAPH: WorkspaceGraphResult = {
-  nodes: [],
-  edges: [],
-  unresolvedLinks: 0,
-  scannedFileCount: 0,
-  omittedFileCount: 0,
-  truncatedFileCount: 0,
-};
+const EMPTY_GRAPH = emptyGraph();
 
 type GraphVariant = "panel" | "page";
 
@@ -93,7 +87,7 @@ const GRAPH_LAYOUT: Record<
 > = {
   // Nodes after the pairwise limit keep center and edge forces, but skip
   // repulsion: panel layouts degrade after 160 ranked nodes, page layouts after 280.
-  // The graph response can describe 2,000 nodes, but mounting all of them as
+  // Mounting every loaded node as
   // interactive SVG plus a second panel list creates a multi-hundred-ms main
   // thread stall and an unreadable cloud. Keep the highest-connected slice
   // (with the active document promoted to the front) and say how many are
@@ -137,13 +131,12 @@ function compareGraphNodes(activePath: string | null) {
 }
 
 function visibleGraphNodes(
-  graph: WorkspaceGraphResult,
+  graph: GraphData,
   activePath: string | null,
   variant: GraphVariant,
 ): WorkspaceGraphNode[] {
-  return [...graph.nodes]
-    .sort(compareGraphNodes(activePath))
-    .slice(0, GRAPH_LAYOUT[variant].nodeLimit);
+  const selected = [...graph.nodes].sort(compareGraphNodes(activePath)).slice(0, GRAPH_LAYOUT[variant].nodeLimit);
+  return degrees(selected, visibleEdges(graph, selected, variant));
 }
 
 function graphRadius(node: WorkspaceGraphNode, variant: GraphVariant): number {
@@ -227,7 +220,7 @@ function stopGraphMotion(
 }
 
 function visibleEdges(
-  graph: WorkspaceGraphResult,
+  graph: GraphData,
   nodes: readonly Pick<WorkspaceGraphNode, "path">[],
   variant: GraphVariant,
 ): VisibleGraphEdge[] {
@@ -238,7 +231,7 @@ function visibleEdges(
 }
 
 function useForceGraph(
-  graph: WorkspaceGraphResult,
+  graph: GraphData,
   activePath: string | null,
   variant: GraphVariant,
   renderPositions: GraphPositionSink,
@@ -487,7 +480,7 @@ function useForceGraph(
 }
 
 function graphStatus(
-  graph: WorkspaceGraphResult,
+  graph: GraphData,
   shownNodeCount: number,
   shownEdgeCount: number,
 ): string | null {
@@ -500,20 +493,13 @@ function graphStatus(
       `${shownEdgeCount} of ${graph.edges.length} link${graph.edges.length === 1 ? "" : "s"} shown`,
     );
   }
-  if (graph.unresolvedLinks > 0) {
-    notices.push(`${graph.unresolvedLinks} unresolved`);
-  }
-  if (graph.omittedFileCount > 0) {
-    notices.push(`${graph.omittedFileCount} omitted`);
-  }
-  if (graph.truncatedFileCount > 0) {
-    notices.push(`${graph.truncatedFileCount} truncated`);
-  }
+  if (!graph.mountsCovered) notices.push("Shared folders excluded");
+  if (graph.unchecked.length) notices.push(`${graph.unchecked.length} unchecked`);
   return notices.length > 0 ? notices.join(" · ") : null;
 }
 
 function GraphMap(props: {
-  graph: WorkspaceGraphResult;
+  graph: GraphData;
   activePath: string | null;
   variant: GraphVariant;
   onOpenPath: (path: string, headingAnchor?: string) => void;
@@ -756,6 +742,7 @@ export function GraphView(props: {
   onOpenChatThread?: (node: WorkspaceGraphNode) => void;
   chatMentionsAvailable?: boolean;
   variant?: GraphVariant;
+  onError?: (message: string, error: unknown, retry: (() => void) | null) => void;
 }) {
   const variant = props.variant ?? "panel";
   const [reloadNonce, setReloadNonce] = useState(0);
@@ -787,52 +774,124 @@ export function GraphView(props: {
     setReloadNonce((nonce) => nonce + 1);
   }, []);
 
-  useAsyncResponseEffect(
-    () => {
-      setState((current) => ({
-        workspaceId: props.workspaceId,
-        chatMentionsEnabled,
-        status: "loading",
-        graph:
-          current.workspaceId === props.workspaceId &&
-          current.chatMentionsEnabled === chatMentionsEnabled
-            ? current.graph
-            : null,
-        error: null,
-      }));
-      return bridge().readWorkspaceGraph({
-        workspaceId: props.workspaceId,
-        includeChatMentions: chatMentionsEnabled,
-      });
-    },
-    {
-      onSuccess: (graph) => {
-        if (requestIdentityRef.current !== requestIdentity) return;
-        setState({
-          workspaceId: props.workspaceId,
-          chatMentionsEnabled,
-          status: "ready",
-          graph,
-          error: null,
-        });
-      },
-      onError: (error: unknown) => {
-        if (requestIdentityRef.current !== requestIdentity) return;
-        setState((current) => ({
-          workspaceId: props.workspaceId,
-          chatMentionsEnabled,
-          status: "error",
-          graph:
-            current.workspaceId === props.workspaceId &&
-            current.chatMentionsEnabled === chatMentionsEnabled
-              ? current.graph
-              : null,
-          error: ipcErrorMessage(error, "Graph failed to load"),
-        }));
-      },
-    },
-    [requestIdentity],
-  );
+  const reportError = useRef(props.onError);
+  reportError.current = props.onError;
+  const [walking, setWalking] = useState(true);
+  const completedRequest = useRef<typeof requestIdentity | null>(null);
+  const [chatRows, setChatRows] = useState<{ workspaceId: string; rows: ChatFileMentionRecord[]; complete: boolean; mountsCovered: boolean } | null>(null);
+  const [chatWalking, setChatWalking] = useState(false);
+  useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let frame: number | undefined;
+    let resumePaint: (() => void) | undefined;
+    let retries = 0;
+    const current = () => active && requestIdentityRef.current === requestIdentity;
+    const retry = () => { if (requestIdentityRef.current === requestIdentity) load(); };
+    setWalking(true);
+    setState(previous => ({ workspaceId: props.workspaceId, chatMentionsEnabled, status: "loading",
+      graph: previous.workspaceId === props.workspaceId ? previous.graph : null, error: null }));
+    const paint = () => new Promise<void>(resolve => {
+      resumePaint = resolve;
+      frame = requestAnimationFrame(() => { timer = setTimeout(resolve, 0); });
+    });
+    let hasDrawnGraph = state.workspaceId === props.workspaceId && (state.graph?.nodes.length ?? 0) > 0;
+    let restarted = false;
+    const walk = async () => {
+      let accumulator = graphWalk();
+      let cursor: string | undefined;
+      try {
+        for (;;) {
+          let page;
+          try {
+            page = await bridge().linksEdges({ workspaceId: props.workspaceId, ...(cursor ? { cursor } : {}) });
+          } catch (error) {
+            if (!current()) return;
+            if (cursor && !restarted && String(error).includes("links-edges-source-changed")) {
+              restarted = true;
+              accumulator = graphWalk();
+              cursor = undefined;
+              continue;
+            }
+            throw error;
+          }
+          if (!current()) return;
+          accumulator.append(page);
+          cursor = page.nextCursor ?? undefined;
+          // Paint initial data before continuing. Keep that snapshot stable while
+          // gathering; refreshes replace the drawn graph only at the end.
+          if (!hasDrawnGraph || !cursor) {
+            const graph = accumulator.snapshot();
+            setState({ workspaceId: props.workspaceId, chatMentionsEnabled, status: "ready", graph, error: null });
+            if (!hasDrawnGraph && graph.nodes.length) {
+              hasDrawnGraph = true;
+              if (cursor) { await paint(); if (!current()) return; }
+            }
+          }
+          if (!cursor) break;
+        }
+        if (accumulator.snapshot().indexBuilding && retries < 5) {
+          timer = setTimeout(() => { retries++; void walk(); }, Math.min(250 * 2 ** retries, 8000));
+        } else { completedRequest.current = requestIdentity; setWalking(false); }
+      } catch (error) {
+        if (!current()) return;
+        setWalking(false);
+        setState(previous => ({ ...previous, status: "error", error: ipcErrorMessage(error, "Graph failed to load") }));
+        reportError.current?.("dohc could not load the graph.", error, retry);
+      }
+    };
+    void walk();
+    return () => { active = false; clearTimeout(timer); if (frame !== undefined) cancelAnimationFrame(frame); resumePaint?.(); };
+  }, [requestIdentity, load, props.workspaceId, chatMentionsEnabled]);
+
+  useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let frame: number | undefined;
+    let resumePaint: (() => void) | undefined;
+    const graph = state.workspaceId === props.workspaceId ? state.graph : null;
+    if (!chatMentionsEnabled || !graph) { setChatRows(null); setChatWalking(false); return; }
+    if (walking || completedRequest.current !== requestIdentity) return;
+    const current = () => active && requestIdentityRef.current === requestIdentity;
+    const retry = () => { if (requestIdentityRef.current === requestIdentity) load(); };
+    let retained = chatRows?.workspaceId === props.workspaceId && chatRows.rows.length > 0;
+    let restarted = false;
+    setChatWalking(true);
+    const walk = async () => {
+      const rows = new Map<string, ChatFileMentionRecord>();
+      let complete = true, mountsCovered = true;
+      let cursor: string | undefined;
+      try {
+        do {
+          const page = await bridge().chatFileMentionsPage({ workspaceId: props.workspaceId, ...(cursor ? { cursor } : {}) });
+          if (!current()) return;
+          for (const row of page?.entries ?? []) rows.set(row.attachment.attachmentId, row);
+          complete &&= page?.complete ?? true;
+          mountsCovered &&= page?.mountsCovered ?? true;
+          cursor = page?.nextCursor ?? undefined;
+          if (!retained || !cursor) setChatRows({ workspaceId: props.workspaceId, rows: [...rows.values()],
+            complete, mountsCovered });
+          if (cursor) await new Promise<void>(resolve => {
+            resumePaint = resolve;
+            frame = requestAnimationFrame(() => { timer = setTimeout(resolve, 0); });
+          });
+          if (!current()) return;
+        } while (cursor);
+        setChatWalking(false);
+      } catch (error) {
+        if (!current()) return;
+        if (isChatMentionPageChanged(error)) {
+          setChatRows(null);
+          retained = false;
+          if (!restarted) { restarted = true; void walk(); return; }
+        }
+        setChatWalking(false);
+        reportError.current?.("dohc could not load chat mentions.", error, retry);
+      }
+    };
+    void walk();
+    return () => { active = false; clearTimeout(timer); if (frame !== undefined) cancelAnimationFrame(frame); resumePaint?.(); };
+  }, [chatMentionsEnabled, walking, state.graph, state.workspaceId, props.workspaceId, requestIdentity, load]);
 
   const scopedState: GraphState =
     state.workspaceId === props.workspaceId &&
@@ -845,7 +904,10 @@ export function GraphView(props: {
           graph: null,
           error: null,
         };
-  const graph = scopedState.graph ?? EMPTY_GRAPH;
+  const baseGraph = scopedState.graph ?? EMPTY_GRAPH;
+  const graph = useMemo(() => chatMentionsEnabled && chatRows?.workspaceId === props.workspaceId
+    ? { ...withChatMentions(baseGraph, chatRows.rows), complete: baseGraph.complete && chatRows.complete,
+      mountsCovered: baseGraph.mountsCovered && chatRows.mountsCovered } : baseGraph, [baseGraph, chatRows, chatMentionsEnabled, props.workspaceId]);
   const rows = useMemo(
     () => visibleGraphNodes(graph, props.activePath, variant),
     [graph, props.activePath, variant],
@@ -920,21 +982,17 @@ export function GraphView(props: {
         </button>
       </div>
 
-      {scopedState.status === "error" ? (
-        <div className="border-b border-line px-3 py-2 text-[11px] text-danger">
-          {scopedState.error}
-        </div>
-      ) : null}
+      {(walking || chatWalking) && scopedState.graph ? <p role="status" className="px-3 py-1 text-xs text-muted">Gathering linked mentions</p> : null}
 
       {scopedState.status === "loading" && !scopedState.graph ? (
         <div className="flex flex-1 items-center justify-center px-4 text-xs text-muted">
-          Building graph…
+          Gathering linked mentions
         </div>
       ) : graph.nodes.length === 0 ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center">
           <FileText size={18} aria-hidden className="text-subtle" />
           <span className="text-xs text-muted">
-            Add a Markdown file to start building your graph.
+            {scopedState.status === "error" ? "Refresh graph to try again." : "Add a Markdown file to start building your graph."}
           </span>
         </div>
       ) : (

@@ -1,6 +1,80 @@
 {
   "owner": [
     {
+      "name": "dohc_chat_file_mentions",
+      "description": "Read a bounded page of accessible chat mentions of files. Optional subject selects one file. Continue nextCursor until null; complete and sharedChannelRowsUncovered report coverage.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "subject": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "objectId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "objectId"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_chat_links",
+      "description": "Read one bounded page of accessible files mentioned in a chat. Use channelWireId from dohc_list_groups, and continue nextCursor until null. Coverage can be partial.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "channelWireId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        },
+        "required": [
+          "channelWireId"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_create_app",
       "description": "Scaffold an app folder with index.html, package.json, a pinned serve devDependency, and an optional dohc.json. Requires dohc open. History records each file under your agent name. A partial failure lists the files already written.",
       "inputSchema": {
@@ -1885,7 +1959,7 @@
     },
     {
       "name": "dohc_delete_path",
-      "description": "Delete a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. Files over 5 MiB binary or 10 MiB text delete without a History row. Text with invalid UTF-8 also deletes without a row when History cannot keep it as binary. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder goes through the workspace's .dohc/trash to the system trash, or stays in .dohc/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.",
+      "description": "Delete a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. Files over 5 MiB binary or 10 MiB text delete without a History row. Text with invalid UTF-8 also deletes without a row when History cannot keep it as binary. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder goes through the workspace's .dohc/local/trash to the system trash, or stays in .dohc/local/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1909,6 +1983,50 @@
       }
     },
     {
+      "name": "dohc_delete_retained_copies",
+      "description": "Permanently delete up to 100 copies listed by dohc_list_retained_copies. They do not go to the trash. dohc cannot check whether another program still has one open: such a program may lose what it writes next. Ask the person to close other programs that use this workspace first, and set acceptLateWriteRisk to true. A copy that changed since it was listed, or whose file waits for review, is skipped and stays. Returns how many copies were `deleted`, `skipped` and `failed`, and the `remaining` count and bytes. List again to delete more.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "copies": {
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                "revision": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "id",
+                "revision"
+              ]
+            }
+          },
+          "acceptLateWriteRisk": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "required": [
+          "copies",
+          "acceptLateWriteRisk"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_detect_apps",
       "description": "Detect app folders in the workspace: web content a browser can open, found from index.html, package.json, dohc.json, and common web configs.",
       "inputSchema": {
@@ -1924,6 +2042,25 @@
             "maximum": 12
           }
         },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_duplicate_file",
+      "description": "Duplicate one regular file beside its source with a fresh identity. Owner workspace only. Undo removes the copy while it is unchanged.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
       "execution": {
@@ -2017,6 +2154,122 @@
         },
         "required": [
           "collectionPath"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_links_edges",
+      "description": "Read a bounded page of file links and isolated Markdown files. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_links_in",
+      "description": "Read a bounded page of documents linking to a file. indexBuilding reports active indexing; unchecked names omitted sources. complete excludes mount coverage, reported by mountsCovered. Cursors carry index state across pages.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "subject": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "objectId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "objectId"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        },
+        "required": [
+          "subject"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_links_resolve",
+      "description": "Resolve wikilink or Markdown literals from one source document using the engine's link rules.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "literals": {
+            "maxItems": 128,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "wikilink",
+                    "markdown"
+                  ]
+                },
+                "literal": {
+                  "type": "string",
+                  "maxLength": 2048
+                }
+              },
+              "required": [
+                "kind",
+                "literal"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "source",
+          "literals"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
@@ -2174,6 +2427,18 @@
       }
     },
     {
+      "name": "dohc_list_retained_copies",
+      "description": "List old file copies dohc keeps on a drive that cannot tell it whether another program still has one open, such as a macFUSE volume. dohc never deletes these itself. `total` counts them all, with their logical size in `bytes`; deleting them may free less disk space. `copies` lists those dohc_delete_retained_copies can delete now, oldest first, with the `revision` each delete must match. Copies changed in the last 30 seconds, copies whose file waits for review, and copies an unfinished save still needs are not listed. `more` is true when more copies remain past this list.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_list_workspaces",
       "description": "List the local dohc workspaces in the desktop registry.",
       "inputSchema": {
@@ -2187,7 +2452,7 @@
     },
     {
       "name": "dohc_move_path",
-      "description": "Move or rename a visible workspace file or folder. Returns its operationId for reading the operation. Move Undo is not available yet. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/trash, and Restore in History brings them back.",
+      "description": "Move or rename a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/local/trash, and Restore in History brings them back.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2274,7 +2539,7 @@
     },
     {
       "name": "dohc_publish_app",
-      "description": "Create a share link, prepare an immutable app revision, and approve publication with local owner authority. createLink requires a stable operationId; retries return the existing grant, never another link. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance.",
+      "description": "Create a share link, prepare an immutable app revision, and approve publication as its owner on this computer. createLink requires a stable operationId; retries return the existing grant, never another link. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3329,7 +3594,7 @@
     },
     {
       "name": "dohc_undo_operation",
-      "description": "Undo a delete by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry a pending copy. Other operations cannot be undone yet.",
+      "description": "Undo a delete, move, or rename by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry each remaining path marked retry.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3403,6 +3668,80 @@
   ],
   "view": [
     {
+      "name": "dohc_chat_file_mentions",
+      "description": "Read a bounded page of accessible chat mentions of files. Optional subject selects one file. Continue nextCursor until null; complete and sharedChannelRowsUncovered report coverage.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "subject": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "objectId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "objectId"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_chat_links",
+      "description": "Read one bounded page of accessible files mentioned in a chat. Use channelWireId from dohc_list_groups, and continue nextCursor until null. Coverage can be partial.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "channelWireId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        },
+        "required": [
+          "channelWireId"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_detect_apps",
       "description": "Detect app folders in the workspace: web content a browser can open, found from index.html, package.json, dohc.json, and common web configs.",
       "inputSchema": {
@@ -3443,6 +3782,122 @@
         },
         "required": [
           "collectionPath"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_links_edges",
+      "description": "Read a bounded page of file links and isolated Markdown files. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_links_in",
+      "description": "Read a bounded page of documents linking to a file. indexBuilding reports active indexing; unchecked names omitted sources. complete excludes mount coverage, reported by mountsCovered. Cursors carry index state across pages.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "subject": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "objectId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "objectId"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        },
+        "required": [
+          "subject"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_links_resolve",
+      "description": "Resolve wikilink or Markdown literals from one source document using the engine's link rules.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "literals": {
+            "maxItems": 128,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "wikilink",
+                    "markdown"
+                  ]
+                },
+                "literal": {
+                  "type": "string",
+                  "maxLength": 2048
+                }
+              },
+              "required": [
+                "kind",
+                "literal"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "source",
+          "literals"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
@@ -3965,6 +4420,80 @@
   ],
   "comment": [
     {
+      "name": "dohc_chat_file_mentions",
+      "description": "Read a bounded page of accessible chat mentions of files. Optional subject selects one file. Continue nextCursor until null; complete and sharedChannelRowsUncovered report coverage.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "subject": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "objectId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "objectId"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_chat_links",
+      "description": "Read one bounded page of accessible files mentioned in a chat. Use channelWireId from dohc_list_groups, and continue nextCursor until null. Coverage can be partial.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "channelWireId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        },
+        "required": [
+          "channelWireId"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_detect_apps",
       "description": "Detect app folders in the workspace: web content a browser can open, found from index.html, package.json, dohc.json, and common web configs.",
       "inputSchema": {
@@ -4005,6 +4534,122 @@
         },
         "required": [
           "collectionPath"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_links_edges",
+      "description": "Read a bounded page of file links and isolated Markdown files. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_links_in",
+      "description": "Read a bounded page of documents linking to a file. indexBuilding reports active indexing; unchecked names omitted sources. complete excludes mount coverage, reported by mountsCovered. Cursors carry index state across pages.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "subject": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "objectId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "objectId"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        },
+        "required": [
+          "subject"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_links_resolve",
+      "description": "Resolve wikilink or Markdown literals from one source document using the engine's link rules.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "literals": {
+            "maxItems": 128,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "wikilink",
+                    "markdown"
+                  ]
+                },
+                "literal": {
+                  "type": "string",
+                  "maxLength": 2048
+                }
+              },
+              "required": [
+                "kind",
+                "literal"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "source",
+          "literals"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
@@ -4527,6 +5172,80 @@
   ],
   "edit": [
     {
+      "name": "dohc_chat_file_mentions",
+      "description": "Read a bounded page of accessible chat mentions of files. Optional subject selects one file. Continue nextCursor until null; complete and sharedChannelRowsUncovered report coverage.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "subject": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "objectId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "objectId"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_chat_links",
+      "description": "Read one bounded page of accessible files mentioned in a chat. Use channelWireId from dohc_list_groups, and continue nextCursor until null. Coverage can be partial.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "channelWireId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        },
+        "required": [
+          "channelWireId"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_detect_apps",
       "description": "Detect app folders in the workspace: web content a browser can open, found from index.html, package.json, dohc.json, and common web configs.",
       "inputSchema": {
@@ -4567,6 +5286,122 @@
         },
         "required": [
           "collectionPath"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_links_edges",
+      "description": "Read a bounded page of file links and isolated Markdown files. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_links_in",
+      "description": "Read a bounded page of documents linking to a file. indexBuilding reports active indexing; unchecked names omitted sources. complete excludes mount coverage, reported by mountsCovered. Cursors carry index state across pages.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "subject": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "objectId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "objectId"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        },
+        "required": [
+          "subject"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_links_resolve",
+      "description": "Resolve wikilink or Markdown literals from one source document using the engine's link rules.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "literals": {
+            "maxItems": 128,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "wikilink",
+                    "markdown"
+                  ]
+                },
+                "literal": {
+                  "type": "string",
+                  "maxLength": 2048
+                }
+              },
+              "required": [
+                "kind",
+                "literal"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "source",
+          "literals"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       },

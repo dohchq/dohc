@@ -18,7 +18,7 @@
 use crate::diff::{ManifestEntry, ScanDiff, ScanManifest, diff_scans};
 use crate::error::FilesError;
 use crate::scan::{ScanOutcome, Scanner};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -79,21 +79,34 @@ impl CaptureOp {
     }
 }
 
+/// The spelling a respelled path's file is stored under now, and the bytes
+/// the scan found there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Respelling {
+    pub path: String,
+    pub sha256: String,
+}
+
 /// A reconcile plan: the ordered capture ops plus the generation transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconcilePlan {
     pub from_generation: ScanGeneration,
     pub to_generation: ScanGeneration,
     pub ops: Vec<CaptureOp>,
-    /// Previously-tracked paths that are still on disk but now exceed the size
-    /// cap. A distinct, no-op disposition: not an `Ingest` (can't re-hash),
+    /// Previously-tracked paths that are still on disk but whose content the
+    /// scan did not read: over the size cap, or evicted by a cloud provider.
+    /// A distinct, no-op disposition: not an `Ingest` (not re-hashed),
     /// never a `Retire` (the file exists). The engine keeps them tracked at
     /// their last-known-good content. Surfaced for
     /// R07 materialization so it can leave these files untouched.
-    pub retained_over_cap: Vec<String>,
+    pub retained_unread: Vec<String>,
     /// Missing paths retained because a scan failure or final lstat result did
     /// not prove absence. Their prior manifest entries remain last-known-good.
     pub unconfirmed_removed: Vec<String>,
+    /// Retires the plan's ingests respell, proven on disk: the old spelling
+    /// still opens the file, which is stored under another spelling. Each
+    /// names the ingest of that spelling.
+    pub respelled_retires: BTreeMap<String, Respelling>,
     /// The pass saw one or more readability failures or an unconfirmed retire.
     /// Callers mirror TS `onCaptureOutcome({ok:false})` while still applying
     /// every independent safe operation.
@@ -111,9 +124,15 @@ pub struct ReconcilePlan {
 
 impl ReconcilePlan {
     /// Build a plan from a classified diff. Ops are sorted by path so the plan
-    /// is deterministic and inspectable.
+    /// is deterministic and inspectable, except that a retire whose path an
+    /// ingested path respells comes before every ingest. `stored_spelling`
+    /// gives the spelling a retired path's file is stored under, when that is
+    /// another one; the retire is respelled only when the plan ingests that
+    /// exact path.
+    #[allow(clippy::too_many_arguments)]
     fn from_diff(
         diff: ScanDiff,
+        stored_spelling: impl Fn(&str) -> Option<String>,
         from_generation: ScanGeneration,
         to_generation: ScanGeneration,
         prepared_from_dirty: bool,
@@ -146,12 +165,67 @@ impl ReconcilePlan {
             ops.push(CaptureOp::Retire { path });
         }
         ops.sort_by(|a, b| a.path().cmp(b.path()));
+        // A rename that changes only case or Unicode normalization retires the
+        // old spelling first. A peer on a disk that ignores case then deletes
+        // the old file before it writes the new one, never the new one after.
+        let key = crate::floor::path_collision_key;
+        let retired: BTreeSet<String> = ops
+            .iter()
+            .filter_map(|op| match op {
+                CaptureOp::Retire { path } => Some(key(path)),
+                CaptureOp::Ingest { .. } => None,
+            })
+            .collect();
+        let paired: BTreeSet<String> = if retired.is_empty() {
+            BTreeSet::new()
+        } else {
+            ops.iter()
+                .filter_map(|op| match op {
+                    CaptureOp::Ingest { path, .. } => Some(key(path)),
+                    CaptureOp::Retire { .. } => None,
+                })
+                .filter(|path| retired.contains(path))
+                .collect()
+        };
+        let mut respelled_retires = BTreeMap::new();
+        if !paired.is_empty() {
+            ops.sort_by_key(
+                |op| !matches!(op, CaptureOp::Retire { path } if paired.contains(&key(path))),
+            );
+            let ingests: BTreeMap<&str, &str> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    CaptureOp::Ingest { path, sha256, .. } if paired.contains(&key(path)) => {
+                        Some((path.as_str(), sha256.as_str()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            for op in &ops {
+                let CaptureOp::Retire { path } = op else {
+                    break;
+                };
+                if let Some(stored) = stored_spelling(path)
+                    && let Some(sha256) = ingests.get(stored.as_str())
+                {
+                    let sha256 = (*sha256).to_owned();
+                    respelled_retires.insert(
+                        path.clone(),
+                        Respelling {
+                            path: stored,
+                            sha256,
+                        },
+                    );
+                }
+            }
+        }
         ReconcilePlan {
             from_generation,
             to_generation,
             ops,
-            retained_over_cap: diff.retained_over_cap,
+            retained_unread: diff.retained_unread,
             unconfirmed_removed: diff.unconfirmed_removed,
+            respelled_retires,
             degraded,
             degraded_paths,
             prepared_from_dirty,
@@ -164,7 +238,7 @@ impl ReconcilePlan {
         self.ops.len()
     }
 
-    /// Whether the plan has no actionable ops (retained-over-cap is a no-op
+    /// Whether the plan has no actionable ops (retained-unread is a no-op
     /// disposition and does not count here).
     pub fn is_empty(&self) -> bool {
         self.ops.is_empty()
@@ -191,10 +265,12 @@ pub enum ReconcileRun {
 /// regular-file reappearance or an indeterminate error (retain). The trait
 /// keeps all three outcomes directly testable on every platform.
 pub trait AbsenceProbe: Send + Sync {
-    /// True when the tracked regular file is confirmed gone, including when a
-    /// non-regular entry now occupies its path. False retains on either a
-    /// regular-file reappearance or an indeterminate probe error.
-    fn confirms_absent(&self, absolute_path: &Path) -> bool;
+    /// True when the tracked regular file at `relative` under `root` is
+    /// confirmed gone, including when a non-regular entry now occupies its
+    /// path or the file found there is stored under another spelling. False
+    /// retains on either a regular-file reappearance or an indeterminate
+    /// probe error.
+    fn confirms_absent(&self, root: &Path, relative: &str) -> bool;
 }
 
 /// Production probe: gone/non-regular retires; regular or indeterminate retains.
@@ -202,19 +278,78 @@ pub trait AbsenceProbe: Send + Sync {
 pub struct StdAbsenceProbe;
 
 impl AbsenceProbe for StdAbsenceProbe {
-    fn confirms_absent(&self, absolute_path: &Path) -> bool {
-        match std::fs::symlink_metadata(absolute_path) {
+    fn confirms_absent(&self, root: &Path, relative: &str) -> bool {
+        let Some(absolute) = absolute_path(root, relative) else {
+            return false;
+        };
+        match std::fs::symlink_metadata(absolute) {
             Err(err) if matches!(err.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
                 true
             }
             // The scanner tracks regular files only. A directory, symlink, or
             // other non-regular replacement confirms that tracked file gone.
-            Ok(metadata) => !metadata.file_type().is_file(),
+            Ok(metadata) => {
+                !metadata.file_type().is_file() || stored_under_other_spelling(root, relative)
+            }
             // Permission, lock, sharing, and other errors cannot prove the
             // regular file gone, so retain its last-known-good state.
             Err(_) => false,
         }
     }
+}
+
+/// Whether `relative` reaches an entry under `root` only through another
+/// stored spelling of its file name. APFS ignores case and Unicode
+/// normalization; NTFS ignores case. A lookup of `notes.md` can therefore
+/// find a file renamed to `Notes.md`. The stored spelling shows that
+/// `relative` itself is gone. A symlink is never another spelling, and a
+/// renamed folder is not proven: its files keep their old handling.
+pub fn stored_under_other_spelling(root: &Path, relative: &str) -> bool {
+    stored_spelling(root, relative).is_some()
+}
+
+/// The spelling under which `relative`'s entry is stored, when that differs
+/// from `relative` only in case or Unicode normalization. See
+/// [`stored_under_other_spelling`]. NTFS keeps normalization forms distinct.
+fn stored_spelling(root: &Path, relative: &str) -> Option<String> {
+    let root = root.canonicalize().ok()?;
+    stored_spelling_in(&root, relative)
+}
+
+pub(crate) fn stored_spelling_in(root: &Path, relative: &str) -> Option<String> {
+    let stored = root.join(relative).canonicalize().ok()?;
+    let stored = stored.strip_prefix(root).ok()?;
+    let tracked: Vec<&str> = relative.split('/').collect();
+    if stored.components().count() != tracked.len() {
+        return None;
+    }
+    // Query the leaf's directory entry on Windows: a file handle's final path
+    // need not name the hard link we looked up. Folders cannot be hard-linked.
+    #[cfg(windows)]
+    let stored = {
+        let mut stored = stored.to_path_buf();
+        stored.set_file_name(dohc_windows_files::stored_leaf_name(&root.join(relative)).ok()?);
+        stored
+    };
+    let mut lookup = root.to_path_buf();
+    let mut spelling = Vec::with_capacity(tracked.len());
+    let leaf = tracked.len() - 1;
+    for (index, (stored, tracked)) in stored.components().zip(tracked).enumerate() {
+        lookup.push(tracked);
+        let stored = stored.as_os_str().to_str()?;
+        if stored != tracked
+            && (index < leaf
+                || crate::floor::fold_segment(stored) != crate::floor::fold_segment(tracked)
+                || std::fs::symlink_metadata(&lookup)
+                    .ok()
+                    .is_none_or(|entry| entry.file_type().is_symlink()))
+        {
+            return None;
+        }
+        spelling.push(stored);
+    }
+    let spelling = spelling.join("/");
+    (spelling != relative).then_some(spelling)
 }
 
 /// Owns the reconcile state: the last committed manifest, the current scan
@@ -272,12 +407,17 @@ impl ReconcileController {
     /// still matches it, so the mandatory post-restart full reconcile is
     /// never skipped.
     ///
+    /// Entries the path floor now excludes are dropped. A `.DS_Store`
+    /// captured before the floor named it can never be listed again, and the
+    /// file still on disk would otherwise hold every pass degraded.
+    ///
     /// Building the seed `ScanManifest` from the domain's own captured-file
     /// records (rather than a caller-supplied one, as here) is a deliberate
     /// follow-up: this crate does not depend on the domain layer (see
     /// `capture.rs`), so the actual rehydration SOURCE lives above this
     /// primitive.
-    pub fn rehydrated(manifest: ScanManifest, generation: ScanGeneration) -> Self {
+    pub fn rehydrated(mut manifest: ScanManifest, generation: ScanGeneration) -> Self {
+        manifest.drop_excluded();
         ReconcileController {
             manifest,
             generation,
@@ -313,7 +453,7 @@ impl ReconcileController {
     }
 
     /// Paths the last acknowledged run deferred to a live document session.
-    /// Every full scan offers them again until one captures them.
+    /// Every full scan offers them again until one captures or retires them.
     pub fn deferred_paths(&self) -> &[String] {
         &self.deferred_paths
     }
@@ -401,9 +541,7 @@ impl ReconcileController {
         let mut confirmed_removed = Vec::with_capacity(diff.removed.len());
         let mut lstat_unconfirmed = Vec::new();
         for path in diff.removed.drain(..) {
-            let confirmed = absolute_path(root, &path)
-                .is_some_and(|absolute| absence_probe.confirms_absent(&absolute));
-            if confirmed {
+            if absence_probe.confirms_absent(root, &path) {
                 confirmed_removed.push(path);
             } else {
                 lstat_unconfirmed.push(path);
@@ -424,6 +562,7 @@ impl ReconcileController {
         let dirty_epoch = self.dirty_epoch;
         let plan = ReconcilePlan::from_diff(
             diff,
+            |path| stored_spelling(root, path),
             from,
             to,
             prepared_from_dirty,
@@ -479,6 +618,11 @@ impl ReconcileController {
         }
         let applied: BTreeSet<&str> = result.applied_paths.iter().map(String::as_str).collect();
         let not_owned: BTreeSet<&str> = result.not_owned_paths.iter().map(String::as_str).collect();
+        let deferred: BTreeSet<&str> = result.deferred_paths.iter().map(String::as_str).collect();
+        let deferred_retires: BTreeSet<&str> =
+            result.deferred_retires.iter().map(String::as_str).collect();
+        let deferred_writes: BTreeSet<&str> =
+            result.deferred_writes.iter().map(String::as_str).collect();
         let captured: std::collections::BTreeMap<&str, (u64, &str)> = result
             .captured
             .iter()
@@ -520,6 +664,17 @@ impl ReconcileController {
             }
             if not_owned.contains(op.path()) {
                 next.remove(op.path());
+                continue;
+            }
+            if deferred.contains(op.path()) {
+                // A deferred ingest is not captured. An entry left from an
+                // earlier file at the path would make the next scan call it
+                // unchanged whenever the bytes match that file, and capture
+                // would never check them. Deferred retires and outside writes
+                // keep their entries, so release retries the original change.
+                if !deferred_retires.contains(op.path()) && !deferred_writes.contains(op.path()) {
+                    next.remove(op.path());
+                }
                 continue;
             }
             if !applied.contains(op.path()) {
@@ -567,17 +722,11 @@ impl ReconcileController {
         }
         // NotOwned paths are dropped even when they never appeared in
         // `plan.ops`: an over-cap policy retire is applied as a direct side
-        // effect (such paths are `retained_over_cap`, deliberately absent
+        // effect (such paths are `retained_unread`, deliberately absent
         // from the ops), and leaving its manifest entry would claim the path
         // is still tracked at content whose head has just been deleted — so a
         // later policy widen would diff clean and never re-ingest it.
         for path in &result.not_owned_paths {
-            next.remove(path);
-        }
-        // A deferred path is not captured. An entry left from an earlier file
-        // at the path would make the next scan call it unchanged whenever the
-        // bytes match that file, and capture would never check them.
-        for path in &result.deferred_paths {
             next.remove(path);
         }
         self.manifest = next;
@@ -745,8 +894,11 @@ mod ack_receipt_tests {
                 sha256: sha256.to_owned(),
             })
         }
-        fn retire(&mut self, _path: &str) -> Result<(), crate::capture::CaptureError> {
-            Ok(())
+        fn retire(
+            &mut self,
+            _path: &str,
+        ) -> Result<crate::capture::RetireOutcome, crate::capture::CaptureError> {
+            Ok(crate::capture::RetireOutcome::Retired)
         }
     }
 
@@ -813,8 +965,9 @@ mod ack_receipt_tests {
             from_generation: controller.generation,
             to_generation: controller.generation.next(),
             ops: Vec::new(),
-            retained_over_cap: Vec::new(),
+            retained_unread: Vec::new(),
             unconfirmed_removed: Vec::new(),
+            respelled_retires: BTreeMap::new(),
             degraded: false,
             degraded_paths: Vec::new(),
             prepared_from_dirty: true,
@@ -829,6 +982,8 @@ mod ack_receipt_tests {
             not_owned_paths: Vec::new(),
             failed_applies: Vec::new(),
             deferred_paths: Vec::new(),
+            deferred_retires: Vec::new(),
+            deferred_writes: Vec::new(),
             held_observations: Vec::new(),
             crashed_after_durable_boundary: None,
             degraded: false,
@@ -856,8 +1011,9 @@ mod ack_receipt_tests {
             from_generation: controller.generation,
             to_generation: controller.generation.next(),
             ops: Vec::new(),
-            retained_over_cap: vec!["over-cap.md".to_owned()],
+            retained_unread: vec!["over-cap.md".to_owned()],
             unconfirmed_removed: Vec::new(),
+            respelled_retires: BTreeMap::new(),
             degraded: false,
             degraded_paths: Vec::new(),
             prepared_from_dirty: true,
@@ -869,6 +1025,8 @@ mod ack_receipt_tests {
             not_owned_paths: vec!["over-cap.md".to_owned()],
             failed_applies: Vec::new(),
             deferred_paths: Vec::new(),
+            deferred_retires: Vec::new(),
+            deferred_writes: Vec::new(),
             held_observations: Vec::new(),
             crashed_after_durable_boundary: None,
             degraded: false,
@@ -882,5 +1040,94 @@ mod ack_receipt_tests {
             "a side-effect retire must drop the manifest entry"
         );
         let _ = Accept;
+    }
+}
+
+#[cfg(test)]
+mod respell_order_tests {
+    use super::*;
+    use crate::diff::ScanDiff;
+    use crate::scan::FileEntry;
+
+    fn entry(path: &str) -> FileEntry {
+        FileEntry {
+            path: path.to_owned(),
+            size: 1,
+            mtime_ms: 0,
+            sha256: "a".repeat(64),
+            media_type: "text/markdown",
+        }
+    }
+
+    /// The retire of a spelling comes before any ingest that respells it,
+    /// changed as well as added: path order would put `Notes.md` before
+    /// `notes.md`, and a peer that ignores case would delete the new file.
+    /// Only a retire the disk proves respelled counts as one.
+    #[test]
+    fn a_retire_comes_before_every_ingest_that_respells_it() {
+        for (added, changed) in [
+            (vec![entry("Notes.md")], vec![]),
+            (vec![], vec![entry("Notes.md")]),
+        ] {
+            for proven in [true, false] {
+                let diff = ScanDiff {
+                    added: added.clone(),
+                    changed: changed.clone(),
+                    removed: vec!["notes.md".to_owned(), "zz.md".to_owned()],
+                    ..ScanDiff::default()
+                };
+                let plan = ReconcilePlan::from_diff(
+                    diff,
+                    |_| proven.then(|| "Notes.md".to_owned()),
+                    ScanGeneration(0),
+                    ScanGeneration(1),
+                    false,
+                    0,
+                    false,
+                    Vec::new(),
+                );
+                let paths: Vec<&str> = plan.ops.iter().map(CaptureOp::path).collect();
+                assert_eq!(paths, ["notes.md", "Notes.md", "zz.md"]);
+                let respelled: Vec<(&str, &str)> = plan
+                    .respelled_retires
+                    .iter()
+                    .map(|(path, to)| (path.as_str(), to.path.as_str()))
+                    .collect();
+                assert_eq!(
+                    respelled,
+                    if proven {
+                        vec![("notes.md", "Notes.md")]
+                    } else {
+                        vec![]
+                    }
+                );
+            }
+        }
+    }
+
+    /// A folded group can hold names the volume keeps apart, such as one with
+    /// a zero-width space. A retire pairs only with the ingest at the exact
+    /// spelling its file is stored under, never with another name that shares
+    /// its key.
+    #[test]
+    fn a_respelled_retire_pairs_only_with_its_stored_spelling() {
+        for (ingested, paired) in [("AB.md", false), ("A\u{200b}B.md", true)] {
+            let diff = ScanDiff {
+                added: vec![entry(ingested)],
+                removed: vec!["a\u{200b}b.md".to_owned()],
+                ..ScanDiff::default()
+            };
+            let plan = ReconcilePlan::from_diff(
+                diff,
+                |_| Some("A\u{200b}B.md".to_owned()),
+                ScanGeneration(0),
+                ScanGeneration(1),
+                false,
+                0,
+                false,
+                Vec::new(),
+            );
+            assert_eq!(!plan.respelled_retires.is_empty(), paired, "{ingested}");
+        }
     }
 }

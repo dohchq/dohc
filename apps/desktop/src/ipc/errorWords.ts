@@ -12,6 +12,7 @@ import type { DaemonErrorCode } from "@dohc/workspace-engine-client";
 type Words = string | null;
 
 const UPDATING = "dohc is still reading this workspace's files. Try again when it finishes.";
+const NOT_READ = "dohc has not read this file yet. Try again when it has.";
 const TOO_LARGE = "It is too large.";
 const UNREADABLE_ANSWER = "The server sent an answer dohc could not read. Try again later.";
 const CONTENT_MISSING = "Some file contents are missing on the server.";
@@ -19,6 +20,60 @@ const STOPPED = "It stopped before it finished. Try again.";
 const REINSTALL = "This copy of dohc is missing a file it needs. Reinstall dohc.";
 // Trying again cannot help with this one; updating dohc can.
 const NEWER_DOHC = "It needs a newer version of dohc. Update dohc to open it.";
+
+/**
+ * The code of macOS refusing dohc a folder the person has not allowed in
+ * Privacy & Security. The engine sends it as a refusal's message; main sets
+ * it on a file system error (`privacyDenial.ts`).
+ */
+export const PRIVACY_DENIED = "privacy-denied";
+export const PRIVACY_DENIED_WORDS =
+  "macOS blocked dohc from this folder. Allow dohc in System Settings › Privacy & Security › Files & Folders.";
+
+/**
+ * The engine's refusal when a volume gives a new file sharing permissions it
+ * was created without, as a network share can, so a secret or a file's own
+ * access could not be kept.
+ */
+export const VOLUME_SHARES_NEW_FILES_WORDS =
+  "The disk this workspace is on adds sharing permissions to new files, so dohc can't keep this file private. Move the workspace to a disk on this Mac.";
+
+/**
+ * The engine's refusal to open a workspace whose `.dohc`, engine folder, a
+ * store file in it, or this computer's `.dohc/local` is a link, the wrong
+ * kind of item, another user's, on a disk or system dohc can't check, or, on
+ * Windows, has permissions dohc can't use. The message names the reason,
+ * then the path from the workspace's root: one of the paths below, and
+ * nothing else.
+ */
+const ENGINE_FOLDER_NOT_PRIVATE =
+  /^engine-folder-not-private: ([a-z-]+) (\.dohc(?:\/engine(?:\/engine\.db(?:-wal|-shm|-journal)?)?|\/local)?)$/;
+// What is there, and the fix that keeps everything in it. Only an item dohc
+// never puts there can be moved without losing anything of dohc's.
+const NOT_PRIVATE_WORDS = new Map<string, readonly [fact: string, fix: string]>([
+  ["link", ["is a link", "Put what it links to in its place, then try again."]],
+  ["not-folder", ["is not a folder", "Rename or move it, then try again."]],
+  ["not-file", ["is not a file", "Rename or move it, then try again."]],
+  ["other-owner", ["belongs to another user", "Make it yours again, then try again."]],
+  ["unchecked-volume", ["is on a disk dohc can't check", "Move the workspace to a disk formatted as APFS, then try again."]],
+  ["not-changeable", ["has permissions dohc can't use", "Give your account full control of this folder and everything in it, then try again."]],
+  ["unchecked-system", ["is on a system where dohc can't check it", "Run dohc where it can read its own /proc/self/fd, then try again."]],
+]);
+// What `sudo` makes in a folder is another user's too, so a folder's fix
+// covers everything in it.
+const OTHER_OWNER_FOLDER_FIX = "Make it and everything in it yours again, then try again.";
+
+/** What keeps a workspace's History, or this computer's own data, from being private, and what to do. */
+function engineFolderNotPrivateWords(message: string): string | null {
+  const [, reason = "", path] = ENGINE_FOLDER_NOT_PRIVATE.exec(message) ?? [];
+  const words = NOT_PRIVATE_WORDS.get(reason);
+  if (words === undefined) return null;
+  const [fact, fix] = words;
+  const folder = path === ".dohc" || path === ".dohc/engine" || path === ".dohc/local";
+  const fixed = reason === "other-owner" && folder ? OTHER_OWNER_FOLDER_FIX : fix;
+  const kept = path === ".dohc/local" ? "this computer's own data" : "its History";
+  return `This workspace's ${path} ${fact}, so dohc can't keep ${kept} private. ${fixed}`;
+}
 
 // Every code the engine refuses with: `ErrorCode` in dohc-engine-protocol.
 const ENGINE_CODE_WORDS = {
@@ -59,8 +114,14 @@ const ENGINE_CODE_WORDS = {
   INVALID_CHANNEL: "This channel cannot be shared.",
   RELAY_METHOD_NOT_ALLOWED: "The server does not support this.",
   RELAY_INVALID_RESPONSE: UNREADABLE_ANSWER,
+  RELAY_HTTPS_REQUIRED: "Your server's address does not use https. Disconnect, then connect your server again with its https address.",
   INTERNAL: null,
 } as const satisfies Record<DaemonErrorCode, Words>;
+
+const CHAT_MENTION_PAGE_CHANGED_WORDS = {
+  "chat-mention-access-changed": "Chat access changed. Try again.",
+  "chat-mention-version-changed": ENGINE_CODE_WORDS.CONFLICT,
+} as const;
 
 // The one map from an error's class, then its message or code, to words. A
 // class listed here writes its messages for developers, so none of them
@@ -69,9 +130,12 @@ const ENGINE_CODE_WORDS = {
 export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>>>> = {
   DaemonRefusalError: {
     ...ENGINE_CODE_WORDS,
+    ...CHAT_MENTION_PAGE_CHANGED_WORDS,
     "Workspace is still updating. Try again.": UPDATING,
     "History is still updating. Try again.": UPDATING,
+    "dohc has not read this file yet. Open it again once dohc has read it.": NOT_READ,
     "file-locked": "Another program has this file open. Close it there, then try again.",
+    "volume-shares-new-files": VOLUME_SHARES_NEW_FILES_WORDS,
     "workspace-owned": "Another copy of dohc has this workspace open. Close it there, then try again.",
     "share-read-only": ENGINE_CODE_WORDS.SHARE_READ_ONLY,
     "relay-origin-diverged": ENGINE_CODE_WORDS.ORIGIN_DIVERGED,
@@ -140,6 +204,7 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
   // The file system's codes. A plain error with no listed code keeps its
   // message, because dohc writes those for people.
   Error: {
+    ...CHAT_MENTION_PAGE_CHANGED_WORDS,
     EACCES: "dohc does not have permission to use this file or folder.",
     EPERM: "dohc does not have permission to use this file or folder.",
     ENOENT: "The file or folder is not there anymore.",
@@ -230,10 +295,15 @@ export interface ReadError {
 
 export function readError(error: unknown): ReadError {
   const { text, name, code, message } = parse(error);
+  if (code === PRIVACY_DENIED || (name === "DaemonRefusalError" && message === PRIVACY_DENIED)) {
+    return { words: PRIVACY_DENIED_WORDS, mapped: true, cause: text };
+  }
   if (name === "DaemonRefusalError" && message.startsWith("capture-file-held: ")) {
     const path = message.slice("capture-file-held: ".length);
     return { words: captureHeldLiveMessage(path), mapped: false, cause: text };
   }
+  const notPrivate = name === "DaemonRefusalError" ? engineFolderNotPrivateWords(message) : null;
+  if (notPrivate !== null) return { words: notPrivate, mapped: true, cause: text };
   if (name === "ReservedWorkspaceIdError") {
     return { title: RESERVED_WORKSPACE_ID_TITLE, words: message, mapped: false, cause: text };
   }
@@ -275,6 +345,64 @@ export function readCollectionReopenWait(error: unknown): { words: string; waitM
     ? { words: message, waitMs: retryAfterMs } : null;
 }
 
+/**
+ * Why this computer cannot use a workspace's Collections: no computer keeps
+ * them yet, another one keeps them, dohc cannot read which one, the store
+ * this computer keeps is not there or was replaced, or the record changed
+ * while dohc wrote it.
+ */
+export const COLLECTIONS_REFUSAL_KINDS = ["unclaimed", "elsewhere", "unreadable", "missing", "replaced", "changed"] as const;
+/** Refusals that keeping the Collections here can answer, after the person confirms where needed. */
+export const KEEPABLE_COLLECTIONS_REFUSALS: readonly CollectionsRefusalKind[] = ["unclaimed", "elsewhere"];
+export type CollectionsRefusalKind = typeof COLLECTIONS_REFUSAL_KINDS[number];
+export const COLLECTIONS_REFUSAL_CODE = "collections-";
+/** The control that keeps Collections no computer keeps yet on this one. */
+export const KEEP_COLLECTIONS_HERE = "Keep the Collections on this computer";
+
+/**
+ * Where another computer keeps a workspace's Collections, and the two ways
+ * on. `others`: this computer lists some of them from its server.
+ */
+export function collectionsElsewhereWords(computer: { label: string; sameName: boolean }, others = false): string {
+  const where = computer.sameName ? `${computer.label}, another installation of dohc with this computer's name` : computer.label;
+  return `${others ? "Other" : "These"} Collections are on ${where}. Open this workspace there to use them, or to move them to a server.`;
+}
+
+/**
+ * The code of a Collections list this computer's server didn't give, where
+ * another computer keeps the workspace's own Collections.
+ */
+export const SERVER_COLLECTIONS_UNAVAILABLE = "server-collections-unavailable";
+
+/**
+ * main's words for that list: on the first line, where the workspace's
+ * Collections are. After it, the server's error, which reads as it would alone.
+ */
+export function readServerCollectionsUnavailable(error: unknown): { elsewhere: string; failure: string } | null {
+  const { name, code, message } = parse(error);
+  if (name !== "ServerCollectionsUnavailableError" || code !== SERVER_COLLECTIONS_UNAVAILABLE) return null;
+  const [elsewhere = "", ...failure] = message.split("\n");
+  return elsewhere ? { elsewhere, failure: failure.join("\n") } : null;
+}
+
+/** main's refusal to use a workspace's Collections here, with its words. */
+export function readCollectionsRefusal(error: unknown): { kind: CollectionsRefusalKind; words: string } | null {
+  const { name, code, message } = parse(error);
+  if (name !== "CollectionsRefusalError" || !code?.startsWith(COLLECTIONS_REFUSAL_CODE) || !message) return null;
+  const kind = COLLECTIONS_REFUSAL_KINDS.find((candidate) => code === `${COLLECTIONS_REFUSAL_CODE}${candidate}`);
+  return kind === undefined ? null : { kind, words: message };
+}
+
+/** macOS refused dohc a folder: System Settings, not dohc, can fix it. */
+export function isPrivacyDenied(error: unknown): boolean {
+  return readError(error).words === PRIVACY_DENIED_WORDS;
+}
+
+/** The volume adds sharing permissions to new files, so dohc refused to write one. */
+export function isVolumeSharesNewFiles(error: unknown): boolean {
+  return readError(error).words === VOLUME_SHARES_NEW_FILES_WORDS;
+}
+
 /** A refusal only a newer dohc can get past, so Try again would do nothing. */
 export function needsNewerDohc(error: unknown): boolean {
   return readError(error).words === NEWER_DOHC;
@@ -285,6 +413,11 @@ export function isWorkspaceUpdatingError(error: unknown): boolean {
   const { name, code, message } = parse(error);
   return name === "DaemonRefusalError" && code === "OVERLOADED" &&
     ERROR_WORDS.DaemonRefusalError?.[message] === UPDATING;
+}
+
+/** Main refused to run an app's code because the workspace is in Restricted Mode. */
+export function isWorkspaceRestricted(error: unknown): boolean {
+  return parse(error).name === "WorkspaceRestrictedError";
 }
 
 /** A share's refusal of a write: the file is read-only inside dohc, not on disk. */
@@ -298,13 +431,30 @@ export function isSharedLiveFileRefusal(error: unknown): boolean {
   return parse(error).name === "LiveDocumentMutationError";
 }
 
+/** A chat page cursor lost its access or version binding. Restart the walk once. */
+export function isChatMentionPageChanged(error: unknown): boolean {
+  const { name, code, message } = parse(error);
+  return ((name === "DaemonRefusalError" && code === "CONFLICT") || (name === "Error" && code === undefined)) &&
+    Object.hasOwn(CHAT_MENTION_PAGE_CHANGED_WORDS, message);
+}
+
 export function isCaptureFileHeldRefusal(error: unknown): boolean {
   const { name, code, message } = parse(error);
   return name === "DaemonRefusalError" && code === "CONFLICT" && message.startsWith("capture-file-held: ");
 }
 
+// A note changed outside dohc closed, but capture has not recorded the new
+// version, so the note did not open again. Try again sits beside it.
+export function outsideVersionWaitingMessage(path: string): string {
+  return `dohc could not open the new version of "${path}". History has not recorded it yet.`;
+}
+
+// Capture holds every refused outside edit with one reason, so these words
+// name each form it refuses. Restoring the file's earlier bytes lets capture record it again.
+export const CAPTURE_HELD_WORDS = "dohc cannot take in this file's Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Restore the file's exact contents from before that edit. For nested lists, make the edit in dohc after the file opens again.";
+
 export function captureHeldLiveMessage(path: string): string {
-  return `dohc cannot open "${path}" for live editing. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.`;
+  return `dohc cannot open "${path}" for live editing. ${CAPTURE_HELD_WORDS}`;
 }
 
 /** Access and connection failures can hide a changed grant behind an IPC error. */

@@ -1,9 +1,10 @@
 import { desktopPins, activityPin } from "../../src/testPins";
-import { expect, type Locator, type Page } from "@playwright/test";
+import { expect, type ElectronApplication, type Locator, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../../src/workspaces/workspaceSettings";
+import { canonicalWorkspaceRoot } from "../../src/workspaces/createWorkspaceFolder";
 import {
   createTestScratch,
   removeTestScratch,
@@ -91,7 +92,7 @@ function assertSafeRelativePath(path: string): void {
   }
 }
 
-// Seeds .dohc/settings.local.json before launch so a spec can set
+// Seeds .dohc/local/settings.local.json before launch so a spec can set
 // per-workspace settings without driving the settings UI. Built FROM
 // DEFAULT_WORKSPACE_SETTINGS (the strict schema's canonical default) so the
 // seed can never drift from the shape the app parses.
@@ -108,11 +109,14 @@ export async function seedWorkspaceSettings(
       ...overrides.files,
     },
   };
-  const dir = join(workspace.rootPath, ".dohc");
+  // The engine's first open takes this folder and makes it private.
+  const dir = join(workspace.rootPath, ".dohc", "local");
   await mkdir(dir, { recursive: true });
+  // dohc reads a settings file only if no other user can write it.
   await writeFile(
     join(dir, "settings.local.json"),
     `${JSON.stringify(settings, null, 2)}\n`,
+    { mode: 0o600 },
   );
 }
 
@@ -179,8 +183,8 @@ export async function seedWorkspaceRegistry(
         version: 1,
         workspaces: entries.map((entry) => ({
           workspaceId: entry.workspaceId,
-          // Store the app-canonical forward-slash form, exactly as the app
-          // itself writes registry entries (matters on Windows).
+          // The forward-slash form (matters on Windows). The app moves a
+          // spelling through a link to the folder's real path when it loads.
           rootPath: normalizeAbsolutePath(entry.rootPath),
           ...SEEDED_WORKSPACE_SHAPE,
           ...(entry.remote ? { remote: entry.remote } : {}),
@@ -260,6 +264,29 @@ export async function waitForWorkspaceReady(page: Page): Promise<void> {
   );
 }
 
+// An opened folder starts in Restricted Mode, where dohc starts no agent and
+// runs no app code. This trusts it the way a person does: Restricted Mode in
+// the title bar, then Trust workspace in main's dialog, answered here.
+export async function trustOpenWorkspace(desktop: { app: ElectronApplication; page: Page }): Promise<void> {
+  await desktop.app.evaluate(({ dialog }) => {
+    const ask = dialog.showMessageBox;
+    dialog.showMessageBox = (async () => {
+      dialog.showMessageBox = ask;
+      return { response: 0, checkboxChecked: false };
+    }) as typeof dialog.showMessageBox;
+  });
+  const indicator = desktop.page.getByTestId("restricted-mode-indicator");
+  await indicator.click();
+  await expect(indicator).toHaveCount(0);
+}
+
+// A manifest seeded on disk names no computer for the workspace's
+// Collections, as a workspace from before dohc kept that record does. The
+// test keeps them on this desktop, as its person would, before using them.
+export async function keepCollectionsHere(page: Page, workspaceId: string): Promise<void> {
+  expect(await page.evaluate(id => window.dohcDesktop!.keepCollectionsHere({ workspaceId: id }), workspaceId)).toEqual({ kept: true });
+}
+
 export async function openWorkspaceFromFirstRun(
   page: Page,
   workspace: Pick<TempWorkspace, "rootPath">,
@@ -292,10 +319,9 @@ export async function activeWorkspace(
   page: Page,
   rootPath: string,
 ): Promise<WorkspaceSummary> {
-  // The registry stores rootPath in the app's canonical forward-slash form
-  // (normalizeAbsolutePath); canonicalize the expected native path the same
-  // way so the comparison holds on Windows.
-  const expected = normalizeAbsolutePath(rootPath);
+  // The registry stores a workspace by its real path in the app's forward-slash
+  // form. Scratch roots can lead through links (macOS /tmp, Windows 8.3 names).
+  const expected = canonicalWorkspaceRoot(rootPath);
   const workspace = await page.waitForFunction(
     async (expectedRootPath) => {
       const api = (window as unknown as {
@@ -342,6 +368,30 @@ export async function waitForWorkspaceFile(
       );
     },
     { expectedPath: path, id: workspaceId },
+  );
+}
+
+// Waits until the engine owns the file under a stable object id, which a
+// chat needs before it can link or mention it.
+export async function waitForFileObjectId(
+  page: Page,
+  workspaceId: string,
+  path: string,
+): Promise<void> {
+  await page.waitForFunction(
+    async ({ id, filePath }) => {
+      const api = (window as unknown as {
+        dohcDesktop?: {
+          listFileChats(payload: { workspaceId: string; path: string }): Promise<{
+            fileObjectId: string | null;
+          }>;
+        };
+      }).dohcDesktop;
+      if (!api) return false;
+      const result = await api.listFileChats({ workspaceId: id, path: filePath });
+      return result.fileObjectId !== null;
+    },
+    { id: workspaceId, filePath: path },
   );
 }
 

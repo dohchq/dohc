@@ -1,4 +1,5 @@
 import { holdSystemClipboard } from "./helpers/systemClipboard";
+import { DOCUMENT_END } from "./helpers/keys";
 import { test, expect } from "@playwright/test";
 import { access, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -36,7 +37,7 @@ for (const mode of ["quit", "last-window", "crash", "crash-reopen-before-import"
       const editor = page.getByTestId("markdown-editor");
       await expect(editor).toBeVisible();
       await editor.click();
-      await page.keyboard.press("ControlOrMeta+End");
+      await page.keyboard.press(DOCUMENT_END);
       await page.keyboard.type(" WARMUP");
       await expect.poll(() => readFile(join(temp.rootPath, path), "utf8")).toContain("WARMUP");
       if (mode === "write-failure") {
@@ -76,7 +77,13 @@ for (const mode of ["quit", "last-window", "crash", "crash-reopen-before-import"
       if (mode === "crash" || mode === "crash-reopen-before-import") await hardKillAppTree(app.process().pid!);
       else if (mode === "last-window") {
         const window = await app.browserWindow(page);
+        // A Mac app keeps running after its last window closes, so the person quits it next.
+        const closed = process.platform === "darwin" ? page.waitForEvent("close") : null;
         await window.evaluate(window => {setImmediate(() => window.close());});
+        if (closed) {
+          await closed;
+          await app.evaluate(({app}) => app.quit());
+        }
       } else await app.evaluate(({app}) => app.quit());
       await exited;
       if (mode === "crash" || mode === "crash-reopen-before-import") await expect(desktop.close()).rejects.toThrow(/Electron exited with (status|signal)/);
@@ -175,7 +182,7 @@ for (const mode of ["quit", "last-window", "crash", "crash-reopen-before-import"
         await expect.poll(() => checkpointText(temp.homeDir)).toBe("");
         await expect(access(join(temp.rootPath, path))).rejects.toThrow();
         await openHistoryView(desktop.page);
-        await expect(desktop.page.getByTestId("engine-history-list").getByText("Typing kept",{exact:true})).toHaveCount(1);
+        await expect(desktop.page.getByTestId("engine-history-list").getByText("Text kept",{exact:true})).toHaveCount(1);
         await desktop.page.locator(`[data-testid="engine-moment-open"][data-moment-id="${momentId}"]`).click();
         await expect(desktop.page.getByTestId("engine-diff-lines")).toContainText(sentinels[2]!);
         await holdSystemClipboard(test.info(), async (remainingMs) => {

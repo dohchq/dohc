@@ -122,6 +122,7 @@ const COMPARED_TABLES: &[&str] = &[
     "owner_ydoc_outboxes",
     "owner_ydoc_outbox_entries",
     "owner_live_stops",
+    "sync_identity",
     "replication_log",
     "hosted_replicas",
     "hosted_documents",
@@ -431,8 +432,11 @@ fn restore_test(
     backup_path: &Path,
     faults: &dyn FaultInjector,
 ) -> Result<bool, StorageError> {
-    let copy = Connection::open_with_flags(backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(StorageError::backup)?;
+    let copy = Connection::open_with_flags(
+        crate::sqlite_path(backup_path),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(StorageError::backup)?;
 
     let check: String = copy
         .pragma_query_value(None, "integrity_check", |row| row.get(0))
@@ -722,6 +726,11 @@ mod tests {
                 "backup restore verification must compare {table}"
             );
         }
+    }
+
+    #[test]
+    fn backup_compares_the_replication_identity_and_its_pull_progress() {
+        assert!(COMPARED_TABLES.contains(&"sync_identity"));
     }
 
     #[test]

@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { prepareLocalAppPublication } from "../workspaces/ownerAppPublication";
 import { createLocalOwnerAppPublicationHandler } from "./localOwnerAppPublication";
-import type { LocalDatasetHost } from "../workspaces/localDatasetHost";
+import { createLocalDatasetHost, type LocalDatasetHost } from "../workspaces/localDatasetHost";
+import { mkdir, readdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { createTestScratch } from "../workspaces/testTemp";
 
 vi.mock("../workspaces/ownerAppPublication", () => ({ prepareLocalAppPublication: vi.fn() }));
 const hash = "a".repeat(64);
@@ -23,7 +26,7 @@ function harness() {
   const datasetForWorkspace = vi.fn(async () => local);
   const launchLocalDataset = vi.fn(async () => "http://127.0.0.1:43211/bootstrap#handoff");
   const handler = createLocalOwnerAppPublicationHandler({ datasetForWorkspace, launchLocalDataset,
-    flushCapture: vi.fn(async () => {}), withAdapter: async (_workspace, work) => work({} as never), compile: vi.fn() });
+    flushCapture: vi.fn(async () => ({ deferredWrites: [] })), withAdapter: async (_workspace, work) => work({} as never), compile: vi.fn() });
   vi.mocked(prepareLocalAppPublication).mockResolvedValue({ candidate, files: [] });
   const prepare = async () => {
     const result = await handler({ action: "prepareLocal", workspaceId: "w", appRoot: "app" }, "caller", operation);
@@ -99,5 +102,29 @@ describe("local app publication review", () => {
     h.has.mockReturnValue(false);
     for (const action of ["withdraw", "revokeCollection"] as const) expect(await h.handler({ action, ...request }, "caller", h.operation)).toBeNull();
     expect(h.withdraw).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("local apps in a workspace whose Collections another computer keeps", () => {
+  it("lists, launches, approves and withdraws nothing, says which computer keeps them, and opens no store", async () => {
+    const root = await createTestScratch("dohc-local-apps-holder-");
+    await mkdir(join(root, ".dohc"));
+    await writeFile(join(root, ".dohc", "collections.json"),
+      JSON.stringify({ version: 1, workspaceId: "w", installId: "install-laptop", label: "Laptop", storeId: null }));
+    const datasetForWorkspace = () => createLocalDatasetHost({ workspaceId: "w", workspaceRoot: root, localPersonId: () => "person-local",
+      holder: { here: () => ({ installId: "install-here", label: "Studio" }), required: () => true } });
+    const h = harness();
+    h.datasetForWorkspace.mockImplementation(datasetForWorkspace as unknown as typeof h.datasetForWorkspace);
+    const review = await h.prepare();
+    const words = "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.";
+    for (const request of [
+      { action: "listLocal", workspaceId: "w", appRoot: "app" },
+      { action: "launchLocal", workspaceId: "w", publicationId: hash },
+      { action: "approve", workspaceId: "w", approvalId: review.approvalId, candidateDigest: review.candidateDigest },
+      { action: "withdraw", workspaceId: "w", publicationId: hash, expectedAuthorityRevision: 1 },
+      { action: "revokeCollection", workspaceId: "w", publicationId: hash, expectedAuthorityRevision: 1 },
+    ] as const) await expect(h.handler(request, "caller", h.operation), request.action).rejects.toThrow(words);
+    expect(h.activate).not.toHaveBeenCalled();
+    expect(await readdir(join(root, ".dohc"))).toEqual(["collections.json"]);
   });
 });

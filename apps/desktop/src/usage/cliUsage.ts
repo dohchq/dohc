@@ -1,7 +1,8 @@
 import {
-  APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, CLI_CAPABILITIES, DATASET_CAPABILITIES,
+  APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, CLI_CAPABILITIES,
   type CliRequest, type CliResultByVerb,
 } from "@dohc/cli/protocol";
+import { DATASET_CAPABILITIES } from "@dohc/cli/dataset";
 import { CAPABILITIES, type CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import { USAGE_ACTION_IDS } from "@dohc/workspace-contracts/usage";
 import { RENDERER_USAGE_COVERAGE } from "./rendererUsage";
@@ -33,6 +34,7 @@ export const DESKTOP_USAGE_COVERAGE = RENDERER_USAGE_COVERAGE.map(pair => ({ ...
 // Called only with the dispatcher's validated result. The collector receives
 // the aggregate pair, never arguments, content, paths or result objects.
 export function cliUsageInvocation(request: CliRequest, result: CliResultByVerb[CliRequest["verb"]]): CliUsageInvocation | null {
+  if (result === null) return null;
   const id = request.verb === "dataset" ? DATASET_CAPABILITIES[request.args.request.action]
     : request.verb === "appPublication" ? APP_PUBLICATION_CAPABILITIES[request.args.request.action]
     : request.verb === "ownerAppResponses" ? APP_RESPONSE_CAPABILITIES[request.args.request.action]

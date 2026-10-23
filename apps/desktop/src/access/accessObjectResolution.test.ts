@@ -4,7 +4,7 @@ import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { hasAccessChat, locateAccessVersionPath, resolveAccessFileObject, resolveAccessObject } from "./accessObjectResolution";
 import type { RegistryEntry } from "../workspaces/registryStore";
 
-it("resolves binary files and binary-only folders in a non-main version through metadata", async () => {
+it("resolves binary files and binary-only folders in a non-main version without a full listing", async () => {
   const engine = new VersionedLoopbackEngine();
   const workspace = { workspaceId: "w", rootPath: "/w" } as RegistryEntry;
   const adapter = new VersionedLiveAdapter({ sendRequest: request => engine.sendRequest(request), close() {} }, "w", { workspaceId: "w" });
@@ -13,12 +13,26 @@ it("resolves binary files and binary-only folders in a non-main version through 
   await adapter.setActiveVersion({ workspaceId: "w", versionId: version.id });
   await adapter.writeBinaryFile({ workspaceId: "w", versionId: version.id, path: "Pictures/photo.png",
     bytes: new Uint8Array([137, 80, 78, 71]), metadata: { origin: "api" } });
+  const wholeListing = vi.spyOn(adapter, "listTextFileMetadata");
+  const page = vi.spyOn(adapter, "listTextFilePage");
+  const resolve = vi.spyOn(adapter, "resolveFiles");
   const ports = { filePathForObjectId: async () => null, hasChat: async () => false,
     locatePath: (path: string, versionId: string | null) => locateAccessVersionPath("w", path, versionId!, adapter) };
   for (const path of ["Pictures/photo.png", "Pictures"]) {
     expect(await resolveAccessObject(workspace, { kind: "path", path, versionId: version.id }, ports)).toMatchObject({ visibility: "visible" });
   }
   expect(await resolveAccessObject(workspace, { kind: "path", path: "Pictures/missing.png", versionId: version.id }, ports)).toMatchObject({ visibility: "missing" });
+  for (const path of ["Pictures/", "./Pictures/photo.png", "../Pictures", "", "pictures", "Empty"]) {
+    expect(await locateAccessVersionPath("w", path, version.id, adapter)).toEqual({ path, exists: false });
+  }
+  expect(await locateAccessVersionPath("w", "Pictures", "main", adapter)).toEqual({ path: "Pictures", exists: false });
+  const shared = { ...workspace, shareView: { shareId: "s", granterEmail: "owner@example.com", genericChatWritable: false,
+    grantedSelector: { versionId: version.id, paths: ["Allowed"], access: "view" } } } as RegistryEntry;
+  expect(await resolveAccessObject(shared, { kind: "path", path: "Pictures/photo.png", versionId: version.id }, ports))
+    .toMatchObject({ visibility: "hidden" });
+  expect(wholeListing).not.toHaveBeenCalled();
+  expect(page.mock.calls.every(([input]) => input.limit === 1)).toBe(true);
+  expect(resolve).toHaveBeenCalledWith({ workspaceId: "w", versionId: version.id, targets: [{ path: "Pictures/photo.png" }] });
 });
 it("bounds chat resolution to 100 wire lookups and does not claim absence beyond its page", async () => {
   const store = { listChannelsPage: vi.fn(async () => ({ channels: Array.from({ length: 100 }, (_, n) => ({ id: `local-${n}` })), nextCursor: "more" }) as never),
@@ -35,7 +49,7 @@ it("labels a chat outside the bounded page unknown through the owner instead of 
   const store = { listChannelsPage: async () => ({ channels: [], nextCursor: "more" }), getChannelWireId: async () => null };
   const owner = createAccessOwner({ resolve: (_w: string, ref) => resolveAccessObject(workspace, ref, {
     filePathForObjectId: async () => null, locatePath: async () => null, hasChat: wire => hasAccessChat("w", wire, store) }),
-    account: () => null, scope: () => "scope", assertCurrent: () => undefined, refresh: async () => undefined,
+    account: () => null, scope: () => "scope", assertCurrent: () => undefined, refresh: async () => ({ status: "requested" }),
     roster: () => ({ listing: null, checkedAtMs: null, freshness: "unknown" }), received: () => ({ inventory: null, checkedAtMs: null, freshness: "unknown" }),
     permissions: async () => { throw Error("unused"); } });
   expect(await owner.object("w", { ref: { kind: "chat", channelWireId: "unvisited" } })).toMatchObject({ freshness: "unknown", visibility: "unknown", coverage: { complete: false } });

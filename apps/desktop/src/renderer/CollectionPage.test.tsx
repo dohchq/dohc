@@ -79,6 +79,11 @@ vi.mock("./collab/useEngineDoc", () => ({
     return typeof current === "function" ? current(input) : current;
   },
 }));
+// The record's file check runs in a worker and has its own tests
+// (recordFieldWrites.test.tsx); here every record is clear.
+vi.mock("./collections/recordSourceCheck", () => ({
+  useRecordSourceCheck: () => ({ state: "clear", contentHash: "c".repeat(64) }),
+}));
 
 function engineDocState(
   partial: Partial<Pick<UseEngineDoc, "available" | "opening" | "doc" | "saveState" | "saveError" | "readOnlyWhileEditing" | "deletedWhileEditing">>,
@@ -479,6 +484,34 @@ describe("CollectionPage", () => {
     ));
     act(() => onError.mock.calls[0]![2]());
     await waitFor(() => expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(2));
+  });
+
+  it("reports nothing while the workspace's files are still being read, and reads Buttons again when main says the read finished", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")], {
+      ...SCHEMA, fields: [...SCHEMA.fields, { name: "Finish", type: "button" }],
+    });
+    bridge.listAutomationButtons.mockRejectedValueOnce(new Error(
+      "Error invoking remote method 'desktop:list-automation-buttons': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+    ));
+    const onError = vi.fn();
+    renderPage(bridge, undefined, undefined, { onError });
+    await screen.findByText("Plan");
+    await waitFor(() => expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(1));
+    await act(async () => undefined);
+    expect(onError).not.toHaveBeenCalled();
+    // The button waits for the read instead of offering Check again.
+    expect(screen.queryByRole("button", { name: "Check Finish for Plan again" })).toBeNull();
+    bridge.listAutomationButtons.mockResolvedValue({ buttons: [
+      { field: "Finish", state: { kind: "ready", automationId: "collection:tasks#finish" } },
+    ] });
+    vi.useFakeTimers();
+    // What main sends when the engine announces capture.initialSettled.
+    bridge.emitWorkspaceActivity({ workspaceId: "ws-1", pathSetChanged: false });
+    await act(() => vi.advanceTimersByTimeAsync(250));
+    vi.useRealTimers();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Finish for Plan" }).getAttribute("aria-disabled")).toBeNull());
+    expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(2);
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("names a newer Collection file and asks to update dohc", async () => {

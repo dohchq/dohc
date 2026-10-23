@@ -97,6 +97,7 @@ const results = {
     groups: [
       {
         id: "channel-1",
+        channelWireId: "wire",
         name: "General",
         slug: "general",
         kind: "group" as const,

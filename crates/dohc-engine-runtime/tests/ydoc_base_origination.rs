@@ -1517,6 +1517,7 @@ async fn deleting_a_crash_left_ydoc_before_enrollment_retires_the_lineage() {
         replication_epoch: "epoch-local".to_owned(),
         stream_identity: "stream-local".to_owned(),
         settlement_report_id: None,
+        ordinary_pull: None,
     };
     commit_relay_cursor(
         &mut store,
@@ -1760,7 +1761,7 @@ async fn live_lease_blocks_capture_retire_until_retry_and_rolls_back_every_row()
     assert!(matches!(
         error,
         RuntimeError::Sync(SyncError::RetryableState {
-            reason: "ydoc-session-live"
+            reason: dohc_engine_runtime::actor::CAPTURE_RETIRE_WAITS_FOR_SESSION
         })
     ));
     assert_eq!(
@@ -1768,8 +1769,29 @@ async fn live_lease_blocks_capture_retire_until_retry_and_rolls_back_every_row()
         before,
         "the retryable refusal must roll back the snapshot, moment, log, and lineage deletes"
     );
-
     drop(lease);
+
+    // An internal attempt's release wakes nothing, so capture must not wait
+    // for it: its lease refuses as an ordinary retryable failure.
+    let internal = leases.acquire_internal(&key).expect("hold internal lease");
+    let error = dohc_engine_testkit::capture::retire_captured_path(
+        &handle,
+        input.clone(),
+        scratch.path(),
+        leases.clone(),
+        Arc::new(NoFaults),
+    )
+    .await
+    .expect_err("an internal lease must make capture retirement retryable");
+    assert!(matches!(
+        error,
+        RuntimeError::Sync(SyncError::RetryableState {
+            reason: "ydoc-session-live"
+        })
+    ));
+    assert_eq!(capture_retire_state(&db, &key, PATH), before);
+    drop(internal);
+
     let error = dohc_engine_testkit::capture::retire_captured_path(
         &handle,
         input.clone(),
@@ -3736,6 +3758,7 @@ async fn oversized_close_decline_survives_prune_and_restart() {
         stream_identity: "stream-local".into(),
         bootstrap_complete: true,
         settlement_report_id: None,
+        ordinary_pull: None,
     };
     for now in [500, 600] {
         let declines = match commit_relay_cursor(
@@ -3930,6 +3953,7 @@ async fn oversized_declined_editor_settlements_export_only_latest_after_enrolmen
         stream_identity: "stream-local".into(),
         bootstrap_complete: true,
         settlement_report_id: None,
+        ordinary_pull: None,
     };
     let mut store = EngineStore::open(&db, 110).expect("open for enrolment");
     assert!(matches!(

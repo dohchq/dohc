@@ -1,11 +1,15 @@
 use super::*;
 use crate::{ContentKind, Ydoc};
+use dohc_engine_storage::text;
 
 /// A source read and retained by the native actor after ordinary cursor commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImportedOwnerSource {
     pub version: u32,
+    /// Engine-captured proof requirement. Ordinary receipts omit this field.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reader_source: bool,
     pub relay_database_namespace: String,
     pub workspace_id: String,
     pub main_version_id: String,
@@ -28,6 +32,10 @@ pub struct ImportedOwnerSource {
     /// and so the activation ID are those of a capture that follows none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predecessor_activation_id: Option<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Debug)]
@@ -228,6 +236,7 @@ pub fn capture_imported_owner_activation(
     path: &str,
     max_bytes: usize,
     faults: &dyn FaultInjector,
+    resolver: Option<&crate::reader_resolver::ReaderResolver>,
 ) -> Result<ImportedOwnerActivation, ApplicationError> {
     identifier(namespace, 1024)?;
     if key.version_id != "main" || max_bytes == 0 {
@@ -282,29 +291,39 @@ pub fn capture_imported_owner_activation(
         adoption::require_local_replay_budget(tx, key, max_bytes)?;
         let local = durable::load_doc_in(tx, key)?;
         if local.has_missing_updates() { return Err(ApplicationError::Conflict); }
+        let reader_source = local.has_reader_source();
+        let baseline_bytes = get_binary_blob(tx, &lineage)?.ok_or(ApplicationError::Corrupt)?;
+        let original_doc = Ydoc::wire(); original_doc.apply(&baseline_bytes)?;
+        if reader_source { original_doc.validate_reader_baseline(&baseline_bytes)?; }
         let projection = local.project(ContentKind::Richdoc)?.content;
         // The same rule as the version's settled file, so a document whose
         // file keeps a body the engine reads differently still activates.
-        let text = local
+        let text = if reader_source {
+            let authority = serde_json::to_string(&(&namespace, &epoch, &stream))
+                .map_err(|_| ApplicationError::Corrupt)?;
+            crate::reader_snapshot::resolve(tx, key, &local, &projection,
+                &crate::reader_snapshot::SnapshotIdentity {
+                    moment: &moment, path, digest: &source_digest, lineage: &lineage, restore_fence: None, authority: &authority,
+                }, resolver)?
+        } else { local
             .settled_markdown_source(&projection, || {
-                tx.query_row("SELECT text FROM blobs WHERE sha256=?1", [&source_digest], |row| row.get(0))
+                text::read(tx, &source_digest)
                     .optional()
-                    .map(Option::flatten)
                     .map_err(read_sql)
             })?
-            .unwrap_or(projection);
+            .unwrap_or(projection) };
         if text.len() as i64 != source_length || hex_sha256(text.as_bytes()) != source_digest {
             settled_at_boundary(tx, namespace, key, path, &lineage, &local, (&moment, &source_digest, source_length), max_bytes)?;
         }
         let full_state = local.encode_full_state_bounded(max_bytes.saturating_sub(baseline_length as usize).min(crate::limits::MAX_YDOC_UPDATE_BYTES))
             .ok_or(ApplicationError::ConfiguredByteBudgetExceeded)?;
-        let baseline_bytes = get_binary_blob(tx, &lineage)?.ok_or(ApplicationError::Corrupt)?;
-        let original_doc = Ydoc::wire(); original_doc.apply(&baseline_bytes)?;
-        original_doc.validate_public_baseline(&baseline_bytes)?;
+        if !reader_source {
+            original_doc.validate_public_baseline(&baseline_bytes)?;
+        }
         // A retirement still settling this document leaves no tail to follow yet.
         if super::retirement::retiring(tx, key)? { return Err(ApplicationError::Conflict); }
         let predecessor_activation_id = owner_activations::capture_predecessor(tx, namespace, key, &lineage)?;
-        let source = ImportedOwnerSource {version: 1, relay_database_namespace: namespace.to_owned(),
+        let source = ImportedOwnerSource {version: 1, reader_source, relay_database_namespace: namespace.to_owned(),
             workspace_id: key.workspace_id.clone(), main_version_id: key.version_id.clone(), object_id: key.object_id.clone(),
             lineage_claim_id: lineage, current_path: path.to_owned(), replication_epoch: epoch, stream_identity: stream,
             committed_cursor: cursor, base_origin_id, base_origin_seq, base_relay_seq, source_moment_id: moment,
@@ -345,6 +364,7 @@ pub fn resume_imported_owner_activation(
     path: &str,
     activation_id: &str,
     max_bytes: usize,
+    resolver: Option<&crate::reader_resolver::ReaderResolver>,
 ) -> Result<ImportedOwnerActivation, ApplicationError> {
     identifier(namespace, 1024)?;
     identifier(activation_id, 1024)?;
@@ -386,7 +406,7 @@ pub fn resume_imported_owner_activation(
         let binding=LiveObjectBinding {workspace_id:key.workspace_id.clone(),main_version_id:key.version_id.clone(),
             object_id:key.object_id.clone(),lineage_claim_id:source.lineage_claim_id.clone(),current_path:path.to_owned(),
             selector_paths:vec![path.to_owned()],restore_fence_generation:1};
-        let verified=adoption::read_adoption_source(conn,namespace,activation_id,&binding)?
+        let verified=adoption::read_adoption_source(conn,namespace,activation_id,&binding,resolver)?
             .and_then(|(_,_,_,_,source)|source).ok_or(ApplicationError::Corrupt)?;
         if verified!=source { return Err(ApplicationError::Corrupt); }
         if cursor<source.committed_cursor || epoch!=source.replication_epoch || stream!=source.stream_identity {
@@ -412,10 +432,9 @@ pub fn resume_imported_owner_activation(
             }
             adoption::require_local_replay_budget(conn,key,max_bytes)?;
             let local=durable::load_doc_in(conn,key)?;
-            let full=local.encode_full_state_bounded(max_bytes.min(crate::limits::MAX_YDOC_UPDATE_BYTES))
-                .ok_or(ApplicationError::ConfiguredByteBudgetExceeded)?;
-            if local.has_missing_updates() || full.len()!=source.full_state_byte_length
-                || hex_sha256(&full)!=source.full_state_digest { return Err(ApplicationError::Conflict); }
+            if local.has_missing_updates() || !matches_imported_state(conn, &local, &source, max_bytes)? {
+                return Err(ApplicationError::Conflict);
+            }
             let current:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM snapshots s JOIN path_aliases p USING(workspace_id,version_id,object_id,path)
                 WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.path=?4 AND s.content_kind='text' AND s.blob_sha256=?5)",
                 params![key.workspace_id,key.version_id,key.object_id,path,source.source_digest],|r|r.get(0)).map_err(read_sql)?;
@@ -432,4 +451,33 @@ pub fn resume_imported_owner_activation(
         let restore_generation=super::restore_generation(conn,key)?;
         Ok(ImportedOwnerActivation {activation_id:activation_id.to_owned(),source,baseline_bytes,full_state,restore_generation})
     })
+}
+
+// E checkpoints can re-encode mark attribute maps in a different order. Compare
+// their complete typed wire structure, including identities, instead of a new encoding.
+pub(super) fn matches_imported_state(
+    conn: &Connection,
+    local: &Ydoc,
+    source: &ImportedOwnerSource,
+    max_bytes: usize,
+) -> Result<bool, ApplicationError> {
+    if local.has_reader_source() != source.reader_source {
+        return Ok(false);
+    }
+    if source.reader_source {
+        let bytes =
+            get_binary_blob(conn, &source.full_state_digest)?.ok_or(ApplicationError::Corrupt)?;
+        let retained = Ydoc::wire();
+        retained.apply(&bytes)?;
+        return Ok(crate::replay_parity::structurally_equal_v2(
+            local, &retained,
+        )?);
+    }
+    let full = local
+        .encode_full_state_bounded(max_bytes.min(crate::limits::MAX_YDOC_UPDATE_BYTES))
+        .ok_or(ApplicationError::ConfiguredByteBudgetExceeded)?;
+    Ok(
+        full.len() == source.full_state_byte_length
+            && hex_sha256(&full) == source.full_state_digest,
+    )
 }

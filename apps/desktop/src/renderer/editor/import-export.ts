@@ -1,4 +1,5 @@
 import type { JSONContent } from '@tiptap/core'
+export {yDocToArtifactMarkdown} from '@dohc/ydoc-projection'
 import { getHTMLFromFragment } from '@tiptap/core'
 import {
   getDohcProseMirrorSchema,

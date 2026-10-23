@@ -4,13 +4,14 @@ import { copyFile, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { NODE_SHA256 } from "./stage-app-compiler.mjs";
+import { PINNED_NODE } from "./pinned-node.mjs";
 
 const desktopRoot = fileURLToPath(new URL("..", import.meta.url));
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
 const ownerSource = "src/agents/agentProbeOwner.cs", relaySource = "src/agents/agentProbeRelay.mjs";
 const stagerSource = "scripts/stage-agent-probe.mjs";
 const files = ["agentProbeOwner.exe", "agentProbeRelay.mjs"];
+const nodeSha256 = PINNED_NODE["win32-x64"].sha256;
 
 /** Compiles C# 5 with the .NET Framework compiler that ships with Windows. */
 export async function compileOwner(sources, outfile, main = "AgentProbeOwner") {
@@ -29,7 +30,7 @@ export async function requireAgentProbe(root = join(desktopRoot, "resources/agen
   if (platform !== "win32") return;
   if (arch !== "x64") throw new Error("The packaged agent probe currently requires Windows x64.");
   const manifest = JSON.parse(await readFile(join(root, "manifest.json"), "utf8"));
-  if (manifest.nodeSha256 !== NODE_SHA256 || manifest.platform !== "win32" || manifest.arch !== "x64" ||
+  if (manifest.nodeSha256 !== nodeSha256 || manifest.platform !== "win32" || manifest.arch !== "x64" ||
       JSON.stringify(Object.keys(manifest.files).sort()) !== JSON.stringify([...files].sort()) ||
       manifest.files["agentProbeRelay.mjs"] !== manifest.sources?.[relaySource]) {
     throw new Error("Agent probe staging manifest does not match this build.");
@@ -37,7 +38,7 @@ export async function requireAgentProbe(root = join(desktopRoot, "resources/agen
   for (const path of files) {
     if (sha256(await readFile(join(root, path))) !== manifest.files[path]) throw new Error(`Agent probe asset changed: ${path}`);
   }
-  if (sha256(await readFile(join(compilerRoot, "node.exe"))) !== NODE_SHA256) throw new Error("Agent probe Node identity changed.");
+  if (sha256(await readFile(join(compilerRoot, "node.exe"))) !== nodeSha256) throw new Error("Agent probe Node identity changed.");
 }
 
 /** csc output is not byte-reproducible, so unchanged sources reuse the checked staged tree. */
@@ -63,7 +64,7 @@ export async function stageAgentProbe(options = {}) {
     await copyFile(join(sourceRoot, relaySource), join(staging, "agentProbeRelay.mjs"));
     const identities = {};
     for (const path of files) identities[path] = sha256(await readFile(join(staging, path)));
-    await writeFile(join(staging, "manifest.json"), JSON.stringify({ nodeSha256: NODE_SHA256, platform, arch, sources, files: identities }, null, 2));
+    await writeFile(join(staging, "manifest.json"), JSON.stringify({ nodeSha256, platform, arch, sources, files: identities }, null, 2));
     await requireAgentProbe(staging, compilerRoot, platform, arch);
     const exists = await stat(destination).then(() => true, error => { if (error.code === "ENOENT") return false; throw error; });
     const previous = `${staging}.previous`;

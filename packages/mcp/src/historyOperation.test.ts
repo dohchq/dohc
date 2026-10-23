@@ -2,14 +2,15 @@ import { expect, it, vi } from "vitest";
 import { readOperation, undoOperation, type ToolContext } from "./tools";
 import { advertisedCapabilityTools } from "./capabilityExposure.fixture";
 const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
-it("passes the main refusal and pending-copy result through as data", async () => {
+it("passes a successful move Undo and pending-copy result through as data", async () => {
   const pending = { ok: true, tracked: { state: "restoring", momentCount: 1 }, restored: [], remaining: [{ path: "a.txt", reason: "a.txt now occupies the old path.", retry: true }] };
   const request = vi.fn(async () => pending);
   const ctx: ToolContext = { root: process.cwd(), home: process.cwd(), request };
   expect(await undoOperation(ctx, { operationId }, "Agent A")).toEqual(pending);
   expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "historyUndo", args: expect.objectContaining({ actor: "agent", operationId, agent: "Agent A" }) }));
-  request.mockResolvedValueOnce({ ok: false, reason: "Cannot undo this change yet. Only a delete can be undone." } as never);
-  expect(await undoOperation(ctx, { operationId })).toEqual({ ok: false, reason: "Cannot undo this change yet. Only a delete can be undone." });
+  const restored = { ok: true, tracked: { state: "restored", momentCount: 1 }, restored: [], remaining: [] };
+  request.mockResolvedValueOnce(restored as never);
+  expect(await undoOperation(ctx, { operationId })).toEqual(restored);
 });
 it("keeps both operation tools owner-only and rejects invalid ids before transport", async () => {
   const request = vi.fn(); const ctx: ToolContext = { root: process.cwd(), home: process.cwd(), request };

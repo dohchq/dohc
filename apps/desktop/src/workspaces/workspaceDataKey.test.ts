@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { access, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { access, mkdir, readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   SECRET_KEY_RELATIVE_PATH,
@@ -23,8 +23,19 @@ describe("desktop workspace data-key custody", () => {
     });
   });
 
+  it("leaves creating the engine's folder to the engine", async () => {
+    const root = await createTestScratch("dohc-desktop-data-key-");
+    await expect(installWorkspaceDataKey(root, randomBytes(32))).rejects.toMatchObject({
+      name: "SecretFileStoreError",
+      code: "key-corrupt",
+    });
+    await expect(access(join(root, ".dohc"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("reinstalls the same key and refuses to overwrite a different key", async () => {
     const root = await createTestScratch("dohc-desktop-data-key-");
+    // The engine creates this folder when it opens the workspace.
+    await mkdir(dirname(join(root, SECRET_KEY_RELATIVE_PATH)), { recursive: true, mode: 0o700 });
     const firstKey = randomBytes(32);
     const differentKey = randomBytes(32);
 

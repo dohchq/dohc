@@ -1,15 +1,14 @@
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract";
 import { createHash } from "node:crypto";
 import { jsonResponse, TokenBucketLimiter } from "@dohc/service-http";
-import type { PublicEditRelease } from "@dohc/security-contract";
 import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, errorResponse, notFound, relayError, RelayError, RELAY_ERRORS } from "./errors";
-import { hashLinkProfileSecret, isPublicLinkAccess, type ValidatedLinkCapability } from "./linkSecurity";
+import { hashLinkProfileSecret, type ValidatedLinkCapability } from "./linkSecurity";
 import { readStreamedBytes } from "./relayBytes";
 import { parseString } from "./requestInputs";
 import { grantEditsCollection, namedCollectionEditGrant } from "./collectionEditGrant";
-import { accountDisplayName } from "./discussionRoutes";
+import { accountDisplayName } from "./accountDisplayName";
 import { collectionEditSelector, filterCollectionWriteForShare, MAX_COLLECTION_WRITE_BYTES, MAX_NEW_COLLECTION_RECORDS, pathVisibleThroughShare } from "./shareFilter";
 import { CollectionWriteStaleError, type CommitCollectionWriteInput, type SyncRelayStorage } from "./storage";
 
@@ -167,7 +166,6 @@ export function createLinkCollectionWriteRoute(input: {
   rateLimiter: TokenBucketLimiter;
   admission: LinkCollectionWriteAdmission;
   linkKey: string | Uint8Array;
-  publicEditRelease?: PublicEditRelease;
   requireLinkCapability(request: Request): { capability: ValidatedLinkCapability };
   nowMs: () => number;
   newId: () => string;
@@ -179,9 +177,9 @@ export function createLinkCollectionWriteRoute(input: {
     const { capability } = input.requireLinkCapability(request);
     const secret = request.headers.get("x-dohc-link-profile-secret");
     if (!secret || !LINK_SECRET_PATTERN.test(secret)) throw notFound();
-    // An Edit link only, on a relay that released Edit links. A View or
+    // An Edit link only. A View or
     // Comment link learns nothing a missing share would not tell it.
-    if (capability.access !== "edit" || !isPublicLinkAccess(capability.access, input.publicEditRelease)) {
+    if (capability.access !== "edit") {
       throw notFound();
     }
     const profileTokenHash = hashLinkProfileSecret(secret, input.linkKey);

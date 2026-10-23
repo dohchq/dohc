@@ -32,7 +32,7 @@ function scope(overrides: Partial<ExplorerMenuScope> = {}): ExplorerMenuScope {
 }
 
 function commands(overrides: Partial<ExplorerMenuScope> = {}): string[] {
-  return explorerMenuEntries(scope(overrides)).flatMap((entry) =>
+  return explorerMenuEntries(scope(overrides), "linux").flatMap((entry) =>
     entry.kind === "item" ? [entry.id] : [],
   );
 }
@@ -171,5 +171,18 @@ describe("a share mount inside an ordinary workspace", () => {
       "export-zip",
       "open-externally",
     ]);
+  });
+});
+
+describe("Show in the file manager", () => {
+  it.each([
+    ["darwin", "Show in Finder"],
+    ["win32", "Show in File Explorer"],
+    ["linux", "Show in file manager"],
+  ] as const)("names the %s file manager wherever the menu reveals a path", (platform, label) => {
+    for (const overrides of [{ kind: "file" }, { kind: "folder" }, { kind: "folder", isMountPath: true, hasMountRecord: true }] as const) {
+      const reveal = explorerMenuEntries(scope(overrides), platform).filter((entry) => entry.kind === "item" && entry.id === "open-externally");
+      expect(reveal, JSON.stringify(overrides)).toEqual([{ kind: "item", label, id: "open-externally" }]);
+    }
   });
 });

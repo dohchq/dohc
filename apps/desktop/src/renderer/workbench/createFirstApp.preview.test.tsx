@@ -6,10 +6,11 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 import type { StartSitePreviewPayload } from "../../ipc/bridgeContract";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../../workspaces/workspaceSettings";
-import { getSitePackage, listSitePackages } from "../../workspaces/sitePackage";
+import { listSitePackages } from "../../workspaces/sitePackage";
 import { startStaticSitePreview, type StaticSitePreview } from "../../workspaces/siteRunner";
 import { listFiles } from "../../workspaces/workspaceFiles";
 import { SitePreviewPage } from "../SitePreviewPage";
+import { selectListedSitePackage } from "../../testing/sitePackageTestOracle";
 import { createFirstAppFiles } from "./createFirstApp";
 
 const spawn = vi.hoisted(() => vi.fn(() => { throw new Error("unexpected child process"); }));
@@ -40,7 +41,7 @@ it("opens the desktop's first app in static mode without spawning a process", as
       },
     });
     const packages = await listSitePackages(workspaceRoot, await listFiles(workspaceRoot));
-    const site = await getSitePackage(workspaceRoot, root, packages);
+    const site = selectListedSitePackage(root, packages);
     expect(site?.scripts.dev).toBeTruthy();
     const startSitePreview = vi.fn(async (payload: StartSitePreviewPayload) => {
       if (payload.mode !== "static") spawn();
@@ -55,6 +56,9 @@ it("opens the desktop's first app in static mode without spawning a process", as
       stopSitePreview: async () => { await preview?.stop(); },
       getSitePreviewLogs: async () => ({ logs: [], exited: false }),
       onSitePreviewReplaced: () => () => undefined,
+      // New workspace made this workspace, so main trusts it.
+      readWorkspaceTrust: async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: true }),
+      onWorkspaceTrustChanged: () => () => undefined,
     });
     render(<SitePreviewPage workspaceId="ws-new-app" siteRoot={root} />);
     await waitFor(() => expect(startSitePreview).toHaveBeenCalledOnce());

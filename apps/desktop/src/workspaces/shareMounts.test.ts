@@ -47,6 +47,7 @@ const PINNED_SELECTOR = {
 } as const;
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import { createTestScratch } from "./testTemp";
+import { readLocalStateFrom } from "./workspaceLocalState";
 
 const SHARE_ID = "share-1";
 const HOST_WORKSPACE = "host-workspace-1";
@@ -74,6 +75,8 @@ async function tempHostRoot(): Promise<string> {
 function daemonHarness(relay: FakeShareRelay): ShareViewDaemonHarness {
   const harness = createShareViewDaemonHarness(relay.connection());
   harnesses.push(harness);
+  // Writers of `.dohc/local` ask the engine's open, as the desktop's do.
+  readLocalStateFrom(harness.sessions);
   return harness;
 }
 

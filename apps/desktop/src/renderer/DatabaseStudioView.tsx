@@ -1,4 +1,5 @@
 import { ViewActions } from "./fileInspectorUi";
+import { isComposingKey } from "./ui/keys";
 import { EmptyState, SectionLabel } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { ArrowDown, ArrowUp, Binary, Database, Hash, Search, TriangleAlert, Type, type LucideIcon } from "lucide-react";
@@ -927,7 +928,8 @@ function DatabaseCellEditor({
       }}
       onBlur={() => end(draft, false)}
       onKeyDown={(event) => {
-        if (event.key === "Enter" && !event.nativeEvent.isComposing) end(draft, true);
+        if (isComposingKey(event)) return;
+        if (event.key === "Enter") end(draft, true);
         else if (event.key === "Escape") end(null, true);
       }}
       className="w-full bg-transparent text-ink shadow-[inset_0_-1px_0_var(--dohc-muted)] outline-none [text-align:inherit]"

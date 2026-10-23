@@ -1,12 +1,18 @@
-import { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations } from "./shareOperations";
+import { linksOperations } from "./linksOperations";
+import { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations, relayShareOperations } from "./shareOperations";
+import { datasetOperations } from "./datasetOperations";
 import { chatOperations } from "./chatOperations";
 import {
+  databaseImportOperations,
   workspaceSyncOperations,
   systemMotionOperations,
+  systemPrivacySettingsOperations,
   serverAccountOperations,
   chatDispatchNoticeOperations,
   agentRunStateOperations,
   crashReportOperations,
+  collectionCopiesLeftOperations,
+  workspaceTrustOperations,
   engineYDocAdmissionOperations,
   liveDraftRecoveryOperations,
   stopAndRestoreRecoveryOperations,
@@ -35,13 +41,18 @@ export const OPERATION_TABLES = [
   workspaceFileOperations,
   settingsOperations,
   chatOperations,
+  datasetOperations,
+  databaseImportOperations,
   shareHandoffOperations,
   shareMountOperations,
   shareProposalOperations,
   sharedChannelOperations,
+  relayShareOperations,
   shareCopyOperations,
+  linksOperations,
   workspaceSyncOperations,
   systemMotionOperations,
+  systemPrivacySettingsOperations,
   serverAccountOperations,
   accessOperations,
   workspaceVersionOperations,
@@ -49,6 +60,8 @@ export const OPERATION_TABLES = [
   workspaceSearchOperations,
   folderAppOfferOperations,
   crashReportOperations,
+  collectionCopiesLeftOperations,
+  workspaceTrustOperations,
   reportingOperations,
   usageRecordOperations,
   engineYDocAdmissionOperations,

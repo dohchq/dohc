@@ -149,7 +149,6 @@ export const bridgeMock = {
   listChatMessages: vi.fn(),
   getChatThreadRevision: vi.fn(),
   listChatThreadDecisions: vi.fn(),
-  resolveChatDecision: vi.fn(),
   listChatThreadAttachments: vi.fn(),
   chatRunRecordsForThread: vi.fn(),
   sendChatMessage: vi.fn(),

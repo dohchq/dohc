@@ -76,15 +76,16 @@ function createVerificationFixtures(directory) {
   { cwd, encoding: "utf8" }).trim();
   createPrepareFixture(root, new URL("./build.mjs", import.meta.url), { commit: false });
   put("scripts/verification/admission.mjs", "export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>JSON.parse(process.env.FIXTURE_CASE).warm;");
-  put("tools/rust-engine-program/build-slot.mjs", "import {writeFileSync} from 'node:fs';export const acquireExclusiveSlot=()=>null;export const buildQueueStatus=()=>({owners:[]});export const maxVerificationLanes=4;export const readVerificationLanes=()=>1;export const heldVerificationSlots=()=>[];export const capBuildParallelism=source=>({...source});export const resolveBuildBudget=()=>null;export const freeDiskGb=()=>100;export const acquireBuildSlot=()=>{throw Error('not expected')};export const acquireVerificationSlot=()=>{writeFileSync('.dohc-dev/queued','yes');return {update(){},release(){}};};");
+  put("tools/rust-engine-program/build-slot.mjs", "import {writeFileSync} from 'node:fs';export const acquireExclusiveSlot=()=>null;export const buildQueueStatus=()=>({owners:[]});export const maxVerificationLanes=4;export const readVerificationLanes=()=>1;export const heldVerificationSlots=()=>[];export const macSlotRoot=()=>'';export const capBuildParallelism=source=>({...source});export const resolveBuildBudget=()=>null;export const freeDiskGb=()=>100;export const acquireBuildSlot=()=>{throw Error('not expected')};export const acquireVerificationSlot=()=>{writeFileSync('.dohc-dev/queued','yes');return {update(){},release(){}};};");
   git(["config", "core.logAllRefUpdates", "true"]);
   mkdirSync(join(root, ".dohc-dev"), { recursive: true });
-  for (const path of ["scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/queue.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/timing.mjs", "scripts/verification/flaky.mjs", "tools/rust-engine-program/tree-provenance.mjs",
+  for (const path of ["scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/queue.mjs", "scripts/verification/queue-supervisor.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/timing.mjs", "scripts/verification/flaky.mjs", "tools/rust-engine-program/tree-provenance.mjs",
     "tools/rust-engine-program/git-read.mjs", "tools/rust-engine-program/gate-commands.mjs",
     "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml"]) {
     put(path, readFileSync(join(repoRoot, path)));
   }
   put("scripts/verification/js-tests-real.mjs", readFileSync(join(root, "scripts/verification/js-tests.mjs")));
+  put("scripts/verification/linux.mjs", "export const linuxDistro=()=>null;export const linuxRustJob=()=>{throw Error('not expected');};");
   put("scripts/verification/rust-reuse.mjs", "export const rustIdentity=()=>({incremental:process.env.CARGO_INCREMENTAL});export const finishRustEvidence=(_report,initial,final)=>{if(JSON.stringify(initial)!==JSON.stringify(final))throw Error('Rust identity changed');return {kind:'fixture'};};export const refreshRustReuse=()=>{throw Error('unexpected reuse');};");
   put("scripts/verification/js-tests.mjs", `
     import assert from 'node:assert/strict';
@@ -266,9 +267,10 @@ function createVerificationFixtures(directory) {
         return {stdout:''};
       }
       if(command==='pnpm' && args[0]==='exec') {
-        if(!fixture.js)throw Error('Browser tools unavailable for this change');
+        const e2e=process.env.FIXTURE_MODE==='e2e';
+        if(!fixture.js && !e2e)throw Error('Browser tools unavailable for this change');
         assert.deepEqual(args,['exec','playwright','install','chromium']);
-        assert.equal(options.env.DOHC_REQUIRE_POSTGRES,'1');
+        if(!e2e)assert.equal(options.env.DOHC_REQUIRE_POSTGRES,'1');
         writeFileSync(join(repoRoot,'.dohc-dev/browser-installed'),'yes');
         return {stdout:''};
       }
@@ -294,8 +296,8 @@ function createVerificationFixtures(directory) {
           assert.equal(options.env.DOHC_REQUIRE_POSTGRES,'1');
           assert.equal(existsSync(join(repoRoot,'.dohc-dev/database-started')),true);
           assert.equal(existsSync(join(repoRoot,'.dohc-dev/database-stopped')),false);
-          assert.equal(existsSync(join(repoRoot,'.dohc-dev/browser-installed')),true);
         }
+        assert.equal(existsSync(join(repoRoot,'.dohc-dev/browser-installed')),process.env.FIXTURE_MODE!=='smoke');
         if(args.includes('services/workspace-api/playwright.config.ts')) {
           assert.ok(pr,'Unselected account proof');
           writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,JSON.stringify({stats:{expected:2,unexpected:process.env.FIXTURE_FAULT==='accounts-cancelled'?1:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='accounts-skipped'?1:0}}));
@@ -524,6 +526,7 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
         assert.deepEqual(report.steps.map(({name})=>name).sort(), [
           ...(mode === "pr" ? ["install"] : []),
           ...(desktop ? ["electron-install", "desktop"] : []),
+          ...(mode === "e2e" ? ["browser-install"] : []),
           "app-backend-runtime",
           ...(rust ? ["pre-queue-fmt", "pre-queue-clippy", "pre-queue-test-build", "cargo-deny-version", "cargo-audit-version", "cargo-nextest-version", "rust", "rust-verdict"] : []),
           ...(js && warm ? ["pre-queue-typecheck"] : []),

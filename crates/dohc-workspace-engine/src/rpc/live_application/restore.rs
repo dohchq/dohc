@@ -45,7 +45,7 @@ impl RestoreOperation {
 
 struct RestoreOutputGuard {
     fence: HostOutputGuard,
-    _reservation: Arc<dyn Send + Sync>,
+    reservation: Mutex<Option<Arc<dyn Send + Sync>>>,
 }
 impl RestoreOutputGuard {
     fn unavailable(&self) -> WireError {
@@ -80,11 +80,14 @@ impl OutputGuard for RestoreOutputGuard {
     fn deadline(&self) -> Option<Instant> {
         self.fence.deadline()
     }
-    fn is_current(&self) -> bool {
-        self.fence.is_current()
+    fn is_current_ignoring_cancel(&self) -> bool {
+        self.fence.is_current_ignoring_cancel()
     }
-    fn with_current(&self, action: &mut dyn FnMut()) -> bool {
-        self.fence.with_current(action)
+    fn with_current(&self, cancellable: bool, action: &mut dyn FnMut()) -> bool {
+        self.fence.with_current(cancellable, action)
+    }
+    fn release(&self) {
+        lock(&self.reservation).take();
     }
     fn with_unretired(&self, action: &mut dyn FnMut()) -> bool {
         self.fence.with_unretired(action)
@@ -218,7 +221,7 @@ impl EngineService {
                 deadline: ctx.deadline,
                 read: false,
             },
-            _reservation: input.reservation.clone(),
+            reservation: Mutex::new(Some(input.reservation.clone())),
         });
         if !guard.is_current() {
             return Err(guard.unavailable());

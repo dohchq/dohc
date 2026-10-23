@@ -203,6 +203,11 @@ export async function startServiceLiveHost(options: {
   const consumers = new Map<string, LiveCommittedDelivery>();
   const documents = new LiveDocumentWork();
   const attachments = new Map<string, HostedAttachment>();
+  // An attached workspace whose replica checked its origin. Activation, restore and departures reach no other.
+  const checked = (workspaceId: string) => {
+    const attached = attachments.get(workspaceId);
+    return attached?.hosted.checked ? attached : undefined;
+  };
   const ledgers = new Map<string, LiveClaimLedger>();
   // Attached workspaces and hosted documents, as `update` last left them.
   const members = new Map<string, {handle: string; workspace: ServiceWorkspace}>();
@@ -344,7 +349,7 @@ export async function startServiceLiveHost(options: {
     signal.throwIfAborted();
     const native = yield* Effect.acquireRelease(Effect.promise(() => createEngineClient({ command: config.engineExecutable, authToken: randomBytes(32).toString("base64url"),
       protocolVersion: 2, capabilities: ["blobs"], privateLiveApplication: config.client, connectTimeoutMs: config.client.connectTimeoutMs,
-      env: { DOHC_ENGINE_LIVE_HOST_CONFIG: nativeConfig }, signal,
+      env: { DOHC_ENGINE_LIVE_HOST_CONFIG: nativeConfig, DOHC_ENGINE_READER_CONFIG: process.env.DOHC_ENGINE_READER_CONFIG }, signal,
       onExit: abort, onStderr: text => console.error("[service-live-host]", text.trimEnd()),
     })),value => Effect.promise(() => value.waitForExit()));
     yield* Effect.acquireRelease(Effect.sync(() => {
@@ -444,6 +449,25 @@ export async function startServiceLiveHost(options: {
       joined.throwIfAborted();
       try {install(workspace, result);} catch (error) {abort(); throw error;}
       changes?.notifyHost([workspace.workspaceId]);
+      // A failure other than divergence detaches it too, so the next update attaches it and checks again.
+      try {await checkOrigin(workspace.workspaceId, joined);}
+      catch (error) {
+        if (!diverged.has(workspace.root)) await detach(workspace.workspaceId, signal).catch(() => {});
+        throw error;
+      }
+    };
+    // A replica checks its origin before any other work on its store,
+    // departures included. A diverged store counts as diverged, then detaches
+    // for good; if that detach fails, the pass's diverged loop retries it.
+    const checkOrigin = async (workspaceId: string, joined: AbortSignal) => {
+      const attached = attachments.get(workspaceId);
+      if (!attached || attached.hosted.checked) return;
+      try {await attached.hosted.create(joined);}
+      catch (error) {
+        if (!attached.hosted.diverged) throw error;
+        diverged.set(members.get(workspaceId)!.workspace.root, workspaceId);
+        try {await detach(workspaceId, signal);} catch {throw error;}
+      }
     };
     // Detach does not wait for unsettled work. The workspace store keeps it until the workspace attaches again.
     const detach = async (workspaceId: string, joined: AbortSignal) => {
@@ -777,7 +801,9 @@ export async function startServiceLiveHost(options: {
         attached.hosted.departedNone && [...attached.announced.values()].every(required => required <= attached.confirmed);
     };
     if(config.activation){
-      activation=new ServiceActivationDriver({trustedAccount:options.trustedAccount,storage,history,client,host:coordinate,workspaces:attachments,config:config.activation,
+      // A configured replica checks its origin before the host serves restores or passes activate. One that could not retries on each pass.
+      for(const workspaceId of [...attachments.keys()])yield* Effect.promise(()=>checkOrigin(workspaceId,signal).catch(()=>{}));
+      activation=new ServiceActivationDriver({trustedAccount:options.trustedAccount,storage,history,client,host:coordinate,workspace:checked,config:config.activation,
         adoption:config.adoption!,restore,nextRequestId,deadlineMs:config.client.requestDeadlineMs,assertCurrent:checkPreparing,
         registered(){registered=true;},runDocument:(document,signal,operation)=>runDocument(document,signal,operation)});
       registerRetained();
@@ -798,6 +824,8 @@ export async function startServiceLiveHost(options: {
             }
           }
         };
+        // A replica that has not checked its origin checks it first. Until it succeeds, its workspace's steps wait.
+        for(const workspaceId of [...attachments.keys()])await step(()=>checkOrigin(workspaceId,passSignal));
         // Departures go first: a document an earlier daemon left resumes only before a pull adopts the scope it left.
         for(const key of [...leaving])await step(async()=>{
           const waiting=await depart(key,passSignal);
@@ -808,7 +836,7 @@ export async function startServiceLiveHost(options: {
         // A departing one whose owner lost live authority only settles what the host applied.
         const targets=activation!.targets.filter(target=>{
           const key=JSON.stringify([target.workspaceId,target.path]),row=hosted.get(key);
-          return !activation!.dormant(target) && !unloading.has(key) && !(row && leaving.has(key) && authorityLost(row));
+          return checked(target.workspaceId) && !activation!.dormant(target) && !unloading.has(key) && !(row && leaving.has(key) && authorityLost(row));
         });
         // Targets with no owner share one catch-up pull of their workspace a pass.
         const catchUp:ServiceCatchUp=new Map();
@@ -823,8 +851,10 @@ export async function startServiceLiveHost(options: {
         });
         // Every ready workspace pushes, then pulls. One with no documents still pulls, so its replica retires what left.
         // One that is not ready only pulls, once a pass unless an activation above caught it up, so its held lists page
-        // on and an ended hold is freed, however long another document holds readiness back.
+        // on and an ended hold is freed, however long another document holds readiness back. One whose replica has not
+        // checked its origin does neither.
         for(const [workspaceId,attached] of [...attachments]){
+          if(!attached.hosted.checked)continue;
           if(activation!.workspaceReady(workspaceId))await step(async()=>{await attached.hosted.push(passSignal);await pull(attached,passSignal);});
           else if(!catchUp.has(workspaceId))await step(()=>pull(attached,passSignal));
         }
@@ -880,7 +910,9 @@ export async function startServiceLiveHost(options: {
        * and unload documents that left, while their workspace stays attached.
        * On a fresh daemon, they first resume departing documents that are
        * still enabled. A workspace that is no longer wanted, or whose identity
-       * changed, detaches at once. A diverged store stays detached.
+       * changed, detaches at once. Each workspace it attaches checks its
+       * replica's origin before anything else; a diverged store detaches and
+       * stays detached.
        */
       update,
       /**
@@ -959,10 +991,11 @@ export async function startServiceLiveHost(options: {
       /**
        * The claim ledger of a workspace this host replicates as its owner,
        * where it claims each accepted frame's field changes, for the relay's
-       * automations. Null for any other workspace, or once this host retired.
+       * automations. Null for any other workspace, one whose replica has not
+       * checked its origin, or once this host retired.
        */
       automationLedger(workspaceId: string): LiveClaimLedger | null {
-        const attached = attachments.get(workspaceId);
+        const attached = checked(workspaceId);
         if (!attached || signal.aborted) return null;
         let ledger = ledgers.get(workspaceId);
         if (!ledger) {

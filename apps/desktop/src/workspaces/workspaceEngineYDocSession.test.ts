@@ -54,6 +54,7 @@ import { setCollectionRecordFields } from "@dohc/automation-executor/collection-
 import { WILL_QUIT_BUDGET_MS } from "../shutdownBudgets";
 import { bindEngineYDoc, EngineYDocDeliveryRefusedError, type EngineYDocTransport } from "../renderer/collab/engineYDocProvider";
 import { flushTypingCheckpoints } from "./outageTypingRecovery";
+import { openedLocalState } from "../testing/preparedLocalState";
 
 const WORKSPACE_ID = "engine-ydoc-session-test";
 const ATTACHMENT_ID = Symbol("test-workspace-attachment");
@@ -63,6 +64,23 @@ const INITIAL_MARKDOWN = "# Solo\n\nStart here.\n";
 vi.mock("node:fs", async importOriginal => {
   const fs = await importOriginal<typeof import("node:fs")>();
   return { ...fs, createReadStream: vi.fn(fs.createReadStream) };
+});
+// Reads one `lstat` of `path`, then holds its answer until the test releases it.
+const lstatGate = vi.hoisted(() => ({ held: null as { path: string; entered: () => void; release: Promise<void> } | null }));
+vi.mock("node:fs/promises", async importOriginal => {
+  const fs = await importOriginal<typeof import("node:fs/promises")>();
+  const lstat: typeof fs.lstat = (async (path: Parameters<typeof fs.lstat>[0], ...rest: unknown[]) => {
+    const held = lstatGate.held;
+    const answer = (fs.lstat as (...args: unknown[]) => ReturnType<typeof fs.lstat>)(path, ...rest);
+    if (held && String(path) === held.path) {
+      lstatGate.held = null;
+      await answer.catch(() => undefined);
+      held.entered();
+      await held.release;
+    }
+    return await answer;
+  }) as typeof fs.lstat;
+  return { ...fs, lstat };
 });
 
 let root = "";
@@ -86,6 +104,7 @@ let blockedMaterialization = false;
 let closeRefusal: unknown = null;
 let beforeRecordUpdate: (() => Promise<void>) | null = null;
 let beforeClose: (() => Promise<void>) | null = null;
+let beforeSettle: (() => Promise<void>) | null = null;
 let enforceRecordOwner = false;
 // Refuses the next journal write once, the way the daemon refuses it on the
 // wire, then lets later writes (the adapter's recovery included) through.
@@ -96,6 +115,12 @@ let busyRecordAttempts = 0;
 // the resync that recovery sends next is lost the same way.
 let loseNextRecordAnswer = false;
 let loseNextResync = false;
+// The claim a claimed lineage answers under. A restore gives it another one.
+let servedClaim = "owner-claim";
+// Resyncs counted from zero, and which of them lose their answer.
+let resyncCount = 0;
+let lostResyncs = new Set<number>();
+let heldResync: { at: number; entered: PromiseWithResolvers<void>; release: Promise<void> } | null = null;
 function transportLost(): Error {
   return Object.assign(new Error("The engine client is closed: transport closed."), {
     code: "transport-error",
@@ -150,6 +175,11 @@ function daemonSessions(): EngineWorkspaceSessions {
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
       }
+      if (request.method === YDOC_METHOD.settle && beforeSettle) {
+        const hook = beforeSettle;
+        beforeSettle = null;
+        await hook();
+      }
       if (request.method === "ydoc.settle" && settleRefusal !== null) {
         throw settleRefusal;
       }
@@ -180,6 +210,14 @@ function daemonSessions(): EngineWorkspaceSessions {
         loseNextResync = false;
         throw transportLost();
       }
+      if (request.method === YDOC_METHOD.resync) {
+        const count = ++resyncCount;
+        if (lostResyncs.has(count)) throw transportLost();
+        if (heldResync?.at === count) {
+          heldResync.entered.resolve();
+          await heldResync.release;
+        }
+      }
       if (request.method === YDOC_METHOD.recordUpdate && loseNextRecordAnswer) {
         loseNextRecordAnswer = false;
         await ydoc.sendRequest(request);
@@ -193,11 +231,21 @@ function daemonSessions(): EngineWorkspaceSessions {
           setTimeout(resolve, recordUpdateDelayMs),
         );
       }
-      const answered = await daemon.sendRequest(request);
+      // A claimed lineage is this fixture's; the loopback keeps no claims. It
+      // refuses an edit made against any other claim, as the engine does.
+      if (claimedLineage && request.method === YDOC_METHOD.recordUpdate &&
+          params.expectedLineageClaimId !== servedClaim) {
+        throw wireRefusal("ydoc-lineage-stale");
+      }
+      const answered = await daemon.sendRequest(
+        claimedLineage && request.method === YDOC_METHOD.recordUpdate
+          ? { ...request, params: { ...params, expectedLineageClaimId: null } }
+          : request,
+      );
       if (answered) {
         if (claimedLineage && (request.method === YDOC_METHOD.open || request.method === YDOC_METHOD.resync || request.method === YDOC_METHOD.recordUpdate)) {
           return { ...answered, result: { ...(answered.result as Record<string, JsonValue>),
-            lineageClaimId: "owner-claim", lineageOriginatedHere: true } };
+            lineageClaimId: servedClaim, lineageOriginatedHere: true } };
         }
         if (request.method === YDOC_METHOD.settle && blockedMaterialization) {
           return { ...answered, result: { ...(answered.result as Record<string, JsonValue>), materialized: false } };
@@ -281,12 +329,17 @@ beforeEach(async () => {
   closeRefusal = null;
   beforeRecordUpdate = null;
   beforeClose = null;
+  beforeSettle = null;
   enforceRecordOwner = false;
   nextRecordRefusal = null;
   nextOpenRefusal = null;
   busyRecordAttempts = 0;
   loseNextRecordAnswer = false;
   loseNextResync = false;
+  servedClaim = "owner-claim";
+  resyncCount = 0;
+  lostResyncs = new Set();
+  heldResync = null;
   captureErrors = [];
   recordUpdateDelayMs = 0;
   versioned = new VersionedLoopbackEngine();
@@ -401,14 +454,18 @@ it.each(["delayed notice", "pending resync", "unchanged"] as const)("settles rep
         resyncEntered.resolve();
         await finishResync.promise;
       }
+      if (request.method === YDOC_METHOD.recordUpdate) {
+        // The claim is this fixture's; the loopback keeps none.
+        const params = request.params as Record<string, JsonValue>;
+        if (params.expectedLineageClaimId !== "owner-claim") throw wireRefusal("ydoc-lineage-stale");
+        const response = await ydoc.sendRequest({ ...request, params: { ...params, expectedLineageClaimId: null } });
+        return { ...response, result: { ...(response.result as Record<string, JsonValue>),
+          lineageClaimId: "owner-claim", lineageOriginatedHere: true } };
+      }
       const response = await ydoc.sendRequest(request);
       if (request.method === YDOC_METHOD.open || request.method === YDOC_METHOD.resync) {
         return { ...response, result: { ...(response.result as Record<string, JsonValue>),
           lineageClaimId: "owner-claim", lineageOriginatedHere: true } };
-      }
-      if (request.method === YDOC_METHOD.recordUpdate) {
-        return { ...response, result: { ...(response.result as Record<string, JsonValue>),
-          lineageClaimId: "owner-claim" } };
       }
       return response;
     },
@@ -696,12 +753,13 @@ it("keeps the closed-record open, journal, settle and close path", async () => {
 
 it("settles an open record before a person's delete and credits the person in History", async () => {
   await mkdir(join(root, ".dohc"), { recursive: true });
+  await openedLocalState({ workspaceId: "record-delete", rootPath: root });
   const { editor } = await openRecordEditor();
   typeIntoBody(editor, "Typed before the delete.");
   let trashedText = "";
   const trashed: Array<{ target: string; requestsBefore: number }> = [];
   await expect(deleteWorkspacePathByHand(
-    { workspace: { rootPath: root }, assertCurrent: () => undefined }, PATH,
+    { workspace: { workspaceId: "record-delete", rootPath: root }, assertCurrent: () => undefined }, PATH,
     { kind: "human", humanId: "person" },
     { capture, requestId: "hand-delete", markDeleted: () => undefined,
       trashItem: async target => {
@@ -741,7 +799,7 @@ it("settles live edits into Markdown before stopping sync and permits local edit
     await sessions.closeWorkspace({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID });
   });
   const stop = createWorkspaceSyncStop({
-    person: async () => ({ kind: "person", personId: "local" }), cleanupFailed: vi.fn(),
+    person: async () => ({ kind: "person", personId: "local" }), cleanupFailed: vi.fn(), reopenFailed: vi.fn(),
     pauseStatus: pause => workspaceSyncPauseStatus(pause, "local"),
     withOwnerHostPaused: work => work(), prepare: () => capture.settleAndCloseLiveSessionsForSyncPause(), resume: async () => {},
     pauseRemote: (id, pause) => registry.pauseRemote(id, pause), closeActivity: async () => {
@@ -752,7 +810,7 @@ it("settles live edits into Markdown before stopping sync and permits local edit
     openActivity: async () => {
       capture = createWorkspaceEngineCapture({ workspaceId: WORKSPACE_ID, rootPath: root,
         attachmentId: ATTACHMENT_ID, rustEngineSessions: sessions, onError: context => captureErrors.push(context) });
-    }, notify: () => {},
+    }, collectionsWaiting: async () => false, notify: () => {},
     status: () => ({ state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
       historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 1,
       ...(registry.find(WORKSPACE_ID)?.syncPause ? { syncPause: workspaceSyncPauseStatus(registry.find(WORKSPACE_ID)!.syncPause!, "local") } : {}) }),
@@ -1107,6 +1165,135 @@ it("closes clean and reports changed-on-disk when the close settle meets a moved
   expect(daemonWriteCount()).toBeGreaterThan(writesBeforeWatcher);
 });
 
+// dohc#2366. History holds all of the document, so a close over its deleted
+// file has nothing to save. A settle would be refused and read as a failed save.
+it.each(["local-only", "synced"] as const)(
+  "releases a %s document with nothing new over a file deleted outside dohc, without a save",
+  async (regime) => {
+    claimedLineage = regime === "synced";
+    const states: string[] = [];
+    const session = await capture.openYDocSession({
+      path: PATH, onRemoteUpdate: () => undefined, onSaveState: state => states.push(state),
+    });
+    if (regime === "synced") ydoc.markSessionReplicated(ydoc.activeSessionIds()[0]!);
+    states.length = 0;
+    await rm(join(root, PATH));
+    settleRefusal = wireRefusal("conflict-stale-target");
+    await expect(session.close()).resolves.toBeUndefined();
+    expect(states).toEqual([]);
+    expect(captureErrors).toEqual([]);
+    expect(methodCount(YDOC_METHOD.settle)).toBe(0);
+    expect(requests.filter(request => request.method === YDOC_METHOD.close).map(request => request.params)).toEqual([
+      expect.objectContaining({ settle: false }),
+    ]);
+    expect(daemon.leases.size).toBe(0);
+  },
+);
+
+// A synced engine releases over unsettled text, so an edit made while the
+// close reads the disk must keep the ordinary close and its failed save.
+async function captureKeepingDrafts(): Promise<string[]> {
+  const drafts: string[] = [];
+  await capture.stop();
+  capture = createWorkspaceEngineCapture({
+    workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID, rustEngineSessions: sessions,
+    onError: (context) => captureErrors.push(context),
+    preserveUnsentState: async ({ doc }) => { drafts.push(documentMarkdown(Y.encodeStateAsUpdate(doc))); return "draft"; },
+    discardUnsentState: async () => undefined,
+  });
+  return drafts;
+}
+
+it("keeps a synced document's edit made while its close checks the deleted file", async () => {
+  claimedLineage = true;
+  const drafts = await captureKeepingDrafts();
+  const states: string[] = [];
+  const session = await capture.openYDocSession({
+    path: PATH, onRemoteUpdate: () => undefined, onSaveState: state => states.push(state),
+  });
+  ydoc.markSessionReplicated(ydoc.activeSessionIds()[0]!);
+  const editor = mirrorEditor(session);
+  states.length = 0;
+  await rm(join(root, PATH));
+  settleRefusal = wireRefusal("conflict-stale-target");
+  const checking = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  lstatGate.held = { path: join(root, PATH), entered: checking.resolve, release: release.promise };
+  const closing = session.close();
+  await checking.promise;
+  typeIntoBody(editor, "Typed during the close.");
+  release.resolve();
+  await expect(closing).rejects.toThrow(/released, but its pre-close settle failed/);
+  expect(states).toEqual(["settling", "error"]);
+  expect(methodCount(YDOC_METHOD.settle)).toBe(1);
+  await vi.waitFor(() => expect(drafts).toEqual([expect.stringContaining("Typed during the close.")]));
+  editor.destroy();
+});
+
+// The close can wait behind other work on the session after its disk check.
+// A peer update counted there must still keep the ordinary close.
+it("keeps a peer update that arrives while a synced document's close waits its turn", async () => {
+  claimedLineage = true;
+  const drafts = await captureKeepingDrafts();
+  const states: string[] = [];
+  const delivered = Promise.withResolvers<void>();
+  const session = await capture.openYDocSession({
+    path: PATH, onRemoteUpdate: () => delivered.resolve(), onSaveState: state => states.push(state),
+  });
+  const sessionId = ydoc.activeSessionIds()[0]!;
+  ydoc.markSessionReplicated(sessionId);
+  const peer = new Y.Doc();
+  Y.applyUpdate(peer, session.initialUpdate);
+  const before = Y.encodeStateVector(peer);
+  typeIntoBody(peer, "From a peer.");
+  await rm(join(root, PATH));
+  settleRefusal = wireRefusal("conflict-stale-target");
+
+  // Other work holds the session: a settle the engine has not answered yet.
+  const settling = Promise.withResolvers<void>();
+  const answerSettle = Promise.withResolvers<void>();
+  beforeSettle = async () => { settling.resolve(); await answerSettle.promise; };
+  const earlierSettle = session.settleNow().catch(() => undefined);
+  await settling.promise;
+
+  // The close finds the file gone and queues behind that settle.
+  const checked = Promise.withResolvers<void>();
+  const answerCheck = Promise.withResolvers<void>();
+  lstatGate.held = { path: join(root, PATH), entered: checked.resolve, release: answerCheck.promise };
+  const closing = session.close();
+  await checked.promise;
+  answerCheck.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  ydoc.applyRemoteUpdate(sessionId, Y.encodeStateAsUpdate(peer, before));
+  await delivered.promise;
+  answerSettle.resolve();
+  await earlierSettle;
+  await expect(closing).rejects.toThrow(/released, but its pre-close settle failed/);
+  expect(methodCount(YDOC_METHOD.settle)).toBe(2);
+  expect(states.at(-1)).toBe("error");
+  await vi.waitFor(() => expect(drafts.at(-1)).toContain("From a peer."));
+  peer.destroy();
+});
+
+// The engine refuses that release while it holds text History lacks. Then the
+// ordinary close runs, and its refused settle is the failed save it reports.
+it("closes as before when the engine refuses to release a deleted file's document without a save", async () => {
+  const states: string[] = [];
+  const session = await capture.openYDocSession({
+    path: PATH, onRemoteUpdate: () => undefined, onSaveState: state => states.push(state),
+  });
+  states.length = 0;
+  await rm(join(root, PATH));
+  settleRefusal = wireRefusal("conflict-stale-target");
+  beforeClose = async () => { throw wireRefusal("ydoc-unsettled-close"); };
+  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
+  expect(states).toEqual(["settling", "error"]);
+  expect(methodCount(YDOC_METHOD.settle)).toBe(1);
+  expect(methodCount(YDOC_METHOD.close)).toBe(2);
+  expect(daemon.leases.size).toBe(0);
+});
+
 // The narrowness guard for the downgrade above. Any other refusal means the
 // user's edits did not reach the engine, which is what the thrown settle
 // failure and the retryable `error` state exist to say.
@@ -1209,11 +1396,20 @@ it.each([
   await session.close({settle: false});
 });
 
+// A close reads the disk before its first retry, so real I/O gets a turn
+// between steps of the faked retry delays.
+const realSetImmediate = setImmediate;
 async function expectBusyBudgetFailure(operation: () => Promise<unknown>, message: string | RegExp = "engine-store-busy") {
   vi.useFakeTimers();
   try {
-    const assertion = expect(operation()).rejects.toThrow(message);
-    await vi.advanceTimersByTimeAsync(10_000);
+    let settled = false;
+    const assertion = expect(operation().finally(() => { settled = true; })).rejects.toThrow(message);
+    // 200 steps of 100 ms: twice the 10 s busy budget.
+    for (let step = 0; !settled; step += 1) {
+      if (step === 200) throw new Error("The busy-store operation did not finish within 20 s of faked retry delays.");
+      await new Promise((resolve) => realSetImmediate(resolve));
+      await vi.advanceTimersByTimeAsync(100);
+    }
     await assertion;
   } finally { vi.useRealTimers(); }
 }
@@ -1862,6 +2058,7 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
     workspaceId: WORKSPACE_ID,
     path: PATH,
     origin,
+    assertEditable: async () => undefined,
     change: async (state, options) =>
       documentEditUpdate(state, { find: "Start here.", replacement: "Start over here.\n\n## Added" }, options),
   })).resolves.toEqual({ path: PATH, changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING });
@@ -2491,6 +2688,126 @@ it.each(["closed", "evicted"] as const)("preserves a renderer draft once after i
     vi.useRealTimers();
     await ipc.shutdown();
   }
+});
+
+// A restore gave the open document another history while edits were on their
+// way. Each refused write reaches the renderer as that history, never as a
+// generic reconnect, and the renderer sets the refused typing aside first.
+it.each([
+  { writer: "renderer typing", lostResync: false },
+  { writer: "keyed write", lostResync: false },
+  { writer: "renderer typing", lostResync: true },
+] as const)("hands a refused $writer to the renderer as the replaced history (lost resync answer: $lostResync)", async ({ writer, lostResync }) => {
+  claimedLineage = true;
+  type Replacement = Parameters<Parameters<EngineYDocTransport["onLineageReplacement"]>[0]>[0];
+  let deliverReplacement: ((input: Replacement) => void | Promise<void>) | null = null;
+  const announced: Replacement[] = [];
+  const sender = {
+    id: 1, isDestroyed: () => false, once() { return this; },
+    send: (channel: string, payload: unknown) => {
+      if (channel !== CHANNELS.engineYDocLineageReplacement) return;
+      announced.push(payload as Replacement);
+      queueMicrotask(() => void deliverReplacement?.(payload as Replacement));
+    },
+  };
+  const workspace = { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID };
+  let provider!: Awaited<ReturnType<typeof capture.openYDocSession>>;
+  const ipc = createEngineYDocSessionIpc({
+    localPersonId: () => "person-local",
+    sessionFor: () => ({ workspaceId: WORKSPACE_ID, generation: 1, isCurrent: () => true }),
+    acquireWorkspace: () => ({ workspace, assertCurrent() {}, release() {} }),
+    captureFor: () => ({ openYDocSession: async input => provider = await capture.openYDocSession(input) }),
+    ensureCaptureFor: async () => undefined, isSharedView: () => false,
+    resolveDocumentPath: async (_workspace, path) => path, onError() {},
+  });
+  let seq = 0;
+  const transport: EngineYDocTransport = {
+    open: () => ipc.open(sender, { workspaceId: WORKSPACE_ID, sessionId: "editor", path: PATH }),
+    stageLocalUpdate: () => ++seq,
+    async applyLocalUpdate(update, staged, lineageGeneration, requestId) {
+      const result = ipc.applyUpdate(sender, { sessionId: "editor", update, seq: staged, lineageGeneration, requestId });
+      if (!result.accepted) throw new EngineYDocDeliveryRefusedError(result.reason);
+    },
+    onRemoteUpdate: () => () => undefined,
+    onLineageReplacement(listener) {
+      deliverReplacement = listener;
+      return () => { deliverReplacement = null; };
+    },
+    async acknowledgeLineageReplacement(lineageGeneration) {
+      const result = ipc.acknowledgeLineageReplacement(sender, { sessionId: "editor", lineageGeneration });
+      if (!result.accepted) throw new EngineYDocDeliveryRefusedError(result.reason);
+      return result.updates;
+    },
+    close: async () => { await ipc.close(sender, { sessionId: "editor" }); },
+  };
+  const setAside: string[] = [];
+  const installed = Promise.withResolvers<Y.Doc>();
+  const binding = await bindEngineYDoc(transport, undefined, {
+    onDocumentReplacing: retired => { setAside.push(documentMarkdown(Y.encodeStateAsUpdate(retired))); },
+  });
+  binding.onDocumentReplaced(doc => installed.resolve(doc));
+  const losingDoc = binding.doc!;
+  typeIntoBody(losingDoc, "Typed before the restore.");
+  await binding.flushPendingLocalUpdates();
+  await provider.settleNow();
+
+  servedClaim = "restored-claim";
+  resyncCount = 0;
+  // The first resync after the restore is the record's own recovery, which
+  // finds the new claim. The second carries the replacement and its recovered
+  // paths.
+  if (lostResync) lostResyncs = new Set([2]);
+  if (writer === "keyed write") {
+    // The caller hears the refusal only once main holds the replaced history.
+    const release = Promise.withResolvers<void>();
+    heldResync = { at: 2, entered: Promise.withResolvers<void>(), release: release.promise };
+    const writing = keyedWrite(provider, "Written against the old history.");
+    let answered = false;
+    writing.then(() => { answered = true; }, () => { answered = true; });
+    await heldResync.entered.promise;
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(answered).toBe(false);
+    release.resolve();
+    await expect(writing).rejects.toMatchObject({ code: "lineage-changed" });
+    expect(announced).toHaveLength(1);
+  } else {
+    // Typing continues while the first refused edit is on its way.
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    beforeRecordUpdate = async () => { entered.resolve(); await release.promise; };
+    typeIntoBody(losingDoc, "Typed against the old history.");
+    await entered.promise;
+    typeIntoBody(losingDoc, "Typed during the refusal.");
+    await binding.flushPendingLocalUpdates();
+    release.resolve();
+  }
+  // A lost answer leaves the replacement to the next settle's resync.
+  if (lostResync) await provider.settleNow().catch(() => undefined);
+  const winner = await installed.promise;
+
+  expect(binding.doc).toBe(winner);
+  expect(announced.map(replacement => replacement.recoveredPaths)).toEqual([[]]);
+  const winnerText = documentMarkdown(Y.encodeStateAsUpdate(winner));
+  expect(winnerText).toContain("Typed before the restore.");
+  for (const refused of ["Written against the old history.", "Typed against the old history.", "Typed during the refusal."]) {
+    expect(winnerText).not.toContain(refused);
+    expect(journalMarkdown()).not.toContain(refused);
+  }
+  if (writer === "renderer typing") {
+    expect(setAside).toHaveLength(1);
+    expect(setAside[0]).toContain("Typed against the old history.");
+    expect(setAside[0]).toContain("Typed during the refusal.");
+  }
+  // Neither a reconnect nor a refused-edit notice: the replacement is the answer.
+  expect(captureErrors.filter(context => context.startsWith("Y.Doc local update") || context.startsWith("Y.Doc rebind"))).toEqual([]);
+
+  typeIntoBody(winner, "Typed on the restored history.");
+  await binding.flushPendingLocalUpdates();
+  await provider.settleNow();
+  expect(journalMarkdown()).toContain("Typed on the restored history.");
+  expect(await readFile(join(root, PATH), "utf8")).toContain("Typed on the restored history.");
+  await binding.destroy();
+  await ipc.shutdown();
 });
 
 it("quit eviction waits for the active typing checkpoint writer and its queued retirement", async () => {

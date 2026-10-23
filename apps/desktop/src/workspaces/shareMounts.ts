@@ -7,7 +7,7 @@ import {
   validateUserWritePath,
 } from "@dohc/workspace-core";
 import { isInside } from "../security/pathContainment";
-// See the note in workspaceGraph.ts: the path floor is a cross-process security
+// The path floor is a cross-process security contract.
 // contract with a Rust twin, not engine state.
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";

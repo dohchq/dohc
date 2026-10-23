@@ -5,7 +5,9 @@ import { Check, PanelLeft, PanelRight, Search } from "lucide-react";
 import { type ReactNode, useId, useRef, useState } from "react";
 import type { WorkspaceSummary } from "../ipc/bridgeContract";
 import { TITLEBAR_HEIGHT_PX } from "./tokens";
+import { Pill } from "./ui/controls";
 import { useDismiss } from "./ui/useDismiss";
+import { useWindowFullScreen } from "./windowFullScreen";
 
 // Workspace labels use the final folder name on either platform.
 export function workspaceName(workspace: Pick<WorkspaceSummary, "rootPath">): string {
@@ -94,10 +96,15 @@ export function Titlebar(props: {
   // macOS draws traffic lights on the left and never populates the
   // titlebar-area-* env vars (WCO is only enabled on the non-darwin branch of
   // createMainWindow) — lay out around them with fixed insets there, and
-  // around the OS window-controls overlay via env() everywhere else.
+  // around the OS window-controls overlay via env() everywhere else. On
+  // macOS 26 and later the lights end 76pt from the left edge, so the mark
+  // starts 12px after them; full screen hides them.
   const isMac = window.dohcDesktop?.platform === "darwin";
+  const fullScreen = useWindowFullScreen();
   const quickOpenShortcut = shortcutText("quick-open", window.dohcDesktop?.platform);
-  const leftInset = isMac ? "80px" : "calc(env(titlebar-area-x, 0px) + 12px)";
+  const leftInset = isMac
+    ? fullScreen ? "12px" : "88px"
+    : "calc(env(titlebar-area-x, 0px) + 12px)";
 
   return (
     <header
@@ -117,6 +124,10 @@ export function Titlebar(props: {
           <DohcMark size={15} className="shrink-0" />
           {props.workspace ? null : <span className="text-[13px] font-semibold tracking-tight">dohc</span>}
         </span>
+        {/* Every nightly is an alpha, so the build says so beside the mark. */}
+        {window.dohcDesktop?.releaseChannel === "nightly" ? (
+          <span data-testid="titlebar-alpha" className="shrink-0"><Pill>Alpha</Pill></span>
+        ) : null}
 
         {props.workspace && props.workspaces && props.onSwitchWorkspace ? (
           <div

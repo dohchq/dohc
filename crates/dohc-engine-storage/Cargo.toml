@@ -33,6 +33,15 @@ serde_json = "1"
 # probe, not by filling a disk.
 fs4 = "1"
 
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+# The barrier flush that orders a materialized file before the commits after it.
+dohc-macos-files = { path = "../dohc-macos-files" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Opens a store reached through the folder the engine holds, with the VFS
+# that keeps that path.
+dohc-linux-files = { path = "../dohc-linux-files" }
+
 [dev-dependencies]
 dohc-test-scratch = { path = "../dohc-test-scratch" }
 

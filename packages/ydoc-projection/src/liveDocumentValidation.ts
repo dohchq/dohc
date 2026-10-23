@@ -1,6 +1,5 @@
 import {
   exceedsLiveMarkdownLimit,
-  exceedsUtf8Bytes,
   parseLiveDocumentKey,
   type LiveDocumentKey,
   type LiveUpdateStructRange,
@@ -13,6 +12,7 @@ import {
   yXmlFragmentToProseMirrorRootNode,
 } from 'y-prosemirror'
 import * as Y from 'yjs'
+import {SOURCE_META_KEYS, readMarkdownSourceWitness, resolveMarkdownSource} from './artifact-markdown.js'
 import {
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
@@ -52,7 +52,6 @@ const META_KEYS = new Set([
   'schemaVersion', 'dohcMarkdownCrlf', 'dohcFrontmatterSource',
   'dohcMarkdownSource', 'dohcMarkdownSourceSha256', 'dohcMarkdownSourceProjectionSha256',
 ])
-const SOURCE_META_KEYS = ['dohcMarkdownSource', 'dohcMarkdownSourceSha256', 'dohcMarkdownSourceProjectionSha256'] as const
 // Exact text the projection keeps only while it reads as the current state.
 // A frontmatter edit leaves it behind, so it need not match a reimport.
 const PROJECTION_SOURCE_META_KEYS = [...SOURCE_META_KEYS, 'dohcFrontmatterSource'] as const
@@ -109,6 +108,11 @@ class Refusal extends Error {
   constructor(readonly reason: LiveMarkdownValidationRefusal) { super(reason) }
 }
 function refuse(reason: LiveMarkdownValidationRefusal): never { throw new Refusal(reason) }
+/** ProseMirror's schema verdicts; allocation and stack RangeErrors stay fatal. */
+export function isProseMirrorSchemaError(error: unknown): boolean {
+  return error instanceof RangeError
+    && /^(Invalid content for node |Invalid collection of marks for node |Unsupported attribute |Expected value of type |No value supplied for attribute |Unknown node type: |Invalid node type: )/.test(error.message)
+}
 function refusal<S extends RefusedRegistration['source'] | RefusedJournal['source']>(
   reason: LiveMarkdownValidationRefusal, source: S,
 ): { readonly kind: 'refused'; readonly reason: LiveMarkdownValidationRefusal; readonly source: S } {
@@ -292,6 +296,7 @@ function captureSuffix(value: unknown): Uint8Array[] {
 
 export function createLiveMarkdownJournalValidator(
   policy: OrderedLiveUpdateCutPolicy,
+  engineReader = false,
 ): (input: unknown) => LiveMarkdownJournalResult {
   const ownedPolicy = capturePolicy(policy)
 
@@ -300,12 +305,12 @@ export function createLiveMarkdownJournalValidator(
     | { kind: 'refused'; failure: Pick<OrderedLiveUpdateCutRefusal, 'reason' | 'stage'> } {
     const result = validateJournalCutForProjection({
       mode: 'journal-candidate', checkpoint: input.checkpoint, suffix: input.suffix, candidate: input.candidate,
-    }, ownedPolicy)
+    }, ownedPolicy, engineReader)
     let failure: Pick<OrderedLiveUpdateCutRefusal, 'reason' | 'stage'>
     if (result.kind === 'refused') failure = result
     else {
       const { cut, topology } = result
-      const projected = projectAndFinalize(cut, topology, 'refuse')
+      const projected = projectAndFinalize(cut, topology, 'refuse', undefined, engineReader)
       if (projected.kind === 'refused') failure = { reason: projected.reason, stage: { kind: 'final' } }
       else {
         if (!includeEvidence) return { kind: 'accepted' }
@@ -347,7 +352,7 @@ export function createLiveMarkdownJournalValidator(
     if (failure.stage.kind === 'input') {
       return refusal(failure.reason, failure.stage.role === 'candidate' ? 'candidate' : 'admitted-cut')
     }
-    if (diagnose && failure.reason !== 'projection-mutated') {
+    if (!engineReader && diagnose && failure.reason !== 'projection-mutated') {
       const last = input.suffix.length - 1
       const prefix = last < 0
         ? validateRegistrationInput({ document: input.document, currentPath: input.currentPath, checkpoint: input.checkpoint }, ownedPolicy, false)
@@ -372,7 +377,10 @@ export function createLiveMarkdownJournalValidator(
         suffix: captureSuffix(snapshot.suffix),
         candidate: captureBytes(snapshot.candidate),
       }
-    } catch (error) { return refusal(error instanceof Refusal ? error.reason : 'invalid-input', 'call') }
+    } catch (error) {
+      if (engineReader && !(error instanceof Refusal)) throw error
+      return refusal(error instanceof Refusal ? error.reason : 'invalid-input', 'call')
+    }
     return validateCaptured(captured, true)
   }
 }
@@ -392,6 +400,7 @@ function projectAndFinalize(
   topology: ProjectionTopology,
   unverifiedSource: UnverifiedSource,
   beforeProjection?: () => void,
+  engineReader = false,
 ): ProjectedCut {
   let pending: LiveMarkdownValidationRefusal | undefined
   let projectedMarkdown = ''
@@ -399,14 +408,17 @@ function projectAndFinalize(
   try {
     beforeProjection?.()
     if (topology.kind !== 'compatible') refuse('invalid-schema')
-    projectedMarkdown = validatePublicState(cut.document, topology, unverifiedSource)
-  } catch (error) { pending = error instanceof Refusal ? error.reason : 'invalid-schema' }
+    projectedMarkdown = validatePublicState(cut.document, topology, unverifiedSource, engineReader)
+  } catch (error) {
+    if (engineReader && !(error instanceof Refusal)) throw error
+    pending = error instanceof Refusal ? error.reason : 'invalid-schema'
+  }
   finally {
     try { finalized = cut.finishAfterProjection() }
-    catch { pending = 'projection-mutated' }
+    catch (error) { if (engineReader) throw error; pending = 'projection-mutated' }
     finally {
       try { if (!cut.document.isDestroyed) cut.document.destroy() }
-      catch { pending = 'projection-mutated' }
+      catch (error) { if (engineReader) throw error; pending = 'projection-mutated' }
     }
   }
   if (finalized?.kind === 'refused') return { kind: 'refused', reason: finalized.reason }
@@ -673,9 +685,19 @@ function semanticEqual(left: unknown, right: unknown): boolean {
     ))
 }
 
-function validateMetadata(meta: Y.Map<unknown>, zeroStructSeed: boolean): Record<string, unknown> {
+function validateMetadata(meta: Y.Map<unknown>, zeroStructSeed: boolean, engineReader: boolean): {metadata: Record<string, unknown>; witness: ReturnType<typeof readMarkdownSourceWitness>} {
   const snapshot: Record<string, unknown> = Object.create(null)
   for (const [key, value] of meta.entries()) {
+    if (engineReader && key === 'dohcLineageEpoch') {
+      if (typeof value !== 'string' || !/^[0-9a-f]{64}$/.test(value)) refuse('invalid-schema')
+      snapshot[key] = value
+      continue
+    }
+    if (engineReader && key === 'dohcMarkdownSourceReader') {
+      if (value !== 1) refuse('invalid-schema')
+      snapshot[key] = value
+      continue
+    }
     if (!META_KEYS.has(key) && !key.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) refuse('invalid-schema')
     snapshot[key] = value
   }
@@ -698,22 +720,16 @@ function validateMetadata(meta: Y.Map<unknown>, zeroStructSeed: boolean): Record
     itemBytes += utf8.encode(key).length + utf8.encode(item).length
     if (itemBytes > 2 * 1024 * 1024) refuse('invalid-schema')
   }
-  const sourceFields = SOURCE_META_KEYS.filter(key => Object.hasOwn(snapshot, key)).length
-  if (sourceFields !== 0) {
-    if (sourceFields !== 3 || typeof snapshot.dohcMarkdownSource !== 'string'
-      || typeof snapshot.dohcMarkdownSourceSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(snapshot.dohcMarkdownSourceSha256)
-      || typeof snapshot.dohcMarkdownSourceProjectionSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(snapshot.dohcMarkdownSourceProjectionSha256)
-      // The existing native text store bounds retained source at 10 MiB.
-      || exceedsUtf8Bytes(snapshot.dohcMarkdownSource, 10 * 1024 * 1024)
-      || sha256Hex(utf8.encode(snapshot.dohcMarkdownSource)) !== snapshot.dohcMarkdownSourceSha256) refuse('invalid-schema')
-  }
-  return snapshot
+  const witness = readMarkdownSourceWitness(snapshot)
+  if (witness === 'invalid') refuse('invalid-schema')
+  return {metadata: snapshot, witness}
 }
 
 function validatePublicState(
   scratch: Y.Doc,
   topology: Extract<ProjectionTopology, { kind: 'compatible' }>,
   unverifiedSource: UnverifiedSource,
+  engineReader = false,
 ): string {
   if (
     scratch.share.size !== 3 || [...scratch.share.keys()].some(key => !PUBLIC_ROOTS.has(key))
@@ -726,7 +742,7 @@ function validatePublicState(
   const meta = scratch.getMap('meta')
   const zeroStructSeed = topology.canonicalZeroStructSeed
     && !topology.bodyHasActiveItem && body.length === 0 && frontmatter.size === 0 && meta.size === 0
-  const metadata = validateMetadata(meta, zeroStructSeed)
+  const {metadata, witness} = validateMetadata(meta, zeroStructSeed, engineReader)
   const budget = new ProjectionBudget()
   for (const value of frontmatter.values()) visitPublicValue(value, 0, budget, new Set())
   const originalFingerprint = bodyFingerprint(body, budget)
@@ -739,6 +755,7 @@ function validatePublicState(
       if (Object.keys(json).length !== 1 || json.type !== 'doc') refuse('invalid-schema')
     } else rootNode.check()
   } catch (error) {
+    if (engineReader && !isProseMirrorSchemaError(error)) throw error
     if (error instanceof Refusal) throw error
     refuse('invalid-schema')
   }
@@ -750,31 +767,26 @@ function validatePublicState(
       prosemirrorJSONToYXmlFragment(getDohcProseMirrorSchema(), rootNode.toJSON(), rebuiltBody)
       if (!semanticEqual(originalFingerprint, bodyFingerprint(rebuiltBody, null))) refuse('invalid-schema')
     } catch (error) {
+      if (engineReader && !isProseMirrorSchemaError(error)) throw error
       if (error instanceof Refusal) throw error
       refuse('invalid-schema')
     } finally { rebuilt.destroy() }
   }
 
   const projectedMarkdown = yDocToMarkdown(scratch)
-  let preservedSource: string | undefined
   if (exceedsLiveMarkdownLimit(projectedMarkdown)) refuse('capacity-refused')
   if (metadata.dohcMarkdownCrlf === true && !projectedMarkdown.includes('\r\n')) refuse('invalid-schema')
-  if (typeof metadata.dohcMarkdownSourceProjectionSha256 === 'string'
-    && metadata.dohcMarkdownSourceProjectionSha256 === sha256Hex(utf8.encode(projectedMarkdown))) {
-    if (exceedsLiveMarkdownLimit(metadata.dohcMarkdownSource as string)) refuse('capacity-refused')
-    const source = markdownToYDoc(metadata.dohcMarkdownSource as string)
-    try {
-      if (yDocToMarkdown(source) === projectedMarkdown) preservedSource = metadata.dohcMarkdownSource as string
-      else if (unverifiedSource === 'refuse') refuse('invalid-schema')
-    }
-    finally { source.destroy() }
-  }
+  const source = resolveMarkdownSource(scratch, projectedMarkdown, witness, engineReader)
+  if (source.kind === 'capacity-refused') refuse('capacity-refused')
+  if (source.kind === 'invalid' || source.kind === 'import-failed'
+    || (source.kind === 'unverified' && unverifiedSource === 'refuse')) refuse('invalid-schema')
   if (!zeroStructSeed) {
     const reimported = markdownToYDoc(projectedMarkdown)
     try {
       if (!semanticEqual(frontmatterSnapshot, getDohcYDocFrontmatter(reimported))) refuse('invalid-schema')
       const withoutSources = (values: Record<string, unknown>) => {
         const kept = { ...values }
+        if (engineReader) {delete kept.dohcLineageEpoch; delete kept.dohcMarkdownSourceReader}
         for (const key of PROJECTION_SOURCE_META_KEYS) delete kept[key]
         for (const key of Object.keys(kept)) if (key.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) delete kept[key]
         return kept
@@ -782,5 +794,5 @@ function validatePublicState(
       if (!semanticEqual(withoutSources(metadata), withoutSources(Object.fromEntries(reimported.getMap('meta').entries())))) refuse('invalid-schema')
     } finally { reimported.destroy() }
   }
-  return preservedSource ?? projectedMarkdown
+  return source.kind === 'verified' ? source.markdown : projectedMarkdown
 }

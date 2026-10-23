@@ -1,4 +1,5 @@
 import { isWorkspaceVisibilityPolicyPath } from "../ipc/bridgeContract";
+import { workspaceRootsMatch } from "./workspaceRootsMatch";
 import {
   deriveSyncStatus,
   type WatcherEvent,
@@ -51,9 +52,21 @@ interface WatchedWorkspace {
   // True once the engine reports that this workspace's drive cannot refuse to
   // replace a file. Sticky for the open workspace, so its notice shows once.
   atomicPlacementUnavailable: boolean;
+  // True once the check finds the root on a network share.
+  onNetworkShare: boolean;
   recoveryUnavailable: boolean;
   keptFiles: readonly (readonly [string, string])[];
+  // Old file copies the engine keeps on a drive that cannot tell it whether
+  // a program still uses one. Null until the engine first reports.
+  retainedCopies: NonNullable<SyncStatusResult["retainedCopies"]> | null;
   heldFiles: NonNullable<SyncStatusResult["heldFiles"]>;
+  // The engine's latest answer: Collection updates wait for an unfinished
+  // pull. Asked at open and after sync passes, and kept as sync engines
+  // attach and detach. Reads are numbered so an older answer that resolves
+  // late cannot replace a newer one.
+  collectionsWaiting: boolean;
+  collectionsWaitingAsked: number;
+  collectionsWaitingAnswered: number;
 }
 
 /**
@@ -70,6 +83,10 @@ export class WorkspaceActivityState {
   agentRun: { workspace: ActivityWorkspace; run: ActiveAgentRun } | null = null;
   preservedStatus: SyncStatusResult | null = null;
   liveSessionsGeneration = 0;
+  // Sync paused while Collection updates waited, and the reopen that ends
+  // the wait did not finish. Only the engine answering that nothing waits
+  // clears it.
+  syncPauseReopenFailed = false;
 }
 
 export interface WorkspaceActivityOptions {
@@ -90,6 +107,13 @@ export interface WorkspaceActivityOptions {
     capture: WorkspaceEngineCapture | null,
     engineOptions?: { joinBootstrap?: boolean },
   ) => CloudSyncEngine | null;
+  // The engine's answer: Collection updates wait for an unfinished pull. It
+  // reads through the owner's open, so it answers only once that open, which
+  // abandons a pull when sync is paused, succeeded.
+  collectionsWaitingFor?: (workspace: ActivityWorkspace) => Promise<boolean>;
+  // Whether the root is on a network share. Asked once per open, without
+  // holding up the open.
+  onNetworkShare?: (rootPath: string) => Promise<boolean>;
   // Builds the watcher->engine capture for a workspace; a null capture
   // leaves the workspace with NO history recorder. Called once per open. The
   // hooks are
@@ -136,6 +160,7 @@ export interface WorkspaceCaptureHooks {
   onAtomicPlacementUnavailable: () => void;
   onRecoveryUnavailable: (unavailable: boolean) => void;
   onKeptFiles: (paths: readonly (readonly [string, string])[]) => void;
+  onRetainedCopies: (summary: NonNullable<SyncStatusResult["retainedCopies"]>) => void;
   onHeldFiles: (files: NonNullable<SyncStatusResult["heldFiles"]>) => void;
 }
 
@@ -230,6 +255,10 @@ export function createWorkspaceActivity(
     if (preserved) return { ...preserved, syncPause, liveSessionsGeneration };
     const w = state.entry;
     const snap = w?.engine?.snapshot();
+    // Only an engine answer that nothing waits ends the wait: not a running
+    // pass, and not signing in or out.
+    const collectionsWaitingForSync: SyncStatusResult["collectionsWaitingForSync"] =
+      state.syncPauseReopenFailed ? "reopen" : w?.collectionsWaiting ? "sync" : undefined;
     const conflictCount = snap?.conflictCount ?? 0;
     const status = deriveSyncStatus({
       pendingChangeCount: snap?.pendingChangeCount ?? 0,
@@ -260,11 +289,14 @@ export function createWorkspaceActivity(
       ...(w?.fileObservationFailure ? { fileObservationFailure: w.fileObservationFailure } : {}),
       historyShareView: w?.historyShareView ?? false,
       atomicPlacementUnavailable: w?.atomicPlacementUnavailable ?? false,
+      ...(w?.onNetworkShare ? { onNetworkShare: true } : {}),
       recoveryUnavailable: w?.recoveryUnavailable ?? false,
       keptFiles: (w?.keptFiles ?? []).map(([original, copy]): [string, string] => [original, copy]),
+      ...(w?.retainedCopies ? { retainedCopies: { ...w.retainedCopies } } : {}),
       heldFiles: w?.heldFiles ?? [],
       sharingDeclined: snap?.sharingDeclined ?? [],
       ownerAdmissionPending: snap?.ownerAdmissionPending ?? [],
+      ...(collectionsWaitingForSync ? { collectionsWaitingForSync } : {}),
       ...(snap?.syncFailure ? { syncFailure: snap.syncFailure } : {}),
       liveSessionsGeneration,
     };
@@ -330,16 +362,17 @@ export function createWorkspaceActivity(
   }
 
   async function open(
-    workspace: ActivityWorkspace,
+    requestedWorkspace: ActivityWorkspace,
     state: WorkspaceActivityState,
   ): Promise<SyncStatusResult> {
     const current = state.entry;
     const rootPath = current?.workspace.rootPath ?? state.agentRun?.workspace.rootPath;
-    if (rootPath !== undefined && rootPath !== workspace.rootPath) {
+    if (rootPath !== undefined && !workspaceRootsMatch(rootPath, requestedWorkspace.rootPath)) {
       throw new Error(
         "Workspace activity was replaced by another physical root.",
       );
     }
+    const workspace = rootPath === undefined ? requestedWorkspace : { ...requestedWorkspace, rootPath };
     if (!current) {
       const entry: WatchedWorkspace = {
         workspace,
@@ -354,11 +387,21 @@ export function createWorkspaceActivity(
         historyCaptureFailure: null,
         historyCaptureDetail: null,
         atomicPlacementUnavailable: false,
+        onNetworkShare: false,
         recoveryUnavailable: false,
         keptFiles: [],
+        retainedCopies: null,
         heldFiles: [],
+        collectionsWaiting: false,
+        collectionsWaitingAsked: 0,
+        collectionsWaitingAnswered: 0,
       };
       state.entry = entry;
+      void options.onNetworkShare?.(workspace.rootPath).then((shared) => {
+        if (!shared || state.entry !== entry) return;
+        entry.onNetworkShare = true;
+        notify({ workspaceId: workspace.workspaceId });
+      }, (error) => console.error(`[desktop] could not check whether ${workspace.rootPath} is on a network share:`, error));
       // Resolve the engine capture before the watcher starts, so the mode is
       // known from the first batch. A capture failure leaves the workspace
       // with no recorder, surfaced via the history-off notice, never a
@@ -378,6 +421,12 @@ export function createWorkspaceActivity(
               onKeptFiles: (paths) => {
                 if (state.entry !== entry || JSON.stringify(paths) === JSON.stringify(entry.keptFiles)) return;
                 entry.keptFiles = [...paths];
+                notify({ workspaceId: workspace.workspaceId });
+              },
+              onRetainedCopies: (summary) => {
+                const previous = entry.retainedCopies;
+                if (state.entry !== entry || (previous?.count === summary.count && previous.bytes === summary.bytes)) return;
+                entry.retainedCopies = { count: summary.count, bytes: summary.bytes };
                 notify({ workspaceId: workspace.workspaceId });
               },
               onHeldFiles: (files) => {
@@ -442,6 +491,7 @@ export function createWorkspaceActivity(
           entry.inFlight = false;
           entry.lastSyncedAtMs = Date.now();
           entry.engine?.queueSync();
+          entry.engine?.queueWatchedUpload();
           notify({ workspaceId: workspace.workspaceId, paths, pathSetChanged: false });
         },
         pulled(paths) {
@@ -483,9 +533,79 @@ export function createWorkspaceActivity(
         // through onChange/notify rather than blocking the open.
         void engine.start();
       }
+      // A shared view pulls through its share and has no ordinary pull.
+      if (options.collectionsWaitingFor && !entry.historyShareView) {
+        void readCollectionsWaiting(workspace, state).catch(error =>
+          console.error(`[desktop] Collections wait check failed for ${workspace.workspaceId}:`, error));
+      }
     }
     state.preservedStatus = null;
     return statusFor(workspace, state);
+  }
+
+  // Asks the engine whether Collection updates wait for an unfinished pull,
+  // and keeps the answer for this open unless a later read already
+  // answered. An answer that nothing waits also ends a failed reopen after a
+  // pause. Resolves the answer and whether the status changed.
+  async function askCollectionsWaiting(
+    state: WorkspaceActivityState,
+    read: () => Promise<boolean>,
+  ): Promise<{ waiting: boolean; changed: boolean }> {
+    const entry = state.entry;
+    const asked = entry ? ++entry.collectionsWaitingAsked : 0;
+    const waiting = await read();
+    if (state.entry !== entry) return { waiting, changed: false };
+    if (entry) {
+      if (asked < entry.collectionsWaitingAnswered) return { waiting, changed: false };
+      entry.collectionsWaitingAnswered = asked;
+    }
+    const reopened = !waiting && state.syncPauseReopenFailed;
+    if (entry && entry.collectionsWaiting === waiting && !reopened) return { waiting, changed: false };
+    if (entry) entry.collectionsWaiting = waiting;
+    if (reopened) state.syncPauseReopenFailed = false;
+    return { waiting, changed: true };
+  }
+
+  async function readCollectionsWaiting(
+    workspace: ActivityWorkspace,
+    state: WorkspaceActivityState,
+  ): Promise<boolean> {
+    const collectionsWaitingFor = options.collectionsWaitingFor;
+    if (!collectionsWaitingFor) throw new Error("dohc cannot ask the engine about Collection updates.");
+    const { waiting, changed } = await askCollectionsWaiting(state, () => collectionsWaitingFor(workspace));
+    if (changed) notify({ workspaceId: workspace.workspaceId });
+    return waiting;
+  }
+
+  // A sync pass ended. A failed pass can leave a pull unfinished, and only a
+  // later pass can finish it, so the engine is asked after a failure and
+  // while Collection updates wait. A failed read keeps the last answer. The
+  // sync engine announces the change itself, once the pass has ended.
+  async function syncPassEnded(
+    workspace: ActivityWorkspace,
+    state: WorkspaceActivityState,
+    failed: boolean,
+    read: () => Promise<boolean>,
+  ): Promise<boolean> {
+    const entry = state.entry;
+    if (!entry || (!failed && !entry.collectionsWaiting)) return false;
+    try {
+      return (await askCollectionsWaiting(state, read)).changed;
+    } catch (error) {
+      console.error(`[desktop] Collections wait check failed for ${workspace.workspaceId}:`, error);
+      return false;
+    }
+  }
+
+  // The pause saved, but the workspace did not reopen while Collection
+  // updates waited for an unfinished pull.
+  function recordSyncPauseReopenFailed(
+    workspace: ActivityWorkspace,
+    state: WorkspaceActivityState,
+  ): void {
+    if (state.syncPauseReopenFailed) return;
+    state.syncPauseReopenFailed = true;
+    notify({ workspaceId: workspace.workspaceId });
   }
 
   // Enable-sync path: build the engine now (registry remote was just set) and
@@ -553,14 +673,14 @@ export function createWorkspaceActivity(
     const entry = state.entry;
     if (!entry) {
       if (!closeOptions.preserveAgentRun && state.agentRun &&
-        (closeOptions.expectedRootPath === undefined || state.agentRun.workspace.rootPath === closeOptions.expectedRootPath)) {
+        (closeOptions.expectedRootPath === undefined || workspaceRootsMatch(state.agentRun.workspace.rootPath, closeOptions.expectedRootPath))) {
         assignAgentRun(state, workspace, null);
       }
       return false;
     }
     if (
       closeOptions.expectedRootPath !== undefined &&
-      entry.workspace.rootPath !== closeOptions.expectedRootPath
+      !workspaceRootsMatch(entry.workspace.rootPath, closeOptions.expectedRootPath)
     ) {
       return false;
     }
@@ -743,7 +863,7 @@ export function createWorkspaceActivity(
     if (!entry) throw new Error(`Workspace is not open: ${workspaceId}`);
     if (
       expectedRootPath !== undefined &&
-      entry.workspace.rootPath !== expectedRootPath
+      !workspaceRootsMatch(entry.workspace.rootPath, expectedRootPath)
     ) {
       throw new Error(
         "Workspace activity was replaced by another physical root.",
@@ -769,7 +889,7 @@ export function createWorkspaceActivity(
     if (!slot) return;
     if (
       expectedRootPath !== undefined &&
-      slot.workspace.rootPath !== expectedRootPath
+      !workspaceRootsMatch(slot.workspace.rootPath, expectedRootPath)
     ) {
       return;
     }
@@ -785,7 +905,7 @@ export function createWorkspaceActivity(
     return (
       slot !== null &&
       (expectedRootPath === undefined ||
-        slot.workspace.rootPath === expectedRootPath)
+        workspaceRootsMatch(slot.workspace.rootPath, expectedRootPath))
     );
   }
 
@@ -834,7 +954,7 @@ export function createWorkspaceActivity(
     if (
       !entry ||
       (expectedRootPath !== undefined &&
-        entry.workspace.rootPath !== expectedRootPath)
+        !workspaceRootsMatch(entry.workspace.rootPath, expectedRootPath))
     ) {
       return null;
     }
@@ -860,6 +980,9 @@ export function createWorkspaceActivity(
     close,
     enableCloud,
     prepareSyncPause,
+    recordSyncPauseReopenFailed,
+    readCollectionsWaiting,
+    syncPassEnded,
     reconcileCloud,
     stopEngine,
     getStatus,

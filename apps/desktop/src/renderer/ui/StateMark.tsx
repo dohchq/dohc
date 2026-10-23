@@ -1,6 +1,7 @@
 import { Clock, Lock, TriangleAlert } from "lucide-react";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
+import { SecondaryButton } from "./controls";
 import { useShownAfter } from "./useShownAfter";
 
 // Save facts and access/view facts share this presentation map.
@@ -24,7 +25,7 @@ export type StatePresentation = {
 };
 
 export const DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE =
-  "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/trash.";
+  "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/local/trash.";
 
 // dohc cannot tell whether the original was moved or deleted, only that
 // another file now has its path.
@@ -41,6 +42,7 @@ export type SaveStateKey =
   | "saved" | "saving" | "error" | "saved-to-host" | "pending-share" | "file-locked" | "changed-on-disk"
   | "deleted" | "object-changed" | "read-only"
   | "recovery"
+  | "reloaded"
   | "read-only-transition"
   | "read-only-unavailable"
   | "too-large";
@@ -88,10 +90,17 @@ export const SAVE_STATE: Record<SaveStateKey, StatePresentation> = {
     mark: "held",
     title: "This file is too large to edit in dohc.",
   },
+  // Shown for a moment after an open document took in a change made outside
+  // dohc. Nothing in it was unsaved.
+  reloaded: {
+    label: "Reloaded",
+    mark: "settled",
+    title: "This file changed outside dohc. dohc opened the new version.",
+  },
   "changed-on-disk": {
-    label: "Changed on disk",
+    label: "Changed outside dohc",
     mark: "attention",
-    title: "This file changed outside dohc while it was open. Open History to restore your text.",
+    title: "This file changed outside dohc while it was open. dohc keeps your text in History.",
   },
   deleted: {
     label: "Deleted",
@@ -188,7 +197,8 @@ function Mark(props: { kind: StateMarkKind }) {
  * saving or saved-to-host chip for screen readers only: those pass on their
  * own, so typing never changes what the row draws. Words appear when the
  * file is held, a pending share has lasted (and then stay while the person
- * keeps typing), or the state needs the person. */
+ * keeps typing), or the state needs the person. `onRetry` puts Try again
+ * beside the chip, for a state the person can retry from the editor. */
 export function StateMark(props: {
   state: string | SaveState;
   shown: SaveStateKey | AccessStateKey | SaveState;
@@ -197,6 +207,7 @@ export function StateMark(props: {
   className?: string;
   truncate?: boolean;
   quietWhenCalm?: boolean;
+  onRetry?: () => void;
 }) {
   const storedKey = typeof props.shown === "string" ? props.shown : saveStatePresentationKey(props.shown);
   const quiet = props.quietWhenCalm === true;
@@ -292,12 +303,19 @@ export function StateMark(props: {
       )}
     </span>
   );
-  if (!props.truncate) return chip;
+  // One line at its natural width: the chip beside it gives way instead.
+  const retry = props.onRetry ? (
+    <SecondaryButton size="compact" data-testid={`${props.testId}-retry`} onClick={props.onRetry} className="shrink-0 whitespace-nowrap">
+      Try again
+    </SecondaryButton>
+  ) : null;
+  if (!props.truncate) return <>{chip}{retry}</>;
   // The tooltip sits beside the chip, not in it, so the chip's text stays its
-  // label while the tooltip is open.
-  return (
+  // label while the tooltip is open. Beside Try again, the chip keeps the
+  // header's 25px for its mark and an ellipsis.
+  const explained = (
     <span
-      className="inline-flex min-w-0 max-w-full"
+      className={`inline-flex max-w-full ${retry ? "min-w-[25px]" : "min-w-0"}`}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={(event) => {
         if (!event.currentTarget.contains(document.activeElement)) setOpen(false);
@@ -317,6 +335,7 @@ export function StateMark(props: {
       ) : null}
     </span>
   );
+  return <>{explained}{retry}</>;
 }
 
 // Between the chip and its tooltip, and between the tooltip and the window's edge.

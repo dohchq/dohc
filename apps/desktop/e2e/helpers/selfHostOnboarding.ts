@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, readdirSync, realpathSync } from "node:fs";
-import { createServer as createHttpServer, request as requestHttp, type IncomingMessage, type RequestListener, type Server } from "node:http";
+import { createServer as createHttpServer, request as requestHttp, type IncomingMessage, type RequestListener, type Server, type ServerResponse } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import type { Duplex } from "node:stream";
 import { createRequire } from "node:module";
@@ -91,35 +91,64 @@ export interface ProxiedCollectionWriteResponse {
   body: string;
 }
 
+export interface ProxiedHostedLogResponse {
+  status: number;
+  statusMessage: string;
+  headers: string[];
+  body: Buffer;
+}
+
+export interface HostedLogResponseBarrier {
+  captured: Promise<ProxiedHostedLogResponse>;
+  delivered: Promise<void>;
+  release(): void;
+  destroy(): void;
+}
+
+export class HostedLogClientClosedError extends Error {
+  constructor() { super("Hosted-log client closed before the captured response was delivered."); }
+}
+
+interface PendingHostedLogResponse extends HostedLogResponseBarrier {
+  workspaceId: string;
+  hold(incoming: IncomingMessage, outgoing: ServerResponse): void;
+  attach(outgoing: ServerResponse): void;
+  receive(response: IncomingMessage): void;
+  fail(error: Error): void;
+}
+
 export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "key">, options: {
   collectionWriteResponse?(response: ProxiedCollectionWriteResponse): "drop" | void | Promise<"drop" | void>;
 } = {}) {
   let authInternalUrl: string | undefined;
   let relayUrl: string | undefined;
-  // While set, a session host's hosted-feed pulls wait for it. Its pushes pass.
-  let hostedPulls: Promise<void> | undefined;
-  let heldHostedPulls = 0;
+  let nextHostedLog: PendingHostedLogResponse | undefined;
+  let holdingHostedLog: PendingHostedLogResponse | undefined;
   const upstreams = new Set<ReturnType<typeof requestHttp>>();
   const upgraded = new Set<Duplex>();
   const route = (path: string) => path.startsWith("/sync/") || path === "/health" ? relayUrl : authInternalUrl;
-  const handle: RequestListener = (incoming, outgoing) => {
-    const path = incoming.url ?? "/";
-    if (hostedPulls && incoming.method === "GET" && /^\/sync\/[^/]+\/hosted\/log(?:\?|$)/u.test(path)) {
-      heldHostedPulls++;
-      void hostedPulls.then(() => { if (!outgoing.destroyed) forward(incoming, outgoing); });
-      return;
-    }
-    forward(incoming, outgoing);
-  };
   const forward: RequestListener = (incoming, outgoing) => {
     const path = incoming.url ?? "/";
+    const hostedWorkspace = incoming.method === "GET"
+      ? /^\/sync\/([^/]+)\/hosted\/log$/u.exec(new URL(path, "http://proxy.test").pathname)?.[1] : undefined;
+    const holding = holdingHostedLog && encodeURIComponent(holdingHostedLog.workspaceId) === hostedWorkspace
+      ? holdingHostedLog : undefined;
+    if (holding) { holding.hold(incoming, outgoing); return; }
+    const barrier = nextHostedLog && encodeURIComponent(nextHostedLog.workspaceId) === hostedWorkspace
+      ? nextHostedLog : undefined;
+    if (barrier) { nextHostedLog = undefined; barrier.attach(outgoing); }
     const target = route(path);
-    if (!target) { outgoing.writeHead(503).end(); return; }
+    if (!target) {
+      if (barrier) { barrier.fail(new Error("Hosted-log proxy has no upstream route.")); return; }
+      outgoing.writeHead(503).end();
+      return;
+    }
     const intercept = options.collectionWriteResponse && incoming.method === "POST"
       && /^\/sync\/shares\/[^/]+\/collection-writes$/u.test(path);
     const requestChunks: Buffer[] = [];
     if (intercept) incoming.on("data", chunk => requestChunks.push(Buffer.from(chunk)));
     const upstream = requestHttp(new URL(path, target), { method: incoming.method, headers: incoming.headers }, (response) => {
+      if (barrier) { barrier.receive(response); return; }
       if (intercept) {
         const chunks: Buffer[] = [];
         response.on("data", chunk => chunks.push(Buffer.from(chunk)));
@@ -142,12 +171,18 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
     });
     upstreams.add(upstream);
     upstream.once("close", () => upstreams.delete(upstream));
-    upstream.on("error", () => { if (!outgoing.headersSent) outgoing.writeHead(502); outgoing.end(); });
-    outgoing.once("close", () => upstream.destroy());
-    incoming.on("error", () => upstream.destroy());
+    upstream.on("error", error => {
+      if (barrier) { barrier.fail(error); outgoing.destroy(); return; }
+      if (!outgoing.headersSent) outgoing.writeHead(502);
+      outgoing.end();
+    });
+    outgoing.once("close", () => {
+      upstream.destroy();
+    });
+    incoming.on("error", error => { barrier?.fail(error); upstream.destroy(); });
     incoming.pipe(upstream);
   };
-  const server: Server = tls ? createHttpsServer({ cert: tls.certificate, key: tls.key }, handle) : createHttpServer(handle);
+  const server: Server = tls ? createHttpsServer({ cert: tls.certificate, key: tls.key }, forward) : createHttpServer(forward);
   server.on("upgrade", (incoming, socket, head) => {
     const target = route(incoming.url ?? "/");
     if (!target) { socket.destroy(); return; }
@@ -182,16 +217,83 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
     origin: `${tls ? "https" : "http"}://127.0.0.1:${address.port}`,
     routeAuthTo(url: string) { authInternalUrl = url; },
     routeRelayTo(url: string) { relayUrl = url; },
-    /** Holds the session host's hosted-feed pulls until the returned release runs. */
-    holdHostedPulls() {
-      let release!: () => void;
-      const held = new Promise<void>(resolve => { release = resolve; });
-      hostedPulls = held;
-      return () => { if (hostedPulls === held) hostedPulls = undefined; release(); };
+    /** Buffers the next real hosted-log response for this workspace until released. */
+    holdNextHostedLogResponse(workspaceId: string): HostedLogResponseBarrier {
+      assert.ok(!nextHostedLog, "A hosted-log response barrier is already waiting for a request.");
+      let resolve!: (response: ProxiedHostedLogResponse) => void;
+      let reject!: (error: Error) => void;
+      const captured = new Promise<ProxiedHostedLogResponse>((done, fail) => { resolve = done; reject = fail; });
+      let resolveDelivered!: () => void;
+      let rejectDelivered!: (error: Error) => void;
+      const delivered = new Promise<void>((done, fail) => { resolveDelivered = done; rejectDelivered = fail; });
+      // Cleanup can destroy a barrier before its owner reaches the await.
+      void captured.catch(() => undefined);
+      void delivered.catch(() => undefined);
+      let outgoing: ServerResponse | undefined;
+      let buffered: ProxiedHostedLogResponse | undefined;
+      let released = false;
+      const held: Array<{ incoming: IncomingMessage; outgoing: ServerResponse }> = [];
+      const barrier: PendingHostedLogResponse = {
+        workspaceId, captured, delivered,
+        hold(incoming, outgoing) { held.push({ incoming, outgoing }); },
+        attach(destination) {
+          outgoing = destination;
+          if (!released) holdingHostedLog = barrier;
+          destination.once("finish", resolveDelivered);
+          destination.once("close", () => {
+            if (destination.writableFinished) return;
+            const error = new HostedLogClientClosedError();
+            rejectDelivered(error);
+            // A timed-out host can retry, but its pulls must stay held until release.
+            if (!buffered) barrier.fail(error);
+          });
+        },
+        receive(response) {
+          const chunks: Buffer[] = [];
+          response.on("data", chunk => chunks.push(Buffer.from(chunk)));
+          response.once("error", error => barrier.fail(error));
+          response.once("aborted", () => barrier.fail(new Error("Hosted-log upstream response aborted.")));
+          response.once("end", () => {
+            if (outgoing?.destroyed) { barrier.fail(new HostedLogClientClosedError()); return; }
+            buffered = { status: response.statusCode ?? 502, statusMessage: response.statusMessage ?? "",
+              headers: [...response.rawHeaders], body: Buffer.concat(chunks) };
+            resolve(buffered);
+            if (released) barrier.release();
+          });
+        },
+        release() {
+          released = true;
+          if (holdingHostedLog === barrier) holdingHostedLog = undefined;
+          if (buffered && outgoing) {
+            if (outgoing.destroyed) rejectDelivered(new HostedLogClientClosedError());
+            else {
+              outgoing.writeHead(buffered.status, buffered.statusMessage, buffered.headers);
+              outgoing.end(buffered.body);
+            }
+            buffered = undefined;
+            outgoing = undefined;
+          }
+          for (const request of held.splice(0)) {
+            if (!request.outgoing.destroyed) forward(request.incoming, request.outgoing);
+          }
+        },
+        fail(error) {
+          if (nextHostedLog === barrier) nextHostedLog = undefined;
+          if (holdingHostedLog === barrier) holdingHostedLog = undefined;
+          reject(error);
+          rejectDelivered(error);
+          outgoing?.destroy();
+          for (const request of held.splice(0)) request.outgoing.destroy();
+          buffered = undefined;
+        },
+        destroy() { barrier.fail(new Error("Hosted-log response barrier destroyed.")); },
+      };
+      nextHostedLog = barrier;
+      return barrier;
     },
-    /** How many hosted-feed pulls arrived while held. */
-    heldHostedPulls: () => heldHostedPulls,
     async close() {
+      nextHostedLog?.destroy();
+      holdingHostedLog?.destroy();
       for (const request of upstreams) request.destroy();
       for (const socket of upgraded) socket.destroy();
       server.closeAllConnections();

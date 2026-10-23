@@ -1,3 +1,5 @@
+import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
+import { ServerCollectionsUnavailableError } from "../workspaces/remoteDataset";
 import { ReservedWorkspaceIdError } from "@dohc/workspace-core";
 import { RelayUnauthorizedError, RelayUnreachableError, SharedFileReadOnlyError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
 import { readFileSync } from "node:fs";
@@ -12,19 +14,25 @@ import type { WorkspacePolicyPath } from "./bridgeContract";
 import {
   ERROR_WORDS,
   ipcWireError,
+  isChatMentionPageChanged,
+  isPrivacyDenied,
   isShareReadOnlyRefusal,
   isSharedLiveFileRefusal,
   isWorkspaceUpdatingError,
   needsNewerDohc,
+  PRIVACY_DENIED_WORDS,
   readCollectionReopenWait,
+  readCollectionsRefusal,
+  readServerCollectionsUnavailable,
   readError,
   shouldRecheckShareAccess,
+  VOLUME_SHARES_NEW_FILES_WORDS,
   withErrorWords,
 } from "./errorWords";
 
 it("explains the held-file live-open refusal after Electron serializes it", () => {
   const error = new Error("Error invoking remote method 'desktop:engine-ydoc-open': DaemonRefusalError [CONFLICT]: capture-file-held: notes/held.md");
-  expect(readError(error).words).toBe('dohc cannot open "notes/held.md" for live editing. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.');
+  expect(readError(error).words).toBe('dohc cannot open "notes/held.md" for live editing. dohc cannot take in this file\'s Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Restore the file\'s exact contents from before that edit. For nested lists, make the edit in dohc after the file opens again.');
 });
 
 // What the renderer receives when a main-process handler rejects: Electron
@@ -44,6 +52,25 @@ const engineCodes = [
 ].map((match) => match[1]!);
 
 describe("error words", () => {
+  it.each([
+    ["chat-mention-access-changed", "Chat access changed. Try again."],
+    ["chat-mention-version-changed", "It changed while dohc was working on it. Try again."],
+  ])("keeps the restartable chat page reason across IPC: %s", (reason, words) => {
+    const received = acrossIpc(refusal("CONFLICT", reason!));
+    expect(isChatMentionPageChanged(received)).toBe(true);
+    expect(readError(received).words).toBe(words);
+    expect(isChatMentionPageChanged(acrossIpc(new Error(reason)))).toBe(true);
+  });
+
+  it.each([
+    refusal("CONFLICT", "A different conflict"),
+    refusal("FORBIDDEN", "chat-mention-access-changed"),
+    refusal("CONFLICT", "chat-mention-access-changed: extra"),
+    new Error("Chat access changed. Try again."),
+  ])("does not restart a chat page for %s", error => {
+    expect(isChatMentionPageChanged(acrossIpc(error))).toBe(false);
+  });
+
   it.each([
     "Each choice is one line of at most 200 characters.",
     "Each choice appears once.",
@@ -145,6 +172,86 @@ describe("error words", () => {
     expect(needsNewerDohc(new ReservedWorkspaceIdError("link"))).toBe(false);
   });
 
+  it("names a macOS privacy refusal the engine sends, after the caller's sentence", () => {
+    const engine = acrossIpc(refusal("INTERNAL", "privacy-denied"), "desktop:list-workspace-files");
+    expect(readError(engine)).toEqual({
+      words: PRIVACY_DENIED_WORDS,
+      mapped: true,
+      cause: "DaemonRefusalError [INTERNAL]: privacy-denied",
+    });
+    expect(isPrivacyDenied(engine)).toBe(true);
+    expect(withErrorWords("Could not refresh workspace files.", engine))
+      .toBe(`Could not refresh workspace files. ${PRIVACY_DENIED_WORDS}`);
+    expect(PRIVACY_DENIED_WORDS).toBe(
+      "macOS blocked dohc from this folder. Allow dohc in System Settings › Privacy & Security › Files & Folders.",
+    );
+  });
+
+  it("says why dohc can't keep a file private on a volume that shares new files, after the caller's sentence", () => {
+    const engine = acrossIpc(refusal("INTERNAL", "volume-shares-new-files"), "desktop:write-workspace-file");
+    expect(readError(engine)).toEqual({
+      words: VOLUME_SHARES_NEW_FILES_WORDS,
+      mapped: true,
+      cause: "DaemonRefusalError [INTERNAL]: volume-shares-new-files",
+    });
+    expect(withErrorWords("Couldn't save .env.", engine)).toBe(
+      "Couldn't save .env. The disk this workspace is on adds sharing permissions to new files, so dohc can't keep this file private. Move the workspace to a disk on this Mac.",
+    );
+  });
+
+  const LINK = "Put what it links to in its place, then try again.";
+  const OTHER_OWNER = "Make it yours again, then try again.";
+  const OTHER_OWNER_FOLDER = "Make it and everything in it yours again, then try again.";
+  const MOVE_ASIDE = "Rename or move it, then try again.";
+  const NOT_CHANGEABLE = "Give your account full control of this folder and everything in it, then try again.";
+  it.each([
+    ["link .dohc", `This workspace's .dohc is a link, so dohc can't keep its History private. ${LINK}`],
+    ["link .dohc/engine/engine.db-journal", `This workspace's .dohc/engine/engine.db-journal is a link, so dohc can't keep its History private. ${LINK}`],
+    ["not-folder .dohc/engine", `This workspace's .dohc/engine is not a folder, so dohc can't keep its History private. ${MOVE_ASIDE}`],
+    ["not-file .dohc/engine/engine.db-wal", `This workspace's .dohc/engine/engine.db-wal is not a file, so dohc can't keep its History private. ${MOVE_ASIDE}`],
+    ["other-owner .dohc", `This workspace's .dohc belongs to another user, so dohc can't keep its History private. ${OTHER_OWNER_FOLDER}`],
+    ["other-owner .dohc/engine", `This workspace's .dohc/engine belongs to another user, so dohc can't keep its History private. ${OTHER_OWNER_FOLDER}`],
+    ["other-owner .dohc/engine/engine.db", `This workspace's .dohc/engine/engine.db belongs to another user, so dohc can't keep its History private. ${OTHER_OWNER}`],
+    ["unchecked-volume .dohc/engine", "This workspace's .dohc/engine is on a disk dohc can't check, so dohc can't keep its History private. Move the workspace to a disk formatted as APFS, then try again."],
+    ["unchecked-system .dohc/engine", "This workspace's .dohc/engine is on a system where dohc can't check it, so dohc can't keep its History private. Run dohc where it can read its own /proc/self/fd, then try again."],
+    ["link .dohc/engine/engine.db-shm", `This workspace's .dohc/engine/engine.db-shm is a link, so dohc can't keep its History private. ${LINK}`],
+    ["link .dohc/local", `This workspace's .dohc/local is a link, so dohc can't keep this computer's own data private. ${LINK}`],
+    ["not-folder .dohc/local", `This workspace's .dohc/local is not a folder, so dohc can't keep this computer's own data private. ${MOVE_ASIDE}`],
+    ["other-owner .dohc/local", `This workspace's .dohc/local belongs to another user, so dohc can't keep this computer's own data private. ${OTHER_OWNER_FOLDER}`],
+    ["not-changeable .dohc", `This workspace's .dohc has permissions dohc can't use, so dohc can't keep its History private. ${NOT_CHANGEABLE}`],
+    ["not-changeable .dohc/local", `This workspace's .dohc/local has permissions dohc can't use, so dohc can't keep this computer's own data private. ${NOT_CHANGEABLE}`],
+  ])("names what keeps a workspace's History from being private, where, and the fix that keeps it: %s", (detail, words) => {
+    const message = `engine-folder-not-private: ${detail}`;
+    expect(readError(acrossIpc(refusal("INTERNAL", message), "desktop:open-workspace"))).toEqual({
+      words,
+      mapped: true,
+      cause: `DaemonRefusalError [INTERNAL]: ${message}`,
+    });
+    for (const sentence of words.split(/(?<=\.) /)) {
+      expect(sentence.split(" ").length, sentence).toBeLessThanOrEqual(20);
+    }
+  });
+
+  it("leaves a refusal of the engine's folder it has no words for to the caller", () => {
+    for (const detail of [
+      "constructor .dohc",
+      "link /Users/me",
+      "link .dohc/trash",
+      "other-owner .dohc/engine/ROOT_BINDING",
+      "link .dohc/engine/engine.db-wal/x",
+      "link .dohc/local/ui-state.json",
+      "link ../.dohc",
+    ]) {
+      expect(readError(acrossIpc(refusal("INTERNAL", `engine-folder-not-private: ${detail}`))).words).toBeNull();
+    }
+  });
+
+  it("keeps an EPERM main did not name a privacy refusal as a permission problem", () => {
+    const eperm = acrossIpc(Object.assign(new Error("EPERM: operation not permitted, rename 'a' -> 'b'"), { code: "EPERM" }));
+    expect(isPrivacyDenied(eperm)).toBe(false);
+    expect(readError(eperm).words).toBe("dohc does not have permission to use this file or folder.");
+  });
+
   it("has words, or the caller's words by decision, for every code the engine refuses with", () => {
     expect(engineCodes.length).toBeGreaterThan(30);
     const refusals = ERROR_WORDS.DaemonRefusalError!;
@@ -179,6 +286,16 @@ describe("error words", () => {
     expect(isWorkspaceUpdatingError(acrossIpc(new Error("Workspace is still updating. Try again.")))).toBe(false);
   });
 
+  it("says a file is not read yet without promising that the workspace will finish", () => {
+    const received = acrossIpc(refusal("OVERLOADED", "dohc has not read this file yet. Open it again once dohc has read it."));
+    expect(readError(received)).toEqual({
+      words: "dohc has not read this file yet. Try again when it has.",
+      mapped: true,
+      cause: "DaemonRefusalError [OVERLOADED]: dohc has not read this file yet. Open it again once dohc has read it.",
+    });
+    expect(isWorkspaceUpdatingError(received)).toBe(false);
+  });
+
   it("knows a shared live file's restore refusal across IPC, and keeps its words", () => {
     const refused = new LiveDocumentMutationError(
       "dohc could not restore notes/plan.md. This action is unavailable for shared live files. Continue editing at the current location.",
@@ -198,6 +315,11 @@ describe("error words", () => {
     });
     expect(readError(acrossIpc(refusal("SHARE_READ_ONLY", "workspace operation failed"))).words)
       .toBe("This share is read-only.");
+  });
+
+  it("names https when the engine refuses a server address", () => {
+    expect(readError(acrossIpc(refusal("RELAY_HTTPS_REQUIRED", "workspace operation failed"))).words)
+      .toBe("Your server's address does not use https. Disconnect, then connect your server again with its https address.");
   });
 
   it("reads the app compiler and the Collection worker by their codes", () => {
@@ -268,6 +390,35 @@ describe("error words", () => {
       new Error("The Collection changed after this preview. Preview the change again."),
       "desktop:dataset",
     ))).toBe("dohc could not prepare this review. The Collection changed after this preview. Preview the change again.");
+  });
+
+  it("carries a refusal to use the Collections here across IPC, with its kind and its words", () => {
+    const elsewhere = new CollectionsRefusalError({ kind: "elsewhere", computer: { installId: "install-laptop", label: "Laptop" }, sameName: false });
+    expect(String(ipcWireError(elsewhere))).toBe(`CollectionsRefusalError [collections-elsewhere]: ${elsewhere.message}`);
+    expect(readCollectionsRefusal(acrossIpc(elsewhere, "desktop:dataset"))).toEqual({ kind: "elsewhere", words: elsewhere.message });
+    expect(withErrorWords("Could not read Collections.", acrossIpc(elsewhere, "desktop:dataset"))).toBe(`Could not read Collections. ${elsewhere.message}`);
+    expect(readCollectionsRefusal(acrossIpc(new CollectionsRefusalError({ kind: "unclaimed" }), "desktop:dataset"))?.kind).toBe("unclaimed");
+    // Another error with the same words is not a refusal.
+    expect(readCollectionsRefusal(acrossIpc(new Error(elsewhere.message), "desktop:dataset"))).toBeNull();
+    expect(readCollectionsRefusal(acrossIpc(Object.assign(new Error("x"), { name: "CollectionsRefusalError", code: "collections-other" })))).toBeNull();
+  });
+
+  it("carries where the Collections are with a server list that failed, across IPC, apart from why", () => {
+    const elsewhere = new CollectionsRefusalError({ kind: "elsewhere", computer: { installId: "install-laptop", label: "Laptop" }, sameName: false });
+    const failed = new ServerCollectionsUnavailableError(elsewhere, new TypeError("fetch failed"));
+    const read = readServerCollectionsUnavailable(acrossIpc(failed, "desktop:dataset"));
+    expect(read).toEqual({ elsewhere: elsewhere.message, failure: "TypeError: fetch failed" });
+    // The server's error reads as it would have alone.
+    for (const cause of [new TypeError("fetch failed"), new CollectionsRefusalError({ kind: "unclaimed" }), new Error("Your server session changed. Try again.")]) {
+      const failure = readServerCollectionsUnavailable(acrossIpc(new ServerCollectionsUnavailableError(elsewhere, cause), "desktop:dataset"))!.failure;
+      expect(readError(new Error(failure))).toEqual(readError(acrossIpc(cause, "desktop:dataset")));
+    }
+    expect(readServerCollectionsUnavailable(acrossIpc(new ServerCollectionsUnavailableError(elsewhere, new Error()), "desktop:dataset")))
+      .toEqual({ elsewhere: elsewhere.message, failure: "" });
+    expect(readCollectionsRefusal(acrossIpc(failed, "desktop:dataset"))).toBeNull();
+    // The same words from another error are not that list.
+    expect(readServerCollectionsUnavailable(acrossIpc(new Error(failed.message), "desktop:dataset"))).toBeNull();
+    expect(readServerCollectionsUnavailable(acrossIpc(elsewhere, "desktop:dataset"))).toBeNull();
   });
 
   it("carries a Collection's reopen wait across IPC as a number beside its code", () => {

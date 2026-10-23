@@ -4,6 +4,7 @@
 //! hold this port to the same schema recovery, Field value, and Record id
 //! outcomes.
 
+use dohc_engine_storage::text;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
@@ -2445,13 +2446,13 @@ fn load_collection_schema(
 ) -> Result<CollectionSchema, crate::DomainError> {
     let text: String = conn
         .query_row(
-            "SELECT b.text FROM collections c \
+            "SELECT b.sha256 FROM collections c \
              JOIN snapshots s ON s.workspace_id=c.workspace_id \
                AND s.version_id=c.version_id AND s.path=c.schema_path \
              JOIN blobs b ON b.sha256=s.blob_sha256 \
              WHERE c.workspace_id=?1 AND c.version_id=?2 AND c.collection_path=?3",
             params![workspace_id, version_id, collection_path],
-            |row| row.get(0),
+            |row| text::from_row(conn, row, 0),
         )
         .map_err(crate::DomainError::sql_corrupt)?;
     Ok(parse_collection_schema(&text).schema)
@@ -2763,7 +2764,7 @@ pub fn collection_record_id_mismatch_in_tx(
 ) -> Result<bool, crate::DomainError> {
     let mut statement = conn
         .prepare(
-            "SELECT r.record_id,b.text,r.adoption_state FROM collection_records r \
+            "SELECT r.record_id,b.sha256,r.adoption_state FROM collection_records r \
              LEFT JOIN snapshots s ON s.workspace_id=r.workspace_id \
                AND s.version_id=r.version_id AND s.path=r.file_path \
                AND s.object_id=r.object_id \
@@ -2777,7 +2778,7 @@ pub fn collection_record_id_mismatch_in_tx(
             .query_row(params![workspace_id, version_id, path], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
+                    text::optional_from_row(conn, row, 1)?,
                     row.get::<_, String>(2)?,
                 ))
             })
@@ -3732,6 +3733,7 @@ fn unindexed_or_conflicted_relation_targets_still_present(
     version_id: &str,
     targets: HashSet<(String, String)>,
 ) -> Result<HashSet<(String, String)>, crate::DomainError> {
+    let snapshot = text::ReadSnapshot::new(conn).map_err(crate::DomainError::sql_corrupt)?;
     let mut targets_by_collection: HashMap<String, HashSet<String>> = HashMap::new();
     for (record_id, collection_path) in targets {
         targets_by_collection
@@ -3745,8 +3747,8 @@ fn unindexed_or_conflicted_relation_targets_still_present(
 
     let mut statement = conn
         .prepare(
-            "SELECT witness.text FROM (\
-               SELECT s.path,b.text,0 AS moment_order FROM snapshots s \
+            "SELECT witness.sha256 FROM (\
+               SELECT s.path,b.sha256,0 AS moment_order FROM snapshots s \
                JOIN blobs b ON b.sha256=s.blob_sha256 \
                WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.content_kind='text' \
                  AND lower(substr(s.path,-3))='.md' \
@@ -3754,7 +3756,7 @@ fn unindexed_or_conflicted_relation_targets_still_present(
                  AND substr(s.path,length(?3)+1,1)='/' \
                  AND instr(substr(s.path,length(?3)+2),'/')=0 \
                UNION ALL \
-               SELECT s.path,b.text,m.moment_order FROM snapshots s \
+               SELECT s.path,b.sha256,m.moment_order FROM snapshots s \
                JOIN moments m ON m.workspace_id=s.workspace_id AND m.version_id=s.version_id \
                  AND m.object_id=s.object_id \
                JOIN blobs b ON b.sha256=m.after_blob_sha256 \
@@ -3774,26 +3776,38 @@ fn unindexed_or_conflicted_relation_targets_still_present(
     let mut present = HashSet::new();
     for (collection_path, wanted_ids) in targets_by_collection {
         let mut matched_count = 0_usize;
-        let rows = statement
+        let mut rows = statement
             .query_map(params![workspace_id, version_id, collection_path], |row| {
                 row.get::<_, String>(0)
             })
             .map_err(crate::DomainError::sql_corrupt)?;
-        for text in rows {
-            let text = text.map_err(crate::DomainError::sql_corrupt)?;
-            let Some(record_id) = markdown_record_id(&text).filter(|id| wanted_ids.contains(id))
-            else {
-                continue;
-            };
-            if present.insert((record_id, collection_path.clone())) {
-                matched_count += 1;
-            }
-            if matched_count == wanted_ids.len() {
+        while matched_count < wanted_ids.len() {
+            let keys = rows
+                .by_ref()
+                .take(256)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(crate::DomainError::sql_corrupt)?;
+            if keys.is_empty() {
                 break;
+            }
+            let bodies = text::read_batch(conn, keys.iter().map(String::as_str), None)
+                .map_err(crate::DomainError::sql_corrupt)?;
+            for key in keys {
+                let text = bodies[&key].text.as_deref().expect("uncapped body");
+                let Some(record_id) = markdown_record_id(text).filter(|id| wanted_ids.contains(id))
+                else {
+                    continue;
+                };
+                if present.insert((record_id, collection_path.clone())) {
+                    matched_count += 1;
+                }
+                if matched_count == wanted_ids.len() {
+                    break;
+                }
             }
         }
     }
-    Ok(present)
+    snapshot.finish(Ok(present), crate::DomainError::sql_corrupt)
 }
 
 fn load_collection_snapshots(
@@ -3801,6 +3815,8 @@ fn load_collection_snapshots(
     workspace_id: &str,
     version_id: &str,
 ) -> Result<Vec<CollectionSnapshot>, crate::DomainError> {
+    let snapshot = text::ReadSnapshot::new(conn).map_err(crate::DomainError::sql_corrupt)?;
+
     let mut statement = conn
         .prepare(
             "WITH collection_prefixes(prefix) AS MATERIALIZED (\
@@ -3823,25 +3839,40 @@ fn load_collection_snapshots(
                        AND instr(substr(s.path,length(c.prefix)+2),'/')=0\
                    )))\
              ) \
-             SELECT s.path,s.object_id,b.text FROM collection_snapshots s \
+             SELECT s.path,s.object_id,b.sha256 FROM collection_snapshots s \
              JOIN blobs b ON b.sha256=s.blob_sha256 \
              ORDER BY s.path",
         )
         .map_err(crate::DomainError::sql_corrupt)?;
-    statement
+    let rows = statement
         .query_map(
             params![workspace_id, version_id, COLLECTION_SCHEMA_FILENAME],
             |row| {
-                Ok(CollectionSnapshot {
-                    path: row.get(0)?,
-                    object_id: row.get(1)?,
-                    text: row.get(2)?,
-                })
+                Ok((
+                    CollectionSnapshot {
+                        path: row.get(0)?,
+                        object_id: row.get(1)?,
+                        text: String::new(),
+                    },
+                    row.get::<_, String>(2)?,
+                ))
             },
         )
         .map_err(crate::DomainError::sql_corrupt)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(crate::DomainError::sql_corrupt)
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let mut bodies = text::read_batch(conn, rows.iter().map(|(_, key)| key.as_str()), None)
+        .map_err(crate::DomainError::sql_corrupt)?;
+    snapshot.finish(
+        Ok(rows
+            .into_iter()
+            .map(|(mut snapshot, key)| {
+                snapshot.text = text::take(&mut bodies, &key);
+                snapshot
+            })
+            .collect()),
+        crate::DomainError::sql_corrupt,
+    )
 }
 
 fn load_record_bindings(
@@ -3883,7 +3914,7 @@ pub fn index_historical_record_owner_moment_in_tx(
     let moment = tx
         .query_row(
             concat!(
-                "SELECT m.version_id,m.object_id,m.path,b.text FROM moments m \
+                "SELECT m.version_id,m.object_id,m.path,b.sha256 FROM moments m \
              JOIN blobs b ON b.sha256=m.after_blob_sha256 \
              WHERE m.workspace_id=?1 AND m.moment_order=?2 \
                AND m.after_content_kind='text' \
@@ -3897,7 +3928,7 @@ pub fn index_historical_record_owner_moment_in_tx(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
+                    text::from_row(tx, row, 3)?,
                 ))
             },
         )
@@ -3961,7 +3992,7 @@ fn ensure_historical_record_owners_backfilled(
 
     let mut statement = tx
         .prepare(concat!(
-            "SELECT m.moment_order,m.object_id,m.path,b.text FROM moments m \
+            "SELECT m.moment_order,m.object_id,m.path,b.sha256 FROM moments m \
              JOIN blobs b ON b.sha256=m.after_blob_sha256 \
              WHERE m.workspace_id=?1 AND m.version_id=?2 \
                AND m.after_content_kind='text' AND lower(substr(m.path,-3))='.md' \
@@ -3984,8 +4015,11 @@ fn ensure_historical_record_owners_backfilled(
         .collect::<Result<Vec<_>, _>>()
         .map_err(crate::DomainError::sql_corrupt)?;
     drop(statement);
-    for (moment_order, object_id, path, text) in moments {
-        let Some(record_id) = markdown_record_id(&text).filter(|value| is_record_id(value)) else {
+    let bodies = text::read_batch(tx, moments.iter().map(|row| row.3.as_str()), None)
+        .map_err(crate::DomainError::sql_corrupt)?;
+    for (moment_order, object_id, path, key) in moments {
+        let text = bodies[&key].text.as_deref().expect("uncapped body");
+        let Some(record_id) = markdown_record_id(text).filter(|value| is_record_id(value)) else {
             continue;
         };
         tx.execute(
@@ -5984,13 +6018,7 @@ fn collection_button_fields(
     if let Some(buttons) = cache().get(&schema_sha256) {
         return Ok(Arc::clone(buttons));
     }
-    let text: String = conn
-        .query_row(
-            "SELECT text FROM blobs WHERE sha256=?1",
-            params![schema_sha256],
-            |row| row.get(0),
-        )
-        .map_err(crate::DomainError::sql_corrupt)?;
+    let text: String = text::read(conn, &schema_sha256).map_err(crate::DomainError::sql_corrupt)?;
     let buttons = Arc::new(
         parse_collection_schema(&text)
             .schema
@@ -6867,7 +6895,7 @@ mod tests {
         let mut connection = Connection::open_in_memory().expect("open scale database");
         connection
             .execute_batch(
-                "CREATE TABLE blobs(sha256 TEXT PRIMARY KEY,text TEXT NOT NULL);\
+                "CREATE TABLE blobs(sha256 TEXT PRIMARY KEY,byte_length INTEGER NOT NULL,text TEXT NOT NULL);\
                  CREATE TABLE snapshots(\
                    workspace_id TEXT NOT NULL,version_id TEXT NOT NULL,path TEXT NOT NULL,\
                    object_id TEXT NOT NULL,blob_sha256 TEXT NOT NULL,content_kind TEXT NOT NULL\
@@ -6892,7 +6920,7 @@ mod tests {
         let transaction = connection.transaction().expect("begin scale seed");
         {
             let mut insert_blob = transaction
-                .prepare("INSERT INTO blobs(sha256,text) VALUES (?1,?2)")
+                .prepare("INSERT INTO blobs(sha256,byte_length,text) VALUES (?1,length(CAST(?2 AS BLOB)),?2)")
                 .expect("prepare scale blobs");
             let mut insert_snapshot = transaction
                 .prepare(
@@ -6936,6 +6964,63 @@ mod tests {
     }
 
     #[test]
+    fn relation_witness_early_match_reads_only_first_chunk() {
+        use std::sync::{Arc, Mutex};
+        let connection = Connection::open_in_memory().unwrap();
+        let reads = Arc::new(Mutex::new(HashSet::new()));
+        let observed = reads.clone();
+        connection
+            .create_scalar_function(
+                "witness_body",
+                2,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                move |ctx| {
+                    observed.lock().unwrap().insert(ctx.get::<String>(0)?);
+                    ctx.get::<String>(1)
+                },
+            )
+            .unwrap();
+        connection.execute_batch(
+            "CREATE TABLE bodies(sha256 TEXT PRIMARY KEY,byte_length INTEGER,text TEXT);\
+             CREATE VIEW blobs AS SELECT sha256,byte_length,witness_body(sha256,text) AS text FROM bodies;\
+             CREATE TABLE snapshots(workspace_id TEXT,version_id TEXT,path TEXT,object_id TEXT,blob_sha256 TEXT,content_kind TEXT);\
+             CREATE TABLE moments(workspace_id TEXT,version_id TEXT,object_id TEXT,after_blob_sha256 TEXT,after_content_kind TEXT,moment_order INTEGER);\
+             CREATE TABLE conflicts(workspace_id TEXT,target_version_id TEXT,status TEXT,current_object_id TEXT,incoming_object_id TEXT,path TEXT);"
+        ).unwrap();
+        for index in 0..600 {
+            let key = format!("key-{index:04}");
+            let body = format!("---\nid: record_{index}\n---\n");
+            connection
+                .execute(
+                    "INSERT INTO bodies VALUES(?1,?2,?3)",
+                    rusqlite::params![key, body.len() as i64, body],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO snapshots VALUES('workspace','version',?1,?2,?2,'text')",
+                    rusqlite::params![format!("records/{index:04}.md"), key],
+                )
+                .unwrap();
+        }
+        let targets = HashSet::from([("record_0".to_owned(), "records".to_owned())]);
+        assert_eq!(
+            unindexed_or_conflicted_relation_targets_still_present(
+                &connection,
+                "workspace",
+                "version",
+                targets.clone()
+            )
+            .unwrap(),
+            targets
+        );
+        let reads = reads.lock().unwrap();
+        assert_eq!(reads.len(), 256);
+        assert!((0..256).all(|index| reads.contains(&format!("key-{index:04}"))));
+        assert!(connection.is_autocommit());
+    }
+
+    #[test]
     fn historical_record_owner_backfill_runs_once_then_moments_append_incrementally() {
         const FIRST_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
         const RAW_AFTER_MARKER_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -6943,7 +7028,7 @@ mod tests {
         let connection = Connection::open_in_memory().expect("open owner index database");
         connection
             .execute_batch(
-                "CREATE TABLE blobs(sha256 TEXT PRIMARY KEY,text TEXT NOT NULL);\
+                "CREATE TABLE blobs(sha256 TEXT PRIMARY KEY,byte_length INTEGER NOT NULL,text TEXT NOT NULL);\
                  CREATE TABLE versions(\
                    workspace_id TEXT NOT NULL,version_id TEXT NOT NULL,\
                    PRIMARY KEY(workspace_id,version_id)\
@@ -6964,10 +7049,11 @@ mod tests {
                    PRIMARY KEY(workspace_id,version_id)\
                  );\
                  INSERT INTO versions(workspace_id,version_id) VALUES('workspace','version');\
-                 INSERT INTO blobs(sha256,text) VALUES\
+                 INSERT INTO blobs(sha256,byte_length,text) \
+                 SELECT column1,length(CAST(column2 AS BLOB)),column2 FROM (VALUES\
                    ('first','---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n'),\
                    ('raw','---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n'),\
-                   ('appended','---\nid: rec_cccccccccccccccccccccccccc\n---\n');\
+                   ('appended','---\nid: rec_cccccccccccccccccccccccccc\n---\n'));\
                  INSERT INTO moments(\
                    workspace_id,version_id,object_id,path,after_blob_sha256,\
                    after_content_kind,moment_order\
@@ -6983,8 +7069,10 @@ mod tests {
             ).expect("seed an inert recovery moment");
         }
 
-        ensure_historical_record_owners_backfilled(&connection, "workspace", "version")
+        let transaction = connection.unchecked_transaction().unwrap();
+        ensure_historical_record_owners_backfilled(&transaction, "workspace", "version")
             .expect("backfill historical owners");
+        transaction.commit().unwrap();
         let first = load_historical_record_owners(&connection, "workspace", "version")
             .expect("read first backfill");
         assert!(first[FIRST_ID].contains("first-object"));
@@ -7007,8 +7095,10 @@ mod tests {
                 [],
             )
             .expect("seed an unindexed moment after the marker");
-        ensure_historical_record_owners_backfilled(&connection, "workspace", "version")
+        let transaction = connection.unchecked_transaction().unwrap();
+        ensure_historical_record_owners_backfilled(&transaction, "workspace", "version")
             .expect("observe completed backfill marker");
+        transaction.commit().unwrap();
         let after_marker = load_historical_record_owners(&connection, "workspace", "version")
             .expect("read marker-protected owners");
         assert!(

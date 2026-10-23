@@ -2,11 +2,13 @@ import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { createPortal } from "react-dom";
 import { CopyButton } from "./ui/CopyButton";
 import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
-import { dismissOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
+import { dismissOrphanedDraft, isOrphanedDraftStored, useOrphanedDrafts } from "./orphanedDrafts";
 import { DismissDraftControls } from "./RecoveryList";
-import { Play, Share2 } from "lucide-react";
-import type { ComponentProps, ReactNode } from "react";
+import { Lock, Play, Share2 } from "lucide-react";
+import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
+import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { bridge } from "./bridge";
+import type { ReportButtonError } from "./collections/useAutomationButtons";
 import type { EngineRemovalInProgress } from "./collab/useEngineDoc";
 import { DocumentMenu } from "./DocumentMenu";
 import { IconButton, SecondaryButton } from "./ui/controls";
@@ -39,13 +41,14 @@ export function ViewActions(props: {
   const content = (
     <>
       {/* 25px: the widest mark (12px), its gap and an ellipsis. A grid of
-          minmax(0, max-content) columns, so its words set how wide it can
-          grow but not how narrow it can get: the row shrinks it to 25px
-          before any tab name gives way. */}
+          minmax(auto, max-content) columns, so its words set how wide it can
+          grow and each item's own minimum how narrow: a label (min-w-0)
+          shrinks, and the row shrinks it to 25px before any tab name gives
+          way, while Try again keeps its natural width. */}
       {props.status ? (
         <div
           data-view-status=""
-          className="contents [&:has(>:not(.sr-only))]:grid [&:has(>:not(.sr-only))]:min-w-[25px] auto-cols-[minmax(0,max-content)] grid-flow-col items-center justify-end gap-2"
+          className="contents [&:has(>:not(.sr-only))]:grid [&:has(>:not(.sr-only))]:min-w-[25px] auto-cols-[minmax(auto,max-content)] grid-flow-col items-center justify-end gap-2"
         >
           {props.status}
         </div>
@@ -188,6 +191,105 @@ export function EngineMayHoldDocumentNotice(props: {
   );
 }
 
+// A lossy note (CONTEXT.md) opens read-only. The way forward is the system's
+// app for the file, which edits it without dohc's editor.
+export function LossyNoteNotice(props: {
+  workspaceId: string;
+  path: string;
+  onError?: ReportButtonError;
+  // Binds the editor for this open, after the person confirms the warning.
+  onEditAnyway?: () => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  // History keeps the original only of a file it shows. A path files.toml
+  // leaves out, or one not captured yet, has none to restore. History's own
+  // list for the file answers, as About's does, with its rules applied. Until
+  // it answers, the warning says nothing about History.
+  const offersEdit = props.onEditAnyway !== undefined;
+  const file = `${props.workspaceId}\u0000${props.path}`;
+  const [history, setHistory] = useState<{ file: string; keeps: boolean } | null>(null);
+  useEffect(() => {
+    if (!offersEdit) return;
+    let live = true;
+    void Promise.resolve()
+      .then(async () => {
+        const chats = await bridge().listFileChats({ workspaceId: props.workspaceId, path: props.path });
+        if (!("fileObjectId" in chats)) return null;
+        if (chats.fileObjectId === null) return false;
+        const moments = await bridge().listEngineMoments({ workspaceId: props.workspaceId, objectId: chats.fileObjectId, limit: 1 });
+        return "moments" in moments ? moments.moments.length > 0 : null;
+      })
+      .then((keeps) => {
+        if (live && keeps !== null) setHistory({ file, keeps });
+      }, () => undefined);
+    return () => {
+      live = false;
+    };
+  }, [offersEdit, file, props.workspaceId, props.path]);
+  const historyLine = history?.file !== file ? null
+    : history.keeps ? "History keeps the original."
+    : "History does not track this file, so dohc can't restore the original.";
+  const openExternally = () => {
+    void bridge()
+      .openFileExternally({ workspaceId: props.workspaceId, relativePath: props.path })
+      .catch((error: unknown) =>
+        props.onError?.("dohc could not open this document externally.", error, openExternally, `lossy-note-open:${props.path}`),
+      );
+  };
+  return (
+    <div
+      data-testid="lossy-note-notice"
+      role="status"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
+    >
+      <span className="flex min-w-0 items-center gap-1.5">
+        <Lock aria-hidden size={12} className="shrink-0" />
+        dohc can't edit this document yet without changing parts it can't show.
+      </span>
+      <span className="flex shrink-0 items-center gap-3">
+        <button
+          type="button"
+          data-testid="lossy-note-open-externally"
+          onClick={openExternally}
+          className="whitespace-nowrap text-subtle hover:text-ink"
+        >
+          Open externally
+        </button>
+        {props.onEditAnyway ? (
+          <button
+            type="button"
+            data-testid="lossy-note-edit-anyway"
+            onClick={() => setConfirming(true)}
+            className="whitespace-nowrap text-subtle hover:text-ink"
+          >
+            Edit anyway
+          </button>
+        ) : null}
+      </span>
+      {confirming && props.onEditAnyway ? (
+        <ConfirmDialog
+          title="Edit this document anyway?"
+          intent="danger"
+          confirmLabel="Edit anyway"
+          testId="lossy-note-edit-anyway-dialog"
+          cancelTestId="lossy-note-edit-anyway-cancel"
+          confirmTestId="lossy-note-edit-anyway-confirm"
+          onCancel={() => setConfirming(false)}
+          onConfirm={() => {
+            setConfirming(false);
+            props.onEditAnyway?.();
+          }}
+        >
+          <p className="mt-2 text-[13px] text-muted">
+            Saving rewrites the parts dohc can't show, such as raw HTML or reference links.
+            {historyLine ? ` ${historyLine}` : null}
+          </p>
+        </ConfirmDialog>
+      ) : null}
+    </div>
+  );
+}
+
 export function EngineArtifactAssetsInvalidNotice(props: {
   workspaceId: string;
   path: string;
@@ -233,12 +335,21 @@ export function OpenExternallyButton(props: { workspaceId: string; path: string 
   );
 }
 
+// The toast for a finished history replacement says the same first sentence.
+export const REPLACED_HISTORY_DRAFT_NOTICE =
+  "This document changed while you were editing. Your earlier edits are set aside here.";
+// So does the notice for a save refused because the file is gone.
+export const DELETED_FILE_DRAFT_NOTICE = "The file was moved or deleted outside dohc. Copy your text to keep it.";
+
 export function OrphanedDraftNotices(props: {
   workspaceId: string;
   path: string;
   message?: string;
   // When set, the message explains only this draft; older drafts keep theirs.
   messageDraftId?: number | null;
+  // Drafts a finished history replacement set aside, where `message` does not
+  // explain them.
+  replacedDraftIds?: readonly number[];
 }) {
   const drafts = useOrphanedDrafts(props.workspaceId, props.path);
   if (drafts.length === 0) return null;
@@ -252,7 +363,12 @@ export function OrphanedDraftNotices(props: {
         >
           <span className="text-danger">
             {(props.messageDraftId === undefined || props.messageDraftId === draft.id ? props.message : undefined) ??
-              "This document reopened before your last edit saved. Copy your text to keep it."}
+              (draft.recovery?.reason === "deleted"
+                ? DELETED_FILE_DRAFT_NOTICE
+                // Until storage keeps the draft, a copy is still the way to keep it.
+                : props.replacedDraftIds?.includes(draft.id) && isOrphanedDraftStored(draft.id)
+                  ? REPLACED_HISTORY_DRAFT_NOTICE
+                  : "This document reopened before your last edit saved. Copy your text to keep it.")}
           </span>
           <div className="flex items-center gap-2">
             {/* Same rule as the recovery list's Copy: a draft the projection

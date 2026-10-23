@@ -70,6 +70,40 @@ fn nested_contract_r23_content_tabs_keep_inline_spelling() {
     }
 }
 
+fn nested_contract_body(doc: &Ydoc) -> Value {
+    let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
+    out_json(&doc.doc.transact(), Out::YXmlFragment(body))
+}
+
+fn nested_contract_marked_start(doc: &Ydoc, case: &Value) {
+    let Some(mark) = case["markedStart"].as_object() else {
+        return;
+    };
+    let fragment = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
+    let mut txn = doc.doc.transact_mut();
+    let mut node = fragment.get(&txn, 0).unwrap();
+    loop {
+        match node {
+            XmlOut::Element(element) => node = element.get(&txn, 0).unwrap(),
+            XmlOut::Text(text) => {
+                let len = text.len(&txn);
+                text.remove_range(&mut txn, 0, len);
+                text.insert_with_attributes(
+                    &mut txn,
+                    0,
+                    case["markedText"].as_str().unwrap(),
+                    yrs::types::Attrs::from([(
+                        mark["type"].as_str().unwrap().into(),
+                        json_to_any(mark.get("attrs").unwrap_or(&json!({}))),
+                    )]),
+                );
+                return;
+            }
+            _ => panic!("expected paragraph text"),
+        }
+    }
+}
+
 fn nested_contract_case(case: &Value) {
     let name = case["name"].as_str().unwrap();
     let doc = Ydoc::wire();
@@ -103,12 +137,23 @@ fn nested_contract_case(case: &Value) {
         assert!(result.is_err(), "{name}: unsupported source was accepted");
     } else {
         result.unwrap();
+        nested_contract_marked_start(&doc, case);
         assert_eq!(
             doc.project_richdoc().unwrap(),
             case["canonical"].as_str().unwrap(),
             "{name}"
         );
         let canonical = case["canonical"].as_str().unwrap();
+        let body = nested_contract_body(&doc);
+        if case["markedStart"].is_object() {
+            // Editor mark fixtures check projection; Markdown import keeps inline syntax as text.
+            let replay = Ydoc::wire();
+            replay.apply(&doc.encode_full_state()).unwrap();
+            assert_eq!(replay.project_richdoc().unwrap(), canonical, "{name}");
+            doc.validate_public_baseline(&doc.encode_full_state())
+                .unwrap();
+            return;
+        }
         if case["exactSource"] == true {
             let source = case["source"].as_str().unwrap();
             doc.preserve_folded_markdown_source(source).unwrap();
@@ -123,6 +168,9 @@ fn nested_contract_case(case: &Value) {
             MarkdownReading::ProjectedSource,
         )
         .unwrap();
+        if case["stableTree"] == true {
+            assert_eq!(nested_contract_body(&doc), body, "{name}: reread tree");
+        }
         let canonical = case["nativeRereadCanonical"].as_str().unwrap_or(canonical);
         assert_eq!(doc.project_richdoc().unwrap(), canonical);
         let replay = Ydoc::wire();
@@ -343,6 +391,7 @@ fn regenerate_nested_contract_seeds() {
             )
             .unwrap();
         }
+        nested_contract_marked_start(&doc, case);
         assert_eq!(
             doc.project_richdoc().unwrap(),
             case["canonical"].as_str().unwrap()
@@ -893,4 +942,147 @@ fn nested_contract_r26_boundaries_in_every_reading() {
         }
     }
     assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
+fn nested_contract_indented_code_refuses_where_marked_reads_otherwise() {
+    // marked splits a code line at a lone carriage return, and an item reads
+    // its code through the list's own indentation.
+    for source in ["Text\n\n    a\rb", "- a\n\n      code"] {
+        for reading in [MarkdownReading::Source, MarkdownReading::Projection] {
+            assert!(
+                Ydoc::wire()
+                    .rewrite_content_to_markdown_as(ContentKind::Richdoc, source, reading)
+                    .is_err(),
+                "{source:?}, {reading:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn nested_contract_item_setext_underline_follows_marked() {
+    // marked's heading text stops before a line that could start a block,
+    // block HTML and a `<...>` that ends the line included, and its
+    // underline ends in spaces only, so these items hold text.
+    for (source, canonical) in [
+        ("- #tag\n  --", "- #tag\n  &#45;-"),
+        ("- a\n  --\t", "- a\n  &#45;-"),
+        ("- <3 >\n  --", "- &lt;3 &gt;\n  &#45;-"),
+        ("- <x>\n  --", "- &lt;x&gt;\n  &#45;-"),
+        ("- <div> x\n  --", "- &lt;div&gt; x\n  &#45;-"),
+    ] {
+        for reading in [MarkdownReading::Source, MarkdownReading::Projection] {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, source, reading)
+                .unwrap();
+            assert_eq!(
+                doc.project_richdoc().unwrap(),
+                canonical,
+                "{source:?}, {reading:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn nested_contract_item_setext_other_readings_keep_text() {
+    // Only the file reading takes these underlines. The fold and the other
+    // readings keep them as text, so a document they built still proves its
+    // file.
+    for (source, text) in [
+        ("- a\n  --", "- a\n  &#45;-"),
+        ("- a\n  =", "- a\n  &#61;"),
+        ("- a\n   -", "- a\n   &#45;"),
+        ("- a\n  b\n  --", "- a\n  b\n  &#45;-"),
+        ("- a\n  b\n  =", "- a\n  b\n  &#61;"),
+    ] {
+        for reading in [
+            MarkdownReading::Projection,
+            MarkdownReading::ProjectedSource,
+            MarkdownReading::Successor,
+        ] {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, source, reading)
+                .unwrap();
+            assert_eq!(
+                doc.project_richdoc().unwrap(),
+                text,
+                "{source:?}, {reading:?}"
+            );
+        }
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source)
+            .unwrap();
+        assert_eq!(doc.project_richdoc().unwrap(), text, "{source:?}, fold");
+    }
+}
+
+#[test]
+fn nested_contract_item_setext_text_trims_like_marked() {
+    // marked trims the heading's whitespace. The importer keeps an item's
+    // tabs as text, so they stay.
+    for (source, text) in [
+        ("- a \n  --", "a"),
+        ("- a\u{a0}\n  --", "a"),
+        ("- a\t\n  --", "a\t"),
+        ("- a \t \n  --", "a \t"),
+    ] {
+        let blocks = parse_markdown_blocks(source, MarkdownReading::Source);
+        let [MdBlock::BulletList(items)] = blocks.as_slice() else {
+            panic!("{source:?}: {blocks:?}");
+        };
+        let (paragraph, item_blocks) = items.iter().next().unwrap();
+        assert_eq!(paragraph, "", "{source:?}");
+        assert_eq!(
+            item_blocks,
+            [MdBlock::Heading {
+                level: 2,
+                text: text.to_owned()
+            }],
+            "{source:?}"
+        );
+    }
+}
+
+#[test]
+fn nested_contract_item_setext_bang_and_pipe_lines_follow_marked() {
+    // marked starts `<!` block HTML only before a letter, a comment or CDATA
+    // in any case, and a table divider holds no tab, so the first lines are
+    // heading text.
+    for (source, heading) in [
+        ("- <!-x\n  =", Some("<!-x")),
+        ("- <!\n  =", Some("<!")),
+        ("- <!1\n  =", Some("<!1")),
+        ("- <! x\n  =", Some("<! x")),
+        ("- |\t|\n  =", Some("|\t|")),
+        ("- <!a\n  =", None),
+        ("- <!--x\n  =", None),
+        ("- <![CDATA[x\n  =", None),
+        ("- <![cdata[x\n  =", None),
+        ("- <![CdAtA[x\n  =", None),
+    ] {
+        let blocks = parse_markdown_blocks(source, MarkdownReading::Source);
+        let [MdBlock::BulletList(items)] = blocks.as_slice() else {
+            panic!("{source:?}: {blocks:?}");
+        };
+        let (paragraph, item_blocks) = items.iter().next().unwrap();
+        match heading {
+            Some(text) => {
+                assert_eq!(paragraph, "", "{source:?}");
+                assert_eq!(
+                    item_blocks,
+                    [MdBlock::Heading {
+                        level: 1,
+                        text: text.to_owned()
+                    }],
+                    "{source:?}"
+                );
+            }
+            None => assert!(
+                item_blocks.is_empty() && paragraph.ends_with("\n="),
+                "{source:?}"
+            ),
+        }
+    }
 }

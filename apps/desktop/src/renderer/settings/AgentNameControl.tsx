@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { isComposingKey } from "../ui/keys";
 import {
   MAX_PREFERRED_NAME_LENGTH,
   preferredNameFromInput,
@@ -44,7 +45,7 @@ export function AgentNameControl(props: {
         onChange={(event) => setDraft(event.currentTarget.value)}
         onBlur={() => void save()}
         onKeyDown={(event) => {
-          if (event.key === "Enter") event.currentTarget.blur();
+          if (event.key === "Enter" && !isComposingKey(event)) event.currentTarget.blur();
         }}
         className="w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
       />

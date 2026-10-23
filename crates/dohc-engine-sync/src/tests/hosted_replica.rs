@@ -1648,9 +1648,35 @@ fn a_document_finishes_on_parking_only_what_no_commit_wrote() {
 
 /// The slice-2 re-review's reproduction: after an epoch rotation the feed
 /// reads above the old log, so it never serves `workspace.init` again. A
-/// replica created then holds `main` from its creation.
+/// replica created then holds `main` from its creation. Rotation leaves the
+/// old epoch's enrollments, so `doc-a` is out of the scope.
 #[test]
 fn a_hosted_replica_created_after_an_epoch_rotation_needs_no_workspace_init() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let feed = hosted_feed();
+    feed.unshare("doc-a");
+    feed.epoch_log_floor.store(4, Ordering::SeqCst);
+    feed.create("owner-2", 0, "doc-c", "c.md", "after rotation");
+    feed.share("doc-c", "c.md");
+    let client = RelaySyncClient::new(feed);
+    sync(&client, &mut store);
+
+    assert!(ready(&store, "doc-c"));
+    let (heads, moments) = content(&store);
+    assert_eq!(
+        heads,
+        BTreeMap::from([("doc-c".to_owned(), "after rotation".to_owned())])
+    );
+    assert!(moments.values().all(|count| *count == 1));
+    assert_eq!(coordinates(&store), [("owner-2".to_owned(), 0)]);
+    assert_eq!(replica(&store).main_cursor, 5);
+}
+
+/// Models a feed no relay produces after a rotation: `doc-a` stays in scope
+/// although every row of it is below the floor. It is held at no path, and
+/// only the document written above the floor is materialized.
+#[test]
+fn a_document_in_scope_with_every_row_below_the_floor_is_held_at_no_path() {
     let (_scratch, _path, mut store) = hosted_store();
     let feed = hosted_feed();
     feed.epoch_log_floor.store(4, Ordering::SeqCst);
@@ -1664,18 +1690,76 @@ fn a_hosted_replica_created_after_an_epoch_rotation_needs_no_workspace_init() {
         Some(HostedHold::ScopePathMismatch {
             scope_path: "a.md".to_owned(),
             head_path: None
-        }),
-        "its rows are all below the floor, so it is at no path"
+        })
     );
-    assert!(ready(&store, "doc-c"));
-    let (heads, moments) = content(&store);
     assert_eq!(
-        heads,
+        content(&store).0,
         BTreeMap::from([("doc-c".to_owned(), "after rotation".to_owned())])
     );
-    assert!(moments.values().all(|count| *count == 1));
-    assert_eq!(coordinates(&store), [("owner-2".to_owned(), 0)]);
-    assert_eq!(replica(&store).main_cursor, 5);
+}
+
+/// Models an inconsistent feed that no dohc engine writes: a hand-written
+/// writer rotated the epoch, then continued `doc-a`'s Y.Doc lineage above the
+/// floor with a delta and a new head. Its base is below the floor, so the feed
+/// never serves it, and `doc-a` stays held rather than becoming ready.
+#[test]
+fn a_document_whose_ydoc_base_is_below_the_floor_stays_held() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let feed = HostedFeed::new();
+    let ydoc = dohc_engine_collab::Ydoc::wire();
+    ydoc.plaintext_insert(0, "hosted a");
+    let base = ydoc.encode_full_state();
+    let base_sha = dohc_engine_storage::hex_sha256(&base);
+    let update = |origin: &str, seq: i64, bytes: Vec<u8>, is_base: bool| {
+        let sha = dohc_engine_storage::hex_sha256(&bytes);
+        feed.blobs.lock().unwrap().insert(sha.clone(), bytes);
+        feed.append(envelope(
+            origin,
+            seq,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": "doc-a",
+                "path": "a.md",
+                "contentKind": "plaintext",
+                "updateBlobSha256": sha,
+                "lineageClaimId": base_sha,
+                "isBaseState": is_base
+            }),
+        ));
+    };
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    update("owner", 1, base, true);
+    feed.create("owner", 2, "doc-a", "a.md", "hosted a");
+    feed.epoch_log_floor.store(3, Ordering::SeqCst);
+    update("writer", 0, ydoc.plaintext_insert(8, ", edited"), false);
+    feed.create("writer", 1, "doc-a", "a.md", "hosted a, edited");
+    feed.share("doc-a", "a.md");
+    let client = RelaySyncClient::new(feed);
+    sync(&client, &mut store);
+
+    assert_eq!(hold(&store, "doc-a"), Some(HostedHold::WorkWaiting));
+    assert_eq!(
+        document(&store, "doc-a").unwrap().backfill_cursor,
+        4,
+        "its read stops at the new head, behind the delta"
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM ydoc_deferred_updates WHERE object_id='doc-a'"
+        ),
+        1,
+        "the delta waits for its base"
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM ydoc_docs WHERE object_id='doc-a'"
+        ),
+        0
+    );
+    assert!(content(&store).0.is_empty(), "no file is materialized");
 }
 
 /// The feed answers a page whose scan passed only withheld rows with no ops
@@ -2843,6 +2927,7 @@ fn a_push_response_refuses_only_its_own_batch_and_only_for_a_hosted_push() {
             0,
             &[],
             std::slice::from_ref(&refused),
+            &[],
             &NoFaults,
             &NoLiveLeases,
             3_000
@@ -2864,6 +2949,7 @@ fn a_push_response_refuses_only_its_own_batch_and_only_for_a_hosted_push() {
                 0,
                 &[],
                 std::slice::from_ref(&wrong),
+                &[],
                 &NoFaults,
                 &NoLiveLeases,
                 3_000
@@ -2990,6 +3076,7 @@ fn ordinary_only_machinery_stays_off_a_hosted_replica() {
         stream_identity: "stream-1".to_owned(),
         bootstrap_complete: true,
         settlement_report_id: None,
+        ordinary_pull: None,
     };
     assert!(
         client
@@ -4022,6 +4109,248 @@ fn a_ydoc_base_at_a_held_path_holds_its_document_until_the_path_frees() {
         ),
         1
     );
+}
+
+/// Two shared documents whose paths differ only in case, or where one path is
+/// a folder of the other, cannot both be files on a disk that ignores case
+/// (#2036). The later one is held, naming the document that holds its path,
+/// while the first and the main cursor go on. Once the first moves, the later
+/// one applies.
+#[test]
+fn a_document_at_another_spelling_of_a_held_path_is_held_until_the_path_frees() {
+    for (held, path) in [
+        ("a.md", "A.md"),
+        ("A.md", "a.md/c.md"),
+        ("a.md/c.md", "A.md"),
+        ("\u{212a}.md", "k.md"),
+        ("e\u{301}.md", "\u{e9}.md"),
+    ] {
+        let (_scratch, _path, mut store) = hosted_store();
+        let client = RelaySyncClient::new(HostedFeed::new());
+        let feed = client.transport();
+        feed.append(envelope("owner", 0, "workspace.init", json!({})));
+        feed.create("owner", 1, "doc-a", held, "hosted a");
+        feed.create("owner", 2, "doc-b", path, "hosted b");
+        feed.share("doc-a", held);
+        sync(&client, &mut store);
+
+        feed.share("doc-b", path);
+        sync(&client, &mut store);
+        assert_eq!(
+            hold(&store, "doc-b"),
+            Some(path_held(path, "doc-a")),
+            "{path} against {held}"
+        );
+        assert_eq!(
+            content(&store).0,
+            heads(&[("doc-a", "hosted a")]),
+            "{path} against {held}"
+        );
+        feed.replace(
+            "owner",
+            3,
+            "doc-a",
+            held,
+            "edited a",
+            ("doc-a", "hosted a", "moment-owner-1"),
+        );
+        sync(&client, &mut store);
+        assert_eq!(
+            content(&store).0,
+            heads(&[("doc-a", "edited a")]),
+            "{path} against {held}"
+        );
+
+        feed.rename(
+            "owner",
+            4,
+            "doc-a",
+            held,
+            "z.md",
+            "edited a",
+            "moment-owner-3",
+        );
+        sync(&client, &mut store);
+        assert!(ready(&store, "doc-b"), "{path} against {held}");
+        assert_eq!(
+            content(&store).0,
+            heads(&[("doc-a", "edited a"), ("doc-b", "hosted b")]),
+            "{path} against {held}"
+        );
+        assert_eq!(retained(&store), 0, "{path} against {held}");
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM conflicts"),
+            0,
+            "{path} against {held}"
+        );
+    }
+}
+
+/// Documents shared together, at two spellings of one path, backfill one at
+/// a time in object id order, so the later id is held whatever the feed's
+/// order, and a document beside them keeps syncing (#2036).
+#[test]
+fn documents_shared_together_at_spellings_of_one_path_hold_the_later_id() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-b", "Notes.md", "hosted b");
+    feed.create("owner", 2, "doc-a", "notes.md", "hosted a");
+    feed.create("owner", 3, "doc-c", "c.md", "hosted c");
+    feed.share("doc-a", "notes.md");
+    feed.share("doc-b", "Notes.md");
+    feed.share("doc-c", "c.md");
+    sync(&client, &mut store);
+
+    assert!(ready(&store, "doc-a"));
+    assert_eq!(hold(&store, "doc-b"), Some(path_held("Notes.md", "doc-a")));
+    assert!(ready(&store, "doc-c"));
+    assert_eq!(
+        content(&store).0,
+        heads(&[("doc-a", "hosted a"), ("doc-c", "hosted c")])
+    );
+    assert_eq!(retained(&store), 0);
+}
+
+/// A ready document renamed to another spelling of a path another document
+/// holds would share that document's file on a disk that ignores case
+/// (#2036). The owner's scope moves with it. The document is held at the
+/// rename, naming the holder, and the other document and the main cursor go
+/// on. Once the holder moves, the rename applies.
+#[test]
+fn a_ready_document_renamed_to_another_spelling_of_a_held_path_waits_until_it_frees() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-a", "a.md", "hosted a");
+    feed.create("owner", 2, "doc-b", "b.md", "hosted b");
+    feed.share("doc-a", "a.md");
+    feed.share("doc-b", "b.md");
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+
+    feed.rename(
+        "owner",
+        3,
+        "doc-b",
+        "b.md",
+        "A.md",
+        "hosted b",
+        "moment-owner-2",
+    );
+    feed.share("doc-b", "A.md");
+    feed.replace(
+        "owner",
+        4,
+        "doc-a",
+        "a.md",
+        "edited a",
+        ("doc-a", "hosted a", "moment-owner-1"),
+    );
+    sync(&client, &mut store);
+    assert_eq!(hold(&store, "doc-b"), Some(path_held("A.md", "doc-a")));
+    assert_eq!(retained(&store), 0);
+    let pair = |left: &str, right: &str| (left.to_owned(), right.to_owned());
+    assert_eq!(
+        paths(&store).0,
+        vec![pair("doc-a", "a.md"), pair("doc-b", "b.md")],
+        "the rename waits"
+    );
+    assert_eq!(
+        content(&store).0,
+        heads(&[("doc-a", "edited a"), ("doc-b", "hosted b")])
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
+
+    feed.rename(
+        "owner",
+        5,
+        "doc-a",
+        "a.md",
+        "z.md",
+        "edited a",
+        "moment-owner-4",
+    );
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(
+        paths(&store).0,
+        vec![pair("doc-a", "z.md"), pair("doc-b", "A.md")]
+    );
+    assert_eq!(retained(&store), 0);
+}
+
+/// Opus's second-round finding: a rename onto another spelling of a held
+/// path stopped its ready document at the first refusal, even when the
+/// holder moved later in the same pass and the rename applied. A later edit
+/// behind a live session then held the document and cut the session off.
+/// The document is stopped only once nothing in the pass can free it. The
+/// scope keeps its paths, so only the spelling hold can stop `doc-b`.
+#[test]
+fn a_rename_freed_later_in_its_pass_leaves_the_document_ready() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-a", "a.md", "hosted a");
+    feed.create("owner", 2, "doc-b", "b.md", "hosted b");
+    feed.share("doc-a", "a.md");
+    feed.share("doc-b", "b.md");
+    sync(&client, &mut store);
+
+    feed.rename(
+        "owner",
+        3,
+        "doc-b",
+        "b.md",
+        "A.md",
+        "hosted b",
+        "moment-owner-2",
+    );
+    feed.rename(
+        "owner",
+        4,
+        "doc-a",
+        "a.md",
+        "z.md",
+        "hosted a",
+        "moment-owner-1",
+    );
+    feed.replace(
+        "owner",
+        5,
+        "doc-b",
+        "A.md",
+        "edited b",
+        ("doc-b", "hosted b", "moment-owner-3"),
+    );
+    let behind_session = client
+        .pull_hosted_workspace(
+            &mut store,
+            &mut WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &LiveSession("doc-b"),
+        )
+        .unwrap();
+    assert!(commit(&client, &mut store, &behind_session));
+    assert!(ready(&store, "doc-b"), "the session keeps its document");
+
+    // The session closed.
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    let pair = |left: &str, right: &str| (left.to_owned(), right.to_owned());
+    assert_eq!(
+        paths(&store).0,
+        vec![pair("doc-a", "z.md"), pair("doc-b", "A.md")]
+    );
+    assert_eq!(
+        content(&store).0,
+        heads(&[("doc-a", "hosted a"), ("doc-b", "edited b")])
+    );
+    assert_eq!(retained(&store), 0);
 }
 
 /// Reports one document's live session.
@@ -7128,4 +7457,120 @@ fn retained_work_without_a_recorded_feed_moves_queues_without_one() {
             ("ydoc:-/-".to_owned(), 1, "legacy-unknown".to_owned(), None),
         ]
     );
+}
+
+/// What this connection has written, to show a probe wrote nothing.
+fn total_changes(store: &EngineStore) -> u64 {
+    store
+        .read_with(|conn| Ok::<_, SyncError>(conn.total_changes()))
+        .unwrap()
+}
+
+/// Confirm the origin, and check that it sent exactly one empty push from
+/// the start of the host's origin and wrote nothing.
+fn confirm(client: &RelaySyncClient<HostedFeed>, store: &EngineStore) -> Result<(), RelayError> {
+    let before = (
+        client.transport().pushes.lock().unwrap().len(),
+        total_changes(store),
+    );
+    let confirmed = client.confirm_hosted_origin(store, "ws");
+    let pushes = client.transport().pushes.lock().unwrap();
+    assert_eq!(pushes.len(), before.0 + 1, "one push to the hosted log");
+    let probe = pushes.last().unwrap();
+    assert_eq!(
+        (probe.origin_id.as_str(), probe.after_seq, probe.ops.len()),
+        (HOST, -1, 0)
+    );
+    assert_eq!(total_changes(store), before.1, "the probe writes nothing");
+    confirmed
+}
+
+/// #2088: the relay may hold the host's origin up to what the replica
+/// numbered: nothing on a fresh replica, everything it pushed, or less
+/// while journaled rows wait for the next push.
+#[test]
+fn the_origin_probe_accepts_a_relay_no_further_than_the_replica_numbered() {
+    let (_scratch, _path, mut store) = hosted_store();
+    host_document(&mut store, "doc-a");
+    let client = RelaySyncClient::new(HostedFeed::new());
+    confirm(&client, &store).unwrap();
+
+    journal_live_update(&mut store, "doc-a", b"one");
+    journal_live_update(&mut store, "doc-a", b"two");
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &NoLiveLeases, 3_000, 1_000_000)
+        .unwrap();
+    assert_eq!(last_outbound_seq(&store), 1);
+    confirm(&client, &store).unwrap();
+
+    journal_live_update(&mut store, "doc-a", b"unpushed");
+    assert_eq!(last_outbound_seq(&store), 2);
+    confirm(&client, &store).unwrap();
+}
+
+#[test]
+fn the_origin_probe_refuses_a_relay_past_what_the_replica_numbered() {
+    let (_scratch, _path, store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    client.transport().append(envelope(
+        HOST,
+        0,
+        "ydoc.update",
+        json!({"objectId": "doc-a"}),
+    ));
+    assert!(matches!(
+        confirm(&client, &store),
+        Err(RelayError::OriginDiverged)
+    ));
+}
+
+/// Copy the store's files, as an operator restoring an older volume would
+/// have kept them.
+fn copy_store(from: &std::path::Path, to: &std::path::Path) {
+    for suffix in ["", "-wal", "-shm"] {
+        let source = std::path::PathBuf::from(format!("{}{suffix}", from.display()));
+        let target = std::path::PathBuf::from(format!("{}{suffix}", to.display()));
+        if source.exists() {
+            std::fs::copy(&source, &target).unwrap();
+        } else if target.exists() {
+            std::fs::remove_file(&target).unwrap();
+        }
+    }
+}
+
+/// #2088's reproduction: a store restored from a copy older than its last
+/// push. The feed serves the host's own rows back, so one pull imports them
+/// and the journal's maximum climbs to the relay's, which hides the loss
+/// from a push. The counter still says what this store numbered.
+#[test]
+fn the_origin_probe_finds_commits_a_restored_store_lost_after_a_pull() {
+    let (_scratch, path, store, client) = departing_b_at("doc-b.md");
+    drop(store);
+    let copy = ScratchDir::new().unwrap();
+    let saved = copy.path().join("engine.db");
+    copy_store(&path, &saved);
+
+    let mut store = EngineStore::open(&path, 2_000).unwrap();
+    journal_live_update(&mut store, "doc-b", b"lost one");
+    journal_live_update(&mut store, "doc-b", b"lost two");
+    client
+        .push_workspace(&mut store, "ws", &NoFaults, &NoLiveLeases, 3_000, 1_000_000)
+        .unwrap();
+    sync(&client, &mut store);
+    confirm(&client, &store).unwrap();
+    drop(store);
+
+    copy_store(&saved, &path);
+    let mut store = EngineStore::open(&path, 4_000).unwrap();
+    assert_eq!(last_outbound_seq(&store), -1);
+    sync(&client, &mut store);
+    assert_eq!(
+        crate::relay::local_max_origin_seq(&store, "ws", HOST).unwrap(),
+        1,
+        "the pull imported the lost rows"
+    );
+    assert!(matches!(
+        confirm(&client, &store),
+        Err(RelayError::OriginDiverged)
+    ));
 }

@@ -9,7 +9,9 @@ import { probeRelayWorkspace } from "./relayWorkspaceProbe";
 // Under the relay's 30 s cap and under the idle timeouts of common proxies.
 export const RELAY_LOG_HOLD_MS = 25_000;
 
-const HeldLogRead = z.object({ ok: z.literal(true), hasMore: z.boolean() });
+const HeldLogRead = z.object({ ok: z.literal(true), hasMore: z.boolean(), watched: z.boolean().default(false) });
+
+export interface RelayLogChange { hasMore: boolean; watched: boolean }
 
 // Waits on the relay until the workspace log holds an op past `since`, and
 // resolves whether it does. The relay holds the read for at most `holdMs` and
@@ -21,13 +23,14 @@ export function createRelayLogWait(input: {
   relay: SyncRelayConnection;
   holdMs?: number;
   nowMs?: () => number;
-}): (since: number, signal: AbortSignal) => Promise<boolean> {
+}): (since: number, signal: AbortSignal) => Promise<RelayLogChange> {
   const holdMs = input.holdMs ?? RELAY_LOG_HOLD_MS;
   const nowMs = input.nowMs ?? (() => Date.now());
   // The relay's current coordinate. A held read names it the way a pull does;
   // the relay refuses a stale one, and the next read asks for it again.
   let identity: RelayWorkspaceIdentity | null | undefined;
-  return async (since, abort) => {
+  let watched = false;
+  const read = async (since: number, abort: AbortSignal): Promise<RelayLogChange> => {
     // One deadline bounds the coordinate read and the held read together.
     const signal = AbortSignal.any([abort, AbortSignal.timeout(holdMs + 15_000)]);
     if (identity === undefined) {
@@ -39,6 +42,7 @@ export function createRelayLogWait(input: {
       signal.throwIfAborted();
     }
     const query = new URLSearchParams({ since: String(since), hold: String(holdMs) });
+    if (watched) query.set("watched", "1");
     if (identity !== null) {
       query.set("replicationEpoch", identity.replicationEpoch);
       query.set("streamIdentity", identity.streamIdentity);
@@ -56,10 +60,15 @@ export function createRelayLogWait(input: {
       },
       label: "Held relay log read",
     });
-    const { hasMore } = HeldLogRead.parse(await response.json());
-    if (!hasMore && nowMs() - startedAtMs < holdMs / 2) {
+    const result = HeldLogRead.parse(await response.json());
+    if (!result.hasMore && result.watched === watched && nowMs() - startedAtMs < holdMs / 2) {
       throw new Error("The relay answered a held read early without a change.");
     }
-    return hasMore;
+    watched = result.watched;
+    return {hasMore: result.hasMore, watched};
+  };
+  return async (since, signal) => {
+    try { return await read(since, signal); }
+    catch (error) { if (!signal.aborted) watched = false; throw error; }
   };
 }

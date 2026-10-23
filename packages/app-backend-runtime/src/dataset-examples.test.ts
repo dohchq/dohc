@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { privateFolder } from "./private-folder.test-helper";
 import { mkdtemp, rm } from "node:fs/promises";
 import { randomBytes, randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -42,7 +43,7 @@ async function fixture(app = "fundraiser") {
     catch (error) { db.exec("ROLLBACK"); throw error; }
   }
   const journal = createDatasetJournal({ db, transaction });
-  const supervisor = await createDatasetSupervisor({ journal, directory: join(directory, "workers") });
+  const supervisor = await createDatasetSupervisor({ journal, directory: privateFolder(join(directory, "workers")) });
   cleanups.push(async () => { await supervisor.close(); db.close(); await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 }); });
   const host = createDatasetHost<Context>({ db, transaction, journal, supervisor,
     resolveAuthority(context, request) {

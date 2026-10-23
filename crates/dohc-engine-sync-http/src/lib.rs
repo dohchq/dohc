@@ -2,6 +2,9 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(unix)]
+mod unix_socket;
+
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -153,6 +156,42 @@ impl std::fmt::Debug for HttpRelayTransport {
 }
 
 impl HttpRelayTransport {
+    /// Local replica feed, with no TCP connector, proxy, TLS, or redirects.
+    pub fn new_unix_socket(
+        socket_path: &std::path::Path,
+        token: impl Into<String>,
+    ) -> Result<Self, RelayError> {
+        let token = token.into();
+        if !socket_path.is_absolute() || token.is_empty() {
+            return Err(RelayError::InvalidResponse);
+        }
+        #[cfg(unix)]
+        {
+            let config = Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(30)))
+                .http_status_as_error(false)
+                .https_only(false)
+                .max_redirects(0)
+                .proxy(None)
+                .middleware(name_relay_api_version)
+                .build();
+            Ok(Self {
+                base_url: "http://127.0.0.1".into(),
+                token,
+                hosted: false,
+                agent: Agent::with_parts(
+                    config,
+                    unix_socket::UnixConnector(socket_path.into()),
+                    unix_socket::UnixResolver,
+                ),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Err(RelayError::Local("relay-unix-socket-unavailable".into()))
+        }
+    }
+
     pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Result<Self, RelayError> {
         Self::build(base_url, token, false)
     }
@@ -207,8 +246,20 @@ impl HttpRelayTransport {
     ) -> Result<Self, RelayError> {
         let base_url = base_url.into().trim_end_matches('/').to_owned();
         let token = token.into();
-        if token.is_empty() || !base_url_is_allowed(&base_url, allow_insecure_loopback) {
+        if token.is_empty() {
             return Err(RelayError::InvalidResponse);
+        }
+        if !base_url_is_allowed(&base_url, allow_insecure_loopback) {
+            // An https address refused for its query or fragment is malformed,
+            // not a scheme the engine refuses.
+            let https = base_url
+                .get(..8)
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"));
+            return Err(if https {
+                RelayError::InvalidResponse
+            } else {
+                RelayError::HttpsRequired
+            });
         }
         Ok(Self {
             base_url,
@@ -2289,12 +2340,19 @@ mod tests {
 
     #[test]
     fn plaintext_bearer_transport_requires_the_debug_loopback_opt_in() {
-        assert!(
-            HttpRelayTransport::new("http://127.0.0.1:1", "token").is_err(),
+        assert_eq!(
+            HttpRelayTransport::new("http://127.0.0.1:1", "token").err(),
+            Some(RelayError::HttpsRequired),
             "accepting `http://` in the normal constructor makes the first two assertions expose a bearer token over plaintext."
         );
-        assert!(HttpRelayTransport::new("http://localhost:1", "token").is_err());
-        assert!(HttpRelayTransport::new("http://example.com", "token").is_err());
+        assert_eq!(
+            HttpRelayTransport::new("http://localhost:1", "token").err(),
+            Some(RelayError::HttpsRequired)
+        );
+        assert_eq!(
+            HttpRelayTransport::new("http://example.com", "token").err(),
+            Some(RelayError::HttpsRequired)
+        );
         assert!(HttpRelayTransport::new("https://example.com", "token").is_ok());
 
         #[cfg(debug_assertions)]
@@ -2322,8 +2380,15 @@ mod tests {
 
     #[test]
     fn relay_base_url_rejects_query_and_fragment_components() {
-        assert!(HttpRelayTransport::new("https://relay.example?tenant=a", "token").is_err());
-        assert!(HttpRelayTransport::new("https://relay.example/#fragment", "token").is_err());
+        assert_eq!(
+            HttpRelayTransport::new("https://relay.example?tenant=a", "token").err(),
+            Some(RelayError::InvalidResponse),
+            "a malformed https address must not tell the person to use https"
+        );
+        assert_eq!(
+            HttpRelayTransport::new("HTTPS://relay.example/#fragment", "token").err(),
+            Some(RelayError::InvalidResponse)
+        );
         assert!(
             HttpRelayTransport::new("https://relay.example/base", "token").is_ok(),
             "ordinary path prefixes remain supported"

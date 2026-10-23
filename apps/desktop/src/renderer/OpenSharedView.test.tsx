@@ -670,19 +670,19 @@ describe("OpenSharedView defaults for a pasted code", () => {
   it("asks after an inline sign-in, then defaults an Edit code to Open separately", async () => {
     vi.useFakeTimers();
     try {
-      const signedOut = { connected: false, serverUrl: "http://localhost:1786" };
+      const signedOut = { connected: false, serverUrl: "https://dohc.example.test" };
       bridgeMock.cloudStatus
         .mockResolvedValueOnce(signedOut)
         .mockResolvedValueOnce(signedOut)
         .mockResolvedValue({
           connected: true,
           email: "recipient@dohc.test",
-          serverUrl: "http://localhost:1786",
+          serverUrl: "https://dohc.example.test",
           relayUrl: "http://localhost:1788",
         });
       bridgeMock.cloudLoginStart.mockResolvedValue({
         userCode: "ABCD",
-        verificationUri: "http://localhost:1786/device",
+        verificationUri: "https://dohc.example.test/device",
       });
       bridgeMock.cloudLoginPoll.mockResolvedValue({
         status: "complete",

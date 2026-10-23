@@ -87,6 +87,8 @@ export class ServiceHostedReplication {
   }
   /** Whether the replica's origin diverged from the relay's. Its workspace stays detached, and its store is kept. */
   get diverged(): boolean { return this.#diverged; }
+  /** Whether the replica checked its origin: a create on this instance succeeded. */
+  get checked(): boolean { return this.#created; }
   /** Whether the last page's departed list, from the first to the last, names no document. */
   get departedNone(): boolean { return this.#departedNone; }
   #check(signal: AbortSignal): void { signal.throwIfAborted(); this.connection.assertCurrent(); }
@@ -119,6 +121,13 @@ export class ServiceHostedReplication {
       }
       return await task(signal);
     } finally { this.#running = false; }
+  }
+  /**
+   * Creates the replica, as the first hosted call of this instance does, which
+   * fails as diverged when the relay holds rows at its origin it never wrote.
+   */
+  async create(callerSignal?: AbortSignal): Promise<void> {
+    await this.#run(callerSignal, async () => {});
   }
   /**
    * Runs up to maxPagesPerPull hosted passes. `onPage` hears each pass once it

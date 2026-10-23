@@ -37,10 +37,11 @@ pub mod records;
 pub mod secrets;
 pub mod store;
 pub use store::{
-    FileResolution, FileResolveTarget, OPERATION_ID_PREFIX, OperationMoment,
-    ensure_operation_published_in, operation_moments_in, preflight_undo_operation_in,
-    replayed_undo_operation_in, undo_correlation_id, undo_operation_in_tx,
-    undo_request_is_replay_in, validate_operation_id,
+    DuplicateFile, FileResolution, FileResolveTarget, OPERATION_ID_PREFIX, OperationMoment,
+    duplicate_file_in_tx, ensure_operation_published_in, is_duplicate_in, operation_moments_in,
+    preflight_undo_operation_in, replayed_undo_operation_in, undo_compensation_moments_in,
+    undo_correlation_id, undo_member_in_tx, undo_member_moment_id, undo_progress_key,
+    undo_request_fingerprint, validate_operation_id,
 };
 
 pub use automations::{
@@ -75,16 +76,16 @@ pub use chats::{
     BookmarkTargetKind, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup, ChannelOpeningMessage,
     ChannelThreadSummary, ChatActorKind, ChatAgentReadState, ChatAttachment, ChatBookmark,
     ChatBookmarkTransition, ChatChannel, ChatChannelKind, ChatChannelSummary, ChatChannelType,
-    ChatDecision, ChatDecisionState, ChatFeedItem, ChatFeedPage, ChatFeedReadState,
-    ChatFileMention, ChatFollow, ChatMention, ChatMessage, ChatMessageAutomation, ChatMessagePage,
-    ChatProjectionFileAccess, ChatReaction, ChatReactionState, ChatThread, ChatThreadLane,
-    ChatThreadProjection, ChatThreadReadState, CreateFileThread, DispatchClaim, DispatchRecord,
-    DispatchRecovery, FeedCoordinateResolution, FeedCursorValue, FollowState, FollowTargetKind,
+    ChatDecision, ChatDecisionState, ChatFeedItem, ChatFeedPage, ChatFeedReadState, ChatFollow,
+    ChatMention, ChatMessage, ChatMessageAutomation, ChatMessagePage, ChatProjectionFileAccess,
+    ChatReaction, ChatReactionState, ChatThread, ChatThreadLane, ChatThreadProjection,
+    ChatThreadReadState, CreateFileThread, DispatchClaim, DispatchRecord, DispatchRecovery,
+    FeedCoordinateResolution, FeedCursorValue, FollowState, FollowTargetKind,
     FollowTargetResolution, GENERAL_CHANNEL_NAME, GENERAL_CHANNEL_WIRE_ID,
-    LINKED_CHAT_PROJECTION_KIND, LinkedChatStore, LocalAttachmentInput, MAX_FILE_MENTION_RESULTS,
-    MAX_MESSAGE_BODY_BYTES, MAX_MESSAGE_PAGE, MentionCursor, PENDING_CHAT_WORKSPACE_EXISTS_SQL,
-    PendingBookmarkRow, PendingChatRefusal, PendingChatReplay, ResolveDecision, RunRecordLink,
-    SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread, ThreadDispatchPause,
+    LINKED_CHAT_PROJECTION_KIND, LinkedChatStore, LocalAttachmentInput, MAX_MESSAGE_BODY_BYTES,
+    MAX_MESSAGE_PAGE, MentionCursor, PENDING_CHAT_WORKSPACE_EXISTS_SQL, PendingBookmarkRow,
+    PendingChatRefusal, PendingChatReplay, ResolveDecision, RunRecordLink, SaveBookmark,
+    SendMessage, SetFollow, SetReaction, StartChannelThread, ThreadDispatchPause,
     ThreadMessageResolution, UnreadFileThread, attachment_id_for, base32_lowercase_no_padding,
     bookmark_id_for, bump_chat_conversation_revision, channel_slug_for_name, decode_feed_cursor,
     decode_poll_options, encode_feed_cursor, encode_poll_options, feed_coordinate_visible,
@@ -176,16 +177,17 @@ pub use store::{
     capture_ingest_binary_in_tx, capture_ingest_binary_with_admission_in_tx,
     capture_ingest_in_batch_with_admission_in_tx, capture_ingest_in_tx,
     capture_ingest_with_admission_in_tx, capture_manifest_seed, capture_recoveries_in,
-    capture_retire_in_tx, clear_capture_recovery_in, decode_binary_rollback_job_identity,
-    delete_text_in_tx, delete_text_in_tx_checked, derive_capture_moment_id,
-    derive_capture_object_id, derive_capture_retire_moment_id, ensure_capture_object_in_tx,
-    ensure_main_version_in_tx, finish_checked_delete_in_tx, is_capture_recovery_origin,
-    moment_has_replication_dependents_in, normalize_tracked_workspace_path, object_has_live_alias,
-    prepare_checked_delete_in_tx, record_capture_recovery_in_tx, rename_text_in_tx,
-    rollback_compensating_moment_id, validate_addressable_plaintext_path, validate_delete_input,
-    validate_plaintext_storable_path, validate_write_input, write_binary_in_tx,
-    write_history_text_in_tx, write_projected_text_in_tx, write_published_binary_in_tx,
-    write_published_history_text_in_tx, write_published_text_in_tx, write_text_in_tx,
+    capture_retire_in_tx, capture_retire_respelled_in_tx, clear_capture_recovery_in,
+    decode_binary_rollback_job_identity, delete_text_in_tx, delete_text_in_tx_checked,
+    derive_capture_moment_id, derive_capture_object_id, derive_capture_retire_moment_id,
+    ensure_capture_object_in_tx, ensure_main_version_in_tx, finish_checked_delete_in_tx,
+    is_capture_recovery_origin, moment_has_replication_dependents_in,
+    normalize_tracked_workspace_path, object_has_live_alias, prepare_checked_delete_in_tx,
+    record_capture_recovery_in_tx, rename_text_in_tx, rollback_compensating_moment_id,
+    validate_addressable_plaintext_path, validate_delete_input, validate_plaintext_storable_path,
+    validate_write_input, write_binary_in_tx, write_history_text_in_tx, write_projected_text_in_tx,
+    write_published_binary_in_tx, write_published_history_text_in_tx, write_published_text_in_tx,
+    write_text_in_tx,
 };
 pub use store::{
     HistoryCursor, HistoryMarkerPosition, HistoryMomentMetadata, HistoryMomentPosition,
@@ -208,3 +210,5 @@ pub(crate) fn received_object_token(id: &str) -> bool {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     })
 }
+
+pub use store::{ensure_no_pending_undo_in, get_active_version_in, validate_moment_metadata};

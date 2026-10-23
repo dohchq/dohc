@@ -3,5 +3,5 @@ import { advertisedRemoteTools, REMOTE_MCP_INVENTORY_CASES } from "./remoteMcpIn
 import mainTools from "./remoteMcpTools.main.json";
 
 it.each(REMOTE_MCP_INVENTORY_CASES)("preserves main share-link MCP names and input schemas for $key", async condition => {
-  expect(await advertisedRemoteTools(condition)).toEqual(mainTools[condition.key as keyof typeof mainTools]);
+  expect(await advertisedRemoteTools(condition)).toEqual(mainTools[condition.key as keyof typeof mainTools].filter(tool => condition.key.startsWith("edit/") || tool.name !== "dohc_list_changes"));
 });

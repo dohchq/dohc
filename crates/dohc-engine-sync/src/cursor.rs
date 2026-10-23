@@ -20,6 +20,19 @@ pub struct RelayCursor {
     pub bootstrap_complete: bool,
     /// Local-only ownership token for applied settlements and deferred relay work.
     pub settlement_report_id: Option<String>,
+    /// Present only on a cursor an ordinary pull pass issued. Every other
+    /// cursor carries no authority over that pull's unfinished progress.
+    pub ordinary_pull: Option<OrdinaryPullCompletion>,
+}
+
+/// The ordinary pull pass a cursor belongs to, so its commit can finish it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrdinaryPullCompletion {
+    /// The `sync_identity.ordinary_pull_token` the pass wrote before it
+    /// changed anything.
+    pub token: String,
+    /// The pass reached the end of the relay's log.
+    pub terminal: bool,
 }
 
 #[derive(Debug)]
@@ -70,6 +83,7 @@ pub fn read_relay_cursor(
                     stream_identity,
                     bootstrap_complete,
                     settlement_report_id: None,
+                    ordinary_pull: None,
                 })
             })
             .transpose()
@@ -164,11 +178,94 @@ pub fn commit_relay_cursor(
                 writer_cache_changed |=
                     release_settlement_report_in_tx(tx, workspace_id, report_id)?;
             }
+            // Only the latest pass, under the identity it pulled with, finishes.
+            if let Some(OrdinaryPullCompletion {
+                token,
+                terminal: true,
+            }) = &cursor.ordinary_pull
+            {
+                tx.execute(
+                    "UPDATE sync_identity SET ordinary_pull_token=NULL \
+                     WHERE workspace_id=?1 AND ordinary_pull_token=?2 \
+                       AND replication_epoch=?3 AND stream_identity=?4",
+                    params![
+                        workspace_id,
+                        token,
+                        cursor.replication_epoch,
+                        cursor.stream_identity
+                    ],
+                )
+                .map_err(SyncError::persist)?;
+            }
             Ok::<_, SyncError>(CursorCommit {
                 sharing_declined,
                 writer_cache_changed,
             })
     })
+}
+
+/// Give a pull pass a fresh token before it changes anything, so only its own
+/// terminal cursor finishes it. Refuses when the identity it pulled under
+/// changed since.
+pub(crate) fn begin_ordinary_pull(
+    store: &mut EngineStore,
+    identity: &crate::SyncIdentity,
+    faults: &dyn FaultInjector,
+) -> Result<TxnOutcome<String>, SyncError> {
+    store.write_with(faults, |tx| {
+        tx.query_row(
+            "UPDATE sync_identity SET ordinary_pull_token=lower(hex(randomblob(16))) \
+             WHERE workspace_id=?1 AND origin_id=?2 AND replication_epoch=?3 AND stream_identity=?4 \
+             RETURNING ordinary_pull_token",
+            params![
+                identity.workspace_id,
+                identity.origin_id,
+                identity.replication_epoch,
+                identity.stream_identity
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::persist)?
+        .ok_or(SyncError::CoordinateDiverged)
+    })
+}
+
+/// Make an unfinished ordinary pull's applied pages local truth: nothing
+/// waits for its terminal commit any more. Applied work, the stored cursor
+/// and deferred relay work stay as they are; a later pull starts afresh.
+/// Answers whether a pull was unfinished.
+pub fn abandon_ordinary_pull(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    faults: &dyn FaultInjector,
+) -> Result<TxnOutcome<bool>, SyncError> {
+    bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
+    store.write_with(faults, |tx| {
+        let cleared = tx
+            .execute(
+                "UPDATE sync_identity SET ordinary_pull_token=NULL \
+                 WHERE workspace_id=?1 AND ordinary_pull_token IS NOT NULL",
+                [workspace_id],
+            )
+            .map_err(SyncError::persist)?;
+        Ok::<bool, SyncError>(cleared > 0)
+    })
+}
+
+/// An ordinary pull applied pages and has not committed its terminal cursor,
+/// so the workspace may hold half of it.
+pub fn ordinary_pull_unfinished_in(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<bool, SyncError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_identity \
+         WHERE workspace_id=?1 AND ordinary_pull_token IS NOT NULL)",
+        [workspace_id],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
 }
 
 /// Drop the deferred work, applied settlements and drain reports a committed
@@ -248,6 +345,7 @@ pub(crate) fn write_pushed_seq(
         pushed_seq,
         &[],
         &[],
+        &[],
         faults,
         leases,
         now_ms,
@@ -264,6 +362,7 @@ pub(crate) fn write_pushed_seq_with_refusals(
     pushed_seq: i64,
     refusals: &[crate::SettlementPublicationRefusal],
     hosted_refusals: &[crate::HostedPushRefusal],
+    batch: &[crate::ReplicationEnvelope],
     faults: &dyn FaultInjector,
     leases: &dyn crate::LeaseProbe,
     now_ms: i64,
@@ -278,6 +377,15 @@ pub(crate) fn write_pushed_seq_with_refusals(
         .write_with(faults, |tx| {
             crate::settlement_publication::push_refusals_in_tx(tx,workspace_id,refusals)?;
             crate::hosted::record_push_refusals_in_tx(tx, workspace_id, hosted_refusals)?;
+            // Commit the relay's consumed payload with the acknowledged cursor.
+            for op in batch {
+                if let Some(stored) = crate::relay::without_recording_claim(&op.op_kind, &op.payload) {
+                    let json = String::from_utf8(crate::relay::canonical_json_bytes(&stored)?)
+                        .map_err(SyncError::corrupt)?;
+                    tx.execute("UPDATE replication_log SET payload_json=?1 WHERE workspace_id=?2 AND origin_id=?3 AND origin_seq=?4",
+                        params![json, workspace_id, origin_id, op.origin_seq]).map_err(SyncError::persist)?;
+                }
+            }
             let was_enrolled =
                 crate::workspace_replicates_with_relay_in_tx(tx, workspace_id)?;
             tx.execute(

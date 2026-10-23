@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { realpathSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAgentRunsIpc } from "./agentRunsIpc";
@@ -7,10 +8,11 @@ import { createRegistryStore, type RegistryEntry } from "../workspaces/registryS
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
 import { RendererWorkspaceSessionOwner } from "../window/rendererWorkspaceSessionOwner";
 import { createRendererWorkspaceOperationRunner } from "../window/rendererWorkspaceOperation";
-import { createAgentIntegration, AgentIntegrationState } from "../agents/AgentIntegration";
+import { agentRunsFileName, createAgentIntegration, AgentIntegrationState } from "../agents/AgentIntegration";
 import type { ChatDispatchService } from "../agents/chatDispatchService";
 import type { LiveAgentDispatchStoreHandle } from "../agents/liveAgentDispatchStore";
 import { createTestScratch } from "../workspaces/testTemp";
+import { canonicalWorkspaceRoot } from "../workspaces/createWorkspaceFolder";
 import { deferred } from "../testing/deferred";
 
 class Sender {
@@ -34,7 +36,7 @@ const sharedView = {
 };
 
 async function harness(shared = false, hooks: { disposeState?: () => void } = {}) {
-  const rootPath = await createTestScratch("agent-runs-ipc-");
+  const rootPath = canonicalWorkspaceRoot(await createTestScratch("agent-runs-ipc-"));
   const registry = createRegistryStore(join(rootPath, "registry.json"));
   const workspace: RegistryEntry = {
     workspaceId: "workspace-a", rootPath, kind: "personal", mode: "local-first",
@@ -47,12 +49,12 @@ async function harness(shared = false, hooks: { disposeState?: () => void } = {}
   const events: string[] = [];
   const authority = createWorkspaceAuthorityOwner({
     findWorkspace: registry.find,
-    canonicalizeRoot: (root: string) => root,
+    canonicalizeRoot: realpathSync.native,
     createState: () => new AgentIntegrationState(),
     ...(hooks.disposeState ? { disposeState: hooks.disposeState } : {}),
   });
   const held = authority.acquire(workspace.workspaceId);
-  const physical = { ...workspace, attachmentId: held.binding.attachmentId };
+  const physical = { ...workspace, rootPath: held.binding.canonicalRootPath, attachmentId: held.binding.attachmentId };
   held.release();
   const renderers = new RendererWorkspaceSessionOwner<Sender>({
     retirement: {
@@ -105,7 +107,7 @@ async function harness(shared = false, hooks: { disposeState?: () => void } = {}
     runnerSelfTest: vi.fn<ChatDispatchService["runnerSelfTest"]>(async () => { events.push("self-test"); return { ok: true, detail: "Ready" }; }),
   };
   const shareAccess = vi.fn((_view: unknown) => "view" as const);
-  const config = vi.fn((_root: string, _access: unknown) => ({ command: "dohc-mcp", args: ["--workspace", rootPath], workspacePath: rootPath, home: rootPath }));
+  const config = vi.fn((root: string, _access: unknown) => ({ command: "dohc-mcp", args: ["--workspace", root], workspacePath: root, home: rootPath }));
   const handlers = new Map<string, (event: { sender: Sender }, payload: unknown) => unknown>();
   const detection = vi.fn(async (_root: string, _signal?: AbortSignal) => []);
   const registrations = createAgentRunsIpc({
@@ -140,7 +142,7 @@ async function harness(shared = false, hooks: { disposeState?: () => void } = {}
     ended, setAgentRun, requireWorkspace, requireCapture,
     ensureOpen, records, runnable, idle, start, writable, activity, dispatch, shareAccess, config,
     detection, handlers, groupSizes, invoke,
-    durableRuns: async () => JSON.parse(await readFile(join(rootPath, ".dohc", "agent-runs.json"), "utf8")),
+    durableRuns: async () => JSON.parse(await readFile(join(rootPath, ".dohc", "agent-runs", agentRunsFileName("install-local")), "utf8")),
     switchWorkspace: async () => {
       const other = { ...physical, workspaceId: "workspace-b", attachmentId: Symbol("other") };
       await renderers.open(sender, other, "document-1");
@@ -222,7 +224,7 @@ describe("agent run IPC registrations", () => {
     const h = await harness();
     await expect(h.invoke(CHANNELS.detectAgentTools)).resolves.toEqual({ workingDirectory: h.workspace.rootPath, tools: [] });
     expect(h.detection).toHaveBeenCalledOnce();
-    expect(h.detection).toHaveBeenCalledWith(h.workspace.rootPath, expect.any(AbortSignal));
+    expect(h.detection).toHaveBeenCalledWith(h.physical.rootPath, expect.any(AbortSignal));
     expect(h.activity).not.toHaveBeenCalled();
     await h.switchWorkspace();
     await expect(h.invoke(CHANNELS.detectAgentTools)).rejects.toThrow();
@@ -367,6 +369,18 @@ describe("agent run IPC registrations", () => {
     await expect(h.invoke(CHANNELS.getAgentRunStatus)).resolves.toEqual({
       activeRun: null, lastRun: expect.objectContaining({ id: "run-1", status: status ?? "complete" }),
     });
+  });
+
+  it.skipIf(process.platform !== "win32")("spells the native operation root like the registry in MCP configuration", async () => {
+    const h = await harness();
+    expect(h.physical.rootPath).toBe(realpathSync.native(h.workspace.rootPath));
+    expect(h.physical.rootPath).not.toBe(h.workspace.rootPath);
+    const canonicalRootPath = canonicalWorkspaceRoot(h.physical.rootPath);
+    await expect(h.invoke(CHANNELS.getMcpConfig)).resolves.toEqual({
+      command: "dohc-mcp", args: ["--workspace", canonicalRootPath], workspacePath: canonicalRootPath, home: h.workspace.rootPath,
+    });
+    expect(h.config).toHaveBeenCalledWith(canonicalRootPath, "view");
+    await expect(h.invoke(CHANNELS.detectAgentTools)).resolves.toEqual({ workingDirectory: canonicalRootPath, tools: [] });
   });
 
   it("forwards main-owned MCP configuration for a shared view", async () => {

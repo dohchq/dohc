@@ -3320,6 +3320,61 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     },
     Migration {
         ordinal: 61,
+        id: "v2-ordinary-pull-progress",
+        sql: V2_ORDINARY_PULL_PROGRESS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 62,
+        id: "v2-history-undo-plans",
+        sql: "CREATE INDEX idx_engine_requests_kind ON engine_requests(kind,request_id); \
+              CREATE TABLE history_undo_plans (request_id TEXT PRIMARY KEY REFERENCES engine_requests(request_id), workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, operation_id TEXT NOT NULL, author_json TEXT, plan_json TEXT NOT NULL CHECK(json_valid(plan_json)), attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, errors_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(errors_json)), UNIQUE(workspace_id,operation_id)) STRICT;",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 63,
+        id: "v2-file-search-key",
+        sql: include_str!("file_search_key.sql"),
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 64,
+        id: "v2-ydoc-files-seen",
+        sql: V2_YDOC_FILES_SEEN_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 65,
+        id: "v2-chat-conversation-file-links",
+        sql: include_str!("conversation_file_links.sql"),
+        sets_user_version: None,
+    },
+    // A merge write that finds its target occupied looks up the pending
+    // delete that expects those bytes.
+    Migration {
+        ordinal: 66,
+        id: "v2-pending-delete-preimage-index",
+        sql: "CREATE INDEX idx_materialization_jobs_pending_delete_preimage \
+              ON materialization_jobs(workspace_id, preimage_sha256) \
+              WHERE status = 'pending' AND operation = 'delete';",
+        sets_user_version: None,
+    },
+    // Why the sweep can never release a retained original. A volume that
+    // cannot refuse to unlink an open file keeps each one until a person or
+    // an agent deletes it. Rows from before this read as unblocked until the
+    // sweep checks their volume.
+    Migration {
+        ordinal: 67,
+        id: "v2-retained-release-blocked",
+        sql: "ALTER TABLE materialization_retained ADD COLUMN release_blocked TEXT \
+              CHECK (release_blocked IS NULL OR release_blocked = 'busy-check-unsupported'); \
+              CREATE INDEX materialization_retained_blocked \
+              ON materialization_retained(workspace_id, release_blocked, size) \
+              WHERE release_blocked IS NOT NULL;",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 68,
         id: "v2-live-owner-activations",
         sql: V2_LIVE_OWNER_ACTIVATIONS_DDL,
         sets_user_version: None,
@@ -4080,6 +4135,36 @@ pub(crate) const RELEASED_TAIL_TRIGGERS: &[&str] = &[
     "released_hold_revision_delete",
 ];
 
+/// Documents whose file a `ydoc.open` found on disk while the version had no
+/// head for it: New File's empty file, before capture records it. A moment
+/// records every other file a document has had. Together they tell a session
+/// that continues the document whether its missing file was deleted.
+const V2_YDOC_FILES_SEEN_DDL: &str = "\
+CREATE TABLE ydoc_files_seen (
+    workspace_id TEXT NOT NULL,
+    version_id   TEXT NOT NULL,
+    object_id    TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, object_id),
+    FOREIGN KEY (workspace_id, version_id)
+      REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
+) STRICT;
+";
+
+/// The ordinary pull pass whose applied pages await their terminal commit.
+/// A replication identity change abandons it.
+const V2_ORDINARY_PULL_PROGRESS_DDL: &str = "\
+ALTER TABLE sync_identity ADD COLUMN ordinary_pull_token TEXT
+    CHECK (ordinary_pull_token IS NULL OR length(ordinary_pull_token) > 0);
+CREATE TRIGGER sync_identity_change_abandons_ordinary_pull
+AFTER UPDATE OF origin_id,replication_epoch,stream_identity ON sync_identity
+WHEN NEW.ordinary_pull_token IS NOT NULL
+  AND (OLD.origin_id IS NOT NEW.origin_id OR OLD.replication_epoch IS NOT NEW.replication_epoch
+    OR OLD.stream_identity IS NOT NEW.stream_identity)
+BEGIN
+    UPDATE sync_identity SET ordinary_pull_token=NULL WHERE workspace_id=NEW.workspace_id;
+END;
+";
+
 /// A hosted document that left the scope parks instead of losing its state.
 /// Its heads and path aliases move to the parked tables, whose blob keys keep
 /// their bytes, so its paths come free while its history, Y.Doc and
@@ -4708,10 +4793,12 @@ mod tests {
         let ctx = MigrationContext::current(1);
         let before = migration_index("v2-retained-materialization-displacements");
         assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 54);
+        // Migration 67 changes the table 54 creates, so a store without 54
+        // predates 67 too.
         let without_retention: Vec<_> = BASELINE_MIGRATIONS
             .iter()
             .copied()
-            .filter(|migration| migration.ordinal != 54)
+            .filter(|migration| !matches!(migration.ordinal, 54 | 67))
             .collect();
         run_migrations(&mut conn, &without_retention, &ctx, &NoFaults).unwrap();
         let sha = crate::blob::put_binary_blob(&conn, b"before").unwrap();
@@ -4732,11 +4819,11 @@ mod tests {
         tx.commit().unwrap();
         assert_eq!(
             run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
-            MigrationOutcome::Applied { newly_applied: 1 }
+            MigrationOutcome::Applied { newly_applied: 2 }
         );
         let jobs:i64=conn.query_row("SELECT COUNT(*) FROM materialization_jobs WHERE job_id='pending' AND status='pending'",[],|r|r.get(0)).unwrap();
         assert_eq!(jobs, 1);
-        for ordinal in [54, 55, 56] {
+        for ordinal in [54, 55, 56, 67] {
             let applied: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM engine_migrations WHERE ordinal=?1 AND completed_at IS NOT NULL",
@@ -5094,6 +5181,34 @@ mod tests {
                 "56e87a5adcc33c2af1f301c3c25c91fe7c6b1c738f34e35ccd629080d89bcc50",
             ),
             (
+                "v2-ordinary-pull-progress",
+                "d97e08cea4e222c34c253d21da14e714bf118ac330e0b0ea3891f2d499e8097e",
+            ),
+            (
+                "v2-history-undo-plans",
+                "804873129399ca333652a5efdfc20b18e2219671d068e70ee2a78dc3a2c92783",
+            ),
+            (
+                "v2-file-search-key",
+                "60447cc5e4274b65f3f9e71a830288acfc896ac0899d471e8bcebaf754519695",
+            ),
+            (
+                "v2-ydoc-files-seen",
+                "85a36c7e1b7e392360e0caf3136b589cfcf0e052d4a26c53118e1ce045b32b5d",
+            ),
+            (
+                "v2-chat-conversation-file-links",
+                "a976e7546ecf2efacaa0e885b966bfaac96f4c2b1c3ca24f417fbf3b645bdd22",
+            ),
+            (
+                "v2-pending-delete-preimage-index",
+                "a6ead02cfa43cab0395717b10b07be6e314baa0b453c09ebb63c56df2267d08b",
+            ),
+            (
+                "v2-retained-release-blocked",
+                "16b4bee68d7fde08b97ade0bd28c4969c185b73bb65bf54ceb6006bfeaee40ff",
+            ),
+            (
                 "v2-live-owner-activations",
                 "3cd8aabfe2ef82e606dd174dd956e46f8e112b3f7bc7f8e1ffd8bbb242679dd2",
             ),
@@ -5107,6 +5222,335 @@ mod tests {
                 "the {id} migration changed after it shipped"
             );
         }
+    }
+
+    #[test]
+    #[ignore = "scheduled migration 65 alias-index measurement"]
+    fn conversation_links_measure_migration_alias_index_on_large_store() {
+        assert!(
+            !std::hint::black_box(cfg!(debug_assertions)),
+            "run with --release"
+        );
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-chat-conversation-file-links");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys=ON; BEGIN;
+            INSERT INTO versioned_workspaces VALUES('ws','v-0');",
+        )
+        .unwrap();
+        for i in 0..10 {
+            conn.execute("INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES('ws',?1,'named','Measured',1)",[format!("v-{i}")]).unwrap();
+        }
+        {
+            let mut object = conn
+                .prepare_cached("INSERT INTO file_objects VALUES('ws',?1,1)")
+                .unwrap();
+            for i in 0..50_000 {
+                object.execute([format!("f-{i:06}")]).unwrap();
+            }
+            let mut alias = conn
+                .prepare_cached("INSERT INTO path_aliases VALUES('ws',?1,?2,?3)")
+                .unwrap();
+            for version in 0..10 {
+                for i in 0..50_000 {
+                    alias
+                        .execute(rusqlite::params![
+                            format!("v-{version}"),
+                            format!("notes/{}/file-{i:06}.md", "long-label/".repeat(8)),
+                            format!("f-{i:06}")
+                        ])
+                        .unwrap();
+                }
+            }
+        }
+        conn.execute_batch("COMMIT; PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        let bytes_before = std::fs::metadata(dir.join("engine.db")).unwrap().len();
+        let start = std::time::Instant::now();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let migration_us = start.elapsed().as_micros();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        let bytes_after = std::fs::metadata(dir.join("engine.db")).unwrap().len();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM chat_conversation_file_link_state",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        // Measure just the alias-index DDL too, on the same populated store.
+        conn.execute_batch(
+            "DROP INDEX conversation_file_link_alias; PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+        let start = std::time::Instant::now();
+        conn.execute_batch("CREATE INDEX conversation_file_link_alias ON path_aliases(workspace_id,version_id,object_id,path);").unwrap();
+        let index_us = start.elapsed().as_micros();
+        println!(
+            "CONVERSATION_LINKS_MIGRATION_MEASUREMENT {{\"aliases\":500000,\"objects\":50000,\"versions\":10,\"migrationUs\":{migration_us},\"aliasIndexUs\":{index_us},\"databaseBytesBefore\":{bytes_before},\"databaseBytesAfter\":{bytes_after}}}"
+        );
+    }
+
+    #[test]
+    fn conversation_links_migrations_64_and_65_apply_in_order_from_fresh_and_main_64() {
+        for resume_at_main_64 in [false, true] {
+            let dir = tempdir();
+            let path = dir.join("engine.db");
+            let mut conn = open_bare(&path);
+            let ctx = MigrationContext::current(1);
+            let before = migration_index("v2-chat-conversation-file-links");
+            let predecessor = &BASELINE_MIGRATIONS[before - 1];
+            assert_eq!(
+                (predecessor.ordinal, predecessor.id),
+                (64, "v2-ydoc-files-seen")
+            );
+            assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 65);
+            let prior = if resume_at_main_64 {
+                run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+                let row: (String, String) = conn.query_row(
+                    "SELECT id,checksum FROM engine_migrations WHERE ordinal=64 AND completed_at IS NOT NULL",
+                    [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+                assert_eq!(
+                    row,
+                    (predecessor.id.into(), migration_checksum(predecessor.sql))
+                );
+                conn.execute_batch("INSERT INTO versioned_workspaces VALUES('ws','main');
+                    INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES('ws','main','named','Main',1);
+                    INSERT INTO ydoc_files_seen VALUES('ws','main','seen-before-links');").unwrap();
+                drop(conn);
+                conn = open_bare(&path);
+                Some(row)
+            } else {
+                None
+            };
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+            let rows: Vec<(i64, String, String)> = conn.prepare(
+                "SELECT ordinal,id,checksum FROM engine_migrations WHERE ordinal BETWEEN 64 AND 65 AND completed_at IS NOT NULL ORDER BY ordinal"
+            ).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap()
+                .collect::<Result<_,_>>().unwrap();
+            assert_eq!(
+                rows,
+                vec![
+                    (
+                        64,
+                        predecessor.id.into(),
+                        migration_checksum(predecessor.sql)
+                    ),
+                    (
+                        65,
+                        "v2-chat-conversation-file-links".into(),
+                        migration_checksum(BASELINE_MIGRATIONS[before].sql)
+                    ),
+                ]
+            );
+            if let Some(prior) = prior {
+                assert_eq!((rows[0].1.clone(), rows[0].2.clone()), prior);
+                assert_eq!(
+                    conn.query_row("SELECT object_id FROM ydoc_files_seen", [], |r| r
+                        .get::<_, String>(0))
+                        .unwrap(),
+                    "seen-before-links"
+                );
+            }
+            assert_eq!(
+                conn.query_row(
+                    "SELECT count(*) FROM chat_conversation_file_link_state",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn pending_delete_preimage_index_covers_jobs_from_main_65() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-pending-delete-preimage-index");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 65);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 66);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        let sha = crate::blob::hex_sha256(b"old");
+        conn.execute(
+            "INSERT INTO blobs(sha256,byte_length,text) VALUES(?1,3,'old')",
+            [&sha],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO materialization_jobs(job_id,target_path,content_sha256,preimage_present,preimage_sha256,target_generation,status,created_at_ms,operation,workspace_id) \
+             VALUES('merge-mat_old','notes.md',?1,1,?1,1,'pending',1,'delete','ws')",
+            [&sha],
+        )
+        .unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let jobs = crate::materialize::pending_merge_deletes_expecting(&conn, "ws", &sha).unwrap();
+        assert_eq!(
+            jobs.iter()
+                .map(|job| job.job_id.as_str())
+                .collect::<Vec<_>>(),
+            ["merge-mat_old"]
+        );
+        assert!(
+            conn.query_row(
+                "SELECT 1 FROM sqlite_schema WHERE type='index' AND name='idx_materialization_jobs_pending_delete_preimage'",
+                [],
+                |_| Ok(()),
+            )
+            .is_ok()
+        );
+    }
+
+    /// Rows retained before migration 67 keep their fields and read as
+    /// unblocked until the sweep checks their volume. The summary reads only
+    /// the blocked rows' index.
+    #[test]
+    fn retained_release_blocked_upgrades_rows_from_main_66() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-retained-release-blocked");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 66);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 67);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute(
+            "INSERT INTO materialization_retained(job_id,workspace_id,target_path,source_path,device,inode,digest,size,mtime,ctime,changed_at_ms) \
+             VALUES('job','ws','notes.md','.dohc/engine/displaced/job.0','1','2','abc',10,'0:0','0:0',5)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let rows = crate::materialize::retained_rows(&conn, 0).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (
+                rows[0].size,
+                rows[0].changed_at_ms,
+                rows[0].busy_check_unsupported
+            ),
+            (10, 5, false)
+        );
+        assert_eq!(
+            crate::materialize::retained_summary(&conn, "ws").unwrap(),
+            crate::RetainedSummary::default()
+        );
+        crate::materialize::record_retained_busy_check(&conn, &rows[0], true).unwrap();
+        assert_eq!(
+            crate::materialize::retained_summary(&conn, "ws").unwrap(),
+            crate::RetainedSummary {
+                count: 1,
+                bytes: 10
+            }
+        );
+        assert!(
+            conn.execute(
+                "UPDATE materialization_retained SET release_blocked='busy'",
+                []
+            )
+            .is_err(),
+            "only known reasons are recorded"
+        );
+        let plan: Vec<String> = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT COUNT(*), COALESCE(SUM(size), 0) FROM materialization_retained \
+                 WHERE workspace_id=?1 AND release_blocked IS NOT NULL",
+            )
+            .unwrap()
+            .query_map(["ws"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("COVERING INDEX materialization_retained_blocked")),
+            "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn conversation_links_upgrade_preserves_mentions_without_startup_backfill() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-chat-conversation-file-links");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 64);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 65);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO chat_attachments(workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,created_at_ms) VALUES('ws','old','t','m','file','f',1);").unwrap();
+        assert!(
+            conn.prepare("SELECT * FROM chat_conversation_file_links")
+                .is_err()
+        );
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        for table in [
+            "chat_conversation_file_links",
+            "chat_conversation_file_link_state",
+            "chat_conversation_file_link_work",
+        ] {
+            assert_eq!(
+                conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM chat_attachments WHERE attachment_id='old'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        drop(conn);
+        let mut conn = open_bare(&dir.join("engine.db"));
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM chat_conversation_file_link_state",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn file_search_key_upgrade_preserves_rows_and_indexes_exact_deletion() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-file-search-key");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 62);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 63);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO engine_search_files_fts(workspace_id,version_id,object_id,path,text) VALUES ('ws','main','a','a.md','alpha'),('ws','other','a','a.md','other'),('ws','main','b','b.md','beta');").unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let plan: String = conn.query_row("EXPLAIN QUERY PLAN SELECT id FROM engine_search_files_fts_content WHERE c0='ws' AND c1='main' AND c2='a'", [], |row| row.get(3)).unwrap();
+        assert!(
+            plan.contains("COVERING INDEX idx_engine_search_files_key"),
+            "{plan}"
+        );
+        assert_eq!(conn.execute("DELETE FROM engine_search_files_fts WHERE rowid IN (SELECT id FROM engine_search_files_fts_content WHERE c0='ws' AND c1='main' AND c2='a')", []).unwrap(), 1);
+        let rows: Vec<(String,String)> = conn.prepare("SELECT version_id,object_id FROM engine_search_files_fts ORDER BY version_id,object_id").unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<Result<_,_>>().unwrap();
+        assert_eq!(
+            rows,
+            vec![("main".into(), "b".into()), ("other".into(), "a".into())]
+        );
+        conn.execute_batch("INSERT INTO engine_search_files_fts(engine_search_files_fts) VALUES('integrity-check');").unwrap();
     }
 
     #[test]
@@ -5192,8 +5636,8 @@ mod tests {
         let path = dir.join("engine.db");
         let ctx = MigrationContext::current(1);
         let before = migration_index("v2-live-owner-activations");
-        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 60);
-        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 61);
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 67);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 68);
         let mut conn = open_bare(&path);
         conn.pragma_update(None, "foreign_keys", true).unwrap();
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults)
@@ -5496,6 +5940,87 @@ mod tests {
             run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("reopen"),
             MigrationOutcome::Applied { newly_applied: 0 }
         );
+    }
+
+    fn ordinary_pull_token(conn: &Connection) -> Option<String> {
+        conn.query_row(
+            "SELECT ordinary_pull_token FROM sync_identity WHERE workspace_id='ws'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn ordinary_pull_progress_upgrade_starts_with_no_unfinished_pull() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-ordinary-pull-progress");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 60);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 61);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute(
+            "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+             VALUES ('ws','origin','epoch','stream',1)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        assert_eq!(ordinary_pull_token(&conn), None);
+        assert!(
+            conn.execute(
+                "UPDATE sync_identity SET ordinary_pull_token='' WHERE workspace_id='ws'",
+                []
+            )
+            .is_err(),
+            "an empty token owns nothing"
+        );
+    }
+
+    #[test]
+    fn each_identity_change_abandons_the_unfinished_ordinary_pull() {
+        for column in ["origin_id", "replication_epoch", "stream_identity"] {
+            let dir = tempdir();
+            let mut conn = open_bare(&dir.join("engine.db"));
+            run_migrations(
+                &mut conn,
+                BASELINE_MIGRATIONS,
+                &MigrationContext::current(1),
+                &NoFaults,
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms,ordinary_pull_token) \
+                 VALUES ('ws','origin','epoch','stream',1,'token')",
+                [],
+            )
+            .unwrap();
+            // Other columns, and rewriting a value unchanged, leave the pull.
+            conn.execute(
+                &format!(
+                    "UPDATE sync_identity SET claim_state='pending',{column}={column} WHERE workspace_id='ws'"
+                ),
+                [],
+            )
+            .unwrap();
+            assert_eq!(ordinary_pull_token(&conn).as_deref(), Some("token"));
+            // A rolled-back change keeps the identity and its pull together.
+            conn.execute_batch(&format!(
+                "BEGIN; UPDATE sync_identity SET {column}='changed' WHERE workspace_id='ws'; ROLLBACK;"
+            ))
+            .unwrap();
+            assert_eq!(ordinary_pull_token(&conn).as_deref(), Some("token"));
+            conn.execute(
+                &format!("UPDATE sync_identity SET {column}='changed' WHERE workspace_id='ws'"),
+                [],
+            )
+            .unwrap();
+            assert_eq!(ordinary_pull_token(&conn), None, "{column} changed");
+        }
     }
 
     #[test]

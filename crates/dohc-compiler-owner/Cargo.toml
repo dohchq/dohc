@@ -1,0 +1,26 @@
+[package]
+name = "dohc-compiler-owner"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Bounds and confines one desktop app compile on macOS and Linux."
+
+[[bin]]
+name = "dohc-compiler-owner"
+path = "src/main.rs"
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4.7"
+seccompiler = "0.5.0"
+
+# Only sys.rs and its platform modules may call libc, libproc or Seatbelt.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

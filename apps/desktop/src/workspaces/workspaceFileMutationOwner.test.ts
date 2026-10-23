@@ -28,7 +28,8 @@ import {
 } from "./workspaceFileMutationOwner";
 import { deferred } from "../testing/deferred";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
-import { beginPendingDeleteRecovery } from "./workspaceDeleteRecovery";
+import { beginPendingRecovery, waitForRecovery, waitForRecoveryPrune } from "./workspaceDeleteRecovery";
+import { openedLocalState } from "../testing/preparedLocalState";
 
 interface TestEvent {
   trusted: boolean;
@@ -43,10 +44,10 @@ interface TestWorkspace {
   shareMounts?: unknown;
 }
 
-type MutationCapture = Pick<WorkspaceEngineCapture, "beginFileRename" | "changePathsAs">;
+type MutationCapture = Pick<WorkspaceEngineCapture, "changePathsAs" | "beginFileRename">;
 // What a test gives the harness: changePathsAs settles through this
 // settleAndCloseLiveSessionsForPath as the real capture settles first.
-type TestCapture = Pick<WorkspaceEngineCapture, "beginFileRename" | "settleAndCloseLiveSessionsForPath">;
+type TestCapture = Pick<WorkspaceEngineCapture, "settleAndCloseLiveSessionsForPath"> & Partial<MutationCapture>;
 
 const roots: string[] = [];
 const trustedEvent: TestEvent = { trusted: true };
@@ -54,7 +55,12 @@ const CONTENT_HASH = "a".repeat(64);
 
 afterEach(async () => {
   await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
+    roots.splice(0).map(async (root) => {
+      await withExclusiveWorkspaceOperation(root, async () => undefined);
+      // A move or delete schedules a prune of old recovery records, which reads the workspace's trash.
+      await waitForRecoveryPrune(root);
+      await rm(root, { recursive: true, force: true });
+    }),
   );
 });
 
@@ -99,6 +105,7 @@ async function harness(options: {
   };
   let authorityId = Symbol(`attachment:${workspace.workspaceId}`);
   let capture: MutationCapture | null = null;
+  let pathChanges: MutationCapture["changePathsAs"];
   const openYDocs: Array<{
     authorityId: symbol;
     path: string;
@@ -168,7 +175,7 @@ async function harness(options: {
   });
   const requireWorkspace = vi.fn((workspaceId: string) => {
     if (workspaceId !== workspace.workspaceId) {
-      throw new Error(`Unknown workspace: ${workspaceId}`);
+      throw new Error("This workspace is not open. Open it again.");
     }
     return workspace;
   });
@@ -212,7 +219,7 @@ async function harness(options: {
   };
   let account = "account-alice";
   const deletedBy: string[] = [];
-  const history = { readHistoryPage: vi.fn(async () => ({ moments: [{ operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async () => { throw new Error("Unexpected Undo"); }) };
+  const history = {readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: [{ operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async () => { throw new Error("Unexpected Undo"); }) };
   const owner = createWorkspaceFileMutationOwner({
     historyFor: () => history,
     assertTrustedSender,
@@ -262,26 +269,39 @@ async function harness(options: {
     setAuthorityId(next: symbol) {
       authorityId = next;
     },
+    get pathChanges() { return pathChanges; },
     setCapture(next: TestCapture | null) {
-      capture = next === null ? null : {
-        beginFileRename: next.beginFileRename,
-        changePathsAs: async (paths, authored, work, removed) => {
+      if (next === null) { capture = null; return; }
+      pathChanges = async (paths, authored, work, removed) => {
           if (authored.author.kind === "human") deletedBy.push(authored.author.humanId);
           const finishDebts = await next.settleAndCloseLiveSessionsForPath(paths[0]!);
           let gone = false;
           try {
             const value = await work({ policy: await readWorkspaceEnginePolicy(rootPath),
-              recordDisk: async (_path, files) => [...files], moveFile: async () => false,
+              readDuplicate: async () => null, hasPath: async () => false,
+      duplicateFile: async () => { throw new Error("unexpected Duplicate"); },
+      recordDisk: async (_path, files) => [...files], moveFile: async () => false,
               rename: async () => undefined, delete: async () => "moment", undoDelete: async () => undefined });
             gone = removed(value).length > 0;
             return value;
           } finally {
             finishDebts(gone);
           }
-        },
-      };
+        };
+      capture = { changePathsAs: next.changePathsAs ?? pathChanges, beginFileRename: next.beginFileRename ?? (async () => async () => undefined) };
     },
   };
+}
+
+function observePathChanges(test: Awaited<ReturnType<typeof harness>>,
+  before: (paths: readonly string[]) => Promise<void> = async () => undefined,
+  after: () => Promise<void> = async () => undefined): MutationCapture["changePathsAs"] {
+  return vi.fn<MutationCapture["changePathsAs"]>(async (paths, authored, work, removed) => {
+    await before(paths);
+    const value = await test.pathChanges(paths, authored, work, removed);
+    await after();
+    return value;
+  }) as MutationCapture["changePathsAs"];
 }
 
 async function openYDoc(
@@ -294,10 +314,17 @@ async function openYDoc(
 }
 
 describe("WorkspaceFileMutationOwner", () => {
+  it("rejects untrusted Duplicate and forged operation ids before workspace admission", async () => {
+    const test = await harness();
+    const payload = {workspaceId: test.workspace.workspaceId, relativePath: "source.md"};
+    await expect(test.owner.duplicateFile({trusted: false}, payload)).rejects.toThrow("Untrusted renderer");
+    await expect(test.owner.duplicateFile(trustedEvent, {...payload, operationId: "dohc-operation:forged"})).rejects.toThrow();
+    expect(test.requireWorkspace).not.toHaveBeenCalled();
+  });
   it("stops an Undo waiting on system trash when its workspace retires", async () => {
     const test = await harness();
     const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
-    const release = beginPendingDeleteRecovery(operationId);
+    const release = beginPendingRecovery(operationId);
     let result: unknown;
     const undo = test.owner.undoHistoryOperation(trustedEvent, { workspaceId: test.workspace.workspaceId, operationId })
       .then(value => { result = value; }, error => { result = { ok: false, reason: error.message }; });
@@ -344,6 +371,7 @@ describe("WorkspaceFileMutationOwner", () => {
     };
     const workspaceId = test.workspace.workspaceId;
     const mutations = [
+      () => test.owner.duplicateFile(staleEvent, {workspaceId, relativePath: "source.md"}),
       () =>
         test.owner.createFile(staleEvent, {
           workspaceId,
@@ -555,12 +583,8 @@ describe("WorkspaceFileMutationOwner", () => {
       );
       await entered.promise;
       test.setCapture({
-        beginFileRename: vi.fn(async () => {
-          trace.push("move:start");
-          return vi.fn(async () => undefined);
-        }),
         settleAndCloseLiveSessionsForPath: vi.fn(async () => {
-          trace.push("delete:start");
+          trace.push(`${kind}:start`);
           return () => undefined;
         }),
       });
@@ -605,7 +629,7 @@ describe("WorkspaceFileMutationOwner", () => {
       throw finisherError;
     });
     test.setCapture({
-      beginFileRename: vi.fn(async () => finishRename),
+      changePathsAs: observePathChanges(test, undefined, () => finishRename(true)),
       settleAndCloseLiveSessionsForPath: vi.fn(async () => () => undefined),
     });
 
@@ -623,14 +647,11 @@ describe("WorkspaceFileMutationOwner", () => {
     });
 
     releaseFinisher.resolve();
-    await expect(moving).rejects.toBe(finisherError);
+    await expect(moving).rejects.toThrow(finisherError.message);
     await expect(queuedWrite).rejects.toThrow(
       "A file or folder changed before this write started. Try the action again.",
     );
-    expect(finishRename.mock.calls.map(([moved]) => moved)).toEqual([
-      true,
-      false,
-    ]);
+    expect(finishRename.mock.calls.map(([moved]) => moved)).toEqual([true]);
     expect(await readFile(join(test.rootPath, "to.md"), "utf8")).toBe(
       "source\n",
     );
@@ -814,14 +835,13 @@ describe("WorkspaceFileMutationOwner", () => {
     const finishRename = vi.fn(async (moved: boolean) => {
       trace.push(`finish:${moved}`);
     });
-    const beginFileRename = vi.fn(async (fromPath: string, toPath: string) => {
+    const changePathsAs = observePathChanges(test, async ([fromPath = "", toPath = ""]) => {
       trace.push(`begin:${fromPath}:${toPath}`);
       await expect(access(join(test.rootPath, fromPath))).resolves.toBeUndefined();
       await expect(access(join(test.rootPath, toPath))).rejects.toThrow();
-      return finishRename;
-    });
+    }, () => finishRename(true));
     test.setCapture({
-      beginFileRename,
+      changePathsAs,
       settleAndCloseLiveSessionsForPath: vi.fn(async () => () => undefined),
     });
 
@@ -831,7 +851,7 @@ describe("WorkspaceFileMutationOwner", () => {
         fromPath: "./from.md",
         toPath: "archive/./to.md",
       }),
-    ).resolves.toEqual({ path: "archive/to.md" });
+    ).resolves.toMatchObject({ path: "archive/to.md", operationId: expect.any(String), undo: { available: true } });
 
     expect(trace).toEqual([
       "begin:from.md:archive/to.md",
@@ -853,9 +873,9 @@ describe("WorkspaceFileMutationOwner", () => {
       process.platform === "win32" ? "junction" : "dir",
     );
     const finishRename = vi.fn(async () => undefined);
-    const beginFileRename = vi.fn(async () => finishRename);
+    const changePathsAs = observePathChanges(test);
     test.setCapture({
-      beginFileRename,
+      changePathsAs,
       settleAndCloseLiveSessionsForPath: vi.fn(async () => () => undefined),
     });
 
@@ -866,12 +886,9 @@ describe("WorkspaceFileMutationOwner", () => {
           process.platform === "win32" ? "alias/FROM.md" : "alias/from.md",
         toPath: "archive/to.md",
       }),
-    ).resolves.toEqual({ path: "archive/to.md" });
+    ).resolves.toMatchObject({ path: "archive/to.md", operationId: expect.any(String), undo: { available: true } });
 
-    expect(beginFileRename).toHaveBeenCalledWith(
-      `${notesDir}/from.md`,
-      "archive/to.md",
-    );
+    expect(changePathsAs).toHaveBeenCalledWith([`${notesDir}/from.md`, "archive/to.md"], expect.objectContaining({ operation: "move" }), expect.any(Function), expect.any(Function));
     await expect(
       readFile(join(test.rootPath, "archive/to.md"), "utf8"),
     ).resolves.toBe("text\n");
@@ -888,9 +905,9 @@ describe("WorkspaceFileMutationOwner", () => {
       process.platform === "win32" ? "junction" : "dir",
     );
     const finishRename = vi.fn(async () => undefined);
-    const beginFileRename = vi.fn(async () => finishRename);
+    const changePathsAs = observePathChanges(test);
     test.setCapture({
-      beginFileRename,
+      changePathsAs,
       settleAndCloseLiveSessionsForPath: vi.fn(async () => () => undefined),
     });
 
@@ -901,12 +918,9 @@ describe("WorkspaceFileMutationOwner", () => {
           process.platform === "win32" ? "alias/FROM.md" : "alias/from.md",
         toPath: "alias/to.md",
       }),
-    ).resolves.toEqual({ path: "alias/to.md" });
+    ).resolves.toMatchObject({ path: "alias/to.md", operationId: expect.any(String), undo: { available: true } });
 
-    expect(beginFileRename).toHaveBeenCalledWith(
-      `${notesDir}/from.md`,
-      `${notesDir}/to.md`,
-    );
+    expect(changePathsAs).toHaveBeenCalledWith([`${notesDir}/from.md`, `${notesDir}/to.md`], expect.objectContaining({ operation: "move" }), expect.any(Function), expect.any(Function));
     await expect(
       readFile(join(test.rootPath, notesDir, "to.md"), "utf8"),
     ).resolves.toBe("text\n");
@@ -924,9 +938,9 @@ describe("WorkspaceFileMutationOwner", () => {
         join(test.rootPath, "escape"),
         process.platform === "win32" ? "junction" : "dir",
       );
-      const beginFileRename = vi.fn(async () => vi.fn(async () => undefined));
+      const changePathsAs = observePathChanges(test);
       test.setCapture({
-        beginFileRename,
+        changePathsAs,
         settleAndCloseLiveSessionsForPath: vi.fn(async () => () => undefined),
       });
 
@@ -941,7 +955,7 @@ describe("WorkspaceFileMutationOwner", () => {
               : "moved.md",
         }),
       ).rejects.toThrow(/escapes (?:the )?workspace|reserved/);
-      expect(beginFileRename).not.toHaveBeenCalled();
+      expect(changePathsAs).not.toHaveBeenCalled();
       expect(await readFile(join(test.rootPath, "inside.md"), "utf8")).toBe(
         "inside\n",
       );
@@ -956,9 +970,9 @@ describe("WorkspaceFileMutationOwner", () => {
     await writeFile(join(test.rootPath, "from.md"), "source\n");
     await writeFile(join(test.rootPath, "to.md"), "destination\n");
     const finishRename = vi.fn(async () => undefined);
-    const beginFileRename = vi.fn(async () => finishRename);
+    const changePathsAs = observePathChanges(test);
     test.setCapture({
-      beginFileRename,
+      changePathsAs,
       settleAndCloseLiveSessionsForPath: vi.fn(async () => () => undefined),
     });
 
@@ -970,7 +984,7 @@ describe("WorkspaceFileMutationOwner", () => {
       }),
     ).rejects.toThrow("already exists");
 
-    expect(beginFileRename).not.toHaveBeenCalled();
+    expect(changePathsAs).not.toHaveBeenCalled();
     expect(finishRename).not.toHaveBeenCalled();
     expect(await readFile(join(test.rootPath, "from.md"), "utf8")).toBe(
       "source\n",
@@ -983,9 +997,9 @@ describe("WorkspaceFileMutationOwner", () => {
   it("refuses a live-document kind change before starting an engine rename", async () => {
     const test = await harness();
     await writeFile(join(test.rootPath, "drawing.excalidraw"), "{}\n");
-    const beginFileRename = vi.fn(async () => vi.fn(async () => undefined));
+    const changePathsAs = observePathChanges(test);
     test.setCapture({
-      beginFileRename,
+      changePathsAs,
       settleAndCloseLiveSessionsForPath: vi.fn(async () => () => undefined),
     });
 
@@ -998,7 +1012,7 @@ describe("WorkspaceFileMutationOwner", () => {
     ).rejects.toThrow(
       "A rename cannot change a live document's kind from scene to richdoc. Create a new file and copy the content instead.",
     );
-    expect(beginFileRename).not.toHaveBeenCalled();
+    expect(changePathsAs).not.toHaveBeenCalled();
   });
 
   it("refuses a live-document kind change in a received share", async () => {
@@ -1218,6 +1232,7 @@ describe("WorkspaceFileMutationOwner", () => {
         throw new Error("OS trash unavailable");
       },
     });
+    await openedLocalState(test.workspace);
     await mkdir(join(test.rootPath, "notes"));
     await writeFile(join(test.rootPath, "notes/a.md"), "text\n");
     const markDeleted = vi.fn(() => trace.push("marked-deleted"));
@@ -1226,7 +1241,6 @@ describe("WorkspaceFileMutationOwner", () => {
       trace.push(`finish-debts:${removed}`);
     });
     test.setCapture({
-      beginFileRename: vi.fn(async () => vi.fn(async () => undefined)),
       settleAndCloseLiveSessionsForPath: vi.fn(async (path) => {
         trace.push(`settle:${path}`);
         return finishDebts;
@@ -1248,7 +1262,7 @@ describe("WorkspaceFileMutationOwner", () => {
     ]);
     expect(markDeleted).toHaveBeenCalledOnce();
     await expect(access(join(test.rootPath, "notes"))).rejects.toThrow();
-    const trashEntries = await readdir(join(test.rootPath, ".dohc/trash"));
+    const trashEntries = await readdir(join(test.rootPath, ".dohc/local/trash"));
     expect(trashEntries.filter(name => name.startsWith("delete-"))).toHaveLength(1);
     expect(trashEntries.filter(name => !name.startsWith("delete-"))).toHaveLength(1);
   });
@@ -1259,8 +1273,8 @@ describe("WorkspaceFileMutationOwner", () => {
     const test = await harness({
       beforeOperation: async () => { entered.resolve(); await release.promise; },
     });
+    await openedLocalState(test.workspace);
     test.setCapture({
-      beginFileRename: vi.fn(async () => vi.fn(async () => undefined)),
       settleAndCloseLiveSessionsForPath: vi.fn(async () => () => undefined),
     });
     await writeFile(join(test.rootPath, "alice.md"), "text\n");
@@ -1281,6 +1295,7 @@ describe("WorkspaceFileMutationOwner", () => {
         throw new Error("OS trash unavailable");
       },
     });
+    await openedLocalState(test.workspace);
     await mkdir(join(test.rootPath, "notes"));
     await writeFile(join(test.rootPath, "notes/a.md"), "text\n");
     // No engine capture: nothing records the delete, and nothing refuses it.
@@ -1289,8 +1304,8 @@ describe("WorkspaceFileMutationOwner", () => {
       relativePath: "notes",
     })).resolves.toEqual({ trashed: false, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/u), undo: { available: true } });
     await expect(access(join(test.rootPath, "notes"))).rejects.toThrow();
-    const [entry] = await readdir(join(test.rootPath, ".dohc/trash"));
-    expect(await readFile(join(test.rootPath, ".dohc/trash", entry!, "a.md"), "utf8")).toBe("text\n");
+    const [entry] = await readdir(join(test.rootPath, ".dohc/local/trash"));
+    expect(await readFile(join(test.rootPath, ".dohc/local/trash", entry!, "a.md"), "utf8")).toBe("text\n");
     expect(test.markDeletedUnderPath).toHaveBeenCalledWith(test.authorityId, "notes");
     expect(test.deletedBy).toEqual([]);
   });
@@ -1298,6 +1313,7 @@ describe("WorkspaceFileMutationOwner", () => {
   it("settles and marks an alias delete by its physical path", async () => {
     const trace: string[] = [];
     const test = await harness();
+    await openedLocalState(test.workspace);
     await mkdir(join(test.rootPath, "notes"));
     await writeFile(join(test.rootPath, "notes/a.md"), "text\n");
     await symlink(
@@ -1315,7 +1331,6 @@ describe("WorkspaceFileMutationOwner", () => {
       return finishDebts;
     });
     test.setCapture({
-      beginFileRename: vi.fn(async () => vi.fn(async () => undefined)),
       settleAndCloseLiveSessionsForPath,
     });
 
@@ -1342,7 +1357,6 @@ describe("WorkspaceFileMutationOwner", () => {
     const markDeleted = vi.fn();
     await openYDoc(test, "notes/a.md", markDeleted);
     test.setCapture({
-      beginFileRename: vi.fn(async () => vi.fn(async () => undefined)),
       settleAndCloseLiveSessionsForPath: vi.fn(async () => {
         throw new Error("dohc could not delete notes. This action is unavailable for shared live files.");
       }),
@@ -1354,7 +1368,7 @@ describe("WorkspaceFileMutationOwner", () => {
     expect(trashItem).not.toHaveBeenCalled();
     expect(markDeleted).not.toHaveBeenCalled();
     expect(await readFile(join(test.rootPath, "notes/a.md"), "utf8")).toBe("text\n");
-    await expect(access(join(test.rootPath, ".dohc/trash"))).rejects.toThrow();
+    await expect(access(join(test.rootPath, ".dohc/local/trash"))).rejects.toThrow();
   });
 
   it("does not mark a Y.Doc deleted when both recovery paths fail", async () => {
@@ -1365,14 +1379,13 @@ describe("WorkspaceFileMutationOwner", () => {
     });
     await mkdir(join(test.rootPath, "notes"));
     await writeFile(join(test.rootPath, "notes/a.md"), "text\n");
-    await mkdir(join(test.rootPath, ".dohc"));
-    await writeFile(join(test.rootPath, ".dohc/trash"), "not a folder");
+    await openedLocalState(test.workspace);
+    await writeFile(join(test.rootPath, ".dohc/local/trash"), "not a folder");
     const markDeleted = vi.fn();
     await openYDoc(test, "notes/a.md", markDeleted);
     const finishDebts = vi.fn();
     const settleAndCloseLiveSessionsForPath = vi.fn(async () => finishDebts);
     test.setCapture({
-      beginFileRename: vi.fn(async () => vi.fn(async () => undefined)),
       settleAndCloseLiveSessionsForPath,
     });
 
@@ -1656,20 +1669,30 @@ describe("WorkspaceFileMutationOwner", () => {
   });
 });
 
-it("admits operation Undo through the mutation owner and refuses other operations without an engine Undo", async () => {
+it("admits operation Undo through the mutation owner and refuses missing recovery records", async () => {
   const h = await harness();
   const payload = { workspaceId: h.workspace.workspaceId, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111" };
   await expect(h.owner.undoHistoryOperation({ trusted: false }, payload)).rejects.toThrow();
   await expect(h.owner.undoHistoryOperation(trustedEvent, { ...payload, workspaceId: "other" })).rejects.toThrow();
   await expect(h.owner.undoHistoryOperation(trustedEvent, { ...payload, operationId: "11111111-1111-4111-8111-111111111111" })).rejects.toThrow();
   expect(h.history.readHistoryPage).not.toHaveBeenCalled();
-  expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual({ ok: false, reason: "Cannot undo this change yet. Only a delete can be undone." });
+  expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual({ ok: false, reason: "Cannot undo the rename. Its recovery record is missing or expired. Rename it back yourself." });
   h.history.readHistoryPage.mockResolvedValue({ moments: [{ operation: "delete", path: "a.txt" }], nextCursor: null } as never);
-  expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." });
+  expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History, the system trash, or .dohc/local/trash." });
   expect(h.history.undoHistoryOperation).not.toHaveBeenCalled();
   h.workspace.readOnly = true;
   expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual({ ok: false, reason: "History operations require the owning workspace. Open it to continue." });
   h.workspace.readOnly = false;
   h.workspace.shareView = { access: "read-only" };
   expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual({ ok: false, reason: "History operations require the owning workspace. Open it to continue." });
+});
+
+it("returns a person's move operation and successfully undoes it without capture", async () => {
+  const h = await harness(); await openedLocalState(h.workspace); await writeFile(join(h.rootPath, "before.txt"), "body");
+  const moved = await h.owner.movePath(trustedEvent, { workspaceId: h.workspace.workspaceId, fromPath: "before.txt", toPath: "after.txt" });
+  expect(moved).toMatchObject({ path: "after.txt", operationId: expect.stringMatching(/^dohc-operation:/), undo: { available: true } });
+  await waitForRecovery(moved.operationId!);
+  expect(await h.owner.undoHistoryOperation(trustedEvent, { workspaceId: h.workspace.workspaceId, operationId: moved.operationId! })).toMatchObject({ ok: true, restored: ["before.txt"], remaining: [] });
+  expect(await readFile(join(h.rootPath, "before.txt"), "utf8")).toBe("body");
+  expect((await readdir(join(h.rootPath, ".dohc/local/trash"))).filter(name => /^move-[a-f0-9]{64}\.json$/u.test(name))).toHaveLength(1);
 });

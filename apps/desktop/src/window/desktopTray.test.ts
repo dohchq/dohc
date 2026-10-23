@@ -29,6 +29,7 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
   await configure(true);
   const service = createChatDispatchService({
     workspaceFor: () => null, listOpenWorkspaces: () => [], listSyncWorkspaces: () => [],
+    assertMayStartAgent: async () => () => undefined,
     chatStoreFor: () => { throw new Error("No workspace should be opened"); },
     dispatchStoreFor: () => { throw new Error("No dispatch store should be opened"); },
     readRunnerSettings: async () => (await readCachedUserSettingsFile(stateRoot)).settings.runner,
@@ -55,10 +56,9 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
     constructor(readonly image: Image) { created.push(this); }
     on(event: "double-click", listener: () => void) { this.listeners.set(event, listener); return this; }
   }
-  const app = { isPackaged: packaged, getAppPath: () => root, quit: vi.fn(), dock: { setIcon: vi.fn((_path: string) => undefined) } };
+  const app = { isPackaged: packaged, getAppPath: () => root, quit: vi.fn() };
   const runtime = { platform, resourcesPath: resourcesPath as string | undefined };
   const theme = { shouldUseDarkColors: false };
-  const windows = [{ setIcon: vi.fn((_path: string) => undefined) }];
   const readSettings = vi.fn(readCachedUserSettingsFile);
   const createImage = vi.fn((path: string) => new Image(path));
   const buildMenu = vi.fn((template: MenuItemConstructorOptions[]) => template);
@@ -68,7 +68,6 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
   const owner = createDesktopTray({
     app, process: runtime, moduleDirectory, Menu: { buildFromTemplate: buildMenu },
     nativeImage: { createFromPath: createImage }, nativeTheme: theme, Tray,
-    BrowserWindow: { getAllWindows: () => windows },
     readCachedUserSettingsFile: readSettings, stateDir: () => stateRoot,
     chatDispatchService: service, showOrCreateMainWindow: showWindow,
     runningSchedules: () => schedules,
@@ -76,7 +75,7 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
   });
   lifecycle = { isQuitting: () => false };
   return {
-    root, iconRoot, resourcesPath, stateRoot, created, service, app, runtime, theme, windows,
+    root, iconRoot, resourcesPath, stateRoot, created, service, app, runtime, theme,
     owner, readSettings, createImage, emptyPaths, buildMenu, showWindow, configure,
     asset: async (name: string) => { const path = join(iconRoot, name); await writeFile(path, "native image fixture"); return path; },
     setLifecycle: (value: { isQuitting(): boolean }) => { lifecycle = value; },
@@ -160,40 +159,37 @@ describe("desktop tray owner", () => {
     expect(h.created).toHaveLength(1);
   });
 
-  it.each(["win32", "linux"] as const)("refreshes all current %s window icons and the existing tray from the live theme", async (platform) => {
+  it.each(["win32", "linux"] as const)("refreshes the existing %s tray from the live theme", async (platform) => {
     const h = await harness(platform);
     await h.asset("icon-light.png");
     const dark = await h.asset("icon-dark.png");
     await h.owner.refreshDispatchTray();
-    const nextWindow = { setIcon: vi.fn((_path: string) => undefined) };
-    h.windows.push(nextWindow);
     h.theme.shouldUseDarkColors = true;
-    h.owner.refreshSystemThemeDesktopIcons();
-    for (const window of h.windows) expect(window.setIcon).toHaveBeenCalledWith(dark);
-    expect(h.app.dock.setIcon).not.toHaveBeenCalled();
+    h.owner.refreshTrayIcon();
     expect(h.created[0]!.setImage.mock.calls[0]?.[0].path).toBe(dark);
     expect(h.created).toHaveLength(1);
   });
 
-  it("uses the macOS Dock and marks both initial and refreshed tray images as templates", async () => {
-    const h = await harness("darwin", true);
-    const light = await h.asset("icon-light.png");
-    const dark = await h.asset("icon-dark.png");
+  it.each([false, true])("gives the macOS menu bar the template image whatever the theme (packaged: %s)", async (packaged) => {
+    const h = await harness("darwin", packaged);
+    await h.asset("icon-light.png");
+    await h.asset("icon-dark.png");
+    const template = await h.asset("trayTemplate.png");
     await h.owner.refreshDispatchTray();
-    expect(h.created[0]!.image.path).toBe(light);
+    expect(h.created[0]!.image.path).toBe(template);
     expect(h.created[0]!.image.setTemplateImage).toHaveBeenCalledWith(true);
     h.theme.shouldUseDarkColors = true;
-    h.owner.refreshSystemThemeDesktopIcons();
-    expect(h.app.dock.setIcon).toHaveBeenCalledWith(dark);
-    expect(h.windows[0]!.setIcon).not.toHaveBeenCalled();
-    expect(h.created[0]!.setImage.mock.calls[0]?.[0].setTemplateImage).toHaveBeenCalledWith(true);
+    h.owner.refreshTrayIcon();
+    const refreshed = h.created[0]!.setImage.mock.calls[0]?.[0];
+    expect(refreshed?.path).toBe(template);
+    expect(refreshed?.setTemplateImage).toHaveBeenCalledWith(true);
   });
 
-  it("refreshes system icons before a tray exists without creating one", async () => {
+  it("refreshes the tray icon before a tray exists without creating one", async () => {
     const h = await harness();
-    const light = await h.asset("icon-light.png");
-    h.owner.refreshSystemThemeDesktopIcons();
-    expect(h.windows[0]!.setIcon).toHaveBeenCalledWith(light);
+    await h.asset("icon-light.png");
+    h.owner.refreshTrayIcon();
+    expect(h.createImage).not.toHaveBeenCalled();
     expect(h.created).toEqual([]);
     expect(h.readSettings).not.toHaveBeenCalled();
   });
@@ -211,8 +207,7 @@ describe("desktop tray owner", () => {
     const fallback = await h.asset("tray-icon.png");
     await h.owner.refreshDispatchTray();
     expect(h.created[0]!.image.path).toBe(fallback);
-    h.owner.refreshSystemThemeDesktopIcons();
-    expect(h.windows[0]!.setIcon).not.toHaveBeenCalled();
+    h.owner.refreshTrayIcon();
     expect(h.created[0]!.setImage.mock.calls[0]?.[0].path).toBe(fallback);
   });
 

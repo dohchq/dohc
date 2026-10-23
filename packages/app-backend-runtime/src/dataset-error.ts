@@ -3,3 +3,10 @@ export class DatasetHostError extends Error {
     super(message); this.name = "DatasetHostError";
   }
 }
+
+export class DatasetBindingPendingAttemptError extends DatasetHostError {
+  constructor() {
+    super("conflict", "A response is pending in another app. Confirm it there before publishing this app.");
+    this.name = "DatasetBindingPendingAttemptError";
+  }
+}

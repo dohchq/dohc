@@ -77,6 +77,9 @@ struct WorkspaceConfig {
 
 impl WorkspaceConfig {
     fn canonicalize(&mut self) -> Result<(), WireError> {
+        if let Some(relay) = &self.relay {
+            relay.validate_transport(false)?;
+        }
         ApplicationOwner::new(self.workspace_id.clone())
             .map_err(|_| invalid("invalid live host workspace identity"))?;
         if !self.root.is_absolute() || self.max_registrations == 0 {
@@ -481,11 +484,11 @@ impl EngineService {
         }
         if let Some(adoption) = &discovery.adoption {
             let opened = self.open(Some(handle))?;
-            let db_path = opened.db_path.clone();
+            let held = opened.actor.location();
             let workspace_id = workspace.workspace_id.clone();
             let limits = adoption.owner_outbox.clone();
             let mismatch = tokio::task::spawn_blocking(move || {
-                let store = dohc_engine_storage::EngineStore::open_read_only(&db_path).map_err(|_|invalid("owner adoption budget read failed"))?;
+                let store = dohc_engine_storage::EngineStore::open_read_only(held.database_path()).map_err(|_|invalid("owner adoption budget read failed"))?;
                 store.read_with(|conn| dohc_engine_collab::live_update_application::owner_activations::retained_limits_exceed(
                     conn,&workspace_id,limits.max_pending_bytes,limits.max_pending_age_ms))
                     .map_err(|_|invalid("owner adoption budget read failed"))
@@ -820,6 +823,20 @@ mod tests {
             "workspaces": roots.iter().map(|(root,id)| json!({"root":root,"workspaceId":id,"maxRegistrations":4})).collect::<Vec<_>>(),
             "ingress":{"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,"maxUploads":2,"uploadDeadlineMs":30_000}
         })).unwrap()
+    }
+
+    #[test]
+    fn configured_host_refuses_socket_transport_and_requires_base_url() {
+        let root = dohc_engine_testkit::ScratchDir::new().unwrap();
+        for relay in [
+            json!({"socketPath":"/private/relay.sock","bearerToken":"lease"}),
+            json!({"baseUrl":"https://relay.test","socketPath":"/private/relay.sock","bearerToken":"lease"}),
+            json!({"bearerToken":"owner"}),
+        ] {
+            let mut configured = config(&[(root.path(), "workspace")]);
+            configured.workspaces[0].relay = Some(serde_json::from_value(relay).unwrap());
+            assert!(configured.canonicalize_and_validate().is_err());
+        }
     }
 
     async fn close(service: &EngineService) {

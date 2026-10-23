@@ -7,7 +7,8 @@ use dohc_engine_files::media::is_text_media_type;
 use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
 use dohc_engine_files::{
     BatchIngestResult, CaptureError, CaptureOp, CaptureSink, IngestOutcome, IngestReason,
-    MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES,
+    MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES, RespelledRetire, Respelling, RetireOutcome,
+    stored_under_other_spelling,
 };
 use dohc_engine_runtime::actor::CapturePlacementPath;
 use dohc_engine_runtime::search::{
@@ -19,7 +20,7 @@ use dohc_engine_runtime::{
     MAX_CAPTURE_INGEST_BATCH_OPS, NoFaults, RuntimeError, WorkspaceRootGuard,
 };
 use dohc_engine_storage::hex_sha256;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
@@ -39,8 +40,16 @@ const INGEST_FAILED: CaptureError = CaptureError {
 const BINARY_INGEST_FAILED: CaptureError = CaptureError {
     reason: "capture binary ingest failed",
 };
+/// A respelled path's retire that must wait, as while an editor holds it.
+const RESPELLED_RETIRE_WAITS: CaptureError = CaptureError {
+    reason: "respelled-retire-waits",
+};
 const RETIRE_FAILED: CaptureError = CaptureError {
     reason: "capture retire failed",
+};
+/// A deleted file's retire that waits for the document session holding it.
+const RETIRE_HELD: CaptureError = CaptureError {
+    reason: "retire-held-by-live-session",
 };
 const ESCAPES_ROOT: CaptureError = CaptureError {
     reason: "capture path did not resolve through real ancestors inside the workspace root",
@@ -80,6 +89,14 @@ pub struct CaptureProvenance {
     pub summary: Option<String>,
     pub correlation_id: Option<String>,
 }
+
+#[derive(Clone, Debug)]
+pub(crate) struct DeferredWrite {
+    sha256: String,
+    author_json: Option<String>,
+}
+
+pub(crate) type DeferredWrites = BTreeMap<String, DeferredWrite>;
 
 /// Single-shot identities of daemon-materialized Y.Doc projections. Capture
 /// consumes a matching `(workspace, path, sha)` observation instead of
@@ -295,6 +312,7 @@ pub struct StoreCaptureSink {
     captured_root: Result<Arc<CapturedRoot>, CaptureError>,
     now_ms: i64,
     author_json: Option<String>,
+    deferred_writes: std::cell::RefCell<DeferredWrites>,
     search_policy: Arc<SearchPolicySnapshot>,
     files_policy: PolicyState,
     /// Set when any op this run was held on an unavailable policy. The driver
@@ -406,6 +424,7 @@ impl StoreCaptureSink {
             now_ms,
             author_json,
             search_policy: snapshot,
+            deferred_writes: std::cell::RefCell::new(DeferredWrites::new()),
             files_policy,
             policy_held: std::cell::Cell::new(false),
             automation_claims: std::cell::RefCell::new(Vec::new()),
@@ -414,6 +433,32 @@ impl StoreCaptureSink {
             self_writes,
             provenance,
         }
+    }
+
+    pub(crate) fn set_deferred_writes(&mut self, writes: DeferredWrites) {
+        *self.deferred_writes.get_mut() = writes;
+    }
+
+    pub(crate) fn take_deferred_writes(&mut self) -> DeferredWrites {
+        std::mem::take(self.deferred_writes.get_mut())
+    }
+
+    fn author_for_write(&self, path: &str, sha256: &str) -> Option<String> {
+        match self.deferred_writes.borrow().get(path) {
+            Some(waiting) if waiting.sha256 == sha256 => waiting.author_json.clone(),
+            _ => self.author_json.clone(),
+        }
+    }
+
+    fn remember_deferred_write(&self, path: &str, sha256: &str) {
+        let author_json = self.author_for_write(path, sha256);
+        self.deferred_writes.borrow_mut().insert(
+            path.to_owned(),
+            DeferredWrite {
+                sha256: sha256.to_owned(),
+                author_json,
+            },
+        );
     }
 
     #[cfg(test)]
@@ -469,7 +514,8 @@ impl StoreCaptureSink {
             // a renamed-and-recreated workspace cannot supply or receive this
             // workspace's encryption key.
             self.require_captured_root()?;
-            let loaded = load_key_file(&self.shadow_root).map_err(|_| SECRET_KEY_UNAVAILABLE)?;
+            let loaded =
+                load_key_file(self.actor.store_folder()).map_err(|_| SECRET_KEY_UNAVAILABLE)?;
             self.require_captured_root()?;
             let key = match loaded {
                 Some(key) => key,
@@ -488,8 +534,8 @@ impl StoreCaptureSink {
                         return Err(SECRET_KEY_UNAVAILABLE);
                     }
                     self.require_captured_root()?;
-                    let key =
-                        create_key_file(&self.shadow_root).map_err(|_| SECRET_KEY_UNAVAILABLE)?;
+                    let key = create_key_file(self.actor.store_folder())
+                        .map_err(|_| SECRET_KEY_UNAVAILABLE)?;
                     self.require_captured_root()?;
                     key
                 }
@@ -610,6 +656,7 @@ impl StoreCaptureSink {
         &self,
         path: &str,
         text: String,
+        sha256: &str,
         claim_foreign_head: bool,
     ) -> Result<DomainIngest, CaptureError> {
         let result = self.actor.capture_ingest_with_search_policy_blocking(
@@ -621,7 +668,7 @@ impl StoreCaptureSink {
                 metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
                 metadata_summary: self.provenance.summary.clone(),
                 metadata_correlation_id: self.provenance.correlation_id.clone(),
-                author_json: self.author_json.clone(),
+                author_json: self.author_for_write(path, sha256),
                 now_ms: self.now_ms,
                 request_id: None,
                 claim_foreign_head,
@@ -668,6 +715,7 @@ impl StoreCaptureSink {
                 Ok(DomainIngest::ForeignHead)
             }
             Err(error) if held_as_new_file(&error) => Ok(DomainIngest::HeldAsNewFile),
+            Err(error) if write_waits_for_session(&error) => Ok(DomainIngest::WriteDeferred),
             Err(RuntimeError::CaptureFileHeld { .. }) => Ok(DomainIngest::Held),
             Err(_) => Err(INGEST_FAILED),
         }
@@ -677,6 +725,7 @@ impl StoreCaptureSink {
         &self,
         path: &str,
         bytes: Vec<u8>,
+        sha256: &str,
         claim_foreign_head: bool,
     ) -> Result<DomainIngest, CaptureError> {
         let result = self.actor.capture_ingest_binary_blocking(
@@ -688,7 +737,7 @@ impl StoreCaptureSink {
                 metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
                 metadata_summary: self.provenance.summary.clone(),
                 metadata_correlation_id: self.provenance.correlation_id.clone(),
-                author_json: self.author_json.clone(),
+                author_json: self.author_for_write(path, sha256),
                 now_ms: self.now_ms,
                 request_id: None,
                 claim_foreign_head,
@@ -727,6 +776,7 @@ impl StoreCaptureSink {
                 Ok(DomainIngest::ForeignHead)
             }
             Err(error) if held_as_new_file(&error) => Ok(DomainIngest::HeldAsNewFile),
+            Err(error) if write_waits_for_session(&error) => Ok(DomainIngest::WriteDeferred),
             Err(RuntimeError::CaptureFileHeld { .. }) => Ok(DomainIngest::Held),
             Err(_) => Err(BINARY_INGEST_FAILED),
         }
@@ -898,14 +948,48 @@ impl StoreCaptureSink {
         only_if_text_head: bool,
         summary: Option<String>,
     ) -> Result<(), CaptureError> {
-        self.retire_head_with(path, only_if_text_head, summary, true, false)
+        self.retire_head_with(path, only_if_text_head, summary, true, false, None)
     }
 
     /// Retire a head because its file is gone. The actor confirms the absence
     /// on its own thread and refuses while the file is back, so a replace
     /// caught between its two renames is never recorded as a delete.
     fn retire_absent_head(&self, path: &str, summary: Option<String>) -> Result<(), CaptureError> {
-        self.retire_head_with(path, false, summary, true, true)
+        self.retire_head_with(path, false, summary, true, true, None)
+    }
+
+    /// A deleted file's head waits while its document is open: the session
+    /// still holds it, refuses every save over the missing file, and the
+    /// person decides whether to save the file again.
+    fn retire_deleted(&self, path: &str) -> Result<RetireOutcome, CaptureError> {
+        match self.retire_absent_head(path, self.provenance.summary.clone()) {
+            Ok(()) => Ok(RetireOutcome::Retired),
+            Err(RETIRE_HELD) => Ok(RetireOutcome::Deferred),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Retire the head at a spelling the disk proves respelled to `to`. The
+    /// file is still there under the new spelling, so this is not a deletion;
+    /// the actor lets it retire a head capture does not own, such as one a
+    /// peer synced, while that head still holds the bytes found at `to`.
+    fn retire_respelled_head(
+        &self,
+        path: &str,
+        to: &Respelling,
+    ) -> Result<RespelledRetire, CaptureError> {
+        match self.retire_head_with(
+            path,
+            false,
+            self.provenance.summary.clone(),
+            true,
+            false,
+            Some(to),
+        ) {
+            Ok(()) => Ok(RespelledRetire::Retired),
+            Err(RESPELLED_RETIRE_WAITS) => Ok(RespelledRetire::Waits),
+            Err(error) => Err(error),
+        }
     }
 
     fn retire_head_with(
@@ -915,28 +999,42 @@ impl StoreCaptureSink {
         summary: Option<String>,
         allow_ydoc_origin: bool,
         confirm_absent: bool,
+        respelled_to: Option<&Respelling>,
     ) -> Result<(), CaptureError> {
         let root_guard = self.root_guard()?;
-        let result = self.actor.capture_retire_materialized_blocking_guarded(
-            CaptureRetire {
-                workspace_id: self.workspace_id.clone(),
-                version_id: self.version_id.clone(),
-                path: path.to_owned(),
-                metadata_summary: summary,
-                metadata_correlation_id: self.provenance.correlation_id.clone(),
-                now_ms: self.now_ms,
-                request_id: None,
-                only_if_text_head,
-                only_if_capture_origin: true,
-                allow_ydoc_origin,
-            },
-            self.shadow_root.clone(),
-            confirm_absent,
-            Arc::new(self.self_writes.clone()),
-            self.leases.clone(),
-            Arc::new(NoFaults),
-            root_guard,
-        );
+        let input = CaptureRetire {
+            workspace_id: self.workspace_id.clone(),
+            version_id: self.version_id.clone(),
+            path: path.to_owned(),
+            metadata_summary: summary,
+            metadata_correlation_id: self.provenance.correlation_id.clone(),
+            now_ms: self.now_ms,
+            request_id: None,
+            only_if_text_head,
+            only_if_capture_origin: true,
+            allow_ydoc_origin,
+        };
+        let result = match respelled_to {
+            Some(to) => self.actor.capture_retire_respelled_blocking_guarded(
+                input,
+                to.path.clone(),
+                to.sha256.clone(),
+                self.shadow_root.clone(),
+                Arc::new(self.self_writes.clone()),
+                self.leases.clone(),
+                Arc::new(NoFaults),
+                root_guard,
+            ),
+            None => self.actor.capture_retire_materialized_blocking_guarded(
+                input,
+                self.shadow_root.clone(),
+                confirm_absent,
+                Arc::new(self.self_writes.clone()),
+                self.leases.clone(),
+                Arc::new(NoFaults),
+                root_guard,
+            ),
+        };
         match self.batch_retry.observe(result) {
             Ok(result) => {
                 if result.pending_placement {
@@ -952,6 +1050,17 @@ impl StoreCaptureSink {
             // A name the store refuses to address can never hold a head;
             // there is nothing to retire.
             Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => Ok(()),
+            Err(RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { .. }))
+                if respelled_to.is_some() =>
+            {
+                Err(RESPELLED_RETIRE_WAITS)
+            }
+            Err(RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { reason }))
+                if confirm_absent
+                    && reason == dohc_engine_runtime::actor::CAPTURE_RETIRE_WAITS_FOR_SESSION =>
+            {
+                Err(RETIRE_HELD)
+            }
             Err(_) => Err(RETIRE_FAILED),
         }
     }
@@ -968,36 +1077,34 @@ enum DomainIngest {
     /// A live session holds a file the store has no head for. See
     /// [`held_new_file_outcome`] for when that defers.
     HeldAsNewFile,
+    /// A recorded file's outside bytes wait for its live session to release.
+    WriteDeferred,
     Held,
 }
 
-/// A live session holds a file the store has no head for yet. Capture defers
-/// it only while the file is still empty, as a new file is when an editor
-/// opens it: the session's first settle writes the head and the file together.
-/// Any bytes on disk before then came from outside the session, and its settle
-/// would refuse them as a stale target, so nothing would ever record them.
-/// That stays a failed ingest, so capture stays unsettled and keeps the
-/// writer's author until the lease is released and capture records it.
+/// Empty new files wait for the editor's first settle. Nonempty bytes wait
+/// as an outside write, without failing the capture pass.
 fn held_new_file_outcome(size: u64) -> Result<IngestOutcome, CaptureError> {
     if size == 0 {
         Ok(IngestOutcome::Deferred)
     } else {
-        Err(INGEST_FAILED)
+        Ok(IngestOutcome::WriteDeferred)
     }
 }
 
-/// The store refuses to capture a path whose document a live session holds.
-/// For a file the store has no head for, the session owns the content and its
-/// settle creates the head, whether capture sees the file for the first time
-/// or saw an earlier file at the path whose head was since deleted; see
-/// [`held_new_file_outcome`]. Every other refusal stays a failure, so disk
-/// text nothing records keeps the layer unsettled.
+/// A session holds a file without a store head. Empty files wait for its first
+/// settle; outside bytes wait for release. Internal leases fail and retry.
 fn held_as_new_file(error: &RuntimeError) -> bool {
     matches!(
         error,
         RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { reason })
             if *reason == dohc_engine_runtime::CAPTURE_NEW_FILE_LIVE
     )
+}
+
+fn write_waits_for_session(error: &RuntimeError) -> bool {
+    matches!(error, RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { reason })
+        if *reason == dohc_engine_runtime::actor::CAPTURE_WRITE_WAITS_FOR_SESSION)
 }
 
 struct PreparedTextCapture {
@@ -1184,7 +1291,7 @@ impl StoreCaptureSink {
                 metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
                 metadata_summary: self.provenance.summary.clone(),
                 metadata_correlation_id: self.provenance.correlation_id.clone(),
-                author_json: self.author_json.clone(),
+                author_json: self.author_for_write(candidate.path, &prepared.sha256),
                 now_ms: self.now_ms,
                 request_id: None,
                 claim_foreign_head: false,
@@ -1231,8 +1338,8 @@ impl StoreCaptureSink {
         let mut inputs = Vec::with_capacity(batch.len());
         let mut identities = Vec::with_capacity(batch.len());
         for prepared in batch {
+            identities.push((prepared.input.path.clone(), prepared.size, prepared.sha256));
             inputs.push(prepared.input);
-            identities.push((prepared.size, prepared.sha256));
         }
         // Each attempt rechecks live leases and preserves uncovered Y.Doc recovery.
         // The receipt records these bytes' hash, so the watcher or next scan
@@ -1256,7 +1363,7 @@ impl StoreCaptureSink {
         match results {
             Ok(results) if results.len() == identities.len() => {
                 let mut outcomes = Vec::with_capacity(results.len());
-                for (result, (size, sha256)) in results.into_iter().zip(identities) {
+                for (result, (path, size, sha256)) in results.into_iter().zip(identities) {
                     outcomes.push(match result {
                         Ok(result) => {
                             if result.pending_placement {
@@ -1287,7 +1394,16 @@ impl StoreCaptureSink {
                         Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => {
                             Ok(IngestOutcome::NotOwned)
                         }
-                        Err(error) if held_as_new_file(&error) => held_new_file_outcome(size),
+                        Err(error) if held_as_new_file(&error) => {
+                            if size > 0 {
+                                self.remember_deferred_write(&path, &sha256);
+                            }
+                            held_new_file_outcome(size)
+                        }
+                        Err(error) if write_waits_for_session(&error) => {
+                            self.remember_deferred_write(&path, &sha256);
+                            Ok(IngestOutcome::WriteDeferred)
+                        }
                         Err(RuntimeError::CaptureFileHeld { .. }) => {
                             Ok(IngestOutcome::Held { size, sha256 })
                         }
@@ -1319,7 +1435,7 @@ impl StoreCaptureSink {
 
     /// Retire a path the current policy excludes, without the absence check.
     ///
-    /// The driver calls this for `retained_over_cap` paths: they are still on
+    /// The driver calls this for `retained_unread` paths: they are still on
     /// disk by definition (that is why the scanner retained them), so the
     /// public [`CaptureSink::retire`] would refuse with a reappearance
     /// guard and the narrowed head would survive forever. Policy exclusion is
@@ -1491,13 +1607,20 @@ impl CaptureSink for StoreCaptureSink {
                 if changed && self.self_writes.consume(&self.workspace_id, path, &sha256) {
                     return Ok(IngestOutcome::Captured { size, sha256 });
                 }
-                match self.ingest_text(path, text, claim_foreign_head)? {
+                let disposition = self.ingest_text(path, text, &sha256, claim_foreign_head)?;
+                if matches!(disposition, DomainIngest::WriteDeferred)
+                    || (size > 0 && matches!(disposition, DomainIngest::HeldAsNewFile))
+                {
+                    self.remember_deferred_write(path, &sha256);
+                }
+                match disposition {
                     DomainIngest::Persisted => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::NameRefused => Ok(IngestOutcome::NotOwned),
                     // Foreign head left intact: track the disk identity so the
                     // next genuine edit arrives as `Changed` and is captured.
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::HeldAsNewFile => held_new_file_outcome(size),
+                    DomainIngest::WriteDeferred => Ok(IngestOutcome::WriteDeferred),
                     DomainIngest::Held => {
                         self.self_writes.clear_path(&self.workspace_id, path);
                         Ok(IngestOutcome::Held { size, sha256 })
@@ -1508,13 +1631,17 @@ impl CaptureSink for StoreCaptureSink {
                 // Raced a delete between scan and re-read: retire like an
                 // ordinary delete (pass provenance; no ownership label), and
                 // report NotOwned so the manifest forgets the path. A refused
-                // retire keeps the self-write identity: the file is back, and
-                // the rescan may find dohc's own bytes.
-                self.retire_absent_head(path, self.provenance.summary.clone())?;
-                if changed {
-                    self.self_writes.clear_path(&self.workspace_id, path);
+                // or deferred retire keeps the self-write identity: the file
+                // can come back, and the rescan may find dohc's own bytes.
+                match self.retire_deleted(path)? {
+                    RetireOutcome::Retired => {
+                        if changed {
+                            self.self_writes.clear_path(&self.workspace_id, path);
+                        }
+                        Ok(IngestOutcome::NotOwned)
+                    }
+                    RetireOutcome::Deferred => Ok(IngestOutcome::RetireDeferred),
                 }
-                Ok(IngestOutcome::NotOwned)
             }
             CurrentContent::NonOwnable => {
                 if changed {
@@ -1548,6 +1675,7 @@ impl CaptureSink for StoreCaptureSink {
                     Some("Stopped tracking non-text content".to_owned()),
                     false,
                     false,
+                    None,
                 )?;
                 Ok(IngestOutcome::NotOwned)
             }
@@ -1562,24 +1690,31 @@ impl CaptureSink for StoreCaptureSink {
                 // same file bytes.
                 let size = bytes.len() as u64;
                 let sha256 = hex_sha256(&bytes);
-                match self.ingest_binary(path, bytes, claim_foreign_head)? {
+                let disposition = self.ingest_binary(path, bytes, &sha256, claim_foreign_head)?;
+                if matches!(disposition, DomainIngest::WriteDeferred)
+                    || (size > 0 && matches!(disposition, DomainIngest::HeldAsNewFile))
+                {
+                    self.remember_deferred_write(path, &sha256);
+                }
+                match disposition {
                     DomainIngest::Persisted => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::NameRefused => Ok(IngestOutcome::NotOwned),
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::HeldAsNewFile => held_new_file_outcome(size),
+                    DomainIngest::WriteDeferred => Ok(IngestOutcome::WriteDeferred),
                     DomainIngest::Held => Ok(IngestOutcome::Held { size, sha256 }),
                 }
             }
         }
     }
 
-    fn retire(&mut self, path: &str) -> Result<(), CaptureError> {
+    fn retire(&mut self, path: &str) -> Result<RetireOutcome, CaptureError> {
         match classify_engine_file_path_normalized(path) {
-            (PathClassification::Ignored, _) => Ok(()),
+            (PathClassification::Ignored, _) => Ok(RetireOutcome::Retired),
             (PathClassification::Secret, normalized) => {
                 // Nothing was ever stored under a non-canonical literal name.
                 if normalized.as_deref() != Some(path) {
-                    return Ok(());
+                    return Ok(RetireOutcome::Retired);
                 }
                 // Apply-time absence confirmation, then the KEYLESS secret
                 // retire (a delete never decrypts). Mirrors the text arm's
@@ -1587,7 +1722,9 @@ impl CaptureSink for StoreCaptureSink {
                 let absolute = self.shadow_root.join(path);
                 match self.path_containment(path) {
                     Containment::Contained => {}
-                    Containment::Absent => return self.retire_secret(path),
+                    Containment::Absent => {
+                        return self.retire_secret(path).map(|()| RetireOutcome::Retired);
+                    }
                     Containment::Escaped => return Err(ESCAPES_ROOT),
                 }
                 match std::fs::symlink_metadata(&absolute) {
@@ -1596,6 +1733,7 @@ impl CaptureSink for StoreCaptureSink {
                     Err(err) if absent_error(&err) => self.retire_secret(path),
                     Err(_) => Err(SECRET_RETIRE_FAILED),
                 }
+                .map(|()| RetireOutcome::Retired)
             }
             (PathClassification::Tracked, Some(normalized)) if normalized == path => {
                 // Apply-time absence confirmation, mirroring both the TS
@@ -1611,26 +1749,43 @@ impl CaptureSink for StoreCaptureSink {
                 // tracked file gone; an escape retains last-known-good.
                 match self.path_containment(path) {
                     Containment::Contained => {}
-                    Containment::Absent => {
-                        return self.retire_absent_head(path, self.provenance.summary.clone());
-                    }
+                    Containment::Absent => return self.retire_deleted(path),
                     Containment::Escaped => return Err(ESCAPES_ROOT),
                 }
                 match std::fs::symlink_metadata(&absolute) {
                     Ok(metadata) if metadata.file_type().is_file() => Err(RETIRE_RACED),
                     // A non-regular replacement confirms the tracked regular
                     // file gone; absence confirms it outright.
-                    Ok(_) => self.retire_head(path, false, self.provenance.summary.clone()),
-                    Err(err) if absent_error(&err) => {
-                        self.retire_absent_head(path, self.provenance.summary.clone())
-                    }
+                    Ok(_) => self
+                        .retire_head(path, false, self.provenance.summary.clone())
+                        .map(|()| RetireOutcome::Retired),
+                    Err(err) if absent_error(&err) => self.retire_deleted(path),
                     // Indeterminate (permissions, locks): cannot prove
                     // absence — retain last-known-good, fail-safe.
                     Err(_) => Err(RETIRE_FAILED),
                 }
             }
             // Nothing was ever stored under a non-canonical literal name.
-            (PathClassification::Tracked, _) => Ok(()),
+            (PathClassification::Tracked, _) => Ok(RetireOutcome::Retired),
+        }
+    }
+
+    fn retire_respelled(
+        &mut self,
+        path: &str,
+        to: &Respelling,
+    ) -> Result<RespelledRetire, CaptureError> {
+        let respelled = matches!(
+            classify_engine_file_path_normalized(path),
+            (PathClassification::Tracked, Some(normalized)) if normalized == path
+        ) && matches!(self.path_containment(path), Containment::Contained)
+            && std::fs::symlink_metadata(self.shadow_root.join(path))
+                .is_ok_and(|metadata| metadata.file_type().is_file())
+            && stored_under_other_spelling(&self.shadow_root, path);
+        if respelled {
+            self.retire_respelled_head(path, to)
+        } else {
+            self.retire(path).map(RespelledRetire::from)
         }
     }
 }
@@ -1714,7 +1869,7 @@ fn read_contained_current(
     }
     // Between the capture cap and the SCAN cap (64 MiB) the scanner still
     // lists the file, so a grow-past-capture-cap lands here and retires.
-    // Past the scan cap the plan classifies it `retained_over_cap` and the
+    // Past the scan cap the plan classifies it `retained_unread` and the
     // sink is never called — deliberately not a retire: the ratified CAL-3
     // delta keeps last-known-good rather than
     // false-deleting live user data behind an operational scan bound.

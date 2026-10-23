@@ -1,9 +1,14 @@
-import { availableParallelism } from "node:os";
+import { realpathSync } from "node:fs";
+import { availableParallelism, tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 import { desktopTestFiles } from "./vitest.projects.ts";
+
+// macOS $TMPDIR is a link into /private. Tests that make folders under
+// os.tmpdir() must hold the path that code resolving links sees.
+if (process.platform !== "win32") process.env.TMPDIR = realpathSync(tmpdir());
 
 // At most 8 concurrent workers. Fifteen of these suites open their own temp
 // `.dohc/engine/engine.db`, and past roughly eight the filesystem is the

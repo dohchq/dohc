@@ -1,8 +1,19 @@
 import type { CommandId } from "../renderer/commands/commandRows";
+import type { ShortcutId } from "../shortcuts/shortcutRegistry";
 
 // Closed tuples and channel names shared by main, the bridge contract, and the
 // preload. This module has no runtime imports so main-side modules can read a tuple
 // without loading the whole contract.
+
+// Edit > Find on macOS. The shell hands each to the editor that has focus,
+// which runs what the shortcut of the same id runs.
+export const EDITOR_MENU_COMMANDS = [
+  "editor-find",
+  "editor-replace",
+  "find-again-next",
+  "find-again-previous",
+] as const satisfies readonly ShortcutId[];
+export type EditorMenuCommand = (typeof EDITOR_MENU_COMMANDS)[number];
 
 export const MENU_COMMANDS = [
   "new-file",
@@ -22,7 +33,14 @@ export const MENU_COMMANDS = [
   "install-update",
   "new-editor-group-right",
   "close-tab",
-] as const satisfies readonly (CommandId | "command-palette")[];
+  "next-tab",
+  "previous-tab",
+  ...EDITOR_MENU_COMMANDS,
+] as const satisfies readonly (CommandId | "command-palette" | EditorMenuCommand)[];
+
+export function isEditorMenuCommand(command: unknown): command is EditorMenuCommand {
+  return (EDITOR_MENU_COMMANDS as readonly unknown[]).includes(command);
+}
 
 // Explorer context menu: the renderer names what was right-clicked, main pops
 // a native menu built from main-owned labels over this closed set, and the
@@ -59,6 +77,17 @@ export const WORKBENCH_MENU_COMMANDS = [
   "toggle-theme",
   "unpin-app",
 ] as const;
+
+// How much one OS drag-in imports: up to 100 dropped items, up to 1,000
+// files and folders in all once dropped folders are opened, and up to 10,000
+// entries those folders hold that dohc leaves out, such as .DS_Store. The
+// bridge contract and the shell hold the first; the drag-in screen holds all.
+export const DROP_IMPORT_LIMITS = { items: 100, entries: 1000, skipped: 10_000 } as const;
+export const DROP_IMPORT_REFUSALS = {
+  items: `dohc imports up to ${DROP_IMPORT_LIMITS.items} dropped items at once. Drop fewer at a time.`,
+  entries: `dohc imports up to ${DROP_IMPORT_LIMITS.entries.toLocaleString("en-US")} files and folders from one drop. Drop fewer folders at a time.`,
+  skipped: `dohc reads up to ${DROP_IMPORT_LIMITS.skipped.toLocaleString("en-US")} files it leaves out, such as .DS_Store, in one drop. Drop fewer folders at a time.`,
+} as const;
 
 // Workspace content search streams batches main→renderer. The bounds mirror
 // workspaceSearch.ts (the producer); bridgeContract's SearchResultsEvent
@@ -130,8 +159,6 @@ export const CHANNELS = {
   createCollectionRecord: "desktop:create-collection-record",
   showExplorerMenu: "desktop:show-explorer-menu",
   showWorkbenchMenu: "desktop:show-workbench-menu",
-  readWorkspaceGraph: "desktop:read-workspace-graph",
-  getBacklinks: "desktop:get-backlinks",
   listWorkspaceHeadings: "desktop:list-workspace-headings",
   listCollections: "desktop:list-collections",
   getCollection: "desktop:get-collection",
@@ -142,7 +169,6 @@ export const CHANNELS = {
   readWorkspaceDatabase: "desktop:read-workspace-database",
   readWorkspaceDatabasePage: "desktop:read-workspace-database-page",
   applyDatabaseEdit: "desktop:apply-database-edit",
-  importToDatabase: "desktop:import-to-database",
   listSites: "desktop:list-sites",
   getSitePackage: "desktop:get-site-package",
   startSitePreview: "desktop:start-site-preview",
@@ -157,49 +183,21 @@ export const CHANNELS = {
   shareHandoffStatus: "desktop:share-handoff-status",
   cloudEnableSync: "desktop:cloud-enable-sync",
   cloudJoinWorkspace: "desktop:cloud-join-workspace",
-  createRelayShare: "desktop:create-relay-share",
-  listRelayShares: "desktop:list-relay-shares",
-  getRelayReceivedShare: "desktop:get-relay-received-share",
-  revokeRelayShare: "desktop:revoke-relay-share",
-  undoRelayShare: "desktop:undo-relay-share",
-  createRelayShareLink: "desktop:create-relay-share-link",
-  addRelayShareLink: "desktop:add-relay-share-link",
-  listRelayShareLinks: "desktop:list-relay-share-links",
-  ownerRestore: "desktop:owner-restore",
-  listOwnerLiveDocuments: "desktop:list-owner-live-documents",
-  listOwnerLiveRefusals: "desktop:list-owner-live-refusals",
-  retryOwnerLiveShare: "desktop:retry-owner-live-share",
-  stopOwnerLiveDocument: "desktop:stop-owner-live-document",
-  resumeOwnerLiveDocument: "desktop:resume-owner-live-document",
   publishOwnerApp: "desktop:publish-owner-app",
   ownerAppResponses: "desktop:owner-app-responses",
-  dataset: "desktop:dataset",
-  retuneRelayShareLink: "desktop:retune-relay-share-link",
-  rotateRelayShareLink: "desktop:rotate-relay-share-link",
-  revokeRelayShareLink: "desktop:revoke-relay-share-link",
-  listRelayShareDiscussion: "desktop:list-relay-share-discussion",
-  pollRelayShareDiscussionActivity:
-    "desktop:poll-relay-share-discussion-activity",
-  cancelRelayShareDiscussionActivity:
-    "desktop:cancel-relay-share-discussion-activity",
-  appendRelayShareDiscussion: "desktop:append-relay-share-discussion",
-  deleteRelayShareDiscussionMessage:
-    "desktop:delete-relay-share-discussion-message",
-  blockRelayShareDiscussionPrincipal:
-    "desktop:block-relay-share-discussion-principal",
-  unblockRelayShareDiscussionPrincipal:
-    "desktop:unblock-relay-share-discussion-principal",
-  pauseRelayShareDiscussion: "desktop:pause-relay-share-discussion",
-  resumeRelayShareDiscussion: "desktop:resume-relay-share-discussion",
-  promoteRelayShareGrant: "desktop:promote-relay-share-grant",
-  revokeRelayShareGrant: "desktop:revoke-relay-share-grant",
   // An automation claim failed or a retry queued one: run history reads again.
   automationRunsChanged: "desktop:automation-runs-changed",
   // The crash report changed; the renderer reads it again.
   crashReportChanged: "desktop:crash-report-changed",
+  // The offline copies an account change left changed; the renderer reads them again.
+  collectionCopiesLeftChanged: "desktop:collection-copies-left-changed",
+  workspaceTrustChanged: "desktop:workspace-trust-changed",
   // A timed save stopped counting, because the usage record changed outside dohc.
   usageRecordStopped: "desktop:usage-record-stopped",
   noticesChanged: "desktop:notices-changed",
+  // Main wrote or removed a draft it set aside for a workspace; the renderer
+  // lists them again.
+  liveDraftRecoveryChanged: "desktop:live-draft-recovery-changed",
   // Which of the owner's computers runs a workspace's schedules changed.
   scheduleHostChanged: "desktop:schedule-host-changed",
   chatDispatchNotices: "desktop:chat-dispatch-notices",
@@ -273,7 +271,9 @@ export const CHANNELS = {
   runnerSelfTest: "desktop:runner-self-test",
   detectAgentTools: "desktop:detect-agent-tools",
   setTitlebarTheme: "desktop:set-titlebar-theme",
+  windowFullScreen: "desktop:window-full-screen",
   stepWindowZoom: "desktop:step-window-zoom",
+  agentColorChanged: "desktop:agent-color-changed",
   userSettingsChanged: "desktop:user-settings-changed",
   folderAppChanged: "desktop:folder-app-changed",
   searchResults: "desktop:search-results",

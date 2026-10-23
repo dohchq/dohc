@@ -1,5 +1,6 @@
 use super::*;
 use dohc_engine_collab::live_update_application::ApplicationHostCoordinate;
+use dohc_engine_storage::text;
 
 pub(super) const SETTLEMENT_OP: &str = "live.audit.settlement";
 
@@ -225,12 +226,7 @@ fn accepted_interval(
 }
 
 fn require_projection(conn: &Connection, sha: &str) -> Result<(), SyncError> {
-    let lengths: Option<(i64, i64)> = conn
-        .query_row(
-            "SELECT byte_length,length(CAST(text AS BLOB)) FROM blobs WHERE sha256=?1",
-            [sha],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
+    let lengths: Option<(i64, i64)> = text::lengths(conn, sha)
         .optional()
         .map_err(SyncError::corrupt)?;
     let Some((length, actual)) = lengths else {
@@ -241,13 +237,8 @@ fn require_projection(conn: &Connection, sha: &str) -> Result<(), SyncError> {
     }
     let mut hash = Sha256::new();
     for offset in (0..length).step_by(65_536) {
-        let bytes: Vec<u8> = conn
-            .query_row(
-                "SELECT substr(CAST(text AS BLOB),?2,?3) FROM blobs WHERE sha256=?1",
-                params![sha, offset + 1, 65_536],
-                |row| row.get(0),
-            )
-            .map_err(SyncError::corrupt)?;
+        let bytes: Vec<u8> =
+            text::byte_range(conn, sha, offset + 1, 65_536).map_err(SyncError::corrupt)?;
         hash.update(bytes);
     }
     if dohc_engine_storage::hex(&hash.finalize()) != sha {

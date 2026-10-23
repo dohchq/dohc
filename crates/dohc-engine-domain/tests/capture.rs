@@ -10,6 +10,123 @@ const WS: &str = "ws-capture";
 const VERSION: &str = "main";
 const NO_FAULTS: NoFaults = NoFaults;
 
+#[test]
+fn list_batch_keeps_history_order_preimages_caps_and_metadata_body_free() {
+    let (_scratch, mut store) = open_store();
+    let at_cap = "é".repeat(65_536);
+    let over_cap = "🦀".repeat(32_769);
+    for (i, body) in ["small\0\r\n", &at_cap, &over_cap, "last"]
+        .into_iter()
+        .enumerate()
+    {
+        VersionedTextStore::new(&mut store)
+            .capture_ingest(&ingest("a.md", body, i as i64 + 10), &NO_FAULTS)
+            .unwrap();
+    }
+    let query = |before| ListMomentsQuery {
+        workspace_id: WS.into(),
+        version_id: Some(VERSION.into()),
+        object_id: None,
+        limit: 2,
+        before_moment_order: before,
+    };
+    let domain = VersionedTextStore::new(&mut store);
+    let first = domain.list_moments(&query(None)).unwrap();
+    assert_eq!(
+        first
+            .moments
+            .iter()
+            .map(|m| m.moment_order)
+            .collect::<Vec<_>>(),
+        vec![4, 3]
+    );
+    assert_eq!(first.next_before_moment_order, Some(3));
+    assert_eq!(first.moments[0].after_text.as_deref(), Some("last"));
+    assert_eq!(first.moments[0].before_text, None);
+    assert_eq!(
+        first.moments[0].before_byte_length,
+        Some(over_cap.len() as i64)
+    );
+    assert_eq!(first.moments[1].after_text, None);
+    assert_eq!(
+        first.moments[1].before_text.as_deref(),
+        Some(at_cap.as_str())
+    );
+    let second = domain
+        .list_moments(&query(first.next_before_moment_order))
+        .unwrap();
+    assert_eq!(
+        second
+            .moments
+            .iter()
+            .map(|m| m.moment_order)
+            .collect::<Vec<_>>(),
+        vec![2, 1]
+    );
+    assert_eq!(second.next_before_moment_order, None);
+    assert_eq!(
+        second.moments[0].after_text.as_deref(),
+        Some(at_cap.as_str())
+    );
+    assert_eq!(
+        second.moments[0].before_text.as_deref(),
+        Some("small\0\r\n")
+    );
+    assert_eq!(second.moments[1].before_text, None);
+    for moment in first.moments.iter().chain(&second.moments) {
+        let single = domain.get_moment(WS, &moment.moment_id).unwrap().unwrap();
+        assert_eq!(single.after_text, moment.after_text);
+        assert_eq!(single.before_text, moment.before_text);
+    }
+    // Invalid UTF-8 proves that the metadata path never decodes a body.
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "UPDATE blobs SET text=CAST(X'ff' AS TEXT) WHERE text='last'",
+                [],
+            )
+            .unwrap();
+            Ok::<_, DomainError>(())
+        })
+        .unwrap();
+    let metadata = VersionedTextStore::new(&mut store)
+        .list_snapshot_metadata(WS, VERSION, None, 10)
+        .unwrap();
+    assert_eq!(metadata[0].byte_length, 4);
+    assert!(
+        VersionedTextStore::new(&mut store)
+            .list_snapshots(WS, VERSION)
+            .is_err()
+    );
+}
+
+#[test]
+fn list_batch_rejects_false_recorded_lengths_on_both_sides_of_cap() {
+    for recorded in [1, 200_000] {
+        let (_scratch, mut store) = open_store();
+        VersionedTextStore::new(&mut store)
+            .capture_ingest(&ingest("a.md", "actual", 10), &NO_FAULTS)
+            .unwrap();
+        store
+            .write_with(&NO_FAULTS, |tx| {
+                tx.execute("UPDATE blobs SET byte_length=?1", [recorded])
+                    .unwrap();
+                Ok::<_, DomainError>(())
+            })
+            .unwrap();
+        let error = VersionedTextStore::new(&mut store)
+            .list_moments(&ListMomentsQuery {
+                workspace_id: WS.into(),
+                version_id: Some(VERSION.into()),
+                object_id: None,
+                limit: 1,
+                before_moment_order: None,
+            })
+            .unwrap_err();
+        assert_eq!(error.code(), "state-corrupt");
+    }
+}
+
 fn ingest(path: &str, text: &str, now_ms: i64) -> CaptureIngest {
     CaptureIngest {
         workspace_id: WS.to_owned(),
@@ -1492,4 +1609,108 @@ fn live_capture_labels_default_at_the_primitive() {
         back.moment.metadata_summary.as_deref(),
         Some("Became a text file")
     );
+}
+
+/// A respell is not a deletion, so a head retires when the disk shows its
+/// file stored under another spelling, whoever owns it, but only when that
+/// loses nothing. Each refused case breaks one condition and keeps the head,
+/// whether a peer synced it or capture recorded it: a newer head the disk has
+/// not caught up with, a write still waiting to land, and a distinct head
+/// already at the new spelling, as a pair of case variants from a peer that
+/// keeps case apart.
+#[test]
+fn a_respelled_head_retires_only_with_its_content() {
+    use dohc_engine_domain::{TxnOutcome, capture_retire_respelled_in_tx};
+    use dohc_engine_storage::{MaterializationJobSpec, Preimage, hex_sha256};
+    let disk = "body\n";
+    let disk_sha = hex_sha256(disk.as_bytes());
+    for owner in ["sync", "capture"] {
+        for case in [
+            "unchanged",
+            "newer head",
+            "pending write",
+            "head at the new spelling",
+        ] {
+            let (_scratch, mut store) = open_store();
+            let synced = |store: &mut EngineStore, object: &str, path: &str, text: &str| {
+                VersionedTextStore::new(store)
+                    .write_text(
+                        &WriteText {
+                            workspace_id: WS.to_owned(),
+                            version_id: VERSION.to_owned(),
+                            object_id: object.to_owned(),
+                            path: path.to_owned(),
+                            text: text.to_owned(),
+                            moment_id: format!("moment-{object}"),
+                            metadata_origin: "sync".to_owned(),
+                            metadata_summary: None,
+                            metadata_correlation_id: None,
+                            author_json: None,
+                            now_ms: 10,
+                            request_id: None,
+                        },
+                        &NO_FAULTS,
+                    )
+                    .expect("synced head");
+            };
+            let head = if case == "newer head" {
+                "newer\n"
+            } else {
+                disk
+            };
+            if owner == "sync" {
+                synced(&mut store, "synced", "notes.md", head);
+            } else {
+                VersionedTextStore::new(&mut store)
+                    .capture_ingest(&ingest("notes.md", head, 10), &NO_FAULTS)
+                    .expect("captured head");
+            }
+            if case == "head at the new spelling" {
+                synced(&mut store, "variant", "Notes.md", disk);
+            }
+            if case == "pending write" {
+                store
+                    .write_with(&NO_FAULTS, |tx| {
+                        let sha = dohc_engine_storage::put_binary_blob(tx, disk.as_bytes())?;
+                        dohc_engine_storage::enqueue_job(
+                            tx,
+                            &MaterializationJobSpec {
+                                job_id: "pending".to_owned(),
+                                workspace_id: WS.to_owned(),
+                                target_path: "notes.md".to_owned(),
+                                content_sha256: sha,
+                                preimage: Preimage::Absent,
+                                target_generation: 1,
+                                now_ms: 11,
+                            },
+                        )
+                    })
+                    .expect("pending write");
+            }
+            let input = CaptureRetire {
+                only_if_capture_origin: true,
+                ..retire("notes.md", 20)
+            };
+            let outcome = store.write_with(&NO_FAULTS, |tx| {
+                capture_retire_respelled_in_tx(tx, &input, "Notes.md", &disk_sha)
+            });
+            let live = VersionedTextStore::new(&mut store)
+                .read_text(WS, VERSION, "notes.md")
+                .expect("read head")
+                .is_some();
+            if case == "unchanged" {
+                let Ok(TxnOutcome::Committed(result)) = outcome else {
+                    panic!("{owner} {case}: {outcome:?}");
+                };
+                assert!(result.retired.is_some(), "{owner} {case}");
+                assert!(!live, "{owner} {case}");
+            } else {
+                assert!(
+                    matches!(outcome, Err(DomainError::WritePreconditionFailed { .. })),
+                    "{owner} {case}: {outcome:?}"
+                );
+                assert!(live, "{owner} {case}");
+            }
+        }
+    }
 }

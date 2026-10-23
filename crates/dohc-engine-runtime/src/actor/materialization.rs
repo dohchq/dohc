@@ -1,5 +1,5 @@
 use super::ActorHandle;
-use super::versions::switch_projection_job_id;
+use super::versions::{projection_target_alias, switch_projection_job_id};
 use crate::error::RuntimeError;
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
@@ -12,7 +12,7 @@ use dohc_engine_files::{
     save_kept_displacement,
 };
 use dohc_engine_storage::{
-    Displacement, EngineStore, FaultInjector, FaultPoint, JobStatus, MaterializationJob,
+    Displacement, EngineStore, FaultInjector, JobStatus, MaterializationJob,
     MaterializationOperation, NoFaults, StorageError, hex_sha256,
 };
 use rusqlite::{OptionalExtension, params};
@@ -159,6 +159,7 @@ impl ActorHandle {
                     progress: progress.as_deref(),
                     file_outcomes_settled: false,
                     released_hold_paths: None,
+                    planned_against_active_heads: false,
                 },
                 now_ms,
                 &NoFaults,
@@ -192,6 +193,7 @@ impl ActorHandle {
                     progress: None,
                     file_outcomes_settled: false,
                     released_hold_paths: None,
+                    planned_against_active_heads: false,
                 },
                 now_ms,
                 &NoFaults,
@@ -233,6 +235,7 @@ impl ActorHandle {
                     progress: None,
                     file_outcomes_settled: false,
                     released_hold_paths: None,
+                    planned_against_active_heads: false,
                 },
                 now_ms,
                 &NoFaults,
@@ -445,6 +448,7 @@ pub(super) struct MaterializationReplaySummary {
     pub(super) completed: usize,
     pub(super) failed: usize,
     pub(super) selected_seen: usize,
+    pub(super) hard_errors: Vec<(String, String)>,
 }
 
 #[derive(Clone, Copy)]
@@ -458,7 +462,11 @@ pub(super) struct MaterializationReplayScope<'a> {
     /// Capture drains settle file conflicts without failing the workspace.
     pub(super) file_outcomes_settled: bool,
     /// Preserve unseen stale relay writes only when this capture released a hold.
+    /// Paths are keyed by `dohc_engine_files::floor::path_collision_key`.
     pub(super) released_hold_paths: Option<&'a std::collections::HashSet<String>>,
+    /// The caller planned every selected job just now against the active
+    /// heads, so its deletes already account for heads at other spellings.
+    pub(super) planned_against_active_heads: bool,
 }
 
 const ROLLBACK_RESTORE_PREFIX: &str = "rollback-restore_\u{1f}";
@@ -612,7 +620,7 @@ fn switch_parent_deletes_first(jobs: Vec<MaterializationJob>) -> Vec<Materializa
         if job.operation == MaterializationOperation::Write
             && job.job_id.starts_with("version-switch-")
         {
-            let path = job.target_path.to_lowercase();
+            let path = dohc_engine_files::floor::path_collision_key(&job.target_path);
             let mut path = path.as_str();
             while let Some((parent, _)) = path.rsplit_once('/') {
                 ancestors.insert(parent.to_owned());
@@ -626,7 +634,9 @@ fn switch_parent_deletes_first(jobs: Vec<MaterializationJob>) -> Vec<Materializa
     let (mut parents, others): (Vec<_>, Vec<_>) = jobs.into_iter().partition(|job| {
         job.operation == MaterializationOperation::Delete
             && job.job_id.starts_with("version-switch-")
-            && ancestors.contains(&job.target_path.to_lowercase())
+            && ancestors.contains(&dohc_engine_files::floor::path_collision_key(
+                &job.target_path,
+            ))
     });
     parents.extend(others);
     parents
@@ -641,12 +651,72 @@ pub(super) fn replay_pending_materializations(
     selected: Option<&HashSet<String>>,
     superseded_after_projection_is_drained: bool,
 ) -> Result<MaterializationReplaySummary, RuntimeError> {
+    replay_materializations(
+        store,
+        root_dir,
+        scope,
+        now_ms,
+        faults,
+        selected,
+        superseded_after_projection_is_drained,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn replay_publication_materializations(
+    store: &mut EngineStore,
+    root: &std::path::Path,
+    workspace: &str,
+    holds: &dohc_engine_files::PlacementHolds,
+    recorder: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    selected: &HashSet<String>,
+) -> Result<MaterializationReplaySummary, RuntimeError> {
+    let summary = store.with_materialization_status_batch(|store| {
+        replay_materializations(
+            store,
+            root,
+            MaterializationReplayScope {
+                holds: Some(holds),
+                workspace_id: workspace,
+                self_writes: Some(recorder),
+                progress: None,
+                file_outcomes_settled: false,
+                released_hold_paths: None,
+                planned_against_active_heads: false,
+            },
+            now_ms,
+            faults,
+            Some(selected),
+            false,
+            false,
+        )
+    })?;
+    // Statuses must reach the ledger before a successful settle can reconcile.
+    reconcile_selected_settlement_attempts(store, workspace, selected, now_ms, faults)?;
+    Ok(summary)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replay_materializations(
+    store: &mut EngineStore,
+    root_dir: &std::path::Path,
+    scope: MaterializationReplayScope<'_>,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    selected: Option<&HashSet<String>>,
+    superseded_after_projection_is_drained: bool,
+    workspace_recovery: bool,
+) -> Result<MaterializationReplaySummary, RuntimeError> {
     if store.is_passive() {
         return Ok(MaterializationReplaySummary {
             parked: 0,
             completed: 0,
             failed: 0,
             selected_seen: 0,
+            hard_errors: Vec::new(),
         });
     }
     let loaded_holds;
@@ -657,22 +727,24 @@ pub(super) fn replay_pending_materializations(
             &loaded_holds
         }
     };
-    // A crash can leave a replace half done, including for a job that will not
-    // run again. Resolve those first, so no displaced file is left unsettled.
-    recover_displacements(
-        store,
-        root_dir,
-        Some(scope.workspace_id),
-        &MaterializeOptions {
-            holds: Some(holds),
-            policy: DurabilityPolicy::per_os(),
-            replacer: &StdReplacer,
-            backoff: &StdBackoff,
-            now_ms,
-            faults,
-        },
-    )?;
-    reconcile_settlement_attempts(store, scope.workspace_id, now_ms, faults)?;
+    if workspace_recovery {
+        // A crash can leave a replace half done, including for a job that will not
+        // run again. Resolve those first, so no displaced file is left unsettled.
+        recover_displacements(
+            store,
+            root_dir,
+            Some(scope.workspace_id),
+            &MaterializeOptions {
+                holds: Some(holds),
+                policy: DurabilityPolicy::per_os(),
+                replacer: &StdReplacer,
+                backoff: &StdBackoff,
+                now_ms,
+                faults,
+            },
+        )?;
+        reconcile_settlement_attempts(store, scope.workspace_id, now_ms, faults)?;
+    }
     let mut jobs = if let Some(selected) = selected {
         let mut jobs = selected
             .iter()
@@ -694,14 +766,82 @@ pub(super) fn replay_pending_materializations(
             && selected.is_none_or(|selected| selected.contains(&job.job_id))
     });
     let jobs = switch_parent_deletes_first(jobs);
+    // Filter small replays in SQL; cache the full version only for larger batches.
+    let cache_all_paths = jobs
+        .iter()
+        .filter(|job| job.operation == MaterializationOperation::Delete)
+        .take(9)
+        .count()
+        > 8;
     let summary = (|| -> Result<MaterializationReplaySummary, RuntimeError> {
         let mut summary = MaterializationReplaySummary {
             parked: 0,
             completed: 0,
             failed: 0,
             selected_seen: 0,
+            hard_errors: Vec::new(),
         };
         let mut secret_key: Option<SecretDataKey> = None;
+        // Replay changes disk and the job ledger, never active tips.
+        let mut active_paths: std::collections::HashMap<String, Vec<String>> = Default::default();
+        let mut paths_loaded = false;
+        // A delete planned earlier must not remove a file that an active head
+        // at another spelling now reaches, as on a disk that ignores case or
+        // normalization. That head owns the file, so the delete completes
+        // without removing it, unless the head's own write is still pending.
+        let mut retire_delete = |store: &mut EngineStore, job: &MaterializationJob| {
+            if scope.planned_against_active_heads
+                || std::fs::canonicalize(root_dir.join(&job.target_path)).is_err()
+            {
+                return Ok::<_, RuntimeError>(false);
+            }
+            let key = dohc_engine_files::floor::path_collision_key(&job.target_path);
+            if !paths_loaded && !active_paths.contains_key(&key) {
+                // Small replays fold only SQL candidates. Check the exact path
+                // before loading the shared cache for a larger batch.
+                let candidates = active_projection_paths(store, scope.workspace_id, Some(&key))?;
+                if candidates.iter().any(|path| path == &job.target_path) {
+                    return Ok(false);
+                }
+                if cache_all_paths {
+                    for path in active_projection_paths(store, scope.workspace_id, None)? {
+                        active_paths
+                            .entry(dohc_engine_files::floor::path_collision_key(&path))
+                            .or_default()
+                            .push(path);
+                    }
+                    paths_loaded = true;
+                } else {
+                    active_paths.insert(
+                        key.clone(),
+                        candidates
+                            .into_iter()
+                            .filter(|path| {
+                                dohc_engine_files::floor::path_collision_key(path) == key
+                            })
+                            .collect(),
+                    );
+                }
+            }
+            let Some(candidates) = active_paths.get(&key) else {
+                return Ok(false);
+            };
+            // The replay cache already narrowed this to one collision group.
+            let active_targets: HashSet<&str> = candidates.iter().map(String::as_str).collect();
+            if active_targets.contains(job.target_path.as_str()) {
+                return Ok(false);
+            }
+            let Some(alias) =
+                projection_target_alias(root_dir, &job.target_path, &active_targets, &mut None)
+            else {
+                return Ok(false);
+            };
+            if store.read_with(|conn| projection_write_pending(conn, scope.workspace_id, alias))? {
+                return Ok(false);
+            }
+            store.mark_materialization_complete(&job.job_id, now_ms)?;
+            Ok(true)
+        };
         for job in jobs {
             summary.selected_seen += usize::from(selected.is_some());
             if let Some(progress) = scope.progress {
@@ -751,6 +891,10 @@ pub(super) fn replay_pending_materializations(
                     coordinates
                 };
                 if job.operation == MaterializationOperation::Delete {
+                    if retire_delete(store, &job)? {
+                        summary.completed += 1;
+                        continue;
+                    }
                     match materialize_secret_delete_one(
                         store,
                         root_dir,
@@ -784,7 +928,8 @@ pub(super) fn replay_pending_materializations(
                     continue;
                 }
                 if secret_key.is_none() {
-                    let Ok(Some(key)) = load_key_file(root_dir) else {
+                    let Ok(Some(key)) = load_key_file(super::store_folder(store.database_path()))
+                    else {
                         summary.failed += 1;
                         continue;
                     };
@@ -865,10 +1010,11 @@ pub(super) fn replay_pending_materializations(
             if job.job_id.starts_with("version-switch-mat_")
                 && switch_projection_matches_active(store, &job, false)?.is_none()
             {
-                if scope
-                    .released_hold_paths
-                    .is_some_and(|paths| paths.contains(&job.target_path.to_lowercase()))
-                    && job.operation == MaterializationOperation::Write
+                if scope.released_hold_paths.is_some_and(|paths| {
+                    paths.contains(&dohc_engine_files::floor::path_collision_key(
+                        &job.target_path,
+                    ))
+                }) && job.operation == MaterializationOperation::Write
                 {
                     match dohc_engine_files::materialize_write_conflict(
                         store,
@@ -933,47 +1079,33 @@ pub(super) fn replay_pending_materializations(
                     }
                 }
             }
-            let outcome = if let Some(self_writes) = scope.self_writes {
-                let (materialized, reported) = materialize_pending_job(
-                    store,
-                    root_dir,
-                    scope.workspace_id,
-                    &job,
-                    self_writes,
+            if job.operation == MaterializationOperation::Delete && retire_delete(store, &job)? {
+                summary.completed += 1;
+                continue;
+            }
+            if let Some(recorder) = scope.self_writes {
+                recorder.record(scope.workspace_id, &job.target_path, &job.content_sha256);
+            }
+            let outcome = dohc_engine_files::materialize::materialize_one_ordinary(
+                store,
+                root_dir,
+                &job,
+                &MaterializeOptions {
+                    holds: Some(holds),
+                    policy: DurabilityPolicy::per_os(),
+                    replacer: &StdReplacer,
+                    backoff: &StdBackoff,
                     now_ms,
                     faults,
-                    Some(holds),
-                );
-                if materialized {
-                    Ok(JobOutcome::Completed)
-                } else {
-                    Ok(match reported {
-                        PostCommitMaterializeOutcome::Conflict => JobOutcome::Conflict,
-                        PostCommitMaterializeOutcome::Parked => JobOutcome::Parked,
-                        PostCommitMaterializeOutcome::Superseded => JobOutcome::Superseded,
-                        PostCommitMaterializeOutcome::Applied
-                        | PostCommitMaterializeOutcome::Skipped
-                        | PostCommitMaterializeOutcome::Error => {
-                            JobOutcome::Crashed(FaultPoint::MaterializeAfterJobCommit)
-                        }
-                    })
-                }
-            } else {
-                materialize_one(
-                    store,
-                    root_dir,
-                    &job,
-                    &MaterializeOptions {
-                        holds: Some(holds),
-                        policy: DurabilityPolicy::per_os(),
-                        replacer: &StdReplacer,
-                        backoff: &StdBackoff,
-                        now_ms,
-                        faults,
-                    },
-                )
-                .map_err(RuntimeError::from)
-            };
+                },
+            );
+            if !matches!(
+                outcome,
+                Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized)
+            ) && let Some(recorder) = scope.self_writes
+            {
+                recorder.retract(scope.workspace_id, &job.target_path, &job.content_sha256);
+            }
             match outcome {
                 Ok(JobOutcome::Parked) => summary.parked += 1,
                 Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
@@ -1024,12 +1156,31 @@ pub(super) fn replay_pending_materializations(
                         }
                     }
                 }
-                Ok(JobOutcome::Crashed(_)) | Err(_) => summary.failed += 1,
+                Ok(JobOutcome::Crashed(_)) => summary.failed += 1,
+                Err(error) => {
+                    summary.failed += 1;
+                    if !matches!(
+                        error,
+                        dohc_engine_files::MaterializeError::FileLocked
+                            | dohc_engine_files::MaterializeError::Storage(
+                                StorageError::FileLocked
+                            )
+                    ) {
+                        summary
+                            .hard_errors
+                            .push((job.job_id.clone(), format!("{}: {error}", job.target_path)));
+                    }
+                }
             }
         }
-        reconcile_settlement_attempts(store, scope.workspace_id, now_ms, faults)?;
+        if workspace_recovery {
+            reconcile_settlement_attempts(store, scope.workspace_id, now_ms, faults)?;
+        }
         Ok(summary)
     })()?;
+    if !workspace_recovery {
+        return Ok(summary);
+    }
     let checked_jobs = store.read_with(|conn| {
         let mut stmt = conn
             .prepare(
@@ -1071,6 +1222,59 @@ pub(super) fn replay_pending_materializations(
         }
     }
     Ok(summary)
+}
+
+// ASCII collision keys lowercase each segment and strip trailing dots/spaces.
+// Keep Unicode and trailing aliases for the full Rust collision-key check.
+const ACTIVE_PROJECTION_PATHS: &str =
+    "SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2
+       AND (?3 IS NULL OR path=?3 COLLATE NOCASE OR path GLOB '*[^ -~]*'
+            OR path GLOB '*[. ]/*' OR path GLOB '*[. ]')
+     UNION ALL SELECT path FROM secret_files WHERE workspace_id=?1 AND version_id=?2
+       AND (?3 IS NULL OR path=?3 COLLATE NOCASE OR path GLOB '*[^ -~]*'
+            OR path GLOB '*[. ]/*' OR path GLOB '*[. ]')";
+
+fn active_projection_paths(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    collision_key: Option<&str>,
+) -> Result<Vec<String>, RuntimeError> {
+    let version = match VersionedTextStore::new(store).get_active_version(workspace_id) {
+        Ok(version) => version,
+        Err(DomainError::WorkspaceNotFound) => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    store.read_with(|conn| {
+        let mut statement = conn
+            .prepare_cached(ACTIVE_PROJECTION_PATHS)
+            .map_err(StorageError::corrupt_public)?;
+        let paths = statement
+            .query_map(
+                params![workspace_id, version.version_id, collision_key],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::corrupt_public)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::corrupt_public)?;
+        Ok(paths)
+    })
+}
+
+// A pending create still needs the old entry removed before it can place
+// its bytes. Only retire an alias delete after that write has settled.
+fn projection_write_pending(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+    path: &str,
+) -> Result<bool, StorageError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM materialization_jobs
+         WHERE (workspace_id=?1 OR workspace_id='') AND target_path=?2
+           AND status='pending' AND operation='write')",
+        params![workspace_id, path],
+        |row| row.get(0),
+    )
+    .map_err(StorageError::corrupt_public)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1190,6 +1394,51 @@ const fn materialize_outcome_severity(outcome: PostCommitMaterializeOutcome) -> 
     }
 }
 
+fn reconcile_selected_settlement_attempts(
+    store: &mut EngineStore,
+    workspace: &str,
+    selected: &HashSet<String>,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<(), RuntimeError> {
+    for id in selected {
+        let Some(moment) = id.strip_prefix("ydoc-mat_") else {
+            continue;
+        };
+        let key = store.read_with(|conn| {
+            conn.query_row(
+                "SELECT d.workspace_id,d.version_id,d.object_id FROM moments m
+             JOIN ydoc_docs d ON d.workspace_id=m.workspace_id AND d.version_id=m.version_id
+             AND d.object_id=m.object_id AND d.settle_seq=m.moment_order
+             JOIN materialization_jobs j ON j.job_id='ydoc-mat_'||m.moment_id
+             WHERE m.moment_id=?1 AND d.workspace_id=?2 AND d.settle_prior_update_seq IS NOT NULL
+             AND j.status!='pending'",
+                params![moment, workspace],
+                |r| {
+                    Ok(dohc_engine_collab::DocKey {
+                        workspace_id: r.get(0)?,
+                        version_id: r.get(1)?,
+                        object_id: r.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StorageError::corrupt_public)
+        })?;
+        if let Some(key) = key
+            && matches!(
+                store.write_with(faults, |tx| {
+                    dohc_engine_collab::author_coverage::reconcile_in(tx, &key, now_ms)
+                })?,
+                dohc_engine_storage::TxnOutcome::Crashed { .. }
+            )
+        {
+            return Err(RuntimeError::OperationCrashed);
+        }
+    }
+    Ok(())
+}
+
 fn reconcile_settlement_attempts(
     store: &mut EngineStore,
     workspace_id: &str,
@@ -1215,6 +1464,48 @@ fn reconcile_settlement_attempts(
         return Err(RuntimeError::OperationCrashed);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod switch_order_tests {
+    use super::*;
+    use dohc_engine_storage::Preimage;
+
+    fn switch_job(id: &str, path: &str, operation: MaterializationOperation) -> MaterializationJob {
+        MaterializationJob {
+            job_id: format!("version-switch-mat_{id}"),
+            workspace_id: "ws".to_owned(),
+            target_path: path.to_owned(),
+            content_sha256: hex_sha256(b""),
+            operation,
+            preimage: Preimage::Absent,
+            target_generation: 1,
+            status: JobStatus::Pending,
+            created_at_ms: 1,
+        }
+    }
+
+    /// A switch that turns the file `café` into a folder deletes the file
+    /// first, though the folder is spelled in the other Unicode
+    /// normalization: a disk that ignores normalization holds one name.
+    #[test]
+    fn a_parent_delete_in_another_normalization_runs_first() {
+        let ordered = switch_parent_deletes_first(vec![
+            switch_job(
+                "write",
+                "caf\u{e9}/plan.md",
+                MaterializationOperation::Write,
+            ),
+            switch_job("delete", "cafe\u{301}", MaterializationOperation::Delete),
+        ]);
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|job| job.job_id.as_str())
+                .collect::<Vec<_>>(),
+            ["version-switch-mat_delete", "version-switch-mat_write"]
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1276,5 +1567,60 @@ mod rollback_identity_tests {
             None,
             "a non-rollback job takes the ordinary replay path."
         );
+    }
+}
+
+#[cfg(test)]
+mod projection_candidate_tests {
+    use super::*;
+
+    #[test]
+    fn materialization_candidates_keep_unicode_and_trailing_aliases() {
+        let paths = [
+            "Notes.md",
+            "notes.md",
+            "K.md",
+            "k.md",
+            "k.md.",
+            "k. /child.md",
+            "unrelated.md",
+        ];
+        let root = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let db = dohc_engine_testkit::engine_db_path(&root).unwrap();
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("projection-candidates", "main", 1, &NoFaults)
+            .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                let sha = hex_sha256(b"old");
+                tx.execute("INSERT INTO blobs(sha256,byte_length,text) VALUES (?1,3,'old')", [&sha])
+                    .map_err(StorageError::persist_public)?;
+                for (n, path) in paths.iter().enumerate() {
+                    let object = format!("live-{n}");
+                    tx.execute("INSERT INTO file_objects(workspace_id,object_id,created_at_ms) VALUES ('projection-candidates',?1,1)", [&object])
+                        .map_err(StorageError::persist_public)?;
+                    tx.execute("INSERT INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES ('projection-candidates','main',?1,?2,?3,1,'fixture','api')", params![object,path,sha])
+                        .map_err(StorageError::persist_public)?;
+                }
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        for key in ["notes.md", "k.md", "k/child.md"] {
+            let mut actual =
+                active_projection_paths(&mut store, "projection-candidates", Some(key))
+                    .unwrap()
+                    .into_iter()
+                    .filter(|path| dohc_engine_files::floor::path_collision_key(path) == key)
+                    .collect::<Vec<_>>();
+            let mut expected = paths
+                .iter()
+                .filter(|path| dohc_engine_files::floor::path_collision_key(path) == key)
+                .map(|path| (*path).to_owned())
+                .collect::<Vec<_>>();
+            actual.sort();
+            expected.sort();
+            assert_eq!(actual, expected);
+        }
     }
 }

@@ -103,9 +103,6 @@ const MAX_ATTACHMENT_HEADING_TEXT_UTF16_UNITS: usize = 300;
 const MAX_ATTACHMENT_HEADING_ANCHOR_UTF16_UNITS: usize = 400;
 /// Opening-message preview bound used by channel summaries.
 const OPENING_MESSAGE_BODY_SNIPPET_UTF16_UNITS: usize = 500;
-/// The logical file-mention lookup never exposes more than the oracle's newest
-/// 2,000 matching attachment rows, even when the wire drains multiple pages.
-pub const MAX_FILE_MENTION_RESULTS: i64 = 2_000;
 /// Feed cursor string cap (`decodeFeedCursor`).
 const MAX_FEED_CURSOR_LEN: usize = 512;
 /// Feed cursor message-id char cap (`decodeFeedCursor`).
@@ -457,15 +454,6 @@ pub struct ChatAttachment {
     pub heading_anchor: Option<String>,
     pub heading_occurrence: Option<i64>,
     pub created_at_ms: i64,
-}
-
-/// One fully hydrated file-mention result.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChatFileMention {
-    pub attachment: ChatAttachment,
-    pub message: ChatMessage,
-    pub thread: ChatThread,
-    pub channel: Option<ChatChannel>,
 }
 
 /// One indexed `@handle` occurrence, hydrated through its authoritative
@@ -3611,88 +3599,6 @@ impl<'a> LinkedChatStore<'a> {
                 )
                 .map_err(DomainError::sql_corrupt)?;
             collect(rows)
-        })
-    }
-
-    /// Newest file mentions with object-id precedence, a complete message /
-    /// thread / optional-channel hydration, and fail-closed missing entities.
-    pub fn list_file_mentions(
-        &self,
-        workspace_id: &str,
-        object_id: Option<&str>,
-        path_hint: Option<&str>,
-        after: Option<(i64, String)>,
-        limit: i64,
-    ) -> Result<Vec<ChatFileMention>, DomainError> {
-        validate_chat_page_limit(limit)?;
-        let object_id = object_id.map(normalize_attachment_object_id).transpose()?;
-        let path_hint = path_hint.map(normalize_attachment_path_hint).transpose()?;
-        if object_id.is_none() && path_hint.is_none() {
-            return Err(DomainError::chat(
-                "invalid-path",
-                "A file mention lookup requires an object id or path hint.",
-            ));
-        }
-        let selector = object_id
-            .as_deref()
-            .or(path_hint.as_deref())
-            .unwrap_or_default();
-        let (has_after, after_created_at_ms, after_attachment_id) = chat_after(after);
-        self.store.read_with(|conn| {
-            let predicate = if object_id.is_some() {
-                "a.object_id = ?2"
-            } else {
-                "a.path_hint = ?2"
-            };
-            let sql = format!(
-                "SELECT a.attachment_id, a.thread_id, a.message_id, a.target_kind, \
-                        a.object_id, a.path_hint, a.heading_text, a.heading_anchor, \
-                        a.heading_occurrence, a.created_at_ms \
-                 FROM chat_attachments a JOIN chat_messages m \
-                   ON m.workspace_id = a.workspace_id AND m.thread_id = a.thread_id \
-                  AND m.message_id = a.message_id \
-                 WHERE a.workspace_id = ?1 AND {predicate} \
-                   AND (?3 = 0 OR a.created_at_ms < ?4 \
-                     OR (a.created_at_ms = ?4 AND a.attachment_id < ?5)) \
-                 ORDER BY a.created_at_ms DESC, a.attachment_id DESC LIMIT ?6"
-            );
-            let mut stmt = conn.prepare(&sql).map_err(DomainError::sql_corrupt)?;
-            let rows = stmt
-                .query_map(
-                    params![
-                        workspace_id,
-                        selector,
-                        has_after,
-                        after_created_at_ms,
-                        after_attachment_id,
-                        limit
-                    ],
-                    map_attachment_row,
-                )
-                .map_err(DomainError::sql_corrupt)?;
-            let attachments = collect(rows)?;
-            drop(stmt);
-            let mut mentions = Vec::with_capacity(attachments.len());
-            for attachment in attachments {
-                let message = require_message(conn, workspace_id, &attachment.message_id)?;
-                if message.thread_id != attachment.thread_id {
-                    return Err(DomainError::StateCorrupt {
-                        reason: "file mention message belongs to another thread",
-                    });
-                }
-                let thread = require_thread(conn, workspace_id, &message.thread_id)?;
-                let channel = match thread.channel_id.as_deref() {
-                    Some(channel_id) => Some(require_channel(conn, workspace_id, channel_id)?),
-                    None => None,
-                };
-                mentions.push(ChatFileMention {
-                    attachment,
-                    message,
-                    thread,
-                    channel,
-                });
-            }
-            Ok(mentions)
         })
     }
 

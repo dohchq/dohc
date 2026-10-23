@@ -1,3 +1,4 @@
+import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import { PublicationAgent } from "./appPublication";
 import { z } from "zod";
 import { CreationPartial } from "./creation";
@@ -170,6 +171,16 @@ const description = z.unknown().transform((value, context) => {
   catch { context.addIssue({ code: "custom", message: "Invalid Collection description." }); return z.NEVER; }
 });
 export type AddressedDatasetDescription = z.infer<typeof description>;
+/**
+ * A list on a computer that doesn't keep the workspace's Collections. It
+ * holds the Collections on `server`, which this computer asked, and
+ * `computer` keeps the others. `sameName`: that computer has this one's name.
+ */
+export const DatasetListElsewhere = z.object({
+  server: z.string().url().max(2048),
+  computer: z.object({ label: z.string().min(1).max(64), sameName: z.boolean() }).strict(),
+}).strict();
+export type DatasetListElsewhere = z.infer<typeof DatasetListElsewhere>;
 export const DatasetResult = z.discriminatedUnion("kind", [
   DatasetHistoryRevision.extend({ kind: z.literal("history-revision") }).strict(),
   DatasetDeletePreview.extend({ kind: z.literal("delete-preview") }).strict(),
@@ -183,7 +194,7 @@ export const DatasetResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("recovery-claimed"), transferId: identity, manifestSha256: sha256, sourceCursor: DatasetCursor, targetCursor: DatasetCursor, datasetPath: resultDatasetPath.nullable(), sourceError: z.string().max(1024).optional() }).strict(),
   z.object({ kind: z.literal("recovery-discarded") }).strict(),
   DatasetHistoryPage.extend({ kind: z.literal("history") }).strict(),
-  z.object({ kind: z.literal("list"), datasets: z.array(description).max(100), nextCursor: identity.nullable() }).strict(),
+  z.object({ kind: z.literal("list"), datasets: z.array(description).max(100), nextCursor: identity.nullable(), elsewhere: DatasetListElsewhere.optional() }).strict(),
   z.object({ kind: z.literal("description"), dataset: description, copy: DatasetCopyStatus.optional() }).strict(),
   DatasetPermissionsPage.extend({ kind: z.literal("permissions") }).strict(),
   z.object({ kind: z.literal("grant-updated") }).strict(),
@@ -203,3 +214,41 @@ export const DatasetResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("migration-discarded") }).strict(),
 ]);
 export type DatasetResult = z.infer<typeof DatasetResult>;
+
+// Local metadata only. These ids never enter a request or its authorship.
+export const DATASET_CAPABILITIES = {
+  list: "dataset.list",
+  describe: "dataset.describe",
+  history: "dataset.history.list",
+  historyRevision: "dataset.history.revision",
+  prepareHistoryRestore: "dataset.history.restore.prepare",
+  lifecycle: "dataset.lifecycle.read",
+  deletePreview: "dataset.delete.preview",
+  delete: "dataset.delete",
+  archive: "dataset.archive",
+  restore: "dataset.restore",
+  pendingAttempts: "dataset.attempts.list",
+  reconcileAttempt: "dataset.attempt.reconcile",
+  cancelAttempt: "dataset.attempt.cancel",
+  permissions: "dataset.permissions.read",
+  setGrant: "dataset.grant.set",
+  removeGrant: "dataset.grant.remove",
+  export: "dataset.export",
+  prepareRecovery: "dataset.recovery.prepare",
+  claimRecovery: "dataset.recovery.claim",
+  discardRecovery: "dataset.recovery.discard",
+  upload: "dataset.file.upload",
+  file: "dataset.file.read",
+  createForm: "dataset.form.create",
+  prepareRelationChoices: "dataset.relation.choices.prepare",
+  create: "dataset.create",
+  prepare: "dataset.prepare",
+  approve: "dataset.approve",
+  discard: "dataset.discard",
+  prepareMigration: "dataset.migration.prepare",
+  migrationPreviewPage: "dataset.migration.preview",
+  prepareSchemaChange: "dataset.schema.change.prepare",
+  approveMigration: "dataset.migration.approve",
+  discardMigration: "dataset.migration.discard",
+  invoke: "dataset.operation.invoke",
+} as const satisfies Record<DatasetRequest["action"], CapabilityId>;

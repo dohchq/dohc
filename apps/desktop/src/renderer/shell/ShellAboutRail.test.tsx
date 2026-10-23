@@ -16,7 +16,6 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { CHATS_TAB_PATH, chatTabPath } from "../workbench/workbenchState";
 import type { DohcDesktopBridge } from "../../ipc/bridgeContract";
-import { deferred } from "../../testing/deferred";
 import {
   WORKSPACE,
   STORED_STATE,
@@ -184,12 +183,12 @@ describe("About rail (right side)", () => {
     );
   });
 
-  it("reveals a file mention in the thread already open in About", async () => {
+  it("opens a chat that links to the file at its message, in the thread About had open", async () => {
     const bridge = Object.assign(makeBridge(Promise.resolve(STORED_STATE)), {
       listChatMessages: vi.fn<DohcDesktopBridge["listChatMessages"]>(),
       listChatReactions: vi.fn<DohcDesktopBridge["listChatReactions"]>(async () => ({ reactions: [], viewerAuthorId: "Reader" })),
       markChatThreadRead: vi.fn<DohcDesktopBridge["markChatThreadRead"]>(async () => ({ lastReadSequence: 300, revision: 1 })),
-      listChatFileMentions: vi.fn<DohcDesktopBridge["listChatFileMentions"]>(),
+      chatFileMentionsPage: vi.fn<DohcDesktopBridge["chatFileMentionsPage"]>(),
     });
     const thread = { id: "file-thread", title: "Long file conversation", createdAtMs: 1, updatedAtMs: 1 };
     const messages = Array.from({ length: 300 }, (_, index) => ({
@@ -200,8 +199,8 @@ describe("About rail (right side)", () => {
     }));
     bridge.listFileChats.mockResolvedValue({ fileObjectId: "object-b", threads: [thread] });
     vi.mocked(bridge.listChatMessages).mockResolvedValue({ messages });
-    bridge.listChatFileMentions.mockResolvedValue({ mentions: [{
-      thread, message: messages[0]!,
+    bridge.chatFileMentionsPage.mockResolvedValue({ versionId: "main", subject: null, unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: null, entries: [{
+      thread, message: { id: messages[0]!.id, preview: messages[0]!.body, authorDisplayName: "Reader", createdAtMs: 1 },
       attachment: { attachmentId: "file-attachment", threadId: thread.id,
         messageId: messages[0]!.id, targetKind: "file", objectId: "object-b",
         pathHint: "b.md", createdAtMs: 1 },
@@ -216,9 +215,38 @@ describe("About rail (right side)", () => {
     await within(await screen.findByTestId("linked-chat-thread")).findByText("File message 299");
     await waitFor(() => expect(scrolled).toContain("file-message-299"));
     scrolled.length = 0;
-    await user.click(await screen.findByTestId("chat-file-mention"));
+    // The chat's link to b.md is a row in About's Links, under the thread.
+    await user.click(screen.getByTestId("linked-chat-back"));
+    const links = await screen.findByTestId("about-links");
+    await user.click(await within(links).findByTestId("chat-file-mention"));
     await waitFor(() => expect(scrolled).toContain("file-message-0"));
     expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
+    expect(bridge.chatFileMentionsPage).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, subject: { path: "b.md" } });
+  });
+
+  it("opens a file that links here at the linking line", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    bridge.listFileChats.mockResolvedValue({ fileObjectId: "object-b", threads: [] });
+    bridge.linksIn.mockResolvedValue({
+      versionId: "main", subject: { path: "b.md", objectId: "object-b" }, unchecked: [], complete: true,
+      indexBuilding: false, mountsCovered: true, nextCursor: null,
+      entries: [{ source: "a.md", title: "Alpha", ordinal: 0, span: [4, 11], line: 3, snippet: "See [[b]] here.", highlightStart: 4, highlightEnd: 9 }],
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    const links = await screen.findByTestId("about-links");
+    const row = await within(links).findByTestId("about-link");
+    expect(row.dataset.line).toBe("3");
+    const toggle = within(links).getByTestId("about-links-toggle");
+    row.focus();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true"));
+    expect(bridge.linksIn).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, subject: { path: "b.md" } });
+    // About turns to a.md, and focus stays on the same Links head, as Search
+    // keeps focus in its own panel.
+    await waitFor(() => expect(within(screen.getByTestId("about-rail")).getByTestId("about-header").textContent).toBe("a.md"));
+    expect(screen.getByTestId("about-links-toggle")).toBe(toggle);
+    expect(document.activeElement).toBe(toggle);
   });
 
   it("opens a chat search hit on another file in About once", async () => {
@@ -262,9 +290,11 @@ describe("About rail (right side)", () => {
   it("drops a hit not yet read when focus moves while About is closed", async () => {
     const bridge = makeBridge(Promise.resolve({ ...storedStateWithTabs(["a.md", "b.md"], "a.md"), aboutVisible: false }));
     bridge.listFileChats.mockResolvedValue({ fileObjectId: "object-a", threads: [] });
-    // Main has not decided capture, so About cannot read the hit yet.
-    const admission = deferred<typeof SYNC_STATUS>();
-    bridge.openWorkspace.mockImplementation(() => admission.promise);
+    // Admit the workspace so its saved tabs can restore. Capture is
+    // unavailable, so About still cannot consume the search hit.
+    const unavailable = { ...SYNC_STATUS, historyRecordingUnavailable: true };
+    bridge.openWorkspace.mockResolvedValue(unavailable);
+    bridge.getSyncStatus.mockResolvedValue(unavailable);
     const user = userEvent.setup();
     renderShell(bridge);
     await screen.findByTestId("tab-a.md");
@@ -285,13 +315,14 @@ describe("About rail (right side)", () => {
       });
     });
     await user.click(await screen.findByTestId("search-result-row"));
-    expect(within(await screen.findByTestId("about-rail")).getByText("Loading About...")).toBeTruthy();
+    expect(await within(await screen.findByTestId("about-rail")).findByTestId("about-rail-off")).toBeTruthy();
 
-    // Close About, move to b.md, open About again, and let main decide.
+    // Close About, move to b.md, open About again, and restore capture.
     await user.click(screen.getByTestId("titlebar-about-sidebar"));
     await user.click(screen.getByTestId("tab-b.md"));
     await user.click(screen.getByTestId("titlebar-about-sidebar"));
-    await act(async () => admission.resolve(SYNC_STATUS));
+    bridge.getSyncStatus.mockResolvedValue(SYNC_STATUS);
+    act(() => bridge.emitWorkspaceActivity());
     const rail = await screen.findByTestId("about-rail");
     expect((await within(rail).findByTestId("about-header")).textContent).toBe("b.md");
     expect(within(rail).queryByTestId("linked-chat-thread")).toBeNull();

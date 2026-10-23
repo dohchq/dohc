@@ -1,4 +1,7 @@
 import {initializeReplicaCurrentViewSchema} from "./replicaCurrentViewSchema";
+import {initializeReplicaHistorySchema, HISTORY_JOURNAL_POSITION_INDEX} from "./replicaHistorySchema";
+import {initializeReplicaHistoryWorkSchema} from "./replicaHistoryWorkSchema";
+import {initializeReplicaCurrentViewIncrementalSchema} from "./replicaCurrentViewIncrementalSchema";
 import {initializeHostedSettlementSchema} from "./hostedSettlementSchema";
 import { initializeLiveAuthorshipSchema, originalLiveJournalSql, liveAuthorSchemaMarked, assertLiveAuthorColumns } from "./liveAuthorshipSchema";
 import { initializeAppPublicationSchema } from "./publicationSchema";
@@ -906,7 +909,7 @@ function assertLiveJournalSchema(db: SqliteDb): void {
     if (table === LIVE_JOURNAL_TABLE && liveAuthorSchemaMarked(db)) assertLiveAuthorColumns(db);
     same(db.prepare(`PRAGMA table_info(${table})`).all().filter(r => table !== LIVE_JOURNAL_TABLE || !liveAuthorSchemaMarked(db) || Number(r.cid) < 24).map(r => [r.cid,r.name,r.type,r.notnull,r.dflt_value,r.pk]), expected.columns);
     same(db.prepare(`PRAGMA foreign_key_list(${table})`).all().map(r => [r.id,r.seq,r.table,r.from,r.to,r.on_update,r.on_delete,r.match]), expected.foreignKeys);
-    same(db.prepare(`PRAGMA index_list(${table})`).all().filter(r => r.name !== LIVE_APPLICATION_AUTHORSHIP_INDEX && r.name !== LIVE_JOURNAL_WORKSPACE_INDEX).map(r => [r.name,r.unique,r.origin,r.partial]).sort((a,b) => String(a[0]).localeCompare(String(b[0]))), expected.indexes);
+    same(db.prepare(`PRAGMA index_list(${table})`).all().filter(r => r.name !== LIVE_APPLICATION_AUTHORSHIP_INDEX && r.name !== LIVE_JOURNAL_WORKSPACE_INDEX && r.name !== HISTORY_JOURNAL_POSITION_INDEX).map(r => [r.name,r.unique,r.origin,r.partial]).sort((a,b) => String(a[0]).localeCompare(String(b[0]))), expected.indexes);
     for (const [name, columns] of Object.entries(expected.indexColumns)) same(db.prepare(`PRAGMA index_info(${name})`).all().map(r => [r.seqno,r.cid,r.name]), columns);
   }
 }
@@ -1276,6 +1279,9 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeHostedSettlementSchema(db);
     initializeRelayAdmissionColumn(db);
     initializeReplicaCurrentViewSchema(db);
+    initializeReplicaHistorySchema(db);
+    initializeReplicaHistoryWorkSchema(db);
+    initializeReplicaCurrentViewIncrementalSchema(db);
     initializeNoticeSchema(db);
     initializeShareNoticeDeliverySchema(db);
     initializeAutomationHostSchema(db);

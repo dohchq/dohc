@@ -48,6 +48,8 @@ export type Notice = {
   copyText?: string;
   copyLabel?: string;
   filePaths?: readonly string[];
+  // A terminal command the body asks the person to run, shown with its copy.
+  command?: string;
   Icon: typeof Bell;
 };
 
@@ -107,11 +109,17 @@ export const AUTOMATION_NOTICE_KINDS: ReadonlySet<string> = new Set([
 const retriesRun = (notice: NoticeRow): boolean =>
   notice.kind === "automation-failed" && notice.postedHere && Boolean(notice.target?.automation && notice.target.run);
 
-// What Copy puts on the clipboard for a failed run's notice.
+// A failed automation run, or an agent run that says why it didn't start. Its
+// toast shows the body and stays until closed, and Copy sits beside its text.
+const isFailure = (notice: NoticeRow): boolean =>
+  notice.kind === "automation-failed" || (notice.kind === "agent-run" && notice.body !== "");
+
+// What Copy puts on the clipboard for a failed run's notice. The notice store
+// already bounds the body, so Copy keeps all of the text the person sees.
 const failureDetails = (notice: NoticeRow): string =>
   errorDetails([
     ["Notice", notice.title],
-    ["Details", notice.body],
+    ["Details", notice.body, Number.POSITIVE_INFINITY],
     ["Automation", notice.target?.automation ?? ""],
     ["Run", notice.target?.run ?? ""],
     ["Time", new Date(notice.createdAtMs).toISOString()],
@@ -200,7 +208,7 @@ function automationStopsCopy(stops: readonly AutomationStopNotice[]): { title: s
 
 // The notice, and the ⚡ panel, when dohc cannot read which steps were allowed.
 export const AUTOMATION_HOLDS_UNREADABLE =
-  "dohc cannot read .dohc/automations/reach.json, which records the automation steps you allowed. Reset holds to allow each step again, or open the folder to fix the file.";
+  "dohc cannot read .dohc/local/automations/reach.json, which records the automation steps you allowed. Reset holds to allow each step again, or open the folder to fix the file.";
 
 // Owner live delivery, and only while it is retrying: what stopped, and the
 // way forward. A stable reason is not a connection the engine can dial
@@ -481,6 +489,15 @@ export function LocalNoticeRow(props: {
         <p className={`m-0 mt-0.5 ${notice.filePaths !== undefined ? "" : "line-clamp-3 "}text-[11px] leading-snug text-muted`}>
           {notice.body}
         </p>
+        {notice.command ? (
+          <div className="mt-1 flex items-start gap-2">
+            <code data-testid={`notice-${notice.id}-command`} className="min-w-0 flex-1 select-text break-all font-mono text-[12px] text-muted">
+              {notice.command}
+            </code>
+            <CopyButton iconOnly pinName label="Copy command" testId={`notice-${notice.id}-command-copy`}
+              getText={() => notice.command ?? ""} />
+          </div>
+        ) : null}
         {notice.filePaths?.length ? (
           <div className="mt-1 flex items-start gap-2">
             <ul className="m-0 min-w-0 flex-1 list-none p-0 font-mono text-[12px] text-muted">
@@ -868,11 +885,10 @@ export function NoticeCenter(props: {
       const result = await requestGuardedUpdateInstall();
       if (result === null) return;
       acceptUpdateResult(result.state);
+      // Main says why an install failed when it knows, such as a Linux password prompt that was closed.
       if (!result.accepted || result.state.status === "error") {
         setUpdateActionError(
-          result.state.status === "error"
-            ? result.state.message
-            : "Could not restart into the update.",
+          result.reason ?? (result.state.status === "error" ? result.state.message : "Could not restart into the update."),
         );
       } else {
         setUpdateActionError(null);
@@ -1210,6 +1226,7 @@ export function NoticeCenter(props: {
         tone: "neutral",
         title: "Update ready",
         body: updateActionError ?? updateState.message,
+        ...(updateState.installCommand ? { command: updateState.installCommand } : {}),
         ...(updateState.canInstall
           ? {
               actions: [{
@@ -1317,7 +1334,8 @@ export function NoticeCenter(props: {
   const sentToastKey = sentToast ? sentKey(sentAccount, sentToast.notice) : null;
   const { onHideSentNoticeToast } = props;
   // A failure's toast stays until it is closed; any other fades.
-  const sentToastFades = sentToast !== null && sentToast.notice.kind !== "automation-failed";
+  const sentToastFails = sentToast !== null && isFailure(sentToast.notice);
+  const sentToastFades = sentToast !== null && !sentToastFails;
   useEffect(() => {
     if (sentToastKey === null || !sentToastFades || !onHideSentNoticeToast) return;
     const timer = setTimeout(onHideSentNoticeToast, FADING_TOAST_MS);
@@ -1397,6 +1415,16 @@ export function NoticeCenter(props: {
               <SenderMark kind={sentToast.notice.senderKind} />
               <span className="min-w-0 flex-1 break-words leading-snug">
                 {sentToast.notice.title}
+                {/* About four lines, then it scrolls, so a long reason never
+                    pushes the title and controls out of a short window. */}
+                {sentToastFails && sentToast.notice.body ? (
+                  <span
+                    data-testid="sent-notice-toast-body"
+                    className="mt-0.5 block max-h-[5.5em] overflow-y-auto overscroll-contain text-[11px] text-muted"
+                  >
+                    {sentToast.notice.body}
+                  </span>
+                ) : null}
               </span>
               {(retriesRun(sentToast.notice) || sentToast.retryable) && props.onRetrySentNotice ? (
                 <button
@@ -1411,7 +1439,7 @@ export function NoticeCenter(props: {
                   Try again
                 </button>
               ) : null}
-              {sentToast.notice.kind === "automation-failed" ? (
+              {sentToastFails ? (
                 <CopyButton
                   key={sentToastKey}
                   iconOnly
@@ -1613,7 +1641,18 @@ export function NoticeCenter(props: {
               role="status"
               className="dohc-popover dohc-pop-in relative flex max-w-md items-center gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
             >
-              <span>{updateActionError ?? updateState?.message}</span>
+              <span className="min-w-0">
+                {updateActionError ?? updateState?.message}
+                {updateState?.installCommand ? (
+                  <code data-testid="update-toast-install-command" className="mt-1 block select-text break-all font-mono text-[11px] text-muted">
+                    {updateState.installCommand}
+                  </code>
+                ) : null}
+              </span>
+              {updateState?.installCommand ? (
+                <CopyButton iconOnly pinName label="Copy command" testId="update-toast-install-command-copy"
+                  getText={() => updateState.installCommand ?? ""} />
+              ) : null}
               {updateState?.canInstall ? (
                 <button
                   type="button"
@@ -1773,7 +1812,7 @@ export function NoticeCenter(props: {
                       const retry = (retriesRun(notice) || retryable) && props.onRetrySentNotice
                         ? () => props.onRetrySentNotice?.(notice)
                         : undefined;
-                      const copies = notice.kind === "automation-failed";
+                      const copies = isFailure(notice);
                       const running = runningKey === key;
                       // A wake from the server waits for one of this person's computers to run it; dismissing it would cancel it.
                       const dismissNotice = props.onDismissSentNotice && notice.kind !== "automation-wake"

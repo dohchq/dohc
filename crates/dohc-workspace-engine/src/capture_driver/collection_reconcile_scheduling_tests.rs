@@ -13,8 +13,9 @@ fn plan_with(op: CaptureOp) -> ReconcilePlan {
         from_generation: ScanGeneration(0),
         to_generation: ScanGeneration(1),
         ops: vec![op],
-        retained_over_cap: Vec::new(),
+        retained_unread: Vec::new(),
         unconfirmed_removed: Vec::new(),
+        respelled_retires: Default::default(),
         degraded: false,
         degraded_paths: Vec::new(),
         prepared_from_dirty: true,
@@ -44,6 +45,32 @@ async fn wait_for_watcher_dirty(files: &FilesHandle) {
             "native watcher did not mark the collection edit dirty"
         );
         tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    }
+}
+
+/// Capture and adoption commits queue link indexing, which the actor drains
+/// in the background. Wait for the drain to finish so a later write check
+/// sees only the pass under test.
+async fn wait_for_link_drain(observer: &rusqlite::Connection) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let drained: bool = observer
+            .query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM link_pending) \
+                   AND NOT EXISTS(SELECT 1 FROM link_gc) \
+                   AND NOT EXISTS(SELECT 1 FROM link_index_state WHERE seed_phase <> 'ready')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("link drain state");
+        if drained {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the link drain did not finish after setup"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 }
 
@@ -143,6 +170,7 @@ fn collection_apply_context<'a>(
         provenance: CaptureProvenance::default(),
         events: EngineEvents::default(),
         apply_probe: None,
+        import_priority: None,
     }
 }
 
@@ -344,6 +372,7 @@ async fn held_collection_idle_ticks(pending_sibling: bool) {
         );
     }
     let observer = rusqlite::Connection::open(&db).expect("idle reconcile observer");
+    wait_for_link_drain(&observer).await;
     let data_version = || {
         observer
             .query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))
@@ -746,6 +775,8 @@ async fn assert_changed_record_reconciles(deferred_same_id: bool) {
                 not_owned_paths: Vec::new(),
                 failed_applies: Vec::new(),
                 deferred_paths: Vec::new(),
+                deferred_retires: Vec::new(),
+                deferred_writes: Vec::new(),
                 held_observations: Vec::new(),
                 crashed_after_durable_boundary: None,
                 degraded: false,
@@ -797,6 +828,7 @@ async fn assert_changed_record_reconciles(deferred_same_id: bool) {
                 provenance: CaptureProvenance::default(),
                 events: EngineEvents::default(),
                 apply_probe: None,
+                import_priority: None,
             },
             &handle,
             RootBoundRun {
@@ -957,6 +989,8 @@ async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
                 not_owned_paths: Vec::new(),
                 failed_applies: Vec::new(),
                 deferred_paths: Vec::new(),
+                deferred_retires: Vec::new(),
+                deferred_writes: Vec::new(),
                 held_observations: Vec::new(),
                 crashed_after_durable_boundary: None,
                 degraded: false,
@@ -999,6 +1033,7 @@ async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
                 provenance: CaptureProvenance::default(),
                 events: EngineEvents::default(),
                 apply_probe: None,
+                import_priority: None,
             },
             &handle,
             RootBoundRun {
@@ -1051,6 +1086,7 @@ async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
                 provenance: CaptureProvenance::default(),
                 events: EngineEvents::default(),
                 apply_probe: None,
+                import_priority: None,
             },
             &handle,
             RootBoundRun {
@@ -1169,6 +1205,7 @@ async fn a_converged_watcher_scan_does_not_rewrite_collection_state() {
             .query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))
             .expect("database version")
     };
+    wait_for_link_drain(&observer).await;
     let before = data_version(&observer);
 
     let files = FilesActor::spawn_async(scratch.path().to_path_buf(), ScanBounds::default())
@@ -1191,6 +1228,7 @@ async fn a_converged_watcher_scan_does_not_rewrite_collection_state() {
             provenance: CaptureProvenance::default(),
             events: EngineEvents::default(),
             apply_probe: None,
+            import_priority: None,
         },
         &files.handle(),
         RootBoundRun {
@@ -1286,6 +1324,7 @@ async fn a_failed_recovery_repair_still_announces_committed_adoptions() {
             provenance: CaptureProvenance::default(),
             events,
             apply_probe: None,
+            import_priority: None,
         },
         &files.handle(),
         RootBoundRun {

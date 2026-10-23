@@ -144,9 +144,9 @@ it("forwards only relay log keys and never interprets query versions", async () 
   const exchanged = await f.exchange();
   const {session} = await exchanged.json();
   const headers = {cookie: exchanged.headers.getSetCookie().map(value => value.split(";", 1)[0]).join("; "), "x-dohc-link-session": session};
-  const result = await f.send("/api/view/log?since=7&limit=500&hold=0&session=" + session + "&apiVersion=99&other=secret", {headers});
+  const result = await f.send("/api/view/log?since=7&limit=500&hold=0&current=true&session=" + session + "&apiVersion=99&other=secret", {headers});
   expect(result.status).toBe(200);
-  expect(new URL(f.calls.at(-1)!.url).search).toBe("?since=7&limit=500&hold=0");
+  expect(new URL(f.calls.at(-1)!.url).search).toBe("?since=7&limit=500&hold=0&current=true");
   for (const path of ["/api/mcp?apiVersion=1", "/mcp?apiVersion=1", "/api/mcp/exchange?apiVersion=1", "/api/account/session?apiVersion=1"]) {
     expect((await f.send(path, {method: path.includes("exchange") ? "POST" : "GET"})).status).toBe(404);
   }

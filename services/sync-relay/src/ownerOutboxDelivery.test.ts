@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { expect, it, vi } from "vitest";
 import { drainOwnerOutbox, type OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
 import { serviceOwnerTransport } from "./serviceOwnerTransport.js";
+import {startLiveJournalCheck} from './storage/liveJournalCheck';
+import type {SqliteDb} from './storage/types';
 import type {LiveUpdateHostApplicationAck, LiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -105,6 +107,17 @@ function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclara
     run: (options: Partial<Parameters<typeof drainOwnerOutbox>[0]> = {}) => drainOwnerOutbox({client: client as never,storage: storage as never,admission,workspace: "handle",host: host as never,registrationId: 1,binding,
       adoption: {adoptionId: "adoption",sequence: 7,applied},nextRequestId: () => ++requestId,deadlineMs: 30_000,assertCurrent() {},applyThrough,...options})};
 }
+
+it('finishes an owner drain while the cold journal check is still pending', async () => {
+  const f = fixture(), prepare = vi.fn(() => {throw Error('cold check ran before drain completed');});
+  vi.useFakeTimers();
+  const check = startLiveJournalCheck({prepare} as unknown as SqliteDb);
+  try {
+    expect(await f.run()).toEqual({admittedEntries: 3, hasMore: false});
+    expect(prepare).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(1);
+  } finally {check.close(); vi.useRealTimers();}
+});
 
 it("proves the adoption's seed applied only from the host's verified ACK, before the queue drops it", async () => {
   const f = fixture(1, 10_000, undefined, seedKey("adoption", 7));

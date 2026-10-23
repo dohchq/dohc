@@ -108,6 +108,7 @@ export function readSettingsLeniently<T>(input: {
   defaults: T;
   kind: (path: SettingsPath) => SettingKind;
   parse: (candidate: unknown) => T | null;
+  reportIgnored?: (path: SettingsPath) => boolean;
 }): { settings: T; ignored: IgnoredSetting[] } {
   const whole = input.parse(input.raw);
   if (whole !== null) return { settings: whole, ignored: [] };
@@ -141,6 +142,7 @@ export function readSettingsLeniently<T>(input: {
   const invalid = new Set(pending);
   const ignored = leaves
     .filter((leaf) => !leaf.known || invalid.has(leaf))
+    .filter((leaf) => input.reportIgnored?.(leaf.path) ?? true)
     .slice(0, MAX_IGNORED_SETTINGS)
     .map((leaf): IgnoredSetting => ({
       key: ignoredKey(leaf.path),

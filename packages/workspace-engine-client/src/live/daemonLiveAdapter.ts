@@ -34,7 +34,8 @@ export type DaemonErrorCode =
   | "AMBIGUOUS_SELECTOR"
   | "INVALID_CHANNEL"
   | "RELAY_METHOD_NOT_ALLOWED"
-  | "RELAY_INVALID_RESPONSE";
+  | "RELAY_INVALID_RESPONSE"
+  | "RELAY_HTTPS_REQUIRED";
 
 export interface DaemonWireError extends Omit<WireError, "code"> {
   code: DaemonErrorCode;
@@ -143,6 +144,14 @@ export function isWorkspaceUpdatingRefusal(error: unknown): boolean {
   );
 }
 
+// A degraded initial capture has not read the file a document open names. No
+// capture wake follows, so the open does not wait; it stays read-only until
+// the person opens it again.
+export function isYdocFileNotReadRefusal(error: unknown): boolean {
+  return refusalMessageOf(error, "OVERLOADED") ===
+    "dohc has not read this file yet. Open it again once dohc has read it.";
+}
+
 // The engine refused a request's input as its domain states it. The daemon
 // keeps the domain's reason to itself and sends only this discriminator, so
 // a caller reads it for a request whose only such refusal it knows.
@@ -198,6 +207,14 @@ export function isFileLockedRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "OVERLOADED") === "file-locked";
 }
 
+// The volume gave a file the engine created sharing permissions it was
+// created without, so the engine refused to write a secret or a file's own
+// access there (`MaterializeError::VolumeSharesNewFiles`). Moving the
+// workspace fixes it; a retry alone does not.
+export function isVolumeSharesNewFilesRefusal(error: unknown): boolean {
+  return refusalMessageOf(error, "INTERNAL") === "volume-shares-new-files";
+}
+
 // The engine's own database was busy and its bounded retry budget ran out
 // (`StorageError::FileLocked`, which the store documents as intact and the
 // operation as retryable). Not the artifact lock above and not the user's
@@ -212,7 +229,7 @@ export function isEngineStoreBusyRefusal(error: unknown): boolean {
 
 // Native live operations reserve shared slots and bytes before reading state.
 // A competing operation can release this capacity without any user action.
-function isLiveSettlementCapacityRefusal(error: unknown): boolean {
+export function isLiveSettlementCapacityRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "OVERLOADED") === "live-settlement-capacity";
 }
 
@@ -412,6 +429,7 @@ export const DAEMON_ERROR_CODES: readonly DaemonErrorCode[] = [
   "INVALID_CHANNEL",
   "RELAY_METHOD_NOT_ALLOWED",
   "RELAY_INVALID_RESPONSE",
+  "RELAY_HTTPS_REQUIRED",
   "INTERNAL",
 ];
 

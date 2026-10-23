@@ -175,7 +175,7 @@ struct ApplicationOutputGuard {
     activation_id: Option<String>,
     cancel: CancelSignal,
     deadline: Option<Instant>,
-    _reservation: Arc<dyn Send + Sync>,
+    reservation: Mutex<Option<Arc<dyn Send + Sync>>>,
 }
 
 struct RetireOnCancellation(Option<Arc<Host>>);
@@ -210,16 +210,15 @@ impl OutputGuard for HostOutputGuard {
     fn deadline(&self) -> Option<Instant> {
         self.deadline
     }
-    fn is_current(&self) -> bool {
+    fn is_current_ignoring_cancel(&self) -> bool {
         self.host.current(&self.host.connection)
-            && !self.cancel.is_cancelled()
             && self
                 .deadline
                 .is_none_or(|deadline| Instant::now() < deadline)
     }
-    fn with_current(&self, action: &mut dyn FnMut()) -> bool {
+    fn with_current(&self, cancellable: bool, action: &mut dyn FnMut()) -> bool {
         let _fence = lock(&self.host.output_fence);
-        if !self.is_current() {
+        if !self.is_current_ignoring_cancel() || (cancellable && self.cancel.is_cancelled()) {
             return false;
         }
         action();
@@ -274,9 +273,9 @@ impl OutputGuard for ApplicationOutputGuard {
     fn retirement_signal(&self) -> CancelSignal {
         self.registration.retired.clone()
     }
-    fn with_current(&self, action: &mut dyn FnMut()) -> bool {
+    fn with_current(&self, cancellable: bool, action: &mut dyn FnMut()) -> bool {
         let _fence = lock(&self.registration.host.output_fence);
-        if !self.is_current() {
+        if !self.is_current_ignoring_cancel() || (cancellable && self.cancel.is_cancelled()) {
             return false;
         }
         action();
@@ -285,7 +284,7 @@ impl OutputGuard for ApplicationOutputGuard {
     fn deadline(&self) -> Option<Instant> {
         self.deadline
     }
-    fn is_current(&self) -> bool {
+    fn is_current_ignoring_cancel(&self) -> bool {
         let host = &self.registration.host;
         host.current(&host.connection)
             && !self.registration.retired.is_cancelled()
@@ -293,10 +292,12 @@ impl OutputGuard for ApplicationOutputGuard {
                 .activation_id
                 .as_deref()
                 .is_some_and(|id| host.retired_activations.contains(id))
-            && !self.cancel.is_cancelled()
             && self
                 .deadline
                 .is_none_or(|deadline| Instant::now() < deadline)
+    }
+    fn release(&self) {
+        lock(&self.reservation).take();
     }
 }
 
@@ -407,7 +408,7 @@ impl EngineService {
             registration: registration.clone(),
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
-            _reservation: Arc::new(()),
+            reservation: Mutex::new(Some(Arc::new(()))),
         });
         if !guard.is_current() {
             return Err(workspace_unavailable());
@@ -477,7 +478,7 @@ impl EngineService {
             let _serial = serial;
             let registration = read_registration;
             let b = &registration.binding;
-            let store = dohc_engine_storage::EngineStore::open_read_only(&open.db_path)
+            let store = dohc_engine_storage::EngineStore::open_read_only(open.actor.database_path())
                 .map_err(|_| workspace_unavailable())?;
             let state = store.read_with(|conn| -> Result<Value,dohc_engine_storage::StorageError> {
                 use rusqlite::OptionalExtension;
@@ -544,7 +545,7 @@ impl EngineService {
             registration: registration.clone(),
             cancel: ctx.cancel,
             deadline: ctx.deadline,
-            _reservation: reservation.clone(),
+            reservation: Mutex::new(Some(reservation.clone())),
         };
         if !guard.is_current() {
             return Err(workspace_unavailable());
@@ -657,7 +658,7 @@ impl EngineService {
             registration: registration.clone(),
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
-            _reservation: reconstruction.reservation.clone(),
+            reservation: Mutex::new(Some(reconstruction.reservation.clone())),
         });
         let mut retirement = RetireOnCancellation(Some(host));
         let operation = tokio::spawn(async move {
@@ -1647,7 +1648,7 @@ impl EngineService {
             registration: input.registration.clone(),
             cancel: ctx.cancel,
             deadline: ctx.deadline,
-            _reservation: input.reservation.clone(),
+            reservation: Mutex::new(Some(input.reservation.clone())),
         });
         // Keep the workspace fence until the writer is terminal if the RPC is cancelled.
         let mut retirement = RetireOnCancellation(Some(host.clone()));
@@ -1769,7 +1770,7 @@ mod tests {
         use dohc_engine_storage::{EngineStore, StorageError};
         let (_scratch, service, _owner, workspace, _registration, mut binding) = fixture().await;
         let open = service.open(Some(&WorkspaceHandle(workspace))).unwrap();
-        let mut store = EngineStore::open(&open.db_path, 0).unwrap();
+        let mut store = EngineStore::open(open.actor.database_path(), 0).unwrap();
         let selectors = serde_json::to_string(&binding.selector_paths).unwrap();
         let wider = serde_json::to_string(&[binding.current_path.as_str(), "zz-other.md"]).unwrap();
         store.write_with(&NoFaults, |tx| {
@@ -3049,6 +3050,7 @@ mod tests {
             activation_id: activation_id.into(),
             source: dohc_engine_collab::live_update_application::ImportedOwnerSource {
                 version: 1,
+                reader_source: false,
                 relay_database_namespace: "unload-test".into(),
                 workspace_id: "workspace".into(),
                 main_version_id: "main".into(),
@@ -3262,7 +3264,8 @@ mod tests {
         );
         assert!(!lock(&service.sessions).contains_key("ydoc-unload-document"));
         drop(service.leases.scoped(&open.root).acquire(&key).unwrap());
-        let store = dohc_engine_storage::EngineStore::open_read_only(&open.db_path).unwrap();
+        let store =
+            dohc_engine_storage::EngineStore::open_read_only(open.actor.database_path()).unwrap();
         let available: Vec<(String, i64)> = store
             .read_with(|conn| {
                 conn.prepare("SELECT object_id,available FROM live_device_application_bindings ORDER BY object_id")?
@@ -3320,7 +3323,8 @@ mod tests {
             ctx
         };
         let open = service.open(Some(&workspace)).unwrap();
-        let mut store = dohc_engine_storage::EngineStore::open(&open.db_path, 0).unwrap();
+        let mut store =
+            dohc_engine_storage::EngineStore::open(open.actor.database_path(), 0).unwrap();
         let deferred = |sql: &'static str, store: &mut dohc_engine_storage::EngineStore| {
             store
                 .write_with(&NoFaults, |tx| {
@@ -3371,7 +3375,8 @@ mod tests {
             ctx
         };
         let open = service.open(Some(&workspace)).unwrap();
-        let mut store = dohc_engine_storage::EngineStore::open(&open.db_path, 0).unwrap();
+        let mut store =
+            dohc_engine_storage::EngineStore::open(open.actor.database_path(), 0).unwrap();
         let execute = |sql: &str, store: &mut dohc_engine_storage::EngineStore| {
             store
                 .write_with(&NoFaults, |tx| {
@@ -3919,7 +3924,7 @@ mod tests {
                 registration,
                 cancel: CancelSignal::new(),
                 deadline: None,
-                _reservation: Arc::new(()),
+                reservation: Mutex::new(Some(Arc::new(()))),
             }
         };
         let (document_output, sibling_output) = (guard(document), guard(sibling));
@@ -4003,7 +4008,7 @@ mod tests {
             registration: registration.clone(),
             cancel: CancelSignal::new(),
             deadline: None,
-            _reservation: Arc::new(()),
+            reservation: Mutex::new(Some(Arc::new(()))),
         };
         let (old_output, ordinary_output) = (output(&old), output(&ordinary));
         let identity = || dohc_engine_collab::live_update_application::LiveApplicationAckIdentity {

@@ -45,7 +45,7 @@ async function fixture(mode: "device" | "service", sizes = [1024], existingRoot?
   } catch (error) {await call("close").catch(() => {}); child.kill(); await exited; lines.close(); if (process.env.DOHC_REPLICA_RETAIN !== "1") await rm(root, {recursive: true, force: true, maxRetries: 5}); else console.log(`RETAINED=${root}`); throw error;}
 }
 
-it.skipIf(binary.missing)("controller death closes the relay and both native daemons mid-scenario", async () => {
+it.skipIf(binary.missing || process.platform !== "linux")("controller death closes the relay and both native daemons mid-scenario", async () => {
   const root = await mkdtemp(join(tmpdir(), "dohc-replica5c-controller-"));
   const controller = spawn(process.execPath, ["--import", "tsx/esm", fileURLToPath(new URL("./replicaJournal.controller.fixture.ts", import.meta.url)), root, binary.require()],
     {cwd: fileURLToPath(new URL("..", import.meta.url)), windowsHide: true, stdio: ["ignore", "ignore", "pipe", "ipc"]});
@@ -65,7 +65,7 @@ it.skipIf(binary.missing)("controller death closes the relay and both native dae
   }
 }, 120_000);
 
-it.skipIf(binary.missing).each(["device", "service"] as const)("%s host: journal precedes echo with equal evidence and no duplicate History", async mode => {
+it.skipIf(binary.missing || process.platform !== "linux").each(["device", "service"] as const)("%s host: journal precedes echo with equal evidence and no duplicate History", async mode => {
   const samples: Record<string, number[]> = {};
   for (const size of (process.env.DOHC_REPLICA_MEASURE === "1" ? [50 * 1024, 1024 * 1024] : [1024])) {
     const f = await fixture(mode, [size]);
@@ -94,7 +94,7 @@ it.skipIf(binary.missing).each(["device", "service"] as const)("%s host: journal
   if (process.env.DOHC_REPLICA_MEASURE_OUT) await writeFile(`${process.env.DOHC_REPLICA_MEASURE_OUT}-${mode}.json`, JSON.stringify(samples));
 }, 600_000);
 
-it.skipIf(binary.missing)("host killed after commit: journal survives, restart echoes once", async () => {
+it.skipIf(binary.missing || process.platform !== "linux")("host killed after commit: journal survives, restart echoes once", async () => {
   const f = await fixture("device", [1024]);
   try {
     await f.call("hold", {beforeRead: true}); await f.call("edit", {deliveryId: "committed-before-kill"}); await f.call("held"); await f.call("killHost");
@@ -109,7 +109,7 @@ it.skipIf(binary.missing)("host killed after commit: journal survives, restart e
   } finally {await f.close();}
 }, 120_000);
 
-it.skipIf(binary.missing)("restore while an old-generation page is in flight steps only at the restore application", async () => {
+it.skipIf(binary.missing || process.platform !== "linux")("restore while an old-generation page is in flight steps only at the restore application", async () => {
   const f = await fixture("service", [1024]);
   try {
     await f.call("edit", {deliveryId: "prime"}); await f.call("drain"); await f.call("compare");
@@ -129,7 +129,7 @@ it.skipIf(binary.missing)("restore while an old-generation page is in flight ste
   } finally {await f.close();}
 }, 120_000);
 
-it.skipIf(binary.missing).each([false, true])("retired lineage skips an in-flight page after delete (rename=%s)", async rename => {
+it.skipIf(binary.missing || process.platform !== "linux").each([false, true])("retired lineage skips an in-flight page after delete (rename=%s)", async rename => {
   const f = await fixture("service", [1024]);
   try {
     await f.call("edit", {deliveryId: "prime"}); await f.call("drain"); await f.call("compare");
@@ -142,7 +142,7 @@ it.skipIf(binary.missing).each([false, true])("retired lineage skips an in-fligh
   } finally {await f.close();}
 }, 120_000);
 
-it.skipIf(binary.missing)("replica killed with a page write transaction open rolls back and rebuilds without duplicate application", async () => {
+it.skipIf(binary.missing || process.platform !== "linux")("replica killed with a page write transaction open rolls back and rebuilds without duplicate application", async () => {
   const f = await fixture("service", [1024]);
   try {
     await f.call("hold", {beforeRead: true});
@@ -159,7 +159,7 @@ it.skipIf(binary.missing)("replica killed with a page write transaction open rol
   } finally {await f.close();}
 }, 180_000);
 
-it.skipIf(binary.missing)("relay process is killed during a journal page and restarts", async () => {
+it.skipIf(binary.missing || process.platform !== "linux")("relay process is killed during a journal page and restarts", async () => {
   let f = await fixture("service", [1024]);
   try {
     await f.call("hold", {beforeRead: true}); for (let i = 0; i < 64; i++) await f.call("edit", {deliveryId: `relay-page-${i}`});
@@ -176,7 +176,7 @@ it.skipIf(binary.missing)("relay process is killed during a journal page and res
   } finally {await f.close();}
 }, 180_000);
 
-it.skipIf(binary.missing)("same lineage resent after an epoch-floor drain cannot reopen a pre-floor live session", async () => {
+it.skipIf(binary.missing || process.platform !== "linux")("same lineage resent after an epoch-floor drain cannot reopen a pre-floor live session", async () => {
   const f = await fixture("service", [1024]);
   try {
     await f.call("edit", {deliveryId: "pre-epoch"}); await f.call("drain"); await f.call("compare");

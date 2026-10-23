@@ -6,6 +6,7 @@ import {
   activateTab,
   activeGroup,
   activeTabPath,
+  adjacentTabPath,
   allTabs,
   clampAboutWidth,
   clampOpenEditorsHeight,
@@ -27,6 +28,7 @@ import {
   versionCompareTabPath,
   GRAPH_TAB_PATH,
   moveTab,
+  openMomentDiff,
   openTab,
   parseUiState,
   pruneMissingRestoredTabs,
@@ -69,6 +71,16 @@ function withTabs(...paths: string[]): WorkbenchState {
 }
 
 describe("tabs", () => {
+  it("finds the next and previous tab in a group, wrapping at the ends", () => {
+    const group = activeGroup(activateTab(withTabs("a.md", "b.md", "c.md"), DEFAULT_EDITOR_GROUP_ID, "a.md"));
+    expect(adjacentTabPath(group, 1)).toBe("b.md");
+    expect(adjacentTabPath(group, -1)).toBe("c.md");
+    expect(adjacentTabPath({ ...group, activeTab: "c.md" }, 1)).toBe("a.md");
+    expect(adjacentTabPath({ ...group, activeTab: null }, 1)).toBe("a.md");
+    expect(adjacentTabPath({ ...group, activeTab: null }, -1)).toBe("c.md");
+    expect(adjacentTabPath({ ...group, tabs: [], activeTab: null }, 1)).toBeNull();
+  });
+
   it("starts with one focused empty editor group", () => {
     const state = defaultWorkbenchState();
     expect(state.editorGroups).toEqual([
@@ -87,6 +99,31 @@ describe("tabs", () => {
   it("openTab of the already-active tab is a no-op (same reference)", () => {
     const state = withTabs("a.md");
     expect(openTab(state, "a.md")).toBe(state);
+  });
+
+  it("points the group's one diff tab at each change History opens, in its place", () => {
+    let state = openMomentDiff(withTabs("a.md"), "m-1");
+    state = openTab(state, "b.md");
+    state = openMomentDiff(state, "m-2");
+    expect(allTabs(state).map((tab) => tab.path)).toEqual(["a.md", momentDiffTabPath("m-2"), "b.md"]);
+    expect(activeTabPath(state)).toBe(momentDiffTabPath("m-2"));
+    // A change already open is activated where it is.
+    state = openTab(state, "b.md");
+    expect(openMomentDiff(state, "m-2")).toEqual(activateTab(state, DEFAULT_EDITOR_GROUP_ID, momentDiffTabPath("m-2")));
+  });
+
+  it("reuses the active diff tab first, and keeps another group's diff tab", () => {
+    let state = moveTabToNewGroup(withTabs(momentDiffTabPath("left"), "a.md"), DEFAULT_EDITOR_GROUP_ID, "a.md", "right");
+    const right = state.activeEditorGroup;
+    state = openMomentDiff(state, "m-1");
+    expect(state.editorGroups.map((group) => group.tabs.map((tab) => tab.path))).toEqual([
+      [momentDiffTabPath("left")],
+      ["a.md", momentDiffTabPath("m-1")],
+    ]);
+    // Two diff tabs persisted in one group: the active one follows.
+    state = openTab(state, momentDiffTabPath("m-2"), right);
+    state = openMomentDiff(state, "m-3", right);
+    expect(activeGroup(state).tabs.map((tab) => tab.path)).toEqual(["a.md", momentDiffTabPath("m-1"), momentDiffTabPath("m-3")]);
   });
 
   it("openTab at the cap drops the oldest tab instead of refusing", () => {

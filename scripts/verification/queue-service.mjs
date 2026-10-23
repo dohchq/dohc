@@ -1,18 +1,21 @@
 // The verification queue service. It accepts submissions, runs one PR
 // verification per host lane, each in its own checkout, and records every outcome.
-// A supervisor (queue-supervisor.ps1) starts it inside a job object that
-// stops every descendant when the service exits, so restart recovery never
-// meets a worker left running.
+// A supervisor starts it and stops every descendant when the service exits, so
+// restart recovery never meets a worker left running: on Windows,
+// queue-supervisor.ps1 runs it in a job object; on a Mac, queue-supervisor.mjs
+// follows its process tree.
 
+import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import { chmod, lstat, readdir, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { cpus, freemem, uptime } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { git, run } from "./process.mjs";
+import { envHelper, holdSocket, requestMarker, requestVariable, stopProcesses } from "./queue-supervisor.mjs";
 import { acquireVerificationSlot, freeDiskGb, maxVerificationLanes, resolveBuildBudget, verificationLanes } from "../../tools/rust-engine-program/build-slot.mjs";
 import { attemptOutcome, lastNightlyPass, lineOrder, listRequests, monitorPort, nextRequest, orderOf, ownerFor, ownerOf, parseMove, pauseQueue, placeMove, placeSubmission, position, protocol, queueLanePurpose, queuePaths, readJson, readPause, recordHistory, restartReason, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
 import { startMonitor, threadDirectory } from "./queue-monitor.mjs";
@@ -57,6 +60,36 @@ export async function sweepContainers({ request, command = run } = {}) {
  */
 export const laneTemp = lane => join(dirname(lane), "tmp", basename(lane));
 
+/**
+ * Remove everything Git does not track except the named caches. A build can leave read-only output that Git
+ * cannot remove, such as the Markdown reader's folder from a commit before #2243. All of it is a build's own
+ * output, so after a clean that Git ran and failed, what remains becomes writable and the clean runs again.
+ * A stop, a timeout, or a Git that never ran fails the lane at once.
+ */
+export async function cleanCheckout(gitOutput, root) {
+  const caches = ["node_modules", "target"];
+  const excludes = caches.map(name => `--exclude=${name}`);
+  const clean = ["clean", "-ffdx", ...excludes];
+  try { return await gitOutput(clean); } catch (error) {
+    // windows-job.ps1 and windows-command.mjs exit with 0xD0C5 when Git never started.
+    if (!error?.commandExitFailure || error.exitCode === 0xD0C5) throw error;
+  }
+  // What the clean left, as raw paths: -z neither quotes nor translates them.
+  for (const path of (await gitOutput(["ls-files", "-z", "--others", "--directory", ...excludes])).split("\0")) {
+    if (path) await makeWritable(join(root, path), caches);
+  }
+  return gitOutput(clean);
+}
+
+/** Adds the owner's write permission throughout `path`, leaving symbolic links and the caches the clean keeps. */
+async function makeWritable(path, caches) {
+  const info = await lstat(path).catch(() => null);
+  if (!info || info.isSymbolicLink()) return;
+  await chmod(path, (info.mode & 0o7777) | 0o200);
+  if (!info.isDirectory()) return;
+  for (const name of await readdir(path)) if (!caches.includes(name)) await makeWritable(join(path, name), caches);
+}
+
 /** Put the lane at `head` with no state from earlier runs except the named caches. */
 export async function prepareLane({ lane, repo, head, signal }) {
   // The temp folder keeps only the coming run's files.
@@ -64,7 +97,8 @@ export async function prepareLane({ lane, repo, head, signal }) {
   await rm(laneTemp(lane), { recursive: true, force: true, maxRetries: 5 }).catch(() => {});
   mkdirSync(laneTemp(lane), { recursive: true });
   // Git runs as a child process, never synchronously, so a slow checkout cannot stop the heartbeat of another lane's run.
-  const laneGit = async (args, cwd = lane) => (await run("git", args, { cwd, signal, quietStdout: true, timeoutMs: 15 * 60_000 })).stdout.trim();
+  const gitOutput = async (args, cwd = lane) => (await run("git", args, { cwd, signal, quietStdout: true, timeoutMs: 15 * 60_000 })).stdout;
+  const laneGit = async (args, cwd = lane) => (await gitOutput(args, cwd)).trim();
   if (!existsSync(join(lane, ".git"))) {
     await laneGit(["worktree", "add", "--detach", "--force", lane, head], repo);
     // Workspace cleanup keeps locked worktrees, so the lane keeps its warm caches.
@@ -74,7 +108,7 @@ export async function prepareLane({ lane, repo, head, signal }) {
   // No worker runs while the lane is prepared, so any Git lock or operation state is stale.
   for (const name of ["index.lock", "HEAD.lock", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG"]) rmSync(join(gitDir, name), { force: true });
   await laneGit(["checkout", "--force", "--detach", head]);
-  await laneGit(["clean", "-ffdx", "--exclude=node_modules", "--exclude=target"]);
+  await cleanCheckout(gitOutput, lane);
   if (await laneGit(["rev-parse", "HEAD"]) !== head) throw new Error(`The lane did not check out ${head}.`);
   if (await laneGit(["status", "--porcelain"]) !== "") throw new Error("The lane has changes after checkout and clean.");
   // Installed while the request waits for the lane, so the verifier's own install has nothing left to do in it.
@@ -99,7 +133,9 @@ async function defaultWorker({ lane, request, grant, output, signal }) {
   const args = ["scripts/verification/verify.mjs", "pr", "--base", request.base,
     ...(request.scope === "all" ? [] : ["--job", request.scope]), ...(request.full ? ["--full"] : [])];
   await run(process.execPath, args, { cwd: lane, signal, log: join(output, "worker.log"), quietStdout: true,
-    env: { ...process.env, TEMP: laneTemp(lane), TMP: laneTemp(lane), DOHC_VERIFICATION_GRANT: JSON.stringify(grant), DOHC_VERIFICATION_OUTPUT: output } })
+    env: { ...process.env, TEMP: laneTemp(lane), TMP: laneTemp(lane), DOHC_VERIFICATION_GRANT: JSON.stringify(grant), DOHC_VERIFICATION_OUTPUT: output,
+      // On a Mac the request's marker lets the service stop what the verifier leaves running.
+      ...(process.platform === "darwin" ? { [requestVariable]: grant.request } : {}) } })
     .catch(error => { if (!error.commandExitFailure) throw error; });
 }
 
@@ -117,11 +153,39 @@ const pipeName = root => `\\\\.\\pipe\\dohc-verification-queue-${createHash("sha
 
 /** Hold the host-wide name for this queue root; the OS frees it when the process dies. */
 function holdInstance(root) {
+  if (process.platform !== "win32") return holdSocket(join(root, "service.sock"));
   return new Promise((done, fail) => {
     const server = createServer(socket => socket.end());
     server.once("error", error => error.code === "EADDRINUSE" ? done(null) : fail(error));
-    server.listen(process.platform === "win32" ? pipeName(root) : join(root, "service.sock"), () => { server.unref(); done(server); });
+    server.listen(pipeName(root), () => { server.unref(); done(server); });
   });
+}
+
+/**
+ * Free memory in GB. On a Mac, os.freemem() counts only pages that were never used, often under 1 GB on an idle
+ * host, so the inactive pages it can reclaim at once count too, as Windows counts its standby memory.
+ */
+export const freeMemoryGb = (platform = process.platform) => (platform === "darwin" ? process.availableMemory() : freemem()) / 1024 ** 3;
+
+/**
+ * Stop what a request's verifier left running once its attempt ends, and resolve with how many processes that was.
+ * Every process the verifier starts inherits the request's marker, except Apple's programs, whose environment is hidden.
+ * Windows counts nothing: there they stop with the service's job.
+ */
+export const stopStrays = (id, root, platform = process.platform) => platform === "darwin"
+  ? stopProcesses({ marker: requestMarker(id), helper: envHelper(root) }).then(pids => pids.length) : Promise.resolve(undefined);
+
+/**
+ * Keep a Mac from idle sleep while a run is active, and return what ends that. A Mac set to sleep would otherwise
+ * pause a gate midway. caffeinate also ends its assertion when the service exits.
+ */
+export function holdAwake(platform = process.platform) {
+  if (platform !== "darwin") return () => {};
+  const child = spawn("caffeinate", ["-i", "-w", String(process.pid)], { stdio: "ignore" });
+  child.on("error", () => {});
+  // caffeinate waits for this process to exit, so this process must never wait for caffeinate.
+  child.unref();
+  return () => child.kill();
 }
 
 /**
@@ -132,10 +196,10 @@ export async function runService({
   root, repo, lane = queuePaths(root).lane, commit = null,
   tickMs = 2000, heartbeatMs = 10_000, timeLimitMs = 120 * 60_000, floorGb = resolveBuildBudget()?.diskFloorGb ?? 40,
   // Another run starts only with this much free memory; a check that failed after it fell under the second floor is not trusted.
-  memoryFloorGb = 10, memoryFailGb = 3, freeMemory = () => freemem() / 1024 ** 3,
+  memoryFloorGb = 10, memoryFailGb = 3, freeMemory = freeMemoryGb,
   freeDisk = () => freeDiskGb(lane) ?? freeDiskGb(root), docker = dockerResponds,
   prepare = prepareLane, sweep = sweepContainers, holdLane = holdLegacyLane,
-  worker = defaultWorker, retryDelay = retryDelayMs, cleanupRetryMs = 60_000, prepareLimitMs = 45 * 60_000, stop, log = defaultLog(root),
+  worker = defaultWorker, retryDelay = retryDelayMs, cleanupRetryMs = 60_000, prepareLimitMs = 45 * 60_000, stop, log = defaultLog(root), keepAwake = holdAwake, strays = stopStrays, strayRetryMs = 5000,
   lanes = () => 1, monitor = null, bootedAt = Date.now() - uptime() * 1000, threadOf = threadDirectory(),
 }) {
   const paths = queuePaths(root);
@@ -201,7 +265,7 @@ export async function runService({
   async function finish(entry, attempt, outcome, { cleanup = false } = {}) {
     const status = readJson(statusPath(entry.id)) ?? entry.status;
     const attempts = status.attempts.map(row => row.n === attempt?.n ? { ...row, endedAt: new Date().toISOString(), awakeMs: attempt.awakeMs, load: attempt.load ?? null, flaky: attempt.flaky ?? [], failed: attempt.failed ?? [],
-      steps: attempt.steps ?? {}, slowest: attempt.slowest ?? [], ...outcome } : row);
+      steps: attempt.steps ?? {}, slowest: attempt.slowest ?? [], strays: attempt.strays, ...outcome } : row);
     // Only the JavaScript gate starts containers.
     if (cleanup && entry.request.gates?.js) status.cleanupPending = await cleanUp(entry.id);
     const failures = attempts.filter(row => row.outcome === "environment").length;
@@ -222,7 +286,7 @@ export async function runService({
         result: attempt ? join(paths.attempt(entry.id, attempt.n), "result.json") : null, cause: outcome.cause, reason: outcome.reason ?? null });
     }
     history({ event: "finished", id: entry.id, attempt: attempt?.n, awakeMs: attempt?.awakeMs, load: attempt?.load ?? null, flaky: attempt?.flaky ?? [], failed: attempt?.failed ?? [],
-      steps: attempt?.steps ?? {}, slowest: attempt?.slowest ?? [], ...outcome });
+      steps: attempt?.steps ?? {}, slowest: attempt?.slowest ?? [], strays: attempt?.strays, ...outcome });
   }
 
   async function recover(requests) {
@@ -367,6 +431,7 @@ export async function runService({
     const current = { id: entry.id, attempt: n, checkout, startedAt: new Date().toISOString(), phase: "preparing", phaseAt: Date.now(), awakeMs: 0, load: { lanes: 0, peakRuns: 0, minFreeMemGb: Infinity, cpuBusy: 0, samples: 0 },
       limitMs: Math.min(timeLimitMs, requestBudgetMs - used), prepareMs: 0, abort: new AbortController(), stopped: undefined };
     running.set(entry.id, current);
+    const letSleep = keepAwake();
     let lease;
     try {
       const laneNumber = checkouts.indexOf(checkout) + 1;
@@ -386,7 +451,21 @@ export async function runService({
     } finally {
       // Only verification counts against the run; its bookkeeping does not.
       current.phase = "finishing";
+      // A process the verifier left running could hold the lane's ports or files, so the lane stays held until
+      // they have stopped, and no other gate starts beside them.
+      let stopped;
+      for (let wait = strayRetryMs; ; wait = Math.min(wait * 2, 60_000)) {
+        try { stopped = await strays(entry.id, root); break; }
+        catch (error) {
+          current.phase = `held: could not stop what the run left running (${error.message}); trying again`;
+          log(`could not stop what ${entry.id}/${n} left running, so its lane stays held: ${error.message}`);
+          await sleep(wait);
+        }
+      }
+      if (stopped) log(`stopped ${stopped} process(es) that ${entry.id}/${n} left running`);
+      current.phase = "finishing";
       lease?.release();
+      letSleep();
       const receipt = readJson(join(output, "result.json"));
       let outcome = attemptOutcome(receipt, grant, { stopped: current.stopped });
       if (outcome.outcome === "failed" && outcome.cause === "check") {
@@ -399,7 +478,7 @@ export async function runService({
       }
       // The attempt stays owned until its outcome is on disk. If that write fails, the
       // service stops, and its replacement recovers the request from the receipt.
-      await finish({ ...entry, status: readJson(statusPath(entry.id)) ?? entry.status }, { n, awakeMs: current.awakeMs, load: runLoad(current), flaky: receipt?.flaky ?? [], failed: receipt?.failed ?? [], ...timesOf(receipt) }, outcome, { cleanup: true });
+      await finish({ ...entry, status: readJson(statusPath(entry.id)) ?? entry.status }, { n, awakeMs: current.awakeMs, load: runLoad(current), flaky: receipt?.flaky ?? [], failed: receipt?.failed ?? [], strays: stopped, ...timesOf(receipt) }, outcome, { cleanup: true });
       running.delete(entry.id);
     }
   }
@@ -436,7 +515,8 @@ export async function runService({
       : !health.diskOk ? `waiting for disk: ${health.diskFreeGb.toFixed(1)} GB free, ${floorGb} GB needed`
       : health.pausedUntil > Date.now() ? `paused after ${health.environmentStreak} environment failures in a row`
       : !health.dockerOk ? "Docker is not responding; runs with the JavaScript gate wait"
-      : running.size && freeMemory() < memoryFloorGb ? `waiting for memory: ${freeMemory().toFixed(1)} GB free, ${memoryFloorGb} GB needed to start another run` : null;
+      // Memory holds back a run only while a lane is free for it.
+      : running.size && running.size < laneCount && freeMemory() < memoryFloorGb ? `waiting for memory: ${freeMemory().toFixed(1)} GB free, ${memoryFloorGb} GB needed to start another run` : null;
   }
 
   function prune(requests) {

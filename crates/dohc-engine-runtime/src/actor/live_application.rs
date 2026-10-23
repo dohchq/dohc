@@ -34,6 +34,38 @@ pub type RestoreApplyObserver =
     Arc<dyn Fn(&dohc_engine_domain::CollectionRecordApplyFacts) + Send + Sync>;
 pub type RestoreSettlementObserver = Arc<dyn Fn(&LiveSettlementResult) + Send + Sync>;
 
+/// A reply that carries the actor's share of its request's reservation. Fields
+/// drop in declaration order, so a reply that nobody takes frees its result
+/// before the capacity that covered it.
+pub(super) struct Reserved<T> {
+    result: Result<T, RuntimeError>,
+    reservation: Option<Arc<dyn Send + Sync>>,
+}
+type ReservedReply<T> = oneshot::Sender<Reserved<T>>;
+
+fn reply_reserved<T>(
+    store: &EngineStore,
+    reply: ReservedReply<T>,
+    reservation: impl Into<Option<Arc<dyn Send + Sync>>>,
+    result: Result<T, RuntimeError>,
+) {
+    let _ = reply.send(Reserved {
+        result: super::drained(store, result),
+        reservation: reservation.into(),
+    });
+}
+
+/// Release the actor's share before the caller sees the result, so a caller
+/// that drops the result finds that capacity free again.
+async fn receive_reserved<T>(receive: oneshot::Receiver<Reserved<T>>) -> Result<T, RuntimeError> {
+    let Reserved {
+        result,
+        reservation,
+    } = receive.await.map_err(|_| RuntimeError::ActorUnavailable)?;
+    drop(reservation);
+    result
+}
+
 /// The caller authenticates the connection, workspace, and relay namespace.
 /// Dropping this owner retires every captured document handle immediately.
 pub struct ActorLiveApplicationOwner {
@@ -114,30 +146,36 @@ impl ActorLiveApplicationOwner {
     ) -> Result<NativeRestoreResumeReceipt, RuntimeError> {
         current(&self.actor, &self.token)?;
         input.validate_budget(max_bytes, max_events)?;
-        let (reply, receive) = oneshot::channel();
-        self.actor
-            .tx
-            .send(Command::LiveApplication(Box::new(Request::ResumeRestore {
-                workspace_id: self.workspace_id.clone(),
-                token: self.token.clone(),
-                input: Box::new(input),
-                coordinate,
-                max_bytes,
-                max_events,
-                root,
-                now_ms,
-                faults,
-                cancel,
-                reservation,
-                reply,
-            })))
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let receipt = receive
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)??;
-        current(&self.actor, &self.token)?;
-        Ok(receipt)
+        // A cold reader point uses all three attempts; eviction holds until the next call.
+        for attempt in 0..=2 {
+            let (reply, receive) = oneshot::channel();
+            self.actor
+                .tx
+                .send(Command::LiveApplication(Box::new(Request::ResumeRestore {
+                    workspace_id: self.workspace_id.clone(),
+                    token: self.token.clone(),
+                    input: Box::new(input.clone()),
+                    coordinate: coordinate.clone(),
+                    max_bytes,
+                    max_events,
+                    root: root.clone(),
+                    now_ms,
+                    faults: faults.clone(),
+                    cancel: cancel.clone(),
+                    reservation: reservation.clone(),
+                    reply,
+                })))
+                .await
+                .map_err(|_| RuntimeError::ActorUnavailable)?;
+            let result = receive_reserved(receive).await;
+            if !super::wait_for_reader(&result, attempt).await {
+                let result = result?;
+                current(&self.actor, &self.token)?;
+                return Ok(result);
+            }
+            current(&self.actor, &self.token)?;
+        }
+        unreachable!()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -185,31 +223,37 @@ impl ActorLiveApplicationOwner {
     ) -> Result<LiveSettlementResult, RuntimeError> {
         current(&self.actor, &self.token)?;
         input.validate_budget(max_bytes, max_events)?;
-        let (reply, receive) = oneshot::channel();
-        self.actor
-            .tx
-            .send(Command::LiveApplication(Box::new(Request::SettleRestore {
-                workspace_id: self.workspace_id.clone(),
-                token: self.token.clone(),
-                input: Box::new(input),
-                coordinate,
-                max_bytes,
-                max_events,
-                root,
-                now_ms,
-                faults,
-                cancel,
-                reservation,
-                observer,
-                reply,
-            })))
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let result = receive
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)??;
-        current(&self.actor, &self.token)?;
-        Ok(result)
+        // A cold reader point uses all three attempts; eviction holds until the next call.
+        for attempt in 0..=2 {
+            let (reply, receive) = oneshot::channel();
+            self.actor
+                .tx
+                .send(Command::LiveApplication(Box::new(Request::SettleRestore {
+                    workspace_id: self.workspace_id.clone(),
+                    token: self.token.clone(),
+                    input: Box::new(input.clone()),
+                    coordinate: coordinate.clone(),
+                    max_bytes,
+                    max_events,
+                    root: root.clone(),
+                    now_ms,
+                    faults: faults.clone(),
+                    cancel: cancel.clone(),
+                    reservation: reservation.clone(),
+                    observer: observer.clone(),
+                    reply,
+                })))
+                .await
+                .map_err(|_| RuntimeError::ActorUnavailable)?;
+            let result = receive_reserved(receive).await;
+            if !super::wait_for_reader(&result, attempt).await {
+                let result = result?;
+                current(&self.actor, &self.token)?;
+                return Ok(result);
+            }
+            current(&self.actor, &self.token)?;
+        }
+        unreachable!()
     }
 
     /// Apply one saved proposal through the current actor owner.
@@ -252,29 +296,35 @@ impl ActorLiveApplicationOwner {
     ) -> Result<NativeRestoreApplicationReceipt, RuntimeError> {
         current(&self.actor, &self.token)?;
         input.validate_budget(max_bytes, max_events)?;
-        let (reply, receive) = oneshot::channel();
-        self.actor
-            .tx
-            .send(Command::LiveApplication(Box::new(Request::ApplyRestore {
-                workspace_id: self.workspace_id.clone(),
-                token: self.token.clone(),
-                input: Box::new(input),
-                coordinate,
-                max_bytes,
-                max_events,
-                now_ms,
-                faults,
-                reservation,
-                observer,
-                reply,
-            })))
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let receipt = receive
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)??;
-        current(&self.actor, &self.token)?;
-        Ok(receipt)
+        // A cold reader point uses all three attempts; eviction holds until the next call.
+        for attempt in 0..=2 {
+            let (reply, receive) = oneshot::channel();
+            self.actor
+                .tx
+                .send(Command::LiveApplication(Box::new(Request::ApplyRestore {
+                    workspace_id: self.workspace_id.clone(),
+                    token: self.token.clone(),
+                    input: Box::new(input.clone()),
+                    coordinate: coordinate.clone(),
+                    max_bytes,
+                    max_events,
+                    now_ms,
+                    faults: faults.clone(),
+                    reservation: reservation.clone(),
+                    observer: observer.clone(),
+                    reply,
+                })))
+                .await
+                .map_err(|_| RuntimeError::ActorUnavailable)?;
+            let result = receive_reserved(receive).await;
+            if !super::wait_for_reader(&result, attempt).await {
+                let result = result?;
+                current(&self.actor, &self.token)?;
+                return Ok(result);
+            }
+            current(&self.actor, &self.token)?;
+        }
+        unreachable!()
     }
 
     /// The authenticated caller keeps proof memory reserved through queued preparation.
@@ -289,29 +339,35 @@ impl ActorLiveApplicationOwner {
     ) -> Result<NativeRestoreProposal, RuntimeError> {
         current(&self.actor, &self.token)?;
         input.validate_budget(max_bytes, max_events)?;
-        let (reply, receive) = oneshot::channel();
-        self.actor
-            .tx
-            .send(Command::LiveApplication(Box::new(
-                Request::PrepareRestore {
-                    workspace_id: self.workspace_id.clone(),
-                    token: self.token.clone(),
-                    input: Box::new(input),
-                    coordinate,
-                    max_bytes,
-                    max_events,
-                    faults,
-                    reservation,
-                    reply,
-                },
-            )))
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let proposal = receive
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)??;
-        current(&self.actor, &self.token)?;
-        Ok(proposal)
+        // A cold reader point uses all three attempts; eviction holds until the next call.
+        for attempt in 0..=2 {
+            let (reply, receive) = oneshot::channel();
+            self.actor
+                .tx
+                .send(Command::LiveApplication(Box::new(
+                    Request::PrepareRestore {
+                        workspace_id: self.workspace_id.clone(),
+                        token: self.token.clone(),
+                        input: Box::new(input.clone()),
+                        coordinate: coordinate.clone(),
+                        max_bytes,
+                        max_events,
+                        faults: faults.clone(),
+                        reservation: reservation.clone(),
+                        reply,
+                    },
+                )))
+                .await
+                .map_err(|_| RuntimeError::ActorUnavailable)?;
+            let result = receive_reserved(receive).await;
+            if !super::wait_for_reader(&result, attempt).await {
+                let result = result?;
+                current(&self.actor, &self.token)?;
+                return Ok(result);
+            }
+            current(&self.actor, &self.token)?;
+        }
+        unreachable!()
     }
 
     /// Fence through the same writer queue as local and committed updates.
@@ -678,9 +734,7 @@ impl ActorLiveApplicationHandle {
             })))
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let result = receive
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        let result = receive_reserved(receive).await?;
         current(&self.actor, &self.token)?;
         Ok(result)
     }
@@ -711,9 +765,7 @@ impl ActorLiveApplicationHandle {
             )))
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let result = receive
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        let result = receive_reserved(receive).await?;
         current(&self.actor, &self.token)?;
         Ok(result)
     }
@@ -752,27 +804,32 @@ impl ActorLiveApplicationHandle {
         reservation: Arc<dyn Send + Sync>,
     ) -> Result<OwnerAdoptionAck, RuntimeError> {
         current(&self.actor, &self.token)?;
-        let (reply, receive) = oneshot::channel();
-        self.actor
-            .tx
-            .send(Command::LiveApplication(Box::new(Request::AdoptOwner {
-                workspace_id: self.workspace_id.clone(),
-                token: self.token.clone(),
-                application: self.application.clone(),
-                cut,
-                max_bytes,
-                max_events,
-                faults,
-                reservation,
-                reply,
-            })))
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let result = receive
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)??;
-        current(&self.actor, &self.token)?;
-        Ok(result)
+        for attempt in 0..=2 {
+            let (reply, receive) = oneshot::channel();
+            self.actor
+                .tx
+                .send(Command::LiveApplication(Box::new(Request::AdoptOwner {
+                    workspace_id: self.workspace_id.clone(),
+                    token: self.token.clone(),
+                    application: self.application.clone(),
+                    cut: cut.clone(),
+                    max_bytes,
+                    max_events,
+                    faults: faults.clone(),
+                    reservation: reservation.clone(),
+                    reply,
+                })))
+                .await
+                .map_err(|_| RuntimeError::ActorUnavailable)?;
+            let result = receive_reserved(receive).await;
+            if !super::wait_for_reader(&result, attempt).await {
+                let result = result?;
+                current(&self.actor, &self.token)?;
+                return Ok(result);
+            }
+            current(&self.actor, &self.token)?;
+        }
+        unreachable!()
     }
     #[allow(clippy::too_many_arguments)]
     pub async fn settle(
@@ -804,9 +861,7 @@ impl ActorLiveApplicationHandle {
             })))
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let result = receive
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        let result = receive_reserved(receive).await?;
         current(&self.actor, &self.token)?;
         Ok(result)
     }
@@ -828,27 +883,33 @@ impl ActorLiveApplicationHandle {
             })
             .into());
         }
-        let (reply, receive) = oneshot::channel();
-        self.actor
-            .tx
-            .send(Command::LiveApplication(Box::new(Request::Bootstrap {
-                workspace_id: self.workspace_id.clone(),
-                token: self.token.clone(),
-                application: self.application.clone(),
-                input,
-                bytes,
-                root,
-                faults,
-                reservation,
-                reply,
-            })))
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let result = receive
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)??;
-        current(&self.actor, &self.token)?;
-        Ok(result)
+        let bytes = Arc::new(bytes);
+        for attempt in 0..=2 {
+            let (reply, receive) = oneshot::channel();
+            self.actor
+                .tx
+                .send(Command::LiveApplication(Box::new(Request::Bootstrap {
+                    workspace_id: self.workspace_id.clone(),
+                    token: self.token.clone(),
+                    application: self.application.clone(),
+                    input: input.clone(),
+                    bytes: bytes.clone(),
+                    root: root.clone(),
+                    faults: faults.clone(),
+                    reservation: reservation.clone(),
+                    reply,
+                })))
+                .await
+                .map_err(|_| RuntimeError::ActorUnavailable)?;
+            let result = receive_reserved(receive).await;
+            if !super::wait_for_reader(&result, attempt).await {
+                let result = result?;
+                current(&self.actor, &self.token)?;
+                return Ok(result);
+            }
+            current(&self.actor, &self.token)?;
+        }
+        unreachable!()
     }
 
     /// Apply committed bytes through the actor-owned store and cache.
@@ -895,9 +956,7 @@ impl ActorLiveApplicationHandle {
             })))
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let result = receive
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)??;
+        let result = receive_reserved(receive).await?;
         current(&self.actor, &self.token)?;
         Ok(result)
     }
@@ -972,7 +1031,7 @@ pub(super) enum Request {
         policy: AppliedSyncPolicy,
         cancel: tokio_util::sync::CancellationToken,
         reservation: Arc<dyn Send + Sync>,
-        reply: Reply<AppliedSyncCut>,
+        reply: ReservedReply<AppliedSyncCut>,
     },
     ReadNextApplied {
         workspace_id: String,
@@ -982,7 +1041,7 @@ pub(super) enum Request {
         policy: AppliedSyncPolicy,
         cancel: tokio_util::sync::CancellationToken,
         reservation: Arc<dyn Send + Sync>,
-        reply: Reply<Option<NextAppliedUpdate>>,
+        reply: ReservedReply<Option<NextAppliedUpdate>>,
     },
     ReadAck {
         workspace_id: String,
@@ -1003,7 +1062,7 @@ pub(super) enum Request {
         faults: Arc<dyn FaultInjector>,
         cancel: tokio_util::sync::CancellationToken,
         reservation: Arc<dyn Send + Sync>,
-        reply: Reply<NativeRestoreResumeReceipt>,
+        reply: ReservedReply<NativeRestoreResumeReceipt>,
     },
     SettleRestore {
         workspace_id: String,
@@ -1018,7 +1077,7 @@ pub(super) enum Request {
         cancel: tokio_util::sync::CancellationToken,
         reservation: Arc<dyn Send + Sync>,
         observer: Option<RestoreSettlementObserver>,
-        reply: Reply<LiveSettlementResult>,
+        reply: ReservedReply<LiveSettlementResult>,
     },
     ApplyRestore {
         workspace_id: String,
@@ -1031,7 +1090,7 @@ pub(super) enum Request {
         faults: Arc<dyn FaultInjector>,
         reservation: Arc<dyn Send + Sync>,
         observer: Option<RestoreApplyObserver>,
-        reply: Reply<NativeRestoreApplicationReceipt>,
+        reply: ReservedReply<NativeRestoreApplicationReceipt>,
     },
     PrepareRestore {
         workspace_id: String,
@@ -1042,7 +1101,7 @@ pub(super) enum Request {
         max_events: usize,
         faults: Arc<dyn FaultInjector>,
         reservation: Arc<dyn Send + Sync>,
-        reply: Reply<NativeRestoreProposal>,
+        reply: ReservedReply<NativeRestoreProposal>,
     },
     FenceRestore {
         workspace_id: String,
@@ -1063,7 +1122,7 @@ pub(super) enum Request {
         max_events: usize,
         faults: Arc<dyn FaultInjector>,
         reservation: Arc<dyn Send + Sync>,
-        reply: Reply<OwnerAdoptionAck>,
+        reply: ReservedReply<OwnerAdoptionAck>,
     },
     Settle {
         workspace_id: String,
@@ -1076,18 +1135,18 @@ pub(super) enum Request {
         faults: Arc<dyn FaultInjector>,
         cancel: tokio_util::sync::CancellationToken,
         reconstruction: AdmittedNativeHistoryReconstruction,
-        reply: Reply<LiveSettlementResult>,
+        reply: ReservedReply<LiveSettlementResult>,
     },
     Bootstrap {
         workspace_id: String,
         token: Token,
         application: ApplicationHandle,
         input: LiveApplicationBootstrap,
-        bytes: Vec<u8>,
+        bytes: Arc<Vec<u8>>,
         root: std::path::PathBuf,
         faults: Arc<dyn FaultInjector>,
         reservation: Option<Arc<dyn Send + Sync>>,
-        reply: Reply<BootstrapResult>,
+        reply: ReservedReply<BootstrapResult>,
     },
     Open {
         workspace_id: String,
@@ -1153,7 +1212,7 @@ pub(super) enum Request {
         faults: Arc<dyn FaultInjector>,
         reservation: Option<Arc<dyn Send + Sync>>,
         working_reserve_bytes: usize,
-        reply: Reply<ApplicationResult>,
+        reply: ReservedReply<ApplicationResult>,
     },
     Unload {
         workspace_id: String,
@@ -1187,7 +1246,7 @@ impl Request {
                 client_vector,
                 policy,
                 cancel,
-                reservation: _reservation,
+                reservation,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
@@ -1204,7 +1263,7 @@ impl Request {
                     )
                     .map_err(Into::into)
                 });
-                let _ = reply.send(result);
+                reply_reserved(store, reply, reservation, result);
             }
             Self::ReadNextApplied {
                 workspace_id,
@@ -1213,7 +1272,7 @@ impl Request {
                 after,
                 policy,
                 cancel,
-                reservation: _reservation,
+                reservation,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
@@ -1230,7 +1289,7 @@ impl Request {
                     )
                     .map_err(Into::into)
                 });
-                let _ = reply.send(result);
+                reply_reserved(store, reply, reservation, result);
             }
             Self::ReadAck {
                 workspace_id,
@@ -1242,7 +1301,7 @@ impl Request {
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
                     read_application_ack(store, &application, &identity).map_err(Into::into)
                 });
-                let _ = reply.send(result);
+                let _ = reply.send(super::drained(store, result));
             }
             Self::ResumeRestore {
                 workspace_id,
@@ -1255,12 +1314,13 @@ impl Request {
                 now_ms,
                 faults,
                 cancel,
-                reservation: _reservation,
+                reservation,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|owner| {
+                    let resolver = cache.reader_resolver.clone();
                     if cancel.is_cancelled() { return Err(RuntimeError::Cancelled); }
-                    owner.resume_restore(store, *input, coordinate, max_bytes, max_events,
+                    owner.resume_restore(store, resolver.as_ref(), *input, coordinate, max_bytes, max_events,
                         now_ms, faults.as_ref(), |conn, binding, moment, markdown| {
                             if cancel.is_cancelled() { return Err(ApplicationError::Interrupted); }
                             let job = dohc_engine_storage::materialize::load_job(conn, &format!("ydoc-mat_{moment}"))?
@@ -1280,7 +1340,7 @@ impl Request {
                             Ok(())
                         }).map_err(Into::into)
                 });
-                let _ = reply.send(result);
+                reply_reserved(store, reply, reservation, result);
             }
             Self::SettleRestore {
                 workspace_id,
@@ -1293,13 +1353,14 @@ impl Request {
                 now_ms,
                 faults,
                 cancel,
-                reservation: _reservation,
+                reservation,
                 observer,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|owner| {
+                    let resolver = cache.reader_resolver.clone();
                     if cancel.is_cancelled() {return Err(RuntimeError::Cancelled);}
-                    owner.with_restore_settlement(store,*input,coordinate,max_bytes,max_events,|store,audit| {
+                    owner.with_restore_settlement(store, resolver.as_ref(),*input,coordinate,max_bytes,max_events,|store,audit| {
                         let mut result = settle_audited(store,cache,&root,audit,now_ms,faults.as_ref(),&cancel)?;
                         result.materialized &= matches!(
                             dohc_engine_files::probe_projection_target(&root,&audit.binding().current_path,dohc_engine_files::ProjectionTargetKind::Plaintext),
@@ -1308,10 +1369,11 @@ impl Request {
                         Ok(result)
                     })
                 });
+                let result = super::drained(store, result);
                 if let (Some(observer), Ok(result)) = (&observer, &result) {
                     observer(result);
                 }
-                let _ = reply.send(result);
+                reply_reserved(store, reply, reservation, result);
             }
             Self::ApplyRestore {
                 workspace_id,
@@ -1322,14 +1384,16 @@ impl Request {
                 max_events,
                 now_ms,
                 faults,
-                reservation: _reservation,
+                reservation,
                 observer,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|owner| {
+                    let resolver = cache.reader_resolver.clone();
                     owner
                         .apply_restore_with_facts(
                             store,
+                            resolver.as_ref(),
                             cache,
                             *input,
                             coordinate,
@@ -1357,7 +1421,7 @@ impl Request {
                         })
                         .map_err(Into::into)
                 });
-                let _ = reply.send(result);
+                reply_reserved(store, reply, reservation, result);
             }
             Self::PrepareRestore {
                 workspace_id,
@@ -1367,13 +1431,15 @@ impl Request {
                 max_bytes,
                 max_events,
                 faults,
-                reservation: _reservation,
+                reservation,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|owner| {
+                    let resolver = cache.reader_resolver.clone();
                     owner
                         .prepare_restore(
                             store,
+                            resolver.as_ref(),
                             *input,
                             coordinate,
                             max_bytes,
@@ -1382,7 +1448,7 @@ impl Request {
                         )
                         .map_err(Into::into)
                 });
-                let _ = reply.send(result);
+                reply_reserved(store, reply, reservation, result);
             }
             Self::FenceRestore {
                 workspace_id,
@@ -1398,17 +1464,25 @@ impl Request {
                     if after_reconnect {
                         owner.fence_restore_after_reconnect(
                             store,
+                            cache.reader_resolver.as_ref(),
                             input,
                             coordinate,
                             now_ms,
                             faults.as_ref(),
                         )
                     } else {
-                        owner.fence_restore(store, input, coordinate, now_ms, faults.as_ref())
+                        owner.fence_restore(
+                            store,
+                            cache.reader_resolver.as_ref(),
+                            input,
+                            coordinate,
+                            now_ms,
+                            faults.as_ref(),
+                        )
                     }
                     .map_err(Into::into)
                 });
-                let _ = reply.send(result);
+                let _ = reply.send(super::drained(store, result));
             }
             Self::AdoptOwner {
                 workspace_id,
@@ -1418,7 +1492,7 @@ impl Request {
                 max_bytes,
                 max_events,
                 faults,
-                reservation: _reservation,
+                reservation,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
@@ -1434,7 +1508,7 @@ impl Request {
                         max_bytes,
                         max_events,
                         now_ms,
-                        faults.as_ref(),
+                        faults.as_ref(), cache.reader_resolver.as_deref(),
                         |tx, namespace, binding, count| {
                             dohc_engine_sync::journal_live_base_in_tx(tx, namespace, binding, now_ms)
                                 .map_err(|error| dohc_engine_collab::live_update_application::ApplicationError::Storage(
@@ -1449,7 +1523,7 @@ impl Request {
                     )
                     .map_err(Into::into)
                 });
-                let _ = reply.send(result);
+                reply_reserved(store, reply, reservation, result);
             }
             Self::Settle {
                 workspace_id,
@@ -1464,7 +1538,6 @@ impl Request {
                 reconstruction,
                 reply,
             } => {
-                let _reservation = reconstruction.reservation;
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
                     if cancel.is_cancelled() {
                         return Err(RuntimeError::Cancelled);
@@ -1488,7 +1561,7 @@ impl Request {
                         },
                     )
                 });
-                let _ = reply.send(result);
+                reply_reserved(store, reply, reconstruction.reservation, result);
             }
             Self::Bootstrap {
                 workspace_id,
@@ -1498,7 +1571,7 @@ impl Request {
                 bytes,
                 root,
                 faults,
-                reservation: _reservation,
+                reservation,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
@@ -1508,7 +1581,7 @@ impl Request {
                         cache,
                         &application,
                         input,
-                        bytes,
+                        bytes.as_slice(),
                         faults.as_ref(),
                         |tx, written, namespace, binding| {
                             dohc_engine_sync::journal_live_base_in_tx(
@@ -1527,7 +1600,7 @@ impl Request {
                         },
                     )
                 });
-                let _ = reply.send(result);
+                reply_reserved(store, reply, reservation, result);
             }
             Self::Open {
                 workspace_id,
@@ -1554,7 +1627,7 @@ impl Request {
                         .insert(workspace_id, OwnedRegistration { token, application });
                     Ok(retired)
                 })();
-                let _ = reply.send(result);
+                let _ = reply.send(super::drained(store, result));
             }
             Self::BeginRetirement {
                 workspace_id,
@@ -1695,7 +1768,7 @@ impl Request {
                     }
                     .map_err(Into::into)
                 });
-                let _ = reply.send(result);
+                let _ = reply.send(super::drained(store, result));
             }
             Self::Apply {
                 workspace_id,
@@ -1703,7 +1776,7 @@ impl Request {
                 application,
                 event,
                 faults,
-                reservation: _reservation,
+                reservation,
                 working_reserve_bytes,
                 reply,
             } => {
@@ -1724,7 +1797,7 @@ impl Request {
                     )
                     .map_err(Into::into)
                 });
-                let _ = reply.send(result);
+                reply_reserved(store, reply, reservation, result);
             }
             Self::Unload {
                 workspace_id,
@@ -1756,7 +1829,7 @@ impl Request {
                     }
                     Ok(None)
                 });
-                let _ = reply.send(result);
+                let _ = reply.send(super::drained(store, result));
             }
             Self::Close {
                 workspace_id,
@@ -1775,7 +1848,7 @@ impl Request {
                 if result.is_ok() {
                     registry.owners.remove(&workspace_id);
                 }
-                let _ = reply.send(result);
+                let _ = reply.send(super::drained(store, result));
             }
         }
     }
@@ -1806,7 +1879,7 @@ fn settle_audited(
         false,
         Some(&binding.lineage_claim_id),
         Some(audit.expected_head().to_owned()),
-        None,
+        audit.restored_source().map(ToOwned::to_owned),
         "configured-live-application",
         &(),
         now_ms,
@@ -1816,6 +1889,7 @@ fn settle_audited(
         Some(audit),
         None,
         super::ydoc::SettlementKind::Document,
+        false,
     )?;
     let settled = outcome.into_settlement_for_internal_caller()?;
     let id = audit.stored_id(store, &settled.moment_id, &settled.sha256)?;
@@ -1864,8 +1938,8 @@ impl ActorHandle {
         reservation: Arc<dyn Send + Sync>,
     ) -> Result<dohc_engine_collab::live_update_application::ImportedOwnerActivation, RuntimeError>
     {
-        self.run(move |store, _cache| {
-            let _reservation = reservation;
+        self.run_with_reader_retry(move |store, cache| {
+            let _reservation = reservation.clone();
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
             }
@@ -1885,14 +1959,15 @@ impl ActorHandle {
                 }
                 .into());
             }
-            let result = if let Some(activation_id) = activation_id {
+            let result = if let Some(activation_id) = activation_id.as_ref() {
                 dohc_engine_collab::live_update_application::resume_imported_owner_activation(
                     store,
                     &namespace,
                     &key,
                     &path,
-                    &activation_id,
+                    activation_id,
                     max_bytes,
+                    cache.reader_resolver.as_deref(),
                 )?
             } else {
                 dohc_engine_collab::live_update_application::capture_imported_owner_activation(
@@ -1902,6 +1977,7 @@ impl ActorHandle {
                     &path,
                     max_bytes,
                     &dohc_engine_storage::NoFaults,
+                    cache.reader_resolver.as_deref(),
                 )?
             };
             if token.is_cancelled() {
@@ -1910,5 +1986,232 @@ impl ActorHandle {
             Ok(result)
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    async fn native_error_precedes_stale_token(bootstrap: bool) {
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&db, 0).unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("workspace", "main", 0, &dohc_engine_storage::NoFaults)
+            .unwrap();
+        let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
+        let bytes = vec![0, 0];
+        let digest = dohc_engine_storage::hex_sha256(&bytes);
+        let application = owner
+            .register(
+                &mut store,
+                "relay".into(),
+                ApplicationHostCoordinate {
+                    host_id: "host".into(),
+                    host_epoch: 1,
+                    instance_id: "instance".into(),
+                    connection_id: "connection".into(),
+                },
+                LiveObjectBinding {
+                    workspace_id: "workspace".into(),
+                    main_version_id: "main".into(),
+                    object_id: "object".into(),
+                    lineage_claim_id: digest.clone(),
+                    current_path: "note.md".into(),
+                    selector_paths: vec!["note.md".into()],
+                    restore_fence_generation: 0,
+                },
+            )
+            .unwrap();
+        drop(store);
+        let actor = super::super::WorkspaceActor::spawn(
+            db.clone(),
+            crate::EngineDbIdentity::of_existing(&db).unwrap(),
+            1,
+            0,
+            None,
+        )
+        .unwrap();
+        let mut actor_handle = actor.handle();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        actor_handle.tx = tx;
+        let token = Arc::new(AtomicBool::new(true));
+        let handle = ActorLiveApplicationHandle {
+            actor: actor_handle,
+            workspace_id: "workspace".into(),
+            token: token.clone(),
+            application,
+        };
+        let respond = tokio::spawn(async move {
+            // Retire the token after enqueue, before delivering the actor error.
+            let Command::LiveApplication(request) = rx.recv().await.unwrap() else {
+                panic!("request")
+            };
+            token.store(false, Ordering::Release);
+            match *request {
+                Request::AdoptOwner { reply, .. } => {
+                    let _ = reply.send(Reserved {
+                        result: Err(ApplicationError::Conflict.into()),
+                        reservation: None,
+                    });
+                }
+                Request::Bootstrap { reply, .. } => {
+                    let _ = reply.send(Reserved {
+                        result: Err(ApplicationError::Conflict.into()),
+                        reservation: None,
+                    });
+                }
+                _ => panic!("unexpected request"),
+            }
+        });
+        let result = if bootstrap {
+            handle
+                .bootstrap(
+                    LiveApplicationBootstrap {
+                        bootstrap_id: "bootstrap".into(),
+                        bootstrap_moment_id: "moment".into(),
+                        baseline_moment_relay_sequence: 0,
+                        baseline_registered_at_ms: 0,
+                        baseline_digest: digest.clone(),
+                        baseline_byte_length: 2,
+                        projected_markdown_digest: dohc_engine_storage::hex_sha256(b""),
+                        projected_markdown_byte_length: 0,
+                    },
+                    bytes,
+                    scratch.path().into(),
+                    Arc::new(dohc_engine_storage::NoFaults),
+                    None,
+                )
+                .await
+                .map(|_| ())
+        } else {
+            handle
+                .adopt_owner(
+                    OwnerAdoptionCut {
+                        relay_database_namespace: "relay".into(),
+                        adoption_id: "adopt".into(),
+                        source_moment_id: "moment".into(),
+                        source_digest: digest,
+                        source_byte_length: 0,
+                        baseline_moment_relay_sequence: 0,
+                        baseline_registered_at_ms: 0,
+                        baseline_bytes: bytes,
+                        expected_local_sequence: 0,
+                        events: vec![],
+                        terminal_receipt: None,
+                        outbox_limits: dohc_engine_collab::OwnerOutboxLimits {
+                            max_pending_bytes: 1_000_000,
+                            max_pending_age_ms: 100_000,
+                        },
+                    },
+                    1_000_000,
+                    100,
+                    Arc::new(dohc_engine_storage::NoFaults),
+                    Arc::new(()),
+                )
+                .await
+                .map(|_| ())
+        };
+        respond.await.unwrap();
+        assert!(
+            matches!(
+                result,
+                Err(RuntimeError::LiveApplication(ApplicationError::Conflict))
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_adoption_error_precedes_stale_token() {
+        native_error_precedes_stale_token(false).await;
+    }
+
+    #[tokio::test]
+    async fn native_bootstrap_error_precedes_stale_token() {
+        native_error_precedes_stale_token(true).await;
+    }
+
+    type Order = Arc<Mutex<Vec<&'static str>>>;
+
+    struct Dropped(&'static str, Order);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.1.lock().unwrap().push(self.0);
+        }
+    }
+
+    fn send(reply: ReservedReply<Dropped>, order: &Order) {
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let store =
+            EngineStore::open(&dohc_engine_testkit::engine_db_path(&scratch).unwrap(), 1).unwrap();
+        let reservation: Arc<dyn Send + Sync> = Arc::new(Dropped("reservation", order.clone()));
+        reply_reserved(
+            &store,
+            reply,
+            reservation,
+            Ok(Dropped("result", order.clone())),
+        );
+    }
+
+    /// Live document replies leave the actor without passing `run`, so they
+    /// pay the owed drain themselves.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn a_live_application_reply_pays_the_owed_drain() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let store =
+            EngineStore::open(&dohc_engine_testkit::engine_db_path(&scratch).unwrap(), 1).unwrap();
+        let note = scratch.join("note.md");
+        std::fs::write(&note, b"settled").unwrap();
+        store
+            .flush_before_commits(&std::fs::File::open(&note).unwrap())
+            .unwrap();
+        let (reply, receive) = oneshot::channel();
+        reply_reserved(&store, reply, None, Ok(()));
+        assert!(receive.blocking_recv().unwrap().result.is_ok());
+        let kinds: Vec<_> = store
+            .take_flush_trace()
+            .into_iter()
+            .map(|event| event.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                dohc_engine_storage::FlushKind::Barrier,
+                dohc_engine_storage::FlushKind::Drain
+            ]
+        );
+    }
+
+    #[test]
+    fn a_reply_nobody_takes_frees_its_result_before_its_reservation() {
+        // The caller gave up before the actor replied, so the send fails.
+        let order = Order::default();
+        let (reply, receive) = oneshot::channel();
+        drop(receive);
+        send(reply, &order);
+        assert_eq!(*order.lock().unwrap(), ["result", "reservation"]);
+
+        // The caller gave up after the reply arrived but before taking it.
+        let order = Order::default();
+        let (reply, receive) = oneshot::channel();
+        send(reply, &order);
+        assert!(order.lock().unwrap().is_empty());
+        drop(receive);
+        assert_eq!(*order.lock().unwrap(), ["result", "reservation"]);
+    }
+
+    #[tokio::test]
+    async fn a_taken_reply_frees_its_reservation_before_the_caller_sees_the_result() {
+        let order = Order::default();
+        let (reply, receive) = oneshot::channel();
+        send(reply, &order);
+        let result = receive_reserved(receive).await.unwrap();
+        assert_eq!(*order.lock().unwrap(), ["reservation"]);
+        drop(result);
+        assert_eq!(*order.lock().unwrap(), ["reservation", "result"]);
     }
 }

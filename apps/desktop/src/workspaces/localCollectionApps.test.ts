@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { openedLocalState } from "../testing/preparedLocalState";
 import { DatabaseSync } from "node:sqlite";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -17,6 +18,7 @@ import { createLocalAppLaunchHost, LocalAppUnavailableError } from "./localAppLa
 import { LocalCollectionRefusal, LOCAL_APP_WITHDRAW_TIMEOUT_MS, MAX_LOCAL_COLLECTION_CREATES_PER_PUBLICATION, type Envelope, type LocalCollectionEngine } from "./localCollectionApps";
 import { createLocalDatasetHost, reconcileExistingLocalCollectionApps, type LocalDatasetHost } from "./localDatasetHost";
 import { prepareLocalAppPublication } from "./ownerAppPublication";
+import { unguardedCollections } from "../testing/collectionsHolder";
 
 const compileFixture = createDatasetFixtureCompiler();
 const schema = "version: 1\nfields:\n  name:\n    type: text\n  destination:\n    type: select\n    options: [Tokyo, Manila]\n  note:\n    type: text\n";
@@ -85,7 +87,9 @@ async function fixture(options: { workspaceRoot?: string; engine?: Engine; autho
   if (!options.workspaceRoot) roots.push(workspaceRoot);
   const engine = options.engine ?? fakeEngine();
   const open = async () => {
-    const host = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, compile: compileFixture,
+    // Workers and exports live in .dohc/local, which an engine open prepares.
+    await openedLocalState({ workspaceId: "w", rootPath: workspaceRoot });
+    const host = await createLocalDatasetHost({ holder: unguardedCollections, localPersonId: () => "person-local", workspaceId: "w", workspaceRoot, capacityBytes: 1024 * 1024, compile: compileFixture,
       collectionEngine: () => { if (engine.state.down) throw new Error("The engine is not running."); return engine.api; },
       collectionAuthor: options.author ?? (async () => person) });
     hosts.push(host);
@@ -96,7 +100,7 @@ async function fixture(options: { workspaceRoot?: string; engine?: Engine; autho
   const collectionApp = (readFields = options.readFields ?? ["destination", "name"]) => {
     sources.set("trip/app.publish.json", JSON.stringify({ version: 1, entryPath: "main.ts", inputs: ["main.ts"], packageMap: {},
       collection: { kind: "collection-create", collectionPath: "responses", allowedFields: ["destination", "name"], requiredFields: ["destination"], readFields } }));
-    return prepareLocalAppPublication({ workspaceId: "w", appRoot: "trip" }, { adapter: sourceCaptureAdapter(sources), compile: compileClosedApp, signal: signal(), assertCurrent() {} });
+    return prepareLocalAppPublication({ workspaceId: "w", appRoot: "trip" }, { deferredWrites: [], adapter: sourceCaptureAdapter(sources), compile: compileClosedApp, signal: signal(), assertCurrent() {} });
   };
   const prepared = await collectionApp();
   const published = await host.apps.activate(prepared, signal());
@@ -104,7 +108,7 @@ async function fixture(options: { workspaceRoot?: string; engine?: Engine; autho
     target.apps.request(published.publicationId, "create", { authorityRevision: revision, idempotencyKey, fields }) as Promise<{ kind: "accepted"; acceptanceId: string; objectId: string; path: string; momentId: string; acceptedAtMs: number }>;
   const list = (input: { limit: number; afterPath?: string } = { limit: 50 }, target = host, revision = published.authorityRevision) =>
     target.apps.request(published.publicationId, "list", { authorityRevision: revision, ...input }) as Promise<{ records: Array<{ path: string; recordId: string | null; fields: Record<string, unknown> }>; nextPath: string | null }>;
-  const inspect = <T>(work: (db: DatabaseSync) => T) => { const db = new DatabaseSync(join(workspaceRoot, ".dohc/datasets/state.sqlite")); try { return work(db); } finally { db.close(); } };
+  const inspect = <T>(work: (db: DatabaseSync) => T) => { const db = new DatabaseSync(join(workspaceRoot, ".dohc/local/datasets/state.sqlite")); try { return work(db); } finally { db.close(); } };
   let approvedDataset: Awaited<ReturnType<LocalDatasetHost["approve"]>> | undefined;
   const datasetApp = async (target: LocalDatasetHost) => {
     if (!approvedDataset) {
@@ -117,7 +121,7 @@ async function fixture(options: { workspaceRoot?: string; engine?: Engine; autho
     const form = generateDatasetFormSources({ datasetPath: "data/dataset.json", approvedRevision: revision, tableId: definition.tables[0]!.tableId,
       createOperationId: definition.operations[0]!.operationId, appRoot: "trip", fieldIds: [definition.tables[0]!.fields[1]!.fieldId] });
     for (const [path, source] of Object.entries(form.files)) sources.set(`trip/${path}`, source);
-    return prepareLocalAppPublication({ workspaceId: "w", appRoot: "trip" }, { adapter: sourceCaptureAdapter(sources), compile: compileClosedApp, signal: signal(),
+    return prepareLocalAppPublication({ workspaceId: "w", appRoot: "trip" }, { deferredWrites: [], adapter: sourceCaptureAdapter(sources), compile: compileClosedApp, signal: signal(),
       assertCurrent() {}, async resolveDatasetRevision(binding) { return target.approvedArtifacts(binding.datasetId).revision; } });
   };
   return { host, engine, workspaceRoot, open, prepared, published, collectionApp, datasetApp, create, list, inspect };

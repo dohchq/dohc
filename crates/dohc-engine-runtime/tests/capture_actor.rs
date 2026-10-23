@@ -204,6 +204,78 @@ fn blocking_capture_variants_round_trip_through_the_actor() {
     supervisor.close(&db).expect("close actor");
 }
 
+/// An absence retire refuses while anything answers at the path, including a
+/// file stored under another spelling. On a disk that ignores case that file
+/// can be a distinct head's, such as one of a pair of case variants a peer
+/// that keeps case apart synced. Skips where the disk keeps case apart.
+#[test]
+fn an_absence_retire_refuses_a_file_at_another_spelling() {
+    let scratch = ScratchDir::new().expect("scratch");
+    std::fs::write(scratch.path().join("Notes.md"), "variant").expect("write file");
+    if !scratch.path().join("notes.md").exists() {
+        eprintln!("SKIP: this disk keeps case apart");
+        return;
+    }
+    let db = engine_db_path(&scratch).expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    handle
+        .capture_ingest_with_search_policy_blocking(
+            CaptureIngest {
+                workspace_id: "ws-actor-capture".to_owned(),
+                version_id: "main".to_owned(),
+                path: "notes.md".to_owned(),
+                text: "captured".to_owned(),
+                metadata_origin: "actor-test".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 10,
+                request_id: None,
+                claim_foreign_head: true,
+            },
+            Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
+                scratch.path(),
+            )),
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+        )
+        .expect("blocking capture");
+
+    let refused = handle.capture_retire_materialized_blocking_guarded(
+        CaptureRetire {
+            workspace_id: "ws-actor-capture".to_owned(),
+            version_id: "main".to_owned(),
+            path: "notes.md".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 20,
+            request_id: None,
+            only_if_text_head: false,
+            only_if_capture_origin: false,
+            allow_ydoc_origin: true,
+        },
+        scratch.path().to_path_buf(),
+        true,
+        Arc::new(()),
+        dohc_engine_collab::LeaseRegistry::new(),
+        Arc::new(NoFaults),
+        Arc::new(ExistingRootGuard),
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(dohc_engine_runtime::RuntimeError::Sync(
+                dohc_engine_sync::SyncError::RetryableState {
+                    reason: "path-present-on-disk"
+                }
+            ))
+        ),
+        "{refused:?}"
+    );
+    supervisor.close(&db).expect("close actor");
+}
+
 #[test]
 fn bounded_capture_batch_contains_a_leased_path_and_replays_without_duplicates() {
     const WORKSPACE_ID: &str = "ws-capture-batch";
@@ -1123,7 +1195,7 @@ async fn live_lease_blocks_text_and_binary_capture_without_mutation_until_retry(
     assert!(matches!(
         refused,
         RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState {
-            reason: "ydoc-session-live"
+            reason: dohc_engine_runtime::actor::CAPTURE_WRITE_WAITS_FOR_SESSION
         })
     ));
     assert_eq!(state(), after_text);
@@ -1144,7 +1216,7 @@ async fn live_lease_blocks_text_and_binary_capture_without_mutation_until_retry(
     assert!(matches!(
         refused,
         RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState {
-            reason: "ydoc-session-live"
+            reason: dohc_engine_runtime::actor::CAPTURE_WRITE_WAITS_FOR_SESSION
         })
     ));
     assert_eq!(state(), after_text);
@@ -1190,7 +1262,7 @@ async fn live_lease_blocks_text_and_binary_capture_without_mutation_until_retry(
     assert!(matches!(
         refused,
         RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState {
-            reason: "ydoc-session-live"
+            reason: dohc_engine_runtime::actor::CAPTURE_WRITE_WAITS_FOR_SESSION
         })
     ));
     assert_eq!(state(), after_binary);

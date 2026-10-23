@@ -241,7 +241,7 @@ describe("a workspace switch while a delete is pending", () => {
   function renderRoot(deleteAccount: () => Promise<DeleteResult>) {
     const { bridge, disconnect } = deletionBridge(deleteAccount);
     let registry: Workspace[] = [WORKSPACE, OTHER_WORKSPACE];
-    let activate: ((workspace: Workspace) => void) | null = null;
+    const activated = new Set<(workspace: Workspace) => void>();
     const root = Object.assign(bridge, {
       windowRole: "workspace" as const,
       getWorkspaceRegistry: vi.fn(async () => ({ workspaces: registry })),
@@ -252,9 +252,9 @@ describe("a workspace switch while a delete is pending", () => {
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async (): Promise<ShareHandoffStatus> => ({ status: "idle" })),
       onWorkspaceActivated: vi.fn((callback: (workspace: Workspace) => void) => {
-        activate = callback;
+        activated.add(callback);
         return () => {
-          activate = null;
+          activated.delete(callback);
         };
       }),
       pickWorkspaceRoot: vi.fn(async () => OTHER_WORKSPACE.rootPath),
@@ -276,7 +276,9 @@ describe("a workspace switch while a delete is pending", () => {
         registry = [];
         await act(async () => root.emitWorkspaceActivity());
       },
-      activate: (workspace: Workspace) => act(() => activate?.(workspace)),
+      activate: (workspace: Workspace) => act(() => {
+        for (const callback of [...activated]) callback(workspace);
+      }),
     };
   }
 

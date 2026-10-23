@@ -1,28 +1,65 @@
-import { watch } from "node:fs";
+import { watch, type FSWatcher } from "node:fs";
+import { join } from "node:path";
 
-type WatchDirectory = (
+type WatchSettings = (
   directory: string,
+  fileName: string,
   listener: (fileName: string | null) => void,
   onError: (error: Error) => void,
 ) => { close(): void };
 
-// Watches the folder, not the file: an editor that saves by renaming a new
-// file over the old one, or by deleting and recreating it, would end a watch
-// held on the old file.
-const watchDirectory: WatchDirectory = (directory, listener, onError) => {
-  const watcher = watch(directory, (_event, fileName) => listener(fileName));
-  watcher.on("error", onError);
-  // The watch never keeps the process alive on its own.
-  watcher.unref();
-  return watcher;
+// macOS starts a directory's FSEvents stream asynchronously. A file watch
+// covers an in-place save during startup; the folder watch survives replacement.
+const watchSettings: WatchSettings = (directory, fileName, listener, onError) => {
+  let fileWatcher: FSWatcher | undefined;
+  const closeFile = () => {
+    fileWatcher?.close();
+    fileWatcher = undefined;
+  };
+  const openFile = () => {
+    closeFile();
+    try {
+      fileWatcher = watch(join(directory, fileName), () => listener(fileName));
+      fileWatcher.on("error", onError);
+      fileWatcher.unref();
+    } catch (error) {
+      // A delete or a first launch can leave only the directory to watch.
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+    }
+  };
+  const directoryWatcher = watch(directory, (event, name) => {
+    if (name !== null && name !== fileName) return;
+    try {
+      if (event === "rename" || !fileWatcher) openFile();
+    } catch (error) {
+      onError(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+    listener(name);
+  });
+  directoryWatcher.on("error", onError);
+  // Neither watch keeps the process alive on its own.
+  directoryWatcher.unref();
+  try {
+    openFile();
+  } catch (error) {
+    directoryWatcher.close();
+    throw error;
+  }
+  return {
+    close: () => {
+      closeFile();
+      directoryWatcher.close();
+    },
+  };
 };
 
 /**
  * Calls onChange once a burst of changes to one file settles. An editor's
  * save is often several events: a write, a rename, a timestamp touch. A watch
- * that fails, at the start or later, is started again after `retryMs`, and
- * the file counts as changed then, because an edit may have landed while
- * nothing watched. Answers the function that stops the watch.
+ * that fails, at the start or later, is started again after `retryMs`.
+ * The file counts as changed after every successful open, because an edit
+ * may have landed while nothing watched. Answers the function that stops the watch.
  */
 export function watchSettingsFile(options: {
   directory: string;
@@ -31,9 +68,9 @@ export function watchSettingsFile(options: {
   retryMs?: number;
   onChange: () => void;
   onError: (error: Error) => void;
-  watchDirectory?: WatchDirectory;
+  watchSettings?: WatchSettings;
 }): () => void {
-  const start = options.watchDirectory ?? watchDirectory;
+  const start = options.watchSettings ?? watchSettings;
   const retryMs = options.retryMs ?? 2000;
   let debounce: ReturnType<typeof setTimeout> | undefined;
   let retry: ReturnType<typeof setTimeout> | undefined;
@@ -59,6 +96,7 @@ export function watchSettingsFile(options: {
     try {
       watcher = start(
         options.directory,
+        options.fileName,
         (fileName) => {
           // Some platforms omit the name, so that change may be this file.
           if (fileName === null || fileName === options.fileName) changed();
@@ -72,7 +110,7 @@ export function watchSettingsFile(options: {
     }
   };
 
-  open();
+  if (open()) changed();
   return () => {
     stopped = true;
     clearTimeout(debounce);

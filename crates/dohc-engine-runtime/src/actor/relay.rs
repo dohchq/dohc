@@ -30,6 +30,7 @@ use relay_push_tests::cache_tests::CursorFaults;
 #[derive(Clone, PartialEq, Eq)]
 pub struct RelayConfiguration {
     pub base_url: String,
+    pub socket_path: Option<std::path::PathBuf>,
     pub bearer_token: String,
     #[cfg(debug_assertions)]
     pub allow_insecure_loopback_for_tests: bool,
@@ -151,6 +152,9 @@ pub enum RelayOperation {
     },
     /// Make a pristine workspace the session host's hosted replica under the
     /// relay's coordinate, before any other write gives it an ordinary one.
+    /// Then confirm the relay holds nothing of its origin past what it
+    /// numbered. Every attach runs this before its first other hosted call,
+    /// so a store that lost pushed commits stops before anyone edits it.
     CreateHostedReplica {
         workspace_id: String,
         new_origin_id: String,
@@ -761,6 +765,10 @@ mod relay_push_tests;
 #[cfg(test)]
 #[path = "relay_base_repair_tests.rs"]
 mod relay_base_repair_tests;
+
+#[cfg(test)]
+#[path = "relay_hosted_origin_tests.rs"]
+mod relay_hosted_origin_tests;
 
 #[cfg(test)]
 mod deferred_relay_tests {
@@ -2064,6 +2072,34 @@ impl ActorHandle {
         .await
     }
 
+    /// Make an unfinished ordinary pull's applied pages local truth, for a
+    /// workspace that opens with no ordinary sync configured. Answers whether
+    /// a pull was unfinished.
+    pub async fn abandon_ordinary_pull(&self, workspace_id: String) -> Result<bool, RuntimeError> {
+        self.run(move |store, _cache| {
+            match dohc_engine_sync::abandon_ordinary_pull(store, &workspace_id, &NoFaults)? {
+                TxnOutcome::Committed(abandoned) => Ok(abandoned),
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+            }
+        })
+        .await
+    }
+
+    /// Collections updates wait for an unfinished ordinary pull.
+    pub async fn ordinary_pull_unfinished(
+        &self,
+        workspace_id: String,
+    ) -> Result<bool, RuntimeError> {
+        self.run(move |store, _cache| {
+            store
+                .read_with(|conn| {
+                    dohc_engine_sync::ordinary_pull_unfinished_in(conn, &workspace_id)
+                })
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     /// How many changes that did not originate on this computer the engine
     /// has applied to the workspace; 0 before the first.
     pub async fn remote_changes_applied(&self, workspace_id: String) -> Result<i64, RuntimeError> {
@@ -2089,11 +2125,13 @@ impl ActorHandle {
             return Err(RuntimeError::Cancelled);
         }
         let http_transport = build_http_transport(configuration)?;
-        // A hosted replica reads and writes only the session host's scoped feed.
+        // A hosted replica reads and writes only the session host's scoped
+        // feed, and so does the operation that creates one.
         let workspace_id = operation.workspace_id().to_owned();
-        let hosted = self
-            .run(move |store, _cache| Ok(is_hosted_replica(store, &workspace_id)?))
-            .await?;
+        let hosted = operation.replicas() == Replicas::Hosted
+            || self
+                .run(move |store, _cache| Ok(is_hosted_replica(store, &workspace_id)?))
+                .await?;
         let http_transport = Arc::new(if hosted {
             http_transport.hosted()
         } else {
@@ -2275,6 +2313,12 @@ impl ActorHandle {
 fn build_http_transport(
     configuration: RelayConfiguration,
 ) -> Result<HttpRelayTransport, RelayError> {
+    if let Some(path) = &configuration.socket_path {
+        if !configuration.base_url.is_empty() {
+            return Err(RelayError::InvalidResponse);
+        }
+        return HttpRelayTransport::new_unix_socket(path, configuration.bearer_token);
+    }
     #[cfg(debug_assertions)]
     {
         let test_ca = test_relay_ca(
@@ -2325,6 +2369,7 @@ fn build_debug_http_transport(
 ) -> Result<HttpRelayTransport, RelayError> {
     let RelayConfiguration {
         base_url,
+        socket_path: _,
         bearer_token: token,
         allow_insecure_loopback_for_tests: insecure,
     } = configuration;
@@ -2927,24 +2972,30 @@ fn run_relay_operation(
             replication_epoch,
             stream_identity,
             created_at_ms,
-        } => match create_hosted_replica(
-            store,
-            &workspace_id,
-            &new_origin_id,
-            &replication_epoch,
-            &stream_identity,
-            created_at_ms,
-            &NoFaults,
-        )
-        .map_err(|error| match error {
-            SyncError::InvalidInput { reason } => {
-                RuntimeError::Relay(RelayError::HostedRefusal(reason))
+        } => {
+            match create_hosted_replica(
+                store,
+                &workspace_id,
+                &new_origin_id,
+                &replication_epoch,
+                &stream_identity,
+                created_at_ms,
+                &NoFaults,
+            )
+            .map_err(|error| match error {
+                SyncError::InvalidInput { reason } => {
+                    RuntimeError::Relay(RelayError::HostedRefusal(reason))
+                }
+                error => RuntimeError::Sync(error),
+            })? {
+                TxnOutcome::Committed(_) => {}
+                TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
             }
-            error => RuntimeError::Sync(error),
-        })? {
-            TxnOutcome::Committed(_) => Ok(RelayOperationOutcome::HostedReplicaCreated),
-            TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
-        },
+            // After the commit, so a lost answer leaves the replica created
+            // and the retry asks again.
+            client.confirm_hosted_origin(store, &workspace_id)?;
+            Ok(RelayOperationOutcome::HostedReplicaCreated)
+        }
         RelayOperation::PullHosted {
             workspace_id,
             root,
@@ -3161,7 +3212,7 @@ fn remove_retired_files(
 ) -> Result<bool, RuntimeError> {
     let mut freed = false;
     for file in dohc_engine_sync::retired_hosted_files(store, workspace_id)? {
-        if !dohc_engine_files::remove_file_holding(root, &file.path, &file.sha256)? {
+        if !dohc_engine_files::remove_file_holding(store, root, &file.path, &file.sha256)? {
             unexpected.get_or_insert(file.path);
             continue;
         }
@@ -3170,7 +3221,7 @@ fn remove_retired_files(
         while let Some((folder, _)) = parent.rsplit_once('/') {
             let path = root.join(folder);
             match left_folder(
-                dohc_engine_files::remove_empty_directory_target(root, folder),
+                dohc_engine_files::remove_empty_directory_target(store, root, folder),
                 || std::fs::symlink_metadata(&path).map(|m| m.is_dir()),
                 || Ok(std::fs::read_dir(&path)?.next().transpose()?.is_none()),
             ) {
@@ -3232,6 +3283,10 @@ fn left_folder<E>(
         },
     }
 }
+
+#[cfg(test)]
+#[path = "scene_unload_tests.rs"]
+mod scene_unload_tests;
 
 #[cfg(test)]
 mod left_folder_tests {
@@ -3601,6 +3656,7 @@ mod hosted_refusal_tests {
                     stream_identity: "stream".into(),
                     bootstrap_complete: true,
                     settlement_report_id: None,
+                    ordinary_pull: None,
                 },
                 now_ms: 2_000,
             },
@@ -4007,6 +4063,7 @@ mod hosted_refusal_tests {
                 progress: None,
                 file_outcomes_settled: false,
                 released_hold_paths: None,
+                planned_against_active_heads: false,
             },
             3_000,
             &NoFaults,
@@ -4031,6 +4088,7 @@ mod test_relay_ca_tests {
     fn configuration(base_url: &str, insecure: bool) -> RelayConfiguration {
         RelayConfiguration {
             base_url: base_url.to_owned(),
+            socket_path: None,
             bearer_token: "token".to_owned(),
             allow_insecure_loopback_for_tests: insecure,
         }

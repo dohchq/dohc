@@ -1,7 +1,7 @@
 // A PR that adds a channel or command edits the main inventory directly. Do not add a delta file.
-import { APP_PUBLICATION_CAPABILITIES, CLI_CAPABILITIES, cliRequestSchema, DATASET_CAPABILITIES } from "@dohc/cli/protocol";
+import { APP_PUBLICATION_CAPABILITIES, CLI_CAPABILITIES, cliRequestSchema } from "@dohc/cli/protocol";
 import { CLI_COMMANDS, parseCliArguments } from "@dohc/cli/args";
-import { DatasetRequest } from "@dohc/cli/dataset";
+import { DATASET_CAPABILITIES, DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { renderCliHelp } from "@dohc/cli/help";
 import { advertisedCapabilityTools as advertisedTools } from "@dohc/mcp/capability-exposure-fixture";
@@ -52,7 +52,7 @@ function assertAdmission(row: Pick<OperationDefinition, "channel" | "guard" | "s
 }
 
 describe("main inventories", () => {
-  it("preserves every IPC wire name and the 26 enforced table guards", () => {
+  it("preserves every IPC wire name and the enforced table guards", () => {
     expect([...Object.values(CHANNELS), ...rows.map(row => row.channel)].sort()).toEqual([...mainIpc.names].sort());
     const guards = Object.fromEntries(rows.map(row => [row.channel, row.guard]));
     expect(Object.fromEntries(Object.keys(mainIpc.guards).map(channel => [channel, guards[channel]]))).toEqual(mainIpc.guards);
@@ -66,20 +66,20 @@ describe("main inventories", () => {
     ].map(name => `desktop:${name}`);
     expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(13);
   });
-  it("records the 13 migrated settings operations", () => {
+  it("records the 14 settings operations", () => {
     const channels = [
-      "get-user-settings", "reload-user-settings", "set-user-settings", "set-app-pinned",
+      "get-user-settings", "reload-user-settings", "set-user-settings", "set-app-pinned", "set-agent-color",
       "reset-user-settings", "get-user-settings-file-path", "open-user-settings-file",
       "open-workspace-settings-file", "get-workspace-settings", "set-workspace-settings",
       "reset-workspace-settings", "get-workspace-ui-state", "set-workspace-ui-state",
     ].map(name => `desktop:${name}`);
-    expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(13);
+    expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(14);
   });
   it("records all 23 chat operations with their sender-workspace admission", () => {
     const channels = [
-      "list-file-chats", "list-chat-file-mentions", "list-chat-bookmarks", "save-chat-bookmark",
+      "list-file-chats", "chat-file-mentions-page", "chat-links", "list-chat-bookmarks", "save-chat-bookmark",
       "archive-chat-bookmark", "create-file-chat", "list-chat-messages", "get-chat-thread-revision",
-      "send-chat-message", "list-chat-thread-decisions", "resolve-chat-decision", "list-chat-thread-attachments",
+      "send-chat-message", "list-chat-thread-decisions", "list-chat-thread-attachments",
       "list-chat-channels", "list-chat-follows", "set-chat-follow", "list-personal-chat-feed",
       "mark-personal-chat-feed-seen", "create-chat-channel", "list-channel-threads", "start-channel-thread",
       "mark-chat-thread-read", "list-chat-reactions", "set-chat-reaction",
@@ -88,7 +88,7 @@ describe("main inventories", () => {
     expect(chatRows.map(row => row.channel).sort()).toEqual(channels.sort());
     for (const row of chatRows) {
       const chatRefusal = [
-        "desktop:list-chat-channels", "desktop:list-chat-file-mentions", "desktop:list-chat-messages",
+        "desktop:list-chat-channels", "desktop:chat-file-mentions-page", "desktop:chat-links", "desktop:list-chat-messages",
         "desktop:send-chat-message", "desktop:list-personal-chat-feed", "desktop:list-channel-threads",
         "desktop:start-channel-thread",
       ].includes(row.channel);
@@ -143,6 +143,61 @@ describe("main inventories", () => {
         guard: "active-workspace", scope: "workspace",
         inactiveMessage: messages[row.channel as keyof typeof messages],
       });
+      expect(row).not.toHaveProperty("handlerCheck");
+    }
+  });
+  it("records the 19 owner relay operations with their existing admission", () => {
+    const channels = [
+      "desktop:list-owner-live-documents",
+      "desktop:list-owner-live-refusals",
+      "desktop:retry-owner-live-share",
+      "desktop:create-relay-share",
+      "desktop:create-relay-share-link",
+      "desktop:add-relay-share-link",
+      "desktop:list-relay-share-links",
+      "desktop:retune-relay-share-link",
+      "desktop:rotate-relay-share-link",
+      "desktop:revoke-relay-share-link",
+      "desktop:list-relay-share-discussion",
+      "desktop:append-relay-share-discussion",
+      "desktop:delete-relay-share-discussion-message",
+      "desktop:block-relay-share-discussion-principal",
+      "desktop:unblock-relay-share-discussion-principal",
+      "desktop:pause-relay-share-discussion",
+      "desktop:resume-relay-share-discussion",
+      "desktop:promote-relay-share-grant",
+      "desktop:revoke-relay-share-grant"
+    ];
+    const ownerRows = rows.filter(row => channels.includes(row.channel));
+    expect(ownerRows.map(row => row.channel)).toEqual(channels);
+    for (const row of ownerRows) {
+      expect(row, row.channel).toMatchObject({
+        guard: "active-workspace", scope: "workspace",
+        inactiveMessage: "Sharing stopped because this window changed workspaces.",
+      });
+      expect(row).not.toHaveProperty("handlerCheck");
+    }
+  });
+  it("records the nine remaining relay operation rows with their existing admission", () => {
+    const workspaceChannels = ["owner-restore", "stop-owner-live-document", "resume-owner-live-document", "poll-relay-share-discussion-activity"]
+      .map(name => `desktop:${name}`);
+    const deviceChannels = ["list-relay-shares", "get-relay-received-share", "revoke-relay-share", "undo-relay-share", "cancel-relay-share-discussion-activity"]
+      .map(name => `desktop:${name}`);
+    const channels = [...workspaceChannels, ...deviceChannels];
+    const migrated = rows.filter(row => channels.includes(row.channel));
+    expect(migrated.map(row => row.channel).sort()).toEqual(channels.sort());
+    for (const row of migrated) {
+      if (workspaceChannels.includes(row.channel)) {
+        expect(row, row.channel).toMatchObject({
+          guard: "active-workspace", scope: "workspace",
+          inactiveMessage: ["desktop:stop-owner-live-document", "desktop:resume-owner-live-document"].includes(row.channel)
+            ? "Live editing stopped because this window changed workspaces."
+            : "Sharing stopped because this window changed workspaces.",
+        });
+      } else {
+        expect(row, row.channel).toMatchObject({ guard: "trusted-sender", scope: "device" });
+        expect(row).not.toHaveProperty("inactiveMessage");
+      }
       expect(row).not.toHaveProperty("handlerCheck");
     }
   });
@@ -210,14 +265,22 @@ describe("capability identities and exposure", () => {
     expect(() => assertAdmission({ ...repro, scope: "workspace", handlerCheck: { check: "existingHandler.check", reason: "Existing lifetime check." } })).not.toThrow();
   });
 
-  it("can tag all dataset actions on one operation row without changing its payload", () => {
-    const row = {
-      capabilityIdsByAction: DATASET_CAPABILITIES, channel: "desktop:dataset", payload: DatasetRequest,
+  it("records the multiplexed dataset operation with its existing admission", () => {
+    const datasetRows = rows.filter(row => row.channel === "desktop:dataset");
+    expect(datasetRows).toHaveLength(1);
+    const row = datasetRows[0]!;
+    expect(row).toMatchObject({
+      capabilityIdsByAction: DATASET_CAPABILITIES, payload: DatasetRequest,
       guard: "trusted-sender", scope: "workspace",
-      handlerCheck: { check: "existingDatasetHandler.check", reason: "Test-only row for the B5 dataset map." },
-    } as const satisfies OperationDefinition;
-    expect(Object.keys(row.capabilityIdsByAction).sort()).toEqual(DatasetRequest.options.map(option => option.shape.action.value).sort());
-    expect(Object.values(row.capabilityIdsByAction)).toHaveLength(34);
+      handlerCheck: { check: "datasetHandler.withRendererWorkspaceOperation" },
+    });
+    expect(row).not.toHaveProperty("capabilityId");
+    expect(row).not.toHaveProperty("inactiveMessage");
+    expect(row.capabilityIdsByAction).toBe(DATASET_CAPABILITIES);
+    expect(row.payload).toBe(DatasetRequest);
+    expect(row.result).toBe(DatasetResult);
+    expect(Object.keys(row.capabilityIdsByAction!).sort()).toEqual(DatasetRequest.options.map(option => option.shape.action.value).sort());
+    expect(Object.values(row.capabilityIdsByAction!)).toHaveLength(34);
     assertAdmission(row);
   });
 
@@ -274,7 +337,8 @@ describe("capability identities and exposure", () => {
     const sorted = (values: readonly (readonly string[])[]) => values.map(value => value.join(":")).sort();
     const actualIpc = OPERATION_TABLES.flatMap(table => Object.entries<OperationDefinition>(table).flatMap(([name, row]) =>
       (row.capabilityId ? [row.capabilityId] : Object.values(row.capabilityIdsByAction)).map(id => [name, id])));
-    expect(sorted(actualIpc)).toEqual(sorted(entries.flatMap(([id, meta]) => meta.ipc.operations.map(name => [name, id]))));
+    const expectedIpc = entries.flatMap(([id, meta]) => meta.ipc.operations.map(name => [name, id]));
+    expect(sorted(actualIpc)).toEqual(sorted(expectedIpc));
     for (const row of rows) assertAdmission(row);
     const offeredTools = new Set<string>();
     for (const level of ["owner", "view", "comment", "edit"] as const) {

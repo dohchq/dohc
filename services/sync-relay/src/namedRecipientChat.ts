@@ -8,7 +8,7 @@ import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { DiscussionActivityCapacityError, linkLogWaitGroup, type DiscussionActivityHub } from "./discussionActivity";
 import type { NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import type { createNamedShareTransportRoutes } from "./namedShareTransportRoutes";
-import { accountDisplayName } from "./discussionRoutes";
+import { accountDisplayName } from "./accountDisplayName";
 import { namedShareOrigin, type LogAuthorNameLookup } from "./relayLogInputs";
 import { parseLimit, parseString, parseLinkLogHold } from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";

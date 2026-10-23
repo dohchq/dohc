@@ -8,40 +8,28 @@ const DATE_PATTERN = /^\d{8}$/;
 const SHA_PATTERN = /^[0-9a-f]{7,40}$/i;
 const STABLE_VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
 
-export function desktopReleaseTargets(platforms = "windows") {
+// With `github`, each target runs on a pinned GitHub-hosted image, so moving to
+// a newer image takes a reviewed change.
+export function desktopReleaseTargets(platforms = "windows-linux", runners = "self-hosted") {
+  if (runners !== "self-hosted" && runners !== "github") {
+    throw new Error(`Invalid release runners '${runners}'. Expected self-hosted or github.`);
+  }
+  const github = runners === "github";
   const targets = [
     {
       label: "Windows x64",
       os: "Windows",
       artifact_platform: "win",
-      runner: ["self-hosted", "windows", "x64"],
+      runner: github ? "windows-2025" : ["self-hosted", "windows", "x64"],
       arch: "x64",
       target: "x86_64-pc-windows-msvc",
-      require_signing: "1",
-    },
-    {
-      label: "macOS x64",
-      os: "macOS",
-      artifact_platform: "mac",
-      runner: ["self-hosted", "macos", "arm64"],
-      arch: "x64",
-      target: "x86_64-apple-darwin",
-      require_signing: "1",
-    },
-    {
-      label: "macOS arm64",
-      os: "macOS",
-      artifact_platform: "mac",
-      runner: ["self-hosted", "macos", "arm64"],
-      arch: "arm64",
-      target: "aarch64-apple-darwin",
       require_signing: "1",
     },
     {
       label: "Linux x64",
       os: "Linux",
       artifact_platform: "linux",
-      runner: ["self-hosted", "linux", "x64"],
+      runner: github ? "ubuntu-24.04" : ["self-hosted", "linux", "x64"],
       arch: "x64",
       target: "x86_64-unknown-linux-gnu",
       require_signing: "0",
@@ -49,9 +37,8 @@ export function desktopReleaseTargets(platforms = "windows") {
   ];
   if (platforms === "windows") return targets.filter((target) => target.os === "Windows");
   if (platforms === "linux") return targets.filter((target) => target.os === "Linux");
-  if (platforms === "windows-linux") return targets.filter((target) => target.os !== "macOS");
-  if (platforms === "all") return targets;
-  throw new Error(`Invalid release platforms '${platforms}'. Expected windows, linux, windows-linux, or all.`);
+  if (platforms === "windows-linux") return targets;
+  throw new Error(`Invalid release platforms '${platforms}'. Expected windows, linux, or windows-linux.`);
 }
 
 export function repoRootFromScript() {
@@ -123,7 +110,7 @@ function validateReleaseInputs({ channel, date, runNumber, runAttempt, sha }) {
 }
 
 export async function resolveDesktopRelease(options = {}) {
-  const targets = desktopReleaseTargets(options.platforms);
+  const targets = desktopReleaseTargets(options.platforms, options.runners);
   const root = resolve(options.root ?? repoRootFromScript());
   const packageVersion =
     options.packageVersion ?? (await readDesktopPackageVersion(root));
@@ -201,6 +188,7 @@ function parseArgs(argv) {
     };
     if (arg === "--channel") out.channel = readValue();
     else if (arg === "--platforms") out.platforms = readValue();
+    else if (arg === "--runners") out.runners = readValue();
     else if (arg === "--version") out.version = readValue();
     else if (arg === "--date") out.date = readValue();
     else if (arg === "--run-number") out.runNumber = readValue();

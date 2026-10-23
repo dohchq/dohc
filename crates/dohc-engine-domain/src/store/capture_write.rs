@@ -15,6 +15,7 @@ use crate::records::{
     CaptureRetireResult, DeleteResult, DeleteTextFile, FileObjectRecord, MomentOp, MomentRecord,
     SnapshotRecord, TextSnapshot, WriteResult, WriteText,
 };
+use dohc_engine_storage::text;
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, Preimage, put_binary_blob,
 };
@@ -569,6 +570,7 @@ where
             &payload_hash,
             result.moment.moment_order,
             input.now_ms,
+            "versioned",
         )?;
         return Ok(result);
     }
@@ -661,6 +663,7 @@ where
         &payload_hash,
         result.moment.moment_order,
         input.now_ms,
+        "versioned",
     )?;
     Ok(result)
 }
@@ -675,6 +678,64 @@ where
 ///
 /// The deletion uses the existing domain delete path. The caller owns related
 /// effects and transaction completion. Roll back the transaction or savepoint on error.
+/// [`capture_retire_in_tx`] for a path whose file the disk shows stored under
+/// `to`, another spelling of it. A respell is not a deletion, so the head
+/// retires whoever owns it, but only when that cannot lose content: the head
+/// still holds the bytes found at `to` (`to_sha256`), nothing is waiting to
+/// materialize at either spelling, and no head lives at `to`. Otherwise the
+/// respell is unproven and the head stays: the retire fails with
+/// [`DomainError::WritePreconditionFailed`] and changes nothing.
+pub fn capture_retire_respelled_in_tx(
+    tx: &Transaction<'_>,
+    input: &CaptureRetire,
+    to: &str,
+    to_sha256: &str,
+) -> Result<CaptureRetireResult, DomainError> {
+    if alias_object_id(tx, &input.workspace_id, &input.version_id, &input.path)?.is_none() {
+        return capture_retire_in_tx(tx, input);
+    }
+    if !respell_keeps_content(tx, input, to, to_sha256)? {
+        return Err(DomainError::WritePreconditionFailed {
+            current_sha256: None,
+        });
+    }
+    let mut input = input.clone();
+    input.only_if_capture_origin = false;
+    capture_retire_in_tx(tx, &input)
+}
+
+fn respell_keeps_content(
+    tx: &Transaction<'_>,
+    input: &CaptureRetire,
+    to: &str,
+    to_sha256: &str,
+) -> Result<bool, DomainError> {
+    let (workspace, version) = (input.workspace_id.as_str(), input.version_id.as_str());
+    let Some(object_id) = alias_object_id(tx, workspace, version, &input.path)? else {
+        return Ok(false);
+    };
+    let Some(head) = get_snapshot_meta(tx, workspace, version, &object_id)? else {
+        return Ok(false);
+    };
+    let sha = if head.content_kind == "binary" {
+        head.binary_sha256
+    } else {
+        head.blob_sha256
+    };
+    if sha.as_deref() != Some(to_sha256) || alias_object_id(tx, workspace, version, to)?.is_some() {
+        return Ok(false);
+    }
+    let pending: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM materialization_jobs WHERE workspace_id IN (?1,'') \
+             AND status='pending' AND target_path IN (?2,?3))",
+            params![workspace, input.path, to],
+            |row| row.get(0),
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    Ok(!pending)
+}
+
 pub fn capture_retire_in_tx(
     tx: &Transaction<'_>,
     input: &CaptureRetire,
@@ -744,6 +805,7 @@ pub fn capture_retire_in_tx(
             &payload_hash,
             0,
             input.now_ms,
+            "versioned",
         )?;
         return Ok(CaptureRetireResult {
             pending_placement: false,
@@ -774,6 +836,7 @@ pub fn capture_retire_in_tx(
                 &payload_hash,
                 0,
                 input.now_ms,
+                "versioned",
             )?;
             return Ok(CaptureRetireResult {
                 pending_placement: false,
@@ -791,6 +854,7 @@ pub fn capture_retire_in_tx(
                 &payload_hash,
                 0,
                 input.now_ms,
+                "versioned",
             )?;
             return Ok(CaptureRetireResult {
                 pending_placement: false,
@@ -843,6 +907,7 @@ pub fn capture_retire_in_tx(
         &payload_hash,
         result.moment.moment_order,
         input.now_ms,
+        "versioned",
     )?;
     Ok(CaptureRetireResult {
         pending_placement: false,
@@ -1073,6 +1138,7 @@ where
                 &payload_hash,
                 result.moment_order,
                 input.now_ms,
+                "versioned",
             )?;
             return Ok(result);
         }
@@ -1175,6 +1241,7 @@ where
         &payload_hash,
         moment_order,
         input.now_ms,
+        "versioned",
     )?;
     Ok(CaptureIngestBinaryResult {
         pending_placement: false,
@@ -1635,12 +1702,14 @@ fn write_normalized_text_in_tx(
     }
     #[cfg(feature = "fault-injection")]
     let blob_phase = dohc_engine_storage::capture_phase::Measure::new("blob_SQL");
-    let blob_inserted = tx
-        .execute(
-            "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
-            params![blob, input.text.len() as i64, input.text.as_ref()],
-        )
-        .map_err(DomainError::sql_persist)?
+    let blob_inserted = text::insert(
+        tx,
+        &(blob),
+        input.text.len() as i64,
+        input.text.as_ref(),
+        true,
+    )
+    .map_err(DomainError::sql_persist)?
         != 0;
     #[cfg(feature = "fault-injection")]
     drop(blob_phase);
@@ -1740,6 +1809,7 @@ fn write_normalized_text_in_tx(
         &payload_hash,
         moment_order,
         input.now_ms,
+        "versioned",
     )?;
 
     // A reused content-addressed row may be corrupt. Preserve the hydration

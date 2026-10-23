@@ -365,7 +365,7 @@ fn native_tail_input(
     let fence = f
         ._owner
         .fence_restore(
-            &mut f.store,
+            &mut f.store, None,
             NativeRestoreFence {
                 operation_id: if f.binding.restore_fence_generation == 0 {
                     "tail-restore".into()
@@ -410,7 +410,7 @@ fn native_tail_prepare(
 ) -> Result<NativeRestoreProposal, ApplicationError> {
     let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
     f._owner
-        .prepare_restore(&mut f.store, input, coordinate, 2_000_000, 100, &NoFaults)
+        .prepare_restore(&mut f.store, None, input, coordinate, 2_000_000, 100, &NoFaults)
 }
 
 fn native_tail_inventory(store: &EngineStore) -> Value {
@@ -867,7 +867,7 @@ fn native_restore_tail_retains_interleaved_pending_context_with_descending_termi
             serde_json::to_vec(
                 &owner
                     .prepare_restore(
-                        &mut restored_store,
+                        &mut restored_store, None,
                         input.clone(),
                         coordinate,
                         2_000_000,
@@ -1084,7 +1084,7 @@ fn native_restore_tail_budgets_count_pending_sources_on_first_prepare_and_replay
             assert!(f
                 ._owner
                 .prepare_restore(
-                    &mut f.store,
+                    &mut f.store, None,
                     input.clone(),
                     coordinate,
                     bytes,
@@ -1639,7 +1639,7 @@ fn native_restore_apply_preserves_quarantined_tail_and_survives_compaction_and_b
     let receipt = f
         ._owner
         .apply_restore(
-            &mut f.store,
+            &mut f.store, None,
             &mut WriterDocCache::new(),
             input.clone(),
             coordinate.clone(),
@@ -1676,7 +1676,7 @@ fn native_restore_apply_preserves_quarantined_tail_and_survives_compaction_and_b
         receipt,
         f._owner
             .apply_restore(
-                &mut f.store,
+                &mut f.store, None,
                 &mut WriterDocCache::new(),
                 input.clone(),
                 coordinate.clone(),
@@ -1691,7 +1691,7 @@ fn native_restore_apply_preserves_quarantined_tail_and_survives_compaction_and_b
     assert_eq!(
         f._owner
             .fence_restore(
-                &mut f.store,
+                &mut f.store, None,
                 prep.fence.operation.clone(),
                 coordinate.clone(),
                 110,
@@ -1719,7 +1719,7 @@ fn native_restore_apply_preserves_quarantined_tail_and_survives_compaction_and_b
         receipt,
         owner
             .apply_restore(
-                &mut store,
+                &mut store, None,
                 &mut WriterDocCache::new(),
                 input.clone(),
                 coordinate.clone(),
@@ -1735,7 +1735,7 @@ fn native_restore_apply_preserves_quarantined_tail_and_survives_compaction_and_b
     assert_eq!(store.table_row_count("moments").unwrap(), 1);
     let settled = owner
         .with_restore_settlement(
-            &mut store,
+            &mut store, None,
             input.clone(),
             coordinate.clone(),
             2_000_000,
@@ -1758,7 +1758,7 @@ fn native_restore_apply_preserves_quarantined_tail_and_survives_compaction_and_b
     let mut store = EngineStore::open(&backup.backup_path, 150).unwrap();
     let replay = owner
         .with_restore_settlement(
-            &mut store,
+            &mut store, None,
             input,
             coordinate,
             2_000_000,
@@ -1810,7 +1810,7 @@ fn resumed_owner_retains_old_pending_sources_and_creates_an_independent_generati
     };
     f._owner
         .apply_restore(
-            &mut f.store,
+            &mut f.store, None,
             &mut WriterDocCache::new(),
             input.clone(),
             coordinate.clone(),
@@ -1857,7 +1857,7 @@ fn resumed_owner_retains_old_pending_sources_and_creates_an_independent_generati
     let settlement = f
         ._owner
         .with_restore_settlement(
-            &mut f.store,
+            &mut f.store, None,
             input.clone(),
             coordinate.clone(),
             2_000_000,
@@ -1873,7 +1873,7 @@ fn resumed_owner_retains_old_pending_sources_and_creates_an_independent_generati
     };
     f._owner
         .resume_restore(
-            &mut f.store,
+            &mut f.store, None,
             resume.clone(),
             coordinate.clone(),
             2_000_000,
@@ -1940,7 +1940,7 @@ fn resumed_owner_retains_old_pending_sources_and_creates_an_independent_generati
     let historic = f
         ._owner
         .resume_restore(
-            &mut f.store,
+            &mut f.store, None,
             resume,
             coordinate,
             2_000_000,
@@ -2020,7 +2020,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
     let proposal = f
         ._owner
         .prepare_restore(
-            &mut f.store,
+            &mut f.store, None,
             preparation.clone(),
             coordinate.clone(),
             PROOF_BYTES,
@@ -2074,7 +2074,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
     drop(proposal);
     f._owner
         .apply_restore(
-            &mut f.store,
+            &mut f.store, None,
             &mut WriterDocCache::new(),
             input.clone(),
             coordinate.clone(),
@@ -2089,7 +2089,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
     let settled = f
         ._owner
         .with_restore_settlement(
-            &mut f.store,
+            &mut f.store, None,
             input.clone(),
             coordinate.clone(),
             PROOF_BYTES,
@@ -2102,7 +2102,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
     mark("settle-restore");
     f._owner
         .resume_restore(
-            &mut f.store,
+            &mut f.store, None,
             NativeRestoreResume {
                 application: input,
                 settlement_id: settled.settlement_id,

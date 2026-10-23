@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { createActorIssuer, deriveLocalActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
+import { createActorIssuer, deriveLocalActor, deriveRelayChatActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
 import { ACTOR_HUES, actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
 import type { ChatMessage, MomentAuthor } from "@dohc/workspace-contracts/engine";
 import type { RegistryEntry } from "./registryStore";
 import type { CloudCredentials } from "./cloudCredentialStore";
-import { chatActorForPresentation, createActorPresentationRequest, createHistoryPresentationRequest, forgetWorkspacePresentation, ownActorPresentation } from "./actorPresentation";
+import { chatLinkMessageForPresentation, chatActorForPresentation, createActorPresentationRequest, createHistoryPresentationRequest, forgetWorkspacePresentation, ownActorPresentation } from "./actorPresentation";
 
 // Count issuer construction while keeping its behavior.
 vi.mock("@dohc/workspace-contracts/actor-identity", async (importOriginal) => {
@@ -24,14 +24,14 @@ function local(kind: "human" | "agent" | "automation", origin: "renderer" | "cli
     author: kind === "agent" ? { kind, claimedName: "handshake" } : kind === "automation" ? { kind, automationId: "job" } : { kind } });
   return message({ author: { kind, displayName: "Renamed" }, authorActorKey: serializeActorKey(actor.key), ...(origin === "cli" ? { origin } : {}) });
 }
-function request(remote = true, workspaceId = "w") {
+function request(remote = true, workspaceId = "w", agentColors: Record<string, "blue" | "rose"> = {}) {
   let workspace: RegistryEntry = { workspaceId, rootPath: "C:/w", kind: "personal", mode: "local-first", lastOpenedAt: 0,
     sharedChannels: [{ shareId: "s", channelWireId: "wire", access: "read-write", granterEmail: null,
       relayUrl: "https://relay.test", recipientUserId: "alice", ...(remote ? { serverUrl: issuer } : {}) }],
     ...(remote ? { remote: { serverUrl: issuer, ownerUserId: "alice" } } : {}) };
   const store = { findThreadChannelId: vi.fn(async () => "channel"), getChannelWireId: vi.fn(async () => "wire") };
   const assertCurrent = vi.fn();
-  const present = createActorPresentationRequest({ readWorkspace: () => workspace, store, installationId: "device", credentials, assertCurrent });
+  const present = createActorPresentationRequest({ agentColors: () => agentColors, readWorkspace: () => workspace, store, installationId: "device", credentials, assertCurrent });
   return { present, store, assertCurrent, replace: () => { workspace = { ...workspace, lastOpenedAt: 1 }; } };
 }
 describe("chat presentation admission", () => {
@@ -243,4 +243,79 @@ describe("History presentation", () => {
     const present = createHistoryPresentationRequest({ source: "received", workspaceId: "closing", assertCurrent: () => { throw new Error("closed"); } });
     expect(() => present([named("sam")])).toThrow("closed");
   });
+});
+
+
+describe("personal agent hues", () => {
+  it("colours chat and History by the full agent key, with no effect on other owners or people", async () => {
+    const chosen = local("agent");
+    const human = local("human");
+    const automation = local("automation");
+    const colors = { [chosen.authorActorKey!]: "blue", [human.authorActorKey!]: "blue",
+      [automation.authorActorKey!]: "rose", malformed: "rose" } as const;
+    const chat = request(true, "w", colors);
+    const token = await chat.present(chosen, "t");
+    expect(token.hue).toBe("blue");
+    const history = createHistoryPresentationRequest({ source: "own-store", workspaceId: "w", assertCurrent: () => undefined,
+      serverUrl: issuer, synced: true, installationId: "device", credentials, agentColors: () => colors });
+    expect(history([{ kind: "agent", agentId: "handshake", onBehalfOf: "alice" }])[0]).toEqual(token);
+    const foreign = local("agent", "renderer", { issuer, userId: "sam" });
+    expect(await chat.present(foreign, "t")).toMatchObject({ hue: null, self: false });
+    expect(await chat.present(human, "t")).toMatchObject({ hue: "rose" });
+    expect(await chat.present(automation, "t")).toMatchObject({ hue: null });
+    expect(history([{ kind: "agent", agentId: "handshake", onBehalfOf: "sam" }])[0]?.hue).toBeNull();
+    expect(history([{ kind: "automation", automationId: "job", depth: 0 }])[0]?.hue).toBeNull();
+    expect((await request(true, "w", { malformed: "blue" }).present(chosen, "t")).hue).toBeNull();
+  });
+});
+
+
+it("matches dispatch's unnamed run and CLI reply claims on the current base", async () => {
+  const { UNNAMED_AGENT_ID } = await import("../agents/activeAgentRun");
+  expect(UNNAMED_AGENT_ID).toBe("dohc-mcp");
+  const key = serializeActorKey(deriveLocalActor({ identity, workspaceId: "w", author: { kind: "agent" },
+    displayName: "Agent", origin: "cli" }).key);
+  const colors = { [key]: "blue" } as const;
+  const chat = await request(true, "w", colors).present(message({ author: { kind: "agent", displayName: "Agent" }, authorActorKey: key }), "t");
+  const [history] = createHistoryPresentationRequest({ source: "own-store", workspaceId: "w", assertCurrent: () => undefined,
+    serverUrl: issuer, synced: true, installationId: "device", credentials, agentColors: () => colors })([
+    { kind: "agent", agentId: UNNAMED_AGENT_ID, onBehalfOf: "alice" },
+  ]);
+  expect(history).toEqual(chat);
+  expect(history?.hue).toBe("blue");
+});
+
+
+it("resolves an in-flight chat and an unread History page against current settings", async () => {
+  const row = local("agent");
+  let choices: Record<string, "rose" | "blue"> = { [row.authorActorKey!]: "rose" };
+  const chat = createActorPresentationRequest({ readWorkspace: () => ({ workspaceId: "w", rootPath: "C:/w", kind: "personal", mode: "local-first" }),
+    store: { findThreadChannelId: async () => null, getChannelWireId: async () => null }, installationId: "device", credentials,
+    agentColors: () => choices });
+  const history = createHistoryPresentationRequest({ source: "own-store", workspaceId: "w", assertCurrent: () => undefined,
+    serverUrl: issuer, synced: true, installationId: "device", credentials, agentColors: () => choices });
+  const pending = chat(row, "thread");
+  choices = { [row.authorActorKey!]: "blue" };
+  expect((await pending).hue).toBe("blue");
+  expect(history([{ kind: "agent", agentId: "handshake", onBehalfOf: "alice" }])[0]?.hue).toBe("blue");
+  choices = {};
+  expect(history([{ kind: "agent", agentId: "handshake", onBehalfOf: "alice" }])[0]?.hue).toBeNull();
+});
+
+it.each(["human", "agent", "automation"] as const)("Links and Chat share %s keys and presentation across origins", async kind => {
+  const claim = kind === "agent" ? { kind, claimedName: "teammate-agent" } : { kind };
+  const input = { issuer, authorUserId: "sam", displayName: "teammate-agent", ...claim };
+  const key = serializeActorKey(deriveRelayChatActor(input).key);
+  for (const origin of ["renderer", "cli", "automation", "unknown"] as const) {
+    expect(serializeActorKey(deriveRelayChatActor({ ...input, origin }).key)).toBe(key);
+    expect(serializeActorKey(deriveRelayChatActor({ ...input, issuer: null, origin }).key))
+      .toBe(serializeActorKey(deriveRelayChatActor({ ...input, issuer: null }).key));
+  }
+  const cli = message({ author: { kind, displayName: input.displayName }, authorUserId: input.authorUserId, origin: "cli" });
+  const link = chatLinkMessageForPresentation({
+    authorKind: kind, authorDisplayName: input.displayName, authorUserId: input.authorUserId,
+  });
+  expect(chatActorForPresentation(link, issuer).key).toEqual(chatActorForPresentation(cli, issuer).key);
+  const present = request(true, "links-origin-" + kind).present;
+  expect(await present(link, "t")).toEqual(await present(cli, "t"));
 });

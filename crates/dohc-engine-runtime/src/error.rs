@@ -7,6 +7,14 @@ use dohc_engine_storage::StorageError;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RuntimeError {
+    #[error("chat-mention-access-changed")]
+    ChatMentionAccessChanged,
+    #[error("chat-mention-version-changed")]
+    ChatMentionVersionChanged,
+    #[error("chat-conversation-links-changed")]
+    ChatConversationLinksChanged,
+    #[error("links-edges-source-changed")]
+    LinksEdgesSourceChanged,
     #[error("capture-file-held: {path}")]
     CaptureFileHeld { path: String },
     #[error("capture-not-owned: {path}")]
@@ -147,6 +155,10 @@ impl RuntimeError {
     /// The stable machine code, preserving the storage code where wrapped.
     pub fn code(&self) -> &'static str {
         match self {
+            RuntimeError::ChatMentionAccessChanged => "chat-mention-access-changed",
+            RuntimeError::ChatMentionVersionChanged => "chat-mention-version-changed",
+            RuntimeError::ChatConversationLinksChanged => "chat-conversation-links-changed",
+            RuntimeError::LinksEdgesSourceChanged => "links-edges-source-changed",
             RuntimeError::CaptureFileHeld { .. } => "capture-file-held",
             RuntimeError::CaptureNotOwnedAfterHold { .. } => "capture-not-owned",
             RuntimeError::Identity { .. } => "identity-unresolved",
@@ -221,6 +233,8 @@ mod tests {
             MaterializeError::Io {
                 path: "record.md".into(),
                 kind: std::io::ErrorKind::PermissionDenied,
+                raw_os_error: None,
+                privacy_denied: false,
             },
         ] {
             let code = error.code();

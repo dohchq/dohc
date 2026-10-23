@@ -7,15 +7,14 @@
 // Positioning is CSS-only (position: sticky inside the shared grid cell
 // set up in styles.css — see the "outline rail" comment there), so this
 // component never measures or tracks its own placement; the only DOM
-// measurement it does is figuring out which heading is "active". During
-// layout churn it measures directly; after layout settles it searches cached
-// offsets and remeasures them once when a new scroll gesture starts.
+// measurement it does is figuring out which heading is "active", with one
+// hit test at the reading line per frame.
 
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey, type Transaction } from "@tiptap/pm/state";
-import { Decoration, DecorationSet } from "@tiptap/pm/view";
+import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 import {
   extractOutline,
   resolveActiveHeadingIndex,
@@ -33,17 +32,6 @@ import {
 // after the user starts scrolling, instead of flipping the instant a new
 // heading's pixel crosses y=0.
 const ACTIVE_HEADING_READING_OFFSET = 72;
-export const OUTLINE_GEOMETRY_HOT_MS = 250;
-
-type OutlineSnapshot = {
-  generation: number;
-  headings: OutlineHeading[];
-};
-
-type HeadingGeometry = {
-  generation: number;
-  values: number[];
-};
 
 type HeadingFlashState = {
   token: number | null;
@@ -121,6 +109,64 @@ export function makeHeadingFlashPlugin(): Plugin<HeadingFlashState> {
 }
 
 let nextHeadingFlashToken = 0;
+
+/** The index of the heading whose section holds the reading line, `line` in
+ *  viewport coordinates: the last heading at or before the position under
+ *  it. Above the editor that is the first heading and below it the last.
+ *  Null when the line resolves to no position. */
+function headingIndexAtReadingLine(
+  view: EditorView,
+  headings: readonly OutlineHeading[],
+  line: number,
+): number | null {
+  const box = view.dom.getBoundingClientRect();
+  let pos: number | null = null;
+  if (line < box.top) pos = 0;
+  else if (line >= box.bottom) pos = view.state.doc.content.size;
+  else {
+    try {
+      pos = view.posAtCoords({ left: box.left + box.width / 2, top: line })?.pos ?? null;
+    } catch {
+      // A point in DOM that is mid-change can fail to resolve; the next
+      // signal tries again.
+    }
+  }
+  if (pos === null) return null;
+  const headingBox = (heading: OutlineHeading) => {
+    const element = view.nodeDOM(heading.pos);
+    return element instanceof HTMLElement ? element.getBoundingClientRect() : null;
+  };
+  let index = resolveActiveHeadingIndex(headings, pos);
+  // A hit in the margin above a heading can resolve to its start, and a hit
+  // in a table cell can follow headings lower in an earlier cell. A heading
+  // is reached only once it is drawn and its top crosses the line.
+  const reached = (heading: OutlineHeading) => {
+    const box = headingBox(heading);
+    return !!box && box.height > 0 && box.top <= line;
+  };
+  while (index > 0 && !reached(headings[index]!)) index -= 1;
+  // Headings side by side, as in a table row, follow the hit in document
+  // order on the same line: the last drawn one the line has reached is
+  // active. A heading in folded content draws no box and is passed over.
+  for (let next = index + 1; next < headings.length; next += 1) {
+    const box = headingBox(headings[next]!);
+    if (!box || box.top > line) break;
+    if (box.height > 0) index = next;
+  }
+  return index;
+}
+
+/** The same headings with the same text and levels draw the same outline,
+ *  wherever an edit moved them. */
+function sameOutline(
+  a: readonly OutlineHeading[],
+  b: readonly OutlineHeading[],
+): boolean {
+  return a.length === b.length && a.every((heading, index) => {
+    const other = b[index]!;
+    return heading.level === other.level && heading.text === other.text;
+  });
+}
 
 function findScrollParent(el: HTMLElement | null): HTMLElement | null {
   let node = el?.parentElement ?? null;
@@ -267,52 +313,52 @@ type OutlinePanelProps = {
 };
 
 export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePanelProps) {
-  const [outline, setOutline] = useState<OutlineSnapshot>({
-    generation: 0,
-    headings: [],
-  });
-  const [activePos, setActivePos] = useState<number | null>(null);
+  // The drawn list: it changes only when a heading's text or level does.
+  const [headings, setHeadings] = useState<OutlineHeading[]>([]);
+  const [activeIndex, setActiveIndex] = useState(-1);
   const wordCount = useDebouncedWordCount(editor);
 
-  // The scroll-tracking effect attaches once per editor and reads current
-  // headings through this ref. Document transactions replace the snapshot
-  // without tearing down the listener.
-  const outlineRef = useRef<OutlineSnapshot>(outline);
-  const activePosRef = useRef<number | null>(activePos);
-  const setActivePosIfChanged = (next: number | null) => {
-    if (activePosRef.current === next) return;
+  // The current headings with their positions, which every edit before a
+  // heading moves. The scroll-tracking effect and clicks read them here, so
+  // typing redraws nothing.
+  const outlineRef = useRef<OutlineHeading[]>(headings);
+  // The active heading is kept by position, so an edit maps it to where its
+  // heading went; the list draws it by index.
+  const activePosRef = useRef<number | null>(null);
+  const activeIndexRef = useRef(-1);
+  const setActivePos = (next: number | null) => {
     activePosRef.current = next;
-    setActivePos(next);
+    const current = outlineRef.current;
+    const index = next === null ? -1 : resolveActiveHeadingIndex(current, next);
+    const shown = index >= 0 && current[index]!.pos === next ? index : -1;
+    if (activeIndexRef.current === shown) return;
+    activeIndexRef.current = shown;
+    setActiveIndex(shown);
   };
 
-  // Recompute the heading list synchronously (cheap: a handful of nodes) on
-  // every doc change. The word count is handled by useDebouncedWordCount above.
+  // Recompute the heading list synchronously (a walk over blocks, not text)
+  // on every doc change, and redraw only when it changed. The word count is
+  // handled by useDebouncedWordCount above.
   useEffect(() => {
-    setActivePosIfChanged(null);
+    setActivePos(null);
     if (!editor) {
-      const empty = {
-        generation: outlineRef.current.generation + 1,
-        headings: [],
-      };
-      outlineRef.current = empty;
-      setOutline(empty);
+      outlineRef.current = [];
+      setHeadings([]);
       return;
     }
     const recomputeHeadings = () => {
-      const next = {
-        generation: outlineRef.current.generation + 1,
-        headings: extractOutline(editor.state.doc),
-      };
+      const next = extractOutline(editor.state.doc);
+      const redraw = !sameOutline(next, outlineRef.current);
       outlineRef.current = next;
-      setOutline(next);
+      if (redraw) setHeadings(next);
     };
     const handleTransaction = ({ transaction }: { transaction: Transaction }) => {
       if (!transaction.docChanged) return;
+      recomputeHeadings();
       const previousActivePos = activePosRef.current;
       if (previousActivePos !== null) {
-        setActivePosIfChanged(transaction.mapping.map(previousActivePos));
+        setActivePos(transaction.mapping.map(previousActivePos));
       }
-      recomputeHeadings();
     };
 
     recomputeHeadings();
@@ -359,115 +405,35 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
     };
   }, [editor, headingTarget?.anchor, headingTarget?.occurrence, headingTarget?.nonce]);
 
-  // Cache contract: active geometry is pixel-correct within one frame of any
-  // observable signal and from the first frame of every scroll gesture.
-  // Non-first steady-state frames perform zero layout reads. An unobservable
-  // shift mid-gesture can remain stale until the next gesture; this accepted
-  // staleness is bounded by the gesture's length.
+  // The active heading is the last one at or before the document position
+  // under the reading line. One hit test and a read of the headings beside
+  // the hit find it each frame, so the cost does not grow with the note's
+  // length. Every signal that can move content under that line schedules
+  // one frame.
   useEffect(() => {
     if (!editor) return;
     const scrollEl = findScrollParent(containerRef.current);
     if (!scrollEl) return;
 
     let frame = 0;
-    let settleTimer = 0;
-    let lastGeometrySignalAt = Number.NEGATIVE_INFINITY;
-    let lastScrollAt = Number.NEGATIVE_INFINITY;
-    let remeasurePending = false;
-    let headingTops: HeadingGeometry | null = null;
-    const measureHeadingTops = (snapshot: OutlineSnapshot): HeadingGeometry => {
-      const containerTop = scrollEl.getBoundingClientRect().top;
-      const measuredTops: number[] = [];
-      let previousTop = Number.NEGATIVE_INFINITY;
-      for (const heading of snapshot.headings) {
-        let measuredTop = Number.POSITIVE_INFINITY;
-        try {
-          measuredTop =
-            editor.view.coordsAtPos(heading.pos).top
-            - containerTop
-            + scrollEl.scrollTop;
-        } catch {
-          // An unresolved position and everything after its first gap remain
-          // unreached until the next measurement can resolve them.
-        }
-        // Hidden descendants can share an ancestor's coordinates. Keeping the
-        // search values nondecreasing preserves the old full scan's first-gap
-        // behavior and makes binary search safe.
-        previousTop = Number.isFinite(measuredTop)
-          ? Math.max(previousTop, measuredTop)
-          : Number.POSITIVE_INFINITY;
-        measuredTops.push(previousTop);
-      }
-      return {
-        generation: snapshot.generation,
-        values: measuredTops,
-      };
-    };
-    const resolveActiveHeading = (
-      snapshot: OutlineSnapshot,
-      geometry: HeadingGeometry,
-    ) => {
-      const activeIndex = resolveActiveHeadingIndex(
-        geometry.values,
-        scrollEl.scrollTop,
-        ACTIVE_HEADING_READING_OFFSET,
-      );
-      const heading = snapshot.headings[activeIndex];
-      setActivePosIfChanged(heading?.pos ?? null);
-    };
-    const geometryIsHot = (time: number) =>
-      time - lastGeometrySignalAt < OUTLINE_GEOMETRY_HOT_MS;
-    const updateActiveHeading = (time: number) => {
+    const updateActiveHeading = () => {
       frame = 0;
-      const snapshot = outlineRef.current;
-      if (geometryIsHot(time)) {
-        resolveActiveHeading(snapshot, measureHeadingTops(snapshot));
-        return;
-      }
-
-      if (
-        remeasurePending
-        || headingTops?.generation !== snapshot.generation
-      ) {
-        remeasurePending = false;
-        if (settleTimer) {
-          window.clearTimeout(settleTimer);
-          settleTimer = 0;
-        }
-        headingTops = measureHeadingTops(snapshot);
-      }
-
-      resolveActiveHeading(snapshot, headingTops);
+      const current = outlineRef.current;
+      const index = headingIndexAtReadingLine(
+        editor.view,
+        current,
+        scrollEl.getBoundingClientRect().top + ACTIVE_HEADING_READING_OFFSET,
+      );
+      if (index !== null) setActivePos(current[index]?.pos ?? null);
     };
     const scheduleUpdate = () => {
       if (frame) return;
       frame = requestAnimationFrame(updateActiveHeading);
     };
-    const scheduleSettledRecompute = () => {
-      window.clearTimeout(settleTimer);
-      settleTimer = window.setTimeout(() => {
-        settleTimer = 0;
-        scheduleUpdate();
-      }, OUTLINE_GEOMETRY_HOT_MS);
-    };
-    const markGeometryHot = () => {
-      lastGeometrySignalAt = performance.now();
-      remeasurePending = true;
-      scheduleUpdate();
-      scheduleSettledRecompute();
-    };
-    const handleScroll = () => {
-      const time = performance.now();
-      if (time - lastScrollAt > OUTLINE_GEOMETRY_HOT_MS) {
-        remeasurePending = true;
-      }
-      lastScrollAt = time;
-      scheduleUpdate();
-    };
     const resizeObserver =
       typeof ResizeObserver === "undefined"
         ? null
-        : new ResizeObserver(markGeometryHot);
+        : new ResizeObserver(scheduleUpdate);
     const observedElements = new Set<HTMLElement>();
     const refreshResizeTargets = () => {
       const nextElements = new Set<HTMLElement>([
@@ -503,7 +469,7 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
             )) {
               refreshResizeTargets();
             }
-            markGeometryHot();
+            scheduleUpdate();
           });
     mutationObserver?.observe(editor.view.dom, {
       attributes: true,
@@ -522,24 +488,24 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
     });
 
     const fonts = document.fonts;
-    fonts?.addEventListener("loadingdone", markGeometryHot);
-    fonts?.addEventListener("loadingerror", markGeometryHot);
-    window.addEventListener("resize", markGeometryHot);
-    scrollEl.addEventListener("load", markGeometryHot, true);
-    scrollEl.addEventListener("error", markGeometryHot, true);
-    editor.on("update", markGeometryHot);
+    fonts?.addEventListener("loadingdone", scheduleUpdate);
+    fonts?.addEventListener("loadingerror", scheduleUpdate);
+    window.addEventListener("resize", scheduleUpdate);
+    scrollEl.addEventListener("load", scheduleUpdate, true);
+    scrollEl.addEventListener("error", scheduleUpdate, true);
+    editor.on("update", scheduleUpdate);
     const handleDocumentTransaction = (
       { transaction }: { transaction: { docChanged: boolean } },
     ) => {
-      if (transaction.docChanged) markGeometryHot();
+      if (transaction.docChanged) scheduleUpdate();
     };
     editor.on("transaction", handleDocumentTransaction);
-    scrollEl.addEventListener("scroll", handleScroll, { passive: true });
+    scrollEl.addEventListener("scroll", scheduleUpdate, { passive: true });
 
     let resolutionQuery: MediaQueryList | null = null;
     const handleResolutionChange = () => {
       resolutionQuery?.removeEventListener("change", handleResolutionChange);
-      markGeometryHot();
+      scheduleUpdate();
       resolutionQuery = window.matchMedia(
         `(resolution: ${window.devicePixelRatio}dppx)`,
       );
@@ -554,48 +520,49 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
 
     scheduleUpdate();
     return () => {
-      scrollEl.removeEventListener("scroll", handleScroll);
+      scrollEl.removeEventListener("scroll", scheduleUpdate);
       editor.off("transaction", handleDocumentTransaction);
-      editor.off("update", markGeometryHot);
-      scrollEl.removeEventListener("load", markGeometryHot, true);
-      scrollEl.removeEventListener("error", markGeometryHot, true);
-      window.removeEventListener("resize", markGeometryHot);
-      fonts?.removeEventListener("loadingdone", markGeometryHot);
-      fonts?.removeEventListener("loadingerror", markGeometryHot);
+      editor.off("update", scheduleUpdate);
+      scrollEl.removeEventListener("load", scheduleUpdate, true);
+      scrollEl.removeEventListener("error", scheduleUpdate, true);
+      window.removeEventListener("resize", scheduleUpdate);
+      fonts?.removeEventListener("loadingdone", scheduleUpdate);
+      fonts?.removeEventListener("loadingerror", scheduleUpdate);
       resolutionQuery?.removeEventListener("change", handleResolutionChange);
       mutationObserver?.disconnect();
       resizeObserver?.disconnect();
-      window.clearTimeout(settleTimer);
       if (frame) cancelAnimationFrame(frame);
     };
   }, [editor, containerRef]);
 
-  const headings = outline.headings;
   if (!editor || headings.length < 2) return null;
 
   return (
     <nav className="dohc-outline" aria-label="Document outline">
       <div className="dohc-outline-rail" aria-hidden="true">
-        {headings.map((h) => (
+        {headings.map((h, index) => (
           <span
-            key={h.pos}
+            key={index}
             className={`dohc-outline-rail-mark dohc-outline-rail-mark--level-${h.level}${
-              h.pos === activePos ? " is-active" : ""
+              index === activeIndex ? " is-active" : ""
             }`}
           />
         ))}
       </div>
       <div className="dohc-outline-panel dohc-popover">
         <ul className="dohc-outline-list">
-          {headings.map((h) => (
-            <li key={h.pos}>
+          {headings.map((h, index) => (
+            <li key={index}>
               <button
                 type="button"
                 className={`dohc-outline-item dohc-outline-item--level-${h.level}${
-                  h.pos === activePos ? " is-active" : ""
+                  index === activeIndex ? " is-active" : ""
                 }`}
-                aria-current={h.pos === activePos ? "true" : undefined}
-                onClick={() => scrollToHeading(editor, h)}
+                aria-current={index === activeIndex ? "true" : undefined}
+                onClick={() => {
+                  const heading = outlineRef.current[index];
+                  if (heading) scrollToHeading(editor, heading);
+                }}
               >
                 {h.text}
               </button>

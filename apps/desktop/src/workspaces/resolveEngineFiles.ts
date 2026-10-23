@@ -31,9 +31,10 @@ export async function resolveEngineFileTargets(
   workspaceId: string,
   targets: readonly FileResolveTarget[],
   assertCurrent?: () => void,
+  initialVersionId?: string,
 ): Promise<FileResolution[]> {
   const results: FileResolution[] = [];
-  let versionId: string | undefined;
+  let versionId = initialVersionId;
   let batch: FileResolveTarget[] = [];
   const emptyRequestBytes = () => Buffer.byteLength(JSON.stringify({ versionId, targets: [] }));
   let batchBytes = emptyRequestBytes();

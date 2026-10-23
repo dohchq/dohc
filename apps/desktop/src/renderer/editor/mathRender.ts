@@ -1,5 +1,7 @@
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import type { EditorView, NodeView } from "@tiptap/pm/view";
+import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
+import { isComposingKey } from "../ui/keys";
 
 // Desktop-only KaTeX rendering for the `mathInline` / `mathBlock` atom nodes.
 //
@@ -166,6 +168,7 @@ export function makeMathNodeView(
       const listenerTarget: HTMLElement = el;
       listenerTarget.addEventListener("blur", () => exitEditing(el.value));
       listenerTarget.addEventListener("keydown", (event) => {
+        if (isComposingKey(event)) return;
         if (event.key === "Escape") {
           event.preventDefault();
           exitEditing(null);
@@ -176,7 +179,7 @@ export function makeMathNodeView(
         // and commits on Cmd/Ctrl+Enter.
         const commitKey =
           event.key === "Enter" &&
-          (!displayMode || event.metaKey || event.ctrlKey);
+          (!displayMode || hasPrimaryModifier(event, window.dohcDesktop?.platform));
         if (commitKey) {
           event.preventDefault();
           exitEditing(el.value);

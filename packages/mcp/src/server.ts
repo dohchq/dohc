@@ -1,3 +1,5 @@
+import { ChatLinksInput } from "@dohc/workspace-contracts/chat-links";
+import { ChatFileMentionsInput, ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
 // The dohc MCP server. The user's AI tool (Claude Code, Codex) is the client,
 // launching it as a stdio child via its own config:
 //   { mcpServers: { dohc: { command, args: ["--workspace", root, "--home", home] } } }
@@ -6,6 +8,7 @@
 // need one). Every tool routes through src/tools.ts, which contains all path
 // validation; this file is only registration + transport.
 
+import { LinksEdgesInput, LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
 import { McpServer, type ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { pathToFileURL } from "node:url";
@@ -23,7 +26,7 @@ import {
 } from "@dohc/security-contract/share-selector";
 import {
   MCP_TOOL_CAPABILITIES,
-  readOperation, undoOperation,
+  chatLinks, chatFileMentions, linksEdges, linksIn, linksResolve, readOperation, undoOperation,
   getShareCopyDetails,
   createDocument,
   createRecord,
@@ -45,6 +48,7 @@ import {
   startGroupChat,
   startFileChat,
   createApp,
+  duplicateWorkspaceFile,
   deleteWorkspacePath,
   detectApps,
   editDocument,
@@ -59,6 +63,8 @@ import {
   readDocument,
   readWorkspaceFile,
   saveKeptCopy,
+  listRetainedCopies,
+  deleteRetainedCopies,
   searchWorkspaceFiles,
   testApp,
   writeWorkspaceFile,
@@ -99,11 +105,11 @@ function shareAccessArg(value: string | undefined): ShareAccess {
   );
 }
 
-function text(structuredContent: Record<string, unknown>) {
+function text(structuredContent: Record<string, unknown> | null) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(structuredContent, null, 2) }],
-    structuredContent,
-    ...(structuredContent.ok === false || structuredContent.kind === "partial" ? { isError: true } : {}),
+    ...(structuredContent === null ? {} : { structuredContent }),
+    ...(structuredContent?.ok === false || structuredContent?.kind === "partial" ? { isError: true } : {}),
   };
 }
 
@@ -135,7 +141,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   }, async args => text(await switchAutomation(ctx, args)));
 
   register("dohc_publish_app", {
-    description: "Create a share link, prepare an immutable app revision, and approve publication with local owner authority. createLink requires a stable operationId; retries return the existing grant, never another link. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance.",
+    description: "Create a share link, prepare an immutable app revision, and approve publication as its owner on this computer. createLink requires a stable operationId; retries return the existing grant, never another link. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance.",
     inputSchema: {request: OwnerAppPublicationRequest},
   }, async ({request}) => text(await publishApp(ctx,request)));
 
@@ -162,12 +168,18 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async () => text(await stopWorkspaceSync(ctx, agentName())),
   );
 
+  register("dohc_chat_links",{description:"Read one bounded page of accessible files mentioned in a chat. Use channelWireId from dohc_list_groups, and continue nextCursor until null. Coverage can be partial.",inputSchema:ChatLinksInput.shape},async args=>text(await chatLinks(ctx,args)));
+  register("dohc_chat_file_mentions", { description: "Read a bounded page of accessible chat mentions of files. Optional subject selects one file. Continue nextCursor until null; complete and sharedChannelRowsUncovered report coverage.", inputSchema: ChatFileMentionsInput.shape }, async args => text(await chatFileMentions(ctx, args)));
+  register("dohc_links_edges", { description: "Read a bounded page of file links and isolated Markdown files. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.", inputSchema: LinksEdgesInput.shape }, async args => text(await linksEdges(ctx, args)));
+  register("dohc_links_in", { description: "Read a bounded page of documents linking to a file. indexBuilding reports active indexing; unchecked names omitted sources. complete excludes mount coverage, reported by mountsCovered. Cursors carry index state across pages.", inputSchema: LinksInInput.shape }, async args => text(await linksIn(ctx, args)));
+  register("dohc_links_resolve", { description: "Resolve wikilink or Markdown literals from one source document using the engine's link rules.", inputSchema: LinksResolveInput.shape }, async args => text(await linksResolve(ctx, args)));
+  register("dohc_duplicate_file", {description: "Duplicate one regular file beside its source with a fresh identity. Owner workspace only. Undo removes the copy while it is unchanged.", inputSchema: {path: z.string()}}, async args => text(await duplicateWorkspaceFile(ctx, args, agentName())));
   register("dohc_read_operation", {
     description: "List the paths changed by one operation, up to 50 per page. Returns change references and paths without retained contents. Owner workspace only.",
     inputSchema: { operationId: HistoryOperationId, cursor: z.string().optional() },
   }, async args => text(await readOperation(ctx, args)));
   register("dohc_undo_operation", {
-    description: "Undo a delete by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry a pending copy. Other operations cannot be undone yet.",
+    description: "Undo a delete, move, or rename by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry each remaining path marked retry.",
     inputSchema: { operationId: HistoryOperationId },
   }, async args => text(await undoOperation(ctx, args, agentName())));
 
@@ -208,6 +220,31 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: { id: z.number().int() },
     },
     async (args) => text(await saveKeptCopy(ctx, args)),
+  );
+
+  register(
+    "dohc_list_retained_copies",
+    {
+      description:
+        "List old file copies dohc keeps on a drive that cannot tell it whether another program still has one open, such as a macFUSE volume. dohc never deletes these itself. `total` counts them all, with their logical size in `bytes`; deleting them may free less disk space. `copies` lists those dohc_delete_retained_copies can delete now, oldest first, with the `revision` each delete must match. Copies changed in the last 30 seconds, copies whose file waits for review, and copies an unfinished save still needs are not listed. `more` is true when more copies remain past this list.",
+      inputSchema: {},
+    },
+    async () => text(await listRetainedCopies(ctx)),
+  );
+
+  register(
+    "dohc_delete_retained_copies",
+    {
+      description:
+        "Permanently delete up to 100 copies listed by dohc_list_retained_copies. They do not go to the trash. dohc cannot check whether another program still has one open: such a program may lose what it writes next. Ask the person to close other programs that use this workspace first, and set acceptLateWriteRisk to true. A copy that changed since it was listed, or whose file waits for review, is skipped and stays. Returns how many copies were `deleted`, `skipped` and `failed`, and the `remaining` count and bytes. List again to delete more.",
+      inputSchema: {
+        copies: z
+          .array(z.object({ id: z.number().int(), revision: z.number().int() }))
+          .max(100),
+        acceptLateWriteRisk: z.literal(true),
+      },
+    },
+    async (args) => text(await deleteRetainedCopies(ctx, args)),
   );
 
   register(
@@ -346,7 +383,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_move_path",
     {
       description:
-        "Move or rename a visible workspace file or folder. Returns its operationId for reading the operation. Move Undo is not available yet. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/trash, and Restore in History brings them back.",
+        "Move or rename a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/local/trash, and Restore in History brings them back.",
       inputSchema: {
         fromPath: z.string().min(1).max(4096),
         toPath: z.string().min(1).max(4096),
@@ -361,7 +398,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_delete_path",
     {
       description:
-        "Delete a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. Files over 5 MiB binary or 10 MiB text delete without a History row. Text with invalid UTF-8 also deletes without a row when History cannot keep it as binary. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder goes through the workspace's .dohc/trash to the system trash, or stays in .dohc/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.",
+        "Delete a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. Files over 5 MiB binary or 10 MiB text delete without a History row. Text with invalid UTF-8 also deletes without a row when History cannot keep it as binary. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder goes through the workspace's .dohc/local/trash to the system trash, or stays in .dohc/local/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         summary: z.string().max(500).optional(),

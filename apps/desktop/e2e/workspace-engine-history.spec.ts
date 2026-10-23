@@ -52,7 +52,8 @@ test("a workspace shows engine moments and restores a file end-to-end", async ()
       '[data-testid="engine-moment-open"][data-moment-path="notes/plan.md"]',
     );
     await expect(momentRow.first()).toBeVisible();
-    await expect(momentRow.first()).toContainText("Edited plan.md");
+    // One line: the file's name, then its folder.
+    await expect(momentRow.first()).toContainText("plan.mdnotes");
     // Engine history replaces the legacy list entirely for this workspace.
     await expect(page.getByTestId("history-list")).toHaveCount(0);
 
@@ -125,7 +126,7 @@ test("History lists the first document of a new workspace while it is open", asy
     const rootPath = join(temp.rootPath, "my-notes");
     const workspace = await activeWorkspace(page, rootPath);
 
-    await page.keyboard.press("Control+n");
+    await page.keyboard.press("ControlOrMeta+n");
     await page.getByRole("textbox", { name: "File name" }).fill("trip/plan");
     await page.keyboard.press("Enter");
     const editor = page.getByTestId("markdown-editor");
@@ -165,7 +166,7 @@ test("History lists the first document of a new workspace while it is open", asy
     await openHistoryView(page);
     await expect(
       page.locator('[data-testid="engine-moment-open"][data-moment-path="trip/plan.md"]').first(),
-    ).toContainText("Edited plan.md");
+    ).toContainText("plan.mdtrip");
     await expect(editor).toBeVisible();
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

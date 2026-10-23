@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
+import { PRIVACY_DENIED_WORDS } from "../ipc/errorWords";
 import type { OwnerLiveDocumentsResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, ResolveAutomationControlsResult, SyncStatusResult, EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
 import type { SentNotices } from "./shell/useSentNotices";
 import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
@@ -903,7 +904,8 @@ describe("workspace shell errors", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
     expect(screen.queryByTestId("workspace-open-failed")).toBeNull();
-    expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(false);
+    // The workbench stays inert until the saved layout has loaded.
+    await waitFor(() => expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(false));
   });
 
   it("says why a workspace did not open in words and keeps the refusal for Copy", async () => {
@@ -928,6 +930,102 @@ describe("workspace shell errors", () => {
     ]);
   });
 
+  it("names the engine folder another user owns, and keeps its path for Copy", async () => {
+    const bridge = makeBridge(Promise.resolve(null), "darwin");
+    bridge.openWorkspace.mockRejectedValueOnce(new Error(
+      "Error invoking remote method 'desktop:open-workspace': DaemonRefusalError [INTERNAL]: engine-folder-not-private: other-owner .dohc/engine",
+    ));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const recovery = await screen.findByTestId("workspace-open-failed");
+    const words =
+      "This workspace's .dohc/engine belongs to another user, so dohc can't keep its History private. " +
+      "Make it and everything in it yours again, then try again.";
+    expect(recovery.textContent).toContain(words);
+    expect(recovery.textContent).not.toMatch(/DaemonRefusalError|INTERNAL|other-owner/);
+    await user.click(within(recovery).getByRole("button", { name: "Copy details" }));
+    const copied = (await navigator.clipboard.readText()).split("\n");
+    expect(copied.slice(0, 3)).toEqual([
+      "Error: Couldn't open this workspace",
+      `Detail: ${words}`,
+      "Cause: DaemonRefusalError [INTERNAL]: engine-folder-not-private: other-owner .dohc/engine",
+    ]);
+    fireEvent.click(within(recovery).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledTimes(2));
+  });
+
+  it("stops a workspace macOS refuses, and offers System Settings beside Try again", async () => {
+    const bridge = makeBridge(Promise.resolve(null), "darwin");
+    bridge.openWorkspace.mockRejectedValueOnce(new Error(
+      "Error invoking remote method 'desktop:open-workspace': Error [privacy-denied]: EPERM: operation not permitted, opendir '/Users/me/Documents/Trip'",
+    ));
+    renderShell(bridge);
+
+    const recovery = await screen.findByTestId("workspace-open-failed");
+    expect(recovery.textContent).toContain(PRIVACY_DENIED_WORDS);
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    fireEvent.click(within(recovery).getByRole("button", { name: "Open System Settings" }));
+    expect(bridge.openSystemPrivacySettings).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("workspace-open-failed")).toBe(recovery);
+
+    fireEvent.click(within(recovery).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+  });
+
+  it("files a toast with Try again when System Settings does not open", async () => {
+    const bridge = makeBridge(Promise.resolve(null), "darwin");
+    bridge.openWorkspace.mockRejectedValue(new Error(
+      "Error invoking remote method 'desktop:open-workspace': Error [privacy-denied]: EPERM: operation not permitted, opendir '/Users/me/Documents/Trip'",
+    ));
+    bridge.openSystemPrivacySettings
+      .mockRejectedValueOnce(new Error(
+        "Error invoking remote method 'desktop:open-system-privacy-settings': Error: Failed to open URL",
+      ))
+      .mockResolvedValueOnce(undefined);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const recovery = await screen.findByTestId("workspace-open-failed");
+    fireEvent.click(within(recovery).getByRole("button", { name: "Open System Settings" }));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("dohc could not open System Settings. Failed to open URL");
+    await user.click(within(toast).getByRole("button", { name: "Copy error details" }));
+    expect(await navigator.clipboard.readText()).toContain("dohc could not open System Settings.");
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const row = (await within(await screen.findByTestId("notice-center"))
+      .findByText("dohc could not open System Settings. Failed to open URL")).closest("li")!;
+    expect(within(row).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+
+    await user.click(within(row).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.openSystemPrivacySettings).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(row.isConnected).toBe(false));
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.getByTestId("workspace-open-failed")).toBeTruthy();
+  });
+
+  it("offers System Settings on a toast when macOS refuses one read", async () => {
+    const bridge = makeBridge(Promise.resolve(null), "darwin");
+    bridge.listWorkspaceFiles.mockRejectedValueOnce(new Error(
+      "Error invoking remote method 'desktop:list-workspace-files': DaemonRefusalError [INTERNAL]: privacy-denied",
+    ));
+    renderShell(bridge);
+
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(`Could not refresh workspace files. ${PRIVACY_DENIED_WORDS}`);
+    fireEvent.click(within(toast).getByTestId("workspace-shell-error-action"));
+    expect(bridge.openSystemPrivacySettings).toHaveBeenCalledOnce();
+    expect(within(toast).getByTestId("workspace-shell-error-action").textContent).toBe("Open System Settings");
+
+    fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
   it("retries a failed initial listing without reopening the workspace", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listWorkspaceFiles.mockRejectedValueOnce(new Error("Listing failed"));
@@ -937,9 +1035,7 @@ describe("workspace shell errors", () => {
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
-    expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(
-      false,
-    );
+    await waitFor(() => expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(false));
     expect(
       (await screen.findByTestId("workspace-shell-error")).textContent,
     ).toContain("Could not refresh workspace files. Listing failed");
@@ -1064,6 +1160,69 @@ describe("crash report notice", () => {
     const row = await screen.findByTestId("notice-crash-report");
     expect(row.textContent).toContain("A dohc window stopped unexpectedly");
     expect(row.textContent).toContain("This report holds 2 problems.");
+  });
+});
+
+describe("offline copies a previous account left", () => {
+  const none = { workspaces: [], recordUnreadable: false, sweepPending: false };
+  const removeFailure = "dohc could not remove offline copies of Collections from a previous account.";
+  // Try again closes Notices, so each row is read from Notices opened again.
+  async function rowOf(user: ReturnType<typeof userEvent.setup>, text: string) {
+    await waitFor(() => expect(screen.getAllByText(text).length).toBeGreaterThan(0));
+    if (!screen.queryByTestId("notice-center")) await user.click(screen.getByTestId("notice-center-toggle"));
+    return (await within(screen.getByTestId("notice-center")).findByText(text)).closest("li")!;
+  }
+
+  it("names the workspaces that still hold them, with Try again and Copy", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.readCollectionCopiesLeft).toHaveBeenCalledOnce());
+    // The sign-out's cleanup fails after the shell opened, and main says so.
+    bridge.readCollectionCopiesLeft.mockResolvedValue({ ...none, workspaces: ["/Users/ana/Trip", "/Users/ana/Fundraiser"] });
+    act(() => bridge.emitCollectionCopiesLeftChanged());
+    const message = `${removeFailure} They are still in Trip and Fundraiser.`;
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(message);
+    const row = await rowOf(user, message);
+    expect(within(row).getByRole("button", { name: "Copy error details" })).toBeTruthy();
+    // Try again that still leaves one says which, and one that removes them all ends the row.
+    bridge.removeCollectionCopiesLeft.mockResolvedValueOnce({ ...none, workspaces: ["/Users/ana/Trip"] });
+    await user.click(within(row).getByRole("button", { name: "Try again" }));
+    const left = `${removeFailure} They are still in Trip.`;
+    const again = await rowOf(user, left);
+    expect(screen.queryByText(message)).toBeNull();
+    const removed = deferred<typeof none>();
+    bridge.removeCollectionCopiesLeft.mockImplementationOnce(() => removed.promise);
+    await user.click(within(again).getByRole("button", { name: "Try again" }));
+    await act(async () => removed.resolve(none));
+    expect(bridge.removeCollectionCopiesLeft).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText(left)).toBeNull();
+    // A later account change that removes them ends a row too.
+    bridge.readCollectionCopiesLeft.mockResolvedValue({ ...none, workspaces: ["/Users/ana/Trip"] });
+    act(() => bridge.emitCollectionCopiesLeftChanged());
+    await rowOf(user, left);
+    bridge.readCollectionCopiesLeft.mockResolvedValue(none);
+    act(() => bridge.emitCollectionCopiesLeftChanged());
+    await waitFor(() => expect(screen.queryByText(left)).toBeNull());
+  });
+
+  it("says when dohc could not read its record of them or check every workspace, until Try again does", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.readCollectionCopiesLeft.mockResolvedValue({ ...none, recordUnreadable: true, sweepPending: true });
+    renderShell(bridge);
+    const row = await rowOf(user, "dohc could not read its list of offline copies of Collections to remove, or check every workspace for them. Some may still be on this computer.");
+    bridge.removeCollectionCopiesLeft.mockResolvedValueOnce({ ...none, workspaces: ["/Users/ana/Trip"], sweepPending: true });
+    await user.click(within(row).getByRole("button", { name: "Try again" }));
+    const both = await rowOf(user, `${removeFailure} They are still in Trip. dohc also could not check every workspace for offline copies of Collections from a previous account.`);
+    bridge.removeCollectionCopiesLeft.mockResolvedValueOnce({ ...none, sweepPending: true });
+    await user.click(within(both).getByRole("button", { name: "Try again" }));
+    const unchecked = await rowOf(user, "dohc could not check every workspace for offline copies of Collections from a previous account. Some may still be on this computer.");
+    bridge.removeCollectionCopiesLeft.mockResolvedValueOnce(none);
+    await user.click(within(unchecked).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.removeCollectionCopiesLeft).toHaveBeenCalledTimes(3));
+    await act(async () => undefined);
+    expect(screen.queryByText(/could not check every workspace/)).toBeNull();
   });
 });
 
@@ -1227,6 +1386,33 @@ describe("notices sent to you", () => {
   it("opens the file a notice named once the workspace it switched to is ready", async () => {
     renderWithNotices(makeBridge(Promise.resolve(null)), { openOnReady: "b.md" });
     await screen.findByTestId("tab-b.md");
+  });
+
+  it("opens a file the OS opened with dohc in this workspace, each time main sends it", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderWithNotices(bridge, {});
+    // Main can send it before this workspace is ready; it opens once it is.
+    act(() => bridge.emitWorkspaceActivated({ ...WORKSPACE, workspaceId: "ws-other" }, "other.md"));
+    act(() => bridge.emitWorkspaceActivated(WORKSPACE, "b.md"));
+    await screen.findByTestId("tab-b.md");
+    expect(screen.queryByTestId("tab-other.md")).toBeNull();
+    act(() => bridge.emitMenuCommand("close-tab"));
+    await waitFor(() => expect(screen.queryByTestId("tab-b.md")).toBeNull());
+    act(() => bridge.emitWorkspaceActivated(WORKSPACE, "b.md"));
+    await screen.findByTestId("tab-b.md");
+  });
+
+  it("hears a file main sends while it answers this workspace's open, before the reply", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    // Main's open handler sends the file, then replies. A listener that the
+    // shell installed only after the reply would miss it.
+    bridge.openWorkspace.mockImplementation(async () => {
+      bridge.emitWorkspaceActivated(WORKSPACE, "b.md");
+      return SYNC_STATUS;
+    });
+    renderWithNotices(bridge, {});
+    await screen.findByTestId("tab-b.md");
+    expect(bridge.openWorkspace).toHaveBeenCalledTimes(1);
   });
 
   it("opens no runs for a notice whose Open was cancelled while main looked the automation up", async () => {
@@ -1490,6 +1676,58 @@ describe("file transfers", () => {
     const notices = await screen.findByTestId("notice-center");
     expect(notices.textContent).toContain("Nothing imported (2 skipped).");
     expect(within(notices).queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
+  async function dropFromOs(bridge: ReturnType<typeof makeBridge>, paths: string[]) {
+    bridge.getDroppedFilePaths.mockReturnValue(paths);
+    const tree = await screen.findByTestId("file-tree");
+    fireEvent.drop(tree, { dataTransfer: { files: [new File([], "dropped")], types: ["Files"] } });
+  }
+
+  it("says how many folders a drop of empty folders created", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({ imported: [], skipped: 0, folders: 2 });
+    renderShell(bridge);
+
+    await dropFromOs(bridge, ["/outside/Empty"]);
+    await waitFor(() => expect(bridge.importWorkspaceFiles).toHaveBeenCalledWith({
+      workspaceId: "ws-shell-test", droppedPaths: ["/outside/Empty"],
+    }));
+    expect((await screen.findByTestId("workspace-shell-notice")).textContent).toContain("Created 2 folders.");
+  });
+
+  // Folders that landed are progress: the same drop again would land beside
+  // them, so the notice names them and the Explorer shows them.
+  it("names the folders a stopped drop created, and refreshes the Explorer", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: [],
+      skipped: 0,
+      interrupted: true,
+      folders: 2,
+      stop: { file: "Trip/sub/a.md", refusal: "changed" },
+    });
+    renderShell(bridge);
+    await screen.findByTestId("file-tree");
+    const listings = bridge.listWorkspaceFiles.mock.calls.length;
+
+    await dropFromOs(bridge, ["/outside/Trip"]);
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      "Created 2 folders before the import stopped. dohc did not import a.md, because a file or folder changed while dohc copied it. Delete the empty folders before you import again.",
+    );
+    await waitFor(() => expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(listings));
+  });
+
+  // The contract refuses the payload, so the shell says why first.
+  it("refuses more than 100 dropped items with the limit", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+
+    await dropFromOs(bridge, Array.from({ length: 101 }, (_, i) => `/outside/f-${i}.md`));
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      "Could not import files. dohc imports up to 100 dropped items at once. Drop fewer at a time.",
+    );
+    expect(bridge.importWorkspaceFiles).not.toHaveBeenCalled();
   });
 
   function sharedViewBridge(refreshOk: boolean[]) {
@@ -2601,7 +2839,7 @@ describe("unavailable MCP launcher settings", () => {
     bridge.getAgentRunStatus.mockImplementation(async () => ({ activeRun, lastRun: null }));
     bridge.endAgentRun.mockImplementationOnce(async () => {
       activeRun = null;
-      throw new Error("Repair .dohc/agent-runs.json, then try again.");
+      throw new Error("Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     });
     const user = userEvent.setup();
     renderShell(bridge);
@@ -2613,7 +2851,7 @@ describe("unavailable MCP launcher settings", () => {
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
     await user.click(screen.getByTestId("notice-center-toggle"));
-    const notice = await within(await screen.findByTestId("notice-center")).findByText("Repair .dohc/agent-runs.json, then try again.");
+    const notice = await within(await screen.findByTestId("notice-center")).findByText("Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
     const row = notice.closest("li");
     if (!row) throw new Error("The agent failure has no Notices row.");
     await user.click(within(row).getByRole("button", { name: "Try again" }));

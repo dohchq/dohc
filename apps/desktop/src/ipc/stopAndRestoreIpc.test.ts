@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -17,6 +17,7 @@ import { registerStopAndRestoreIpc } from "./stopAndRestoreIpc";
 import { KeptAutomationFieldShape, stopAndRestoreRecoveryOperations } from "./bridgeContract";
 import { newRun } from "@dohc/automation-executor/collection-automation-run";
 import { createAutomationRunStore, type PendingRestore } from "@dohc/automation-executor/automation-run-store";
+import { preparedAutomationStoreFolder, readersTrustLocalState } from "../testing/preparedLocalState";
 import {
   LiveDocumentMutationError,
   RestoreHeadChangedError,
@@ -25,6 +26,9 @@ import {
 } from "../workspaces/workspaceEngineCapture";
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import {restoreRequestId, restoreReceiptOf} from "../workspaces/restoreWriteIdentity";
+
+// The run store reads `.dohc/local` as the engine's open leaves it.
+beforeEach(() => readersTrustLocalState());
 
 const KEPT = { id: "f".repeat(32), path: "trip/Tasks/Untitled.md", field: "Finished on", recordId: null };
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
@@ -259,8 +263,7 @@ async function capturedFiles(paths: string[]) {
 describe("stop and restore in main", () => {
   async function pendingFileUndo(kind: "person" | "link" = "person") {
     const root = await createTestScratch("dohc-restore-undo-pass-");
-    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
-    const store = createAutomationRunStore(root, resolver);
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(root));
     const target = kind === "person" ? {kind, userId: "user_ana"} : {kind, grantId: "grant-link"};
     await store.savePendingRestore({id: "pending-pass", claims: ["held-run"], session: {
       grants: [kind === "person" ? "grant-edit" : "grant-link"], target, label: "Ana",
@@ -270,18 +273,18 @@ describe("stop and restore in main", () => {
         runsUndone: 0, runsLeft: 1, runChangesKept: 0, fieldsMissing: 0, keptFields: [],
         wroteAutomations: true, sendsMessages: false, unfinished: {step: "files", message: "Interrupted"}},
     }});
-    return {rootPath: root, resolver, store, target};
+    return {rootPath: root, store, target};
   }
 
   it.each(["retry", "dismiss"])("finishes a refused file Undo and releases the pending session on %s", async action => {
-    const {store, target, rootPath, resolver} = await pendingFileUndo();
+    const {store, target, rootPath} = await pendingFileUndo();
     const runs = vi.fn(async () => ({...NOTHING, undone: 1}));
     const f = fixture({rootPath, runStore: store, granted: [grant({revokedAtMs: 3})],
       restoreError: new RestoreHeadChangedError(SCHEMA), undoRunsOf: runs, releaseAllowed: () => false});
     await expect(f.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: []})).resolves.toMatchObject({
       files: [{momentId: "back-schema", kind: "refused"}], errorMessage: null,
     });
-    const saved = (await createAutomationRunStore(rootPath, resolver).pendingRestores())[0]!.session!;
+    const saved = (await createAutomationRunStore(preparedAutomationStoreFolder(rootPath)).pendingRestores())[0]!.session!;
     expect(saved.filesUndone).toBe(true);
     expect(saved.undoingFiles).toBeUndefined();
     expect(saved.receipts).toEqual([{path: SCHEMA, restoredMomentId: "back-schema"}]);
@@ -313,12 +316,12 @@ describe("stop and restore in main", () => {
   });
 
   it.each(["missing person", "deleted link"])("resumes an interrupted file Undo after checking the %s", async changed => {
-    const {store, target, rootPath, resolver} = await pendingFileUndo(changed === "deleted link" ? "link" : "person");
+    const {store, target, rootPath} = await pendingFileUndo(changed === "deleted link" ? "link" : "person");
     const first = fixture({rootPath, runStore: store, restoreError: Error("Interrupted Undo")});
     await expect(first.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: []})).resolves.toMatchObject({errorMessage: "Interrupted Undo"});
-    expect((await createAutomationRunStore(rootPath, resolver).pendingRestores())[0]!.session).toMatchObject({undoingFiles: true, filesUndone: false});
+    expect((await createAutomationRunStore(preparedAutomationStoreFolder(rootPath)).pendingRestores())[0]!.session).toMatchObject({undoingFiles: true, filesUndone: false});
     const runs = vi.fn(async () => NOTHING);
-    const retry = fixture({rootPath, runStore: createAutomationRunStore(rootPath, resolver), undoRunsOf: runs,
+    const retry = fixture({rootPath, runStore: createAutomationRunStore(preparedAutomationStoreFolder(rootPath)), undoRunsOf: runs,
       granted: [], links: [[]]});
     await expect(retry.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({unfinished: null, restored: []});
     expect(retry.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("back-schema", OWNER, expect.anything());
@@ -329,7 +332,7 @@ describe("stop and restore in main", () => {
   });
 
   it.each(["person", "link"] as const)("revokes current %s access before resuming Undo and queues a new restore", async kind => {
-    const {store, target, rootPath, resolver} = await pendingFileUndo(kind);
+    const {store, target, rootPath} = await pendingFileUndo(kind);
     const entry = (await store.pendingRestores())[0]!;
     entry.session!.undoingFiles = true;
     await store.savePendingRestore(entry);
@@ -353,7 +356,7 @@ describe("stop and restore in main", () => {
     expect(f.calls.filter(call => call.method === "POST").map(call => call.path)).toEqual([
       kind === "person" ? "/sync/shares/new-share/grants/new-grant/revoke" : "/sync/shares/new-link/revoke",
     ]);
-    const pending = (await createAutomationRunStore(rootPath, resolver).pendingRestores()).find(entry => entry.session)!;
+    const pending = (await createAutomationRunStore(preparedAutomationStoreFolder(rootPath)).pendingRestores()).find(entry => entry.session)!;
     expect(pending.id).not.toBe("pending-pass");
     expect(pending.session).toMatchObject({filesUndone: false, receipts: []});
     expect(pending.session!.grants).toContain(newGrant);
@@ -370,7 +373,7 @@ describe("stop and restore in main", () => {
   });
 
   it("keeps a waiting session's refused file in review on the next Stop", async () => {
-    const {store, target, rootPath, resolver} = await pendingFileUndo();
+    const {store, target, rootPath} = await pendingFileUndo();
     const f = fixture({rootPath, runStore: store, granted: [grant({revokedAtMs: 3})],
       restoreError: new RestoreHeadChangedError(SCHEMA), undoRunsOf: async () => NOTHING});
     f.capture.readMoment.mockResolvedValueOnce(null);
@@ -379,7 +382,7 @@ describe("stop and restore in main", () => {
     await expect(f.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: []})).resolves.toMatchObject({
       files: [{kind: "refused"}], errorMessage: null,
     });
-    expect((await createAutomationRunStore(rootPath, resolver).pendingRestores())[0]!.session!.result).toMatchObject({
+    expect((await createAutomationRunStore(preparedAutomationStoreFolder(rootPath)).pendingRestores())[0]!.session!.result).toMatchObject({
       status: "restored", review: [{path: SCHEMA, reason: "restore-refused"}],
     });
     await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({
@@ -416,7 +419,7 @@ describe("stop and restore in main", () => {
   });
 
   it.each(["Undo", "runs", "handoff"])("keeps the follow-up Stop after an interrupted %s", async boundary => {
-    const {store, target, rootPath, resolver} = await pendingFileUndo();
+    const {store, target, rootPath} = await pendingFileUndo();
     const entry = (await store.pendingRestores())[0]!;
     entry.session!.undoingFiles = true;
     await store.savePendingRestore(entry);
@@ -441,7 +444,7 @@ describe("stop and restore in main", () => {
       else await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({unfinished: {message: `Interrupted ${boundary}`}});
     }
     expect(rows[1]).toMatchObject({revokedAtMs: 3});
-    const restartedStore = createAutomationRunStore(rootPath, resolver);
+    const restartedStore = createAutomationRunStore(preparedAutomationStoreFolder(rootPath));
     const saved = (await restartedStore.pendingRestores()).find(entry => entry.id === "pending-pass")!;
     expect(saved.session).toMatchObject({nextGrants: ["new-grant"]});
     if (boundary === "handoff") {
@@ -462,7 +465,7 @@ describe("stop and restore in main", () => {
   });
 
   it.each(["person", "link"] as const)("keeps a reactivated %s grant after a crash immediately after revocation", async kind => {
-    const {store, target, rootPath, resolver} = await pendingFileUndo(kind);
+    const {store, target, rootPath} = await pendingFileUndo(kind);
     const entry = (await store.pendingRestores())[0]!;
     entry.session!.undoingFiles = true;
     await store.savePendingRestore(entry);
@@ -473,7 +476,7 @@ describe("stop and restore in main", () => {
       afterRevoke: async () => {throw Error("Crash after revocation");}});
     await expect(f.call(CHANNELS.stopAndRestore, {target})).rejects.toThrow("Crash after revocation");
     expect(kind === "person" ? rows[0]!.revokedAtMs : links[0]![0]!.status).toBe(kind === "person" ? 3 : "revoked");
-    const reopened = createAutomationRunStore(rootPath, resolver);
+    const reopened = createAutomationRunStore(preparedAutomationStoreFolder(rootPath));
     expect((await reopened.pendingRestores())[0]!.session!.nextGrants).toEqual([grantId]);
     const newMoment = {...schemaMoment, id: "reactivated-write", objectId: "reactivated-object", path: "notes/reactivated.txt"};
     const retry = fixture({rootPath, runStore: reopened, granted: rows, links, moment: newMoment,
@@ -492,7 +495,7 @@ describe("stop and restore in main", () => {
   });
 
   it.each(["person", "link"] as const)("recovers a reused %s grant when the first progress read fails", async kind => {
-    const {store, target, rootPath, resolver} = await pendingFileUndo(kind);
+    const {store, target, rootPath} = await pendingFileUndo(kind);
     const entry = (await store.pendingRestores())[0]!;
     entry.session!.undoingFiles = true;
     await store.savePendingRestore(entry);
@@ -506,7 +509,7 @@ describe("stop and restore in main", () => {
         files: [{path: newMoment.path, objectId: newMoment.objectId, momentId: newMoment.id, created: false}]}], nextAfterOriginSeq: null}]}});
     f.capture.restoreFileToBeforeMoment.mockImplementationOnce(async () => {
       expect(kind === "person" ? rows[0]!.revokedAtMs : links[0]![0]!.status).toBe(kind === "person" ? 3 : "revoked");
-      const reopened = createAutomationRunStore(rootPath, resolver);
+      const reopened = createAutomationRunStore(preparedAutomationStoreFolder(rootPath));
       expect((await reopened.pendingRestores())[0]!.session!.nextGrants).toEqual([grantId]);
       return {restored: "text", path: SCHEMA, restoredMomentId: "undo-old"};
     }).mockImplementationOnce(async momentId => {
@@ -557,7 +560,6 @@ describe("stop and restore in main", () => {
 
   it.each(["first batch", "mid-batch", "before barrier", "before receipts", "retry", "mid-Undo"])("keeps every file reversible after an unjournaled batch: %s", async boundary => {
     const root = await createTestScratch("dohc-restore-intents-");
-    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
     const originals = Array.from({length: 150}, (_, i) => ({...schemaMoment, id: `intent-${i}`, objectId: `object-${i}`, path: `notes/${i}.txt`}));
     const all = [...originals], writes = new Map<string, {path: string; restoredMomentId: string; restored: "text"}>();
     let undoCrash = false;
@@ -583,7 +585,7 @@ describe("stop and restore in main", () => {
     } as unknown as WorkspaceEngineCapture;
     const options = {rootPath: root, granted: [grant({})], engineCapture: capture, undoRunsOf: async () => NOTHING,
       ledger: {"grant-edit": [{writes: [{committedAtMs: 2, files: originals.map(m => ({path: m.path, objectId: m.objectId, momentId: m.id, created: false}))}], nextAfterOriginSeq: null}]}};
-    const store = createAutomationRunStore(root, resolver);
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(root));
     let appends = 0;
     const first = fixture({...options, runStore: store, beforeReceipt: async () => {if ((boundary === "before receipts" || boundary === "retry" || boundary === "mid-Undo") && ++appends === 2) throw Error("crash");}});
     if (boundary === "before barrier" || boundary === "mid-batch") first.barrier.mockResolvedValueOnce(undefined).mockRejectedValueOnce(Error("crash"));
@@ -593,21 +595,21 @@ describe("stop and restore in main", () => {
     expect(failed).toMatchObject({unfinished: {message: "crash"}}); expect(failed.restored).toHaveLength(boundary === "first batch" ? 0 : 100);
     const committed = boundary === "first batch" ? 100 : boundary === "mid-batch" ? 125 : 150;
     expect(writes.size).toBe(committed);
-    const restartedStore = createAutomationRunStore(root, resolver), restarted = fixture({...options, runStore: restartedStore});
+    const restartedStore = createAutomationRunStore(preparedAutomationStoreFolder(root)), restarted = fixture({...options, runStore: restartedStore});
     let ids = failed.restored.map(r => r.restoredMomentId);
     if (boundary === "mid-Undo") {
       undoCrash = true;
       restarted.barrier.mockResolvedValueOnce(undefined).mockRejectedValueOnce(Error("crash"));
       expect(await restarted.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: ids})).toMatchObject({errorMessage: "crash"});
       expect(writes.size).toBe(170);
-      const interrupted = (await createAutomationRunStore(root, resolver).pendingRestores())[0]!.session!;
+      const interrupted = (await createAutomationRunStore(preparedAutomationStoreFolder(root)).pendingRestores())[0]!.session!;
       expect(interrupted).toMatchObject({filesUndone: false, undoingFiles: true, intents: []});
       expect(interrupted.receipts).toHaveLength(150);
       undoCrash = false;
-      const retry = fixture({...options, runStore: createAutomationRunStore(root, resolver)});
+      const retry = fixture({...options, runStore: createAutomationRunStore(preparedAutomationStoreFolder(root))});
       expect(await retry.call(CHANNELS.stopAndRestore, {target})).toMatchObject({unfinished: null});
       expect(writes.size).toBe(300);
-      expect((await createAutomationRunStore(root, resolver).pendingRestores()).every(entry => !entry.session)).toBe(true);
+      expect((await createAutomationRunStore(preparedAutomationStoreFolder(root)).pendingRestores()).every(entry => !entry.session)).toBe(true);
       return;
     }
     if (boundary === "retry") {
@@ -635,7 +637,6 @@ describe("stop and restore in main", () => {
 
   it.each(["before barrier", "before receipts"])("retries unjournaled file batches after a crash %s", async boundary => {
     const root = await createTestScratch("dohc-restore-crash-batch-");
-    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
     const originals = Array.from({length: 3}, (_, i) => ({...schemaMoment, id: `m-${i}`, objectId: `o-${i}`, path: `notes/${i}.txt`}));
     const all = [...originals]; const writes = new Map<string, {path: string; restoredMomentId: string; restored: "text"}>();
     const capture = {
@@ -654,13 +655,13 @@ describe("stop and restore in main", () => {
     const granted = [grant({})];
     const ledger = {"grant-edit": [{writes: [{committedAtMs: 2, files: originals.map(m => ({path: m.path, objectId: m.objectId, momentId: m.id, created: false}))}], nextAfterOriginSeq: null}]};
     const options = {rootPath: root, granted, ledger, engineCapture: capture};
-    const store = createAutomationRunStore(root, resolver);
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(root));
     const first = fixture({...options, runStore: store, beforeReceipt: async () => {if (boundary === "before receipts") throw Error("crash");}});
     if (boundary === "before barrier") first.barrier.mockRejectedValueOnce(Error("crash"));
     const target = {kind: "person", userId: "user_ana"};
     expect(await first.call(CHANNELS.stopAndRestore, {target})).toMatchObject({restored: [], unfinished: {message: "crash"}});
     expect(writes.size).toBe(3); expect((await store.pendingRestores())[0]?.session?.receipts).toEqual([]);
-    const restartedStore = createAutomationRunStore(root, resolver);
+    const restartedStore = createAutomationRunStore(preparedAutomationStoreFolder(root));
     const restarted = fixture({...options, runStore: restartedStore});
     const done = await restarted.call(CHANNELS.stopAndRestore, {target}) as {restored: unknown[]};
     expect(done).toMatchObject({review: [], unfinished: null}); expect(done.restored).toHaveLength(3);
@@ -673,7 +674,7 @@ describe("stop and restore in main", () => {
     if (boundary === "before barrier") undoneFirst.barrier.mockRejectedValueOnce(Error("crash"));
     expect(await undoneFirst.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: ids})).toMatchObject({files: [], errorMessage: "crash"});
     expect((await restartedStore.pendingRestores())[0]?.session?.receipts).toHaveLength(3); expect(writes.size).toBe(6);
-    const undoneRetry = fixture({...options, runStore: createAutomationRunStore(root, resolver)});
+    const undoneRetry = fixture({...options, runStore: createAutomationRunStore(preparedAutomationStoreFolder(root))});
     const undo = await undoneRetry.call(CHANNELS.undoStopAndRestore, {target, restoredMomentIds: ids}) as {files: unknown[]};
     expect(undo).toMatchObject({errorMessage: null}); expect(undo.files).toHaveLength(3);
     expect(undoneRetry.receiptBatches).toEqual([3]); expect(writes.size).toBe(6);
@@ -690,8 +691,7 @@ describe("stop and restore in main", () => {
   });
   it("keeps an unflushed restore out of the result and the failure snapshot", async () => {
     const root = await createTestScratch("dohc-restore-barrier-");
-    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
-    const store = createAutomationRunStore(root, resolver);
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(root));
     const f = fixture({runStore: store, receiptError: Error("WAL sync failed")});
     expect(await f.call(CHANNELS.stopAndRestore, {target: {kind: "person", userId: "user_ana"}}))
       .toMatchObject({restored: [], unfinished: {step: "files", message: "WAL sync failed"}});
@@ -700,9 +700,8 @@ describe("stop and restore in main", () => {
 
   it("acknowledges an in-flight release through the reopened attachment without losing a new restore", async () => {
     const root = await createTestScratch("dohc-release-reopen-");
-    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
     let current = true;
-    const oldStore = createAutomationRunStore(root, resolver, () => {if (!current) throw Error("closed");});
+    const oldStore = createAutomationRunStore(preparedAutomationStoreFolder(root), () => {if (!current) throw Error("closed");});
     await oldStore.savePendingRestore({id: "R1", claims: [], serverRelease: true});
     let release!: () => void;
     const blocked = new Promise<void>(resolve => {release = resolve;});
@@ -710,7 +709,7 @@ describe("stop and restore in main", () => {
     await f.call(stopAndRestoreRecoveryOperations.pendingStopAndRestores.channel, {});
     await vi.waitFor(() => expect(f.releases).toEqual(["R1"]));
     current = false;
-    const newStore = createAutomationRunStore(root, resolver);
+    const newStore = createAutomationRunStore(preparedAutomationStoreFolder(root));
     const old = f.reopen(newStore);
     const remove = vi.spyOn(old, "removePendingRestore");
     const next = {id: "R2", claims: ["B"], session: {grants: ["grant-B"],
@@ -720,12 +719,11 @@ describe("stop and restore in main", () => {
     release();
     await vi.waitFor(async () => expect(await newStore.pendingRestores()).toEqual([next]));
     expect(remove).not.toHaveBeenCalled();
-    expect(await createAutomationRunStore(root, resolver).pendingRestores()).toEqual([next]);
+    expect(await createAutomationRunStore(preparedAutomationStoreFolder(root)).pendingRestores()).toEqual([next]);
   });
   it("stops server restore passes and releases a retain that lands after dismissal", async () => {
     const root = await createTestScratch("dohc-release-inflight-retain-");
-    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
-    const store = createAutomationRunStore(root, resolver);
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(root));
     let resume!: () => void;
     const blocked = new Promise<void>(resolve => {resume = resolve;});
     const retained = new Set<string>();
@@ -749,7 +747,7 @@ describe("stop and restore in main", () => {
   });
   it("keeps releases queued without requests while the workspace is local, then retries when remote", async () => {
     const root = await createTestScratch("dohc-release-local-");
-    const store = createAutomationRunStore(root, async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;});
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(root));
     await store.savePendingRestore({id: "queued", claims: [], serverRelease: true});
     let remote = false;
     const f = fixture({runStore: store, canRelease: () => remote});
@@ -763,7 +761,7 @@ describe("stop and restore in main", () => {
   });
   it("retries a queued release when the original account signs in again", async () => {
     const root = await createTestScratch("dohc-release-account-");
-    const store = createAutomationRunStore(root, async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;});
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(root));
     await store.savePendingRestore({id: "queued", claims: [], serverRelease: true});
     let allowed = false;
     const f = fixture({rootPath: root, runStore: store, releaseAllowed: () => allowed});
@@ -775,8 +773,7 @@ describe("stop and restore in main", () => {
   });
   it("lists pending restores and dismisses without waiting for server release", async () => {
     const root = await createTestScratch("dohc-restore-background-");
-    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
-    const store = createAutomationRunStore(root, resolver);
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(root));
     const target = {kind: "person" as const, userId: "user_ana"};
     await store.savePendingRestore({id: "queued", claims: [], serverRelease: true});
     await store.savePendingRestore({id: "live", claims: ["older"], session: {grants: ["grant"], target, label: "Ana",
@@ -800,8 +797,7 @@ describe("stop and restore in main", () => {
   });
   it.each([false, true])("uses real retention through session saves with unrelated claims at the cap: %s", async atCap => {
     const root = await createTestScratch("dohc-restore-real-retention-");
-    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
-    const store = createAutomationRunStore(root, resolver);
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(root));
     if(atCap) await store.savePendingRestore({id: "other-restore", claims: Array.from({length: 10000}, (_, i) => `other-${i}`)});
     const files = automationsFile();
     const parsed = parseAutomationsFile(files.moment.payload.after.text);
@@ -832,7 +828,7 @@ describe("stop and restore in main", () => {
       expect(await retry.call(CHANNELS.stopAndRestore, {target})).toMatchObject({unfinished: {step: "runs", message}});
       return;
     }
-    const restarted = createAutomationRunStore(root, resolver);
+    const restarted = createAutomationRunStore(preparedAutomationStoreFolder(root));
     expect(await restarted.unfinishedUndos()).toEqual(new Set(["newer", "older"]));
     await restarted.expire(31 * 24 * 60 * 60 * 1000, async () => "gone", null);
     expect((await restarted.runsOf(automationId, "older")).runs).toHaveLength(1);
@@ -847,15 +843,14 @@ describe("stop and restore in main", () => {
   });
   it.each(["dismiss", "complete"] as const)("releases locally offline on %s and retries server release after restart", async action => {
     const root = await createTestScratch("dohc-restore-offline-");
-    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
-    const store = createAutomationRunStore(root, resolver);
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(root));
     const target = {kind: "person" as const, userId: "user_ana"};
     if(action === "dismiss") await store.savePendingRestore({id: "restore-test", claims: ["older"], session: {grants: ["grant-edit"], target,
       label: "Ana", definitions: [], filesUndone: true, receipts: [], result: {status: "waiting"}}});
     const f = fixture({rootPath: root, runStore: store, releaseError: () => Error("Offline")});
     if(action === "dismiss") await expect(f.call(stopAndRestoreRecoveryOperations.dismissStopAndRestore.channel, {target})).resolves.toBeUndefined();
     else await expect(f.call(CHANNELS.stopAndRestore, {target})).resolves.toMatchObject({restored: [{path: SCHEMA}], unfinished: null});
-    const restarted = createAutomationRunStore(root, resolver);
+    const restarted = createAutomationRunStore(preparedAutomationStoreFolder(root));
     expect(await restarted.unfinishedUndos()).toEqual(new Set());
     const recovery = fixture({rootPath: root, runStore: restarted});
     expect(await recovery.call(stopAndRestoreRecoveryOperations.pendingStopAndRestores.channel, {})).toEqual([]);
@@ -864,8 +859,7 @@ describe("stop and restore in main", () => {
   });
   it.each(["dismiss", "missing-share"] as const)("releases both hosts' retained claims on %s", async action => {
     const root = await createTestScratch("dohc-restore-release-");
-    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
-    const store = createAutomationRunStore(root, resolver);
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(root));
     const target = {kind: "person" as const, userId: "user_ana"};
     await store.savePendingRestore({id: "restore-test", claims: ["older"], session: {grants: ["grant-edit"], target,
       label: "Ana", definitions: [], filesUndone: true, receipts: [], result: {status: "waiting"}}});
@@ -873,7 +867,7 @@ describe("stop and restore in main", () => {
     if (action === "dismiss") await f.call(stopAndRestoreRecoveryOperations.dismissStopAndRestore.channel, {target});
     else await expect(f.call(CHANNELS.stopAndRestore, {target})).rejects.toThrow("This person no longer has a share");
     await vi.waitFor(() => expect(f.releases).toEqual(["restore-test"]));
-    await vi.waitFor(async () => expect(await createAutomationRunStore(root, resolver).pendingRestores()).toEqual([]));
+    await vi.waitFor(async () => expect(await createAutomationRunStore(preparedAutomationStoreFolder(root)).pendingRestores()).toEqual([]));
   });
   it.each(["person", "link"] as const)("stops %s access before reading a broken run store", async kind => {
     const f = fixture({runStoreError: new Error("Unreadable progress"), links: [[{shareId: "link-share", grantId: "grant-link", status: "active", dependents: []}]]});
@@ -883,7 +877,7 @@ describe("stop and restore in main", () => {
   });
   it("starts fresh when new access exists after an unfinished restore's files were undone", async () => {
     const root = await createTestScratch("dohc-restore-new-access-");
-    const store = createAutomationRunStore(root, async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;});
+    const store = createAutomationRunStore(preparedAutomationStoreFolder(root));
     const target = {kind: "person" as const, userId: "user_ana"};
     await store.savePendingRestore({id: "person:user_ana", claims: [], session: {grants: ["grant-old"], target, label: "Ana", definitions: [], filesUndone: true,
       receipts: [], result: {status: "waiting"}}});
@@ -893,7 +887,6 @@ describe("stop and restore in main", () => {
   });
   it("recovers an unfinished restore after restart and finishes runs after Undo of the files", async () => {
     const root = await createTestScratch("dohc-restore-restart-");
-    const resolver = async () => {const path = join(root, ".dohc"); await mkdir(path, {recursive: true}); return path;};
     const target = {kind: "person", userId: "user_ana"};
     const definition = {id: "bump", name: "Bump", enabled: true, when: {kind: "record-added", table: null}, if: null,
       do: [{kind: "set", values: [{field: "Count", value: {kind: "literal", value: 2}}], records: null, operation: null}]} as unknown as Automation;
@@ -903,13 +896,13 @@ describe("stop and restore in main", () => {
       before: {path: "trip/automations.yaml", text: "version: 1\nautomations: []\n"},
       after: {path: "trip/automations.yaml", text: written.text},
     }};
-    const first = fixture({rootPath: root, runStore: createAutomationRunStore(root, resolver), moment,
+    const first = fixture({rootPath: root, runStore: createAutomationRunStore(preparedAutomationStoreFolder(root)), moment,
       ledger: {"grant-edit": [{writes: [{committedAtMs: 2, files: [{path: moment.path, objectId: moment.objectId, momentId: moment.id, created: false}]}], nextAfterOriginSeq: null}]},
       undoRunsOf: async () => ({...NOTHING, errorMessage: "Resolve the conflict."}),
     });
     const outcome = await first.call(CHANNELS.stopAndRestore, {target}) as {restored: {restoredMomentId: string}[]};
     const resumedRuns = vi.fn(async () => NOTHING);
-    const restarted = fixture({rootPath: root, runStore: createAutomationRunStore(root, resolver), undoRunsOf: resumedRuns,
+    const restarted = fixture({rootPath: root, runStore: createAutomationRunStore(preparedAutomationStoreFolder(root)), undoRunsOf: resumedRuns,
       granted: [grant({revokedAtMs: 3}), grant({grantId: "grant-view", shareId: "share-2", access: "view"}), grant({grantId: "grant-old", shareId: "share-3", revokedAtMs: 5})]});
     const saved = await restarted.call(stopAndRestoreRecoveryOperations.pendingStopAndRestores.channel, {}) as unknown[];
     expect(saved).toHaveLength(1);

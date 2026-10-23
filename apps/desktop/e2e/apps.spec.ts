@@ -9,6 +9,7 @@ import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
+  keepCollectionsHere,
   openWorkspaceFromFirstRun,
   seedCloudCredentials,
   seedWorkspaceManifest,
@@ -138,17 +139,18 @@ test("@apps closes Preview options when a click lands in the preview", async () 
     await expect(frame.getByRole("button", { name: "Inside the app" })).toBeVisible({ timeout: 20_000 });
 
     // The titlebar stops being a drag region while the menu is open, so a
-    // press on it reaches the page too.
+    // press on it reaches the page too. The menu can paint before the effect
+    // that marks it open runs, so the region is polled.
     const titlebarRegion = () =>
       page.getByTestId(desktopPins.titlebar).evaluate((element) => getComputedStyle(element).getPropertyValue("-webkit-app-region"));
     expect(await titlebarRegion()).toBe("drag");
     await page.getByTestId("site-preview-options").click();
     const staticMode = page.getByTestId("site-preview-static");
     await expect(staticMode).toBeVisible();
-    expect(await titlebarRegion()).toBe("no-drag");
+    await expect.poll(titlebarRegion).toBe("no-drag");
     await frame.getByRole("button", { name: "Inside the app" }).click();
     await expect(staticMode).toBeHidden();
-    expect(await titlebarRegion()).toBe("drag");
+    await expect.poll(titlebarRegion).toBe("drag");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
@@ -214,6 +216,7 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
     desktop = await launchDesktopApp({ workspace });
     const { page } = desktop;
     await openWorkspaceFromFirstRun(page, workspace);
+    await keepCollectionsHere(page, workspaceId);
     await page.getByTestId(activityPin("sites")).click();
 
     const publishAndOpen = async (root: string) => {
@@ -328,6 +331,7 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     desktop = await launchDesktopApp({ workspace });
     const { page } = desktop;
     await openWorkspaceFromFirstRun(page, workspace);
+    await keepCollectionsHere(page, workspaceId);
 
     await page.getByTestId(activityPin("sites")).click();
     await page.locator('[data-testid="sites-row"][data-root="reading-list"]').click();

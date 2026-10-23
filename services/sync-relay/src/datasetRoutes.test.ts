@@ -13,6 +13,7 @@ import { hashLinkBearer } from "./linkSecurity";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
 import { encodeRecoveryManifest } from "@dohc/app-backend-runtime/recovery";
 import { DatasetReopenWaitError } from "@dohc/app-backend-runtime/supervisor";
+import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-error";
 import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
 import { serveFetchHandler } from "@dohc/service-http";
 import { guardRelayResponses } from "./relayResponseStanding";
@@ -121,6 +122,33 @@ it("exposes bounded owner history and denies helpers, strangers, and malformed c
   expect((await f.http(`${f.path}/history?beforeRevision=0`)).status).toBe(400);
   expect((await f.http(`${f.path}/history?limit=101`)).status).toBe(400);
   expect((await f.http(`${f.path}/history?after=x`)).status).toBe(400);
+});
+
+it("returns the pending-response sentence when another app cannot bind", async () => {
+  const f = await httpFixture(); await f.activate();
+  const publicationId = f.publish();
+  expect((await f.http(`${f.path}/binding`, {publicationId, enabled: true})).status).toBe(200);
+  const route = `link/app-publications/${publicationId}/backend`;
+  expect((await f.http(`${route}/attempt`, {authorityRevision: 1, operation: "submit", action: "save",
+    input: {name: "Pending guest"}, idempotencyKey: "pending"}, f.publicHeaders)).status).toBe(200);
+  const anotherPublication = f.publish("b".repeat(64));
+  for (const [path, body] of [
+    [`${f.path}/binding`, {publicationId: anotherPublication, enabled: true}],
+    [`w/app-publications/${anotherPublication}/backend/activate`, {authorityRevision: 1}],
+  ] as const) {
+    const refused = await f.http(path, body);
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({ok: false, code: "conflict", error: "A response is pending in another app. Confirm it there before publishing this app."});
+  }
+});
+
+it("keeps other host conflict details private", async () => {
+  const f = await httpFixture(); await f.activate();
+  const publicationId = f.publish();
+  vi.spyOn(f.host, "bindPublication").mockImplementation(() => {throw new DatasetHostError("conflict", "Private conflict detail");});
+  const refused = await f.http(`${f.path}/binding`, {publicationId, enabled: true});
+  expect(refused.status).toBe(409);
+  expect(await refused.json()).toEqual({ok: false, code: "conflict", error: "conflict"});
 });
 
 it("creates and manages one dataset through authenticated routes and the public app broker", async () => {
@@ -593,6 +621,36 @@ it("imports a fenced dataset and its receipt over HTTP with a durable retry rece
 });
 
 
+it.each([false, true])("lists and describes a transferred dataset only once its import is claimed (archived: %s)", async archived => {
+  const source = await httpFixture(), target = await httpFixture(); await source.activate();
+  if (archived) expect((await source.http(`${source.path}/archive`, {})).status).toBe(200);
+  const owner = {kind: "named" as const, workspaceId: "w", userId: "owner"}, scope = {workspaceId: "w", datasetId: id(1)};
+  const journal = createDatasetJournal({db: source.storage.db, transaction: run => source.storage.tx(run)}), cursor = journal.head(scope, () => {}).cursor;
+  journal.fence({expected: cursor, authorize() {}});
+  const archive = await source.host.exportRecovery(owner, scope);
+  try {
+    const chunks = []; for await (const bytes of archive.stream()) chunks.push(bytes);
+    const body = Buffer.concat(chunks), transferId = "claim-later";
+    const manifestSha256 = createHash("sha256").update(encodeRecoveryManifest(archive.manifest, {maxTotalBytes: source.storage.options.workspaceQuotaBytes})).digest("hex");
+    // Installed, as a transfer cut short after installation leaves it.
+    await target.host.importRecovery(owner, {...scope, transferId, manifestSha256, sourceCursor: cursor, stream: (async function* () {yield body;})()});
+    expect(target.storage.db.prepare("SELECT count(*) AS n FROM dohc_dataset_catalog").get()!.n).toBe(1);
+    expect(await (await target.http("w/datasets")).json()).toEqual({datasets: [], nextCursor: null});
+    expect(await (await target.http("w/datasets?includeArchived=true")).json()).toEqual({datasets: [], nextCursor: null});
+    expect((await target.http(target.path)).status).toBe(404);
+    expect((await target.http(`${target.path}?includeArchived=true`)).status).toBe(404);
+    const claimed = await target.handler(new Request(`https://relay/sync/w/datasets/${id(1)}/imports/${transferId}`, {method: "POST", headers: {
+      authorization: "Bearer owner", "content-type": "application/octet-stream", "x-dohc-dataset-manifest-sha256": manifestSha256,
+      "x-dohc-dataset-source-cursor": JSON.stringify(cursor)}, body}));
+    expect(claimed.status).toBe(200);
+    expect(await (await target.http(`w/datasets${archived ? "?includeArchived=true" : ""}`)).json())
+      .toMatchObject({datasets: [{datasetId: id(1), name: "Requests", archived}], nextCursor: null});
+    expect(await (await target.http(`${target.path}${archived ? "?includeArchived=true" : ""}`)).json()).toMatchObject({datasetId: id(1), name: "Requests", archived});
+    // Claimed, an archived one is refused as archived again.
+    if (archived) expect((await target.http(target.path)).status).toBe(409);
+  } finally {await archive.dispose();}
+});
+
 it("transfers a lost-response attempt and replays it under the same publication without a second row", async () => {
   const source = await httpFixture(), target = await httpFixture(); await source.activate();
   const publicationId = source.publish(); await source.http(`${source.path}/binding`, {publicationId, enabled: true});
@@ -619,8 +677,7 @@ it("transfers a lost-response attempt and replays it under the same publication 
     expect(await (await target.http(`${route}/invoke`, {authorityRevision: 1, operation: "submit", input: pending.attempt.input, idempotencyKey: pending.attempt.idempotencyKey}, target.publicHeaders)).json()).toMatchObject({replayed: true});
     expect(await (await target.invoke()).json()).toMatchObject({result: [{name: "Lost response", receipt: uploaded.file.fileId}]});
     const anotherPublication = target.publish("b".repeat(64));
-    const refused = await target.http(`${target.path}/binding`, {publicationId: anotherPublication, enabled: true});
-    expect(refused.status).toBe(409);
+    expect((await target.http(`${target.path}/binding`, {publicationId: anotherPublication, enabled: true})).status).toBe(200);
     const before = Number(target.storage.db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'").get()!.usage_bytes);
     expect((await target.http(`${route}/attempt`, {authorityRevision: 1, operation: "submit", action: "clear", token: pending.attempt.token}, target.publicHeaders)).status).toBe(200);
     expect(Number(target.storage.db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'").get()!.usage_bytes)).toBeLessThan(before);

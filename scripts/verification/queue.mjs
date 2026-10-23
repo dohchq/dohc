@@ -16,30 +16,36 @@
 //   control/pause                start no run until resume (client, the dashboard, or the service after the computer restarts)
 //   lane/                        the checkout the service verifies in
 //   service/<commit>/, current   installed service checkouts, and the active one
+//   supervisor.ps1, supervisor.mjs  the supervisor launchd or Task Scheduler runs (install)
+//   service-tree.json            on a Mac, the service's processes, for the next supervisor (supervisor)
 
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
-import { userInfo } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
-import { buildQueueStatus, heldVerificationSlots, maxVerificationLanes, readVerificationLanes, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
+import { buildQueueStatus, heldVerificationSlots, macSlotRoot, maxVerificationLanes, readVerificationLanes, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
 import { git } from "./process.mjs";
+import { buildEnvHelper, envHelper, heldPath, stopRecorded } from "./queue-supervisor.mjs";
 
 export const protocol = 1;
 // "error" ends a request the host kept failing; it carries no verdict about the change.
 export const terminalStates = new Set(["passed", "failed", "error", "cancelled", "superseded"]);
 
 /**
- * The queue root on a host that runs the service, else null. CI, other
- * platforms, and runs with their own slot root (tests and trials) verify inline.
+ * The queue root on a host that runs the service, else null: beside the build slot root on the shared Windows host,
+ * and on a shared Mac once the service is installed there. CI, other platforms, other Macs, and runs with their own
+ * slot root (tests and trials) verify inline. `host` replaces the platform, the home folder, and the install check.
  */
-export function queueRoot(env = process.env, platform = process.platform) {
+export function queueRoot(env = process.env, { platform = process.platform, home, installed = root => existsSync(join(root, "current")) } = {}) {
   if (env.DOHC_VERIFICATION_QUEUE_ROOT) return env.DOHC_VERIFICATION_QUEUE_ROOT;
-  const budget = platform === "win32" && !env.DOHC_BUILD_SLOT_ROOT ? resolveBuildBudget(env) : null;
-  return budget ? join(dirname(budget.root), "_verification") : null;
+  const budget = ["win32", "darwin"].includes(platform) && !env.DOHC_BUILD_SLOT_ROOT ? resolveBuildBudget(env, { platform, home }) : null;
+  const root = budget ? join(dirname(budget.root), "_verification") : null;
+  // A Mac uninstalled again verifies inline, though it keeps its slot root.
+  return root && (platform !== "darwin" || installed(root)) ? root : null;
 }
 
 export const queuePaths = root => ({
@@ -472,9 +478,20 @@ export function pauseStatus(root, service = serviceState(root), inline = inlineR
 export const taskName = "dohc-verification-queue";
 // The service serves its read-only monitor page here, on this host only.
 export const monitorPort = 4250;
+// On a Mac, launchd runs the supervisor and the nightly submission as these LaunchAgents.
+export const launchAgentLabel = "app.dohc.verification-queue";
+export const nightlyAgentLabel = "app.dohc.verification-nightly";
+export const launchAgentsDir = (home = homedir()) => join(home, "Library", "LaunchAgents");
+export const guiDomain = () => `gui/${process.getuid()}`;
+const launchctl = args => spawnSync("launchctl", args, { encoding: "utf8" });
 
-/** Start the installed service if its heartbeat is not current. Starting a running task does nothing. */
-export function ensureService(root, { start = () => spawnSync("schtasks.exe", ["/run", "/tn", taskName], { windowsHide: true, encoding: "utf8" }) } = {}) {
+/** The command that starts the installed service. Starting a running task or LaunchAgent does nothing. */
+export const startCommand = (platform = process.platform) => platform === "darwin"
+  ? ["launchctl", ["kickstart", `${guiDomain()}/${launchAgentLabel}`]]
+  : ["schtasks.exe", ["/run", "/tn", taskName]];
+
+/** Start the installed service if its heartbeat is not current. */
+export function ensureService(root, { start = () => spawnSync(...startCommand(), { windowsHide: true, encoding: "utf8" }) } = {}) {
   if (serviceState(root).alive) return;
   const result = start();
   if (result.status !== 0) throw new Error(`The verification queue service is not installed on this host (${(result.stderr || result.stdout || "").trim()}). Run pnpm verify:queue install from a checkout of origin/main.`);
@@ -640,9 +657,103 @@ export function taskDefinition(root) {
 `;
 }
 
+export const plistText = text => `<string>${text.replace(/[&<>]/gu, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c])}</string>`;
+export const plist = (label, env, entries) => `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>${plistText(label)}
+  <key>EnvironmentVariables</key><dict>${Object.entries(env).map(([name, value]) => `<key>${name}</key>${plistText(value)}`).join("")}</dict>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
+${entries}
+</dict>
+</plist>
+`;
+
+/**
+ * The installer's PATH for the LaunchAgents: its absolute entries, without the ones pnpm adds for a script, the
+ * installing checkout's node_modules/.bin folders and pnpm's node-gyp-bin. A later checkout at that path would
+ * otherwise supply tools to every run, and a relative entry would name a folder inside each lane.
+ */
+export const launchPath = (path = process.env.PATH ?? "") => [...new Set(path.split(":")
+  .filter(entry => entry.startsWith("/") && !/\/node_modules\/\.bin\/?$/u.test(entry) && !/(^|\/)node-gyp-bin\/?$/u.test(entry)))].join(":");
+
+/**
+ * The LaunchAgent that keeps the supervisor running. It loads only into the login session, where Electron can open
+ * windows. launchd starts it at login and again whenever it exits. PATH is the installer's, so the service finds the
+ * same node, git, cargo, and Docker as the agents that submit to it. Interactive runs it without the resource limits
+ * launchd sets for other jobs, as a terminal would. Node raises the open-file limit, which launchd sets to 256.
+ * The service's environment never names the queue root: each lane's verifier and its tests inherit it, and a test's
+ * nested verifier must verify inline under its own slot root.
+ */
+export function launchAgentDefinition(root, path = launchPath()) {
+  return plist(launchAgentLabel, { PATH: path }, `  <key>ProgramArguments</key><array>${["/usr/bin/env", "node", join(root, "supervisor.mjs"), "--root", root].map(plistText).join("")}</array>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key>${plistText(join(root, "supervisor.err.log"))}
+  <key>StandardErrorPath</key>${plistText(join(root, "supervisor.err.log"))}`);
+}
+
+/**
+ * The LaunchAgent that submits the nightly verification of main every night at 03:07, and tries again every 10 minutes
+ * for an hour if that fails. launchd runs a night the Mac slept through when it wakes.
+ */
+export function nightlyAgentDefinition(root, path = launchPath()) {
+  const script = 'for attempt in 1 2 3 4 5 6 7; do date -u +%Y-%m-%dT%H:%M:%SZ; node "$0/service/$(cat "$0/current")/scripts/verification/queue.mjs" nightly && exit 0; sleep 600; done; exit 1';
+  return plist(nightlyAgentLabel, { PATH: path, DOHC_VERIFICATION_QUEUE_ROOT: root }, `  <key>ProgramArguments</key><array>${["/bin/sh", "-c", script, root].map(plistText).join("")}</array>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>7</integer></dict>
+  <key>StandardOutPath</key>${plistText(join(root, "nightly.log"))}
+  <key>StandardErrorPath</key>${plistText(join(root, "nightly.log"))}`);
+}
+
+/**
+ * Unload a LaunchAgent and wait until launchd lets it go. bootout returns while the job may still be stopping;
+ * launchd kills a job that has not stopped 20 seconds after it was asked to.
+ */
+export async function unloadLaunchAgent(label, { command = launchctl, waitMs = 60_000, pollMs = 200 } = {}) {
+  command(["bootout", `${guiDomain()}/${label}`]);
+  for (const deadline = Date.now() + waitMs; command(["print", `${guiDomain()}/${label}`]).status === 0; await sleep(pollMs)) {
+    if (Date.now() > deadline) throw new Error(`launchd did not unload ${label}.`);
+  }
+}
+
+/**
+ * Write the LaunchAgents and load them into this login session. A loaded supervisor keeps its definition until
+ * `restart`, so a run in progress is never stopped; the nightly agent is loaded again at once.
+ * Resolves with whether the loaded supervisor's definition changed.
+ */
+export async function registerLaunchAgents(root, { dir = launchAgentsDir(), command = launchctl, path = launchPath(), waitMs } = {}) {
+  mkdirSync(dir, { recursive: true });
+  let changed = false;
+  for (const [label, definition] of [[launchAgentLabel, launchAgentDefinition(root, path)], [nightlyAgentLabel, nightlyAgentDefinition(root, path)]]) {
+    const file = join(dir, `${label}.plist`);
+    const before = existsSync(file) ? readFileSync(file, "utf8") : null;
+    writeFileSync(file, definition);
+    const loaded = command(["print", `${guiDomain()}/${label}`]).status === 0;
+    if (label === launchAgentLabel && loaded) { changed = before !== definition; continue; }
+    if (loaded) await unloadLaunchAgent(label, { command, waitMs });
+    const result = command(["bootstrap", guiDomain(), file]);
+    if (result.status !== 0) throw new Error(`launchd refused ${label}: ${(result.stderr || result.stdout || "").trim()}`);
+  }
+  return changed;
+}
+
+/**
+ * Unload the LaunchAgents and remove them. Unloading the supervisor stops the service and everything it started;
+ * what a supervisor that launchd had to kill leaves is stopped from its record.
+ */
+export async function unregisterLaunchAgents(root, { dir = launchAgentsDir(), command = launchctl, stop = stopRecorded, waitMs } = {}) {
+  for (const label of [launchAgentLabel, nightlyAgentLabel]) {
+    await unloadLaunchAgent(label, { command, waitMs });
+    rmSync(join(dir, `${label}.plist`), { force: true });
+  }
+  return stop(root);
+}
+
 /** Install or upgrade the service to `ref` from this checkout's repository. It switches between runs, never during one. */
 async function install(root, ref) {
-  if (process.platform !== "win32") throw new Error("The queue service runs on Windows hosts. Elsewhere pnpm verify:pr runs inline.");
+  if (!["win32", "darwin"].includes(process.platform)) throw new Error("The queue service runs on the shared Windows host and on a shared Mac. Elsewhere pnpm verify:pr runs inline.");
   const here = fileURLToPath(new URL("../..", import.meta.url));
   const repo = resolve(git(["rev-parse", "--git-common-dir"], here), "..");
   const commit = git(["rev-parse", "--verify", `${ref}^{commit}`], here);
@@ -657,26 +768,34 @@ async function install(root, ref) {
   }
   const check = spawnSync(process.execPath, [join(dir, "scripts/verification/queue-service.mjs"), "--self-test", "--root", root], { encoding: "utf8", windowsHide: true, timeout: 120_000 });
   if (check.status !== 0) throw new Error(`The service at ${short} failed its self-test, so the current one stays active:\n${check.stderr || check.stdout}`);
-  // The running supervisor keeps its script and its task's settings until it restarts.
-  const supervisorScript = join(root, "supervisor.ps1");
-  const definition = join(root, "task.xml");
-  const before = [supervisorScript, definition].map(path => existsSync(path) ? readFileSync(path) : null);
-  copyFileSync(join(dir, "scripts/verification/queue-supervisor.ps1"), supervisorScript);
-  copyFileSync(join(dir, "scripts/verification/queue-nightly.ps1"), join(root, "nightly.ps1"));
+  // The running supervisor keeps its script and its task's or LaunchAgent's settings until it restarts.
+  const windows = process.platform === "win32";
+  // A Mac's supervisor and service find their processes with this helper, so an install without it stops here.
+  if (!windows) buildEnvHelper(envHelper(root), join(dir, "scripts/verification/procenv.c"));
+  const supervisorScript = join(root, windows ? "supervisor.ps1" : "supervisor.mjs");
+  const before = existsSync(supervisorScript) ? readFileSync(supervisorScript) : null;
+  copyFileSync(join(dir, "scripts/verification", windows ? "queue-supervisor.ps1" : "queue-supervisor.mjs"), supervisorScript);
   const previous = existsSync(paths.current) ? readFileSync(paths.current, "utf8").trim() : null;
   await withFileRetry(() => { writeFileSync(`${paths.current}.tmp`, short); renameSync(`${paths.current}.tmp`, paths.current); });
-  writeFileSync(definition, `﻿${taskDefinition(root)}`, "utf16le");
-  const created = spawnSync("schtasks.exe", ["/create", "/tn", taskName, "/xml", definition, "/f"], { encoding: "utf8", windowsHide: true });
-  if (created.status !== 0) throw new Error(`Task Scheduler refused the service task: ${created.stderr || created.stdout}`);
-  const nightlyDefinition = join(root, "nightly-task.xml");
-  writeFileSync(nightlyDefinition, `﻿${nightlyTaskDefinition(root)}`, "utf16le");
-  const nightly = spawnSync("schtasks.exe", ["/create", "/tn", nightlyTaskName, "/xml", nightlyDefinition, "/f"], { encoding: "utf8", windowsHide: true });
-  if (nightly.status !== 0) throw new Error(`Task Scheduler refused the nightly task: ${nightly.stderr || nightly.stdout}`);
+  let changed = !before?.equals(readFileSync(supervisorScript));
+  if (windows) {
+    copyFileSync(join(dir, "scripts/verification/queue-nightly.ps1"), join(root, "nightly.ps1"));
+    const definition = join(root, "task.xml");
+    const task = existsSync(definition) ? readFileSync(definition) : null;
+    writeFileSync(definition, `﻿${taskDefinition(root)}`, "utf16le");
+    changed ||= !task?.equals(readFileSync(definition));
+    const created = spawnSync("schtasks.exe", ["/create", "/tn", taskName, "/xml", definition, "/f"], { encoding: "utf8", windowsHide: true });
+    if (created.status !== 0) throw new Error(`Task Scheduler refused the service task: ${created.stderr || created.stdout}`);
+    const nightlyDefinition = join(root, "nightly-task.xml");
+    writeFileSync(nightlyDefinition, `﻿${nightlyTaskDefinition(root)}`, "utf16le");
+    const nightly = spawnSync("schtasks.exe", ["/create", "/tn", nightlyTaskName, "/xml", nightlyDefinition, "/f"], { encoding: "utf8", windowsHide: true });
+    if (nightly.status !== 0) throw new Error(`Task Scheduler refused the nightly task: ${nightly.stderr || nightly.stdout}`);
+  } else changed = await registerLaunchAgents(root) || changed;
   if (serviceState(root).alive && previous !== short) {
     // The running service exits when idle; the supervisor then starts this one.
     mkdirSync(paths.control, { recursive: true });
     writeFileSync(join(paths.control, "restart"), "");
-  } else if (!serviceState(root).alive) spawnSync("schtasks.exe", ["/run", "/tn", taskName], { windowsHide: true });
+  } else if (!serviceState(root).alive) spawnSync(...startCommand(), { windowsHide: true });
   // Keep the active, the previous, and the running installation; older ones are removed.
   const runningInstall = serviceState(root).record?.commit?.slice(0, 12);
   for (const name of readdirSync(paths.installs).filter(name => ![short, previous, runningInstall].includes(name))) {
@@ -684,8 +803,7 @@ async function install(root, ref) {
     catch (error) { console.error(`could not remove the old install ${name}: ${error.message}`); }
   }
   console.log(`verification queue service ${short} installed at ${root}${previous && previous !== short ? `, replacing ${previous} once the current run ends` : ""}.`);
-  const changed = [supervisorScript, definition].some((path, index) => !before[index]?.equals(readFileSync(path)));
-  if (changed && serviceState(root).alive) console.log("The supervisor or its task changed. Run pnpm verify:queue restart when no run is in progress to apply it.");
+  if (changed && serviceState(root).alive) console.log(`The supervisor or its ${windows ? "task" : "LaunchAgent"} changed. Run pnpm verify:queue restart when no run is in progress to apply it.`);
 }
 
 function printStatus(root) {
@@ -698,6 +816,9 @@ function printStatus(root) {
   if (alive) console.log(`monitor: http://127.0.0.1:${monitorPort}`);
   const pause = pauseStatus(root, { record, alive });
   if (pause) console.log(pause);
+  // The supervisor starts no service while processes of the last one still run.
+  const held = readJson(heldPath(root));
+  if (held) console.log(`held since ${held.at}: the supervisor could not stop the last service's processes (${held.reason}). No service starts until they stop; supervisor.log has each try.`);
   if (record?.health?.reason) console.log(`health: ${record.health.reason}`);
   if (record?.health?.diskFreeGb != null) console.log(`free disk: ${record.health.diskFreeGb.toFixed(1)} GB`);
   // The setting, which the service reads each tick, and any lane above it still finishing a gate.
@@ -745,8 +866,30 @@ async function move(root, args) {
   console.log(`The service has not applied the move of ${id} yet. It applies on the service's next pass; pnpm verify:queue status shows the line. A service older than this checkout applies no moves until pnpm verify:queue upgrade.`);
 }
 
+/** Report a restart once a service other than `stoppedPid` beats. */
+async function reportRestart(root, stoppedPid, scheduler) {
+  for (let waited = 0; waited < 30_000; waited += 500) {
+    const next = serviceState(root);
+    if (next.alive && next.record.pid !== stoppedPid) return console.log(`restarted the verification queue service (pid ${next.record.pid})`);
+    await sleep(500);
+  }
+  console.log(scheduler === "launchd" ? "asked launchd to restart the verification queue service; pnpm verify:queue status shows when it runs"
+    : "asked Task Scheduler to restart the verification queue service; it starts within five minutes");
+}
+
+/** Unload the supervisor's LaunchAgent, which stops the service and everything it started, and load it again, so a changed definition applies. */
+export async function reloadLaunchAgent(root, { dir = launchAgentsDir(), command = launchctl, stop = stopRecorded, waitMs } = {}) {
+  await unloadLaunchAgent(launchAgentLabel, { command, waitMs });
+  await stop(root);
+  const result = command(["bootstrap", guiDomain(), join(dir, `${launchAgentLabel}.plist`)]);
+  if (result.status !== 0) throw new Error(`launchd refused ${launchAgentLabel}: ${(result.stderr || result.stdout || "").trim()}`);
+}
+
 async function main([command, ...args]) {
-  const root = queueRoot();
+  const installing = command === "install" || command === "upgrade";
+  // Installing makes a Mac a shared host: its slot root marks it, and the install marks its queue.
+  if (installing && process.platform === "darwin" && !process.env.DOHC_BUILD_SLOT_ROOT) mkdirSync(macSlotRoot(), { recursive: true });
+  const root = queueRoot(process.env, installing ? { installed: () => true } : {});
   if (!root) throw new Error("This host has no verification queue. pnpm verify:pr runs inline here.");
   const ref = args.includes("--ref") ? args[args.indexOf("--ref") + 1] : "origin/main";
   if (command === "status" || !command) return printStatus(root);
@@ -762,7 +905,7 @@ async function main([command, ...args]) {
     const ended = await resumeQueue(root);
     return console.log(ended ? `resumed the verification queue, which was ${pausedSince(ended)}.` : "the verification queue was not paused.");
   }
-  if (command === "install" || command === "upgrade") return install(root, ref);
+  if (installing) return install(root, ref);
   if (command === "nightly") {
     const here = fileURLToPath(new URL("../..", import.meta.url));
     const { head, base } = await submitNightly(root, resolve(git(["rev-parse", "--git-common-dir"], here), ".."));
@@ -772,6 +915,10 @@ async function main([command, ...args]) {
   if (command === "restart") {
     const { record, alive } = serviceState(root);
     if (serviceRuns(record).runs.length && !args.includes("--now")) throw new Error("A run is in progress. Wait for it, or pass --now to stop it; it will be retried.");
+    if (process.platform === "darwin") {
+      await reloadLaunchAgent(root);
+      return reportRestart(root, record?.pid, "launchd");
+    }
     // The task's own process is conhost, so ending the task leaves the supervisor running. Stop the supervisor
     // itself; its job stops the service and any run. It is found by its command line, which names this root's
     // script, and stopped through a handle held before that check, so a reused pid is never stopped. The script
@@ -799,14 +946,19 @@ async function main([command, ...args]) {
     spawnSync("schtasks.exe", ["/end", "/tn", taskName], { windowsHide: true });
     spawnSync("schtasks.exe", ["/run", "/tn", taskName], { windowsHide: true });
     // Report a restart only once a new service is beating; otherwise the task's five-minute trigger finishes it.
-    for (let waited = 0; waited < 30_000; waited += 500) {
-      const next = serviceState(root);
-      if (next.alive && next.record.pid !== stoppedPid) return console.log(`restarted the verification queue service (pid ${next.record.pid})`);
-      await sleep(500);
-    }
-    return console.log("asked Task Scheduler to restart the verification queue service; it starts within five minutes");
+    return reportRestart(root, stoppedPid, "Task Scheduler");
   }
-  throw new Error("Use status, pause [--reason <text>], resume, cancel <id>, move <id> --first|--before <id> --reason <text>, install [--ref <ref>], upgrade [--ref <ref>], restart [--now], or nightly.");
+  if (command === "uninstall") {
+    if (process.platform !== "darwin") throw new Error("uninstall removes a Mac's LaunchAgents. On Windows, delete the dohc-verification-queue and dohc-verification-nightly scheduled tasks.");
+    if (serviceRuns(serviceState(root).record).runs.length && !args.includes("--now")) throw new Error("A run is in progress. Wait for it, or pass --now to stop it; it runs again after the next install.");
+    const stopped = await unregisterLaunchAgents(root);
+    // Without its install marker the queue root is no longer found, so pnpm verify:pr runs inline.
+    rmSync(queuePaths(root).current, { force: true });
+    return console.log(`uninstalled the verification queue service: removed ${launchAgentLabel} and ${nightlyAgentLabel} from ${launchAgentsDir()}${stopped.length ? `, and stopped ${stopped.length} process(es) its supervisor left` : ""}. pnpm verify:pr runs inline on this Mac now.
+The requests, history, lanes, and installs stay in ${root}, so pnpm verify:queue install resumes with warm lanes. To remove them too, run git worktree remove --force --force on each of ${join(root, "lane*")} and ${join(root, "service", "*")}, then delete ${root}.
+${macSlotRoot()} stays too, so builds and gates on this Mac keep sharing the build budget. Delete it while no build or gate runs to stop that.`);
+  }
+  throw new Error(`Use status, pause [--reason <text>], resume, cancel <id>, move <id> --first|--before <id> --reason <text>, install [--ref <ref>], upgrade [--ref <ref>], restart [--now],${process.platform === "darwin" ? " uninstall [--now]," : ""} or nightly.`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

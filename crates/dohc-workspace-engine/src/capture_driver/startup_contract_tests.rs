@@ -5,8 +5,9 @@ fn plan_with_ops(ops: Vec<CaptureOp>) -> ReconcileRun {
         from_generation: ScanGeneration(0),
         to_generation: ScanGeneration(1),
         ops,
-        retained_over_cap: Vec::new(),
+        retained_unread: Vec::new(),
         unconfirmed_removed: Vec::new(),
+        respelled_retires: Default::default(),
         degraded: false,
         degraded_paths: Vec::new(),
         prepared_from_dirty: true,
@@ -136,6 +137,7 @@ async fn assert_gate_wait_leaves_link_drain_running(tick: bool) {
         events,
         apply_probe: None,
         scan: ScanGauge::default(),
+        import_priority: Arc::new(ImportPriority::new(|| {})),
         no_atomic_placement_announced: false,
     };
     let cancel = CancellationToken::new();
@@ -276,6 +278,7 @@ async fn failed_first_layer_start_releases_link_drain_in_the_open_workspace() {
         events,
         apply_probe: None,
         scan: ScanGauge::default(),
+        import_priority: Arc::new(ImportPriority::new(|| {})),
         no_atomic_placement_announced: false,
     };
     assert!(env.start_layer(&CancellationToken::new()).await.is_err());

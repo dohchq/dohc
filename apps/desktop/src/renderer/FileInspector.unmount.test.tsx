@@ -11,6 +11,12 @@ import { resetOrphanedDrafts } from "./orphanedDrafts";
 import * as orphanedDraftsModule from "./orphanedDrafts";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import { getSharedLocalDocument } from "./sharedLocalDocument";
+
+// A note stays read-only until its lossy-note check answers and the engine
+// open that follows it settles.
+async function waitForEditable(): Promise<void> {
+  await waitFor(() => expect(screen.getByTestId("markdown-edit-toggle").hasAttribute("disabled")).toBe(false));
+}
 import { documentVersionKey } from "./documentVersionKey";
 import { lineSpanInText } from "./FileInspector.text-fixture";
 import {
@@ -45,6 +51,14 @@ const csvMode = (name: "Table" | "Raw") =>
 import { deferred } from "../testing/deferred";
 import { EDITOR_WRITE_STALL_MS, hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEditorDrafts";
 import { loadStoredDrafts } from "./orphanedDraftStorage";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLimits";
+
+// These tests need a note past the WYSIWYG limit, not the limit itself. A
+// small limit keeps their notes small, so opening one stays fast on a busy host.
+vi.mock("../workspaces/workspaceTextLimits", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../workspaces/workspaceTextLimits")>()),
+  WYSIWYG_MARKDOWN_THRESHOLD_BYTES: 64 * 1024,
+}));
 
 setupFileInspectorTests();
 
@@ -155,6 +169,7 @@ describe("markdown editor unmount flush", () => {
     const user = userEvent.setup();
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
     await screen.findByTestId("view-markdown");
+    await waitForEditable();
     await user.click(screen.getByTestId("markdown-edit-toggle"));
     await typeInMarkdownEditor(
       user,
@@ -1158,7 +1173,7 @@ describe("markdown editor unmount flush", () => {
   });
 
   it("opens large editable Markdown in CodeMirror and keeps every rapid keystroke", async () => {
-    const largeBody = `# Large\n\n${"Body line\n".repeat(8_000)}`;
+    const largeBody = `# Large\n\n${"Body line\n".repeat(WYSIWYG_MARKDOWN_THRESHOLD_BYTES / 10 + 1)}`;
     const typed = "profilex-0123456789-abcdefghij";
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: largeBody,
@@ -1327,6 +1342,7 @@ describe("markdown editor unmount flush", () => {
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
     await screen.findByTestId("view-markdown");
+    await waitForEditable();
     // Properties render inline under the title now — no toggle to open.
     await screen.findByTestId("properties-panel");
     await user.clear(screen.getByDisplayValue("draft"));
@@ -1392,7 +1408,7 @@ describe("markdown editor unmount flush", () => {
     // over the WYSIWYG threshold opens in read mode without being truncated
     // (truncated would make PageIdentity read-only and skip the save entirely).
     const bigBody = `---\ntitle: Plan\n---\n\n${LARGE_READ_MODE_FILLER}`;
-    expect(bigBody.length).toBeGreaterThan(64 * 1024);
+    expect(bigBody.length).toBeGreaterThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: bigBody,
       truncated: false,
@@ -1499,6 +1515,9 @@ describe("markdown editor unmount flush", () => {
       truncated: false,
       contentHash: TEST_CONTENT_HASH,
     });
+    vi.stubGlobal("dohcDesktop", { ...bridgeMock, linksResolve: vi.fn()
+      .mockResolvedValueOnce({ results: [{ path: "notes/faq?.md", fragment: "answers" }] })
+      .mockResolvedValueOnce({ results: [{ path: "notes/#notes.md", fragment: "risks" }] }) });
     const onOpenPath = vi.fn();
     render(
       <FileInspector
@@ -1528,10 +1547,7 @@ describe("markdown editor unmount flush", () => {
     });
     expect(link.dispatchEvent(click)).toBe(false);
     expect(click.defaultPrevented).toBe(true);
-    expect(onOpenPath).toHaveBeenCalledWith("notes/faq?.md", {
-      anchor: "answers",
-      nonce: 1,
-    });
+    await waitFor(() => expect(onOpenPath).toHaveBeenCalledWith("notes/faq?.md", { anchor: "answers", nonce: 1 }));
     expect(onOpenPath).toHaveBeenCalledOnce();
 
     const hashClick = new MouseEvent("click", {
@@ -1542,10 +1558,7 @@ describe("markdown editor unmount flush", () => {
     expect(
       screen.getByRole("link", { name: "Hash notes" }).dispatchEvent(hashClick),
     ).toBe(false);
-    expect(onOpenPath).toHaveBeenLastCalledWith("notes/#notes.md", {
-      anchor: "risks",
-      nonce: 2,
-    });
+    await waitFor(() => expect(onOpenPath).toHaveBeenLastCalledWith("notes/#notes.md", { anchor: "risks", nonce: 2 }));
 
     const fragmentClick = new MouseEvent("click", {
       bubbles: true,
@@ -1555,10 +1568,7 @@ describe("markdown editor unmount flush", () => {
     expect(
       screen.getByRole("link", { name: "Section" }).dispatchEvent(fragmentClick),
     ).toBe(false);
-    expect(onOpenPath).toHaveBeenLastCalledWith("notes/status.md", {
-      anchor: "next%20steps",
-      nonce: 3,
-    });
+    await waitFor(() => expect(onOpenPath).toHaveBeenLastCalledWith("notes/status.md", { anchor: "next%20steps", nonce: 3 }));
     expect(onOpenPath).toHaveBeenCalledTimes(3);
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
@@ -1587,58 +1597,18 @@ describe("markdown editor unmount flush", () => {
     await waitFor(() => expect(scrollTo).toHaveBeenCalledWith({ top: 0 }));
   });
 
-  it("keeps encoded filename hashes distinct from real fragments without known files", async () => {
-    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
-      text: [
-        "[Unknown](new%23plan.md)",
-        "[Multiple](new%23release%231.md)",
-        "[Fragment](new%23plan.md?mode=preview#risks)",
-        "[Raw root](/plan.md#raw-root)",
-        "[Encoded root](%2Fplan.md#root)",
-        "[Encoded fragment](#a%2520b)",
-        "[Empty fragment](#)",
-        "[Malformed](bad%E0%A4%A.md#part%E0%A4%A)",
-      ].join("\n"),
-      truncated: false,
-      contentHash: TEST_CONTENT_HASH,
-    });
+  it("keeps encoded filename delimiters in the literal sent to the engine", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({ text: "[Hash](new%23plan.md) [FAQ](faq%3F.md#answers)", truncated: false, contentHash: TEST_CONTENT_HASH });
+    const linksResolve = vi.fn().mockResolvedValueOnce({ results: [{ path: null, create: "notes/new#plan.md", fragment: null }] }).mockResolvedValueOnce({ results: [{ path: null, create: "notes/faq?.md", fragment: "answers" }] });
+    vi.stubGlobal("dohcDesktop", { ...bridgeMock, linksResolve });
     const onOpenPath = vi.fn();
-    render(
-      <FileInspector
-        workspaceId="ws-1"
-        path="notes/status.md"
-        readOnly
-        knownMarkdownFiles={[]}
-        onOpenPath={onOpenPath}
-      />,
-    );
-    await screen.findByRole("link", { name: "Unknown" });
-
-    for (const [name, expectedPath, rawFragment] of [
-      ["Unknown", "notes/new#plan.md", undefined],
-      ["Multiple", "notes/new#release#1.md", undefined],
-      ["Fragment", "notes/new#plan.md", "risks"],
-      ["Raw root", "plan.md", "raw-root"],
-      ["Encoded root", "plan.md", "root"],
-      ["Encoded fragment", "notes/status.md", "a%2520b"],
-      ["Empty fragment", "notes/status.md", ""],
-      ["Malformed", "notes/bad%E0%A4%A.md", "part%E0%A4%25A"],
-    ] as const) {
-      const click = new MouseEvent("click", {
-        bubbles: true,
-        cancelable: true,
-        detail: 1,
-      });
-      expect(screen.getByRole("link", { name }).dispatchEvent(click)).toBe(false);
-      expect(onOpenPath).toHaveBeenLastCalledWith(
-        expectedPath,
-        rawFragment !== undefined
-          ? { anchor: rawFragment, nonce: onOpenPath.mock.calls.length }
-          : undefined,
-      );
-    }
-    expect(onOpenPath).toHaveBeenCalledTimes(8);
-    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+    render(<FileInspector workspaceId="ws-1" path="notes/status.md" readOnly onOpenPath={onOpenPath} />);
+    fireEvent.click(await screen.findByRole("link", { name: "Hash" }));
+    await waitFor(() => expect(linksResolve).toHaveBeenCalledWith({ workspaceId: "ws-1", source: "notes/status.md", literals: [{ kind: "markdown", literal: "./new%23plan.md" }] }));
+    fireEvent.click(screen.getByRole("link", { name: "FAQ" }));
+    await waitFor(() => expect(linksResolve).toHaveBeenLastCalledWith({ workspaceId: "ws-1", source: "notes/status.md", literals: [{ kind: "markdown", literal: "./faq%3F.md#answers" }] }));
+    expect(onOpenPath).toHaveBeenNthCalledWith(1, "notes/new#plan.md", undefined);
+    expect(onOpenPath).toHaveBeenNthCalledWith(2, "notes/faq?.md", { anchor: "answers", nonce: expect.any(Number) });
   });
 
   it("keeps local source mode and selects the target heading line", async () => {
@@ -6027,6 +5997,7 @@ describe("markdown editor unmount flush", () => {
     );
 
     await screen.findByTestId("view-markdown");
+    await waitForEditable();
     // Large docs open in read mode; properties still render inline (editable).
     await screen.findByTestId("properties-panel");
     await user.clear(screen.getByDisplayValue("draft"));

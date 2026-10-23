@@ -54,6 +54,7 @@ export interface EngineYDocTransport {
     // Main could no longer resolve the live file at the path the renderer read.
     documentUnavailable?: boolean;
     captureHeld?: boolean;
+    outsideWriteWaiting?: boolean;
     liveHostUnavailable?: boolean;
     sharedWaiting?: SharedDocumentOpenState;
     // A session for this document may still be the engine's —
@@ -183,7 +184,18 @@ interface EngineYDocBindOptions {
     retired: Y.Doc,
     recoveredPaths: string[],
   ) => void | Promise<void>;
-  onLineageReplacementFailure?: (error: unknown, retired: Y.Doc) => void;
+  // Runs right before main is told to accept the winner. Throwing keeps the
+  // retired mirror, as a failed onDocumentReplacing does: the retired mirror
+  // can take an edit while onDocumentReplacing settles.
+  beforeReplacementAcknowledged?: () => void;
+  // The retired mirror stays frozen and the winner waits. `retry` runs the
+  // same replacement again; it does nothing once that replacement, or a newer
+  // one, has installed.
+  onLineageReplacementFailure?: (
+    error: unknown,
+    retired: Y.Doc,
+    retry: () => Promise<void>,
+  ) => void;
 }
 
 // Text ships on the next turn. Drawing updates share a 32 ms batching window.
@@ -214,6 +226,7 @@ export interface EngineYDocBinding {
   // Main could no longer resolve the live file at the path the renderer read.
   readonly documentUnavailable: boolean;
   readonly captureHeld?: boolean;
+  readonly outsideWriteWaiting?: boolean;
   readonly liveHostUnavailable: boolean;
   readonly sharedWaiting: SharedDocumentOpenState | null;
   // A session for this document may still be the engine's. The
@@ -286,6 +299,7 @@ export async function bindEngineYDoc(
       notInVersion: opened.notInVersion === true,
       documentUnavailable: opened.documentUnavailable === true,
       captureHeld: opened.captureHeld === true,
+      outsideWriteWaiting: opened.outsideWriteWaiting === true,
       liveHostUnavailable: opened.liveHostUnavailable === true,
       sharedWaiting: opened.sharedWaiting ?? null,
       engineMayHoldDocument: opened.engineMayHoldDocument === true,
@@ -564,9 +578,18 @@ export async function bindEngineYDoc(
   const retiredDocs = new Set<Y.Doc>();
   let replacementHandoff: Promise<void> | null = null;
   let artifactAssets = opened.artifactAssets ?? [];
+  // A newer replacement wins over an older one still waiting to install.
+  let newestReplacement = lineageGeneration;
   const queueReplacement = (input: LineageReplacement): Promise<void> => {
+    newestReplacement = Math.max(newestReplacement, input.lineageGeneration);
     const replace = async (): Promise<void> => {
-      if (destroyed || input.lineageGeneration <= lineageGeneration) return;
+      if (
+        destroyed ||
+        input.lineageGeneration <= lineageGeneration ||
+        input.lineageGeneration < newestReplacement
+      ) {
+        return;
+      }
       const replacement = new Y.Doc();
       transport.initializeDoc?.(replacement);
       Y.applyUpdate(replacement, input.update, ENGINE_SOURCED_ORIGIN);
@@ -593,11 +616,15 @@ export async function bindEngineYDoc(
         if (options.onDocumentReplacing) {
           await options.onDocumentReplacing(retired, input.recoveredPaths);
         }
+        options.beforeReplacementAcknowledged?.();
         bufferedUpdates = await transport.acknowledgeLineageReplacement(
           input.lineageGeneration,
         );
       } catch (error) {
-        options.onLineageReplacementFailure?.(error, retired);
+        replacement.destroy();
+        if (!destroyed) {
+          options.onLineageReplacementFailure?.(error, retired, () => queueReplacement(input));
+        }
         throw error;
       }
       if (destroyed) {
@@ -619,8 +646,9 @@ export async function bindEngineYDoc(
         listener(replacement, input.recoveredPaths);
       }
     };
+    // A failed handoff does not skip a newer one queued behind it.
     const handoff = replacementHandoff
-      ? replacementHandoff.then(replace)
+      ? replacementHandoff.then(replace, replace)
       : replace();
     replacementHandoff = handoff;
     void handoff.catch((error: unknown) => {

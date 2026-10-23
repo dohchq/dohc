@@ -1,4 +1,5 @@
 import { readDatasetHistoryHeads } from "./dataset-history.js";
+import { privateFolder } from "./private-folder.test-helper";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import * as datasetOperations from "@dohc/security-contract/dataset-operations";
 import type { JsonValue } from "./protocol.js";
@@ -70,7 +71,7 @@ async function fixture(overrides: Partial<DatasetHostOptions<Context>> = {}) {
     try { const result = run(); db.exec("COMMIT"); return result; } catch (error) { db.exec("ROLLBACK"); throw error; }
   }
   const journal = createDatasetJournal({ db, transaction });
-  const supervisor = await createDatasetSupervisor({ journal, directory: join(directory, "workers") });
+  const supervisor = await createDatasetSupervisor({ journal, directory: privateFolder(join(directory, "workers")) });
   cleanups.push(async () => { await supervisor.close(); db.close(); await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 }); });
   const host = createDatasetHost<Context>({ db, transaction, journal, supervisor,
     resolveAuthority(context, request) {
@@ -484,6 +485,41 @@ it("lets only owners acknowledge an exact committed response without exposing pa
   f.host.reconcileAttempt("owner", {...scope, reference: unconfirmed.reference, acknowledge: true});
   expect(attempts.request(attemptScope, {action: "get"}, () => {})).toEqual(next);
   expect(next.attempt!.token).not.toBe(pending.attempt!.token);
+});
+
+it("binds another app while retaining a committed guest response attempt", async () => {
+  const f = await fixture(); await f.activate();
+  f.host.setBinding("owner", {...scope, appId: "form", binding: f.binding()});
+  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
+  const selected = {...scope, appId: "form", principalKey: "friend", operationId: id(6), revisionSha256: prepared.revision.revisionSha256};
+  attempts.request(selected, {action: "save", idempotencyKey: "request", input: {value: "saved"}}, () => {});
+  const saved = await f.invoke("friend", id(6), {value: "saved"}, "form");
+  const receipts = f.db.prepare("SELECT * FROM dohc_dataset_receipts WHERE workspace_id=? AND dataset_id=?");
+  const savedReceipts = receipts.all(scope.workspaceId, scope.datasetId);
+  const events = f.db.prepare("SELECT * FROM dohc_dataset_events WHERE workspace_id=? AND dataset_id=? ORDER BY revision");
+  const savedEvents = events.all(scope.workspaceId, scope.datasetId);
+  expect(f.host.pendingAttempts("owner", scope).entries).toMatchObject([{outcome: "committed"}]);
+  expect(() => f.host.setBinding("owner", {...scope, appId: "dashboard", binding: f.binding([id(7)])})).not.toThrow();
+  expect(await f.invoke("friend", id(6), {value: "saved"}, "form")).toEqual({...saved, replayed: true});
+  expect(receipts.all(scope.workspaceId, scope.datasetId)).toEqual(savedReceipts);
+  expect(events.all(scope.workspaceId, scope.datasetId)).toEqual(savedEvents);
+  expect(f.host.lifecycle("owner", scope).apps).toEqual(expect.arrayContaining([{appId: "dashboard", binding: f.binding([id(7)])}]));
+  expect(f.host.pendingAttempts("owner", scope).entries).toHaveLength(1);
+});
+
+it("refuses a new binding only for unconfirmed attempts in other apps", async () => {
+  const f = await fixture(); await f.activate();
+  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
+  const selected = {...scope, appId: "form", principalKey: "friend", operationId: id(6), revisionSha256: prepared.revision.revisionSha256};
+  attempts.request(selected, {action: "save", idempotencyKey: "request", input: {value: "pending"}}, () => {});
+  expect(() => f.host.setBinding("owner", {...scope, appId: "form", binding: f.binding()})).not.toThrow();
+  const commitPublication = vi.fn();
+  expect(() => f.host.setBinding("owner", {...scope, appId: "dashboard", binding: f.binding([id(7)])}, commitPublication))
+    .toThrow("A response is pending in another app. Confirm it there before publishing this app.");
+  expect(commitPublication).not.toHaveBeenCalled();
+  expect(f.host.lifecycle("owner", scope).apps.map(app => app.appId)).toEqual(["form"]);
+  attempts.request({...selected, appId: "another-form"}, {action: "save", idempotencyKey: "another-request", input: {value: "pending"}}, () => {});
+  expect(() => f.host.setBinding("owner", {...scope, appId: "form", binding: f.binding([id(6), id(7)])})).not.toThrow();
 });
 
 it("cancels an unconfirmed retry before queued execution and permanently refuses its key", async () => {

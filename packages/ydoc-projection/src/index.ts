@@ -21,6 +21,7 @@ export {
   yDocToMarkdown,
 } from "./import-export.js";
 export { getDohcYDocBodyFragment } from "./body-fragment.js";
+export { yDocToArtifactMarkdown, createArtifactMarkdownProjector } from "./artifact-markdown.js";
 export {
   documentCreateUpdate,
   FRONTMATTER_REFUSAL,

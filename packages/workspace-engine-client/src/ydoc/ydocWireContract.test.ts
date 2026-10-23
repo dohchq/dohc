@@ -103,7 +103,7 @@ const appendResult = {
 describe("owner Y.Doc append result", () => {
   function projection(value: typeof appendResult) {
     const { oldestEntryAtMs: _omitted, ...ownerDraft } = value;
-    return { lineageClaimId: "lineage", ownerDraft };
+    return { lineageClaimId: "lineage", lineageOriginatedHere: false, ownerDraft };
   }
 
   it.each(["active", "sealed"])("accepts %s full results and six-field projections", (state) => {
@@ -118,7 +118,14 @@ describe("owner Y.Doc append result", () => {
     expect(decodeOwnerYDocOutboxAppendResult({ ...value, extra: true })).toEqual(value);
     const projected = projection(value);
     expect(decodeYdocResult(YDOC_METHOD.recordUpdate, { ...projected, extra: true, ownerDraft: { ...projected.ownerDraft, oldestEntryAtMs: -1, extra: true } })).toEqual(projected);
-    expect(decodeYdocResult(YDOC_METHOD.recordUpdate, { seq: 0, lineageClaimId: null, extra: true })).toEqual({ seq: 0, lineageClaimId: null });
+    expect(decodeYdocResult(YDOC_METHOD.recordUpdate, { seq: 0, lineageClaimId: null, lineageOriginatedHere: false, extra: true }))
+      .toEqual({ seq: 0, lineageClaimId: null, lineageOriginatedHere: false });
+  });
+
+  it("requires whether the lineage originated here in both shapes", () => {
+    const { lineageOriginatedHere: _omitted, ...owner } = projection(appendResult);
+    expect(() => decodeYdocResult(YDOC_METHOD.recordUpdate, owner)).toThrow(ProtocolShapeError);
+    expect(() => decodeYdocResult(YDOC_METHOD.recordUpdate, { seq: 1, lineageClaimId: null })).toThrow(ProtocolShapeError);
   });
 
   for (const field of ["sequence", "pendingBytes"] as const) {
@@ -126,7 +133,7 @@ describe("owner Y.Doc append result", () => {
       const value = { ...appendResult, [field]: invalid };
       expect(() => decodeOwnerYDocOutboxAppendResult(value)).toThrow(TypeError);
       const { oldestEntryAtMs: _omitted, ...ownerDraft } = value;
-      expect(() => decodeYdocResult(YDOC_METHOD.recordUpdate, { lineageClaimId: "lineage", ownerDraft })).toThrow(ProtocolShapeError);
+      expect(() => decodeYdocResult(YDOC_METHOD.recordUpdate, { lineageClaimId: "lineage", lineageOriginatedHere: false, ownerDraft })).toThrow(ProtocolShapeError);
     });
   }
 
@@ -154,20 +161,20 @@ describe("owner Y.Doc append result", () => {
   it("rejects quarantine, missing fields, null and arrays", () => {
     for (const state of ["quarantined", null]) {
       expect(() => decodeOwnerYDocOutboxAppendResult({ ...appendResult, state })).toThrow(TypeError);
-      expect(() => decodeYdocResult(YDOC_METHOD.recordUpdate, { lineageClaimId: "lineage", ownerDraft: { ...appendResult, state } })).toThrow(ProtocolShapeError);
+      expect(() => decodeYdocResult(YDOC_METHOD.recordUpdate, { lineageClaimId: "lineage", lineageOriginatedHere: false, ownerDraft: { ...appendResult, state } })).toThrow(ProtocolShapeError);
     }
     for (const field of Object.keys(appendResult)) {
       const value: Record<string, unknown> = { ...appendResult };
       delete value[field];
       expect(() => decodeOwnerYDocOutboxAppendResult(value)).toThrow(TypeError);
       if (field !== "oldestEntryAtMs") {
-        expect(() => decodeYdocResult(YDOC_METHOD.recordUpdate, { lineageClaimId: "lineage", ownerDraft: value as typeof appendResult })).toThrow(ProtocolShapeError);
+        expect(() => decodeYdocResult(YDOC_METHOD.recordUpdate, { lineageClaimId: "lineage", lineageOriginatedHere: false, ownerDraft: value as typeof appendResult })).toThrow(ProtocolShapeError);
       }
     }
     for (const value of [null, []]) {
       expect(() => decodeOwnerYDocOutboxAppendResult(value)).toThrow(TypeError);
       expect(() => decodeYdocResult(YDOC_METHOD.recordUpdate, value)).toThrow(ProtocolShapeError);
-      expect(() => decodeYdocResult(YDOC_METHOD.recordUpdate, { lineageClaimId: "lineage", ownerDraft: value })).toThrow(ProtocolShapeError);
+      expect(() => decodeYdocResult(YDOC_METHOD.recordUpdate, { lineageClaimId: "lineage", lineageOriginatedHere: false, ownerDraft: value })).toThrow(ProtocolShapeError);
     }
   });
 });

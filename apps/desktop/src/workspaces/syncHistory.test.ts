@@ -1,8 +1,6 @@
-import * as disk from "node:fs/promises";
-import { mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import * as timers from "node:timers/promises";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import type { RegistryEntry } from "./registryStore";
 import {
   provedNeverShared,
@@ -10,21 +8,10 @@ import {
   recordNeverSynced,
   recordReceivedShare,
   recordSynced,
+  runSchedulesOn,
+  scheduleComputer,
 } from "./syncHistory";
 import { createTestScratch } from "./testTemp";
-
-const io = vi.hoisted(() => ({
-  rename: vi.fn<typeof disk.rename>(), readFile: vi.fn<typeof disk.readFile>(), realpath: vi.fn<typeof disk.realpath>(),
-  delay: vi.fn<typeof timers.setTimeout>(),
-}));
-vi.mock("node:fs/promises", async (original) => ({
-  ...await original<typeof disk>(), rename: io.rename, readFile: io.readFile, realpath: io.realpath,
-}));
-vi.mock("node:timers/promises", async (original) => ({
-  ...await original<typeof timers>(), setTimeout: io.delay,
-}));
-const actual = await vi.importActual<typeof disk>("node:fs/promises");
-const clock = await vi.importActual<typeof timers>("node:timers/promises");
 
 const selector = { paths: ["Trip"], versionId: null, access: "view" as const };
 const channel = {
@@ -34,42 +21,23 @@ const channel = {
 const mount = {
   shareId: "s-mount", label: "Ana", granterEmail: "ana@dohc.test", relayUrl: "https://relay.dohc.test", grantedSelector: selector,
 };
+const laptop = { installId: "install-laptop", label: "Laptop" };
+const desk = { installId: "install-desk", label: "Desk" };
 
 let root: string;
 let entry: RegistryEntry;
 const none = async () => 0;
+const recordPath = () => join(root, ".dohc", "sync-history.json");
 
 beforeEach(async () => {
-  io.rename.mockImplementation(actual.rename);
-  io.readFile.mockImplementation(actual.readFile);
-  io.realpath.mockImplementation(actual.realpath);
-  io.delay.mockImplementation(clock.setTimeout);
   root = await createTestScratch("dohc-sync-history-");
   await mkdir(join(root, ".dohc"));
   entry = { workspaceId: "w-1", rootPath: root, kind: "personal", mode: "local-first" };
 });
 
-afterEach(() => {
-  vi.resetAllMocks();
-  vi.unstubAllGlobals();
-});
-
 describe("a workspace proved never shared", () => {
-  it("records sync after transient Windows destination locks", async () => {
-    vi.stubGlobal("process", { ...process, platform: "win32" });
-    await recordNeverSynced(root);
-    const locked = Object.assign(new Error("destination locked"), { code: "EPERM" });
-    io.rename.mockRejectedValueOnce(locked).mockRejectedValueOnce(locked);
-    io.delay.mockResolvedValue(undefined);
-    await recordSynced(root);
-    expect(io.rename).toHaveBeenCalledTimes(3);
-    expect(io.delay).toHaveBeenCalledTimes(2);
-    expect(await readSyncHistory(root)).toBe("synced");
-    expect(await readdir(join(root, ".dohc"))).toEqual(["sync-history.json"]);
-  });
-
   it("is a new workspace that never synced, whose engine applied nothing from another computer", async () => {
-    await recordNeverSynced(root);
+    await recordNeverSynced(root, laptop);
     expect(await provedNeverShared(entry, none)).toBe(true);
   });
 
@@ -92,16 +60,16 @@ describe("a workspace proved never shared", () => {
   });
 
   it("is never one that synced or opened as a share, even after it is forgotten and attached again", async () => {
-    await recordNeverSynced(root);
+    await recordNeverSynced(root, laptop);
     await recordSynced(root);
     // Attached again, the registry entry has no server connection or share.
     expect(await provedNeverShared(entry, none)).toBe(false);
-    await recordNeverSynced(root);
+    await recordNeverSynced(root, laptop);
     expect(await provedNeverShared(entry, none), "a new-workspace record does not replace it").toBe(false);
   });
 
   it("is never one the registry connects to a server or a share, whatever the folder says", async () => {
-    await recordNeverSynced(root);
+    await recordNeverSynced(root, laptop);
     const cases: RegistryEntry[] = [
       { ...entry, remote: { serverUrl: "https://server.dohc.test", ownerUserId: "u-me" } },
       { ...entry, shareView: { shareId: "s-view", granterEmail: null, genericChatWritable: false, grantedSelector: selector } },
@@ -112,7 +80,7 @@ describe("a workspace proved never shared", () => {
   });
 
   it("stays unproved after a joined chat or a mount is left or removed", async () => {
-    await recordNeverSynced(root);
+    await recordNeverSynced(root, laptop);
     await recordReceivedShare(root);
     expect(await provedNeverShared(entry, none)).toBe(false);
     // Schedules still run here: the workspace itself never synced.
@@ -121,18 +89,18 @@ describe("a workspace proved never shared", () => {
     expect(await provedNeverShared(entry, none)).toBe(false);
   });
 
-  it("leaves a record that synced, or that dohc cannot read, as it is when a share comes in", async () => {
-    const path = join(root, ".dohc", "sync-history.json");
+  it("keeps a sync or a share whatever a stale copy of the record says", async () => {
+    await recordNeverSynced(root, laptop);
+    // The desk's copy of the folder from before either was recorded.
+    const stale = await readFile(recordPath(), "utf8");
+    await recordReceivedShare(root);
+    await writeFile(recordPath(), stale);
+    expect(await provedNeverShared(entry, none), "the share stays").toBe(false);
+    expect(await readSyncHistory(root), "a share does not make it sync").toBe("never-synced");
     await recordSynced(root);
-    const synced = await readFile(path, "utf8");
-    await recordReceivedShare(root);
-    expect(await readFile(path, "utf8")).toBe(synced);
-    await writeFile(path, "{");
-    await recordReceivedShare(root);
-    expect(await readFile(path, "utf8")).toBe("{");
-    await rm(path);
-    await recordReceivedShare(root);
-    expect(await readSyncHistory(root)).toBe("absent");
+    await writeFile(recordPath(), stale);
+    expect(await readSyncHistory(root), "the sync stays").toBe("synced");
+    expect(await scheduleComputer(root, laptop), "so the relay chooses the host").toBeNull();
   });
 
   it("reads a record it cannot read as unknown, and only a missing one as absent", async () => {
@@ -142,27 +110,41 @@ describe("a workspace proved never shared", () => {
     await mkdir(path);
     expect(await readSyncHistory(root)).toBe("unknown");
     await rm(path, { recursive: true });
-    await recordSynced(root);
-    const synced = await readFile(path, "utf8");
-    await writeFile(path, synced.slice(0, 10));
+    await recordNeverSynced(root, laptop);
+    const record = await readFile(path, "utf8");
+    await writeFile(path, record.slice(0, 10));
     expect(await readSyncHistory(root), "a record cut off mid-write").toBe("unknown");
+    await writeFile(path, record);
+    // A file where the marks should be fails their read with an error other than ENOENT.
+    await writeFile(join(root, ".dohc", "sync-history"), "");
+    expect(await readSyncHistory(root), "a mark dohc cannot check may say synced").toBe("unknown");
   });
 
-  it("replaces the record whole, leaving nothing beside it", async () => {
-    await recordNeverSynced(root);
+  it("records each fact once, leaving nothing beside it", async () => {
+    await recordNeverSynced(root, laptop);
+    await recordReceivedShare(root);
     await recordReceivedShare(root);
     await recordSynced(root);
+    await recordSynced(root);
     expect(await readSyncHistory(root)).toBe("synced");
-    expect(await readdir(join(root, ".dohc"))).toEqual(["sync-history.json"]);
+    expect(await readdir(join(root, ".dohc"))).toEqual(["sync-history", "sync-history.json"]);
+    expect((await readdir(join(root, ".dohc", "sync-history"))).sort()).toEqual(["received-share", "synced"]);
+  });
+
+  it("does not bring back a workspace folder that is gone", async () => {
+    await rm(root, { recursive: true });
+    await expect(recordSynced(root)).rejects.toThrow();
+    await expect(recordReceivedShare(root)).rejects.toThrow();
+    await expect(readdir(root)).rejects.toThrow();
   });
 
   it("refuses to keep a share whose coming in it cannot record", async () => {
-    await mkdir(join(root, ".dohc", "sync-history.json"));
+    await writeFile(join(root, ".dohc", "sync-history"), "");
     await expect(recordReceivedShare(root)).rejects.toThrow();
   });
 
   it("is never one whose engine applied a change from another computer, or did not answer", async () => {
-    await recordNeverSynced(root);
+    await recordNeverSynced(root, laptop);
     expect(await provedNeverShared(entry, async () => 3)).toBe(false);
     expect(await provedNeverShared(entry, async () => null)).toBe(false);
   });
@@ -177,174 +159,170 @@ describe("a workspace proved never shared", () => {
   });
 });
 
-describe("replacing the record", () => {
-  const path = () => join(root, ".dohc", "sync-history.json");
+describe("the computer that runs a never-synced workspace's schedules", () => {
+  const schedulesPath = () => join(root, ".dohc", "sync-history", "schedules.json");
 
-  it.skipIf(process.platform !== "win32")("records a sync once a program reading the record closes it", async () => {
-    await recordNeverSynced(root);
-    const reader = await actual.open(path(), "r");
-    const conflicts: string[] = [];
-    io.rename.mockImplementation(async (from, to) => {
-      try {
-        await actual.rename(from, to);
-      } catch (error) {
-        conflicts.push((error as NodeJS.ErrnoException).code!);
-        await reader.close();
-        throw error;
-      }
-    });
-    try {
-      await expect(recordSynced(root)).resolves.toBeUndefined();
-    } finally {
-      await reader.close();
-    }
-    expect(conflicts).toEqual(["EPERM"]);
-    expect(await readSyncHistory(root)).toBe("synced");
-    expect(await readdir(join(root, ".dohc"))).toEqual(["sync-history.json"]);
+  it("is the computer that made it, on every computer the folder reaches", async () => {
+    await recordNeverSynced(root, laptop);
+    expect(await scheduleComputer(root, laptop)).toEqual({ kind: "computer", computer: laptop });
+    expect(await scheduleComputer(root, desk)).toEqual({ kind: "computer", computer: laptop });
+    expect(await readdir(join(root, ".dohc")), "reading writes nothing").toEqual(["sync-history.json"]);
   });
 
-  it.each(["EPERM", "EACCES", "EBUSY"])("gives up on a Windows %s that does not clear, keeping the old record", async (code) => {
-    vi.stubGlobal("process", { ...process, platform: "win32" });
-    await recordNeverSynced(root);
-    const before = await actual.readFile(path(), "utf8");
-    const error = Object.assign(new Error("the record is still open"), { code });
-    io.rename.mockRejectedValue(error);
-    io.delay.mockResolvedValue(undefined);
-    await expect(recordSynced(root)).rejects.toBe(error);
-    expect(io.rename).toHaveBeenCalledTimes(100);
-    expect(io.delay.mock.calls.reduce((total, [ms]) => total + ms!, 0)).toBe(2381);
-    expect(await actual.readFile(path(), "utf8")).toBe(before);
-    expect(await readdir(join(root, ".dohc")), "only its own temporary file is removed").toEqual(["sync-history.json"]);
-    io.rename.mockImplementation(actual.rename);
+  it("moves to the computer chosen, and stays there for every reader", async () => {
+    await recordNeverSynced(root, laptop);
+    expect(await runSchedulesOn(root, desk)).toBe(true);
+    expect(await scheduleComputer(root, laptop)).toEqual({ kind: "computer", computer: desk });
+    expect(await scheduleComputer(root, desk)).toEqual({ kind: "computer", computer: desk });
+    expect(await runSchedulesOn(root, laptop)).toBe(true);
+    expect(await scheduleComputer(root, desk)).toEqual({ kind: "computer", computer: laptop });
+    expect(await readdir(join(root, ".dohc", "sync-history")), "nothing left beside it").toEqual(["schedules.json"]);
+  });
+
+  it("belongs to the first computer that reads a record from before dohc named one", async () => {
+    await writeFile(recordPath(), "{\"version\": 1, \"synced\": false, \"receivedShare\": false}");
+    expect(await scheduleComputer(root, laptop)).toEqual({ kind: "computer", computer: laptop });
+    expect(await scheduleComputer(root, desk)).toEqual({ kind: "computer", computer: laptop });
+    expect(await provedNeverShared(entry, none), "the record keeps what it said").toBe(true);
+  });
+
+  it("is no computer when the workspace synced, has no history, or its history cannot be read", async () => {
+    expect(await scheduleComputer(root, laptop), "no record").toBeNull();
+    await writeFile(recordPath(), "{");
+    expect(await scheduleComputer(root, laptop), "unreadable").toBeNull();
+    expect(await runSchedulesOn(root, laptop)).toBe(false);
+    await rm(recordPath());
+    await recordNeverSynced(root, laptop);
     await recordSynced(root);
-    expect(await readSyncHistory(root)).toBe("synced");
+    expect(await scheduleComputer(root, laptop)).toBeNull();
+    expect(await runSchedulesOn(root, desk), "the relay chooses instead").toBe(false);
+    await expect(readFile(schedulesPath())).rejects.toThrow();
   });
 
-  it.each([["win32", "EIO"], ["linux", "EACCES"]])("fails at once on %s %s, which waiting cannot fix", async (platform, code) => {
-    vi.stubGlobal("process", { ...process, platform });
-    await recordNeverSynced(root);
-    const before = await actual.readFile(path(), "utf8");
-    const error = Object.assign(new Error("cannot replace"), { code });
-    io.rename.mockRejectedValue(error);
-    await expect(recordReceivedShare(root)).rejects.toBe(error);
-    expect(io.rename).toHaveBeenCalledTimes(1);
-    expect(io.delay).not.toHaveBeenCalled();
-    expect(await actual.readFile(path(), "utf8")).toBe(before);
-    expect(await readdir(join(root, ".dohc"))).toEqual(["sync-history.json"]);
-  });
-
-  it("never writes a share it read before a sync over that sync", async () => {
-    await recordNeverSynced(root);
-    const reading = Promise.withResolvers<void>();
-    const release = Promise.withResolvers<void>();
-    io.readFile.mockImplementationOnce((async (file, options) => {
-      const text = await actual.readFile(file, options);
-      reading.resolve();
-      await release.promise;
-      return text;
-    }) as typeof disk.readFile);
-    const written: string[] = [];
-    io.rename.mockImplementation(async (from, to) => {
-      written.push(await actual.readFile(from, "utf8"));
-      await actual.rename(from, to);
-    });
-    const share = recordReceivedShare(root);
-    await reading.promise;
-    const synced = recordSynced(root);
-    try {
-      await new Promise<void>(resolve => setImmediate(resolve));
-      expect(io.rename).not.toHaveBeenCalled();
-    } finally {
-      release.resolve();
-      await Promise.all([share, synced]);
+  it("is none dohc can name when its record cannot be read, until a computer takes over", async () => {
+    await recordNeverSynced(root, laptop);
+    await mkdir(join(root, ".dohc", "sync-history"));
+    for (const text of ["{", "{\"version\": 1, \"installId\": \"\", \"label\": \"Desk\"}", "{\"version\": 2, \"installId\": \"d\", \"label\": \"Desk\"}"]) {
+      await writeFile(schedulesPath(), text);
+      expect(await scheduleComputer(root, laptop), text).toMatchObject({ kind: "unreadable" });
     }
-    expect(written.map(text => JSON.parse(text))).toEqual([
-      { version: 1, synced: false, receivedShare: true },
-      { version: 1, synced: true },
-    ]);
-    expect(await readSyncHistory(root)).toBe("synced");
+    expect(await runSchedulesOn(root, laptop)).toBe(true);
+    expect(await scheduleComputer(root, desk)).toEqual({ kind: "computer", computer: laptop });
+  });
+});
+
+describe("a workspace's history stays inside it", () => {
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+
+  it("refuses a link at .dohc/sync-history, and writes nothing where it leads", async () => {
+    const outside = await createTestScratch("dohc-sync-history-outside-");
+    await recordNeverSynced(root, laptop);
+    await symlink(outside, join(root, ".dohc", "sync-history"), linkType);
+    const refusal = "dohc could not record this workspace's sync history. A link is at .dohc/sync-history, which must be a real folder. Remove or rename that link. Then retry.";
+    await expect(recordSynced(root)).rejects.toThrow(refusal);
+    await expect(recordReceivedShare(root)).rejects.toThrow(refusal);
+    // A link proves nothing, so no computer runs the schedules and none can take them.
+    expect(await readSyncHistory(root)).toBe("unknown");
+    expect(await scheduleComputer(root, laptop)).toBeNull();
+    expect(await runSchedulesOn(root, desk)).toBe(false);
+    expect(await readdir(outside)).toEqual([]);
   });
 
-  it("never writes a share read through a junction over a sync through the folder it reaches", async () => {
-    const alias = join(await createTestScratch("dohc-sync-history-alias-"), "workspace");
-    await symlink(root, alias, "junction");
-    await recordNeverSynced(root);
-    const reading = Promise.withResolvers<void>();
-    const release = Promise.withResolvers<void>();
-    io.readFile.mockImplementationOnce((async (file, options) => {
-      const text = await actual.readFile(file, options);
-      reading.resolve();
-      await release.promise;
-      return text;
-    }) as typeof disk.readFile);
-    // The sync either waits its turn once its folder is resolved, or writes at once.
-    const waiting = Promise.withResolvers<void>();
-    io.realpath.mockImplementation((async (folder) => {
-      try {
-        return await actual.realpath(folder);
-      } finally {
-        if (folder === root) waiting.resolve();
-      }
-    }) as typeof disk.realpath);
-    const written: string[] = [];
-    io.rename.mockImplementation(async (from, to) => {
-      const text = await actual.readFile(from, "utf8");
-      written.push(text);
-      if (JSON.parse(text).synced) waiting.resolve();
-      await actual.rename(from, to);
-    });
-    const share = recordReceivedShare(alias);
-    await reading.promise;
-    const synced = recordSynced(root);
-    try {
-      await waiting.promise;
-      await new Promise<void>(resolve => setImmediate(resolve));
-      expect(io.rename).not.toHaveBeenCalled();
-    } finally {
-      release.resolve();
-      await Promise.all([share, synced]);
+  it("refuses a file at .dohc/sync-history, and a .dohc that is a link", async () => {
+    await writeFile(join(root, ".dohc", "sync-history"), "");
+    await expect(recordSynced(root)).rejects.toThrow("A file is at .dohc/sync-history, which must be a real folder.");
+    const outside = await createTestScratch("dohc-sync-history-outside-");
+    await rm(join(root, ".dohc"), { recursive: true });
+    await symlink(outside, join(root, ".dohc"), linkType);
+    await expect(recordSynced(root)).rejects.toThrow("A link is at .dohc, which must be a real folder.");
+    await expect(recordNeverSynced(root, laptop)).rejects.toThrow("A link is at .dohc, which must be a real folder.");
+    expect(await readSyncHistory(root)).toBe("unknown");
+    expect(await readdir(outside)).toEqual([]);
+  });
+});
+
+describe("a mark that a link stands in for", () => {
+  it.each(["synced", "received-share"] as const)("counts a link that leads nowhere at %s as there, and refuses to write over it", async (name) => {
+    await recordNeverSynced(root, laptop);
+    await mkdir(join(root, ".dohc", "sync-history"));
+    await symlink(join(root, "nowhere"), join(root, ".dohc", "sync-history", name));
+    const write = name === "synced" ? recordSynced : recordReceivedShare;
+    await expect(write(root)).rejects.toThrow(
+      `dohc could not record this workspace's sync history. A link is at .dohc/sync-history/${name}, which must be a file. Remove or rename that link. Then retry.`,
+    );
+    expect(await provedNeverShared(entry, none), "never proved never shared").toBe(false);
+    if (name === "synced") {
+      expect(await readSyncHistory(root), "a stale never-synced record cannot undo it").toBe("synced");
+      expect(await scheduleComputer(root, laptop), "so no schedules run here").toBeNull();
     }
-    expect(written.map(text => JSON.parse(text))).toEqual([
-      { version: 1, synced: false, receivedShare: true },
-      { version: 1, synced: true },
-    ]);
-    expect(await readSyncHistory(alias)).toBe("synced");
+    expect((await lstat(join(root, ".dohc", "sync-history", name))).isSymbolicLink()).toBe(true);
+    await expect(lstat(join(root, "nowhere"))).rejects.toMatchObject({ code: "ENOENT" });
   });
+});
 
-  it("records another folder's sync while one folder's record is held", async () => {
-    const other = await createTestScratch("dohc-sync-history-other-");
-    await mkdir(join(other, ".dohc"));
-    await recordNeverSynced(root);
-    await recordNeverSynced(other);
-    const renaming = Promise.withResolvers<void>();
-    const release = Promise.withResolvers<void>();
-    io.rename.mockImplementation(async (from, to) => {
-      if (to === path()) {
-        renaming.resolve();
-        await release.promise;
-      }
-      await actual.rename(from, to);
-    });
-    const held = recordSynced(root);
-    try {
-      await renaming.promise;
-      await recordSynced(other);
-      expect(await readSyncHistory(other)).toBe("synced");
-      expect(await readSyncHistory(root)).toBe("never-synced");
-    } finally {
-      release.resolve();
-      await held;
-    }
+describe("a record from before the marks", () => {
+  it("keeps a sync it says, whatever a stale copy says after", async () => {
+    await writeFile(recordPath(), "{\"version\": 1, \"synced\": true}");
+    expect(await readSyncHistory(root)).toBe("synced");
+    await writeFile(recordPath(), "{\"version\": 1, \"synced\": false, \"receivedShare\": false}");
     expect(await readSyncHistory(root)).toBe("synced");
   });
 
-  it("lets a later change run after an earlier one fails", async () => {
-    await recordNeverSynced(root);
-    io.rename.mockRejectedValueOnce(Object.assign(new Error("disk error"), { code: "EIO" }));
-    const failed = recordReceivedShare(root);
-    const synced = recordSynced(root);
-    await expect(failed).rejects.toThrow("disk error");
-    await expect(synced).resolves.toBeUndefined();
-    expect(await readSyncHistory(root)).toBe("synced");
+  it("keeps a share it says, whatever a stale copy says after", async () => {
+    await writeFile(recordPath(), "{\"version\": 1, \"synced\": false, \"receivedShare\": true}");
+    expect(await provedNeverShared(entry, none)).toBe(false);
+    await writeFile(recordPath(), "{\"version\": 1, \"synced\": false, \"receivedShare\": false}");
+    expect(await provedNeverShared(entry, none)).toBe(false);
+    expect(await readSyncHistory(root), "a share does not make it sync").toBe("never-synced");
+  });
+});
+
+describe("a schedules record that names no computer", () => {
+  const legacy = "{\"version\": 1, \"synced\": false, \"receivedShare\": false}";
+
+  it("is unreadable whatever its words, and never loops", async () => {
+    await writeFile(recordPath(), legacy);
+    await mkdir(join(root, ".dohc", "sync-history"));
+    await writeFile(join(root, ".dohc", "sync-history", "schedules.json"), "absent");
+    expect(await scheduleComputer(root, laptop)).toMatchObject({ kind: "unreadable" });
+  });
+
+  it.each(["legacy", "named"])("is unreadable when a link that leads nowhere is there with a %s host, and never loops", async (host) => {
+    if (host === "legacy") await writeFile(recordPath(), legacy);
+    else await recordNeverSynced(root, laptop);
+    await mkdir(join(root, ".dohc", "sync-history"));
+    const target = join(root, "nowhere.json");
+    const path = join(root, ".dohc", "sync-history", "schedules.json");
+    await symlink(target, path);
+    const link = await readlink(path);
+    expect(await scheduleComputer(root, laptop)).toMatchObject({ kind: "unreadable" });
+    await expect(runSchedulesOn(root, desk)).rejects.toThrow("A link is at .dohc/sync-history/schedules.json");
+    expect(await readlink(path)).toBe(link);
+    await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("never reads or replaces a link to an existing schedules record", async () => {
+    await recordNeverSynced(root, laptop);
+    await mkdir(join(root, ".dohc", "sync-history"));
+    const outside = await createTestScratch("dohc-sync-history-outside-");
+    const target = join(outside, "schedules.json");
+    const text = JSON.stringify({ version: 1, ...desk });
+    await writeFile(target, text);
+    const path = join(root, ".dohc", "sync-history", "schedules.json");
+    await symlink(target, path);
+    const link = await readlink(path);
+    expect(await scheduleComputer(root, laptop)).toMatchObject({ kind: "unreadable" });
+    await expect(runSchedulesOn(root, laptop)).rejects.toThrow("A link is at .dohc/sync-history/schedules.json");
+    expect(await readlink(path)).toBe(link);
+    expect(await readFile(target, "utf8")).toBe(text);
+  });
+
+  it("never creates a history record through a dangling link", async () => {
+    const target = join(root, "nowhere.json");
+    await symlink(target, recordPath());
+    expect(await readSyncHistory(root)).toBe("unknown");
+    await expect(recordNeverSynced(root, laptop)).rejects.toThrow("A link is at .dohc/sync-history.json");
+    expect((await lstat(recordPath())).isSymbolicLink()).toBe(true);
+    await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

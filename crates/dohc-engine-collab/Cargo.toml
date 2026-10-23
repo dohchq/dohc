@@ -28,6 +28,8 @@ test-support = []
 held-proof-memory = []
 
 [dependencies]
+dohc-engine-reader = { path = "../dohc-engine-reader" }
+tokio = { version = "1", features = ["sync"] }
 # The durable store (single writer, migration ledger with the R11a ydoc tables,
 # content-addressed binary_blobs, the R04 materialization-job pipeline).
 dohc-engine-storage = { path = "../dohc-engine-storage" }
@@ -65,6 +67,7 @@ ryu-js = "1.0.3"
 base64 = "0.23"
 
 [dev-dependencies]
+dohc-engine-reader = { path = "../dohc-engine-reader", features = ["test-support"] }
 rusqlite = { version = "0.40", features = ["limits"] }
 # Integration tests need the library built with its test APIs.
 dohc-engine-collab = { path = ".", features = ["test-support"] }

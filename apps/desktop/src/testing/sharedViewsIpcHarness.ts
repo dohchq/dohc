@@ -11,6 +11,7 @@ import type { EngineRelayWorkspaceClient } from "../workspaces/engineRelayClient
 import { createWorkspaceAuthorityOwner, type PhysicalWorkspace, type WorkspaceAuthorityLease } from "../workspaces/workspaceAuthorityOwner";
 import { createRendererWorkspaceOperationRunner, type ExactRendererWorkspaceOperation } from "../window/rendererWorkspaceOperation";
 import { createJoinedWorkspaceRunner } from "../workspaces/createJoinedWorkspace";
+import type { CreatedWorkspace } from "../workspaces/createWorkspaceFolder";
 import { type ShareViewInfo } from "../workspaces/shareViewInfo";
 import { withStaleSensitiveWorkspaceOperation } from "../workspaces/workspaceAssets";
 import { buildShareCode } from "../workspaces/syncCode";
@@ -29,10 +30,16 @@ export const ready: WatcherStatusResult = {
   terminal: false,
   running: true,
   degraded: false,
-  noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [],
+  noAtomicPlacement: false, recoveryUnavailable: false, deferredWrites: [], keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 },
 };
 
-export async function createSharedViewsIpcHarness(options: { rootPath?: string; syncNotices?: (isCurrent: () => boolean) => Promise<void> } = {}) {
+export async function createSharedViewsIpcHarness(options: {
+  rootPath?: string;
+  syncNotices?: (isCurrent: () => boolean) => Promise<void>;
+  // How the authority and the open flow resolve roots. Real folders use canonicalWorkspaceRoot.
+  canonicalizeRoot?: (root: string) => string;
+} = {}) {
+  const canonicalizeRoot = options.canonicalizeRoot ?? ((root: string) => root);
   const steps: string[] = [];
   const home = resolve("/shared-views-ipc-home").replace(/\\/g, "/");
   const rootPath = `${home}/received`;
@@ -43,7 +50,7 @@ export async function createSharedViewsIpcHarness(options: { rootPath?: string; 
   };
   const registry = new Map([[workspace.workspaceId, workspace]]);
   const authorities = createWorkspaceAuthorityOwner({
-    findWorkspace: (id: string) => registry.get(id) ?? null, canonicalizeRoot: (root: string) => root, createState: () => ({}),
+    findWorkspace: (id: string) => registry.get(id) ?? null, canonicalizeRoot, createState: () => ({}),
   });
   const attachmentId = await authorities.withOperation("existing", operation => operation.workspace.attachmentId);
   let rendererCurrent = true;
@@ -68,7 +75,7 @@ export async function createSharedViewsIpcHarness(options: { rootPath?: string; 
   const fetchAccess = vi.fn<Dependencies["fetchShareViewAccess"]>(async () => "edit");
   const readDir = vi.fn(async (_root: string) => [] as string[]);
   const mkdir = vi.fn(async () => { steps.push("mkdir"); });
-  const createFolder = vi.fn(async (input: { workspaceId?: string; rootPath: string }) => {
+  const createFolder = vi.fn(async (input: { workspaceId?: string; rootPath: string }): Promise<CreatedWorkspace> => {
     steps.push("create");
     return { workspaceId: input.workspaceId!, rootPath: input.rootPath, kind: "personal" as const, mode: "local-first" as const };
   });
@@ -77,7 +84,7 @@ export async function createSharedViewsIpcHarness(options: { rootPath?: string; 
   const syncNotices = vi.fn(options.syncNotices ?? (async (_isCurrent: () => boolean) => undefined));
   const surfaces = vi.fn(() => { steps.push("surfaces"); });
   const createJoinedWorkspace = createJoinedWorkspaceRunner({
-    reserve: input => authorities.reserveBinding(input), createFolder,
+    canonicalizeRoot, reserve: input => authorities.reserveBinding(input), createFolder,
     register: (reservation, entry) => authorities.registerReservedBinding(reservation, entry, {
       persist: () => { steps.push("register"); registry.set(entry.workspaceId, entry); },
       rollback: () => { registry.delete(entry.workspaceId); },

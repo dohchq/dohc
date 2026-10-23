@@ -25,7 +25,7 @@ The PR verifier rejects missing tools or versions that differ from those workflo
 
 On Linux, install Chromium system dependencies once with `pnpm exec playwright install-deps chromium`.
 This preparation requires administrator access.
-The verifier installs the pinned browser.
+`pnpm qa:e2e` and the PR verifier install the pinned browser.
 Missing host dependencies fail the browser proofs.
 
 Run `pnpm run doctor` to inspect readiness without changing the checkout.
@@ -94,13 +94,25 @@ When Rust is selected, it runs `cargo fmt --check`, then clippy and the nextest 
 A failure stops the run before it joins the queue. The `pre-queue-*` steps record these checks, and the full gate repeats them as evidence.
 The runner labels its Postgres container and removes it by the recorded container ID.
 
-### The verification queue on the shared Windows host
+### The verification queue on the shared hosts
 
-On the shared Windows host, a queue service runs PR verifications, one per verification lane.
+The shared Windows host and the shared Mac each run a queue service for PR verifications, one per verification lane.
 After the pre-queue checks, `pnpm verify:pr` hands the commit to the service and reports its progress until it finishes.
-The service verifies the commit in one of its own checkouts, `C:\w\_verification\lane` to `lane-4`, so your checkout is free to change while the request waits.
+The service verifies the commit in one of its own checkouts, the lanes, so your checkout is free to change while the request waits.
 Stopping `pnpm verify:pr` does not stop the request. Run the same command again to follow it, or to get its result once it has finished.
 Pass `--detach` to submit the request and return at once.
+
+Each host keeps its queue root beside its build slot root:
+
+| | Windows host | Mac |
+| --- | --- | --- |
+| Build slot root | `C:\w\_locks` | `~/dev/worktrees/.locks` |
+| Queue root | `C:\w\_verification` | `~/dev/worktrees/_verification` |
+| Lanes | `lane` to `lane-4` in the queue root | `lane` in the queue root |
+| Service | `dohc-verification-queue` scheduled task | `app.dohc.verification-queue` LaunchAgent |
+| Nightly run | `dohc-verification-nightly` scheduled task | `app.dohc.verification-nightly` LaunchAgent |
+
+A Mac takes the shared build budget only while `~/dev/worktrees/.locks` exists, and queues only while the service is installed. Other Macs verify inline.
 
 - [Owners take turns](#owners-take-turns). Each owner's requests run in the order the service accepted them, unless someone [moves one](#move-a-waiting-request).
 - A newer commit on the same branch replaces that branch's waiting request and keeps its owner and its place, including a place a move gave it. A running request finishes.
@@ -109,12 +121,12 @@ Pass `--detach` to submit the request and return at once.
 - A run that fails a check is reported at once. The service never retries it.
 - A run stops and fails after two hours of awake time. Time the machine spends asleep does not count.
 - While Docker does not respond, runs that need the JavaScript gate wait and Rust-only runs continue.
-- A run beyond the first starts only while free memory is at least 10 GB. The service counts only its own runs here, not inline gates holding a lane. A check that fails after free memory fell below 3 GB during the run is retried as a machine failure.
+- A run beyond the first starts only while free memory is at least 10 GB. The service counts only its own runs here, not inline gates holding a lane. A check that fails after free memory fell below 3 GB during the run is retried as a machine failure. On the Mac, free memory includes the inactive memory macOS can reclaim at once.
 - While free disk is below the 40 GB floor, no run starts. The service first deletes the build output of its lanes that have no run.
 
-Each lane runs with its own temp folder, `C:\w\_verification\tmp\<lane>`, which antivirus skips and the service empties before each run.
-Each attempt records the load it verified under in `status.json` and `C:\w\_verification\history.jsonl`: the highest lane setting while it ran, the most runs at once, the lowest free memory, and the mean CPU use. Read them before changing the lane count, and to tell a failure under three lanes from one under two.
-Each attempt has its own evidence folder, `C:\w\_verification\requests\<id>\attempts\<n>`, and its `result.json` names the request and attempt.
+On Windows, each lane runs with its own temp folder, `C:\w\_verification\tmp\<lane>`, which antivirus skips and the service empties before each run.
+Each attempt records the load it verified under in `status.json` and in `history.jsonl` in the queue root: the highest lane setting while it ran, the most runs at once, the lowest free memory, and the mean CPU use. Read them before changing the lane count, and to tell a failure under three lanes from one under two.
+Each attempt has its own evidence folder, `requests/<id>/attempts/<n>` in the queue root, and its `result.json` names the request and attempt.
 Read the service's verdict from the request's `status.json`, or from the last line `pnpm verify:pr` prints.
 
 Run `pnpm verify:queue status` to see the service, a pause, the lane setting, the running requests, the line with each request's owner, and wait estimates.
@@ -131,6 +143,7 @@ While the queue is paused, every tab shows a banner with the words `pnpm verify:
 The pause records `by` as `{ "name": "dashboard", "host": "<host name the page used>" }`, and the service log records each pause and resume from the dashboard.
 
 The lane switch beside Pause sets the host's lane count, `verification-lanes`, to 2 or 3 without asking first. It always shows the current setting, including a count of 1 or 4 set on the host.
+The Mac's dashboard refuses the switch and keeps one lane, because [Electron runs cannot share its display](#lanes-on-the-mac).
 At 3, the queue starts a third gate when a request waits and free memory allows another run. The first gate in `C:\w\_verification\lane-3` starts cold, because the service creates that checkout then.
 Switching back to 2 stops nothing. Lane 3 finishes its current gate and takes no more. Until then, every tab shows `Lane 3 closes after its current gate`, and `pnpm verify:queue status` prints the same note.
 The setting stays until someone changes it, through service and computer restarts.
@@ -149,13 +162,38 @@ Pause, resume, and the lane switch accept only a JSON `POST` whose `Origin` head
 The lane switch accepts only `{ "lanes": 2 }` or `{ "lanes": 3 }`. The server refuses any other value and changes nothing.
 A write body must arrive within 10 seconds and be at most 4 KB. The server answers a refused write and closes its connection.
 
-The `dohc-verification-queue` scheduled task starts the service at logon and every five minutes if it is not running.
+On Windows, the `dohc-verification-queue` scheduled task starts the service at logon and every five minutes if it is not running.
 A supervisor runs the service in a Windows job object. When the service exits or its heartbeat stops for two minutes, the supervisor stops it and everything it started, then starts it again.
+
+On the Mac, launchd runs the supervisor, `supervisor.mjs` in the queue root, as a LaunchAgent in the login session, where Electron can open windows.
+launchd starts it at login and again whenever it exits. The supervisor restarts the service as it does on Windows.
+launchd stops only a job's process group, and the verifier starts each command in a session of its own, so the supervisor finds the service's processes itself.
+Each service instance runs with `DOHC_VERIFICATION_SERVICE_INSTANCE` set to an id of its own. Every process it starts inherits that variable, whatever its session, parent, or folder.
+The supervisor finds those processes with `procenv` in the queue root, which the install builds with the system `cc`, so a Mac needs the Xcode Command Line Tools.
+Only your user can change `procenv` and the queue's files, because `~/dev` is open to its owner only. A queue root that `DOHC_VERIFICATION_QUEUE_ROOT` places elsewhere loses that protection. `procenv` reads each process's environment entries exactly, so the marker in a command's arguments, such as `pgrep -f DOHC_VERIFICATION_REQUEST=<id>`, or inside another variable's value, does not count.
+macOS hides the environment of Apple's own programs, such as `/bin/sh` and `/bin/sleep`. For those, the supervisor also records each process below the service with its start time, once a second.
+The id and that record are in `service-tree.json` in the queue root. A supervisor that launchd killed leaves them, and the next one stops those processes before it starts a service.
+To stop a process, the supervisor sends SIGSTOP, reads the process again, and sends SIGKILL only if its start time and id are unchanged. A stopped process cannot exit, so its pid cannot pass to another process before the check.
+If a process outlives SIGKILL, the supervisor keeps the record, starts no service, and tries again after 5 seconds, then at longer waits up to a minute. Meanwhile `pnpm verify:queue status` prints `held since`, and `supervisor.log` records each try.
+When an attempt ends, the service also stops what its verifier left running, such as a daemon a test started. The verifier runs with `DOHC_VERIFICATION_REQUEST` set to the request's id, and the service stops each process that carries it, in the same way. The attempt in `status.json` and its `finished` event in `history.jsonl` record the count as `strays`.
+The lane stays held until those processes have stopped. If one survives, the service tries again at growing waits up to a minute, and `pnpm verify:queue status` shows the run as `held`.
+An Apple program left running by an attempt stops only when the service restarts, because its environment is hidden.
+Some processes can still escape: one that clears its environment, one that launchd starts on its behalf, such as an app opened through Launch Services, and an Apple program whose parent died before the supervisor recorded it. The service removes each request's Docker containers itself.
+The reverse also happens: a shared per-user daemon that a verifier happens to start first, such as an ssh ControlMaster, gpg-agent, watchman, or a tmux server on its default socket, carries the marker, and the service stops it with the run.
+While a run is active, the service holds off idle sleep with `caffeinate`, so a Mac set to sleep does not pause a gate.
+
 A request that was running when the service stopped runs again as a new attempt. A request whose receipt already finished keeps that result.
 Install or upgrade the service from a checkout of `origin/main` with `pnpm verify:queue install`. An upgrade takes effect when the current runs end. No new run starts until then.
 
-CI, other platforms, and runs with their own `DOHC_BUILD_SLOT_ROOT` verify inline in their checkout.
-On the shared host, pass `--inline` only when the queue cannot do the job: the service is unavailable, or the run needs `--reuse-rust`, or `--keep-going` without `--full`.
+On a Mac, the install creates `~/dev/worktrees/.locks` if it is missing. It writes both LaunchAgents to `~/Library/LaunchAgents` and loads them with `launchctl bootstrap gui/<uid>`.
+The LaunchAgents keep the installer's `PATH`. Run the install from a shell that finds node, git, cargo, and Docker.
+`pnpm verify:queue restart` loads the supervisor's LaunchAgent again, so a changed definition applies.
+To remove the service from a Mac, run `pnpm verify:queue uninstall`. It unloads and deletes both LaunchAgents, and `pnpm verify:pr` then runs inline.
+The queue root keeps its requests, history, lanes, and installs, so a later install starts with warm lanes. The uninstall prints how to remove them too.
+`~/dev/worktrees/.locks` also stays, so builds and gates on that Mac keep sharing the build budget. To end that, delete the folder while no build or gate runs.
+
+CI, Linux, Macs without the service, and runs with their own `DOHC_BUILD_SLOT_ROOT` verify inline in their checkout.
+On a shared host, pass `--inline` only when the queue cannot do the job: the service is unavailable, or the run needs `--reuse-rust`, or `--keep-going` without `--full`.
 An inline run takes a lane outside the [owners' turns](#owners-take-turns), and it says so when it starts. Inline runs still wait for the host's verification lane, so they never overlap a queued run.
 An inline run owns its checkout until cleanup and receipt writing finish. Another PR run in that checkout fails before installation or queue admission and reports the owner.
 
@@ -166,6 +204,7 @@ node tools/rust-engine-program/build-slot.mjs --status
 ```
 
 Use `--root <directory>` to inspect another queue root. The command emits JSON and does not create directories or acquire slots.
+On a host that [checks Rust on Linux](#rust-on-linux), it also reports the Linux slot.
 Each lane reports owners and waiters with their purpose, checkout, commit, phase, and elapsed time when recorded.
 Older records without that metadata have an unknown purpose.
 Wait estimates use the median duration of up to twenty completed runs in the same lane.
@@ -203,6 +242,45 @@ Record other host builds and gates during the comparison; a separate outer queue
 Compare elapsed time, queue time, failures, and peak host memory under matching work and cache conditions.
 Do not change the live queue root or remove another run's tickets to conduct a trial.
 Remove the two verification trial environment variables from the shell before returning to ordinary verification.
+
+#### Lanes on the Mac
+
+Keep the Mac at one lane. Each desktop proof opens Electron windows on the Mac's one display, and Electron runs cannot share it.
+The dashboard refuses the lane switch there. Do not write `verification-lanes` on the Mac.
+
+### Rust on Linux
+
+On the shared Windows host, a run that selects Rust also checks Rust in WSL. A change that breaks only the Linux build then fails before merge.
+A PR run runs the gate's clippy command there, which builds every target, tests included, without running them.
+It then runs the app compiler owner's tests, which check its Landlock and seccomp rules. Those compile only on Linux.
+A full run, such as the nightly, runs the whole Rust job there, tests included.
+A full Rust job on every PR would take as long as the Windows one, and the host runs one Linux job at a time for every lane.
+
+The host names its WSL distro in `verification-linux` in the build slot root:
+
+```powershell
+Set-Content C:\w\_locks\verification-linux Ubuntu
+```
+
+Without that file, nothing runs on Linux. Other hosts and CI do not have it.
+
+- The verifier sends the commit and its base to the distro as a Git bundle. The distro checks out the commit in `~/.dohc-verification/linux`. A full run installs dependencies and runs `verify.mjs pr --job rust` there, with the same pinned tools as Windows.
+- The host runs one Linux job at a time. The job waits for the Linux slot, then takes a cargo lane, like a build in another lane, and builds with the same number of jobs.
+- The job runs in a systemd user scope with a memory limit of 11 GB, because all WSL distros share one VM with Docker. When the Windows side stops, the scope stops everything the job started.
+  The job frees its slots only after WSL confirms that the scope stopped. Otherwise the run is a machine failure, and the job leaves its slots as a holder that died leaves them. Each slot frees once the verifier has exited and its grace has passed since its last heartbeat, which stops when the job gives the slot up: 30 minutes for the cargo lane, about 2 minutes for the Linux slot, so that the next Linux job can stop the scope.
+  If WSL's connection broke during a run, its Linux build can keep running beside other builds until the scope's two-hour limit.
+  The next job stops a scope that a killed run left behind, and does not start while one still runs.
+  The scope's peak memory and out-of-memory kills are in the job's `scope.json`. A failure after a kill at the limit is a machine failure.
+- Before it builds, the job waits until Windows has room for it. The VM's page cache already counts against Windows memory, so the job needs only the part of its limit that exceeds that cache, with 3 GB still free.
+- The job waits at most 75 minutes in all for the Linux slot, a cargo lane, and memory, or 55 minutes in a full run. The run's own Windows jobs hold a cargo lane and memory for about 45 minutes, or 60 in a full run, so the wait outlasts them. A longer wait is a machine failure, so the queue retries the run instead of failing it at its two-hour limit.
+- The step is `rust-linux`. Its evidence is in the attempt's `rust-linux` folder: a `result.json`, the logs, and the scripts that ran in WSL. In a full run, that `result.json` and the logs are the Linux verifier's own.
+- A clippy error or warning, or a failed Linux test, fails the change. A failed test appears under `failed` and `flaky` with the step `rust-linux`. A failure of WSL, of the transfer, or of the Linux host is a machine failure, and the queue retries it.
+  The distro keeps its own cargo home, so the job first runs `cargo fetch --locked`. If cargo gives up after network errors, the run is a machine failure too. Any other failed fetch, such as a lockfile that needs an update, fails the change.
+- `pnpm verify:plan` shows the distro under `linux`. A run that reuses Rust evidence with `--reuse-rust` runs nothing on Linux, because a reuse covers renderer changes only.
+
+To run a failed Linux check again, use your own clone in the distro, not the queue's checkout.
+The distro needs systemd, and the Node, pnpm, Rust, and cargo tool versions that `pr-checks.yml` pins on the `PATH` of a login shell.
+The first job sends the whole history, about 60 MB, and builds from cold.
 
 ### Restart the computer without losing a run
 
@@ -276,7 +354,7 @@ The turns add no capacity. They give each thread quick feedback on its most impo
 
 `pnpm verify:queue status`, the wait estimates, and the dashboard show the line in the order the service starts it when every request can start.
 The dashboard's Queue tab shows each request's owner and how many requests that owner has waiting.
-An [inline run](#the-verification-queue-on-the-shared-windows-host) takes no turn.
+An [inline run](#the-verification-queue-on-the-shared-hosts) takes no turn.
 
 ### Move a waiting request
 
@@ -314,7 +392,8 @@ A `--full` run always keeps going. On the shared host, the queue keeps going onl
 
 ### Nightly run
 
-Every night at 03:07, the `dohc-verification-nightly` scheduled task submits a full verification of main's head: every gate, every package, every repository test, and every proof.
+Every night at 03:07, the host's nightly task submits a full verification of main's head: every gate, every package, every repository test, and every proof.
+On Windows that is the `dohc-verification-nightly` scheduled task. On the Mac it is the `app.dohc.verification-nightly` LaunchAgent, and launchd runs a night the Mac slept through when it wakes.
 It covers everything merged since the last nightly that passed, and it runs before the rest of the line. A head that already passed is not verified again.
 It keeps going after a failure, so triage sees the failures of both jobs.
 A PR run lets desktop unit test files share workers. A full run, the nightly included, runs each desktop unit test file in a worker of its own, so a test that passes only when another file runs before it in the same worker fails there.

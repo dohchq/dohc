@@ -70,7 +70,8 @@ import {
 import { UrlPasteOffer } from "./UrlPasteOffer";
 import { bridge } from "../bridge";
 import { FindReplaceBar } from "./FindReplaceBar";
-import { findReplaceExtension } from "./findReplace";
+import { findReplaceExtension, runFindCommand } from "./findReplace";
+import { onEditorMenuCommand } from "./editorMenuCommands";
 import { makeInlineAtomPlugin } from "./inlineAtomPlugin";
 import { makeTableControlsPlugin } from "./tableControls";
 import {
@@ -139,7 +140,7 @@ import {
 import { intraBlockRange, type IntraBlockMatch } from "./intraBlock";
 import { SafeTrailingNode } from "./safeTrailingNode";
 import { hasFormattableSelection, selectionFormat } from "./selectionFormat";
-import { createCollaborationHistoryHandle } from "./sharedCollaborationHistory";
+import { CollaborationHistoryInput, createCollaborationHistoryHandle } from "./sharedCollaborationHistory";
 import { ListConversions, parseMarkdownListClipboard } from "./listEditing";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
@@ -771,6 +772,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
                   field: "body",
                   yUndoOptions: { undoManager: collaborationHistory! },
                 }),
+                CollaborationHistoryInput,
                 // Only wired when the caller hands us an Awareness
                 // bound to this same ydoc (docPresence.ts's bindDocPresence).
                 // No awareness (today's only caller, or a peer that dropped
@@ -932,6 +934,13 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         pane.removeEventListener("dragover", onDragOver);
         pane.removeEventListener("drop", onDrop);
       };
+    }, [editor]);
+
+    // Edit > Find on macOS, while focus is in this editor or its find bar.
+    useEffect(() => {
+      const container = containerRef.current;
+      if (!container || !editor) return;
+      return onEditorMenuCommand(container, (command) => runFindCommand(editor, command));
     }, [editor]);
 
     // A choice is its own undo step in either history, so Undo, like Ctrl+Z,

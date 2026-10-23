@@ -590,9 +590,9 @@ test("proof edits during preparation reject full source provenance", () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("prepared desktop checks staged compiler bytes on Windows and Linux x64", () => {
-  for (const [platform, arch] of [["win32", "x64"], ["win32", "arm64"], ["linux", "x64"], ["linux", "arm64"]]) {
-    const supported = arch === "x64" && ["win32", "linux"].includes(platform);
+test("prepared desktop checks staged compiler bytes on Windows x64, Apple silicon macOS, and Linux", () => {
+  for (const [platform, arch] of [["win32", "x64"], ["win32", "arm64"], ["darwin", "arm64"], ["darwin", "x64"], ["linux", "x64"], ["linux", "arm64"], ["linux", "arm"]]) {
+    const supported = platform === "win32" ? arch === "x64" : platform === "darwin" ? arch === "arm64" : arch !== "arm";
     const root = mkdtempSync(join(tmpdir(), "dohc-prepare-compiler-"));
     try {
       const invoke = createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
@@ -991,6 +991,7 @@ test("path folding data and fixtures select Rust and their TypeScript drift chec
   for (const file of [
     "crates/dohc-engine-files/src/pathFoldData.json",
     "crates/dohc-engine-files/src/pathFoldFixtures.json",
+    "crates/dohc-engine-files/src/pathCollisionFixtures.json",
     "packages/workspace-contracts/src/pathFoldData.json",
   ]) {
     assert.deepEqual(selectedGates([file], workflow), { rust: true, js: true }, file);
@@ -1035,9 +1036,9 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
   ], { cwd: root, encoding: "utf8" }).trim();
   try {
     for (const file of [
-      "scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/queue.mjs", "scripts/verification/timing.mjs", "scripts/verification/flaky.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
+      "scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/queue.mjs", "scripts/verification/queue-supervisor.mjs", "scripts/verification/timing.mjs", "scripts/verification/flaky.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
       "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/admission.mjs", "scripts/verification/rust-reuse.mjs",
-      "tools/rust-engine-program/build-slot.mjs", "tools/rust-engine-program/tree-provenance.mjs",
+      "scripts/verification/linux.mjs", "tools/rust-engine-program/build-slot.mjs", "tools/rust-engine-program/tree-provenance.mjs",
       "tools/rust-engine-program/git-read.mjs", "tools/rust-engine-program/gate-commands.mjs", "tools/rust-engine-program/require-ci-pass-verdict.mjs",
       "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml",
     ]) {

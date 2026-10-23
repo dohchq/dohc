@@ -15,6 +15,7 @@ import {
 } from "./WikilinkPicker";
 import type { WikilinkFile } from "./wikilinkPlugin";
 import { inListView, mockListLayout } from "../ui/listLayout.testSupport";
+import { indexFileListing } from "../workbench/file-listing-index";
 
 // Same ResizeObserver / Range stubs MarkdownEditor.test.ts uses — needed
 // because the picker calls `view.coordsAtPos`, which under real
@@ -99,6 +100,34 @@ describe("applyWikilinkPick — insertMode: node (the @-mention path)", () => {
       target: "deep/nested/untitled-thing",
       label: "untitled-thing",
     });
+    editor.destroy();
+  });
+});
+
+describe("WikilinkPicker — option names", () => {
+  it("names each option by its display name and extensionless path, as before the chip", () => {
+    const editor = makeEditor("@");
+    const listed = indexFileListing([
+      { path: "notes/alpha.md", kind: "file" },
+      { path: "plan.md", kind: "file" },
+      { path: "notes/guide.markdown", kind: "file" },
+    ]).markdownWikilinkFiles;
+    render(
+      createElement(WikilinkPicker, {
+        state: { open: true, from: 1, query: "" },
+        files: [...listed, { path: "notes/roadmap.md", title: "Roadmap" }],
+        view: editor.view,
+        onDismiss: vi.fn(),
+      }),
+    );
+
+    expect(screen.getAllByRole("option").map((option) => option.getAttribute("aria-label"))).toEqual([
+      "alpha notes/alpha",
+      "guide notes/guide.markdown",
+      "Roadmap notes/roadmap",
+      "plan",
+    ]);
+    expect(screen.getByRole("option", { name: "alpha notes/alpha" })).toBeTruthy();
     editor.destroy();
   });
 });

@@ -9,6 +9,8 @@ import {
   type RefObject,
 } from "react";
 import { IconButton } from "./controls";
+import { isComposingKey } from "./keys";
+import { focusedElementIn } from "./focusedElement";
 import { useDismiss } from "./useDismiss";
 
 export type MenuItem = {
@@ -195,12 +197,6 @@ const ROW_TONE = {
   danger: { base: MENU_ROW_TONE.danger, hover: "hover:bg-hover" },
 };
 
-// During IME composition, Enter, Escape and the arrows work the candidate
-// list. Some browsers mark those keys only with keyCode 229.
-function composing(event: KeyboardEvent): boolean {
-  return event.nativeEvent.isComposing || event.keyCode === 229;
-}
-
 function isField(row: MenuRow): row is MenuField {
   return "field" in row;
 }
@@ -299,11 +295,14 @@ export function Menu(props: {
     if (props.closeOnPick !== false) close();
     item.onSelect();
   };
-  const typing = () => document.activeElement instanceof HTMLInputElement && !!list.current?.contains(document.activeElement);
-  const current = () => rowElements.current.findIndex((row) => row === document.activeElement);
+  const typing = () => {
+    const focused = focusedElementIn(list.current);
+    return focused instanceof HTMLInputElement && !!list.current?.contains(focused);
+  };
+  const current = () => rowElements.current.findIndex((row) => row === focusedElementIn(row));
   const onKeyDown = (event: KeyboardEvent) => {
     const inField = typing();
-    if (inField && composing(event)) return;
+    if (inField && isComposingKey(event)) return;
     const arrow = event.key === "ArrowDown" || event.key === "ArrowUp";
     const letter = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
     // A field keeps Home, End and the typed letters; the arrows leave it.
@@ -391,7 +390,7 @@ export function Menu(props: {
             if (isField(entry)) {
               const { field } = entry;
               return (
-                <div key={entry.id} className="py-0.5">
+                <div key={entry.id} className="relative py-0.5">
                   <input
                     ref={setElement}
                     autoFocus
@@ -409,17 +408,19 @@ export function Menu(props: {
                     onKeyDownCapture={(event) => {
                       if (event.key !== "Escape") return;
                       event.stopPropagation();
-                      if (composing(event) || field.busy) return;
+                      if (isComposingKey(event) || field.busy) return;
                       refocus.current = entry.id;
                       field.onCancel();
                     }}
                     onKeyDown={(event) => {
-                      if (event.key !== "Enter" || composing(event)) return;
+                      if (event.key !== "Enter" || isComposingKey(event)) return;
                       event.preventDefault();
                       if (!field.busy) field.onSubmit();
                     }}
-                    className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle"
+                    className="h-7 w-full rounded-md border border-line bg-bg pl-2 pr-7 text-[13px] text-ink placeholder:text-subtle"
                   />
+                  {/* Enter submits every field; the key says so at its end. */}
+                  <kbd aria-hidden className="pointer-events-none absolute right-1.5 top-2 rounded border border-line bg-bg px-1 font-mono text-[10px] leading-[14px] text-subtle">↵</kbd>
                   {field.hint ? <p className="m-0 mt-1 px-2 text-[11px] leading-4 text-subtle">{field.hint}</p> : null}
                 </div>
               );

@@ -1,5 +1,4 @@
 import { app } from "electron";
-import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
@@ -12,6 +11,7 @@ import {
   type ShareMountRecord,
   type ShareViewIdentity,
 } from "./registryStore";
+import { canonicalWorkspaceRoot, FOLDER_CHANGED } from "./createWorkspaceFolder";
 import { storedShareMounts } from "./shareViewFilesTarget";
 import { recordReceivedShare, recordSynced } from "./syncHistory";
 
@@ -49,16 +49,21 @@ export function listWorkspaces(): RegistryEntry[] {
   return store().list();
 }
 
+// Saves only a root that is its folder's real path, the one every workspace
+// operation receives. A root that no longer resolves to itself changed after
+// createWorkspaceFolder checked it, so nothing is saved.
 export function registerWorkspace(workspace: RegistryEntry): void {
-  const canonicalRoot = realpathSync.native(workspace.rootPath);
+  if (canonicalWorkspaceRoot(workspace.rootPath) !== workspace.rootPath) {
+    throw new Error(FOLDER_CHANGED);
+  }
   for (const existing of store().list()) {
-    let existingCanonicalRoot: string;
+    let existingRoot: string;
     try {
-      existingCanonicalRoot = realpathSync.native(existing.rootPath);
+      existingRoot = canonicalWorkspaceRoot(existing.rootPath);
     } catch {
       continue;
     }
-    if (existingCanonicalRoot === canonicalRoot) {
+    if (existingRoot === workspace.rootPath) {
       throw new Error(`Folder is already attached: ${existing.rootPath}`);
     }
   }
@@ -184,7 +189,7 @@ async function updateReceived<Row>(
 ): Promise<void> {
   for (let recorded = false; ; recorded = true) {
     const workspace = findWorkspace(workspaceId);
-    if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
+    if (!workspace) throw new Error("This workspace is not open. Open it again.");
     const current = stored(workspace);
     const next = update(current);
     if (next === current) return;

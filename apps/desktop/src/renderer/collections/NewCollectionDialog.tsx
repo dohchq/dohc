@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { isComposingKey } from "../ui/keys";
 import { Plus, X } from "lucide-react";
 import { COLLECTION_SCHEMA_FILENAME, type CollectionSchema } from "@dohc/workspace-contracts/collection";
 import type { CollectionRef } from "@dohc/workspace-contracts/collection-data";
@@ -125,7 +126,7 @@ function ScopedNewCollectionDialog(props: NewCollectionDialogProps) {
           <span className="flex items-center gap-2 text-[13px] text-ink"><input type="radio" name="collection-kind" checked={kind === option} onChange={() => { setKind(option); setError(null); }} />{option === "document" ? "Documents" : "Data"}</span>
         </label>)}
       </fieldset>}
-      <input ref={inputRef} spellCheck={false} aria-label="Collection name" placeholder="Collection name" value={name} disabled={pending} className={`${inputClass} font-mono`} onChange={event => setName(event.target.value)} onKeyDown={event => { if (event.key === "Enter") void create(); }} />
+      <input ref={inputRef} spellCheck={false} aria-label="Collection name" placeholder="Collection name" value={name} disabled={pending} className={`${inputClass} font-mono`} onChange={event => setName(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !isComposingKey(event)) void create(); }} />
       <SectionLabel>Fields</SectionLabel>
       {(kind === "document" ? documentDrafts : drafts).map((draft, index) => <div key={index} className="flex items-start gap-2 border-b border-line pb-4">
         <span className="pt-2"><FieldTypeIcon type={draft.type} /></span>

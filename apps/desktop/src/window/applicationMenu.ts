@@ -1,23 +1,30 @@
 import type { BrowserWindow, MenuItemConstructorOptions } from "electron";
 import { SHORTCUTS, shortcutAccelerators, type ShortcutId } from "../shortcuts/shortcutRegistry";
+import { shortcutName } from "../shortcuts/shortcutNames";
 import { basename } from "node:path";
 import type { MenuCommand, WorkspaceSummary } from "../ipc/bridgeContract";
-import { COMMAND_ROWS, type StaticCommandId } from "../renderer/commands/commandRows";
+import { COMMAND_ROWS, isStaticCommandId, type StaticCommandId } from "../renderer/commands/commandRows";
 import type { ZoomStep } from "../settings/userSettings";
 
 // Each item's label is its palette row's label, so the menu and the palette
 // cannot disagree. The menu already groups by category, so "View: Chats" shows
-// as "Chats". The palette does not list itself, so it has no row.
+// as "Chats". The palette does not list itself, and macOS's Edit > Find items
+// act on the editor that has focus, which the palette would take, so neither
+// has a row: they take their shortcut's name. macOS adds the ellipsis of a
+// command that asks for more: Settings… in the app menu, and Find… and Find
+// and replace…, which open the find bar.
 function menuLabel(id: MenuCommand | StaticCommandId): string {
-  if (id === "command-palette") return "Command palette";
-  return COMMAND_ROWS[id].label.replace(/^View: /, "");
+  if (isStaticCommandId(id)) return COMMAND_ROWS[id].label.replace(/^View: /, "");
+  return id === "editor-find" || id === "editor-replace" ? `${shortcutName(id)}…` : shortcutName(id);
 }
 
-// Real application menu (File/Edit/View/Go/Help). Custom items send a
+// Real application menu (File/Edit/View/Go/Help on Windows and Linux; the
+// app menu, File/Edit/View/Window/Help on macOS). Custom items send a
 // MenuCommand to the focused window's renderer, where the shell routes it
-// through the same command registry the palette uses — the menu owns no
-// action logic of its own. Pure template builder so the structure is
-// unit-testable without Electron.
+// through the same command registry the palette uses, or hands an Edit >
+// Find item to the editor that has focus — the menu owns no action logic of
+// its own. Pure template builder so the structure is unit-testable without
+// Electron.
 //
 // registerAccelerator:false on renderer-owned shortcuts lets Windows/Linux
 // display the accelerator without registering a second owner. Electron treats
@@ -37,38 +44,100 @@ export function buildMenuTemplate(options: {
     window: BrowserWindow | undefined,
     workspace: WorkspaceSummary,
   ) => void;
+  // Windows and Linux. macOS shows its own About panel.
   showAbout: () => void;
 }): MenuItemConstructorOptions[] {
   const isMac = options.platform === "darwin";
+  // keys: false shows a command a second time without its accelerators,
+  // which macOS would otherwise register a second time.
   const command = (
     name: MenuCommand,
-    enabled = true,
+    { enabled = true, label = menuLabel(name), keys = true } = {},
   ): MenuItemConstructorOptions[] => {
-    const label = menuLabel(name);
-    const accelerators = shortcutAccelerators(name);
+    const accelerators = keys ? shortcutAccelerators(name, options.platform) : [];
     return (accelerators.length ? accelerators : [undefined]).map((accelerator, index) => ({
       label: index > 0 ? label + " (alternate)" : label,
       enabled,
       ...(index > 0 ? { visible: false } : {}),
       ...(accelerator ? { accelerator } : {}),
-      ...(accelerator && SHORTCUTS[name as ShortcutId]?.owner === "shell"
+      ...(accelerator && !["main", "native"].includes(SHORTCUTS[name as ShortcutId]?.owner)
         ? { registerAccelerator: false } : {}),
       click: (_item, window) =>
         options.sendCommand(window as BrowserWindow | undefined, name),
     }));
   };
 
-  // macOS renders the first template entry as the application menu (label
-  // replaced by the app name); without an explicit appMenu role, "File"
-  // would be swallowed into it and Quit/Hide/Services would be missing.
   const recentWorkspaces = (options.recentWorkspaces ?? []).slice(0, 10);
   const recentLabel = (workspace: WorkspaceSummary): string => {
     const leaf = basename(workspace.rootPath);
     return leaf.length > 0 ? leaf : workspace.rootPath;
   };
+  const updates = [
+    ...command("check-updates"),
+    ...command("install-update", { enabled: options.canInstallUpdate === true }),
+  ];
+
+  // macOS renders the first template entry as the application menu, titled
+  // with the app's name. It holds About, updates, Settings, and the system's
+  // Services, Hide, and Quit. The labels name dohc, not app.name, which names
+  // the package or Electron in an unpackaged run.
+  const appMenu: MenuItemConstructorOptions = {
+    role: "appMenu",
+    submenu: [
+      { role: "about", label: "About dohc" },
+      ...updates,
+      { type: "separator" },
+      ...command("settings", { label: "Settings…" }),
+      { type: "separator" },
+      { role: "services" },
+      { type: "separator" },
+      { role: "hide", label: "Hide dohc" },
+      { role: "hideOthers" },
+      { role: "unhide" },
+      { type: "separator" },
+      { role: "quit", label: "Quit dohc", accelerator: shortcutAccelerators("quit", options.platform)[0] },
+    ],
+  };
+  const macEditItems: MenuItemConstructorOptions[] = [
+    { type: "separator" },
+    {
+      label: "Find",
+      submenu: [
+        ...command("editor-find"),
+        ...command("editor-replace"),
+        ...command("find-again-next"),
+        ...command("find-again-previous"),
+      ],
+    },
+    {
+      label: "Substitutions",
+      submenu: [
+        { role: "showSubstitutions" },
+        { type: "separator" },
+        { role: "toggleSmartQuotes" },
+        { role: "toggleSmartDashes" },
+        { role: "toggleTextReplacement" },
+      ],
+    },
+    { label: "Speech", submenu: [{ role: "startSpeaking" }, { role: "stopSpeaking" }] },
+  ];
+  // The standard macOS Window menu, with Safari's tab commands. AppKit
+  // appends the window list.
+  const windowMenu: MenuItemConstructorOptions = {
+    role: "windowMenu",
+    submenu: [
+      { role: "minimize" },
+      { role: "zoom" },
+      { type: "separator" },
+      ...command("next-tab"),
+      ...command("previous-tab"),
+      { type: "separator" },
+      { role: "front" },
+    ],
+  };
 
   return [
-    ...(isMac ? [{ role: "appMenu" } as const] : []),
+    ...(isMac ? [appMenu] : []),
     {
       label: "File",
       submenu: [
@@ -95,12 +164,22 @@ export function buildMenuTemplate(options: {
         ...command("import-files"),
         ...command("export-workspace"),
         { type: "separator" },
+        // macOS keeps tab switching in the Window menu.
+        ...(isMac ? [] : [...command("next-tab"), ...command("previous-tab")]),
         ...command("close-tab"),
         // VS Code convention: CommandOrControl+W closes the tab in the
         // renderer. The close role uses a separate window shortcut.
-        { role: "close", label: "Close window", accelerator: shortcutAccelerators("close-window")[0] },
+        { role: "close", label: "Close window", accelerator: shortcutAccelerators("close-window", options.platform)[0] },
+        // A schedule can keep dohc running with no window, and GNOME hides the
+        // tray icon that would quit it, so Linux quits from File.
+        ...(options.platform === "linux"
+          ? [{ type: "separator" }, { role: "quit", label: "Quit", accelerator: shortcutAccelerators("quit", options.platform)[0] }] as const
+          : []),
       ],
     },
+    // The editor answers Undo and Redo. macOS adds the items of Electron's
+    // editMenu role, with Find before Substitutions as in TextEdit, and the
+    // system appends AutoFill, Dictation, and Emoji & Symbols.
     {
       label: "Edit",
       submenu: [
@@ -110,7 +189,9 @@ export function buildMenuTemplate(options: {
         { role: "cut" },
         { role: "copy" },
         { role: "paste" },
+        ...(isMac ? [{ role: "pasteAndMatchStyle" }, { role: "delete" }] as const : []),
         { role: "selectAll" },
+        ...(isMac ? macEditItems : []),
       ],
     },
     {
@@ -137,7 +218,7 @@ export function buildMenuTemplate(options: {
           { id: "zoom-in", step: "in" },
           { id: "zoom-out", step: "out" },
         ] as const).flatMap((zoom) =>
-          shortcutAccelerators(zoom.id).map(
+          shortcutAccelerators(zoom.id, options.platform).map(
             (accelerator, index): MenuItemConstructorOptions => ({
               label: menuLabel(zoom.id),
               accelerator,
@@ -146,26 +227,30 @@ export function buildMenuTemplate(options: {
             }),
           ),
         ),
+        ...(isMac
+          ? [{ type: "separator" }, { role: "togglefullscreen" }] as const
+          : []),
         // Dev only: a packaged everyday-people app has no devtools menu item.
         ...(options.isDev
           ? [{ type: "separator" }, { role: "toggleDevTools" }] as const
           : []),
       ],
     },
-    {
-      label: "Go",
-      submenu: [...command("settings")],
-    },
-    // Standard macOS Window menu (minimize/zoom/front + window list).
-    ...(isMac ? [{ role: "windowMenu" } as const] : []),
+    // macOS keeps Settings in the app menu.
+    ...(isMac ? [] : [{ label: "Go", submenu: [...command("settings")] }]),
+    ...(isMac ? [windowMenu] : []),
+    // macOS adds its menu search to Help, which shows only when it has an
+    // item. Help holds the command palette, which lists every command.
     {
       label: "Help",
-      submenu: [
-        ...command("check-updates"),
-        ...command("install-update", options.canInstallUpdate === true),
-        { type: "separator" },
-        { label: "About dohc", click: () => options.showAbout() },
-      ],
+      role: "help",
+      submenu: isMac
+        ? command("command-palette", { keys: false })
+        : [
+            ...updates,
+            { type: "separator" },
+            { label: "About dohc", click: () => options.showAbout() },
+          ],
     },
   ];
 }

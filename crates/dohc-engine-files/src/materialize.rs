@@ -9,8 +9,15 @@
 //! 1. Load the content blob; short-circuit idempotently if the target already
 //!    holds exactly it (a prior run renamed but crashed before marking
 //!    complete — no second write, no duplicate).
-//! 2. Write a **sibling temp file**, bounded bytes, restrictive mode.
-//! 3. **Flush** per the per-OS [`DurabilityPolicy`].
+//! 2. Write a **sibling temp file**, bounded bytes. A secret's temp is
+//!    owner-only. On POSIX an ordinary temp takes the group and permission
+//!    bits of the file it replaces, and on macOS its ACL and the extended
+//!    attributes a save keeps. When the full mode could give someone else
+//!    more access, because the group or the ACL did not carry over, the temp
+//!    takes only the owner's bits. A temp for a new file follows the umask.
+//! 3. **Flush** per the per-OS [`DurabilityPolicy`], through
+//!    [`EngineStore::flush_before_commits`], so the file persists before the
+//!    job's status.
 //! 4. **Revalidate the preimage** immediately before the replace: if an external
 //!    editor produced newer content after the DB commit, do not overwrite —
 //!    preserve both and mark the job `conflict`.
@@ -86,8 +93,11 @@
 //! Secret paths retain their single bound replacement and are excluded.
 //!
 //! These guarantees cover process crashes. Power-loss protection follows the
-//! existing flush policy. B1 must expose durable displacement reads as document
-//! observations before the product promises to keep every outside version read.
+//! flush policy: every flush persists its file before the commits after it.
+//! On Apple silicon a file on the database's device takes a barrier, and the
+//! actor drains the drive once before it replies. B1 must expose durable
+//! displacement reads as document observations before the product promises to
+//! keep every outside version read.
 //!
 //! Every materialization first canonicalizes the workspace root, then rejects
 //! symlinks/reparse points in each existing below-root target component.
@@ -105,7 +115,7 @@
 //! ancestor-redirection race is closed.
 
 use crate::bounds::{MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES};
-use crate::floor::is_excluded_file;
+use crate::floor::{is_excluded_file, path_collision_key};
 use crate::media::{is_text_media_type, media_type_for_path};
 use crate::policy::{
     MAX_CANONICAL_WORKSPACE_PATH_BYTES, PathClassification, classify_engine_file_path,
@@ -134,11 +144,12 @@ pub const MAX_MATERIALIZE_BYTES: usize = dohc_engine_storage::MAX_MATERIALIZE_BY
 /// constant.
 pub const MAX_REPLACE_ATTEMPTS: u32 = dohc_engine_storage::MAX_REPLACE_ATTEMPTS;
 
-/// A per-OS flush policy. The
-/// TS engine never fsyncs; the Rust pipeline adds an explicit, documented policy
-/// (approved delta). Directory fsync is a POSIX affordance; on Windows `std`
-/// exposes no portable directory sync, so `fsync_parent_dir` is a documented
-/// no-op there (an honestly-scoped durability limit).
+/// A per-OS flush policy: which files a job flushes. The store decides how
+/// ([`EngineStore::flush_before_commits`]). The TS engine never fsyncs; the
+/// Rust pipeline adds an explicit, documented policy (approved delta).
+/// Directory fsync is a POSIX affordance; on Windows `std` exposes no portable
+/// directory sync, so `fsync_parent_dir` is a documented no-op there (an
+/// honestly-scoped durability limit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DurabilityPolicy {
     pub fsync_file: bool,
@@ -604,6 +615,9 @@ impl ProjectionProbe {
     pub fn probe(&self, rel: &str, kind: ProjectionTargetKind) -> ProjectionTargetState {
         probe_projection_target_in(&self.root, rel, kind)
     }
+    pub fn stored_under_other_spelling(&self, rel: &str) -> bool {
+        crate::reconcile::stored_spelling_in(&self.root, rel).is_some()
+    }
 }
 
 pub fn projection_target_stamp(root: &Path, rel: &str) -> ProjectionTargetStamp {
@@ -791,7 +805,15 @@ pub enum MaterializeError {
     Storage(#[from] StorageError),
     /// A filesystem step failed for a non-transient reason.
     #[error("materialization io failed at {path}: {kind:?}")]
-    Io { path: String, kind: ErrorKind },
+    Io {
+        path: String,
+        kind: ErrorKind,
+        /// The OS error number, which tells EPERM from EACCES where `kind`
+        /// cannot.
+        raw_os_error: Option<i32>,
+        /// See [`crate::privacy_denied`].
+        privacy_denied: bool,
+    },
     /// The job references a content blob that is not in the store — a corrupt
     /// job (the enqueue should have committed the blob in the same txn).
     #[error("job {job_id} references missing blob {sha256}")]
@@ -818,6 +840,13 @@ pub enum MaterializeError {
     /// The content or an on-disk file exceeded the materialization byte cap.
     #[error("materialization content {actual} bytes exceeds the cap")]
     TooLarge { actual: usize },
+    /// The volume gave a new temp ACL entries, so neither a secret nor a
+    /// file's own access could be kept. The write is refused like an io
+    /// failure.
+    #[error(
+        "this volume adds sharing permissions to new files, so dohc can't keep this file private"
+    )]
+    VolumeSharesNewFiles,
 }
 
 impl MaterializeError {
@@ -825,6 +854,8 @@ impl MaterializeError {
         MaterializeError::Io {
             path: path.to_string_lossy().into_owned(),
             kind: err.kind(),
+            raw_os_error: err.raw_os_error(),
+            privacy_denied: crate::privacy_denied(err, path),
         }
     }
 
@@ -832,6 +863,10 @@ impl MaterializeError {
     pub fn code(&self) -> &'static str {
         match self {
             MaterializeError::Storage(e) => e.code(),
+            MaterializeError::Io {
+                privacy_denied: true,
+                ..
+            } => crate::PRIVACY_DENIED,
             MaterializeError::Io { .. } => "materialize-io",
             MaterializeError::MissingBlob { .. } => "missing-blob",
             MaterializeError::UnsafeTargetPath => "unsafe-target-path",
@@ -840,6 +875,7 @@ impl MaterializeError {
             MaterializeError::FileLocked => "file-locked",
             MaterializeError::RecoveryUnavailable => "recovery-unavailable",
             MaterializeError::TooLarge { .. } => "materialize-too-large",
+            MaterializeError::VolumeSharesNewFiles => "volume-shares-new-files",
         }
     }
 }
@@ -940,7 +976,7 @@ impl PlacementHolds {
     ) -> Self {
         let case_aliases = paths
             .keys()
-            .map(|path| (path.to_lowercase(), path.clone()))
+            .map(|path| (path_collision_key(path), path.clone()))
             .collect();
         Self {
             workspace_id: workspace_id.to_owned(),
@@ -956,8 +992,9 @@ impl PlacementHolds {
         self.paths.iter().map(|(path, hold)| (path.as_str(), hold))
     }
 
-    /// Lexical checks never resolve or read the outside file. Lowercase aliases
-    /// deliberately over-park distinct paths on case-sensitive volumes.
+    /// Lexical checks never resolve or read the outside file. Case and
+    /// normalization aliases deliberately over-park distinct paths on
+    /// case-sensitive volumes.
     pub fn get(&self, path: &str) -> Option<(&str, &PlacementHold)> {
         if let Some((path, hold)) = self.paths.get_key_value(path) {
             return Some((path, hold));
@@ -965,7 +1002,7 @@ impl PlacementHolds {
         if self.is_empty() {
             return None;
         }
-        let stored = self.case_aliases.get(&path.to_lowercase())?;
+        let stored = self.case_aliases.get(&path_collision_key(path))?;
         self.paths
             .get_key_value(stored)
             .map(|(path, hold)| (path.as_str(), hold))
@@ -1104,6 +1141,13 @@ fn materialize_one_inner(
     let MaterializeOptions { now_ms, faults, .. } = *options;
     // Canonicalizing the root deliberately accepts aliases above (or at) the
     // workspace boundary. The component walk below owns only descendants.
+    // A job an older build queued for OS metadata the floor now excludes (an
+    // old `.DS_Store`) has nothing to place. It ends as cancelled and reports no
+    // further work, so no replay counts it as failed.
+    if crate::floor::names_os_metadata(&job.target_path) {
+        store.mark_materialization_cancelled(&job.job_id, now_ms)?;
+        return Ok(JobOutcome::AlreadyMaterialized);
+    }
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
     let target = resolve_target(&canonical_root, &job.target_path)?;
@@ -1129,7 +1173,7 @@ fn materialize_one_inner(
     // first, so every check below sees the target as it was or as it ended.
     // Bytes the store lacks that cannot return to their path make the job
     // conflict, so the person is told.
-    let (staging, kept) = recover_job_displacements(store, &canonical_root, job, options)?;
+    let (staging, kept) = recover_job_displacements(store, &canonical_root, &target, job, options)?;
     if kept {
         store.mark_materialization_conflict(&job.job_id, now_ms)?;
         return Ok(JobOutcome::Conflict);
@@ -1254,6 +1298,7 @@ fn materialize_secret_one_with_remover(
     let current = read_current_no_follow(&target)?;
     if let CurrentTarget::Present(bytes) = &current
         && hex_sha256(bytes) == desired_sha
+        && !target_has_other_leaf_spelling(&target)
     {
         store.mark_materialization_complete(&job.job_id, now_ms)?;
         return Ok(JobOutcome::AlreadyMaterialized);
@@ -1391,7 +1436,7 @@ fn materialize_secret_delete_with_hook(
     parent
         .remove_file(target_name, target)
         .map_err(|err| MaterializeError::io(target, &err))?;
-    parent.sync(policy)?;
+    parent.sync(store, policy)?;
     if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeAfterRenameBeforeComplete,
@@ -1447,6 +1492,7 @@ fn materialize_secret_write(
     }
     if let CurrentTarget::Present(bytes) = &current
         && hex_sha256(bytes) == job.content_sha256
+        && !target_has_other_leaf_spelling(target)
     {
         store.mark_materialization_complete(&job.job_id, now_ms)?;
         return Ok(JobOutcome::AlreadyMaterialized);
@@ -1483,7 +1529,7 @@ fn materialize_secret_write(
     // Step 3: flush the temp FILE per the per-OS durability policy. The parent
     // directory is synced after the rename (below), which is where the rename's
     // durability actually lives on POSIX.
-    flush_temp_file(&temp_file, &tmp, policy)?;
+    flush_temp_file(store, &temp_file, &tmp, policy)?;
     drop(temp_file);
     if should_crash(faults, FaultPoint::MaterializeAfterFlushBeforeRename) {
         secret_temp_cleanup.disarm();
@@ -1541,7 +1587,7 @@ fn materialize_secret_write(
     // Make the completed replace durable by syncing the parent directory
     // (POSIX), THEN mark complete — so a
     // crash can never leave the job marked complete over a non-durable rename.
-    parent.sync(policy)?;
+    parent.sync(store, policy)?;
     if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
         secret_temp_cleanup.disarm();
         return Ok(JobOutcome::Crashed(
@@ -1586,17 +1632,27 @@ fn materialize_ordinary_write(
     // The staging recheck reuses this read while the target's size and time
     // stay the same.
     let mut reads = TargetReads::default();
+    let mut respelled = None;
     if matches!(placement, OrdinaryWritePlacement::Target(_))
         && let TargetHash::Sha(sha) = reads.read(target)?
-        && sha == job.content_sha256
     {
-        store.mark_materialization_complete(&job.job_id, now_ms)?;
-        return Ok(JobOutcome::AlreadyMaterialized);
+        if matches!(job.preimage, Preimage::Absent) {
+            respelled = pending_respelled_delete(store, root, target, job, &sha)?;
+        }
+        if sha == job.content_sha256
+            && respelled.is_none()
+            && !target_has_other_leaf_spelling(target)
+        {
+            store.mark_materialization_complete(&job.job_id, now_ms)?;
+            return Ok(JobOutcome::AlreadyMaterialized);
+        }
     }
 
-    // Step 2: sibling temp file, bounded, restrictive mode.
+    // Step 2: sibling temp file, bounded, with the target's permissions. A
+    // secret path routed here still gets an owner-only temp.
     let tmp = temp_sibling(target, &job.job_id);
-    let temp_file = write_temp(&tmp, content)?;
+    let owner_only = crate::policy::normalized_path_is_secret(&job.target_path);
+    let temp_file = write_temp(target, &tmp, content, owner_only)?;
     if should_crash(faults, FaultPoint::MaterializeAfterTempWrite) {
         // A crash here leaves an orphan temp; startup replay ignores it (temp is
         // never captured as user content: it lives under a `.dohc-write-` name
@@ -1607,7 +1663,7 @@ fn materialize_ordinary_write(
     // Step 3: flush the temp FILE per the per-OS durability policy. The parent
     // directory is synced after the renames, which is where their durability
     // lives on POSIX.
-    flush_temp_file(&temp_file, &tmp, policy)?;
+    flush_temp_file(store, &temp_file, &tmp, policy)?;
     drop(temp_file);
     if should_crash(faults, FaultPoint::MaterializeAfterFlushBeforeRename) {
         return Ok(JobOutcome::Crashed(
@@ -1624,9 +1680,16 @@ fn materialize_ordinary_write(
         ));
     }
     let outcome = match placement {
-        OrdinaryWritePlacement::Target(staging) => {
-            swap_in_temp(store, staging, target, &tmp, job, &mut reads, options)
-        }
+        OrdinaryWritePlacement::Target(staging) => swap_in_temp(
+            store,
+            staging,
+            target,
+            &tmp,
+            job,
+            respelled.as_ref(),
+            &mut reads,
+            options,
+        ),
         OrdinaryWritePlacement::ConflictSibling => {
             record_write_conflict(store, target, &tmp, job, now_ms)
         }
@@ -1637,12 +1700,17 @@ fn materialize_ordinary_write(
     outcome
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the respelled delete is found with the first read of the target"
+)]
 fn swap_in_temp(
     store: &EngineStore,
     staging: &Staging,
     target: &Path,
     tmp: &Path,
     job: &MaterializationJob,
+    respelled: Option<&MaterializationJob>,
     reads: &mut TargetReads,
     options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
@@ -1656,9 +1724,24 @@ fn swap_in_temp(
     let expected = match &job.preimage {
         Preimage::Absent => {
             if !create_from_temp(target, tmp, options)? {
-                return record_write_conflict(store, target, tmp, job, now_ms);
+                // The old spelling's delete keeps its own preimage check, so
+                // a file changed since the merge stays and this write conflicts.
+                let Some(delete) = respelled else {
+                    return record_write_conflict(store, target, tmp, job, now_ms);
+                };
+                match materialize_one(store, root, delete, options)? {
+                    JobOutcome::Completed | JobOutcome::AlreadyMaterialized
+                        if create_from_temp(target, tmp, options)? => {}
+                    outcome @ (JobOutcome::Parked | JobOutcome::Blocked) => {
+                        // Both jobs stay pending, and replay runs the delete first.
+                        let _ = std::fs::remove_file(tmp);
+                        return Ok(outcome);
+                    }
+                    outcome @ JobOutcome::Crashed(_) => return Ok(outcome),
+                    _ => return record_write_conflict(store, target, tmp, job, now_ms),
+                }
             }
-            sync_parent_dir(target.parent(), policy)?;
+            sync_parent_dir(store, target.parent(), policy)?;
             if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
                 return Ok(JobOutcome::Crashed(
                     FaultPoint::MaterializeAfterRenameBeforeComplete,
@@ -1708,7 +1791,7 @@ fn swap_in_temp(
                 dispose_known(store, root, &staged, &spec, &known, now_ms)?;
             }
             other => {
-                sync_staged(&staging.dir, policy)?;
+                sync_staged(store, &staging.dir, policy)?;
                 store.keep_displacement(&spec, keep_sha256(&other))?;
             }
         }
@@ -1736,15 +1819,15 @@ fn swap_in_temp(
                 FaultPoint::MaterializeAfterKnownCopyDeletion,
             ));
         }
-        sync_parent_dir(target.parent(), policy)?;
+        sync_parent_dir(store, target.parent(), policy)?;
         store.mark_materialization_complete(&job.job_id, now_ms)?;
         return Ok(JobOutcome::Completed);
     }
     // Another program wrote the file after the check. Its bytes go back to
     // their path, where capture records them like any outside edit; the
     // job's content moves to the conflict sibling.
-    sync_staged(&staging.dir, policy)?;
-    sync_parent_dir(target.parent(), policy)?;
+    sync_staged(store, &staging.dir, policy)?;
+    sync_parent_dir(store, target.parent(), policy)?;
     let moved = Moved::open(store, spec, &staging.dir)?;
     if should_crash(faults, FaultPoint::MaterializeAfterDisplacementJournal) {
         return Ok(JobOutcome::Crashed(
@@ -1867,7 +1950,7 @@ fn materialize_delete(
                 ));
             }
             if !matches!(inspected, Inspected::Known { .. } | Inspected::Missing) {
-                if !return_displaced(target, &staged, options)? {
+                if !return_displaced(store, target, &staged, options)? {
                     let moved = Moved::open(store, spec.clone(), &staging.dir)?;
                     store.resolve_displacement(
                         moved.displacement_id,
@@ -1879,7 +1962,7 @@ fn materialize_delete(
                 store.mark_materialization_conflict(&job.job_id, now_ms)?;
                 return Ok(JobOutcome::Conflict);
             }
-            sync_parent_dir(target.parent(), policy)?;
+            sync_parent_dir(store, target.parent(), policy)?;
             #[cfg(unix)]
             {
                 registered = if let Inspected::Known {
@@ -1941,7 +2024,7 @@ fn materialize_delete(
                     return published;
                 }
             }
-            && !return_displaced(target, &staged, options)?
+            && !return_displaced(store, target, &staged, options)?
         {
             // A failed return leaves retention as the only owner of this source.
             if retention_release_failed {
@@ -1975,21 +2058,21 @@ fn materialize_delete(
                 FaultPoint::MaterializeAfterKnownCopyDeletion,
             ));
         }
-        sync_parent_dir(target.parent(), policy)?;
+        sync_parent_dir(store, target.parent(), policy)?;
         store.mark_materialization_complete(&job.job_id, now_ms)?;
         return Ok(JobOutcome::Completed);
     }
     // Bytes the store does not have go back to their path, and the delete
     // conflicts, as it would had the recheck seen them.
-    sync_staged(&staging.dir, policy)?;
-    sync_parent_dir(target.parent(), policy)?;
+    sync_staged(store, &staging.dir, policy)?;
+    sync_parent_dir(store, target.parent(), policy)?;
     let moved = Moved::open(store, spec, &staging.dir)?;
     if should_crash(faults, FaultPoint::MaterializeAfterDisplacementJournal) {
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeAfterDisplacementJournal,
         ));
     }
-    let resolution = if return_displaced(target, &moved.path, options)? {
+    let resolution = if return_displaced(store, target, &moved.path, options)? {
         DisplacementResolution::Discard
     } else {
         keep_resolution(&inspected)
@@ -2052,7 +2135,7 @@ fn materialize_cross_volume(
         store.mark_materialization_conflict(&job.job_id, options.now_ms)?;
         return Ok(JobOutcome::Conflict);
     }
-    sync_parent_dir(target.parent(), options.policy)?;
+    sync_parent_dir(store, target.parent(), options.policy)?;
     if should_crash(
         options.faults,
         FaultPoint::MaterializeAfterRenameBeforeComplete,
@@ -2189,7 +2272,7 @@ fn job_staging_dir(
     create: bool,
 ) -> Result<PathBuf, MaterializeError> {
     let Some(rel) = store.staging_location(job_id)? else {
-        return staging_dir(root, create);
+        return checked_staging_dir(store.database_path(), root, create);
     };
     let path = Path::new(&rel);
     if path.is_absolute()
@@ -2222,7 +2305,7 @@ fn all_staging_dirs(
             eprintln!("materialization recovery directory: {error}");
         }
     };
-    add(staging_dir(root, false));
+    add(staging_dir(store.database_path(), root, false));
     for rel in store.staging_locations()? {
         add((|| {
             let path = Path::new(&rel);
@@ -2251,7 +2334,7 @@ pub fn cleanup_staging_directory(
     directory: &Path,
 ) -> Result<(), MaterializeError> {
     cleanup_staging_directory_with_sync(store, root, directory, |parent| {
-        sync_parent_dir(Some(parent), DurabilityPolicy::per_os())
+        sync_parent_dir(store, Some(parent), DurabilityPolicy::per_os())
     })
 }
 
@@ -2303,10 +2386,17 @@ fn stage_target(
     options: &MaterializeOptions<'_>,
 ) -> Result<Stage, MaterializeError> {
     let write = job.operation == MaterializationOperation::Write;
+    let mut original_path = PathBuf::from(&job.target_path);
+    if let Some(leaf) = other_leaf_spelling(target)
+        .as_deref()
+        .or_else(|| target.file_name())
+    {
+        original_path.set_file_name(leaf);
+    }
     let spec = DisplacementSpec {
         job_id: job.job_id.clone(),
         workspace_id: job.workspace_id.clone(),
-        target_path: job.target_path.clone(),
+        target_path: original_path.to_string_lossy().replace('\\', "/"),
         displaced_name: unused_staged_name(&staging.dir, &job.job_id, &staging.taken)?,
         expected_sha256: expected.to_owned(),
         content_sha256: write.then(|| job.content_sha256.clone()),
@@ -2476,6 +2566,40 @@ fn create_from_temp(
     })
 }
 
+/// A merge that renames a file only by case or normalization deletes the old
+/// path before it creates the new one. On a disk that ignores the difference,
+/// a create that finds its name held by the file that delete must still
+/// remove runs the delete first. This finds that delete when its path
+/// reaches the same file on disk as the target, and the file holds the bytes
+/// the delete expects. Either path can be spelled differently from the name
+/// the disk stores. A delete through a link never matches: it would refuse
+/// to run, and the write would wait for it forever.
+fn pending_respelled_delete(
+    store: &EngineStore,
+    root: &Path,
+    target: &Path,
+    job: &MaterializationJob,
+    current_sha256: &str,
+) -> Result<Option<MaterializationJob>, MaterializeError> {
+    let Some(file) = std::fs::canonicalize(target)
+        .ok()
+        .filter(|file| file.starts_with(root))
+    else {
+        return Ok(None);
+    };
+    Ok(store
+        .pending_merge_deletes_expecting(&job.workspace_id, current_sha256)?
+        .into_iter()
+        .find(|delete| {
+            delete.target_path != job.target_path
+                && resolve_target(root, &delete.target_path)
+                    .ok()
+                    .filter(|path| ensure_target_symlink_free(root, path).is_ok())
+                    .and_then(|path| std::fs::canonicalize(path).ok())
+                    .is_some_and(|path| path == file)
+        }))
+}
+
 /// Rename the temp to the name staging emptied. `false` when a program
 /// created the target in between. On any other failure the staged file is
 /// moved back, so the target name is not left empty. One that cannot go back
@@ -2493,7 +2617,16 @@ fn place_after_stage(
     });
     if placed.is_err()
         && !matches!(
-            return_displaced(target, &staging.join(&spec.displaced_name), options),
+            return_displaced(
+                store,
+                &target.with_file_name(
+                    Path::new(&spec.target_path)
+                        .file_name()
+                        .ok_or(MaterializeError::UnsafeTargetPath)?
+                ),
+                &staging.join(&spec.displaced_name),
+                options,
+            ),
             Ok(true)
         )
     {
@@ -2564,6 +2697,7 @@ const RETURN_ATTEMPTS: u32 = 10;
 /// Move a staged file back to its empty target name. `false` when a
 /// program created the target meanwhile, so the file stays staged.
 fn return_displaced(
+    store: &EngineStore,
     target: &Path,
     staged: &Path,
     options: &MaterializeOptions<'_>,
@@ -2572,8 +2706,8 @@ fn return_displaced(
         place_attempt(options.replacer, staged, target)
     })?;
     if returned {
-        sync_parent_dir(target.parent(), options.policy)?;
-        sync_parent_dir(staged.parent(), options.policy)?;
+        sync_parent_dir(store, target.parent(), options.policy)?;
+        sync_parent_dir(store, staged.parent(), options.policy)?;
     }
     Ok(returned)
 }
@@ -2621,7 +2755,7 @@ fn swap_back(
         // kept first, so a put-back that fails leaves only the newer file's
         // open row, which the next recovery returns.
         keep_moved(store)?;
-        let back = if return_displaced(target, &aside.path, options)? {
+        let back = if return_displaced(store, target, &aside.path, options)? {
             DisplacementResolution::Discard
         } else {
             DisplacementResolution::Keep {
@@ -2631,7 +2765,12 @@ fn swap_back(
         store.resolve_displacement(aside.displacement_id, back, None, options.now_ms)?;
         return Ok(true);
     }
-    let returned = return_displaced(target, &moved.path, options)?;
+    let original = target.with_file_name(
+        Path::new(&moved.target_path)
+            .file_name()
+            .ok_or(MaterializeError::UnsafeTargetPath)?,
+    );
+    let returned = return_displaced(store, &original, &moved.path, options)?;
     if returned {
         store.resolve_displacement(
             moved.displacement_id,
@@ -2688,10 +2827,17 @@ fn move_aside(
         .into_iter()
         .map(|row| row.displaced_name)
         .collect();
+    let mut original_path = PathBuf::from(&moved.target_path);
+    if let Some(leaf) = other_leaf_spelling(target)
+        .as_deref()
+        .or_else(|| target.file_name())
+    {
+        original_path.set_file_name(leaf);
+    }
     let spec = DisplacementSpec {
         job_id: moved.job_id.clone(),
         workspace_id: moved.workspace_id.clone(),
-        target_path: moved.target_path.clone(),
+        target_path: original_path.to_string_lossy().replace('\\', "/"),
         displaced_name: unused_staged_name(staging, &moved.job_id, &taken)?,
         expected_sha256: content.to_owned(),
         content_sha256: Some(content.to_owned()),
@@ -2716,8 +2862,8 @@ fn move_aside(
         })
     });
     if let Ok(Some(true)) = attempt {
-        sync_staged(staging, options.policy)?;
-        sync_parent_dir(target.parent(), options.policy)?;
+        sync_staged(store, staging, options.policy)?;
+        sync_parent_dir(store, target.parent(), options.policy)?;
         return Ok(Aside::Moved(aside));
     }
     store.resolve_displacement(
@@ -2885,24 +3031,108 @@ pub(super) fn open_displaced(path: &Path) -> std::io::Result<std::fs::File> {
 /// the workspace's volume, so staging is one plain rename.
 const STAGING_DIR: &str = ".dohc/engine/displaced";
 
-fn sync_staged(staging: &Path, policy: DurabilityPolicy) -> Result<(), MaterializeError> {
-    sync_parent_dir(Some(staging), policy)?;
-    // Include newly created staging ancestors before source removal is synced.
-    sync_parent_dir(staging.parent(), policy)?;
-    sync_parent_dir(staging.parent().and_then(Path::parent), policy)
+/// The folder staging is checked from, and the staging folder below it. A
+/// store at `database` that opened through the engine folder the engine
+/// checked, by the folder's ID on a Mac or by the descriptor the engine holds
+/// for it on Linux, sits in that folder. Staging then goes through that
+/// folder, and only `displaced` is checked below it. Otherwise the check
+/// starts at `root`.
+fn staging_base(database: &Path, root: &Path) -> (PathBuf, PathBuf) {
+    if let Some(engine) = database.parent().filter(|engine| by_id(engine)) {
+        let name = Path::new(STAGING_DIR).file_name().unwrap_or_default();
+        return (engine.to_owned(), engine.join(name));
+    }
+    (root.to_owned(), root.join(STAGING_DIR))
 }
 
-/// The staging directory under an already-canonicalized root. Every
-/// component must be a real directory; `create` makes the missing ones.
-fn staging_dir(root: &Path, create: bool) -> Result<PathBuf, MaterializeError> {
-    let dir = root.join(STAGING_DIR);
-    if create {
-        walk_target_components(root, &dir, ensure_real_directory)?;
-    } else {
-        ensure_target_symlink_free(root, &dir)?;
+/// Whether `path` reaches its folder by its ID on a Mac, or through a
+/// descriptor this process holds on Linux, rather than by its name.
+fn by_id(path: &Path) -> bool {
+    #[cfg(target_vendor = "apple")]
+    return dohc_macos_files::is_path_by_id(path);
+    #[cfg(target_os = "linux")]
+    return dohc_linux_files::held::is_path_by_fd(path);
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
+    {
+        let _ = path;
+        false
     }
+}
+
+/// The path that reaches `rel`, a workspace-relative name a row stores, and
+/// the folder to check that path from. A name below `.dohc/engine/displaced`
+/// goes through the staging folder of [`staging_base`].
+pub fn stored_path(database: &Path, root: &Path, rel: &Path) -> (PathBuf, PathBuf) {
+    let (base, staging) = staging_base(database, root);
+    match rel.strip_prefix(STAGING_DIR) {
+        Ok(name) if by_id(&base) => (base, staging.join(name)),
+        _ => (root.to_owned(), root.join(rel)),
+    }
+}
+
+/// The workspace-relative name a row stores for `path`, a staged file. A file
+/// in the staging folder of [`staging_base`] is named below
+/// `.dohc/engine/displaced`, whichever path reached it.
+pub(super) fn stored_name(
+    database: &Path,
+    root: &Path,
+    path: &Path,
+) -> Result<String, MaterializeError> {
+    let rel = match path.strip_prefix(root) {
+        Ok(rel) => rel.to_owned(),
+        Err(_) => {
+            let (_, staging) = staging_base(database, root);
+            let name = path
+                .strip_prefix(&staging)
+                .map_err(|_| MaterializeError::UnsafeTargetPath)?;
+            Path::new(STAGING_DIR).join(name)
+        }
+    };
+    Ok(rel.to_string_lossy().replace('\\', "/"))
+}
+
+fn sync_staged(
+    store: &EngineStore,
+    staging: &Path,
+    policy: DurabilityPolicy,
+) -> Result<(), MaterializeError> {
+    sync_parent_dir(store, Some(staging), policy)?;
+    // Include newly created staging ancestors before source removal is synced.
+    // A staging folder reached through the checked engine folder was the only
+    // one made.
+    sync_parent_dir(store, staging.parent(), policy)?;
+    let engine = staging.parent().filter(|engine| !by_id(engine));
+    sync_parent_dir(store, engine.and_then(Path::parent), policy)
+}
+
+/// The staging directory under an already-canonicalized root, or through the
+/// engine folder of [`staging_base`]. Every component must be a real
+/// directory; `create` makes the missing ones.
+fn staging_dir(database: &Path, root: &Path, create: bool) -> Result<PathBuf, MaterializeError> {
+    let dir = checked_staging_dir(database, root, create)?;
     #[cfg(windows)]
     readonly_link::recover_all(root, &dir).map_err(|err| MaterializeError::io(&dir, &err))?;
+    Ok(dir)
+}
+
+fn checked_staging_dir(
+    database: &Path,
+    root: &Path,
+    create: bool,
+) -> Result<PathBuf, MaterializeError> {
+    let (base, dir) = staging_base(database, root);
+    if create {
+        walk_target_components(&base, &dir, ensure_real_directory)?;
+    } else {
+        ensure_target_symlink_free(&base, &dir)?;
+    }
+    // Check access without walking other jobs' entries.
+    #[cfg(windows)]
+    if let Err(err) = std::fs::read_dir(&dir)
+        && err.kind() != ErrorKind::NotFound
+    {
+        return Err(MaterializeError::io(&dir, &err));
+    }
     Ok(dir)
 }
 
@@ -2951,6 +3181,23 @@ fn staged_name_key(name: &str) -> Option<&str> {
 
 fn is_staged_name(name: &str) -> bool {
     staged_name_key(name).is_some()
+}
+
+/// Whether `source_path`, the name a retained row stores, names a staged
+/// original of `job_id`: a name that job's replace makes, in the folder it
+/// stages into.
+pub fn is_staged_original(
+    store: &EngineStore,
+    job_id: &str,
+    source_path: &str,
+) -> Result<bool, MaterializeError> {
+    let Some((folder, name)) = source_path.rsplit_once('/') else {
+        return Ok(false);
+    };
+    let staging = store
+        .staging_location(job_id)?
+        .unwrap_or_else(|| STAGING_DIR.to_owned());
+    Ok(folder == staging && staged_name_key(name) == Some(staged_key(job_id).as_str()))
 }
 
 /// The job a staged name spells, and its id, when the store still has it. A
@@ -3013,6 +3260,8 @@ fn rowless_staged(
     let mut found = Vec::new();
     let names = store.displacement_names()?;
     for entry in entries {
+        #[cfg(feature = "fault-injection")]
+        dohc_engine_storage::capture_phase::count("publication_staging_entries", 1);
         let entry = entry.map_err(|err| MaterializeError::io(staging, &err))?;
         let Ok(name) = entry.file_name().into_string() else {
             continue;
@@ -3021,14 +3270,11 @@ fn rowless_staged(
             continue;
         };
         if names.contains(&name)
-            || store.is_retained_source(
-                &staging
-                    .join(&name)
-                    .strip_prefix(root)
-                    .map_err(|_| MaterializeError::UnsafeTargetPath)?
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-            )?
+            || store.is_retained_source(&stored_name(
+                store.database_path(),
+                root,
+                &staging.join(&name),
+            )?)?
         {
             continue;
         }
@@ -3159,7 +3405,12 @@ impl RecoveryEntry {
 /// Remove the regular file at `rel` when its bytes hash to `sha256`, so the
 /// path is free. `true` when `rel` is free afterwards, absent before or
 /// removed; `false`, removing nothing, when it holds anything else.
-pub fn remove_file_holding(root: &Path, rel: &str, sha256: &str) -> Result<bool, MaterializeError> {
+pub fn remove_file_holding(
+    store: &EngineStore,
+    root: &Path,
+    rel: &str,
+    sha256: &str,
+) -> Result<bool, MaterializeError> {
     match probe_projection_target(root, rel, ProjectionTargetKind::Plaintext) {
         ProjectionTargetState::Absent => return Ok(true),
         ProjectionTargetState::Text { sha256: held }
@@ -3172,15 +3423,20 @@ pub fn remove_file_holding(root: &Path, rel: &str, sha256: &str) -> Result<bool,
     let target = resolve_target(&canonical_root, rel)?;
     ensure_target_symlink_free(&canonical_root, &target)?;
     std::fs::remove_file(&target).map_err(|err| MaterializeError::io(&target, &err))?;
-    sync_parent_dir(target.parent(), DurabilityPolicy::per_os())?;
+    sync_parent_dir(store, target.parent(), DurabilityPolicy::per_os())?;
     Ok(true)
 }
 
 /// Remove the directory at `rel` when it is empty, so a file can take its
 /// name. Used when a sync page deletes the last tracked files under a path
 /// and then writes a file there. Only a real, empty directory below the
-/// workspace root is removed; `false` when nothing was removed.
-pub fn remove_empty_directory_target(root: &Path, rel: &str) -> Result<bool, MaterializeError> {
+/// workspace root is removed; `false` when nothing was removed. On macOS a
+/// directory that holds only Finder's files, such as `.DS_Store`, is empty.
+pub fn remove_empty_directory_target(
+    store: &EngineStore,
+    root: &Path,
+    rel: &str,
+) -> Result<bool, MaterializeError> {
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
     let target = resolve_target(&canonical_root, rel)?;
@@ -3194,13 +3450,92 @@ pub fn remove_empty_directory_target(root: &Path, rel: &str) -> Result<bool, Mat
     {
         return Ok(false);
     }
-    // `remove_dir` refuses a directory that is not empty.
-    if std::fs::remove_dir(&target).is_ok() {
-        sync_parent_dir(target.parent(), DurabilityPolicy::per_os())?;
+    if remove_emptied_directory(&canonical_root, rel, &target, || {}) {
+        sync_parent_dir(store, target.parent(), DurabilityPolicy::per_os())?;
         Ok(true)
     } else {
         Ok(false)
     }
+}
+
+/// Remove the directory at `rel` if it is empty. On Unix every step goes
+/// through directory handles opened without following a link, so a folder
+/// swapped for a link cannot point a deletion outside the workspace. On macOS
+/// Finder's files go first when they are all the directory holds;
+/// `after_inspect` runs between that check and the deletion.
+#[cfg(unix)]
+fn remove_emptied_directory(
+    root: &Path,
+    rel: &str,
+    target: &Path,
+    after_inspect: impl FnOnce(),
+) -> bool {
+    use rustix::fs::{AtFlags, Mode, OFlags};
+    let relative = Path::new(rel);
+    let Some(leaf) = relative.file_name() else {
+        return false;
+    };
+    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    let Ok(Some(parent_fd)) = open_existing_secret_parent_unix(root, parent, target) else {
+        return false;
+    };
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let Ok(directory) = rustix::fs::openat(&parent_fd, leaf, flags, Mode::empty()) else {
+        return false;
+    };
+    #[cfg(target_vendor = "apple")]
+    {
+        let finder_files = finder_files_only(&directory);
+        after_inspect();
+        for name in finder_files.into_iter().flatten() {
+            let _ = rustix::fs::unlinkat(&directory, name.as_c_str(), AtFlags::empty());
+        }
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        // Only macOS removes metadata, so the open only proved this is a
+        // directory and not a link.
+        drop(directory);
+        after_inspect();
+    }
+    rustix::fs::unlinkat(&parent_fd, leaf, AtFlags::REMOVEDIR).is_ok()
+}
+
+#[cfg(not(unix))]
+fn remove_emptied_directory(
+    _root: &Path,
+    _rel: &str,
+    target: &Path,
+    after_inspect: impl FnOnce(),
+) -> bool {
+    after_inspect();
+    std::fs::remove_dir(target).is_ok()
+}
+
+/// The names in `directory` when every entry is a regular file Finder wrote,
+/// such as `.DS_Store`. `None` when anything else is there.
+#[cfg(target_vendor = "apple")]
+fn finder_files_only(directory: &rustix::fd::OwnedFd) -> Option<Vec<std::ffi::CString>> {
+    use rustix::fs::{AtFlags, FileType};
+    let mut entries = rustix::fs::Dir::read_from(directory).ok()?;
+    let mut names = Vec::new();
+    while let Some(entry) = entries.read() {
+        let entry = entry.ok()?;
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        let regular = rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
+            .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile);
+        let finder = name.to_str().is_ok_and(|text| {
+            crate::floor::is_finder_metadata_file(&crate::floor::normalize_segment(text))
+        });
+        if !regular || !finder {
+            return None;
+        }
+        names.push(name.to_owned());
+    }
+    Some(names)
 }
 
 fn unavailable_recovery_roots() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
@@ -3337,7 +3672,7 @@ fn recover_displacements_in(
         }
     }
     if !adopt.is_empty() {
-        sync_staged(staging, options.policy)?;
+        sync_staged(store, staging, options.policy)?;
         store.open_displacements(&adopt)?;
     }
     if !adopt.is_empty()
@@ -3430,7 +3765,7 @@ pub fn recover_path_displacements(
     }
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
-    let staging = staging_dir(&canonical_root, false)?;
+    let staging = staging_dir(store.database_path(), &canonical_root, false)?;
     let rowless = rowless_all(store, &canonical_root)?
         .into_iter()
         .filter(|staged| {
@@ -3457,8 +3792,9 @@ pub enum KeptCopySave {
     /// The workspace has no kept row under that id, or its file was already
     /// gone. A row whose file is gone is ended too.
     Gone,
-    /// No free sibling name fits the engine's name and path limits and keeps
-    /// the original's classification, so capture could not record a copy.
+    /// No free sibling name fits the engine's and the OS's name and path
+    /// limits and keeps the original's classification, so capture could not
+    /// record a copy.
     /// The file stays at its hidden name, and its row stays.
     NoValidName,
 }
@@ -3530,7 +3866,10 @@ fn save_kept_displacement_with_cleanup(
         return Ok(KeptCopySave::NoValidName);
     }
     let target = resolve_target(&canonical_root, &row.target_path)?;
-    ensure_target_symlink_free(&canonical_root, &target)?;
+    match ensure_target_symlink_free(&canonical_root, &target) {
+        Err(err) if names_too_long(&err) => return Ok(KeptCopySave::NoValidName),
+        checked => checked?,
+    }
     let (parent, file_name) = match row.target_path.rsplit_once('/') {
         Some((parent, name)) => (Some(parent), name),
         None => (None, row.target_path.as_str()),
@@ -3539,6 +3878,12 @@ fn save_kept_displacement_with_cleanup(
     let name_budget = MAX_KEPT_COPY_NAME_BYTES.min(
         MAX_CANONICAL_WORKSPACE_PATH_BYTES
             .saturating_sub(parent.map_or(0, |parent| parent.len() + 1)),
+    );
+    // macOS refuses a whole path of PATH_MAX bytes, its NUL included, so the
+    // copy's full path must fit too.
+    #[cfg(target_vendor = "apple")]
+    let name_budget = name_budget.min(
+        APPLE_PATH_MAX.saturating_sub(target.parent().map_or(0, |dir| dir.as_os_str().len() + 2)),
     );
     for n in 1..=MAX_DISPLACED_NAMES {
         let Some(name) = kept_copy_name(file_name, n, name_budget) else {
@@ -3558,10 +3903,14 @@ fn save_kept_displacement_with_cleanup(
             return Ok(KeptCopySave::NoValidName);
         }
         let copy = sibling_with_name(&target, &name);
+        let exists = match entry_exists(&copy) {
+            Err(err) if names_too_long(&err) => return Ok(KeptCopySave::NoValidName),
+            exists => exists?,
+        };
         // A copy that is the kept file itself, linked before a crash or a
         // failed unlink, is this save's own: finish it. Anything else at the
         // name, even with the same bytes, is another file.
-        if entry_exists(&copy)? {
+        if exists {
             if !is_same_file(&kept, &copy).map_err(|err| MaterializeError::io(&copy, &err))? {
                 continue;
             }
@@ -3573,15 +3922,12 @@ fn save_kept_displacement_with_cleanup(
             match move_kept_copy(&kept, &copy, options) {
                 Ok(true) => {}
                 Ok(false) => continue,
-                Err(MaterializeError::Io {
-                    kind: ErrorKind::InvalidFilename,
-                    ..
-                }) => return Ok(KeptCopySave::NoValidName),
+                Err(err) if names_too_long(&err) => return Ok(KeptCopySave::NoValidName),
                 Err(err) => return Err(err),
             }
         }
-        sync_parent_dir(copy.parent(), options.policy)?;
-        sync_staged(&staging, options.policy)?;
+        sync_parent_dir(store, copy.parent(), options.policy)?;
+        sync_staged(store, &staging, options.policy)?;
         store.resolve_displacement(
             displacement_id,
             DisplacementResolution::Discard,
@@ -3696,6 +4042,22 @@ fn kept_copy_name(file_name: &str, n: u32, budget: usize) -> Option<String> {
 /// UTF-8 never needs more than 255 UTF-16 units.
 const MAX_KEPT_COPY_NAME_BYTES: usize = 255;
 
+/// macOS `PATH_MAX`: the bytes of a whole path, its NUL included.
+#[cfg(target_vendor = "apple")]
+const APPLE_PATH_MAX: usize = 1_024;
+
+/// Whether the OS refused a path as too long, or as a name it cannot hold.
+/// No kept copy can take such a path, so the file stays kept.
+fn names_too_long(err: &MaterializeError) -> bool {
+    matches!(
+        err,
+        MaterializeError::Io {
+            kind: ErrorKind::InvalidFilename,
+            ..
+        }
+    )
+}
+
 /// Whether a replace left `path`'s file staged where it may still go back:
 /// an open row names it, or a pending job that targets it staged a file no
 /// row names yet. Capture must not record such a path as deleted.
@@ -3735,6 +4097,7 @@ fn job_targets(job: &MaterializationJob, workspace_id: &str, path: &str) -> bool
 fn recover_job_displacements(
     store: &EngineStore,
     root: &Path,
+    _target: &Path,
     job: &MaterializationJob,
     options: &MaterializeOptions<'_>,
 ) -> Result<(Staging, bool), MaterializeError> {
@@ -3745,7 +4108,7 @@ fn recover_job_displacements(
         return Ok((
             Staging {
                 root: root.to_owned(),
-                dir: root.join(STAGING_DIR),
+                dir: staging_base(store.database_path(), root).1,
                 taken: Vec::new(),
             },
             false,
@@ -3768,6 +4131,9 @@ fn recover_job_displacements(
     let mut rowless = Vec::new();
     for n in 0..MAX_DISPLACED_NAMES {
         let name = staged_name(&job.job_id, n);
+        #[cfg(windows)]
+        readonly_link::recover_one(&dir.join(&name), _target)
+            .map_err(|err| MaterializeError::io(&dir, &err))?;
         if !taken.contains(&name) && entry_exists(&dir.join(&name))? {
             rowless.push(name);
         }
@@ -3838,13 +4204,13 @@ fn recover_staged(
     let staged = staging.join(name);
     #[cfg(windows)]
     if placement_is_linked(&staged, &target).map_err(|err| MaterializeError::io(&staged, &err))? {
-        return return_displaced(&target, &staged, options).map(|returned| !returned);
+        return return_displaced(store, &target, &staged, options).map(|returned| !returned);
     }
     let write = job.operation == MaterializationOperation::Write;
     if write
         && !entry_exists(&target)?
         && entry_exists(&temp_sibling(&target, &job.job_id))?
-        && return_displaced(&target, &staged, options)?
+        && return_displaced(store, &target, &staged, options)?
     {
         return Ok(false);
     }
@@ -3927,7 +4293,7 @@ fn recover_displacement(
     if placement_is_linked(&moved.path, &target)
         .map_err(|err| MaterializeError::io(&moved.path, &err))?
     {
-        if return_displaced(&target, &moved.path, options)? {
+        if return_displaced(store, &target, &moved.path, options)? {
             store.resolve_displacement(
                 moved.displacement_id,
                 DisplacementResolution::Discard,
@@ -3940,7 +4306,7 @@ fn recover_displacement(
     }
     if displacement.state == DisplacementState::Open
         && !entry_exists(&target)?
-        && return_displaced(&target, &moved.path, options)?
+        && return_displaced(store, &target, &moved.path, options)?
     {
         store.resolve_displacement(
             moved.displacement_id,
@@ -4086,6 +4452,29 @@ fn preimage_matches(preimage: &Preimage, current: &CurrentTarget) -> bool {
     }
 }
 
+/// Whether a hold on `held` covers `path`: the same path in any case or
+/// Unicode normalization, or a path beneath it. Aliases deliberately over-hold
+/// distinct paths on case-sensitive volumes.
+pub fn path_is_held(held: &str, path: &str) -> bool {
+    let (held, path) = (path_collision_key(held), path_collision_key(path));
+    path == held
+        || path
+            .strip_prefix(&held)
+            .is_some_and(|tail| tail.starts_with('/'))
+}
+
+/// Whether a durable capture hold in `workspace` covers `path`.
+pub fn placement_is_held_in(
+    store: &EngineStore,
+    workspace: &str,
+    path: &str,
+) -> Result<bool, StorageError> {
+    Ok(store
+        .held_paths(workspace)?
+        .iter()
+        .any(|held| path_is_held(held, path)))
+}
+
 /// Protect lexical aliases and held ancestors on every platform. Filesystem
 /// aliases are checked only here, after the placement boundary resolves them.
 fn placement_is_held(
@@ -4116,7 +4505,7 @@ fn placement_is_held(
         #[cfg(not(windows))]
         return Ok(false);
     }
-    if store.placement_is_held(workspace, path)? {
+    if placement_is_held_in(store, workspace, path)? {
         return Ok(true);
     }
     #[cfg(windows)]
@@ -4134,12 +4523,98 @@ fn placement_is_held(
             .to_string_lossy()
             .replace('\\', "/");
         if resolved != path {
-            return Ok(store.placement_is_held(workspace, &resolved)?);
+            return Ok(placement_is_held_in(store, workspace, &resolved)?);
         }
     }
     #[cfg(not(windows))]
     let _ = (root, target);
     Ok(false)
+}
+
+fn target_has_other_leaf_spelling(target: &Path) -> bool {
+    other_leaf_spelling(target).is_some()
+}
+
+fn other_leaf_spelling(target: &Path) -> Option<std::ffi::OsString> {
+    #[cfg(windows)]
+    {
+        let requested = target.file_name()?.to_str()?;
+        let stored = dohc_windows_files::stored_leaf_name(target).ok()?;
+        if stored != requested
+            && crate::floor::fold_segment(stored.to_str()?) == crate::floor::fold_segment(requested)
+        {
+            return Some(stored);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = target;
+    None
+}
+
+/// The existing disk-placement segment rule, including tracked peer names.
+fn materialize_segment_is_safe(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && !segment.contains('\\')
+        && !segment.contains(':')
+}
+
+/// Admission for a new document opened by a link click. Existing tracked
+/// files keep the disk writer's broader rule.
+pub fn creation_segment_is_safe(segment: &str) -> bool {
+    if !materialize_segment_is_safe(segment)
+        || segment.contains('/')
+        || segment.chars().any(char::is_control)
+    {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        let name = segment.trim_end_matches(['.', ' ']);
+        let base = name
+            .split('.')
+            .next()
+            .unwrap_or(name)
+            .trim_end_matches(['.', ' ']);
+        let base = base.to_ascii_lowercase();
+        let named_device = matches!(
+            base.as_str(),
+            "con" | "prn" | "aux" | "nul" | "conin$" | "conout$" | "clock$"
+        );
+        let numbered_device = ["com", "lpt"].into_iter().any(|prefix| {
+            base.strip_prefix(prefix).is_some_and(|number| {
+                number.chars().count() == 1
+                    && number
+                        .chars()
+                        .any(|c| matches!(c, '1'..='9' | '¹' | '²' | '³'))
+            })
+        });
+        if named_device || numbered_device {
+            return false;
+        }
+        // Desktop: ^[^.\s]{1,8}~\d+(?:\.[^.\s]{1,3})?$
+        let (base, extension) = name
+            .split_once('.')
+            .map_or((name, None), |(b, e)| (b, Some(e)));
+        if let Some((stem, digits)) = base.rsplit_once('~') {
+            let plain = |text: &str| {
+                !text
+                    .chars()
+                    .any(|c| c == '.' || c.is_whitespace() || c == '\u{feff}')
+            };
+            if (1..=8).contains(&stem.encode_utf16().count())
+                && plain(stem)
+                && !digits.is_empty()
+                && digits.bytes().all(|byte| byte.is_ascii_digit())
+                && extension
+                    .is_none_or(|ext| (1..=3).contains(&ext.encode_utf16().count()) && plain(ext))
+            {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Resolve a workspace-relative forward-slash path to an absolute target under
@@ -4150,20 +4625,14 @@ fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, MaterializeError> {
     }
     let mut out = root.to_path_buf();
     for segment in rel.split('/') {
-        // Reject empty (`a//b`), current (`.`), parent (`..`), and any segment
-        // containing a backslash or drive-colon (Windows escape shapes).
-        if segment.is_empty()
-            || segment == "."
-            || segment == ".."
-            || segment.contains('\\')
-            || segment.contains(':')
-        {
+        if !materialize_segment_is_safe(segment) {
             return Err(MaterializeError::UnsafeTargetPath);
         }
         out.push(segment);
     }
     #[cfg(windows)]
     {
+        let requested_leaf = out.file_name().unwrap().to_os_string();
         // Check links before resolving aliases. Resolve the deepest existing
         // path once, including an existing leaf so file aliases cannot bypass
         // the sidecar and conflict-artifact floor.
@@ -4197,6 +4666,17 @@ fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, MaterializeError> {
         let relative = relative.to_string_lossy().replace('\\', "/");
         if is_excluded_file(&relative) || crate::policy::is_shared_with_me_path(&relative) {
             return Err(MaterializeError::UnsafeTargetPath);
+        }
+        // Validate the resolved alias first, including the short-name floor.
+        // Publication must still use the requested case of an ordinary leaf.
+        if requested_leaf
+            .to_str()
+            .zip(out.file_name().and_then(OsStr::to_str))
+            .is_some_and(|(requested, resolved)| {
+                crate::floor::fold_segment(requested) == crate::floor::fold_segment(resolved)
+            })
+        {
+            out.set_file_name(requested_leaf);
         }
     }
     Ok(out)
@@ -4444,7 +4924,13 @@ impl SecretParentGuard {
     ) -> Result<std::fs::File, MaterializeError> {
         #[cfg(unix)]
         {
-            write_secret_temp_at_unix(&self.parent_fd, name, display_path, content)
+            write_temp_at_unix(
+                &self.parent_fd,
+                name,
+                display_path,
+                content,
+                TempAccess::Owner,
+            )
         }
 
         #[cfg(not(unix))]
@@ -4490,29 +4976,29 @@ impl SecretParentGuard {
         }
     }
 
-    fn sync(&self, policy: DurabilityPolicy) -> Result<(), MaterializeError> {
+    fn sync(&self, store: &EngineStore, policy: DurabilityPolicy) -> Result<(), MaterializeError> {
         if !policy.fsync_parent_dir {
             return Ok(());
         }
 
         #[cfg(unix)]
         {
-            // Sync through `std`, not `rustix::fs::fsync`: on macOS `sync_all`
-            // issues F_FULLFSYNC, which flushes the drive write cache, and
-            // plain fsync does not. Duplicating the PINNED fd keeps durability
-            // identical to `sync_parent_dir` on the non-secret path without
-            // giving up the pin — the duplicate closes with `file`, the
-            // original stays open.
+            // Flush through the store, not `rustix::fs::fsync`: plain fsync
+            // neither orders nor drains on macOS, and the store picks the
+            // flush `sync_parent_dir` uses. Duplicating the PINNED fd keeps
+            // the pin — the duplicate closes with `file`, the original stays
+            // open.
             let duplicate = rustix::io::fcntl_dupfd_cloexec(&self.parent_fd, 0)
                 .map_err(std::io::Error::from)
                 .map_err(|err| MaterializeError::io(&self.parent_path, &err))?;
-            std::fs::File::from(duplicate)
-                .sync_all()
+            store
+                .flush_before_commits(&std::fs::File::from(duplicate))
                 .map_err(|err| MaterializeError::io(&self.parent_path, &err))
         }
 
         #[cfg(not(unix))]
         {
+            let _ = store;
             Ok(())
         }
     }
@@ -4852,24 +5338,210 @@ fn read_current_at_unix(
     read_current_file(std::fs::File::from(fd), display_path)
 }
 
+/// Who may open a temp. A temp gives nobody but the owner more access than
+/// the file it replaces. Only a new ordinary file takes what the folder's
+/// ACL grants every new file: on macOS the other temps never take it, and
+/// on Linux their 0600 mode empties a default ACL's mask.
 #[cfg(unix)]
-fn write_secret_temp_at_unix(
+enum TempAccess {
+    /// Only the owner: secret plaintext, or a target the engine cannot read.
+    Owner,
+    /// A new ordinary file. The umask decides its mode.
+    New,
+    /// The regular file the temp replaces.
+    Like(Replaced),
+}
+
+#[cfg(unix)]
+impl TempAccess {
+    /// Stat `target` without following a link first, so nothing opens a FIFO
+    /// or a device there. A missing target is a new file. A regular file is
+    /// opened without following a link. Any other entry, or a file the
+    /// engine cannot open, gets an owner-only temp.
+    fn replacing(parent_fd: &rustix::fd::OwnedFd, target: &OsStr) -> Self {
+        use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+
+        match rustix::fs::statat(parent_fd, target, AtFlags::SYMLINK_NOFOLLOW) {
+            Err(rustix::io::Errno::NOENT) => return Self::New,
+            Ok(stat) if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile => {}
+            _ => return Self::Owner,
+        }
+        let Ok(file) = rustix::fs::openat(
+            parent_fd,
+            target,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) else {
+            return Self::Owner;
+        };
+        let stat = match rustix::fs::fstat(&file) {
+            Ok(stat) if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile => stat,
+            _ => return Self::Owner,
+        };
+        Self::Like(Replaced {
+            #[cfg(target_os = "linux")]
+            has_acl: has_posix_acl(&file),
+            #[cfg(target_vendor = "apple")]
+            file,
+            mode: Mode::from_raw_mode(stat.st_mode & 0o777),
+            uid: stat.st_uid,
+            gid: stat.st_gid,
+        })
+    }
+}
+
+/// What an ordinary temp takes from the regular file it replaces: the group,
+/// the permission bits and, on macOS, the ACL and the extended attributes a
+/// save keeps. Setuid, setgid and sticky bits, the owner and times are not
+/// copied, so capture sees the replace.
+#[cfg(unix)]
+struct Replaced {
+    #[cfg(target_vendor = "apple")]
+    file: rustix::fd::OwnedFd,
+    mode: rustix::fs::Mode,
+    uid: u32,
+    gid: u32,
+    /// Whether the file has a POSIX ACL, which the temp does not take.
+    #[cfg(target_os = "linux")]
+    has_acl: bool,
+}
+
+#[cfg(unix)]
+impl Replaced {
+    /// Give the empty temp this file's group, ACL and mode, as [`temp_mode`]
+    /// allows. A failed copy never fails the write.
+    fn apply_to(&self, temp: &std::fs::File) {
+        let has_gid = || rustix::fs::fstat(temp).is_ok_and(|stat| stat.st_gid == self.gid);
+        let gid = Some(rustix::fs::Gid::from_raw(self.gid));
+        let group_kept = has_gid() || (rustix::fs::fchown(temp, None, gid).is_ok() && has_gid());
+        let owner_kept = rustix::fs::fstat(temp).is_ok_and(|stat| stat.st_uid == self.uid);
+        // A Linux ACL's mask shows as the group bits. A folder's default ACL
+        // can give the temp an ACL the file never had.
+        #[cfg(target_os = "linux")]
+        let acl_kept = !self.has_acl && !has_posix_acl(temp);
+        // The temp has no ACL yet, so none of the file's entries can block
+        // the attribute copy.
+        #[cfg(target_vendor = "apple")]
+        dohc_macos_files::copy_saved_xattrs(&self.file, temp);
+        #[cfg(target_vendor = "apple")]
+        let acl_kept = dohc_macos_files::copy_acl(&self.file, temp).is_ok();
+        // No check exists for another Unix's ACLs.
+        #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+        let acl_kept = false;
+        let mode = temp_mode(self.mode, group_kept, acl_kept, owner_kept);
+        let _ = rustix::fs::fchmod(temp, mode);
+    }
+}
+
+/// The mode a temp takes from a file with `mode`. The full mode needs the
+/// file's ACL on the temp, or no ACL on either, and it needs the file's group
+/// or equal group and other bits. Otherwise only the owner's bits stay, so
+/// nobody but the owner gains access. A temp with another owner than the
+/// file, the engine's user, keeps read and write, so the engine can read the
+/// file it wrote.
+#[cfg(unix)]
+fn temp_mode(
+    mode: rustix::fs::Mode,
+    group_kept: bool,
+    acl_kept: bool,
+    owner_kept: bool,
+) -> rustix::fs::Mode {
+    use rustix::fs::Mode;
+
+    let bits = mode.bits();
+    let group_is_other = (bits >> 3) & 0o7 == bits & 0o7;
+    let mode = if acl_kept && (group_kept || group_is_other) {
+        mode
+    } else {
+        mode & Mode::RWXU
+    };
+    if owner_kept {
+        mode
+    } else {
+        mode | Mode::RUSR | Mode::WUSR
+    }
+}
+
+#[cfg(all(test, target_vendor = "apple"))]
+#[test]
+fn a_volume_that_shares_new_files_reaches_the_caller_by_its_code() {
+    let refused = std::io::Error::other(dohc_macos_files::VolumeSharesNewFiles);
+    let err = temp_create_error(Path::new("ws/.env"), &refused);
+    assert!(matches!(err, MaterializeError::VolumeSharesNewFiles));
+    assert_eq!(err.code(), "volume-shares-new-files");
+    assert!(!err.to_string().contains(".env"), "{err}");
+}
+
+#[cfg(all(test, unix))]
+mod temp_mode_tests {
+    use super::temp_mode;
+    use rustix::fs::Mode;
+
+    #[test]
+    fn a_temp_with_another_owner_keeps_owner_read_and_write() {
+        let mode = temp_mode(Mode::from_raw_mode(0o040), true, true, false);
+        assert_eq!(mode, Mode::from_raw_mode(0o640));
+        let mode = temp_mode(Mode::from_raw_mode(0o755), true, true, false);
+        assert_eq!(mode, Mode::from_raw_mode(0o755));
+    }
+
+    #[test]
+    fn a_lost_group_keeps_the_mode_only_when_group_and_other_bits_match() {
+        for (old, new) in [
+            (0o755, 0o755),
+            (0o644, 0o644),
+            (0o640, 0o600),
+            (0o604, 0o600),
+        ] {
+            let mode = temp_mode(Mode::from_raw_mode(old), false, true, true);
+            assert_eq!(mode, Mode::from_raw_mode(new), "{old:o}");
+        }
+    }
+
+    #[test]
+    fn an_acl_left_behind_keeps_only_the_owner_bits() {
+        let mode = temp_mode(Mode::from_raw_mode(0o755), true, false, true);
+        assert_eq!(mode, Mode::from_raw_mode(0o700));
+    }
+}
+
+/// Whether a file has a POSIX access ACL. A failed check counts as one.
+#[cfg(target_os = "linux")]
+fn has_posix_acl(file: impl rustix::fd::AsFd) -> bool {
+    !matches!(
+        rustix::fs::fgetxattr(file, "system.posix_acl_access", &mut [0u8; 0]),
+        Err(rustix::io::Errno::NODATA | rustix::io::Errno::NOTSUP)
+    )
+}
+
+#[cfg(unix)]
+fn write_temp_at_unix(
     parent_fd: &rustix::fd::OwnedFd,
     name: &OsStr,
     display_path: &Path,
     content: &[u8],
+    access: TempAccess,
 ) -> Result<std::fs::File, MaterializeError> {
     use rustix::fs::{Mode, OFlags};
     use std::io::Write as _;
 
     let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let create = || {
-        rustix::fs::openat(parent_fd, name, flags, Mode::from_raw_mode(0o600))
-            .map(std::fs::File::from)
+    let mode = Mode::from_raw_mode(match access {
+        TempAccess::New => 0o666,
+        TempAccess::Owner | TempAccess::Like(_) => 0o600,
+    });
+    let create = || -> std::io::Result<std::fs::File> {
+        #[cfg(target_vendor = "apple")]
+        if !matches!(access, TempAccess::New) {
+            return dohc_macos_files::create_uninherited(parent_fd, name, mode.bits())
+                .map(std::fs::File::from);
+        }
+        Ok(rustix::fs::openat(parent_fd, name, flags, mode)?.into())
     };
+    let errno = |err: &std::io::Error| rustix::io::Errno::from_io_error(err);
     let mut file = match create() {
         Ok(file) => file,
-        Err(err) if err == rustix::io::Errno::EXIST => {
+        Err(err) if errno(&err) == Some(rustix::io::Errno::EXIST) => {
             let stale = match rustix::fs::openat(
                 parent_fd,
                 name,
@@ -4896,24 +5568,32 @@ fn write_secret_temp_at_unix(
             rustix::fs::unlinkat(parent_fd, name, rustix::fs::AtFlags::empty())
                 .map_err(std::io::Error::from)
                 .map_err(|remove_err| MaterializeError::io(display_path, &remove_err))?;
-            create()
-                .map_err(std::io::Error::from)
-                .map_err(|retry_err| MaterializeError::io(display_path, &retry_err))?
+            create().map_err(|retry_err| temp_create_error(display_path, &retry_err))?
         }
-        Err(err) if err == rustix::io::Errno::LOOP => {
+        Err(err) if errno(&err) == Some(rustix::io::Errno::LOOP) => {
             return Err(MaterializeError::SymlinkTarget);
         }
-        Err(err) => {
-            let err = std::io::Error::from(err);
-            return Err(MaterializeError::io(display_path, &err));
-        }
+        Err(err) => return Err(temp_create_error(display_path, &err)),
     };
+    if let TempAccess::Like(replaced) = &access {
+        replaced.apply_to(&file);
+    }
     if let Err(err) = file.write_all(content) {
         drop(file);
         let _ = rustix::fs::unlinkat(parent_fd, name, rustix::fs::AtFlags::empty());
         return Err(MaterializeError::io(display_path, &err));
     }
     Ok(file)
+}
+
+/// The error for a temp that could not be created at `display_path`.
+#[cfg(unix)]
+fn temp_create_error(display_path: &Path, err: &std::io::Error) -> MaterializeError {
+    #[cfg(target_vendor = "apple")]
+    if dohc_macos_files::volume_shares_new_files(err) {
+        return MaterializeError::VolumeSharesNewFiles;
+    }
+    MaterializeError::io(display_path, err)
 }
 
 fn temp_sibling(target: &Path, job_id: &str) -> PathBuf {
@@ -4960,20 +5640,36 @@ fn filesystem_job_component(id: &str) -> String {
     }
 }
 
-fn write_temp(tmp: &Path, content: &[u8]) -> Result<std::fs::File, MaterializeError> {
+/// Write an ordinary job's temp beside `target`, which it will replace. An
+/// `owner_only` temp is 0600 whatever the target allows.
+fn write_temp(
+    target: &Path,
+    tmp: &Path,
+    content: &[u8],
+    owner_only: bool,
+) -> Result<std::fs::File, MaterializeError> {
     #[cfg(unix)]
     {
         use std::os::fd::OwnedFd;
 
         let parent_path = tmp.parent().ok_or(MaterializeError::UnsafeTargetPath)?;
         let name = tmp.file_name().ok_or(MaterializeError::UnsafeTargetPath)?;
+        let target_name = target
+            .file_name()
+            .ok_or(MaterializeError::UnsafeTargetPath)?;
         let parent_fd: OwnedFd = std::fs::File::open(parent_path)
             .map_err(|err| MaterializeError::io(parent_path, &err))?
             .into();
-        write_secret_temp_at_unix(&parent_fd, name, tmp, content)
+        let access = if owner_only {
+            TempAccess::Owner
+        } else {
+            TempAccess::replacing(&parent_fd, target_name)
+        };
+        write_temp_at_unix(&parent_fd, name, tmp, content, access)
     }
     #[cfg(not(unix))]
     {
+        let _ = (target, owner_only);
         write_secret_temp_no_follow(tmp, content)
     }
 }
@@ -5022,21 +5718,26 @@ fn write_secret_temp_no_follow(
 }
 
 fn flush_temp_file(
+    store: &EngineStore,
     file: &std::fs::File,
     tmp: &Path,
     policy: DurabilityPolicy,
 ) -> Result<(), MaterializeError> {
     if policy.fsync_file {
-        file.sync_all().map_err(|e| MaterializeError::io(tmp, &e))?;
+        store
+            .flush_before_commits(file)
+            .map_err(|e| MaterializeError::io(tmp, &e))?;
     }
     Ok(())
 }
 
-/// Sync the parent directory after the rename so the directory entry change (the
-/// replace) is durable. POSIX only; on Windows `std` exposes no portable
-/// directory sync, so this is a documented no-op there (an honestly-scoped
-/// durability limit — `per_os()` sets `fsync_parent_dir = false` off POSIX).
+/// Flush the parent directory after the rename so the directory entry change
+/// (the replace) persists before the job's status. POSIX only; on Windows `std`
+/// exposes no portable directory sync, so this is a documented no-op there (an
+/// honestly-scoped durability limit — `per_os()` sets `fsync_parent_dir =
+/// false` off POSIX).
 fn sync_parent_dir(
+    store: &EngineStore,
     parent: Option<&Path>,
     policy: DurabilityPolicy,
 ) -> Result<(), MaterializeError> {
@@ -5046,11 +5747,13 @@ fn sync_parent_dir(
         #[cfg(unix)]
         {
             let dirf = std::fs::File::open(dir).map_err(|e| MaterializeError::io(dir, &e))?;
-            dirf.sync_all().map_err(|e| MaterializeError::io(dir, &e))?;
+            store
+                .flush_before_commits(&dirf)
+                .map_err(|e| MaterializeError::io(dir, &e))?;
         }
         #[cfg(not(unix))]
         {
-            let _ = dir; // documented no-op off POSIX
+            let _ = (store, dir); // documented no-op off POSIX
         }
     }
     Ok(())
@@ -5180,7 +5883,12 @@ fn resolve_replace_exhaustion(
 /// Whether an io error is a transient sharing/lock condition worth retrying
 /// (Windows AV/indexer `ERROR_SHARING_VIOLATION` = os error 32, or a permission
 /// denial std maps such handles to). A non-transient error is returned at once.
+/// EPERM on Unix is not a lock: a macOS privacy refusal or an immutable file
+/// does not clear while dohc waits.
 fn is_transient_lock(err: &std::io::Error) -> bool {
+    if cfg!(unix) && err.raw_os_error() == Some(1) {
+        return false;
+    }
     if err.kind() == ErrorKind::PermissionDenied {
         return true;
     }
@@ -5297,55 +6005,124 @@ fn replace_secret_with_bounded_retry(
 
 #[cfg(test)]
 mod tests {
+    /// A store outside the workspace under test, for helpers that flush.
+    fn flush_store() -> (dohc_test_scratch::ScratchDir, EngineStore) {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("flush-store").unwrap();
+        let store = EngineStore::open(&scratch.path().join("engine.db"), 0).unwrap();
+        (scratch, store)
+    }
+
     #[test]
     fn directory_replacement_removes_only_empty_real_directories() {
+        let (_db, store) = flush_store();
         let scratch = dohc_test_scratch::ScratchDir::new_named("empty-directory-target").unwrap();
         let root = scratch.path();
         std::fs::create_dir_all(root.join("d/sub")).unwrap();
         std::fs::write(root.join("d/keep.md"), "keep").unwrap();
-        assert!(!super::remove_empty_directory_target(root, "d").unwrap());
-        assert!(super::remove_empty_directory_target(root, "d/sub").unwrap());
-        assert!(!super::remove_empty_directory_target(root, "d").unwrap());
+        assert!(!super::remove_empty_directory_target(&store, root, "d").unwrap());
+        assert!(super::remove_empty_directory_target(&store, root, "d/sub").unwrap());
+        assert!(!super::remove_empty_directory_target(&store, root, "d").unwrap());
         assert_eq!(
             std::fs::read_to_string(root.join("d/keep.md")).unwrap(),
             "keep"
         );
-        assert!(!super::remove_empty_directory_target(root, "d/sub").unwrap());
-        assert!(super::remove_empty_directory_target(root, "../d").is_err());
+        assert!(!super::remove_empty_directory_target(&store, root, "d/sub").unwrap());
+        assert!(super::remove_empty_directory_target(&store, root, "../d").is_err());
+    }
+
+    /// Finder writes `.DS_Store` into every folder it shows. Once the last
+    /// file leaves, that folder is empty and goes, but no other file goes
+    /// with it, and a volume folder such as `.Trashes` keeps its folder.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_directory_holding_only_finder_files_is_empty() {
+        let (_db, store) = flush_store();
+        let scratch = dohc_test_scratch::ScratchDir::new_named("os-metadata-directory").unwrap();
+        let root = scratch.path();
+        std::fs::create_dir_all(root.join("d/sub")).unwrap();
+        std::fs::write(root.join("d/sub/.DS_Store"), "finder").unwrap();
+        std::fs::write(root.join("d/sub/._a.md"), "appledouble").unwrap();
+        std::fs::write(root.join("d/.DS_Store"), "finder").unwrap();
+        std::fs::write(root.join("d/keep.md"), "keep").unwrap();
+        std::fs::create_dir_all(root.join("t/.Trashes/501")).unwrap();
+        std::fs::write(root.join("t/.Trashes/501/trashed.md"), "trashed").unwrap();
+        std::fs::create_dir_all(root.join("w")).unwrap();
+        std::fs::write(root.join("w/Thumbs.db"), "explorer").unwrap();
+        assert!(super::remove_empty_directory_target(&store, root, "d/sub").unwrap());
+        assert!(!root.join("d/sub").exists());
+        assert!(!super::remove_empty_directory_target(&store, root, "d").unwrap());
+        assert!(root.join("d/.DS_Store").exists());
+        assert!(root.join("d/keep.md").exists());
+        assert!(!super::remove_empty_directory_target(&store, root, "t").unwrap());
+        assert!(root.join("t/.Trashes/501/trashed.md").exists());
+        assert!(!super::remove_empty_directory_target(&store, root, "w").unwrap());
+        assert!(root.join("w/Thumbs.db").exists());
+    }
+
+    /// A folder swapped for a link between the check and the deletion must
+    /// not send the deletion through the link.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_folder_swapped_for_a_link_keeps_the_files_outside() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("os-metadata-swap").unwrap();
+        let outside = dohc_test_scratch::ScratchDir::new_named("os-metadata-outside").unwrap();
+        let root = std::fs::canonicalize(scratch.path()).unwrap();
+        std::fs::create_dir_all(root.join("d/sub")).unwrap();
+        std::fs::write(root.join("d/sub/.DS_Store"), "ours").unwrap();
+        std::fs::write(outside.path().join(".DS_Store"), "outside").unwrap();
+        let target = root.join("d/sub");
+        let removed = super::remove_emptied_directory(&root, "d/sub", &target, || {
+            std::fs::rename(root.join("d/sub"), root.join("d/moved")).unwrap();
+            std::os::unix::fs::symlink(outside.path(), root.join("d/sub")).unwrap();
+        });
+        assert!(!removed);
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join(".DS_Store")).unwrap(),
+            "outside"
+        );
+        assert!(
+            std::fs::symlink_metadata(root.join("d/sub"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(root.join("d/moved").is_dir());
     }
 
     #[test]
     fn a_file_is_removed_only_while_it_holds_the_expected_bytes() {
+        let (_db, store) = flush_store();
         let scratch = dohc_test_scratch::ScratchDir::new_named("file-holding").unwrap();
         let root = scratch.path();
         let held = dohc_engine_storage::hex_sha256(b"held");
         std::fs::write(root.join("a.md"), "edited").unwrap();
-        assert!(!super::remove_file_holding(root, "a.md", &held).unwrap());
+        assert!(!super::remove_file_holding(&store, root, "a.md", &held).unwrap());
         assert_eq!(
             std::fs::read_to_string(root.join("a.md")).unwrap(),
             "edited"
         );
         std::fs::write(root.join("a.md"), "held").unwrap();
-        assert!(super::remove_file_holding(root, "a.md", &held).unwrap());
+        assert!(super::remove_file_holding(&store, root, "a.md", &held).unwrap());
         assert!(!root.join("a.md").exists());
         assert!(
-            super::remove_file_holding(root, "a.md", &held).unwrap(),
+            super::remove_file_holding(&store, root, "a.md", &held).unwrap(),
             "already free"
         );
         std::fs::create_dir(root.join("d.md")).unwrap();
-        assert!(!super::remove_file_holding(root, "d.md", &held).unwrap());
+        assert!(!super::remove_file_holding(&store, root, "d.md", &held).unwrap());
         assert!(root.join("d.md").is_dir());
     }
 
     #[cfg(unix)]
     #[test]
     fn directory_replacement_refuses_links_in_the_parent_chain() {
+        let (_db, store) = flush_store();
         let scratch = dohc_test_scratch::ScratchDir::new_named("linked-directory-target").unwrap();
         let root = scratch.path();
         std::fs::create_dir_all(root.join("real/sub")).unwrap();
         std::os::unix::fs::symlink(root.join("real"), root.join("alias")).unwrap();
-        assert!(super::remove_empty_directory_target(root, "alias/sub").is_err());
-        assert!(super::remove_empty_directory_target(root, "alias").is_err());
+        assert!(super::remove_empty_directory_target(&store, root, "alias/sub").is_err());
+        assert!(super::remove_empty_directory_target(&store, root, "alias").is_err());
         assert!(root.join("real/sub").is_dir());
     }
 
@@ -5467,14 +6244,37 @@ mod tests {
                 )
             })
             .unwrap();
-        assert!(
-            store
-                .placement_is_held("workspace", "plans/trip.md")
-                .unwrap()
-        );
-        assert!(store.placement_is_held("workspace", "PLANS").unwrap());
-        assert!(!store.placement_is_held("other", "PLANS").unwrap());
-        assert!(!store.placement_is_held("workspace", "planets.md").unwrap());
+        assert!(placement_is_held_in(&store, "workspace", "plans/trip.md").unwrap());
+        assert!(placement_is_held_in(&store, "workspace", "PLANS").unwrap());
+        assert!(!placement_is_held_in(&store, "other", "PLANS").unwrap());
+        assert!(!placement_is_held_in(&store, "workspace", "planets.md").unwrap());
+    }
+
+    /// APFS stores `café` in whichever normalization it was written in and
+    /// opens it under either, so a write to one must not replace a held other.
+    #[test]
+    fn holds_cover_every_spelling_a_disk_may_alias() {
+        for (held, path) in [
+            ("caf\u{e9}.md", "cafe\u{301}.md"),
+            ("cafe\u{301}/plan.md", "CAF\u{c9}/plan.md"),
+            ("Stra\u{df}e.md", "STRASSE.md"),
+            ("notes", "Notes/a.md"),
+        ] {
+            assert!(path_is_held(held, path), "{held} {path}");
+            let holds = PlacementHolds::from_paths(
+                "workspace",
+                std::collections::HashMap::from([(
+                    held.to_owned(),
+                    PlacementHold {
+                        source_version_id: "main".into(),
+                        preimage: Preimage::Absent,
+                    },
+                )]),
+            );
+            assert!(holds.blocks(path), "{held} {path}");
+        }
+        assert!(!path_is_held("caf\u{e9}.md", "cafe.md"));
+        assert!(!path_is_held("notes", "notes.md"));
     }
 
     fn options_with(replacer: &dyn AtomicReplacer) -> MaterializeOptions<'_> {
@@ -5643,6 +6443,96 @@ mod tests {
             MAX_REPLACE_ATTEMPTS as usize
         );
         assert!(matches!(result, Err(MaterializeError::Io { .. })));
+    }
+
+    /// EPERM is not a lock on Unix: a macOS privacy refusal does not clear
+    /// while the replace waits, so it fails on the first try and keeps its
+    /// OS error. On macOS it has its own code. EACCES still retries.
+    #[cfg(unix)]
+    #[test]
+    fn replace_fails_eperm_at_once_and_names_a_macos_privacy_denial() {
+        let scratch = Scratch::new("replace-eperm");
+        let tmp = scratch.root.join("tmp-file");
+        std::fs::write(&tmp, b"pending bytes").expect("write tmp");
+        let attempt = |error: fn() -> std::io::Error| {
+            let replacer = AlwaysFailReplacer {
+                error,
+                attempts: AtomicUsize::new(0),
+            };
+            let result = create_from_temp(
+                &scratch.root.join("target.md"),
+                &tmp,
+                &options_with(&replacer),
+            );
+            (replacer.attempts.load(Ordering::Relaxed), result)
+        };
+
+        let (attempts, result) = attempt(|| std::io::Error::from_raw_os_error(1));
+        assert_eq!(attempts, 1);
+        let error = result.expect_err("EPERM fails the replace");
+        assert!(matches!(
+            error,
+            MaterializeError::Io {
+                raw_os_error: Some(1),
+                ..
+            }
+        ));
+        let eperm = if cfg!(target_os = "macos") {
+            "privacy-denied"
+        } else {
+            "materialize-io"
+        };
+        assert_eq!(error.code(), eperm);
+
+        let (attempts, result) = attempt(|| std::io::Error::from_raw_os_error(13));
+        assert_eq!(attempts, MAX_REPLACE_ATTEMPTS as usize);
+        assert_eq!(result.expect_err("EACCES").code(), "materialize-io");
+    }
+
+    /// A file locked in Finder, or a locked folder a new file goes into, also
+    /// fails a write with EPERM. That is the file's own state, so it keeps
+    /// the ordinary io code and is still not retried as a lock.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_finder_lock_is_not_a_privacy_denial() {
+        let chflags = |flag: &str, path: &Path| {
+            let status = std::process::Command::new("chflags")
+                .arg(flag)
+                .arg(path)
+                .status()
+                .expect("chflags");
+            assert!(status.success());
+        };
+        let scratch = Scratch::new("replace-finder-lock");
+        let tmp = scratch.root.join("tmp-file");
+        std::fs::write(&tmp, b"pending bytes").expect("write tmp");
+        let locked_file = scratch.root.join("locked.md");
+        std::fs::write(&locked_file, b"locked").expect("write locked file");
+        let locked_dir = scratch.root.join("locked");
+        std::fs::create_dir(&locked_dir).expect("create locked folder");
+        chflags("uchg", &locked_file);
+        chflags("uchg", &locked_dir);
+
+        let replaced = std::fs::rename(&tmp, &locked_file).expect_err("a locked file refuses");
+        let replaced = MaterializeError::io(&locked_file, &replaced);
+        let replacer = AlwaysFailReplacer {
+            error: || std::io::Error::from_raw_os_error(1),
+            attempts: AtomicUsize::new(0),
+        };
+        let created = create_from_temp(&locked_dir.join("new.md"), &tmp, &options_with(&replacer));
+        chflags("nouchg", &locked_file);
+        chflags("nouchg", &locked_dir);
+
+        assert!(matches!(
+            replaced,
+            MaterializeError::Io {
+                raw_os_error: Some(1),
+                ..
+            }
+        ));
+        assert_eq!(replaced.code(), "materialize-io");
+        assert_eq!(replacer.attempts.load(Ordering::Relaxed), 1);
+        assert_eq!(created.expect_err("EPERM").code(), "materialize-io");
     }
 
     /// The replace boundary's meanings of ERROR_ACCESS_DENIED (#554, #595
@@ -5819,7 +6709,7 @@ mod tests {
                 let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
                 enqueue_write_job(&mut store, "kept-link", "notes.md", b"job content", 1);
                 let expected = store.put_binary_blob(b"preimage").unwrap();
-                let staging = staging_dir(&root, true).unwrap();
+                let staging = staging_dir(&scratch.db(), &root, true).unwrap();
                 let name = staged_name("kept-link", 0);
                 let kept = staging.join(&name);
                 let bytes: &[u8] = if known_bytes {
@@ -6041,7 +6931,9 @@ mod tests {
         for fail in [true, false] {
             let scratch = Scratch::new("readonly-unlink");
             let root = std::fs::canonicalize(&scratch.root).unwrap();
-            let incoming = staging_dir(&root, true).unwrap().join("staged.md");
+            let incoming = staging_dir(&scratch.db(), &root, true)
+                .unwrap()
+                .join("staged.md");
             let target = root.join("target.md");
             std::fs::write(&incoming, b"outside").unwrap();
             let mut permissions = std::fs::metadata(&incoming).unwrap().permissions();
@@ -6123,6 +7015,7 @@ mod tests {
                 assert!(!workspace_lacks_atomic_placement(&scratch.root));
             }
             let scratch = Scratch::new("unsupported-return");
+            let store = EngineStore::open(&scratch.db(), 1).unwrap();
             let root = std::fs::canonicalize(&scratch.root).unwrap();
             let staged = root.join("staged.md");
             let target = root.join("notes.md");
@@ -6130,13 +7023,13 @@ mod tests {
             let mut permissions = std::fs::metadata(&staged).unwrap().permissions();
             permissions.set_readonly(true);
             std::fs::set_permissions(&staged, permissions).unwrap();
-            assert!(return_displaced(&target, &staged, &options_with(&replacer)).unwrap());
+            assert!(return_displaced(&store, &target, &staged, &options_with(&replacer)).unwrap());
             assert!(!staged.exists());
             assert_eq!(std::fs::read(&target).unwrap(), b"outside");
             assert!(std::fs::metadata(&target).unwrap().permissions().readonly());
             assert!(!workspace_lacks_atomic_placement(&scratch.root));
             std::fs::write(&staged, b"another file").unwrap();
-            assert!(!return_displaced(&target, &staged, &options_with(&replacer)).unwrap());
+            assert!(!return_displaced(&store, &target, &staged, &options_with(&replacer)).unwrap());
             assert_eq!(std::fs::read(&target).unwrap(), b"outside");
             assert_eq!(std::fs::read(&staged).unwrap(), b"another file");
         }
@@ -6231,7 +7124,9 @@ mod tests {
         for unlink in [false, true] {
             let scratch = Scratch::new("readonly-fallback-crash");
             let root = std::fs::canonicalize(&scratch.root).unwrap();
-            let incoming = staging_dir(&root, true).unwrap().join("staged.md");
+            let incoming = staging_dir(&scratch.db(), &root, true)
+                .unwrap()
+                .join("staged.md");
             let target = root.join("target.md");
             let store = EngineStore::open(&scratch.db(), 1).unwrap();
             drop(store);
@@ -6291,6 +7186,69 @@ mod tests {
                 attributes
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn selected_job_recovers_readonly_journal_with_resolved_folder_case() {
+        use std::os::windows::fs::MetadataExt;
+
+        let scratch = Scratch::new("readonly-folder-case");
+        let root = std::fs::canonicalize(&scratch.root).unwrap();
+        std::fs::create_dir(root.join("Notes")).unwrap();
+        let target = root.join("Notes/a.md");
+        let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+        let sha = store.put_binary_blob(b"outside").unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                enqueue_job(
+                    tx,
+                    &MaterializationJobSpec {
+                        job_id: "folder-case".into(),
+                        workspace_id: "ws".into(),
+                        target_path: "notes/a.md".into(),
+                        content_sha256: sha.clone(),
+                        preimage: Preimage::Present(sha.clone()),
+                        target_generation: 1,
+                        now_ms: 1,
+                    },
+                )
+            })
+            .unwrap();
+        let job = store
+            .load_materialization_job("folder-case")
+            .unwrap()
+            .unwrap();
+        let incoming = staging_dir(&scratch.db(), &root, true)
+            .unwrap()
+            .join(staged_name(&job.job_id, 0));
+        std::fs::write(&incoming, b"outside").unwrap();
+        let mut permissions = std::fs::metadata(&incoming).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&incoming, permissions).unwrap();
+        let attributes = std::fs::metadata(&incoming).unwrap().file_attributes();
+        std::fs::hard_link(&incoming, &target).unwrap();
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _ = readonly_link::remove(&incoming, &target, || {
+                    std::fs::remove_file(&incoming)?;
+                    panic!("crash before attribute restoration");
+                });
+            })
+            .is_err()
+        );
+        assert!(!incoming.exists());
+        assert!(!std::fs::metadata(&target).unwrap().permissions().readonly());
+
+        // Exercise selected placement without the workspace-wide journal sweep.
+        materialize_one(&store, &root, &job, &options_with(&StdReplacer)).unwrap();
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().file_attributes(),
+            attributes
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"outside");
+        assert_eq!(store.pending_materialization_count().unwrap(), 0);
+        assert!(!incoming.with_extension("0.restore-attributes").exists());
     }
 
     /// The inverse: a real sharing violation that survives every attempt
@@ -6411,6 +7369,135 @@ mod tests {
             .expect("enqueue materialization job");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn conflicting_case_alias_publication_returns_the_outside_spelling() {
+        struct EditOnDisplace(AtomicUsize);
+        impl AtomicReplacer for EditOnDisplace {
+            fn displace(&self, target: &Path, displaced: &Path) -> std::io::Result<()> {
+                if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
+                    std::fs::write(target, b"outside edit")?;
+                }
+                std::fs::rename(target, displaced)
+            }
+        }
+        for crash in [false, true] {
+            let scratch = Scratch::new("conflict-leaf-case");
+            let root = scratch.root.path();
+            std::fs::write(root.join("held.md"), b"before").unwrap();
+            if !root.join("HELD.MD").exists() {
+                continue;
+            }
+            let (_db, mut store) = flush_store();
+            let before = store.put_binary_blob(b"before").unwrap();
+            let content = store.put_binary_blob(b"intended").unwrap();
+            store
+                .write_with(&NoFaults, |tx| {
+                    enqueue_job(
+                        tx,
+                        &MaterializationJobSpec {
+                            job_id: "alias-conflict".into(),
+                            workspace_id: "ws".into(),
+                            target_path: "HELD.MD".into(),
+                            content_sha256: content,
+                            preimage: Preimage::Present(before),
+                            target_generation: 1,
+                            now_ms: 1,
+                        },
+                    )
+                })
+                .unwrap();
+            let job = store
+                .load_materialization_job("alias-conflict")
+                .unwrap()
+                .unwrap();
+            struct CrashAfterJournal;
+            impl FaultInjector for CrashAfterJournal {
+                fn poll(&self, point: FaultPoint) -> FaultAction {
+                    if point == FaultPoint::MaterializeAfterDisplacementJournal {
+                        FaultAction::Crash
+                    } else {
+                        FaultAction::Continue
+                    }
+                }
+            }
+            let faults = CrashAfterJournal;
+            let replacer = EditOnDisplace(AtomicUsize::new(0));
+            let mut options = options_with(&replacer);
+            if crash {
+                options.faults = &faults;
+            }
+            let outcome = materialize_one(&store, root, &job, &options).unwrap();
+            if crash {
+                assert_eq!(
+                    outcome,
+                    JobOutcome::Crashed(FaultPoint::MaterializeAfterDisplacementJournal)
+                );
+                recover_displacements(&store, root, None, &options_with(&StdReplacer)).unwrap();
+            } else {
+                assert_eq!(outcome, JobOutcome::Conflict);
+            }
+            assert_eq!(
+                dohc_windows_files::stored_leaf_name(&root.join("held.md")).unwrap(),
+                "held.md"
+            );
+            assert_eq!(
+                std::fs::read(root.join("held.md")).unwrap(),
+                b"outside edit"
+            );
+            assert_eq!(
+                std::fs::read(conflict_sibling(&root.join("HELD.MD"), "alias-conflict")).unwrap(),
+                b"intended"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ordinary_publication_keeps_the_requested_leaf_case_even_with_equal_bytes() {
+        for desired in [b"Before.\n".as_slice(), b"After.\n".as_slice()] {
+            let scratch = Scratch::new("publication-leaf-case");
+            let root = scratch.root.path();
+            std::fs::write(root.join("held.md"), b"Before.\n").unwrap();
+            if !root.join("HELD.MD").exists() {
+                continue;
+            }
+            let (_db, mut store) = flush_store();
+            let before = store.put_binary_blob(b"Before.\n").unwrap();
+            let content = store.put_binary_blob(desired).unwrap();
+            store
+                .write_with(&NoFaults, |tx| {
+                    enqueue_job(
+                        tx,
+                        &MaterializationJobSpec {
+                            job_id: "leaf-case".into(),
+                            workspace_id: "ws".into(),
+                            target_path: "HELD.MD".into(),
+                            content_sha256: content,
+                            preimage: Preimage::Present(before),
+                            target_generation: 1,
+                            now_ms: 1,
+                        },
+                    )
+                })
+                .unwrap();
+            let job = store
+                .load_materialization_job("leaf-case")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                materialize_one(&store, root, &job, &options_with(&StdReplacer)).unwrap(),
+                JobOutcome::Completed
+            );
+            assert_eq!(
+                dohc_windows_files::stored_leaf_name(&root.join("HELD.MD")).unwrap(),
+                "HELD.MD"
+            );
+            assert_eq!(std::fs::read(root.join("HELD.MD")).unwrap(), desired);
+            assert!(!crate::stored_under_other_spelling(root, "HELD.MD"));
+        }
+    }
+
     fn capture_file_hold_fixture(store: &mut EngineStore, outside: &[u8]) {
         store.write_with(&NoFaults, |tx| {
             // The fixture supplies the durable hold contract on the old build
@@ -6524,7 +7611,7 @@ mod tests {
         let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
         capture_file_hold_fixture(&mut store, outside.as_bytes());
         enqueue_write_job(&mut store, "held-recovery", path, outside.as_bytes(), 1);
-        let staging = staging_dir(&root, true).unwrap();
+        let staging = staging_dir(&scratch.db(), &root, true).unwrap();
         let name = staged_name("held-recovery", 0);
         std::fs::write(staging.join(&name), previous).unwrap();
         if journaled {
@@ -6609,6 +7696,141 @@ mod tests {
             assert_eq!(failed_attempt, 1);
             std::fs::write(&self.0, b"external edit").expect("external editor saves");
         }
+    }
+
+    #[test]
+    fn disk_targets_reject_colon_segments() {
+        let scratch = Scratch::new("colon-segments");
+        for path in ["x.md:evil", "notes/x:evil.md"] {
+            assert!(matches!(
+                resolve_target(&scratch.root, path),
+                Err(MaterializeError::UnsafeTargetPath)
+            ));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn tracked_short_name_still_writes_probes_and_deletes() {
+        let scratch = Scratch::new("tracked-short-name");
+        let path = "draft~2.md";
+        assert_eq!(
+            crate::policy::classify_engine_file_path(path),
+            crate::policy::PathClassification::Tracked
+        );
+        std::fs::write(scratch.root.join(path), b"old\n").unwrap();
+        let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+        let original = store.put_binary_blob(b"old\n").unwrap();
+        let updated = store.put_binary_blob(b"new\n").unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                enqueue_job(
+                    tx,
+                    &MaterializationJobSpec {
+                        job_id: "short-write".into(),
+                        workspace_id: "ws".into(),
+                        target_path: path.into(),
+                        content_sha256: updated.clone(),
+                        preimage: Preimage::Present(original.clone()),
+                        target_generation: 1,
+                        now_ms: 1,
+                    },
+                )
+            })
+            .unwrap();
+        let write = store
+            .load_materialization_job("short-write")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            materialize_one(&store, &scratch.root, &write, &options_with(&StdReplacer)).unwrap(),
+            JobOutcome::Completed
+        );
+        assert_eq!(std::fs::read(scratch.root.join(path)).unwrap(), b"new\n");
+        assert_eq!(
+            probe_projection_target(&scratch.root, path, ProjectionTargetKind::Plaintext),
+            ProjectionTargetState::Text {
+                sha256: updated.clone()
+            }
+        );
+        assert!(matches!(
+            projection_target_stamp(&scratch.root, path),
+            ProjectionTargetStamp::File { byte_length: 4, .. }
+        ));
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_storage::enqueue_delete_job(
+                    tx,
+                    &MaterializationJobSpec {
+                        job_id: "short-delete".into(),
+                        workspace_id: "ws".into(),
+                        target_path: path.into(),
+                        content_sha256: updated.clone(),
+                        preimage: Preimage::Present(updated.clone()),
+                        target_generation: 2,
+                        now_ms: 2,
+                    },
+                )
+            })
+            .unwrap();
+        let delete = store
+            .load_materialization_job("short-delete")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            materialize_one(&store, &scratch.root, &delete, &options_with(&StdReplacer)).unwrap(),
+            JobOutcome::Completed
+        );
+        assert!(!scratch.root.join(path).exists());
+        assert_eq!(
+            projection_target_stamp(&scratch.root, path),
+            ProjectionTargetStamp::Absent
+        );
+    }
+
+    /// A merge's pending delete through a link reaches the file a create
+    /// targets, but would refuse to run. The create must not wait for it.
+    #[cfg(unix)]
+    #[test]
+    fn a_pending_delete_through_a_link_never_holds_back_a_create() {
+        let scratch = Scratch::new("respelled-delete-link");
+        std::fs::write(scratch.root.join("notes.md"), b"notes").unwrap();
+        std::os::unix::fs::symlink("notes.md", scratch.root.join("alias.md")).unwrap();
+        let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+        let sha = store.put_binary_blob(b"notes").unwrap();
+        let spec = |job_id: &str, target_path: &str, preimage| MaterializationJobSpec {
+            job_id: job_id.into(),
+            workspace_id: "ws".into(),
+            target_path: target_path.into(),
+            content_sha256: sha.clone(),
+            preimage,
+            target_generation: 1,
+            now_ms: 1,
+        };
+        let delete = spec(
+            "merge-mat_alias",
+            "alias.md",
+            Preimage::Present(sha.clone()),
+        );
+        let write = spec("merge-mat_notes", "notes.md", Preimage::Absent);
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_storage::enqueue_delete_job(tx, &delete)?;
+                enqueue_job(tx, &write)
+            })
+            .unwrap();
+        let write = store
+            .load_materialization_job("merge-mat_notes")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            materialize_one(&store, &scratch.root, &write, &options_with(&StdReplacer)).unwrap(),
+            JobOutcome::AlreadyMaterialized
+        );
+        let delete = store.load_materialization_job("merge-mat_alias").unwrap();
+        assert_eq!(delete.unwrap().status, JobStatus::Pending);
+        let link = std::fs::symlink_metadata(scratch.root.join("alias.md")).unwrap();
+        assert!(link.file_type().is_symlink());
     }
 
     #[test]
@@ -6929,8 +8151,14 @@ mod tests {
         let plaintext = b"SECRET=must-not-escape\n";
         let opened = open_secret_parent_unix(root, relative_parent, &display_parent);
         if let Ok(parent_fd) = &opened {
-            write_secret_temp_at_unix(parent_fd, OsStr::new(".env"), &redirected_target, plaintext)
-                .expect("a mistakenly accepted parent handle permits the secret write");
+            write_temp_at_unix(
+                parent_fd,
+                OsStr::new(".env"),
+                &redirected_target,
+                plaintext,
+                TempAccess::Owner,
+            )
+            .expect("a mistakenly accepted parent handle permits the secret write");
         }
 
         assert!(

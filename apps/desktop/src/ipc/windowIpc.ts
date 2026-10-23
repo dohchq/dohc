@@ -9,6 +9,7 @@ import { isSafeExternalUrl } from "../security/electronSecurity";
 import type { DesktopUserSettingsResult as UserSettingsResult, ZoomStep } from "../settings/userSettings";
 import type { createExitRounds, createQuitGuard } from "../quitGuard";
 import type { rememberChromeTheme as RememberChromeTheme, titleBarOverlayOptions as TitleBarOverlayOptions } from "../window/createMainWindow";
+import { palette } from "../renderer/tokens";
 
 export function createWindowIpc<
   Sender extends { id: number; isDestroyed(): boolean; reload(): void },
@@ -20,7 +21,10 @@ export function createWindowIpc<
   assertTrustedSender(event: Event): void;
   prepareForRendererReload(sender: Sender, rendererDocumentId: string): Promise<boolean>;
   shell: { openExternal(url: string): Promise<void> };
-  BrowserWindow: { fromWebContents(sender: Sender): Partial<Pick<ElectronWindow, "setTitleBarOverlay">> | null };
+  BrowserWindow: {
+    fromWebContents(sender: Sender):
+      (Pick<ElectronWindow, "setBackgroundColor"> & Partial<Pick<ElectronWindow, "setTitleBarOverlay">>) | null;
+  };
   rememberChromeTheme: typeof RememberChromeTheme;
   titleBarOverlayOptions: typeof TitleBarOverlayOptions;
   stepWindowZoom(step: ZoomStep): Promise<UserSettingsResult>;
@@ -76,7 +80,11 @@ export function createWindowIpc<
       // before any renderer JS runs (no light flash on dark launches).
       rememberChromeTheme(input.theme);
       const window = BrowserWindow.fromWebContents(event.sender);
-      if (!window || typeof window.setTitleBarOverlay !== "function") return;
+      if (!window) return;
+      // The window paints this color wherever the page has not drawn yet,
+      // such as the strip a resize uncovers. It starts in the launch theme.
+      window.setBackgroundColor(palette[input.theme].bg);
+      if (typeof window.setTitleBarOverlay !== "function") return;
       try {
         window.setTitleBarOverlay(titleBarOverlayOptions(input.theme));
       } catch {

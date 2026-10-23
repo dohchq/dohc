@@ -1,4 +1,5 @@
 import { holdSystemClipboard } from "./helpers/systemClipboard";
+import { DOCUMENT_START, DOCUMENT_END } from "./helpers/keys";
 import { test, expect, type Locator } from "@playwright/test";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -51,21 +52,21 @@ test("a wrapped page title keeps ArrowDown, selection, and paste inside the titl
 
     // From the first line, ArrowDown moves down the title.
     await title.click();
-    await page.keyboard.press("Control+Home");
+    await page.keyboard.press(DOCUMENT_START);
     await page.keyboard.press("ArrowDown");
     const moved = await caret(title);
     expect(moved.focused).toBe(true);
     expect(moved.start).toBeGreaterThan(0);
 
     // Shift+ArrowDown selects instead of leaving.
-    await page.keyboard.press("Control+Home");
+    await page.keyboard.press(DOCUMENT_START);
     await page.keyboard.press("Shift+ArrowDown");
     const selected = await caret(title);
     expect(selected.focused).toBe(true);
     expect(selected.end).toBeGreaterThan(selected.start);
 
     // From the last line, ArrowDown moves to the body.
-    await page.keyboard.press("Control+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.press("ArrowDown");
     await expect(page.getByTestId("markdown-editor")).toBeFocused();
 
@@ -74,7 +75,7 @@ test("a wrapped page title keeps ArrowDown, selection, and paste inside the titl
       await desktop!.app.evaluate(({ clipboard }) => clipboard.writeText("short\nand "));
       await title.click({ timeout: remainingMs() });
       await title.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(2, 2), undefined, { timeout: remainingMs() });
-      await page.keyboard.press("Control+V");
+      await page.keyboard.press("ControlOrMeta+V");
       await expect(title).toHaveValue(`A short and ${TITLE.slice(2)}`, { timeout: remainingMs() });
       expect(await caret(title, remainingMs())).toMatchObject({ start: "A short and ".length, focused: true });
     });
@@ -141,7 +142,7 @@ test("ArrowDown leaves a mixed-direction title from its last line, and only ther
     await expect(title).toHaveValue(long, { timeout: 20_000 });
     await expect(page.locator(".dohc-tiptap-editor")).toHaveAttribute("data-collab-state", "disabled");
     await title.click();
-    await page.keyboard.press("Control+Home");
+    await page.keyboard.press(DOCUMENT_START);
     await page.keyboard.press("ArrowDown");
     expect(await caret(title)).toMatchObject({ focused: true });
 
@@ -150,7 +151,7 @@ test("ArrowDown leaves a mixed-direction title from its last line, and only ther
     await expect(title).toHaveValue(short, { timeout: 20_000 });
     await expect(page.locator(".dohc-tiptap-editor")).toHaveAttribute("data-collab-state", "disabled");
     await title.click();
-    await page.keyboard.press("Control+Home");
+    await page.keyboard.press(DOCUMENT_START);
     await page.keyboard.press("ArrowDown");
     await expect(page.getByTestId("markdown-editor")).toBeFocused();
   } finally {

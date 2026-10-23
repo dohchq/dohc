@@ -1,6 +1,9 @@
 import {accountIsFenced} from "./storage/accountDeletion";
 import * as replicaCurrentViews from "./storage/replicaCurrentViews";
 import * as replicaCurrentViewReads from "./replicaCurrentViewReads";
+import * as replicaHistoryReads from "./replicaHistoryReads";
+import {createReplicaLinkReadService} from "./replicaLinkReadService";
+import {nextReplicaHistoryPinAt, type ReplicaHistoryObservation} from "./storage/replicaHistoryPins";
 import {prepareLiveApplications} from "./storage/liveApplicationAuthorship";
 import {prepareHostedSettlements} from "./storage/hostedSettlement";
 import * as shareLabelsStorage from "./storage/shareLabels";
@@ -83,6 +86,7 @@ import type {
   ShareProposalRow,
   ShareProposalState,
   FetchLogPageResult,
+  CurrentFileStateRow,
   CurrentFileStateSnapshot,
   LiveTicketLookup,
   LiveTicketMint,
@@ -227,7 +231,6 @@ export {
   currentFileStateQuery,
   currentFileBlobByteLengthQuery,
 } from "./storage/currentFiles";
-export { normalizeDiscussionDisplayName } from "./storage/discussion";
 export { CollectionWriteStaleError, type CollectionWriteReceipt, type CommitCollectionWriteInput } from "./storage/collectionWrites";
 export { referencedBlobShas } from "./storage/blobReferences";
 export { SyncRelayConflictError, SyncRelayQuotaExceededError, SyncRelayBlobMissingError } from "./storage/errors";
@@ -350,6 +353,7 @@ export function openSyncRelayStorage(
 }
 
 class SqliteSyncRelayStorage implements SyncRelayStorage {
+  createReplicaLinkReadService(...args:Parameters<SyncRelayStorage["createReplicaLinkReadService"]>) {return createReplicaLinkReadService(this,...args);}
   readonly newDiscussionId: () => string;
   private readingLiveAuthority = false;
 
@@ -617,10 +621,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
   bindReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.bindReplicaCurrentView>[1]) { return replicaCurrentViews.bindReplicaCurrentView(this,lease); }
   replicaCurrentViewSelectors(workspaceId: string) { return replicaCurrentViews.replicaCurrentViewSelectors(this,workspaceId); }
-  stageReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[1],view: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[2]) { return replicaCurrentViews.stageReplicaCurrentView(this,lease,view); }
+  stageReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[1],view: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[2], observations?: ReplicaHistoryObservation[]) { return replicaCurrentViews.stageReplicaCurrentView(this,lease,view,observations); }
   flipReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.flipReplicaCurrentView>[1],staged: Parameters<typeof replicaCurrentViews.flipReplicaCurrentView>[2]) { return replicaCurrentViews.flipReplicaCurrentView(this,lease,staged); }
-  storeReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[1],view: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[2]) {
-    const saved=this.flipReplicaCurrentView(lease,this.stageReplicaCurrentView(lease,view));
+  advanceReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.advanceReplicaCurrentView>[1],view: Parameters<typeof replicaCurrentViews.advanceReplicaCurrentView>[2],previous: Parameters<typeof replicaCurrentViews.advanceReplicaCurrentView>[3]) { return replicaCurrentViews.advanceReplicaCurrentView(this,lease,view,previous); }
+  storeReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[1],view: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[2], observations?: ReplicaHistoryObservation[]) {
+    const saved=this.flipReplicaCurrentView(lease,this.stageReplicaCurrentView(lease,view,observations));
     const needed=new Set(saved.files.map(f=>f.sha256));
     return {...saved,texts:view.texts.filter(t=>needed.has(t.sha256))};
   }
@@ -628,7 +633,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   currentViewFilesAtFences(workspaceId: string, files: Parameters<typeof replicaCurrentViews.currentViewFilesAtFences>[2], previous: Parameters<typeof replicaCurrentViews.currentViewFilesAtFences>[3], omitted: Parameters<typeof replicaCurrentViews.currentViewFilesAtFences>[4]) { return replicaCurrentViews.currentViewFilesAtFences(this,workspaceId,files,previous,omitted); }
   readReplicaCurrentViewText(workspaceId: string,sha: string) { return replicaCurrentViews.readReplicaCurrentViewText(this,workspaceId,sha); }
   readReplicaStanding(workspaceId: string, shareGrantBindings?: string) { return replicaReads.readReplicaStanding(this, workspaceId, shareGrantBindings); }
-  listReplicaCurrentViewFiles(input: replicaCurrentViewReads.ReplicaCurrentViewReadInput, source?: replicaCurrentViewReads.ReplicaCurrentViewSource) {
+  nextReplicaHistoryPinAt(workspaceId: string) { return nextReplicaHistoryPinAt(this,workspaceId); }
+  sampleReplicaHistory(lease: Parameters<typeof replicaCurrentViews.sampleReplicaHistory>[1]) { return replicaCurrentViews.sampleReplicaHistory(this,lease); }
+  listReplicaHistoryPins(input: replicaCurrentViewReads.ReplicaCurrentViewReadInput, source?: replicaCurrentViewReads.ReplicaCurrentViewSource) { return replicaHistoryReads.listReplicaHistoryPins(this,input,source); }
+  readReplicaHistoryPin(input: replicaCurrentViewReads.ReplicaCurrentViewReadInput & {pinId: string}, source?: replicaCurrentViewReads.ReplicaCurrentViewSource) { return replicaHistoryReads.readReplicaHistoryPin(this,input,source); }
+  listReplicaCurrentViewFiles(input: Parameters<typeof replicaCurrentViewReads.listReplicaCurrentViewFiles>[1], source?: replicaCurrentViewReads.ReplicaCurrentViewSource) {
     return replicaCurrentViewReads.listReplicaCurrentViewFiles(this, input, source);
   }
   readReplicaCurrentViewFile(input: replicaCurrentViewReads.ReplicaCurrentViewReadInput & {path: string}, source?: replicaCurrentViewReads.ReplicaCurrentViewSource) {
@@ -1442,6 +1451,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   captureReadRevisionMatches(): () => boolean {
     return captureSqliteReadRevisionMatches(this.db);
+  }
+
+  currentObjectFile(input: { workspaceId: string; versionId: string; objectId: string; epochLogFloor: number }): CurrentFileStateRow | null | "reset" {
+    return currentFilesStorage.currentObjectFile(this, input);
+  }
+
+  currentFileObjectId(input: { workspaceId: string; versionId: string; path: string }): string | undefined {
+    return currentFilesStorage.currentFileObjectId(this, input);
   }
 
   currentObjectPath(input: { workspaceId: string; versionId: string; objectId: string }): string | null {

@@ -4,6 +4,7 @@ import { act, cleanup, configure, fireEvent, render, screen, waitFor } from "@te
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  WorkspaceTrustAnswer,
   SitePreviewReplacedEvent,
   StartSitePreviewAnswer,
   GetSitePreviewLogsResult,
@@ -62,7 +63,7 @@ const workspaceSettingsResult = {
 const bridgeMock = {
   getSitePackage: vi.fn(async (_payload: SitePackagePayload): Promise<SitePackageInfo | null> => site),
   getWorkspaceSettings: vi.fn(async () => workspaceSettingsResult),
-  startSitePreview: vi.fn(async (_payload: { holderId: string }): Promise<StartSitePreviewAnswer> => ({
+  startSitePreview: vi.fn(async (_payload: { holderId: string; mode: string }): Promise<StartSitePreviewAnswer> => ({
     siteRoot: "report",
     mode: "static" as const,
     url: "http://127.0.0.1:49152/",
@@ -79,7 +80,28 @@ const bridgeMock = {
     replacedListeners.add(listener);
     return () => { replacedListeners.delete(listener); };
   }),
+  // Main's trust. The person's answer in main's dialog is `answer`.
+  readWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }): Promise<WorkspaceTrustAnswer> =>
+    ({ workspaceId, trusted: trust.trusted })),
+  requestWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }): Promise<WorkspaceTrustAnswer> => {
+    trust.trusted ||= trust.answer;
+    return { workspaceId, trusted: trust.trusted };
+  }),
+  restrictWorkspace: vi.fn(async ({ workspaceId }: { workspaceId: string }): Promise<WorkspaceTrustAnswer> => {
+    trust.trusted = false;
+    return { workspaceId, trusted: false };
+  }),
+  onWorkspaceTrustChanged: vi.fn((listener: (event: WorkspaceTrustAnswer) => void) => {
+    trustListeners.add(listener);
+    return () => { trustListeners.delete(listener); };
+  }),
 };
+const trust = { trusted: true, answer: true };
+const trustListeners = new Set<(event: WorkspaceTrustAnswer) => void>();
+function trustChanged(event: WorkspaceTrustAnswer) {
+  trust.trusted = event.trusted;
+  act(() => { for (const listener of trustListeners) listener(event); });
+}
 const replacedListeners = new Set<(event: SitePreviewReplacedEvent) => void>();
 function replace(event: SitePreviewReplacedEvent) {
   act(() => { for (const listener of replacedListeners) listener(event); });
@@ -88,6 +110,8 @@ function replace(event: SitePreviewReplacedEvent) {
 describe("SitePreviewPage", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    trust.trusted = true;
+    trust.answer = true;
     vi.stubGlobal("dohcDesktop", bridgeMock);
   });
 
@@ -337,6 +361,162 @@ describe("SitePreviewPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Show in Explorer" }));
 
     expect(onShowSource).toHaveBeenCalledTimes(1);
+  });
+
+  describe("in Restricted Mode", () => {
+    const packageApp: SitePackageInfo = {
+      ...site,
+      kind: "package",
+      packagePath: "report/package.json",
+      scripts: { dev: "vite", build: "vite build" },
+    };
+    const answer = (mode: "static" | "dev" | "build", generation = 1): StartSitePreviewAnswer => ({
+      siteRoot: "report", mode, url: `http://127.0.0.1:${49160 + generation}/`, logs: [], exited: false, generation,
+    });
+    const starts = () => bridgeMock.startSitePreview.mock.calls.map(([payload]) => payload.mode);
+
+    it("shows the static preview in place of Dev, and runs Dev once the person trusts the workspace", async () => {
+      trust.trusted = false;
+      bridgeMock.getSitePackage.mockResolvedValue(packageApp);
+      bridgeMock.startSitePreview.mockResolvedValueOnce(answer("static")).mockResolvedValueOnce(answer("dev", 2));
+      render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+      const state = await screen.findByTestId("restricted-mode-state");
+      expect(state.dataset.variant).toBe("band");
+      expect(state.textContent).toContain("In Restricted Mode, dohc does not run this app's code.");
+      await screen.findByTestId("site-preview-frame");
+      expect(starts()).toEqual(["static"]);
+      // The static preview stands in; the person's mode is still Dev.
+      expect(window.localStorage.getItem("dohc.site-preview-mode.v1:ws-sites:report")).toBeNull();
+
+      await userEvent.click(screen.getByRole("button", { name: "Trust workspace" }));
+
+      expect(bridgeMock.requestWorkspaceTrust).toHaveBeenCalledWith({ workspaceId: "ws-sites" });
+      await waitFor(() => expect(starts()).toEqual(["static", "dev"]));
+      await waitFor(() => expect(screen.queryByTestId("restricted-mode-state")).toBeNull());
+      bridgeMock.getSitePackage.mockResolvedValue(site);
+    });
+
+    it("starts nothing for an app with no static preview, and stays put when the person stays restricted", async () => {
+      trust.trusted = false;
+      trust.answer = false;
+      bridgeMock.getSitePackage.mockResolvedValue({ ...packageApp, entryPath: null });
+      render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+      const state = await screen.findByTestId("restricted-mode-state");
+      expect(state.dataset.variant).toBe("page");
+      await userEvent.click(screen.getByRole("button", { name: "Trust workspace" }));
+      await waitFor(() => expect(bridgeMock.requestWorkspaceTrust).toHaveBeenCalledTimes(1));
+      expect(bridgeMock.startSitePreview).not.toHaveBeenCalled();
+      expect(screen.getByTestId("restricted-mode-state")).toBeTruthy();
+      bridgeMock.getSitePackage.mockResolvedValue(site);
+    });
+
+    it("holds back Dev and Build chosen in Preview options", async () => {
+      trust.trusted = false;
+      bridgeMock.getSitePackage.mockResolvedValue({ ...packageApp, configuredPreviewMode: "static" });
+      render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+      await screen.findByTestId("site-preview-frame");
+      expect(screen.queryByTestId("restricted-mode-state")).toBeNull();
+
+      for (const mode of ["dev", "build"]) {
+        await userEvent.click(screen.getByTestId("site-preview-options"));
+        await userEvent.click(screen.getByTestId(`site-preview-${mode}`));
+        await screen.findByTestId("restricted-mode-state");
+      }
+      expect(starts()).toEqual(["static"]);
+      bridgeMock.getSitePackage.mockResolvedValue(site);
+    });
+
+    it("shows Restricted Mode, not an error, when main refuses a stale start", async () => {
+      bridgeMock.getSitePackage.mockResolvedValue({ ...packageApp, entryPath: null });
+      bridgeMock.startSitePreview.mockRejectedValueOnce(new Error(
+        "Error invoking remote method 'desktop:start-site-preview': WorkspaceRestrictedError: This workspace is in Restricted Mode, so dohc does not run its apps' code or start agents in it. Trust the workspace to allow them.",
+      ));
+      render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+      await screen.findByTestId("restricted-mode-state");
+      expect(screen.queryByTestId("site-preview-error")).toBeNull();
+      bridgeMock.getSitePackage.mockResolvedValue(site);
+    });
+
+    it("starts over in Restricted Mode when the person restricts the workspace again", async () => {
+      bridgeMock.getSitePackage.mockResolvedValue(packageApp);
+      bridgeMock.startSitePreview.mockResolvedValueOnce(answer("dev")).mockResolvedValueOnce(answer("static", 2));
+      render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+      await screen.findByTestId("site-preview-frame");
+      expect(starts()).toEqual(["dev"]);
+
+      trustChanged({ workspaceId: "ws-sites", trusted: false });
+
+      await screen.findByTestId("restricted-mode-state");
+      await waitFor(() => expect(starts()).toEqual(["dev", "static"]));
+      bridgeMock.getSitePackage.mockResolvedValue(site);
+    });
+
+    it("starts a static app when main's trust read fails, and says so with Try again", async () => {
+      bridgeMock.readWorkspaceTrust.mockRejectedValueOnce(new Error("busy"));
+      const reportError = vi.fn();
+      render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" reportError={reportError} />);
+      await screen.findByTestId("site-preview-frame");
+      expect(starts()).toEqual(["static"]);
+      await waitFor(() => expect(reportError).toHaveBeenCalledWith(
+        "dohc could not read whether it trusts this workspace.", expect.any(Error), expect.any(Function)));
+      expect(screen.queryByTestId("restricted-mode-state")).toBeNull();
+    });
+
+    it("holds Dev back while the read failed, and runs it once Try again reads trust", async () => {
+      bridgeMock.getSitePackage.mockResolvedValue(packageApp);
+      bridgeMock.readWorkspaceTrust.mockRejectedValueOnce(new Error("busy"));
+      bridgeMock.startSitePreview.mockResolvedValueOnce(answer("static")).mockResolvedValueOnce(answer("dev", 2));
+      const reportError = vi.fn();
+      render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" reportError={reportError} />);
+      await screen.findByTestId("restricted-mode-state");
+      await screen.findByTestId("site-preview-frame");
+      expect(starts()).toEqual(["static"]);
+
+      await waitFor(() => expect(reportError).toHaveBeenCalled());
+      act(() => { (reportError.mock.calls[0]![2] as () => void)(); });
+
+      await waitFor(() => expect(starts()).toEqual(["static", "dev"]));
+      await waitFor(() => expect(screen.queryByTestId("restricted-mode-state")).toBeNull());
+      bridgeMock.getSitePackage.mockResolvedValue(site);
+    });
+
+    it("ignores another workspace's trust change", async () => {
+      trust.trusted = false;
+      bridgeMock.getSitePackage.mockResolvedValue(packageApp);
+      render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+      await screen.findByTestId("restricted-mode-state");
+      act(() => { for (const listener of trustListeners) listener({ workspaceId: "ws-other", trusted: true }); });
+      expect(starts()).toEqual(["static"]);
+      expect(screen.getByTestId("restricted-mode-state")).toBeTruthy();
+      bridgeMock.getSitePackage.mockResolvedValue(site);
+    });
+
+    it("builds nothing for Share, and shares once the person trusts the workspace", async () => {
+      trust.trusted = false;
+      const needsBuild: SitePackageInfo = {
+        ...packageApp, entryPath: null, shareManifest: noRunnableArtifact,
+      };
+      const built: SitePackageInfo = { ...needsBuild, shareManifest: readyShare("report/dist/index.html") };
+      bridgeMock.getSitePackage.mockImplementation(async (payload) =>
+        payload.effectivePreviewMode === "build" ? built : needsBuild);
+      bridgeMock.startSitePreview.mockResolvedValue(answer("build"));
+      const onShareSite = vi.fn();
+      render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" onShareSite={onShareSite} />);
+      await screen.findByTestId("restricted-mode-state");
+
+      await userEvent.click(screen.getByTestId("site-preview-share"));
+      await waitFor(() => expect(bridgeMock.getSitePackage).toHaveBeenCalledTimes(2));
+      expect(bridgeMock.startSitePreview).not.toHaveBeenCalled();
+
+      await userEvent.click(screen.getByRole("button", { name: "Trust workspace" }));
+      await waitFor(() => expect(onShareSite).toHaveBeenCalledWith({ paths: ["report/dist/index.html"], label: "Report" }));
+      expect(starts()).toEqual(["build"]);
+      bridgeMock.getSitePackage.mockReset();
+      bridgeMock.getSitePackage.mockResolvedValue(site);
+      bridgeMock.startSitePreview.mockReset();
+    });
   });
 
   it("prefers a development preview for an owned package site", async () => {

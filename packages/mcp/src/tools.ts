@@ -1,3 +1,6 @@
+import { ChatLinksInput } from "@dohc/workspace-contracts/chat-links";
+import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-mentions";
+import { LinksEdgesInput, LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import { WorkspaceSyncPause, workspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { ShareCopyInput } from "@dohc/workspace-contracts/share-copy";
@@ -20,10 +23,9 @@ import { databaseSyncStrategy, DOHC_METADATA_GUARD, frameworkConfigName, hasIgno
 import { sendCliRequest } from "@dohc/cli/client";
 import { DohcCliError } from "@dohc/cli/errors";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
-import { DatasetRequest } from "@dohc/cli/dataset";
+import { DATASET_CAPABILITIES, DatasetRequest } from "@dohc/cli/dataset";
 import {
   CLI_PROTOCOL_VERSION,
-  DATASET_CAPABILITIES,
   APP_PUBLICATION_CAPABILITIES,
   collectionCreateFieldsSchema,
   collectionQueryCursorSchema,
@@ -70,6 +72,13 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_list_changes: ["history.list"],
   dohc_list_kept_copies: ["file.kept.list"],
   dohc_save_kept_copy: ["file.kept.save"],
+  dohc_list_retained_copies: ["file.retained.list"],
+  dohc_delete_retained_copies: ["file.retained.delete"],
+  dohc_chat_file_mentions: ["chat.read"],
+  dohc_chat_links: ["chat.read"],
+  dohc_links_edges: ["links.edges"],
+  dohc_links_in: ["links.in"],
+  dohc_links_resolve: ["links.resolve"],
   dohc_read_change: ["history.read"],
   dohc_list_files: ["file.list"],
   dohc_read_file: ["file.read"],
@@ -81,6 +90,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_create_directory: ["folder.create"],
   dohc_read_operation: ["history.operation.read"],
   dohc_undo_operation: ["history.operation.undo"],
+  dohc_duplicate_file: ["file.duplicate"],
   dohc_move_path: ["file.move"],
   dohc_delete_path: ["file.delete"],
   dohc_detect_apps: ["app.detect"],
@@ -847,6 +857,13 @@ export async function moveWorkspacePath(
   });
 }
 
+export async function duplicateWorkspaceFile(ctx: ToolContext, args: {path: string}, agent?: string) {
+  const source = await safeResolve(ctx, args.path, "entry");
+  if (!source.ok) return {ok: false as const, reason: source.reason};
+  if (isSecretResolvedPath(source)) return {ok: false as const, reason: SECRET_READ_DENIED_REASON};
+  return requestCli(ctx, "fileDuplicate", {path: source.normalized, agent, requestId: randomUUID()});
+}
+
 export async function deleteWorkspacePath(
   ctx: ToolContext,
   args: { path: string; summary?: string },
@@ -1043,11 +1060,14 @@ export async function stopWorkspaceSync(ctx: ToolContext, agent?: string) {
 }
 
 export async function workspaceStatus(ctx: ToolContext) {
-  const [manifest, remote, credentials, entry] = await Promise.all([
+  // The engine answers from the pull's durable token, so this holds whether
+  // or not sync is running. Absent when the app cannot answer.
+  const [manifest, remote, credentials, entry, waiting] = await Promise.all([
     readSyncManifest(ctx),
     remoteForCurrentWorkspace(ctx),
     loadCloudCredentials(ctx),
     findWorkspaceEntry(ctx),
+    requestCli(ctx, "collectionsWaiting", {}),
   ]);
   const serverUrl = remote?.serverUrl ?? manifest?.serverUrl;
   const synced = !entry?.pausedRemote && (remote !== null || nonEmptyString(manifest?.serverUrl));
@@ -1068,6 +1088,7 @@ export async function workspaceStatus(ctx: ToolContext) {
     }} : {}),
     synced,
     ...(syncPause ? { syncPause } : {}),
+    ...(waiting.ok ? { collectionsWaiting: waiting.waiting } : {}),
     ...removedShareStatus(entry),
     scope: synced ? ("cloud" as const) : ("local" as const),
     ...credential,
@@ -1860,6 +1881,7 @@ export const FILE_MOVE_UNAVAILABLE_REASON = "dohc is not running. Open dohc to m
 export const FILE_DELETE_UNAVAILABLE_REASON = "dohc is not running. Open dohc to delete through it, or delete the file yourself. History will record that delete without your name.";
 const FILE_UNAVAILABLE_REASONS: Partial<Record<CliVerb, string>> = {
   fileWrite: FILE_WRITE_UNAVAILABLE_REASON,
+  fileDuplicate: "dohc is not running. Open dohc to duplicate this file.",
   fileMove: FILE_MOVE_UNAVAILABLE_REASON,
   fileDelete: FILE_DELETE_UNAVAILABLE_REASON,
 };
@@ -1893,6 +1915,9 @@ async function requestCli<Verb extends CliVerb>(
     return { ok: false as const, reason: cliFailureReason(error, verb) };
   }
 }
+
+export async function linksIn(ctx: ToolContext, input: LinksInInput) { return requestCli(ctx, "linksIn", LinksInInput.parse(input)); }
+export async function linksResolve(ctx: ToolContext, input: LinksResolveInput) { return requestCli(ctx, "linksResolve", LinksResolveInput.parse(input)); }
 
 export async function readOperation(ctx: ToolContext, args: { operationId: string; cursor?: string }) {
   if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "History operations require the owning workspace. Open it to continue." };
@@ -2188,6 +2213,23 @@ export async function saveKeptCopy(ctx: ToolContext, args: { id: number }) {
   return requestCli(ctx, "saveKeptCopy", { id: args.id });
 }
 
+// Old file copies kept on a drive that cannot tell dohc whether a program
+// still has one open. The desktop shows their count and size as one Notices
+// row and deletes them after the same warning an agent accepts here.
+export async function listRetainedCopies(ctx: ToolContext) {
+  return requestCli(ctx, "retainedCopies", {});
+}
+
+export async function deleteRetainedCopies(
+  ctx: ToolContext,
+  args: { copies: { id: number; revision: number }[]; acceptLateWriteRisk: true },
+) {
+  return requestCli(ctx, "deleteRetainedCopies", {
+    copies: args.copies,
+    acceptLateWriteRisk: args.acceptLateWriteRisk,
+  });
+}
+
 // An automation's runs, and Try again, through the desktop's Automations
 // panel calls. An automation is named by its Collection's folder and its id
 // in that Collection's automations.yaml.
@@ -2320,3 +2362,9 @@ export async function startFileChat(
 }
 
 export { safeResolve };
+
+export async function linksEdges(ctx: ToolContext, input: LinksEdgesInput) { return requestCli(ctx, "linksEdges", LinksEdgesInput.parse(input)); }
+
+export async function chatFileMentions(ctx: ToolContext, input: ChatFileMentionsInput) { return requestCli(ctx, "chatFileMentions", ChatFileMentionsInput.parse(input)); }
+
+export async function chatLinks(ctx: ToolContext, input: ChatLinksInput) { return requestCli(ctx, "chatLinks", ChatLinksInput.parse(input)); }

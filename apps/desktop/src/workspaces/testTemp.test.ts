@@ -1,7 +1,10 @@
 import { spawnSync } from "node:child_process";
 import {
+  chmod,
+  lstat,
   lutimes,
   mkdir,
+  realpath,
   stat,
   symlink,
   utimes,
@@ -13,7 +16,9 @@ import {
   cleanupSuiteTestScratch,
   createTestScratch,
   isRunRootName,
+  scratchParentProblem,
   sweepScratchParent,
+  testScratchParent,
   testScratchRunRoot,
 } from "./testTemp";
 
@@ -92,6 +97,14 @@ describe("test scratch", () => {
     },
   );
 
+  // The relay deployment refuses a path that resolves elsewhere, and macOS
+  // temp directories resolve into /private.
+  it.skipIf(process.platform === "win32")("gives a path with every link already resolved", async () => {
+    const scratch = await createTestScratch("resolved-");
+
+    expect(scratch).toBe(await realpath(scratch));
+  });
+
   // A link is a leaf, not a door. Reading through one asks about a tree the
   // abandoned run does not own, and the answer pins it: an external target
   // still being written to reads as recent work, so the dead run is never
@@ -125,6 +138,51 @@ describe("test scratch", () => {
       await pathExists(join(outside, "engine.db")),
       "the sweep must never delete through a link",
     ).toBe(true);
+  });
+
+  // Every account on a Mac or Linux host shares /tmp, so each user gets a
+  // parent of their own that no other account may enter.
+  describe.skipIf(process.platform === "win32")("per-user scratch parent", () => {
+    const uid = process.getuid?.() ?? -1;
+
+    it("names the parent for this user", () => {
+      expect(basename(testScratchParent())).toBe(`dohc-scratch-${uid}`);
+      const previous = process.env.DOHC_TEST_SCRATCH_ROOT;
+      delete process.env.DOHC_TEST_SCRATCH_ROOT;
+      try {
+        expect(dirname(testScratchRunRoot())).toBe(testScratchParent());
+      } finally {
+        if (previous !== undefined) process.env.DOHC_TEST_SCRATCH_ROOT = previous;
+      }
+    });
+
+    it("accepts a private directory this user owns", async () => {
+      const parent = join(await createTestScratch("private-parent-"), "parent");
+      await mkdir(parent, { mode: 0o700 });
+      expect(scratchParentProblem(parent, await lstat(parent), uid)).toBeUndefined();
+    });
+
+    it("refuses a parent another user owns", async () => {
+      const parent = join(await createTestScratch("other-owner-"), "parent");
+      await mkdir(parent, { mode: 0o700 });
+      expect(scratchParentProblem(parent, await lstat(parent), uid + 1)).toMatch(/belongs to user/);
+    });
+
+    it("refuses a parent other accounts can enter", async () => {
+      const parent = join(await createTestScratch("loose-mode-"), "parent");
+      await mkdir(parent);
+      await chmod(parent, 0o755);
+      expect(scratchParentProblem(parent, await lstat(parent), uid)).toMatch(/has mode 755/);
+    });
+
+    it("refuses a link in place of the parent", async () => {
+      const harness = await createTestScratch("linked-parent-");
+      const target = join(harness, "target");
+      const parent = join(harness, "parent");
+      await mkdir(target, { mode: 0o700 });
+      await symlink(target, parent);
+      expect(scratchParentProblem(parent, await lstat(parent), uid)).toMatch(/is not a directory/);
+    });
   });
 
   // Every worker of a vitest run shares one handed-down root, and each test

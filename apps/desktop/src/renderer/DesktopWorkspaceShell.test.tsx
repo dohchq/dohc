@@ -221,12 +221,12 @@ describe("global letter shortcut ownership", () => {
   });
 
   it.each([
-    ["Control", { ctrlKey: true, metaKey: false }],
-    ["Command", { ctrlKey: false, metaKey: true }],
+    ["Control", "linux", { ctrlKey: true, metaKey: false }],
+    ["Command", "darwin", { ctrlKey: false, metaKey: true }],
   ] as const)(
     "leaves unsupported %s+Alt letter chords unclaimed",
-    async (_name, modifier) => {
-      renderShell(makeBridge(Promise.resolve(STORED_STATE)));
+    async (_name, platform, modifier) => {
+      renderShell(makeBridge(Promise.resolve(STORED_STATE), platform));
       await screen.findByTestId("side-panel");
 
       for (const [key, shiftKey] of [
@@ -1474,22 +1474,15 @@ describe("native workbench context menus", () => {
     expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(1);
   });
 
-  it("opens the native editor context menu from the inspector area", async () => {
+  it("leaves a right-click in the editor to the text menu", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
     renderShell(bridge);
 
     await user.click(await screen.findByText("a.md"));
-    fireEvent.contextMenu(await screen.findByTestId("view-markdown"));
-
-    await waitFor(() => {
-      expect(bridge.showWorkbenchMenu).toHaveBeenCalledWith({
-        workspaceId: "ws-shell-test",
-        context: "editor",
-        path: "a.md",
-        groupId: "primary",
-      });
-    });
+    // An uncancelled event is what lets Electron open main's text menu.
+    expect(fireEvent.contextMenu(await screen.findByTestId("view-markdown"))).toBe(true);
+    expect(bridge.showWorkbenchMenu).not.toHaveBeenCalled();
   });
 });
 

@@ -2,13 +2,11 @@ import {
   ChatsLiveAdapter,
   type ChatChannel as LiveChatChannel,
   type ChatChannelSummary as LiveChatChannelSummary,
-  type ChatFileMention as LiveChatFileMention,
 } from "@dohc/workspace-engine-client";
 import {
   type ChatChannel,
   type ChatChannelSummary,
   type ChatFeedPage,
-  type ChatFileMention,
   type LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
 import type {
@@ -39,15 +37,6 @@ function toStoreChannelSummary(
 ): ChatChannelSummary {
   const { channelId, ...rest } = channel;
   return { ...rest, id: channelId } as ChatChannelSummary;
-}
-
-function toStoreFileMention(mention: LiveChatFileMention): ChatFileMention {
-  return {
-    ...mention,
-    ...(mention.channel
-      ? { channel: toStoreChannel(mention.channel) }
-      : {}),
-  } as ChatFileMention;
 }
 
 async function mapWithConcurrency<T, U>(
@@ -221,12 +210,8 @@ export function createLiveLinkedChatStore(
         async (adapter) =>
           await adapter.listThreadAttachments(workspaceId, threadId),
       ),
-    listFileMentions: async (input) =>
-      (
-        await invokeRead(
-          async (adapter) => await adapter.listFileMentions(input),
-        )
-      ).map(toStoreFileMention),
+    linksPage: async input => await invokeRead(adapter => adapter.linksPage(input)),
+    fileMentionsPage: input => invokeRead(adapter => adapter.fileMentionsPage(input)),
     markThreadReadByAgent: async (input) =>
       await invoke(
         async (adapter) => await adapter.markThreadReadByAgent(input),

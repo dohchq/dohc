@@ -20,9 +20,10 @@ use dohc_engine_domain::{
     CaptureSecretRetire, DomainError, SecretFileStore, SecretMomentRecord, SecretWriteResult,
     VersionedTextStore, WriteResult, capture_ingest_binary_with_admission_in_tx,
     capture_ingest_in_batch_with_admission_in_tx, capture_ingest_with_admission_in_tx,
-    capture_manifest_seed, capture_retire_in_tx, capture_secret_retire_with,
-    ensure_main_version_in_tx,
+    capture_manifest_seed, capture_retire_in_tx, capture_retire_respelled_in_tx,
+    capture_secret_retire_with, ensure_main_version_in_tx,
 };
+use dohc_engine_files::floor::path_collision_key;
 use dohc_engine_storage::capture_file_holds::{self, CaptureFileHold};
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome};
 use rusqlite::{Connection, Transaction, params};
@@ -203,6 +204,7 @@ mod capture_file_hold_tests {
         let result = capture_retire_on_store(
             &mut store,
             &retire,
+            None,
             scratch.path(),
             &Root,
             true,
@@ -640,16 +642,15 @@ mod capture_file_hold_tests {
     fn operation_undo(
         store: &mut EngineStore,
         root: &std::path::Path,
-        faults: &dyn FaultInjector,
+        faults: Arc<dyn FaultInjector>,
     ) -> Result<super::super::history_operations::HistoryUndoResult, RuntimeError> {
-        super::super::history_operations::history_undo_on_store(
+        super::super::history_operations::test_undo_in_turns(
             store,
             "hold-proof",
             "dohc-operation:hold-proof",
             "undo-hold-proof",
             None,
             root,
-            &(),
             faults,
             10,
         )
@@ -672,7 +673,7 @@ mod capture_file_hold_tests {
             .read_with(|conn| conn.query_row("SELECT COUNT(*) FROM moments", [], |r| r.get(0)))
             .unwrap();
         assert!(
-            matches!(operation_undo(&mut store,scratch.path(),&NoFaults),Err(RuntimeError::Domain(DomainError::UndoRefused {path,reason:"capture hold"})) if path=="moved.md")
+            matches!(operation_undo(&mut store,scratch.path(),Arc::new(NoFaults)),Err(RuntimeError::Domain(DomainError::UndoRefused {path,reason:"capture hold"})) if path=="moved.md")
         );
         assert_eq!(
             store
@@ -722,7 +723,7 @@ mod capture_file_hold_tests {
             .read_with(|conn| capture_file_holds::list_in(conn, "hold-proof"))
             .unwrap();
         assert!(
-            matches!(operation_undo(&mut store,scratch.path(),&NoFaults),Err(RuntimeError::Domain(DomainError::UndoRefused {path,reason:"capture hold"})) if path=="held.md")
+            matches!(operation_undo(&mut store,scratch.path(),Arc::new(NoFaults)),Err(RuntimeError::Domain(DomainError::UndoRefused {path,reason:"capture hold"})) if path=="held.md")
         );
         assert_eq!(
             store
@@ -774,7 +775,7 @@ mod capture_file_hold_tests {
             .unwrap();
         std::fs::write(scratch.path().join("renamed.txt"), "Other").unwrap();
         assert!(
-            operation_undo(&mut store, scratch.path(), &NoFaults)
+            operation_undo(&mut store, scratch.path(), Arc::new(NoFaults))
                 .unwrap()
                 .materialized
         );
@@ -795,10 +796,13 @@ mod capture_file_hold_tests {
     }
     #[test]
     fn history_operation_pending_inverse_defers_capture_at_both_endpoints() {
-        struct Crash;
+        #[derive(Default)]
+        struct Crash(std::sync::atomic::AtomicUsize);
         impl FaultInjector for Crash {
             fn poll(&self, p: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
-                if p == dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck {
+                if p == dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck
+                    && self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
+                {
                     dohc_engine_storage::FaultAction::Crash
                 } else {
                     dohc_engine_storage::FaultAction::Continue
@@ -809,7 +813,7 @@ mod capture_file_hold_tests {
         operation_rename(&mut store);
         std::fs::write(scratch.path().join("moved.md"), "Before.\n").unwrap();
         assert!(matches!(
-            operation_undo(&mut store, scratch.path(), &Crash),
+            operation_undo(&mut store, scratch.path(), Arc::new(Crash::default())),
             Err(RuntimeError::OperationCrashed)
         ));
         let count = store
@@ -843,6 +847,7 @@ mod capture_file_hold_tests {
             capture_retire_on_store(
                 &mut store,
                 &retire,
+                None,
                 scratch.path(),
                 &Root,
                 true,
@@ -870,7 +875,7 @@ mod capture_file_hold_tests {
         );
         assert!(!scratch.path().join("held.md").exists());
         assert!(
-            operation_undo(&mut store, scratch.path(), &NoFaults)
+            operation_undo(&mut store, scratch.path(), Arc::new(NoFaults))
                 .unwrap()
                 .materialized
         );
@@ -878,10 +883,13 @@ mod capture_file_hold_tests {
 
     #[test]
     fn history_operation_restart_parked_placement_never_reports_restored() {
-        struct Crash;
+        #[derive(Default)]
+        struct Crash(std::sync::atomic::AtomicUsize);
         impl FaultInjector for Crash {
             fn poll(&self, p: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
-                if p == dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck {
+                if p == dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck
+                    && self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
+                {
                     dohc_engine_storage::FaultAction::Crash
                 } else {
                     dohc_engine_storage::FaultAction::Continue
@@ -893,7 +901,7 @@ mod capture_file_hold_tests {
         operation_rename(&mut store);
         std::fs::write(scratch.path().join("moved.md"), "Before.\n").unwrap();
         assert!(matches!(
-            operation_undo(&mut store, scratch.path(), &Crash),
+            operation_undo(&mut store, scratch.path(), Arc::new(Crash::default())),
             Err(RuntimeError::OperationCrashed)
         ));
         drop(store);
@@ -906,7 +914,7 @@ mod capture_file_hold_tests {
         let before = store
             .read_with(|conn| capture_file_holds::list_in(conn, "hold-proof"))
             .unwrap();
-        let result = operation_undo(&mut store, scratch.path(), &NoFaults).unwrap();
+        let result = operation_undo(&mut store, scratch.path(), Arc::new(NoFaults)).unwrap();
         assert!(result.deduped && !result.materialized);
         assert_eq!(
             store
@@ -1047,6 +1055,13 @@ pub struct CapturePassSettlement {
     pub repair_recoveries: bool,
 }
 
+/// Matches job targets that name `path` on a disk that ignores case or
+/// Unicode normalization, as capture holds match them.
+fn names_path(path: &str) -> impl Fn(&str) -> bool {
+    let path = path_collision_key(path);
+    move |target| path_collision_key(target) == path
+}
+
 fn select_released_switch_jobs(
     conn: &Connection,
     workspace_id: &str,
@@ -1056,10 +1071,10 @@ fn select_released_switch_jobs(
     let released: Vec<String> = paths
         .iter()
         .filter(|path| path.released_hold)
-        .map(|path| path.path.to_lowercase())
+        .map(|path| path_collision_key(&path.path))
         .collect();
     for (id, target) in dohc_engine_storage::pending_switch_jobs_in(conn, workspace_id)? {
-        let target = target.to_lowercase();
+        let target = path_collision_key(&target);
         if released.iter().any(|path| {
             target == *path
                 || target
@@ -1140,7 +1155,7 @@ impl ActorHandle {
                     .paths
                     .iter()
                     .filter(|path| path.released_hold)
-                    .map(|path| path.path.to_lowercase())
+                    .map(|path| path_collision_key(&path.path))
                     .collect();
                 root_guard.validate(&root_dir)?;
                 let replay = super::materialization::replay_pending_materializations(
@@ -1153,6 +1168,7 @@ impl ActorHandle {
                         progress: None,
                         file_outcomes_settled: true,
                         released_hold_paths: Some(&released_hold_paths),
+                        planned_against_active_heads: false,
                     },
                     now_ms,
                     &dohc_engine_storage::NoFaults,
@@ -1374,9 +1390,42 @@ impl ActorHandle {
                 capture_retire_on_store(
                     store,
                     &input,
+                    None,
                     &root_dir,
                     root_guard.as_ref(),
                     confirm_absent,
+                    self_writes.as_ref(),
+                    &leases,
+                    faults.as_ref(),
+                )
+            })
+        })
+    }
+
+    /// Retire `input.path`, whose file the disk shows stored under `to`, another
+    /// spelling of it, with the bytes `to_sha256`. See
+    /// [`dohc_engine_domain::capture_retire_respelled_in_tx`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn capture_retire_respelled_blocking_guarded(
+        &self,
+        input: CaptureRetire,
+        to: String,
+        to_sha256: String,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        leases: LeaseRegistry,
+        faults: Arc<dyn FaultInjector>,
+        root_guard: Arc<dyn WorkspaceRootGuard>,
+    ) -> Result<CaptureRetireResult, RuntimeError> {
+        self.run_blocking(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                capture_retire_on_store(
+                    store,
+                    &input,
+                    Some((&to, &to_sha256)),
+                    &root_dir,
+                    root_guard.as_ref(),
+                    false,
                     self_writes.as_ref(),
                     &leases,
                     faults.as_ref(),
@@ -2002,7 +2051,7 @@ fn capture_ingest_in_tx(
         capture_file_holds::rebase_switch_jobs_in(
             tx,
             &input.workspace_id,
-            &input.path,
+            names_path(&input.path),
             &dohc_engine_storage::Preimage::Present(result.snapshot.blob_sha256.clone()),
         )?;
         capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
@@ -2497,7 +2546,7 @@ fn capture_ingest_binary_on_store(
             capture_file_holds::rebase_switch_jobs_in(
                 tx,
                 &input.workspace_id,
-                &input.path,
+                names_path(&input.path),
                 &dohc_engine_storage::Preimage::Present(dohc_engine_storage::hex_sha256(
                     &input.bytes,
                 )),
@@ -2565,17 +2614,19 @@ fn ensure_capture_target_not_leased(
     object_id: &str,
 ) -> Result<(), RuntimeError> {
     let key = DocKey::new(workspace_id, version_id, object_id)?;
-    if !leases.is_held(&key) {
+    // Session releases wake deferred capture. Internal leases still fail
+    // and retry because their release does not wake the driver.
+    let session = leases.is_held_by_session(&key);
+    if !session && !leases.is_held(&key) {
         return Ok(());
     }
-    // A live session on a file the store has no head for yet: its settle
-    // creates the head, so capture can wait for it. A recorded head the
-    // session holds is refused as before.
     let recorded = dohc_engine_domain::object_has_live_alias(conn, workspace_id, object_id)?;
     Err(RuntimeError::Sync(
         dohc_engine_sync::SyncError::RetryableState {
-            reason: if recorded {
-                "ydoc-session-live"
+            reason: if recorded && session {
+                CAPTURE_WRITE_WAITS_FOR_SESSION
+            } else if recorded || !session {
+                CAPTURE_RECORDED_FILE_LIVE
             } else {
                 CAPTURE_NEW_FILE_LIVE
             },
@@ -2586,6 +2637,18 @@ fn ensure_capture_target_not_leased(
 /// The capture refusal for a new file whose live session holds it before the
 /// store has a head for it.
 pub const CAPTURE_NEW_FILE_LIVE: &str = "ydoc-session-live-new-file";
+
+/// An internal attempt holds the capture target; fail and retry on a later pass.
+const CAPTURE_RECORDED_FILE_LIVE: &str = "ydoc-session-live";
+
+/// An outside write waits until the open document releases its lease.
+pub const CAPTURE_WRITE_WAITS_FOR_SESSION: &str = "capture-write-waits-for-session";
+
+/// The capture refusal to retire a recorded file while a document session
+/// holds it. The session's release wakes capture, which retires it then. An
+/// internal attempt's release wakes nothing, so its lease refuses as
+/// `ydoc-session-live` and capture retries as for any failure.
+pub const CAPTURE_RETIRE_WAITS_FOR_SESSION: &str = "capture-retire-waits-for-session";
 
 fn capture_secret_on_store(
     store: &mut EngineStore,
@@ -2711,6 +2774,7 @@ pub(super) fn confirm_absent_on_disk(
 fn capture_retire_on_store(
     store: &mut EngineStore,
     input: &CaptureRetire,
+    respelled_to: Option<(&str, &str)>,
     root_dir: &std::path::Path,
     root_guard: &dyn WorkspaceRootGuard,
     confirm_absent: bool,
@@ -2777,7 +2841,11 @@ fn capture_retire_on_store(
             ])
             .map_err(StorageError::persist_public)?;
         }
-        let mut result = capture_retire_in_tx(tx, input).map_err(RuntimeError::from)?;
+        let mut result = match respelled_to {
+            Some((to, to_sha256)) => capture_retire_respelled_in_tx(tx, input, to, to_sha256),
+            None => capture_retire_in_tx(tx, input),
+        }
+        .map_err(RuntimeError::from)?;
         if result.retired.is_some() {
             placement_admission?;
         }
@@ -2793,7 +2861,11 @@ fn capture_retire_on_store(
             if leases.is_held(&key) {
                 return Err(RuntimeError::Sync(
                     dohc_engine_sync::SyncError::RetryableState {
-                        reason: "ydoc-session-live",
+                        reason: if leases.is_held_by_session(&key) {
+                            CAPTURE_RETIRE_WAITS_FOR_SESSION
+                        } else {
+                            CAPTURE_RECORDED_FILE_LIVE
+                        },
                     },
                 ));
             }
@@ -2839,7 +2911,7 @@ fn capture_retire_on_store(
             capture_file_holds::rebase_switch_jobs_in(
                 tx,
                 &input.workspace_id,
-                &input.path,
+                names_path(&input.path),
                 &dohc_engine_storage::Preimage::Absent,
             )?;
             capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;

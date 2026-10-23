@@ -133,7 +133,7 @@ export function registerStopAndRestoreIpc<
   queuePull(workspaceId: string): void;
   /** Runs one sync pass of the workspace now, pushing and pulling, and throws when it did not sync. */
   syncNow(workspaceId: string): Promise<void>;
-  /** A person's delete: the OS trash, or the workspace's .dohc/trash. */
+  /** A person's delete: the OS trash, or the workspace's .dohc/local/trash. */
   deletePath(event: Event, payload: DeleteWorkspacePathPayload): Promise<unknown>;
   notifyRenderer(input: { workspaceId: string }): void;
   /** Only the original workspace has grants to stop. */
@@ -268,7 +268,7 @@ export function registerStopAndRestoreIpc<
     const stillPending = async () => {
       if (active.released) return false;
       const current = dependencies.currentAutomations(workspaceId);
-      if (current !== automations) throw new Error("This workspace was closed.");
+      if (current !== automations) throw new Error("This workspace was closed. Open it again.");
       const entry = (await current.pendingRestores()).find(entry => entry.id === retentionId);
       active.released = !entry?.session || entry.serverRelease === true;
       return !active.released;

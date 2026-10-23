@@ -14,14 +14,19 @@ use serde_json::Value;
 use serde_json::json;
 
 fn method_requires_initial_capture_ready(method: &str) -> bool {
-    (method.starts_with("sync.") && method != "sync.remoteChanges")
+    (method.starts_with("sync.")
+        && !matches!(method, "sync.remoteChanges" | "sync.collectionsWaiting"))
         || method.starts_with("share.")
+        || method.starts_with("links.")
         || method.starts_with("search.")
         || method.starts_with("collections.")
         || method.starts_with("liveApplication.")
         || method.starts_with("ydoc.ownerDelivery.")
         || method.starts_with("ydoc.ownerStop.")
-        || (method.starts_with("versions.") && method != "versions.ensureMain")
+        // The main bootstrap is idempotent, and the active version is metadata
+        // no version operation can change while the import fences them.
+        || (method.starts_with("versions.")
+            && !matches!(method, "versions.ensureMain" | "versions.active"))
         || method.starts_with("conflicts.")
         || (method.starts_with("secrets.") && method != "secrets.write")
         || matches!(
@@ -49,6 +54,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
                 | "history.page"
                 | "history.operations"
                 | "history.undo"
+                | "history.rewriteLinks"
         )
 }
 
@@ -147,9 +153,10 @@ impl EngineService {
     pub(crate) async fn dispatch_input(
         &self,
         ctx: RequestContext,
-        request: Request,
+        mut request: Request,
         input: crate::LiveApplicationInput,
     ) -> Result<ServiceResponse, WireError> {
+        self.guard_replica_request(&mut request)?;
         super::request::validate_request_ids(&request)?;
         self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
@@ -173,8 +180,9 @@ impl EngineService {
     pub(crate) async fn dispatch(
         &self,
         ctx: RequestContext,
-        request: Request,
+        mut request: Request,
     ) -> Result<ServiceResponse, WireError> {
+        self.guard_replica_request(&mut request)?;
         let id = request.id;
         super::request::validate_request_ids(&request)?;
         self.ensure_admissible_author(&request)?;
@@ -362,8 +370,18 @@ impl EngineService {
                 self.live_application_register(&ctx, request.workspace, request.params)
                     .await?
             }
-            "engine.ping" => engine_ping(),
+            "engine.ping" => {
+                if self.replica_mode.is_some() {
+                    json!({"ok":true, "mode":"replica", "landlockAbi":crate::replica_sandbox::applied_policy_abi()})
+                } else {
+                    engine_ping()
+                }
+            }
             "workspace.open" => Box::pin(self.workspace_open(&ctx, request.params)).await?,
+            "links.in" | "links.resolve" | "links.edges" => {
+                self.links_read(&ctx, request.workspace, request.params, &request.method)
+                    .await?
+            }
             "files.resolve" => {
                 self.files_resolve(&ctx, request.workspace, request.params)
                     .await?
@@ -398,6 +416,10 @@ impl EngineService {
                 Box::pin(self.sync_probe(&ctx, request.workspace, request.params)).await?
             }
             "sync.remoteChanges" => self.sync_remote_changes(&ctx, request.workspace).await?,
+            "sync.collectionsWaiting" => {
+                self.sync_collections_waiting(&ctx, request.workspace)
+                    .await?
+            }
             "sync.dismissRefusal" => {
                 self.sync_dismiss_refusal(&ctx, request.workspace, request.params)
                     .await?
@@ -603,6 +625,11 @@ impl EngineService {
                 self.kept_copies_save(request.workspace, request.params)
                     .await?
             }
+            "retainedCopies.list" => self.retained_copies_list(request.workspace).await?,
+            "retainedCopies.delete" => {
+                self.retained_copies_delete(request.workspace, request.params)
+                    .await?
+            }
             "capture.flush" => self.capture_flush(&ctx, request.workspace).await?,
             "capture.reconcile" => self.capture_reconcile(&ctx, request.workspace).await?,
             "capture.retryHeld" => {
@@ -623,6 +650,10 @@ impl EngineService {
             }
             "capture.release" => {
                 self.capture_release(request.workspace, request.params)
+                    .await?
+            }
+            "capture.duplicateFile" => {
+                self.capture_duplicate_file(request.workspace, request.params)
                     .await?
             }
             "capture.moveFile" => {
@@ -665,7 +696,8 @@ impl EngineService {
                 self.history_operation(&ctx, request.workspace, request.params)
                     .await?
             }
-            "history.undo" => self.history_undo(&ctx, request).await?,
+            "history.undo" => Box::pin(self.history_undo(&ctx, request)).await?,
+            "history.rewriteLinks" => Box::pin(self.history_rewrite_links(&ctx, request)).await?,
             "history.page" => {
                 self.history_page(&ctx, request.workspace, request.params)
                     .await?
@@ -825,6 +857,10 @@ impl EngineService {
             }
             "chats.attachments.listForThread" => {
                 self.chats_attachments_list_for_thread(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.conversations.listLinks" => {
+                self.chats_conversations_list_links(&ctx, request.workspace, request.params)
                     .await?
             }
             "chats.attachments.listFileMentions" => {
@@ -1184,6 +1220,9 @@ impl EngineService {
             && !matches!(
                 method,
                 "workspace.close"
+                    | "links.edges"
+                    | "links.in"
+                    | "links.resolve"
                     | "files.changesSince"
                     | "files.drain"
                     | "search.queryChatMessagesGranular"
@@ -1255,7 +1294,6 @@ mod tests {
             future_size(|| service.call_with_input(RequestContext::unbounded(), request(), None));
         // InProcessTransport test callers carry dispatch state on the default thread stack.
         // The supervisor spawns request futures on the heap; growth still costs memory per request.
-        println!("dispatch: {bytes} bytes; call_with_input: {input_bytes} bytes");
         assert!(bytes <= 5 * 1024, "dispatch future uses {bytes} bytes");
         assert!(
             input_bytes <= 6 * 1024,
@@ -1378,17 +1416,19 @@ mod tests {
     }
 
     #[test]
-    fn only_idempotent_version_bootstrap_bypasses_the_initial_capture_fence() {
-        assert!(!method_requires_initial_capture_ready(
-            "versions.ensureMain"
-        ));
+    fn only_version_bootstrap_and_the_active_version_bypass_the_initial_capture_fence() {
+        for method in ["versions.ensureMain", "versions.active"] {
+            assert!(!method_requires_initial_capture_ready(method), "{method}");
+        }
         for method in [
+            "links.edges",
+            "links.in",
+            "links.resolve",
             "files.resolve",
             "ydoc.ownerStop.request",
             "ydoc.ownerStop.release",
             "ydoc.ownerStop.clear",
             "ydoc.ownerStop.retired",
-            "versions.active",
             "versions.list",
             "versions.createNamed",
             "versions.setActive",
@@ -1501,6 +1541,7 @@ mod tests {
             "chats.agentReadState.listUnreadThreads",
             "chats.agentReadState.markThreadRead",
             "chats.attachments.listFileMentions",
+            "chats.conversations.listLinks",
             "chats.attachments.listForThread",
             "chats.bookmarks.archive",
             "chats.bookmarks.find",
@@ -1575,6 +1616,8 @@ mod tests {
             "history.page",
             "keptCopies.list",
             "keptCopies.save",
+            "retainedCopies.delete",
+            "retainedCopies.list",
             "keys.download",
             "keys.upload",
             "moments.get",
@@ -1604,6 +1647,7 @@ mod tests {
             "share.view.recordIdentity",
             "sync.adoptJoinIdentity",
             "sync.claim",
+            "sync.collectionsWaiting",
             "sync.resetClaimRefusal",
             "sync.materializePendingCursor",
             "sync.commitCursor",

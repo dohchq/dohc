@@ -184,6 +184,9 @@ const REQUIRED_TABLES: &[&str] = &[
     "chat_reactions",
     "chat_decisions",
     "chat_attachments",
+    "chat_conversation_file_links",
+    "chat_conversation_file_link_state",
+    "chat_conversation_file_link_work",
     "chat_pending_message_parents",
     "chat_pending_replication",
     "chat_agent_read_state",
@@ -335,7 +338,7 @@ fn open_engine_db_configured(
     // Step 1: "is this file empty?" is our question, not the VFS's.
     reject_undersized_database(path)?;
 
-    let mut conn = Connection::open_with_flags(
+    let mut conn = crate::open_store(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
     )
@@ -444,8 +447,8 @@ pub(crate) fn open_engine_db_read_only(
     work: Option<Arc<AtomicU64>>,
 ) -> Result<OpenedEngineDb, StorageError> {
     reject_undersized_database(path)?;
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(StorageError::corrupt)?;
+    let conn =
+        crate::open_store(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(StorageError::corrupt)?;
     count_open_work(&conn, work)?;
     apply_session_pragmas(&conn)?;
     if classify_fingerprint(&conn)? != Disposition::ExistingV2 {
@@ -502,11 +505,14 @@ fn apply_session_pragmas(conn: &Connection) -> Result<(), StorageError> {
     .map_err(StorageError::corrupt)?;
     conn.pragma_update(None, "foreign_keys", true)
         .map_err(StorageError::corrupt)?;
-    // A checkpoint must not recycle a durable WAL before its copied pages
-    // reach permanent storage on macOS.
-    conn.pragma_update(None, "checkpoint_fullfsync", cfg!(target_os = "macos"))
-        .map_err(StorageError::corrupt)?;
+    set_checkpoint_fullfsync(conn).map_err(StorageError::corrupt)?;
     Ok(())
+}
+
+/// A checkpoint must not recycle a durable WAL before its copied pages reach
+/// permanent storage on macOS. Every connection that checkpoints sets this.
+pub(crate) fn set_checkpoint_fullfsync(conn: &Connection) -> rusqlite::Result<()> {
+    conn.pragma_update(None, "checkpoint_fullfsync", cfg!(target_os = "macos"))
 }
 
 fn apply_persistent_pragmas(conn: &Connection) -> Result<(), StorageError> {
@@ -688,20 +694,49 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
+    fn conversation_links_schema_rejects_missing_projection_resources() {
+        for table in [
+            "chat_conversation_file_links",
+            "chat_conversation_file_link_state",
+            "chat_conversation_file_link_work",
+        ] {
+            let directory =
+                dohc_test_scratch::ScratchDir::new_named("conversation-links-schema").unwrap();
+            let path = directory.path().join("store.sqlite");
+            drop(crate::EngineStore::open(&path, 0).unwrap());
+            let c = rusqlite::Connection::open(&path).unwrap();
+            c.execute_batch(&format!("DROP TABLE {table}")).unwrap();
+            drop(c);
+            assert!(
+                matches!(
+                    crate::EngineStore::open(&path, 0),
+                    Err(crate::StorageError::StateCorrupt { .. })
+                ),
+                "missing {table}"
+            );
+        }
+    }
+
+    #[test]
     fn checkpoint_fullfsync_is_set_for_the_connection_lifetime() {
         let directory = dohc_test_scratch::ScratchDir::new_named("checkpoint-sync").unwrap();
         let path = directory.path().join("store.sqlite");
+        let expected = i64::from(cfg!(target_os = "macos"));
+        let setting = |conn: &rusqlite::Connection| -> rusqlite::Result<i64> {
+            conn.pragma_query_value(None, "checkpoint_fullfsync", |row| row.get(0))
+        };
         for _ in 0..2 {
             let store = crate::EngineStore::open(&path, 0).unwrap();
             store
                 .read_with(|conn| {
-                    let setting: i64 =
-                        conn.pragma_query_value(None, "checkpoint_fullfsync", |row| row.get(0))?;
-                    assert_eq!(setting, i64::from(cfg!(target_os = "macos")));
+                    assert_eq!(setting(conn)?, expected);
                     Ok::<_, rusqlite::Error>(())
                 })
                 .unwrap();
         }
+        // The background checkpointer copies WAL pages too.
+        let background = crate::checkpoint::Checkpoints::connection(&path).unwrap();
+        assert_eq!(setting(&background).unwrap(), expected);
     }
 
     #[test]

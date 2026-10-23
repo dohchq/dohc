@@ -37,6 +37,8 @@ export const COMMAND_ROWS = {
   "export-workspace": { label: "Export workspace as zip", availability: "always" },
   "toggle-sidebar": { label: "Toggle sidebar", availability: "always" },
   "close-tab": { label: "Close tab", availability: "always" },
+  "next-tab": { label: "Show next tab", availability: "always" },
+  "previous-tab": { label: "Show previous tab", availability: "always" },
   "new-editor-group-right": { label: "New editor group right", availability: "always" },
   "toggle-markdown-source": { label: "Toggle markdown source view", availability: "activeMarkdown" },
   "toggle-about": { label: "Toggle About", availability: "always" },

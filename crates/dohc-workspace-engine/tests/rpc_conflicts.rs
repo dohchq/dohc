@@ -2506,6 +2506,95 @@ async fn a_conflict_row_at_the_hard_cap_ships_in_band_and_one_byte_more_degrades
     );
 }
 
+/// #2205: an original retained on a volume that cannot refuse to unlink an
+/// open file is counted in watcher.status, listed with its revision, and
+/// deleted only with the late-write risk accepted.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retained_copy_on_an_unchecked_volume_is_counted_listed_and_deleted() {
+    use std::os::unix::fs::MetadataExt;
+    let (scratch, transport, handle, workspace_id) = fixture("retained-copy").await;
+    let _simulated = dohc_engine_files::retained::unchecked::simulate(scratch.path());
+    // The first name job "old" stages its original under.
+    let source = ".dohc/engine/displaced/6f6c64.0";
+    write_file(scratch.path(), source, b"old bytes");
+    let m = std::fs::metadata(scratch.path().join(source)).expect("source");
+    let store =
+        dohc_engine_storage::EngineStore::open(&scratch.path().join(".dohc/engine/engine.db"), 10)
+            .expect("store");
+    let id = store
+        .retain_displacement(&dohc_engine_storage::RetainedDisplacement {
+            displacement_id: 0,
+            job_id: "old".to_owned(),
+            workspace_id: workspace_id.clone(),
+            target_path: "notes/a.md".to_owned(),
+            source_path: source.to_owned(),
+            device: m.dev().to_string(),
+            inode: m.ino().to_string(),
+            digest: dohc_engine_storage::hex_sha256(b"old bytes"),
+            size: 9,
+            mtime: format!("{}:{}", m.mtime(), m.mtime_nsec()),
+            ctime: format!("{}:{}", m.ctime(), m.ctime_nsec()),
+            changed_at_ms: 0,
+            busy_check_unsupported: true,
+        })
+        .expect("retain");
+    drop(store);
+
+    let status = call(&transport, &handle, 9, "watcher.status", json!({})).await;
+    assert_eq!(status["retainedCopies"], json!({ "count": 1, "bytes": 9 }));
+    let listed = call(&transport, &handle, 10, "retainedCopies.list", json!({})).await;
+    assert_eq!(
+        listed,
+        json!({
+            "copies": [{ "id": id, "revision": 0 }],
+            "more": false,
+            "total": { "count": 1, "bytes": 9 },
+        })
+    );
+    let copies = listed["copies"].clone();
+    for (n, params) in [
+        json!({ "copies": copies }),
+        json!({ "copies": copies, "acceptLateWriteRisk": false }),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let refused = call_error(
+            &transport,
+            &handle,
+            11 + n as u64,
+            "retainedCopies.delete",
+            params,
+        )
+        .await;
+        assert_eq!(refused.code, ErrorCode::InvalidParams, "{refused:?}");
+    }
+    assert!(scratch.path().join(source).exists());
+    let deleted = call(
+        &transport,
+        &handle,
+        13,
+        "retainedCopies.delete",
+        json!({ "copies": copies, "acceptLateWriteRisk": true }),
+    )
+    .await;
+    assert_eq!(
+        deleted,
+        json!({
+            "deleted": 1,
+            "skipped": 0,
+            "failed": 0,
+            "remaining": { "count": 0, "bytes": 0 },
+        })
+    );
+    assert!(!scratch.path().join(source).exists());
+    assert_eq!(
+        call(&transport, &handle, 14, "retainedCopies.list", json!({})).await,
+        json!({ "copies": [], "more": false, "total": { "count": 0, "bytes": 0 } })
+    );
+}
+
 /// A file a replace kept at its hidden displaced name is listed until it is
 /// saved as a visible copy beside its path, and saving it twice finds nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

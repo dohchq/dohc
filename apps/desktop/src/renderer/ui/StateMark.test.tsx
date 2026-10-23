@@ -2,6 +2,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ViewActions } from "../fileInspectorUi";
 import type { SettingsSaveState } from "../settings/SettingsDialog";
 import { ACCESS_STATE, SAVE_STATE, StateMark, type AccessStateKey, type SaveStateKey, type StatePresentation } from "./StateMark";
 
@@ -31,8 +32,10 @@ describe("StateMark", () => {
     // covers the newest local edit, and by the draft hook and Settings only
     // after their write returned. Every other state is still working, held
     // by something, or needs the person, so none of them may read as done.
+    // "reloaded" stands in for "saved" only over a saved document that just
+    // opened the file as it is on disk.
     const settled = KEYS.filter((key) => SAVE_STATE[key].mark === "settled");
-    expect(settled).toEqual(["saved"]);
+    expect(settled).toEqual(["saved", "reloaded"]);
     // "Saved" at the start of a label claims the edit is durable somewhere.
     // The host and the local engine store are the only other places that
     // can make that claim.
@@ -86,6 +89,26 @@ describe("StateMark", () => {
   it("lets the caller's title replace the row's", () => {
     render(<StateMark testId="mark" state="error" shown="error" title="The disk is full." />);
     expect(screen.getByTestId("mark").getAttribute("title")).toBe("The disk is full.");
+  });
+
+  // jsdom lays nothing out, so this reads the rules that size the header: a
+  // narrow window cuts the chip's label, never Try again.
+  it("keeps Try again whole in a narrow header and cuts the chip's label instead", () => {
+    const { container } = render(
+      <ViewActions status={<StateMark testId="mark" truncate state="read-only" shown="read-only-transition" onRetry={() => undefined} />} />,
+    );
+    const status = container.querySelector<HTMLElement>("[data-view-status]")!;
+    // Each column is as narrow as its item allows, so the button's own minimum counts.
+    expect(status.className).toContain("auto-cols-[minmax(auto,max-content)]");
+    const retry = screen.getByTestId("mark-retry");
+    expect(retry.parentElement).toBe(status);
+    expect(retry.className.split(" ")).toEqual(expect.arrayContaining(["shrink-0", "whitespace-nowrap"]));
+    expect(retry.closest(".truncate")).toBeNull();
+    // The chip has its own column and keeps room for its mark and an ellipsis.
+    const chip = screen.getByTestId("mark");
+    expect(chip.parentElement!.parentElement).toBe(status);
+    expect(chip.parentElement!.className.split(" ")).toContain("min-w-[25px]");
+    expect(chip.querySelector(".truncate")?.textContent).toBe("Read-only");
   });
 
   // A narrow header cuts the label short. The chip then takes focus and its

@@ -1,3 +1,5 @@
+import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
+import { createTestScratch } from "../workspaces/testTemp";
 import type { TimelineReads } from "../workspaces/historyTimeline";
 import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -150,9 +152,9 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     onError: vi.fn(),
   });
   const adapter = {
-    reconcileCapture: vi.fn<VersionedLiveAdapter["reconcileCapture"]>(async () => ({ settled: true, running: true, degraded: false, heldFiles: [] })),
-    retryHeldCapture: vi.fn<VersionedLiveAdapter["retryHeldCapture"]>(async () => ({ settled: true, running: true, degraded: false, retried: true, heldFiles: [] })),
-    watcherStatus: vi.fn<VersionedLiveAdapter["watcherStatus"]>(async () => ({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [] })),
+    reconcileCapture: vi.fn<VersionedLiveAdapter["reconcileCapture"]>(async () => ({ deferredWrites: [], settled: true, running: true, degraded: false, heldFiles: [] })),
+    retryHeldCapture: vi.fn<VersionedLiveAdapter["retryHeldCapture"]>(async () => ({ deferredWrites: [], settled: true, running: true, degraded: false, retried: true, heldFiles: [] })),
+    watcherStatus: vi.fn<VersionedLiveAdapter["watcherStatus"]>(async () => ({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: false, deferredWrites: [], keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 } })),
     clearCaptureRecovery: vi.fn<VersionedLiveAdapter["clearCaptureRecovery"]>(async () => undefined),
     listCollections: vi.fn<VersionedLiveAdapter["listCollections"]>(async () => ({ collections: [] })),
     getCollection: vi.fn<VersionedLiveAdapter["getCollection"]>(async () => { throw new Error("get boundary"); }),
@@ -226,12 +228,14 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
   const warmCredentialCache = vi.fn(async () => undefined);
   const readSyncHistory = vi.fn(async (_rootPath: string): Promise<SyncHistory> => "never-synced");
   const historyCollections = vi.fn<() => Promise<Pick<TimelineReads, "scope" | "local" | "remote">>>(async () => ({ scope: "test", local: () => ({ pages: [], transferred: [], sourceIds: [], sourceCount: 0 }), remote: async () => { throw new Error("unexpected remote history"); } }));
+  const stateDirectory = await createTestScratch("engine-ipc-settings-");
   const registrations = createWorkspaceEngineIpc({
     historyCollections,
     readWorkspaceEnginePolicy: readPolicy, readSyncHistory,
     localPersonId: () => "person-local",
     localPersonName: () => "Ice",
     localInstallationId: () => "install-local",
+    stateDir: () => stateDirectory,
     warmCredentialCache, currentCredentials: () => identity.credentials,
     // Read from main's own account, as the sign-in stands when the request arrives.
     localPerson: async () => ({ kind: "human", humanId: session.account ?? "install-local" }),
@@ -377,7 +381,7 @@ describe("workspace engine IPC registrations", () => {
     const h = await harness();
     const bridge = operationBridge(captureRecoveryOperations, async (channel, payload) => h.invoke(channel, payload));
     const recovery = { momentId: "recovery", versionId: "main", objectId: "object", path: "notes/a.md", captureMomentId: "capture", deleted: false };
-    h.adapter.watcherStatus.mockResolvedValue({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [recovery], heldFiles: [] });
+    h.adapter.watcherStatus.mockResolvedValue({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: false, deferredWrites: [], keptFiles: [], captureRecoveries: [recovery], heldFiles: [], retainedCopies: { count: 0, bytes: 0 } });
     expect(await bridge.getCaptureRecoveryStatus({workspaceId: "workspace"})).toEqual({ captureRecoveries: [recovery] });
     expect(await bridge.clearCaptureRecovery({workspaceId: "workspace", momentId: "recovery"})).toBeUndefined();
     expect(h.adapter.clearCaptureRecovery).toHaveBeenCalledWith("recovery");
@@ -408,7 +412,7 @@ describe("workspace engine IPC registrations", () => {
   });
   it("keeps recovery unavailable when reconciliation or the recovery scan still fails", async () => {
     const h = await harness();
-    h.adapter.watcherStatus.mockResolvedValue({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: true, keptFiles: [], captureRecoveries: [], heldFiles: [] });
+    h.adapter.watcherStatus.mockResolvedValue({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: true, deferredWrites: [], keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 } });
     await expect(h.invoke(CHANNELS.retryFileRecovery)).rejects.toThrow("still cannot read");
     h.adapter.reconcileCapture.mockRejectedValue(new Error("denied"));
     await expect(h.invoke(CHANNELS.retryFileRecovery)).rejects.toThrow("denied");
@@ -1047,7 +1051,7 @@ describe("workspace engine IPC registrations", () => {
 
     it.each([
       // The workspace authority retires an operation whose folder changed.
-      ["its folder moves", { rootPath: "C:/moved" }, "retired workspace authority"],
+      ["its folder moves", { rootPath: "C:/moved" }, "This workspace changed while this ran. Try again."],
       ["it becomes a shared view", { shareView: {} as NonNullable<RegistryEntry["shareView"]> }, "the workspace changed"],
     ])("stops a read when %s", async (_change, fields, message) => {
       const h = await harness();
@@ -1534,6 +1538,16 @@ describe("merged History IPC", () => {
     expect(h.capture.listMoments).toHaveBeenLastCalledWith({ limit: 50, versionId: "branch", objectId: "object" });
     expect(h.historyCollections).not.toHaveBeenCalled();
   });
+});
+
+it("shows file History without Collections when another computer keeps them, and still fails on any other Collection error", async () => {
+  const h = await harness();
+  h.capture.listMoments.mockResolvedValue({ ...historyPage(), nextCursor: null });
+  h.historyCollections.mockRejectedValue(new CollectionsRefusalError({ kind: "elsewhere", computer: { installId: "install-laptop", label: "Laptop" }, sameName: false }));
+  await expect(h.invoke(historyOperations.listHistory.channel)).resolves.toMatchObject({ status: "ready", entries: [{ kind: "file" }] });
+  expect(h.historyCollections).toHaveBeenCalledOnce();
+  h.historyCollections.mockRejectedValue(new Error("Collection storage is full."));
+  await expect(h.invoke(historyOperations.listHistory.channel)).rejects.toThrow("Collection storage is full.");
 });
 
 it("does not start the Collection host for main per-file History", async () => {

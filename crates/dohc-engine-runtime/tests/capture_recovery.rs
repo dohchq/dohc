@@ -464,6 +464,7 @@ async fn recovery_after_pruning_and_reenrollment_never_exports_private_typing() 
                 stream_identity: "stream".into(),
                 bootstrap_complete: true,
                 settlement_report_id: None,
+                ordinary_pull: None,
             },
             &NoFaults,
             &LeaseRegistry::new(),

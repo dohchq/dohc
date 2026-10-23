@@ -98,10 +98,12 @@ function account(allocation) {
   if (current + allocation.bytes > 8*1024*MiB) throw new Error('Benchmark quota exceeded.');
   db.prepare('UPDATE accounting SET bytes=bytes+?').run(allocation.bytes);
 }
+// The benchmark's own private folders, made when first asked for.
+const folder=name=>async()=>{const path=join(output,name);await mkdir(path,{recursive:true});return path;};
 async function open() {
-  supervisor=await createDatasetSupervisor({journal,directory:join(output,'workers'),runtime:{launch},maxWorkers:4,maintenanceStorage:{authorize(){if(!db.isOpen)throw new Error('Benchmark store is closed.');},account}});
+  supervisor=await createDatasetSupervisor({journal,directory:folder('workers'),runtime:{launch},maxWorkers:4,maintenanceStorage:{authorize(){if(!db.isOpen)throw new Error('Benchmark store is closed.');},account}});
   host=createDatasetHost({db,transaction,journal,supervisor,
-    recovery:{directory:join(output,'exports'),limits:{maxTotalBytes:8*1024*MiB}},
+    recovery:{directory:folder('exports'),limits:{maxTotalBytes:8*1024*MiB}},
     resolveAuthority(context,request){if(request.workspaceId!=='workspace'||db.prepare('SELECT active FROM permissions WHERE user=?').get(context)?.active!==1)throw new Error('Permission denied.');if(request.access.kind==='app'&&request.access.appId!=='form')throw new Error('Publication denied.');return{principalKey:context,...(request.access.kind==='app'?{appId:'form'}:{}),caller:context==='owner'?{kind:'owner',userId:'owner'}:{kind:'link',principalId:'friend',grantId:'benchmark-public-link'}};},
     accountCreation:(_context,allocation)=>account(allocation),accountMetadata:(_context,allocation)=>account(allocation),accountMigration:(_context,allocation)=>account(allocation),accountCheckpointStage:(_context,allocation)=>account(allocation),
     operationResources(){return{accountAndAttach:allocation=>account(allocation)};},
