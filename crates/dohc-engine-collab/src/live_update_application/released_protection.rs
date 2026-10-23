@@ -13,6 +13,7 @@ use std::task::{Poll, Waker};
 
 mod binding;
 mod preservation;
+pub use binding::ContributionArtifact;
 pub use preservation::{
     inspect_held, HeldInspection, Preservation, PreservationFinding, PreservationReason,
     PreservationStatus, PreservedState,

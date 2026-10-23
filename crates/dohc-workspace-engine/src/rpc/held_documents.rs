@@ -2,18 +2,24 @@
 //! replica holds for retained work a released chain left, read for the relay,
 //! which answers the workspace's owner. Only the configured host's own
 //! connection may ask, for a workspace it attached, and both checks hold again
-//! once the read returns. Nothing here writes.
+//! once the read returns. Nothing here writes. Each answer fits
+//! [`HELD_RESPONSE_BYTE_BUDGET`] however much a hold covers: discovery pages
+//! by bytes, findings list a few examples per reason, and the binding with
+//! every covered contribution streams as the contribution artifact.
 use crate::EngineService;
 use crate::rpc::error::workspace_unavailable;
+use crate::rpc::reads::BLOB_EGRESS_BYTE_BUDGET;
 use crate::rpc::reads::MAX_INBAND_CONTENT_BYTES;
+use crate::rpc::reads::json_string_encoded_len;
+use crate::rpc::reads::response_encoded_bytes;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::parse;
 use crate::rpc::workspace::OpenWorkspace;
 use crate::rpc::workspace::validate_workspace_param;
+use dohc_engine_collab::live_update_application::ContributionArtifact;
 use dohc_engine_collab::live_update_application::ContributionLocator;
 use dohc_engine_collab::live_update_application::Preservation;
 use dohc_engine_collab::live_update_application::PreservationFinding;
-use dohc_engine_collab::live_update_application::RetainedContribution;
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::BlobEgress;
@@ -23,6 +29,7 @@ use dohc_engine_protocol::wire::Response;
 use dohc_engine_protocol::wire::WorkspaceHandle;
 use dohc_engine_sync::HeldDocument;
 use dohc_engine_sync::HeldDocumentInspection;
+use dohc_engine_sync::HeldDocumentsPage;
 use dohc_engine_sync::MAX_HELD_DOCUMENTS_PAGE;
 use serde::Deserialize;
 use serde_json::Value;
@@ -43,14 +50,39 @@ struct HeldDocumentsParams {
 struct HeldDocumentParams {
     workspace_id: String,
     object_id: String,
-    /// Stream preserved Markdown above the in-band limit. Only a caller that
-    /// reads the text asks.
+    /// What streams as a blob under the request's ID. Only a caller that
+    /// reads it asks.
     #[serde(default)]
-    stream_markdown: bool,
+    stream: Option<HeldStream>,
+}
+
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum HeldStream {
+    /// Preserved Markdown the answer leaves out.
+    Markdown,
+    /// The contribution artifact.
+    Contributions,
 }
 
 /// The longest object ID a request names.
 const MAX_OBJECT_ID_BYTES: usize = 512;
+
+/// The most a held-document answer's serialized control response holds,
+/// below the relay's 256 KiB metadata limit.
+pub(super) const HELD_RESPONSE_BYTE_BUDGET: usize = 240 * 1024;
+
+/// The most findings an answer lists for one reason; its total counts all.
+const MAX_REASON_EXAMPLES: usize = 8;
+
+fn serialized_len(value: &Value) -> usize {
+    serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len())
+}
+
+/// Bytes stored state cannot hold within its bounds.
+fn over_budget() -> WireError {
+    WireError::new(ErrorCode::Internal, "state-corrupt")
+}
 
 fn object_id(value: &str) -> Result<(), WireError> {
     if value.is_empty() || value.len() > MAX_OBJECT_ID_BYTES {
@@ -78,13 +110,16 @@ impl EngineService {
         Ok(open)
     }
 
-    /// `sync.heldDocuments`: up to `limit` held documents in object ID order
-    /// after `afterObjectId`, from durable state alone.
+    /// `sync.heldDocuments`: summaries of up to `limit` held documents in
+    /// object ID order after `afterObjectId`, from durable state alone, as
+    /// many as fit the response budget. The next page starts after the last
+    /// one listed.
     pub(super) async fn sync_held_documents(
         &self,
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
+        request_id: u64,
     ) -> Result<Value, WireError> {
         let params: HeldDocumentsParams = parse(params)?;
         if !(1..=MAX_HELD_DOCUMENTS_PAGE).contains(&params.limit) {
@@ -111,18 +146,17 @@ impl EngineService {
         .await?;
         self.held_documents_open(ctx, &handle, &params.workspace_id)?;
         let page = page.ok_or_else(not_hosted)?;
-        Ok(json!({
-            "documents": page.documents.iter().map(held_json).collect::<Vec<_>>(),
-            "hasMore": page.has_more,
-        }))
+        discovery_page(request_id, &page, HELD_RESPONSE_BYTE_BUDGET)
     }
 
     /// `sync.heldDocument`: one held document, whether its binding still
     /// stands, and what that binding preserves; null when the replica holds
     /// no such document for retained work. Preserved Markdown above the
     /// in-band limit is left out of the result, which keeps its digest and
-    /// length. With `streamMarkdown`, which needs a connection that
-    /// negotiated blobs, it streams as a blob under the request's ID. The
+    /// length; the binding and the covered and merged contributions are
+    /// named only by the contribution artifact's digest and length. With
+    /// `stream`, which needs a connection that negotiated blobs, the left-out
+    /// Markdown or the artifact streams as a blob under the request's ID. The
     /// answer is withheld once the workspace's live host retires.
     pub(super) async fn sync_held_document(
         &self,
@@ -133,10 +167,10 @@ impl EngineService {
     ) -> Result<ServiceResponse, WireError> {
         let params: HeldDocumentParams = parse(params)?;
         object_id(&params.object_id)?;
-        if params.stream_markdown && !ctx.has_capability("blobs") {
+        if params.stream.is_some() && !ctx.has_capability("blobs") {
             return Err(WireError::new(
                 ErrorCode::InvalidParams,
-                "held document Markdown streams only as a blob",
+                "held document details stream only as a blob",
             ));
         }
         let handle = handle.ok_or_else(workspace_unavailable)?;
@@ -162,18 +196,23 @@ impl EngineService {
         let Some(inspected) = inspected else {
             return Ok(answer(Value::Null, None));
         };
-        let markdown = inspected
-            .preservation
-            .as_ref()
-            .and_then(|preservation| preservation.preserved.as_ref())
-            .map(|preserved| preserved.markdown.as_bytes());
-        let outside = markdown.is_some_and(|bytes| bytes.len() > MAX_INBAND_CONTENT_BYTES);
-        let result = inspection_json(&inspected, !outside);
-        let Some(bytes) = markdown.filter(|_| outside && params.stream_markdown) else {
+        let (result, outside) =
+            inspection_answer(request_id, &inspected, HELD_RESPONSE_BYTE_BUDGET)?;
+        let bytes = match params.stream {
+            Some(HeldStream::Markdown) if outside => inspected
+                .preservation
+                .and_then(|preservation| preservation.preserved)
+                .map(|preserved| preserved.markdown.into_bytes()),
+            Some(HeldStream::Contributions) => inspected
+                .contributions
+                .map(|contributions| contributions.bytes),
+            _ => None,
+        };
+        let Some(bytes) = bytes else {
             return Ok(answer(result, None));
         };
         let blob = self
-            .held_markdown_egress(
+            .held_blob_egress(
                 ctx,
                 &handle,
                 &params.workspace_id,
@@ -188,15 +227,21 @@ impl EngineService {
     /// `bytes` as the blob of request `request_id`, once the egress budget
     /// holds them and the caller may still have them: the configured host's
     /// connection can end, or the workspace detach, while the budget waits.
-    async fn held_markdown_egress(
+    async fn held_blob_egress(
         &self,
         ctx: &RequestContext,
         handle: &WorkspaceHandle,
         workspace_id: &str,
         cancellation: &OperationCancellation,
-        bytes: &[u8],
+        bytes: Vec<u8>,
         request_id: u64,
     ) -> Result<BlobEgress, WireError> {
+        if bytes.len() > BLOB_EGRESS_BYTE_BUDGET {
+            return Err(WireError::new(
+                ErrorCode::PayloadTooLarge,
+                "held document details exceed the blob limit",
+            ));
+        }
         let byte_permit = self
             .blob_egress_budget
             .reserve(bytes.len() as i64, cancellation, "sync.heldDocument")
@@ -204,8 +249,8 @@ impl EngineService {
         self.held_documents_open(ctx, handle, workspace_id)?;
         Ok(BlobEgress {
             stream_id: request_id,
-            sha256: dohc_engine_storage::hex_sha256(bytes),
-            bytes: bytes.to_vec(),
+            sha256: dohc_engine_storage::hex_sha256(&bytes),
+            bytes,
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
             byte_permit: Some(byte_permit),
@@ -213,53 +258,150 @@ impl EngineService {
     }
 }
 
+/// A held document as discovery lists it: where it is and which binding
+/// holds it, without the binding itself.
 fn held_json(document: &HeldDocument) -> Value {
     json!({
         "objectId": document.object_id,
         "path": document.path,
-        "binding": document.binding.to_json(),
         "bindingDigest": document.binding.digest(),
         "continuation": document.continuation.as_str(),
         "bindingStale": document.binding_stale,
     })
 }
 
-/// The inspection on the wire, its preserved Markdown in band when `inband`.
-fn inspection_json(inspected: &HeldDocumentInspection, inband: bool) -> Value {
-    let mut result = held_json(&inspected.document);
-    result["status"] = json!(inspected.status.as_str());
-    result["preservation"] = inspected
-        .preservation
-        .as_ref()
-        .map_or(Value::Null, |preservation| {
-            preservation_json(preservation, inband)
-        });
-    // Resolution is not recorded yet; the round that adds it fills this.
-    result["resolution"] = Value::Null;
-    result
+/// The discovery answer to request `request_id`: the summaries of `page`
+/// that fit `budget` bytes of serialized response, in order. A summary that
+/// does not fit ends the page and leads the next, where it comes first; its
+/// fields are bounded far below the budget, so one that fits no page is
+/// corrupt state, never an empty page that claims more.
+fn discovery_page(
+    request_id: u64,
+    page: &HeldDocumentsPage,
+    budget: usize,
+) -> Result<Value, WireError> {
+    // `false` is the longer of the two, so the answer only shrinks.
+    let mut size = response_encoded_bytes(request_id, &json!({"documents": [], "hasMore": false}));
+    let mut documents = Vec::new();
+    for document in &page.documents {
+        let summary = held_json(document);
+        let comma = usize::from(!documents.is_empty());
+        let added = serialized_len(&summary).saturating_add(comma);
+        if size.saturating_add(added) > budget {
+            break;
+        }
+        size += added;
+        documents.push(summary);
+    }
+    if documents.is_empty() && !page.documents.is_empty() {
+        return Err(over_budget());
+    }
+    let has_more = page.has_more || documents.len() < page.documents.len();
+    Ok(json!({"documents": documents, "hasMore": has_more}))
 }
 
-fn preservation_json(preservation: &Preservation, inband: bool) -> Value {
+/// The inspection's answer to request `request_id` within `budget` bytes of
+/// serialized response, and whether it leaves the preserved Markdown out.
+/// Every reason is listed with its exact total; its examples follow in
+/// namespace and contribution order, at most [`MAX_REASON_EXAMPLES`] each,
+/// while they fit, and the rest are counted as omitted. The status is the
+/// preservation's own, taken over every finding.
+fn inspection_answer(
+    request_id: u64,
+    inspected: &HeldDocumentInspection,
+    budget: usize,
+) -> Result<(Value, bool), WireError> {
+    let (mut result, outside) = inspection_outline(inspected);
+    let mut size = response_encoded_bytes(request_id, &result);
+    if size > budget {
+        return Err(over_budget());
+    }
+    let Some(preservation) = &inspected.preservation else {
+        return Ok((result, outside));
+    };
+    let mut found: Vec<&PreservationFinding> = preservation.findings.iter().collect();
+    found.sort_by(|a, b| {
+        (a.reason, &a.namespace, &a.contribution).cmp(&(b.reason, &b.namespace, &b.contribution))
+    });
+    let reasons = result["preservation"]["reasons"]
+        .as_array_mut()
+        .expect("the outline lists reasons");
+    'examples: for (entry, group) in reasons
+        .iter_mut()
+        .zip(found.chunk_by(|a, b| a.reason == b.reason))
+    {
+        for (listed, example) in group.iter().take(MAX_REASON_EXAMPLES).enumerate() {
+            let example = example_json(example);
+            let comma = usize::from(listed > 0);
+            let added = serialized_len(&example).saturating_add(comma);
+            // A smaller omitted count only shortens the answer.
+            if size.saturating_add(added) > budget {
+                break 'examples;
+            }
+            size += added;
+            entry["examples"]
+                .as_array_mut()
+                .expect("the outline lists examples")
+                .push(example);
+            entry["omitted"] = json!(group.len() - listed - 1);
+        }
+    }
+    Ok((result, outside))
+}
+
+/// The inspection with every reason's total and no examples yet, and
+/// whether its preserved Markdown is left out: in band only while JSON
+/// encodes it within the in-band limit, so it never crowds the budget.
+fn inspection_outline(inspected: &HeldDocumentInspection) -> (Value, bool) {
+    let mut result = held_json(&inspected.document);
+    result["status"] = json!(inspected.status.as_str());
+    let (preservation, outside) = match (&inspected.preservation, &inspected.contributions) {
+        (Some(preservation), Some(contributions)) => {
+            let markdown = preservation
+                .preserved
+                .as_ref()
+                .map(|preserved| preserved.markdown.as_str());
+            let outside = markdown.map_or(0, json_string_encoded_len) > MAX_INBAND_CONTENT_BYTES;
+            (preservation_outline(preservation, contributions, !outside), outside)
+        }
+        _ => (Value::Null, false),
+    };
+    result["preservation"] = preservation;
+    // Resolution is not recorded yet; the round that adds it fills this.
+    result["resolution"] = Value::Null;
+    (result, outside)
+}
+
+fn preservation_outline(
+    preservation: &Preservation,
+    contributions: &ContributionArtifact,
+    inband: bool,
+) -> Value {
     let preserved = preservation.preserved.as_ref();
+    let mut reasons: Vec<_> = preservation
+        .findings
+        .iter()
+        .map(|found| found.reason)
+        .collect();
+    reasons.sort();
     json!({
         "status": preservation.status.as_str(),
-        "reasons": preservation.findings.iter().map(finding_json).collect::<Vec<_>>(),
-        "coveredContributions": preservation
-            .covered
-            .iter()
-            .map(|(namespace, contributions)| json!({
-                "namespace": namespace,
-                "contributions": contributions
-                    .iter()
-                    .map(RetainedContribution::to_json)
-                    .collect::<Vec<_>>(),
+        "reasons": reasons
+            .chunk_by(|a, b| a == b)
+            .map(|group| json!({
+                "reason": group[0].as_str(),
+                "status": group[0].status().as_str(),
+                "total": group.len(),
+                "omitted": group.len(),
+                "examples": [],
             }))
             .collect::<Vec<_>>(),
-        "mergedContributionIds": preservation
-            .merged
-            .iter()
-            .map(RetainedContribution::to_json)
-            .collect::<Vec<_>>(),
+        "mergedContributions": {
+            "count": contributions.merged.count,
+            "digest": contributions.merged.digest,
+        },
+        "contributionsSha256": contributions.sha256,
+        "contributionsByteLength": contributions.bytes.len(),
         "markdown": preserved.filter(|_| inband).map(|preserved| preserved.markdown.as_str()),
         "markdownSha256": preserved
             .map(|preserved| dohc_engine_storage::hex_sha256(preserved.markdown.as_bytes())),
@@ -268,10 +410,9 @@ fn preservation_json(preservation: &Preservation, inband: bool) -> Value {
     })
 }
 
-fn finding_json(found: &PreservationFinding) -> Value {
+/// Where one finding is: its tail and contribution, when it has them.
+fn example_json(found: &PreservationFinding) -> Value {
     json!({
-        "reason": found.reason.as_str(),
-        "status": found.reason.status().as_str(),
         "namespace": found.namespace,
         "contribution": found.contribution.as_ref().map(ContributionLocator::to_json),
     })
@@ -280,7 +421,20 @@ fn finding_json(found: &PreservationFinding) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dohc_engine_collab::live_update_application::IncomingCoordinate;
+    use dohc_engine_collab::live_update_application::PreservationReason;
+    use dohc_engine_collab::live_update_application::PreservationStatus;
+    use dohc_engine_collab::live_update_application::PreservedState;
+    use dohc_engine_collab::live_update_application::ProtectedTail;
+    use dohc_engine_collab::live_update_application::ProtectedTails;
+    use dohc_engine_collab::live_update_application::ReleasedLineageBinding;
+    use dohc_engine_collab::live_update_application::RetainedAuthors;
+    use dohc_engine_collab::live_update_application::RetainedContribution;
+    use dohc_engine_collab::live_update_application::RetainedCoverage;
+    use dohc_engine_collab::live_update_application::UnprovenCommitment;
     use dohc_engine_protocol::transport::ConnectionOwner;
+    use dohc_engine_sync::HeldBindingStatus;
+    use dohc_engine_sync::ReleasedHoldContinuation;
 
     /// Plan r3, inspection authority: the handlers themselves require the
     /// configured host's own current connection and a workspace it attached,
@@ -333,7 +487,7 @@ mod tests {
         // The host's own connection reaches the store: this one is no hosted
         // replica, so nothing is held there.
         let reached = service
-            .sync_held_documents(&ctx, Some(attached_handle.clone()), list("attached"))
+            .sync_held_documents(&ctx, Some(attached_handle.clone()), list("attached"), 1)
             .await
             .unwrap_err();
         assert_eq!((reached.code, reached.message.as_str()), (ErrorCode::InvalidParams, "workspace is not a hosted replica"));
@@ -342,18 +496,30 @@ mod tests {
             .await
             .unwrap();
         assert!(nothing.response.result.is_null() && nothing.blob_egress.is_none(), "{nothing:?}");
+        // Nothing held streams nothing, whichever stream is asked for.
+        let mut reader = RequestContext::unbounded();
+        reader.connection = Some(owner.handle());
+        reader.capabilities = Arc::from(vec!["blobs".to_owned()]);
+        for stream in ["markdown", "contributions"] {
+            let params = json!({"workspaceId": "attached", "objectId": "object", "stream": stream});
+            let streamed = service
+                .sync_held_document(&reader, Some(attached_handle.clone()), params, 2)
+                .await
+                .unwrap();
+            assert!(streamed.response.result.is_null() && streamed.blob_egress.is_none(), "{stream}");
+        }
         // Its answer lapses with the host, as each queued output does.
         let answered = nothing.output_guard.expect("the live host guards its answer");
         assert!(answered.is_current());
         // Another workspace's ID, a workspace the host did not attach, and a
         // handle that names nothing.
         assert_eq!(
-            code(service.sync_held_documents(&ctx, Some(attached_handle.clone()), list("private")).await),
+            code(service.sync_held_documents(&ctx, Some(attached_handle.clone()), list("private"), 1).await),
             ErrorCode::InvalidParams
         );
         for foreign in [private_handle.clone(), WorkspaceHandle("foreign".into())] {
             assert_eq!(
-                code(service.sync_held_documents(&ctx, Some(foreign.clone()), list("private")).await),
+                code(service.sync_held_documents(&ctx, Some(foreign.clone()), list("private"), 1).await),
                 ErrorCode::WorkspaceUnavailable
             );
             assert_eq!(
@@ -366,7 +532,7 @@ mod tests {
         let mut stranger = RequestContext::unbounded();
         stranger.connection = Some(other.handle());
         assert_eq!(
-            code(service.sync_held_documents(&stranger, Some(attached_handle.clone()), list("attached")).await),
+            code(service.sync_held_documents(&stranger, Some(attached_handle.clone()), list("attached"), 1).await),
             ErrorCode::SessionExpired
         );
         assert_eq!(
@@ -374,13 +540,13 @@ mod tests {
             ErrorCode::SessionExpired
         );
         assert_eq!(
-            code(service.sync_held_documents(&RequestContext::unbounded(), Some(attached_handle.clone()), list("attached")).await),
+            code(service.sync_held_documents(&RequestContext::unbounded(), Some(attached_handle.clone()), list("attached"), 1).await),
             ErrorCode::SessionExpired
         );
         owner.retire();
         assert!(!answered.is_current(), "a retired host's answer is withheld");
         assert_eq!(
-            code(service.sync_held_documents(&ctx, Some(attached_handle.clone()), list("attached")).await),
+            code(service.sync_held_documents(&ctx, Some(attached_handle.clone()), list("attached"), 1).await),
             ErrorCode::SessionExpired
         );
         service.workspace_close(Some(attached_handle)).await.unwrap();
@@ -452,12 +618,12 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let mut waiting = std::pin::pin!(service.held_markdown_egress(
+            let mut waiting = std::pin::pin!(service.held_blob_egress(
                 &ctx,
                 &handle,
                 "attached",
                 &cancellation,
-                b"# Preserved\n",
+                b"# Preserved\n".to_vec(),
                 9,
             ));
             let mut context = std::task::Context::from_waker(std::task::Waker::noop());
@@ -497,12 +663,16 @@ mod tests {
             json!({"workspaceId": "w", "limit": 1, "afterObjectId": ""}),
             json!({"workspaceId": "w", "limit": 1, "extra": true}),
         ] {
-            let refused = service.sync_held_documents(&ctx, None, params.clone()).await.unwrap_err();
+            let refused = service.sync_held_documents(&ctx, None, params.clone(), 1).await.unwrap_err();
             assert_eq!(refused.code, ErrorCode::InvalidParams, "{params}");
         }
-        // Streamed Markdown needs a connection that reads blobs.
+        // Either stream needs a connection that reads blobs, and nothing else
+        // streams.
         for params in [
             json!({"workspaceId": "w", "objectId": ""}),
+            json!({"workspaceId": "w", "objectId": "o", "stream": "markdown"}),
+            json!({"workspaceId": "w", "objectId": "o", "stream": "contributions"}),
+            json!({"workspaceId": "w", "objectId": "o", "stream": "binding"}),
             json!({"workspaceId": "w", "objectId": "o", "streamMarkdown": true}),
         ] {
             let refused = service
@@ -512,5 +682,297 @@ mod tests {
                 .unwrap_err();
             assert_eq!(refused.code, ErrorCode::InvalidParams, "{params}");
         }
+    }
+
+    fn held(object_id: &str, path: &str, tails: ProtectedTails) -> HeldDocument {
+        HeldDocument {
+            object_id: object_id.into(),
+            path: path.into(),
+            binding: Box::new(ReleasedLineageBinding {
+                workspace_id: "attached".into(),
+                main_version_id: "main".into(),
+                object_id: object_id.into(),
+                lineage_claim_id: "a".repeat(64),
+                current_path: Some(path.into()),
+                restore_generation: Some(0),
+                incoming: IncomingCoordinate {
+                    relay_namespace: Some("relay".into()),
+                    replication_epoch: "epoch".into(),
+                    stream_identity: "stream".into(),
+                    origin_id: "desktop".into(),
+                    origin_seq: 1,
+                    relay_seq: 3,
+                },
+                head_digest: "b".repeat(64),
+                tails: Arc::new(tails),
+            }),
+            continuation: ReleasedHoldContinuation::Frozen,
+            binding_stale: false,
+        }
+    }
+
+    /// The `index`th contribution of a large hold, its identities as long as
+    /// the engine mints them, made by an agent for the owner or by nobody.
+    fn contribution(index: usize) -> RetainedContribution {
+        let agent = dohc_engine_domain::ChangeAttribution {
+            actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
+            on_behalf_of: Some("owner".into()),
+            depth: 1,
+            run: None,
+        };
+        let actor = format!("agent-{index}");
+        let authors = if index % 2 == 0 {
+            RetainedAuthors::credited(Some(actor.as_str()), Some(&agent))
+        } else {
+            RetainedAuthors::credited(None, None)
+        };
+        let digest = dohc_engine_storage::hex_sha256(index.to_string().as_bytes());
+        RetainedContribution::Outbox {
+            outbox_id: format!("owner-outbox-{}", "f".repeat(64)),
+            sequence: index as i64 + 1,
+            delivery_id: format!("owner-delivery-{digest}"),
+            update_digest: digest,
+            authors: authors.unwrap(),
+        }
+    }
+
+    fn inspection(document: HeldDocument, preservation: Preservation) -> HeldDocumentInspection {
+        let contributions = ContributionArtifact::of(&document.binding, &preservation);
+        HeldDocumentInspection {
+            document,
+            status: HeldBindingStatus::Current,
+            preservation: Some(preservation),
+            contributions: Some(contributions),
+        }
+    }
+
+    /// Sol's ruling B, item 1: discovery lists summaries, never bindings, as
+    /// many as fit the budget, and claims more only with one listed. Reading
+    /// on after the last one listed reaches every held document once, a
+    /// summary that fits only a page of its own included; one that fits no
+    /// page is corrupt state, not an empty page that claims more.
+    #[test]
+    fn discovery_pages_by_bytes_and_always_progresses() {
+        let mut all: Vec<_> = (0..40)
+            .map(|index| held(&format!("object-{index:02}"), &format!("docs/{index}.md"), ProtectedTails::Invalid))
+            .collect();
+        // Escaping multiplies this path sixfold.
+        all[17].path = "\u{1}".repeat(500);
+        let alone = response_encoded_bytes(7, &json!({"documents": [held_json(&all[17])], "hasMore": false}));
+        let one = serialized_len(&held_json(&all[0]));
+        // Room for that summary alone, and not beside any other.
+        let budget = alone + one / 2;
+        let (mut listed, mut after, mut pages) = (Vec::new(), None::<String>, Vec::new());
+        loop {
+            // What the store answers: up to its largest page after the cursor.
+            let rest: Vec<_> = all
+                .iter()
+                .filter(|document| after.as_deref().is_none_or(|after| document.object_id.as_str() > after))
+                .cloned()
+                .collect();
+            let page = HeldDocumentsPage {
+                has_more: rest.len() > MAX_HELD_DOCUMENTS_PAGE,
+                documents: rest.into_iter().take(MAX_HELD_DOCUMENTS_PAGE).collect(),
+            };
+            let answer = discovery_page(7, &page, budget).unwrap();
+            assert!(response_encoded_bytes(7, &answer) <= budget, "{answer}");
+            let documents: Vec<String> = answer["documents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|summary| {
+                    assert!(summary.get("binding").is_none(), "{summary}");
+                    summary["objectId"].as_str().unwrap().to_owned()
+                })
+                .collect();
+            if answer["hasMore"] == false {
+                listed.extend(documents.iter().cloned());
+                pages.push(documents);
+                break;
+            }
+            assert!(!documents.is_empty(), "a page that claims more lists something");
+            after = documents.last().cloned();
+            listed.extend(documents.iter().cloned());
+            pages.push(documents);
+        }
+        let ids: Vec<_> = all.iter().map(|document| document.object_id.clone()).collect();
+        assert_eq!(listed, ids);
+        assert!(pages.contains(&vec!["object-17".to_owned()]), "{pages:?}");
+        assert!(pages.len() > 3, "the budget ended pages: {pages:?}");
+
+        let lone = HeldDocumentsPage { documents: vec![all[17].clone()], has_more: true };
+        assert_eq!(discovery_page(7, &lone, alone - 1).unwrap_err().message, "state-corrupt");
+    }
+
+    /// Sol's ruling B, item 3: however many findings there are, each reason
+    /// lists its exact total and at most eight of them, in namespace and
+    /// contribution order, while they fit; the status is the worst over every
+    /// finding, a reason the budget left without an example included.
+    #[test]
+    fn findings_list_a_few_examples_per_reason_with_exact_totals_and_the_worst_status() {
+        let located = |reason, namespace: Option<&str>, index: Option<usize>| PreservationFinding {
+            reason,
+            namespace: namespace.map(str::to_owned),
+            contribution: index.map(|index| contribution(index).locator()),
+        };
+        // Found out of order: the answer orders them.
+        let mut findings: Vec<_> = (0..50_000)
+            .rev()
+            .map(|index| {
+                let namespace = if index % 2 == 0 { "relay-b" } else { "relay-a" };
+                located(PreservationReason::SourceMissing, Some(namespace), Some(index))
+            })
+            .collect();
+        findings.push(located(PreservationReason::MalformedAuthorship, Some("relay-c"), Some(1)));
+        findings.push(located(PreservationReason::PendingContributionDependencies, None, None));
+        let inspected = inspection(
+            held("object", "docs/object.md", ProtectedTails::Invalid),
+            Preservation {
+                status: PreservationStatus::InvalidEvidence,
+                findings,
+                covered: Vec::new(),
+                merged: Vec::new(),
+                preserved: None,
+            },
+        );
+        let summary = |answer: &Value| -> Vec<(String, String, u64, u64, usize)> {
+            answer["preservation"]["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|reason| (
+                    reason["reason"].as_str().unwrap().to_owned(),
+                    reason["status"].as_str().unwrap().to_owned(),
+                    reason["total"].as_u64().unwrap(),
+                    reason["omitted"].as_u64().unwrap(),
+                    reason["examples"].as_array().unwrap().len(),
+                ))
+                .collect()
+        };
+        let row = |reason: &str, status: &str, total: u64, omitted: u64, examples: usize| {
+            (reason.to_owned(), status.to_owned(), total, omitted, examples)
+        };
+
+        let (answer, outside) = inspection_answer(7, &inspected, HELD_RESPONSE_BYTE_BUDGET).unwrap();
+        assert!(!outside);
+        assert!(response_encoded_bytes(7, &answer) <= HELD_RESPONSE_BYTE_BUDGET);
+        assert_eq!(answer["preservation"]["status"], "invalid-evidence");
+        assert_eq!(summary(&answer), [
+            row("source-missing", "missing-evidence", 50_000, 49_992, 8),
+            row("pending-contribution-dependencies", "pending-dependencies", 1, 0, 1),
+            row("malformed-authorship", "invalid-evidence", 1, 0, 1),
+        ]);
+        // relay-a's work sorts first, by sequence.
+        let expected: Vec<_> = (0..8)
+            .map(|nth| json!({"namespace": "relay-a", "contribution": contribution(2 * nth + 1).locator().to_json()}))
+            .collect();
+        assert_eq!(answer["preservation"]["reasons"][0]["examples"], json!(expected));
+
+        // Room for the totals and two examples: the first reason's, and the
+        // worst reason keeps its total, its status and the preservation's.
+        let (outline, _) = inspection_outline(&inspected);
+        let two = serialized_len(&expected[0]) + 1 + serialized_len(&expected[1]);
+        let budget = response_encoded_bytes(7, &outline) + two;
+        let (answer, _) = inspection_answer(7, &inspected, budget).unwrap();
+        assert!(response_encoded_bytes(7, &answer) <= budget);
+        assert_eq!(answer["preservation"]["status"], "invalid-evidence");
+        assert_eq!(summary(&answer), [
+            row("source-missing", "missing-evidence", 50_000, 49_998, 2),
+            row("pending-contribution-dependencies", "pending-dependencies", 1, 1, 0),
+            row("malformed-authorship", "invalid-evidence", 1, 1, 0),
+        ]);
+        // Room for the totals alone lists no example.
+        let (answer, _) = inspection_answer(7, &inspected, response_encoded_bytes(7, &outline)).unwrap();
+        assert_eq!(answer, outline);
+        assert_eq!(answer["preservation"]["status"], "invalid-evidence");
+        assert_eq!(
+            inspection_answer(7, &inspected, response_encoded_bytes(7, &outline) - 1).unwrap_err().message,
+            "state-corrupt"
+        );
+    }
+
+    /// Sol's ruling B: a hold covering 50,000 contributions, every one
+    /// merged, answers within the response budget, and its contribution
+    /// artifact names every one with its authors, none left out.
+    #[test]
+    fn a_large_hold_answers_within_budget_and_its_artifact_keeps_every_contribution() {
+        let covered: Vec<_> = (0..50_000).map(contribution).collect();
+        let committed = UnprovenCommitment::of(covered.clone()).unwrap();
+        let tail = ProtectedTail {
+            namespace: "relay".into(),
+            activation_id: "activation".into(),
+            release: None,
+            coverage: RetainedCoverage::Unproven(committed.clone()),
+        };
+        let inspected = inspection(
+            held("object", "docs/object.md", ProtectedTails::Listed(vec![tail])),
+            Preservation {
+                status: PreservationStatus::Complete,
+                findings: Vec::new(),
+                covered: vec![("relay".into(), covered.clone())],
+                merged: covered.clone(),
+                preserved: Some(PreservedState {
+                    markdown: "# Plan\n".repeat(10_000),
+                    full_state: Vec::new(),
+                }),
+            },
+        );
+        let (answer, outside) = inspection_answer(7, &inspected, HELD_RESPONSE_BYTE_BUDGET).unwrap();
+        assert!(response_encoded_bytes(7, &answer) <= HELD_RESPONSE_BYTE_BUDGET);
+        assert!(outside, "the text streams");
+        let artifact = inspected.contributions.as_ref().unwrap();
+        let preservation = &answer["preservation"];
+        assert_eq!(preservation["markdown"], Value::Null);
+        assert_eq!(preservation["contributionsSha256"], dohc_engine_storage::hex_sha256(&artifact.bytes));
+        assert_eq!(preservation["contributionsByteLength"], artifact.bytes.len());
+        // Every contribution merged: the merged list commits as the tail does.
+        assert_eq!(preservation["mergedContributions"], json!({"count": 50_000, "digest": committed.digest}));
+        assert!(artifact.bytes.len() <= BLOB_EGRESS_BYTE_BUDGET, "{} bytes stream", artifact.bytes.len());
+
+        let listed: Value = serde_json::from_slice(&artifact.bytes).unwrap();
+        let every: Vec<_> = covered.iter().map(RetainedContribution::to_json).collect();
+        assert_eq!(listed["version"], 1);
+        assert_eq!(listed["binding"], inspected.document.binding.to_json());
+        assert_eq!(listed["coveredContributions"], json!([{"namespace": "relay", "contributions": every}]));
+        let read: Vec<_> = listed["mergedContributionIds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| RetainedContribution::from_json(value).unwrap())
+            .collect();
+        assert_eq!(read, covered, "every identity, with its authors");
+        assert_eq!(
+            ReleasedLineageBinding::from_json(&listed["binding"]).unwrap().digest(),
+            answer["bindingDigest"]
+        );
+    }
+
+    /// The merged list's digest is the commitment encoding's, the empty
+    /// list's included, and never the artifact's own SHA-256.
+    #[test]
+    fn the_merged_list_commits_even_when_empty() {
+        let inspected = inspection(
+            held("object", "docs/object.md", ProtectedTails::Invalid),
+            Preservation {
+                status: PreservationStatus::InvalidEvidence,
+                findings: vec![PreservationFinding {
+                    reason: PreservationReason::ContradictoryEvidence,
+                    namespace: None,
+                    contribution: None,
+                }],
+                covered: Vec::new(),
+                merged: Vec::new(),
+                preserved: None,
+            },
+        );
+        let (answer, _) = inspection_answer(7, &inspected, HELD_RESPONSE_BYTE_BUDGET).unwrap();
+        let mut empty = b"dohc:released-tail-contributions:v2\0".to_vec();
+        empty.extend_from_slice(b"[]");
+        let merged = &answer["preservation"]["mergedContributions"];
+        assert_eq!(*merged, json!({"count": 0, "digest": dohc_engine_storage::hex_sha256(&empty)}));
+        assert_ne!(merged["digest"], answer["preservation"]["contributionsSha256"]);
+        let listed: Value = serde_json::from_slice(&inspected.contributions.unwrap().bytes).unwrap();
+        assert_eq!(listed["coveredContributions"], json!([]));
+        assert_eq!(listed["mergedContributionIds"], json!([]));
     }
 }

@@ -4,8 +4,8 @@ import {UnauthorizedError} from "@dohc/workspace-auth/session";
 import {fixture as ticketFixture, scope} from "./liveTickets.test-helper";
 import {createSyncRelayHandler} from "./server";
 import {releasedLineageBindingDigest, type ReleasedLineageBinding} from "@dohc/workspace-engine-client/relay-wire";
-import {MAX_HELD_DOCUMENTS_PAGE, withStreamedMarkdown, type HeldDocumentHost, type HeldDocumentInspection,
-  type HeldDocumentsPage} from "./heldDocumentRoutes";
+import {MAX_HELD_DOCUMENTS_PAGE, withStreamedContributions, withStreamedMarkdown, type HeldContributionsRead, type HeldDocumentHost,
+  type HeldDocumentInspection, type HeldDocumentsPage} from "./heldDocumentRoutes";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {for (const close of cleanups.splice(0).reverse()) await close();});
@@ -16,18 +16,23 @@ const binding: ReleasedLineageBinding = {version: 3, workspaceId: scope.workspac
   headDigest: "b".repeat(64),
   tails: [{namespace: "relay", activationId: "activation", release: {path: "docs/a.md", restoreGeneration: 0},
     unproven: {count: 1, digest: "c".repeat(64)}}]};
-const held: HeldDocumentsPage["documents"][number] = {objectId: binding.objectId, path: binding.currentPath!, binding,
+const held: HeldDocumentsPage["documents"][number] = {objectId: binding.objectId, path: binding.currentPath!,
   bindingDigest: releasedLineageBindingDigest(binding), continuation: "frozen", bindingStale: false};
 const page: HeldDocumentsPage = {documents: [held], hasMore: false};
 const inspection: HeldDocumentInspection = {...held, status: "stale", preservation: null, resolution: null};
 const sha256 = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 // Preserved text past the engine's in-band limit, as the session host answers it whole.
 const markdown = "# Plan\n\n" + "Kept paragraph with ünïcode.\n\n".repeat(4096);
+// The binding and the work it covers, as the engine streams them; the details name them by digest.
+const contributions = Buffer.from(JSON.stringify({binding, coveredContributions: [], mergedContributionIds: [], version: 1}));
 const preserved: HeldDocumentInspection = {...held, status: "current", resolution: null, preservation: {status: "complete",
-  reasons: [], coveredContributions: [], mergedContributionIds: [], markdown, markdownSha256: sha256(markdown),
+  reasons: [], mergedContributions: {count: 0, digest: "e".repeat(64)}, contributionsSha256: sha256(contributions),
+  contributionsByteLength: contributions.length, markdown, markdownSha256: sha256(markdown),
   markdownByteLength: Buffer.byteLength(markdown), inbandLimitBytes: 48 * 1024}};
 const markdownPath = `${scope.workspaceId}/held-documents/${held.objectId}/markdown` +
   `?bindingDigest=${held.bindingDigest}&sha256=${sha256(markdown)}`;
+const contributionsPath = `${scope.workspaceId}/held-documents/${held.objectId}/contributions` +
+  `?bindingDigest=${held.bindingDigest}&sha256=${sha256(contributions)}`;
 
 // Each bearer names one account: the owner, a named Edit recipient, a View
 // recipient, and the owner of another workspace.
@@ -55,7 +60,19 @@ function fakeHost(overrides: Partial<HeldDocumentHost> = {}): HeldDocumentHost &
   const calls: unknown[][] = [];
   return {calls,
     heldDocuments: overrides.heldDocuments ?? (async (...args) => {calls.push(["list", ...args.slice(0, 2)]); return page;}),
-    heldDocument: overrides.heldDocument ?? (async (...args) => {calls.push(["one", ...args.slice(0, 3)]); return inspection;})};
+    heldDocument: overrides.heldDocument ?? (async (...args) => {calls.push(["one", ...args.slice(0, 3)]); return inspection;}),
+    heldContributions: overrides.heldContributions ?? (async (...args) => {
+      calls.push(["contributions", ...args.slice(0, 2)]);
+      return {inspected: inspection, contributions: null};
+    })};
+}
+
+/** A host answering `inspected` with the artifact the engine streams for it, as the session host does. */
+function streaming(inspected: HeldDocumentInspection, asked: string[] = []): HeldDocumentHost["heldContributions"] {
+  return async () => {
+    asked.push("contributions");
+    return withStreamedContributions(inspected, inspected.preservation ? contributions : undefined);
+  };
 }
 
 /** A host answering `inspected` as the session host does: text above the in-band limit only when asked for. */
@@ -95,7 +112,8 @@ describe("held document routes", () => {
     ["an unknown credential", {authorization: "Bearer forged"}, new UnauthorizedError().statusCode],
   ])("refuse %s as they refuse elsewhere, naming nothing, and never ask the host", async (_case, headers, status) => {
     const host = fakeHost(), f = await relay(host);
-    for (const path of [`${scope.workspaceId}/held-documents`, `${scope.workspaceId}/held-documents/${held.objectId}`, markdownPath]) {
+    for (const path of [`${scope.workspaceId}/held-documents`, `${scope.workspaceId}/held-documents/${held.objectId}`, markdownPath,
+      contributionsPath]) {
       const refused = await f.get(path, headers);
       expect(refused.status).toBe(status);
       expect(JSON.stringify(await refused.json())).not.toContain(held.objectId);
@@ -148,8 +166,10 @@ describe("held document routes", () => {
   });
 
   it.each(["registration", "attachment"] as const)("answer a read its host's %s overtook as a missing document", async ended => {
-    const f = await relay(fakeHost({heldDocument: async () => ({invalidated: ended}), heldDocuments: async () => ({invalidated: ended})}));
-    for (const path of [`${scope.workspaceId}/held-documents`, `${scope.workspaceId}/held-documents/${held.objectId}`, markdownPath]) {
+    const f = await relay(fakeHost({heldDocument: async () => ({invalidated: ended}), heldDocuments: async () => ({invalidated: ended}),
+      heldContributions: async () => ({invalidated: ended})}));
+    for (const path of [`${scope.workspaceId}/held-documents`, `${scope.workspaceId}/held-documents/${held.objectId}`, markdownPath,
+      contributionsPath]) {
       const refused = await f.get(path);
       expect(refused.status, path).toBe(404);
       expect(await refused.json()).toMatchObject({code: "not_found"});
@@ -202,6 +222,7 @@ describe("held document routes", () => {
     const host = fakeHost(), f = await relay(host);
     expect((await f.get(`${scope.workspaceId}/held-documents`, {authorization: "Bearer owner"}, "POST")).status).toBe(405);
     expect((await f.get(markdownPath, {authorization: "Bearer owner"}, "POST")).status).toBe(405);
+    expect((await f.get(contributionsPath, {authorization: "Bearer owner"}, "POST")).status).toBe(405);
     expect(host.calls).toEqual([]);
   });
 
@@ -246,7 +267,7 @@ describe("held document routes", () => {
     const stale = await relay(fakeHost({heldDocument: async () => inspection}));
     expect((await stale.get(markdownPath)).status).toBe(404);
     const incomplete: HeldDocumentInspection = {...preserved, preservation: {...preserved.preservation!, status: "missing-evidence",
-      reasons: [{reason: "source-missing", status: "missing-evidence", namespace: "relay", contribution: null}],
+      reasons: [{reason: "source-missing", status: "missing-evidence", total: 1, omitted: 0, examples: [{namespace: "relay", contribution: null}]}],
       markdown: null, markdownSha256: null, markdownByteLength: null}};
     const missing = await relay(fakeHost({heldDocument: async () => incomplete}));
     expect((await missing.get(markdownPath)).status).toBe(404);
@@ -257,9 +278,10 @@ describe("held document routes", () => {
     `?bindingDigest=${"A".repeat(64)}&sha256=${"a".repeat(64)}`,
     `?bindingDigest=${"a".repeat(64)}&sha256=${"a".repeat(64)}&other=1`,
     `?bindingDigest=${"a".repeat(64)}&bindingDigest=${"a".repeat(64)}&sha256=${"a".repeat(64)}`,
-  ])("refuse a bad Markdown query, %s, before asking the host", async query => {
+  ])("refuse a bad Markdown or contributions query, %s, before asking the host", async query => {
     const host = fakeHost(), f = await relay(host);
     expect((await f.get(`${scope.workspaceId}/held-documents/${held.objectId}/markdown${query}`)).status).toBe(400);
+    expect((await f.get(`${scope.workspaceId}/held-documents/${held.objectId}/contributions${query}`)).status).toBe(400);
     expect(host.calls).toEqual([]);
   });
 
@@ -275,6 +297,82 @@ describe("held document routes", () => {
     const refused = await transferred;
     expect(refused.status).toBe(404);
     expect(await refused.text()).not.toContain("Kept paragraph");
+  });
+
+  it("answer the contribution artifact whole from its own route, streaming only it there", async () => {
+    const markdownAsked: boolean[] = [], contributionsAsked: string[] = [];
+    const f = await relay(fakeHost({heldDocument: answering(preserved, markdownAsked), heldContributions: streaming(preserved, contributionsAsked)}));
+    const artifact = await f.get(contributionsPath);
+    expect(artifact.status).toBe(200);
+    expect(artifact.headers.get("content-type")).toBe("application/json");
+    expect(artifact.headers.get("cache-control")).toBe("private, no-store");
+    expect(Buffer.from(await artifact.arrayBuffer())).toEqual(contributions);
+    expect([markdownAsked, contributionsAsked]).toEqual([[], ["contributions"]]);
+    // The Markdown route asks for the text alone, and the details for neither.
+    expect((await f.get(markdownPath)).status).toBe(200);
+    expect((await f.get(`${scope.workspaceId}/held-documents/${held.objectId}`)).status).toBe(200);
+    expect([markdownAsked, contributionsAsked]).toEqual([[true, false], ["contributions"]]);
+  });
+
+  it("answer the artifact of an incomplete preservation too, since it names the work that is missing", async () => {
+    const incomplete: HeldDocumentInspection = {...preserved, preservation: {...preserved.preservation!, status: "missing-evidence",
+      reasons: [{reason: "source-missing", status: "missing-evidence", total: 1, omitted: 0, examples: [{namespace: "relay", contribution: null}]}],
+      markdown: null, markdownSha256: null, markdownByteLength: null}};
+    const f = await relay(fakeHost({heldContributions: streaming(incomplete)}));
+    const artifact = await f.get(contributionsPath);
+    expect(artifact.status).toBe(200);
+    expect(sha256(new Uint8Array(await artifact.arrayBuffer()))).toBe(sha256(contributions));
+  });
+
+  it.each([
+    ["another binding", {bindingDigest: "e".repeat(64)}],
+    ["another artifact", {sha256: "e".repeat(64)}],
+  ])("answer no artifact inspected under %s, as a missing document", async (_case, query) => {
+    const f = await relay(fakeHost({heldContributions: streaming(preserved)}));
+    const params = new URLSearchParams({bindingDigest: held.bindingDigest, sha256: sha256(contributions), ...query});
+    const refused = await f.get(`${scope.workspaceId}/held-documents/${held.objectId}/contributions?${params}`);
+    expect(refused.status).toBe(404);
+    expect(await refused.text()).not.toContain("coveredContributions");
+  });
+
+  it("answer no artifact for a stale binding, or a document no longer held, as a missing document", async () => {
+    const stale = await relay(fakeHost({heldContributions: streaming(inspection)}));
+    expect((await stale.get(contributionsPath)).status).toBe(404);
+    const gone = await relay(fakeHost({heldContributions: async () => null}));
+    expect((await gone.get(contributionsPath)).status).toBe(404);
+  });
+
+  it("recheck ownership after the host's read before answering the artifact", async () => {
+    let release!: () => void, began!: () => void;
+    const answered = new Promise<void>(resolve => {release = resolve;});
+    const asked = new Promise<void>(resolve => {began = resolve;});
+    const read: HeldContributionsRead = {inspected: preserved, contributions};
+    const f = await relay(fakeHost({heldContributions: async () => {began(); await answered; return read;}}));
+    const transferred = f.get(contributionsPath);
+    await asked;
+    f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='owner-2' WHERE workspace_id=?").run(scope.workspaceId);
+    release();
+    const refused = await transferred;
+    expect(refused.status).toBe(404);
+    expect(await refused.text()).not.toContain("coveredContributions");
+  });
+});
+
+describe("streamed held document contributions", () => {
+  it("keeps the artifact the engine streamed when it is exactly what the inspection names", () => {
+    expect(withStreamedContributions(preserved, contributions)).toEqual({inspected: preserved, contributions});
+  });
+
+  it("refuses a stream that is missing or not the artifact the inspection names", () => {
+    expect(() => withStreamedContributions(preserved, undefined)).toThrow();
+    expect(() => withStreamedContributions(preserved, Buffer.concat([contributions, Buffer.from(" ")]))).toThrow();
+    const swapped = Buffer.from(contributions);
+    swapped[swapped.length - 2] = 0x21;
+    expect(() => withStreamedContributions(preserved, swapped)).toThrow();
+  });
+
+  it("names no artifact for an inspection that is not current", () => {
+    expect(withStreamedContributions(inspection, undefined)).toEqual({inspected: inspection, contributions: null});
   });
 });
 

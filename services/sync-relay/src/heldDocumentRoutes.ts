@@ -13,6 +13,12 @@ export type { HeldDocumentInspection };
  */
 export type HeldReadInvalidated = {readonly invalidated: "registration" | "attachment"};
 
+/**
+ * An inspection with the contribution artifact the engine streamed for it, exactly the bytes it names;
+ * null when the inspection is not current, so it names none.
+ */
+export type HeldContributionsRead = {inspected: HeldDocumentInspection; contributions: Uint8Array | null};
+
 /** The session host's read-only view of the documents its hosted replica holds for released retained work. */
 export type HeldDocumentHost = {
   /** Null when the workspace has no hosted replica on this host. */
@@ -25,13 +31,18 @@ export type HeldDocumentHost = {
    */
   heldDocument(workspaceId: string, objectId: string, read: {markdown: boolean}, signal?: AbortSignal):
     Promise<HeldDocumentInspection | HeldReadInvalidated | null>;
+  /** {@link heldDocument} with its contribution artifact, and nothing else, streamed. */
+  heldContributions(workspaceId: string, objectId: string, signal?: AbortSignal):
+    Promise<HeldContributionsRead | HeldReadInvalidated | null>;
 };
-export type HeldDocumentRoute = {route: "held-documents"; workspaceId: string; objectId?: string; markdown?: true};
+export type HeldDocumentRoute = {route: "held-documents"; workspaceId: string; objectId?: string; read?: "markdown" | "contributions"};
 
 /** The largest page the engine answers. */
 export const MAX_HELD_DOCUMENTS_PAGE = 256;
 const DEFAULT_HELD_DOCUMENTS_PAGE = 50;
 export const MAX_HELD_OBJECT_ID_CHARS = 512;
+/** The largest contribution artifact answered: the most the engine streams as one blob. */
+export const MAX_HELD_CONTRIBUTIONS_BYTES = 64 * 1024 * 1024;
 const DIGEST = /^[0-9a-f]{64}$/;
 
 function page(url: URL): {afterObjectId?: string; limit: number} {
@@ -46,12 +57,15 @@ function page(url: URL): {afterObjectId?: string; limit: number} {
   return {...(after === null ? {} : {afterObjectId: after}), limit: parsed};
 }
 
-/** Which inspected text a Markdown read asks for: the binding it was inspected under, and its digest. */
-function markdownQuery(url: URL): {bindingDigest: string; sha256: string} {
+/**
+ * Which inspected Markdown or contribution artifact a read asks for: the binding it was inspected under,
+ * and its digest.
+ */
+function inspectedQuery(url: URL): {bindingDigest: string; sha256: string} {
   const keys = [...url.searchParams.keys()].sort();
   const bindingDigest = url.searchParams.get("bindingDigest"), sha256 = url.searchParams.get("sha256");
   if (keys.join() !== "bindingDigest,sha256" || !DIGEST.test(bindingDigest ?? "") || !DIGEST.test(sha256 ?? "")) {
-    throw badRequest("Invalid held document Markdown query.");
+    throw badRequest("Invalid held document query.");
   }
   return {bindingDigest: bindingDigest!, sha256: sha256!};
 }
@@ -72,38 +86,56 @@ export function withStreamedMarkdown(inspected: HeldDocumentInspection, streamed
 }
 
 /**
- * `GET /sync/:workspaceId/held-documents`, `.../held-documents/:objectId` and
- * `.../held-documents/:objectId/markdown`: the workspace's owner, or an agent
- * acting with the owner's credential, reads what the session host holds for
- * retained work and what it preserves. Authority comes from the
- * authenticated owner alone. The host's read yields, so ownership and the
- * answering host must still hold before anything is returned, or a failure
- * is reported; anything else, and a read its host's registration or
- * attachment overtook, answers as if nothing were there.
+ * `inspected` with the contribution artifact the engine streamed for it. A
+ * current inspection names one, and the stream must be exactly its bytes.
+ */
+export function withStreamedContributions(inspected: HeldDocumentInspection, streamed: Uint8Array | undefined): HeldContributionsRead {
+  const preservation = inspected.preservation;
+  if (preservation === null) return {inspected, contributions: null};
+  if (!streamed || streamed.length !== preservation.contributionsByteLength ||
+    createHash("sha256").update(streamed).digest("hex") !== preservation.contributionsSha256) {
+    throw new Error("Held document contributions do not match their inspection.");
+  }
+  return {inspected, contributions: streamed};
+}
+
+/**
+ * `GET /sync/:workspaceId/held-documents`, `.../held-documents/:objectId`,
+ * `.../held-documents/:objectId/markdown` and `.../contributions`: the
+ * workspace's owner, or an agent acting with the owner's credential, reads
+ * what the session host holds for retained work and what it preserves.
+ * Authority comes from the authenticated owner alone. The host's read
+ * yields, so ownership and the answering host must still hold before
+ * anything is returned, or a failure is reported; anything else, and a read
+ * its host's registration or attachment overtook, answers as if nothing were
+ * there.
  *
- * The details leave Markdown above the in-band limit out. The Markdown route
- * answers the whole text of a current, complete preservation, only while the
- * binding and digest the caller inspected still name it.
+ * The details leave Markdown above the in-band limit out, and name the
+ * binding and the covered and merged contributions only by the contribution
+ * artifact's digest. The Markdown route answers the whole text of a current,
+ * complete preservation, and the contributions route the artifact of a
+ * current one, each only while the binding and digest the caller inspected
+ * still name it.
  */
 export function createHeldDocumentRoutes(options: {storage: SyncRelayStorage; host(): HeldDocumentHost | undefined}) {
   return async (request: Request, route: HeldDocumentRoute, ownerUserId: string) => {
     const {storage} = options;
     if (!storage.workspaceIsOwnedBy(route.workspaceId, ownerUserId)) throw notFound();
     if (request.method !== "GET") throw relayError("method_not_allowed");
-    const {objectId} = route, url = new URL(request.url);
+    const {objectId, read} = route, url = new URL(request.url);
     // Read the query before asking the host, so a bad query asks nothing.
     const query = objectId === undefined ? page(url) : null;
-    const wanted = route.markdown ? markdownQuery(url) : null;
-    if (objectId !== undefined && !route.markdown && url.search) throw badRequest("Invalid held document query.");
+    const wanted = read ? inspectedQuery(url) : null;
+    if (objectId !== undefined && !read && url.search) throw badRequest("Invalid held document query.");
     const host = options.host();
     if (!host) throw notFound();
     const signal = AbortSignal.any([request.signal, storage.unavailable]);
     const standing = () => storage.workspaceIsOwnedBy(route.workspaceId, ownerUserId) && options.host() === host;
-    let answered: HeldDocumentsPage | HeldDocumentInspection | HeldReadInvalidated | null;
+    let answered: HeldDocumentsPage | HeldDocumentInspection | HeldContributionsRead | HeldReadInvalidated | null;
     try {
-      answered = objectId !== undefined
-        ? await host.heldDocument(route.workspaceId, objectId, {markdown: wanted !== null}, signal)
-        : await host.heldDocuments(route.workspaceId, query ?? page(url), signal);
+      answered = objectId === undefined ? await host.heldDocuments(route.workspaceId, query ?? page(url), signal)
+        : read === "contributions" ? await host.heldContributions(route.workspaceId, objectId, signal)
+        : await host.heldDocument(route.workspaceId, objectId, {markdown: read === "markdown"}, signal);
     } catch (error) {
       // A former owner, or a caller of a replaced host, learns nothing from how the read ended.
       if (!standing()) throw notFound();
@@ -112,6 +144,15 @@ export function createHeldDocumentRoutes(options: {storage: SyncRelayStorage; ho
     signal.throwIfAborted();
     if (!standing() || answered === null || "invalidated" in answered) throw notFound();
     const headers = {"cache-control": "private, no-store"};
+    if (wanted && read === "contributions") {
+      const {inspected, contributions} = answered as HeldContributionsRead;
+      if (inspected.status !== "current" || inspected.bindingDigest !== wanted.bindingDigest || contributions === null ||
+        inspected.preservation?.contributionsSha256 !== wanted.sha256) throw notFound();
+      if (contributions.length > MAX_HELD_CONTRIBUTIONS_BYTES) {
+        throw relayError("payload_too_large", "Held document contributions exceed the blob limit.");
+      }
+      return new Response(Buffer.from(contributions), {status: 200, headers: {...headers, "content-type": "application/json"}});
+    }
     if (wanted) {
       const inspected = answered as HeldDocumentInspection, preservation = inspected.preservation;
       if (inspected.status !== "current" || inspected.bindingDigest !== wanted.bindingDigest ||

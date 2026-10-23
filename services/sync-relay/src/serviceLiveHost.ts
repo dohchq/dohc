@@ -30,7 +30,7 @@ import type {StopRestoreLookup} from "./storage/liveRestoreOperation.js";
 import {parseLiveRestoreConfig, LiveRestorePreparation, type LiveRestoreConfig} from "./liveRestorePreparation.js";
 import {parseServiceHostedReplicationConfig, ServiceHostedReplication} from "./serviceHostedReplication.js";
 import {decodeHostedSyncResult, type HostedSyncMethodResultMap} from "@dohc/workspace-engine-client/relay-wire";
-import {withStreamedMarkdown, type HeldReadInvalidated} from "./heldDocumentRoutes";
+import {withStreamedContributions, withStreamedMarkdown, type HeldReadInvalidated} from "./heldDocumentRoutes";
 import type {ServiceActivationReplica} from "./serviceActivationDriver";
 interface ServiceLiveHostConfig {
   readonly version: 1;
@@ -951,9 +951,16 @@ export async function startServiceLiveHost(options: {
        */
       async heldDocument(workspaceId: string, objectId: string, read: {markdown: boolean}, callerSignal?: AbortSignal) {
         let streamed: Uint8Array | undefined;
-        const inspected = await heldRead(workspaceId, "sync.heldDocument", {objectId, streamMarkdown: read.markdown}, callerSignal,
-          read.markdown ? bytes => {streamed = bytes;} : undefined);
+        const inspected = await heldRead(workspaceId, "sync.heldDocument", {objectId, ...(read.markdown ? {stream: "markdown"} : {})},
+          callerSignal, read.markdown ? bytes => {streamed = bytes;} : undefined);
         return inspected === null || "invalidated" in inspected || !read.markdown ? inspected : withStreamedMarkdown(inspected, streamed);
+      },
+      /** One held document with its contribution artifact, exactly the bytes its inspection names. */
+      async heldContributions(workspaceId: string, objectId: string, callerSignal?: AbortSignal) {
+        let streamed: Uint8Array | undefined;
+        const inspected = await heldRead(workspaceId, "sync.heldDocument", {objectId, stream: "contributions"}, callerSignal,
+          bytes => {streamed = bytes;});
+        return inspected === null || "invalidated" in inspected ? inspected : withStreamedContributions(inspected, streamed);
       },
       get restoreConfigured() { return restore !== undefined; },
       async prepareRestore(value: StopRestoreLookup, callerSignal?: AbortSignal) {

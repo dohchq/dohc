@@ -30,6 +30,13 @@ impl UnprovenCommitment {
         }
         #[cfg(any(test, feature = "test-support"))]
         COMMITMENTS_HERE.with(|commitments| commitments.set(commitments.get() + 1));
+        Some(Self::of_listed(contributions))
+    }
+
+    /// The count and digest of `contributions`, already in canonical order,
+    /// in [`Self::of`]'s encoding; none of them hash as the canonical empty
+    /// array. What inspection names the merged list by.
+    pub fn of_listed(contributions: &[RetainedContribution]) -> Self {
         let mut out = String::new();
         write_canonical(
             &Value::Array(contributions.iter().map(contribution_value).collect()),
@@ -37,10 +44,56 @@ impl UnprovenCommitment {
         );
         let mut input = CONTRIBUTIONS_DOMAIN.to_vec();
         input.extend_from_slice(out.as_bytes());
-        Some(Self {
+        Self {
             count: contributions.len() as i64,
             digest: hex_sha256(&input),
-        })
+        }
+    }
+}
+
+/// The version of a [`ContributionArtifact`]'s encoding.
+const ARTIFACT_VERSION: i64 = 1;
+
+/// Everything a current preservation names, as one canonical JSON document
+/// the owner downloads by its SHA-256: the format version, the binding, each
+/// valid tail's covered contributions with their authors, by namespace, and
+/// the merged contributions in canonical order. Inspection's own answer
+/// names it only by digest and length, so that answer stays small however
+/// much work a hold covers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContributionArtifact {
+    pub bytes: Vec<u8>,
+    pub sha256: String,
+    /// The merged list's commitment, an empty list's included.
+    pub merged: UnprovenCommitment,
+}
+
+impl ContributionArtifact {
+    pub fn of(binding: &ReleasedLineageBinding, preservation: &Preservation) -> Self {
+        fn listed(contributions: &[RetainedContribution]) -> Value {
+            Value::Array(contributions.iter().map(contribution_value).collect())
+        }
+        let value = serde_json::json!({
+            "version": ARTIFACT_VERSION,
+            "binding": binding.to_json(),
+            "coveredContributions": preservation
+                .covered
+                .iter()
+                .map(|(namespace, contributions)| serde_json::json!({
+                    "namespace": namespace,
+                    "contributions": listed(contributions),
+                }))
+                .collect::<Vec<_>>(),
+            "mergedContributionIds": listed(&preservation.merged),
+        });
+        let mut text = String::new();
+        write_canonical(&value, &mut text);
+        let bytes = text.into_bytes();
+        Self {
+            sha256: hex_sha256(&bytes),
+            merged: UnprovenCommitment::of_listed(&preservation.merged),
+            bytes,
+        }
     }
 }
 
@@ -533,6 +586,41 @@ mod tests {
             );
         }
         assert_eq!(UnprovenCommitment::of(Vec::new()), None);
+    }
+
+    /// Inspection's contribution artifact and the merged list's commitment
+    /// encode as the shared vectors pin them, an empty list included.
+    #[test]
+    fn the_shared_artifact_vectors_encode_as_typescript_does() {
+        let vectors = vectors();
+        let listed = |value: &Value| -> Vec<RetainedContribution> {
+            value.as_array().unwrap().iter().map(contribution).collect()
+        };
+        for vector in vectors["artifacts"].as_array().unwrap() {
+            let name = &vector["name"];
+            let parsed: Value = serde_json::from_str(vector["canonical"].as_str().unwrap()).unwrap();
+            let binding = ReleasedLineageBinding::from_json(&parsed["binding"]).unwrap();
+            let preservation = Preservation {
+                status: PreservationStatus::Complete,
+                findings: Vec::new(),
+                covered: parsed["coveredContributions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|tail| (tail["namespace"].as_str().unwrap().to_owned(), listed(&tail["contributions"])))
+                    .collect(),
+                merged: listed(&parsed["mergedContributionIds"]),
+                preserved: None,
+            };
+            let artifact = ContributionArtifact::of(&binding, &preservation);
+            assert_eq!(std::str::from_utf8(&artifact.bytes).unwrap(), vector["canonical"], "{name}");
+            assert_eq!(artifact.sha256, vector["sha256"], "{name}");
+            assert_eq!(
+                serde_json::json!({"count": artifact.merged.count, "digest": artifact.merged.digest}),
+                vector["mergedContributions"],
+                "{name}"
+            );
+        }
     }
 
     /// A commitment names every field, kind and repetition of the work: a

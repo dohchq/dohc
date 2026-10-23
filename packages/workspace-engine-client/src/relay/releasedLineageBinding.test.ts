@@ -2,9 +2,11 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import vectors from "./releasedLineageBindingVectors.json" with { type: "json" };
 import {
+  canonicalJson,
   canonicalReleasedLineageBinding,
   decodeReleasedLineageBinding,
   decodeRetainedContribution,
+  mergedContributionsCommitment,
   releasedLineageBindingDigest,
   releasedLineageBindingFromCanonical,
   releasedTailContributionsCommitment,
@@ -15,6 +17,25 @@ describe("released-lineage binding contract", () => {
   it.each(vectors.commitments)("commits to $name as the engine does", vector => {
     expect(releasedTailContributionsCommitment(vector.contributions)).toEqual({count: vector.count, digest: vector.digest});
     expect(releasedTailContributionsCommitment([...vector.contributions].reverse())).toEqual({count: vector.count, digest: vector.digest});
+  });
+
+  it.each(vectors.artifacts)("encodes the contribution artifact $name, and commits to its merged list, as the engine does", vector => {
+    const artifact = JSON.parse(vector.canonical);
+    expect(canonicalJson(artifact)).toBe(vector.canonical);
+    expect(createHash("sha256").update(vector.canonical, "utf8").digest("hex")).toBe(vector.sha256);
+    expect(mergedContributionsCommitment(artifact.mergedContributionIds)).toEqual(vector.mergedContributions);
+    // The same encoding a tail commits to, the empty list's included.
+    if (artifact.mergedContributionIds.length > 0) {
+      expect(releasedTailContributionsCommitment(artifact.mergedContributionIds)).toEqual(vector.mergedContributions);
+    }
+  });
+
+  it("commits to merged contributions only in canonical order, each once", () => {
+    const [carried, outbox] = vectors.commitments[0]!.contributions;
+    expect(mergedContributionsCommitment([carried, outbox])).toEqual(releasedTailContributionsCommitment([outbox, carried]));
+    expect(() => mergedContributionsCommitment([outbox, carried])).toThrow("merged order");
+    expect(() => mergedContributionsCommitment([outbox, outbox])).toThrow("merged order");
+    expect(mergedContributionsCommitment([]).count).toBe(0);
   });
 
   it("commits to every contribution's identity, digest, position and authors, and to each addition and removal", () => {

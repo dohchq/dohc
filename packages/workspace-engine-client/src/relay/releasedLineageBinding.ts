@@ -244,6 +244,12 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 
+/** `value` as the engine writes canonical JSON: keys in UTF-8 byte order at every depth, no whitespace. */
+export const canonicalJson = (value: unknown): string => canonical(value);
+
+const listCommitment = (list: RetainedContribution[]): UnprovenCommitment =>
+  ({count: list.length, digest: createHash("sha256").update(CONTRIBUTIONS_DOMAIN, "utf8").update(canonical(list), "utf8").digest("hex")});
+
 /**
  * The commitment a tail's unproven work names: how many contributions there
  * are, and `SHA256(UTF8("dohc:released-tail-contributions:v2\0") || canonical
@@ -251,8 +257,18 @@ function canonical(value: unknown): string {
  */
 export function releasedTailContributionsCommitment(contributions: readonly unknown[]): UnprovenCommitment {
   if (contributions.length === 0) throw invalid("unproven");
-  const list = contributions.map(contribution).sort(compareContribution);
-  return {count: list.length, digest: createHash("sha256").update(CONTRIBUTIONS_DOMAIN, "utf8").update(canonical(list), "utf8").digest("hex")};
+  return listCommitment(contributions.map(contribution).sort(compareContribution));
+}
+
+/**
+ * What inspection names merged contributions by: the same count and digest
+ * as a tail's commitment, none of them hashing as the canonical empty array.
+ * They must already be in canonical order, each once.
+ */
+export function mergedContributionsCommitment(contributions: readonly unknown[]): UnprovenCommitment {
+  const list = contributions.map(contribution);
+  if (list.some((item, index) => index > 0 && compareContribution(list[index - 1]!, item) >= 0)) throw invalid("merged order");
+  return listCommitment(list);
 }
 
 /** The binding's canonical JSON. */

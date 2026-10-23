@@ -3,7 +3,9 @@
 //! state alone, so discovery needs no editor and survives a restart, and each
 //! inspected against its stored binding. Nothing here writes.
 
-use dohc_engine_collab::live_update_application::{HeldInspection, Preservation, inspect_held};
+use dohc_engine_collab::live_update_application::{
+    ContributionArtifact, HeldInspection, Preservation, inspect_held,
+};
 
 use super::*;
 
@@ -52,6 +54,9 @@ pub struct HeldDocumentInspection {
     pub status: HeldBindingStatus,
     /// What the binding preserves; only a current binding has one.
     pub preservation: Option<Preservation>,
+    /// The binding and the work that preservation covers and merged, as
+    /// the owner downloads them; present with the preservation.
+    pub contributions: Option<ContributionArtifact>,
 }
 
 /// The largest page [`list_held_documents`] answers.
@@ -142,10 +147,14 @@ pub fn inspect_held_document(
             } else {
                 HeldBindingStatus::Stale
             };
+            let contributions = preservation
+                .as_ref()
+                .map(|preservation| ContributionArtifact::of(&document.binding, preservation));
             Ok(Some(HeldDocumentInspection {
                 document,
                 status,
                 preservation,
+                contributions,
             }))
         })
     })

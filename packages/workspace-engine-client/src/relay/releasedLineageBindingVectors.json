@@ -195,5 +195,19 @@
       "name": "a commitment with another key",
       "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":2,\"digest\":\"0d1966ad3707c6903ffa46a5ef448ff6e4e61732fdb87b7b62d12621aae69e0a\",\"extra\":1}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":3,\"workspaceId\":\"workspace\"}"
     }
+  ],
+  "artifacts": [
+    {
+      "name": "one tail covered, one contribution merged",
+      "canonical": "{\"binding\":{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":2,\"digest\":\"0d1966ad3707c6903ffa46a5ef448ff6e4e61732fdb87b7b62d12621aae69e0a\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":3,\"workspaceId\":\"workspace\"},\"coveredContributions\":[{\"contributions\":[{\"authors\":[{\"agentId\":\"trip-agent\",\"depth\":1,\"kind\":\"agent\",\"onBehalfOf\":\"owner\"}],\"deliveryId\":\"delivery-1\",\"journalCursor\":7,\"kind\":\"carried\",\"updateDigest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},{\"authors\":[{\"kind\":\"unattributed\"}],\"deliveryId\":\"delivery-2\",\"kind\":\"outbox\",\"outboxId\":\"outbox\",\"sequence\":3,\"updateDigest\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}],\"namespace\":\"relay-a\"}],\"mergedContributionIds\":[{\"authors\":[{\"kind\":\"unattributed\"}],\"deliveryId\":\"delivery-2\",\"kind\":\"outbox\",\"outboxId\":\"outbox\",\"sequence\":3,\"updateDigest\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}],\"version\":1}",
+      "sha256": "340e543c718ed172285bb8efe265ac25e718b2416e72fa93d8a43072a8c5f0d8",
+      "mergedContributions": {"count": 1, "digest": "a2bcefb746d0d601328f6c21ae4559c7ced6eeca96bf1e9e76ca28c49a00f5f5"}
+    },
+    {
+      "name": "no tail that reads, nothing merged",
+      "canonical": "{\"binding\":{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":3,\"workspaceId\":\"workspace-2\"},\"coveredContributions\":[],\"mergedContributionIds\":[],\"version\":1}",
+      "sha256": "5dd66841d39806e8b7ce68cfac98b0371933c6db98c400eb8a58c3c80f1343b1",
+      "mergedContributions": {"count": 0, "digest": "5964fc80717d1f7d6065eb0c08258760ab380fcf8334fdd115261fe4ac57e08f"}
+    }
   ]
 }

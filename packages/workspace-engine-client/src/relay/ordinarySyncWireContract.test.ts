@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ProtocolShapeError } from "../wireSchema";
-import { decodeHostedSyncResult, decodeOrdinarySyncResult, releasedLineageBindingDigest } from "./ordinarySyncWireContract";
+import { decodeHeldContributions, decodeHostedSyncResult, decodeOrdinarySyncResult, releasedLineageBindingDigest } from "./ordinarySyncWireContract";
+import { canonicalJson } from "./releasedLineageBinding";
 import vectors from "./releasedLineageBindingVectors.json" with { type: "json" };
 
 const decline = { path: "work.md", objectId: "work.md", versionId: "main", lineagePruned: false, headBlobSha256: null, constraint: "MAX_YDOC_UPDATE_BYTES", limitBytes: 20, observedBytes: 21 };
@@ -150,136 +151,200 @@ describe("hosted native sync contract", () => {
   });
 });
 
-describe("held document inspection contract", () => {
-  const bound = JSON.parse(vectors.valid[0]!.canonical);
-  const held = { objectId: bound.objectId, path: "notes/plan.md", binding: bound, bindingDigest: vectors.valid[0]!.digest,
-    continuation: "frozen", bindingStale: false };
-  const markdown = "# Plan\n\nRetained.\n";
-  const sha = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
-  // The work the binding's one valid tail, relay-a, commits to, with its authors.
-  const [carried, outbox] = vectors.commitments[0]!.contributions as unknown as [Record<string, unknown>, Record<string, unknown>];
-  const covered = [{ namespace: "relay-a", contributions: [carried, outbox] }];
-  // Where each is, as a finding names it.
-  const { authors: _carriedAuthors, ...carriedAt } = carried;
-  const { authors: _outboxAuthors, ...outboxAt } = outbox;
-  const complete = { status: "complete", reasons: [], coveredContributions: covered, mergedContributionIds: [outbox], markdown,
-    markdownSha256: sha(markdown), markdownByteLength: Buffer.byteLength(markdown), inbandLimitBytes: 49152 };
-  const inspected = { ...held, status: "current", preservation: complete, resolution: null };
+const sha = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+// The first artifact vector names the first binding vector, the work of its
+// one valid tail, relay-a, and one contribution merged.
+const [listedArtifact, emptyArtifact] = vectors.artifacts as [typeof vectors.artifacts[number], typeof vectors.artifacts[number]];
+const bound = JSON.parse(vectors.valid[0]!.canonical);
+const held = { objectId: bound.objectId, path: "notes/plan.md", bindingDigest: vectors.valid[0]!.digest,
+  continuation: "frozen", bindingStale: false };
+const markdown = "# Plan\n\nRetained.\n";
+const [carried, outbox] = vectors.commitments[0]!.contributions as unknown as [Record<string, unknown>, Record<string, unknown>];
+// Where each is, as a finding names it.
+const { authors: _carriedAuthors, ...carriedAt } = carried;
+const { authors: _outboxAuthors, ...outboxAt } = outbox;
+const artifactBytes = Buffer.from(listedArtifact.canonical, "utf8");
+const complete = { status: "complete", reasons: [], mergedContributions: listedArtifact.mergedContributions,
+  contributionsSha256: listedArtifact.sha256, contributionsByteLength: artifactBytes.length, markdown,
+  markdownSha256: sha(markdown), markdownByteLength: Buffer.byteLength(markdown), inbandLimitBytes: 49152 };
+const inspected = { ...held, status: "current", preservation: complete, resolution: null };
+// What no merged contributions commit to.
+const nothingMerged = emptyArtifact.mergedContributions;
 
-  it("keeps a page of held documents and each binding's digest", () => {
+describe("held document inspection contract", () => {
+  it("keeps a page of held document summaries, and refuses one that claims more with nothing listed", () => {
     const page = { documents: [held], hasMore: true };
     expect(decodeHostedSyncResult("sync.heldDocuments", page)).toEqual(page);
     expect(decodeHostedSyncResult("sync.heldDocuments", { documents: [], hasMore: false }).documents).toEqual([]);
+    expect(() => decodeHostedSyncResult("sync.heldDocuments", { documents: [], hasMore: true })).toThrow(ProtocolShapeError);
+    expect(() => decodeHostedSyncResult("sync.heldDocuments", { documents: [{ ...held, bindingDigest: "D".repeat(64) }], hasMore: false }))
+      .toThrow(ProtocolShapeError);
   });
 
-  it("keeps complete preservation, its merged contributions and its exact text", () => {
+  it("keeps complete preservation, its artifact's digest and length, its merged commitment and its exact text", () => {
     expect(decodeHostedSyncResult("sync.heldDocument", inspected)).toEqual(inspected);
-    // Text above the in-band limit streams; its digest and length still name it.
-    const streamed = { ...complete, markdown: null, inbandLimitBytes: 4 };
+    // Text the engine streams instead; its digest and length still name it.
+    const streamed = { ...complete, markdown: null };
     expect(decodeHostedSyncResult("sync.heldDocument", { ...inspected, preservation: streamed })?.preservation).toEqual(streamed);
+    // Merging added nothing: the empty list's commitment names that.
+    const contained = { ...complete, mergedContributions: nothingMerged };
+    expect(decodeHostedSyncResult("sync.heldDocument", { ...inspected, preservation: contained })?.preservation).toEqual(contained);
     expect(decodeHostedSyncResult("sync.heldDocument", null)).toBeNull();
   });
 
+  // One reason with its total, and the examples listed of it.
+  const reason = (code: string, status: string, total: number, ...examples: unknown[]) =>
+    ({ reason: code, status, total, omitted: total - examples.length, examples });
+  const at = (namespace: string | null, contribution: unknown = null) => ({ namespace, contribution });
+  const incomplete = (status: string, ...reasons: unknown[]) => ({ ...complete, status, reasons, mergedContributions: nothingMerged,
+    markdown: null, markdownSha256: null, markdownByteLength: null });
+  const pending = reason("pending-contribution-dependencies", "pending-dependencies", 1, at(null));
+  const missing = reason("source-missing", "missing-evidence", 1, at("relay-a", outboxAt));
+  const contradictory = reason("contradictory-evidence", "invalid-evidence", 1, at("relay-b"));
+  const decoded = (preservation: unknown) => decodeHostedSyncResult("sync.heldDocument", { ...inspected, preservation })?.preservation;
+
   it("keeps each machine-readable reason preservation is incomplete, and a stale binding claims nothing", () => {
-    const reasons = [
-      { reason: "pending-head-dependencies", status: "pending-dependencies", namespace: null, contribution: null },
-      { reason: "pending-contribution-dependencies", status: "pending-dependencies", namespace: null, contribution: null },
-      { reason: "source-missing", status: "missing-evidence", namespace: "relay-a", contribution: outboxAt },
-      { reason: "contradictory-evidence", status: "invalid-evidence", namespace: "relay-b", contribution: null },
-      { reason: "contradictory-evidence", status: "invalid-evidence", namespace: "relay-b", contribution: carriedAt },
-      { reason: "digest-mismatch", status: "invalid-evidence", namespace: "relay-a", contribution: carriedAt },
+    for (const found of [
+      reason("pending-head-dependencies", "pending-dependencies", 1, at(null)),
+      pending,
+      missing,
+      reason("contradictory-evidence", "invalid-evidence", 2, at("relay-b"), at("relay-b", carriedAt)),
+      reason("digest-mismatch", "invalid-evidence", 1, at("relay-a", carriedAt)),
       // Authorship that does not read names where its work is, and nothing else.
-      { reason: "malformed-authorship", status: "invalid-evidence", namespace: "relay-b", contribution: outboxAt },
-    ];
-    for (const reason of reasons) {
-      const incomplete = { status: reason.status, reasons: [reason], coveredContributions: covered, mergedContributionIds: [],
-        markdown: null, markdownSha256: null, markdownByteLength: null, inbandLimitBytes: 49152 };
-      expect(decodeHostedSyncResult("sync.heldDocument", { ...inspected, preservation: incomplete })?.preservation).toEqual(incomplete);
+      reason("malformed-authorship", "invalid-evidence", 1, at("relay-b", outboxAt)),
+    ]) {
+      const preservation = incomplete(found.status, found);
+      expect(decoded(preservation)).toEqual(preservation);
     }
     const stale = { ...inspected, status: "stale", preservation: null, bindingStale: true };
     expect(decodeHostedSyncResult("sync.heldDocument", stale)).toEqual(stale);
   });
 
+  it("keeps a few examples of each reason with its exact total, and the worst reason's status even with none listed", () => {
+    const eight = Array.from({ length: 8 }, (_, index) => at("relay-a", { ...outboxAt, sequence: index + 1 }));
+    // Of 50,000 missing sources eight are listed; the invalid authorship the budget left without an example still decides.
+    const truncated = incomplete("invalid-evidence", reason("source-missing", "missing-evidence", 50_000, ...eight),
+      reason("malformed-authorship", "invalid-evidence", 3));
+    expect(decoded(truncated)).toEqual(truncated);
+    expect(decoded(truncated)?.reasons.map(found => [found.total, found.omitted, found.examples.length])).toEqual([[50_000, 49_992, 8], [3, 3, 0]]);
+    for (const [status, reasons] of [
+      ["missing-evidence", [missing, pending]],
+      ["invalid-evidence", [missing, pending, contradictory]],
+    ] as const) {
+      const preservation = incomplete(status, ...reasons);
+      expect(decoded(preservation)).toEqual(preservation);
+    }
+    const preservation = incomplete("missing-evidence", reason("source-missing", "missing-evidence", 2,
+      at("relay-a", { ...carriedAt, journalCursor: 1 }), at("relay-a", { ...outboxAt, sequence: Number.MAX_SAFE_INTEGER })));
+    expect(decoded(preservation)).toEqual(preservation);
+  });
+
+  const nine = Array.from({ length: 9 }, () => at(null));
   it.each([
-    ["another binding's digest", { bindingDigest: "0".repeat(64) }],
-    ["another object", { objectId: "elsewhere" }],
+    ["another binding's digest that is no SHA-256", { bindingDigest: "0".repeat(63) }],
     ["a stale binding that preserves", { status: "stale" }],
     ["a current binding with nothing inspected", { preservation: null }],
+    ["a stale-marked hold that claims to be current", { bindingStale: true }],
     ["text its digest does not name", { preservation: { ...complete, markdown: `${markdown}!` } }],
     ["text its length does not name", { preservation: { ...complete, markdownByteLength: 1 } }],
-    ["in-band text left out", { preservation: { ...complete, markdown: null } }],
-    ["complete with a reason", { preservation: { ...complete, reasons: [{ reason: "source-missing", status: "missing-evidence", namespace: null, contribution: null }] } }],
-    ["incomplete with text", { preservation: { ...complete, status: "missing-evidence",
-      reasons: [{ reason: "source-missing", status: "missing-evidence", namespace: null, contribution: null }] } }],
-    ["an unknown reason", { preservation: { ...complete, status: "invalid-evidence",
-      reasons: [{ reason: "guess", status: "invalid-evidence", namespace: null, contribution: null }], markdown: null, markdownSha256: null, markdownByteLength: null } }],
+    ["complete with a reason", { preservation: { ...complete, reasons: [missing] } }],
+    ["incomplete with text", { preservation: { ...complete, status: "missing-evidence", reasons: [missing] } }],
+    ["an unknown reason", { preservation: incomplete("invalid-evidence", reason("guess", "invalid-evidence", 1)) }],
+    ["a reason under another reason's status", { preservation: incomplete("invalid-evidence", reason("source-missing", "invalid-evidence", 1)) }],
+    ["a pending reason claiming invalid evidence",
+      { preservation: incomplete("invalid-evidence", reason("pending-head-dependencies", "invalid-evidence", 1)) }],
+    ["a status better than its worst reason", { preservation: incomplete("pending-dependencies", missing, pending) }],
+    ["a status better than a worst reason listed without examples",
+      { preservation: incomplete("missing-evidence", missing, reason("malformed-authorship", "invalid-evidence", 3)) }],
+    ["a status worse than its worst reason", { preservation: incomplete("invalid-evidence", missing) }],
+    ["no reasons but an incomplete status", { preservation: incomplete("missing-evidence") }],
+    ["examples and omitted findings past the total", { preservation: incomplete("missing-evidence", { ...missing, total: 1, omitted: 1 }) }],
+    ["examples and omitted findings short of the total", { preservation: incomplete("missing-evidence", { ...missing, total: 5, omitted: 3 }) }],
+    ["a reason no finding gave", { preservation: incomplete("missing-evidence", reason("source-missing", "missing-evidence", 0)) }],
+    ["more than eight examples", { preservation: incomplete("missing-evidence", reason("source-missing", "missing-evidence", 9, ...nine)) }],
+    ["a reason listed twice", { preservation: incomplete("missing-evidence", missing, missing) }],
+    ["reasons out of order", { preservation: incomplete("invalid-evidence", contradictory, missing) }],
+    ["a negative omitted count", { preservation: incomplete("missing-evidence", { ...missing, total: 0, omitted: -1 }) }],
+    ["a fractional total", { preservation: incomplete("missing-evidence", { ...missing, total: 1.5, omitted: 0.5 }) }],
+    ["an example with no SHA-256", { preservation: incomplete("missing-evidence",
+      reason("source-missing", "missing-evidence", 1, at("relay-a", { ...outboxAt, updateDigest: "not-a-digest" }))) }],
+    ["an example at journal cursor zero", { preservation: incomplete("missing-evidence",
+      reason("source-missing", "missing-evidence", 1, at("relay-a", { ...carriedAt, journalCursor: 0 }))) }],
+    ["merged work under the empty list's digest", { preservation: { ...complete, mergedContributions: { ...nothingMerged, count: 1 } } }],
+    ["nothing merged under another digest", { preservation: { ...complete, mergedContributions: { ...listedArtifact.mergedContributions, count: 0 } } }],
+    ["a merged digest that is no SHA-256", { preservation: { ...complete, mergedContributions: { count: 1, digest: "d" } } }],
+    ["the artifact's own digest for the merged list",
+      { preservation: { ...complete, mergedContributions: { count: 1, digest: listedArtifact.sha256 } } }],
+    ["an artifact digest that is no SHA-256", { preservation: { ...complete, contributionsSha256: "A".repeat(64) } }],
+    ["an empty artifact", { preservation: { ...complete, contributionsByteLength: 0 } }],
+    ["no artifact", { preservation: { ...complete, contributionsSha256: undefined, contributionsByteLength: undefined } }],
     ["a resolution this round never records", { resolution: {} }],
   ])("rejects %s", (_case, patch) => {
     expect(() => decodeHostedSyncResult("sync.heldDocument", { ...inspected, ...patch })).toThrow(ProtocolShapeError);
   });
+});
 
-  const found = (reason: string, status: string) => ({ reason, status, namespace: null, contribution: null });
-  const incomplete = (status: string, ...reasons: unknown[]) => ({ status, reasons, coveredContributions: covered,
-    mergedContributionIds: [], markdown: null, markdownSha256: null, markdownByteLength: null, inbandLimitBytes: 49152 });
-  const pending = found("pending-contribution-dependencies", "pending-dependencies");
-  const missing = found("source-missing", "missing-evidence");
-  const contradictory = found("contradictory-evidence", "invalid-evidence");
+describe("held document contribution artifact", () => {
+  const artifact = JSON.parse(listedArtifact.canonical);
+  // `bytes` under an inspection that names exactly them.
+  const namedBytes = (bytes: Buffer) =>
+    [bytes, { ...inspected, preservation: { ...complete, contributionsSha256: sha(bytes), contributionsByteLength: bytes.length } }] as const;
+  // `value` as the engine encodes it, or `text`, so named.
+  const named = (value: unknown, text = canonicalJson(value)) => namedBytes(Buffer.from(text, "utf8"));
+  const current = (value: unknown) => decodeHostedSyncResult("sync.heldDocument", value)!;
 
-  it("keeps mixed reasons under the worst one's status, and coordinates from one", () => {
-    for (const [status, reasons] of [
-      ["missing-evidence", [pending, missing]],
-      ["invalid-evidence", [missing, contradictory, pending]],
-    ] as const) {
-      const preservation = incomplete(status, ...reasons);
-      expect(decodeHostedSyncResult("sync.heldDocument", { ...inspected, preservation })?.preservation).toEqual(preservation);
-    }
-    const preservation = incomplete("missing-evidence", { ...missing, contribution: { ...carriedAt, journalCursor: 1 } },
-      { ...missing, contribution: { ...outboxAt, sequence: Number.MAX_SAFE_INTEGER } });
-    expect(decodeHostedSyncResult("sync.heldDocument", { ...inspected, preservation })?.preservation).toEqual(preservation);
+  it("names the binding, every covered contribution with its authors, and the merged list, none left out", () => {
+    expect(decodeHeldContributions(artifactBytes, current(inspected))).toEqual({
+      binding: bound,
+      coveredContributions: [{ namespace: "relay-a", contributions: [carried, outbox] }],
+      mergedContributionIds: [outbox],
+    });
+    // A binding whose tails do not read covers nothing, and nothing merged.
+    const unread = Buffer.from(emptyArtifact.canonical, "utf8");
+    const nothing = { ...inspected, objectId: "object-2", bindingDigest: vectors.valid[1]!.digest,
+      preservation: { ...incomplete(), contributionsSha256: emptyArtifact.sha256, contributionsByteLength: unread.length } };
+    expect(decodeHeldContributions(unread, current(nothing))).toEqual({
+      binding: JSON.parse(vectors.valid[1]!.canonical), coveredContributions: [], mergedContributionIds: [],
+    });
   });
 
-  it("keeps covered work with its authors, already contained work included, only as the binding commits to it", () => {
-    // Merging added nothing: the covered work still names who made it.
-    const contained = { ...complete, mergedContributionIds: [] };
-    expect(decodeHostedSyncResult("sync.heldDocument", { ...inspected, preservation: contained })?.preservation).toEqual(contained);
-    // A binding whose tails do not read covers nothing.
-    const unread = JSON.parse(vectors.valid[1]!.canonical);
-    const nothing = { ...held, objectId: unread.objectId, binding: unread, bindingDigest: vectors.valid[1]!.digest, status: "current",
-      preservation: { ...incomplete("invalid-evidence", contradictory), coveredContributions: [] }, resolution: null };
-    expect(decodeHostedSyncResult("sync.heldDocument", nothing)?.preservation?.coveredContributions).toEqual([]);
-  });
+  function incomplete() {
+    return { ...complete, status: "invalid-evidence", reasons: [{ reason: "contradictory-evidence", status: "invalid-evidence",
+      total: 1, omitted: 0, examples: [{ namespace: null, contribution: null }] }], mergedContributions: nothingMerged,
+      markdown: null, markdownSha256: null, markdownByteLength: null };
+  }
 
   it.each([
-    ["a stale-marked hold that claims to be current", { bindingStale: true }],
-    ["a reason under another reason's status", { preservation: incomplete("invalid-evidence", found("source-missing", "invalid-evidence")) }],
-    ["a pending reason claiming invalid evidence", { preservation: incomplete("invalid-evidence", found("pending-head-dependencies", "invalid-evidence")) }],
-    ["a status better than its worst reason", { preservation: incomplete("pending-dependencies", pending, missing) }],
-    ["a status worse than its worst reason", { preservation: incomplete("invalid-evidence", missing) }],
-    ["no reasons but an incomplete status", { preservation: incomplete("missing-evidence") }],
-    ["an update digest that is no SHA-256", { preservation: { ...complete, mergedContributionIds: [{ ...outbox, updateDigest: "d" }] } }],
-    ["an uppercase update digest", { preservation: { ...complete, mergedContributionIds: [{ ...carried, updateDigest: "C".repeat(64) }] } }],
-    ["a reason's contribution with no SHA-256", { preservation: incomplete("missing-evidence",
-      { ...missing, contribution: { ...outboxAt, updateDigest: "not-a-digest" } }) }],
-    ["a reason's contribution at journal cursor zero", { preservation: incomplete("missing-evidence",
-      { ...missing, contribution: { ...carriedAt, journalCursor: 0 } }) }],
-    ["journal cursor zero", { preservation: { ...complete, mergedContributionIds: [{ ...carried, journalCursor: 0 }] } }],
-    ["outbox sequence zero", { preservation: { ...complete, mergedContributionIds: [{ ...outbox, sequence: 0 }] } }],
-    ["an unsafe journal cursor", { preservation: { ...complete, mergedContributionIds: [{ ...carried, journalCursor: Number.MAX_SAFE_INTEGER + 1 }] } }],
-    ["a fractional sequence", { preservation: { ...complete, mergedContributionIds: [{ ...outbox, sequence: 1.5 }] } }],
-    ["a merged contribution without its authors", { preservation: { ...complete, mergedContributionIds: [outboxAt] } }],
-    ["a merged contribution nothing covers", { preservation: { ...complete, mergedContributionIds: [{ ...outbox, sequence: 4 }] } }],
-    ["a merged contribution credited to someone else", { preservation: { ...complete,
-      mergedContributionIds: [{ ...outbox, authors: [{ kind: "agent", agentId: "stranger" }] }] } }],
-    ["no covered work", { preservation: { ...complete, coveredContributions: [] } }],
-    ["covered work left out", { preservation: { ...complete, coveredContributions: [{ namespace: "relay-a", contributions: [outbox] }] } }],
-    ["covered work credited to someone else", { preservation: { ...complete, mergedContributionIds: [],
-      coveredContributions: [{ namespace: "relay-a", contributions: [{ ...carried, authors: [{ kind: "unattributed" }] }, outbox] }] } }],
-    ["covered work under another tail", { preservation: { ...complete, coveredContributions: [{ ...covered[0], namespace: "relay-b" }] } }],
-    ["covered work for a tail that does not read", { preservation: { ...complete,
-      coveredContributions: [...covered, { namespace: "relay-b", contributions: [carried] }] } }],
-    ["covered work with malformed authorship", { preservation: { ...complete, mergedContributionIds: [],
-      coveredContributions: [{ namespace: "relay-a", contributions: [{ ...carried, authors: [] }, outbox] }] } }],
-  ])("rejects %s", (_case, patch) => {
-    expect(() => decodeHostedSyncResult("sync.heldDocument", { ...inspected, ...patch })).toThrow(ProtocolShapeError);
+    ["bytes its length does not name", [Buffer.concat([artifactBytes, Buffer.from(" ")]), inspected]],
+    ["bytes its digest does not name", [Buffer.from(listedArtifact.canonical.replace("relay-a\"}]", "relay-b\"}]")), inspected]],
+    ["a stale inspection", [artifactBytes, { ...inspected, status: "stale", preservation: null, bindingStale: true }]],
+    ["bytes that are no UTF-8", namedBytes(Buffer.from([0x7b, 0xff, 0x7d]))],
+    ["bytes that are no JSON", named(null, "{")],
+    ["whitespace", named(null, JSON.stringify(artifact, null, 1))],
+    ["keys out of order", named(null, JSON.stringify({ version: 1, ...artifact }))],
+    ["another format version", named({ ...artifact, version: 2 })],
+    ["an unknown key", named({ ...artifact, extra: 1 })],
+    ["no binding", named({ ...artifact, binding: null })],
+    ["another binding", named({ ...artifact, binding: { ...bound, headDigest: "c".repeat(64) } })],
+    ["covered work left out", named({ ...artifact, coveredContributions: [{ namespace: "relay-a", contributions: [outbox] }] })],
+    ["covered work credited to someone else", named({ ...artifact,
+      coveredContributions: [{ namespace: "relay-a", contributions: [{ ...carried, authors: [{ kind: "unattributed" }] }, outbox] }] })],
+    ["covered work under another tail", named({ ...artifact, coveredContributions: [{ ...artifact.coveredContributions[0], namespace: "relay-b" }] })],
+    ["covered work for a tail that does not read", named({ ...artifact,
+      coveredContributions: [...artifact.coveredContributions, { namespace: "relay-b", contributions: [carried] }] })],
+    ["no covered work", named({ ...artifact, coveredContributions: [] })],
+    ["covered work with malformed authorship", named({ ...artifact,
+      coveredContributions: [{ namespace: "relay-a", contributions: [{ ...carried, authors: [] }, outbox] }] })],
+    ["a covered tail with another key", named({ ...artifact, coveredContributions: [{ ...artifact.coveredContributions[0], extra: 1 }] })],
+    ["a merged contribution nothing covers", named({ ...artifact, mergedContributionIds: [{ ...outbox, sequence: 4 }] })],
+    ["a merged contribution credited to someone else", named({ ...artifact,
+      mergedContributionIds: [{ ...outbox, authors: [{ kind: "agent", agentId: "stranger" }] }] })],
+    ["a merged contribution without its authors", named({ ...artifact, mergedContributionIds: [outboxAt] })],
+    ["merged contributions out of canonical order", named({ ...artifact, mergedContributionIds: [outbox, carried] })],
+    ["a merged contribution listed twice", named({ ...artifact, mergedContributionIds: [outbox, outbox] })],
+    ["merged work its commitment does not name", named({ ...artifact, mergedContributionIds: [carried] })],
+    ["less merged work than its commitment names", named({ ...artifact, mergedContributionIds: [] })],
+  ] as const)("rejects %s", (_case, [bytes, inspection]) => {
+    expect(() => decodeHeldContributions(bytes, current(inspection))).toThrow(ProtocolShapeError);
   });
 });

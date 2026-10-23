@@ -5,8 +5,9 @@ import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import { ProtocolShapeError, mutableStruct } from "../wireSchema";
 import {
-  canonicalRetainedContribution, decodeReleasedLineageBinding, decodeRetainedContribution, releasedLineageBindingDigest,
-  releasedTailContributionsCommitment, type ReleasedLineageBinding, type RetainedContribution,
+  canonicalJson, canonicalRetainedContribution, decodeReleasedLineageBinding, decodeRetainedContribution,
+  mergedContributionsCommitment, releasedLineageBindingDigest, releasedTailContributionsCommitment,
+  type ReleasedLineageBinding, type RetainedContribution,
 } from "./releasedLineageBinding";
 
 export { releasedLineageBindingDigest, type ReleasedLineageBinding } from "./releasedLineageBinding";
@@ -124,16 +125,12 @@ const ContributionLocatorSchema = Schema.Union([
   mutableStruct({ kind: Schema.Literal("carried"), deliveryId: Text, updateDigest: Digest, journalCursor: Coordinate }),
   mutableStruct({ kind: Schema.Literal("outbox"), outboxId: Text, sequence: Coordinate, deliveryId: Text, updateDigest: Digest }),
 ]);
-// A contribution with its authors, as a tail's commitment names it.
-const RetainedContributionSchema = Schema.declareConstructor<RetainedContribution>()([], () => (value) => Effect.try({
-  try: () => decodeRetainedContribution(value),
-  catch: (error) => new SchemaIssue.InvalidValue({ message: (error as TypeError).message }),
-}));
-// A document the hosted replica holds for retained work a released chain left.
+// A document the hosted replica holds for retained work a released chain
+// left, named by its binding's digest; the binding itself is in the
+// contribution artifact.
 const HeldDocumentFields = {
   objectId: Text,
   path: Text,
-  binding: ReleasedLineageBindingSchema,
   bindingDigest: Digest,
   continuation: Schema.Literals(["frozen", "dependency-drain"]),
   bindingStale: Schema.Boolean,
@@ -141,23 +138,31 @@ const HeldDocumentFields = {
 // Best to worst: a preservation's status is its worst reason's.
 const PRESERVATION_STATUSES = ["complete", "pending-dependencies", "missing-evidence", "invalid-evidence"] as const;
 const PreservationStatus = Schema.Literals(PRESERVATION_STATUSES);
-// Whether merged state keeps every retained contribution, why not, every
-// contribution with its authors each valid tail covers, and what merging added.
+// In the engine's order, which the answer lists them in.
+const PRESERVATION_REASONS = ["source-missing", "pending-head-dependencies", "pending-contribution-dependencies",
+  "digest-mismatch", "malformed-update", "contradictory-evidence", "missing-feed-identity", "malformed-authorship"] as const;
+// The most findings the engine lists for one reason.
+const MAX_REASON_EXAMPLES = 8;
+// Whether merged state keeps every retained contribution, and why not: each
+// reason once, with how many findings gave it and where a few of them are.
+// The covered and merged work itself is in the contribution artifact, named
+// here by its SHA-256 and length; the merged list also by its commitment.
 const Preservation = mutableStruct({
   status: PreservationStatus,
   reasons: Schema.mutable(Schema.Array(mutableStruct({
-    reason: Schema.Literals(["source-missing", "pending-head-dependencies", "pending-contribution-dependencies",
-      "digest-mismatch", "malformed-update", "contradictory-evidence", "missing-feed-identity", "malformed-authorship"]),
+    reason: Schema.Literals(PRESERVATION_REASONS),
     status: PreservationStatus,
-    namespace: Schema.NullOr(Text),
-    contribution: Schema.NullOr(ContributionLocatorSchema),
+    total: Count,
+    omitted: Count,
+    examples: Schema.mutable(Schema.Array(mutableStruct({
+      namespace: Schema.NullOr(Text),
+      contribution: Schema.NullOr(ContributionLocatorSchema),
+    }))),
   }))),
-  coveredContributions: Schema.mutable(Schema.Array(mutableStruct({
-    namespace: Text,
-    contributions: Schema.mutable(Schema.Array(RetainedContributionSchema)),
-  }))),
-  mergedContributionIds: Schema.mutable(Schema.Array(RetainedContributionSchema)),
-  // Null above the in-band limit, when the engine streams it instead.
+  mergedContributions: mutableStruct({ count: Count, digest: Digest }),
+  contributionsSha256: Digest,
+  contributionsByteLength: Count,
+  // Null when JSON would encode it past the in-band limit, and the engine streams it instead.
   markdown: Schema.NullOr(Schema.String),
   markdownSha256: Schema.NullOr(Digest),
   markdownByteLength: Schema.NullOr(Count),
@@ -220,7 +225,11 @@ export function decodeHostedSyncResult<M extends HostedSyncMethod>(
   }
   const result = decoded.success as HostedSyncMethodResultMap[M];
   if (method === "sync.heldDocuments") {
-    for (const held of (result as HostedSyncMethodResultMap["sync.heldDocuments"]).documents) checkHeldDocument(method, held);
+    const page = result as HostedSyncMethodResultMap["sync.heldDocuments"];
+    // The next page starts after the last document listed, so one that claims more lists one.
+    if (page.hasMore && page.documents.length === 0) {
+      throw new ProtocolShapeError(`hosted ${method} result: a page that claims more lists nothing`);
+    }
   } else if (method === "sync.heldDocument") {
     const inspected = result as HostedSyncMethodResultMap["sync.heldDocument"];
     if (inspected !== null) checkHeldInspection(inspected);
@@ -228,14 +237,7 @@ export function decodeHostedSyncResult<M extends HostedSyncMethod>(
   return result;
 }
 
-type HeldDocument = HostedSyncMethodResultMap["sync.heldDocuments"]["documents"][number];
 export type HeldDocumentInspection = NonNullable<HostedSyncMethodResultMap["sync.heldDocument"]>;
-
-function checkHeldDocument(method: HostedSyncMethod, held: HeldDocument): void {
-  if (releasedLineageBindingDigest(held.binding) !== held.bindingDigest || held.binding.objectId !== held.objectId) {
-    throw new ProtocolShapeError(`hosted ${method} result: binding digest or object does not match its binding`);
-  }
-}
 
 type HeldPreservation = NonNullable<HeldDocumentInspection["preservation"]>;
 // The status each reason holds preservation at.
@@ -250,42 +252,35 @@ const REASON_STATUS: Record<HeldPreservation["reasons"][number]["reason"], HeldP
   "malformed-authorship": "invalid-evidence",
 };
 
-// The covered work names exactly what each tail with valid coverage commits
-// to, in the binding's order, and every merged contribution is among it.
-function checkCovered(binding: ReleasedLineageBinding, preservation: HeldPreservation, invalid: () => Error): void {
-  const valid = (binding.tails ?? []).filter(tail => tail.unproven !== null);
-  const covered = preservation.coveredContributions;
-  if (covered.length !== valid.length) throw invalid();
-  const every = new Set<string>();
-  covered.forEach(({namespace, contributions}, index) => {
-    const tail = valid[index]!;
-    const committed = tail.unproven!;
-    const commitment = contributions.length === 0 ? null : releasedTailContributionsCommitment(contributions);
-    if (namespace !== tail.namespace || commitment === null || commitment.count !== committed.count ||
-      commitment.digest !== committed.digest) throw invalid();
-    for (const contribution of contributions) every.add(canonicalRetainedContribution(contribution));
-  });
-  if (preservation.mergedContributionIds.some(merged => !every.has(canonicalRetainedContribution(merged)))) throw invalid();
-}
+// What no merged contributions commit to.
+const NOTHING_MERGED = mergedContributionsCommitment([]).digest;
 
 // Only a current binding may preserve, and a hold marked stale never is
-// current. Each reason has its own status, the preservation its worst
-// reason's, and only complete preservation carries text, whose digest and
+// current. Each reason appears once, in order, under its own status, with
+// its examples and omitted findings adding up to its total; the preservation
+// takes its worst reason's status, however few examples that reason lists.
+// The merged commitment is the canonical empty one exactly when nothing
+// merged, and only complete preservation carries text, whose digest and
 // length must name it.
 function checkHeldInspection(inspected: HeldDocumentInspection): void {
   const method = "sync.heldDocument";
-  checkHeldDocument(method, inspected);
   const preservation = inspected.preservation;
   const invalid = () => new ProtocolShapeError(`hosted ${method} result: preservation does not match its status`);
   if ((inspected.status === "current") !== (preservation !== null) || (inspected.bindingStale && inspected.status !== "stale")) {
     throw invalid();
   }
   if (preservation === null) return;
-  checkCovered(inspected.binding, preservation, invalid);
-  const worst = preservation.reasons.reduce((worst, found) => {
-    if (found.status !== REASON_STATUS[found.reason]) throw invalid();
-    return Math.max(worst, PRESERVATION_STATUSES.indexOf(found.status));
-  }, 0);
+  let worst = 0;
+  preservation.reasons.forEach((found, index) => {
+    const before = preservation.reasons[index - 1];
+    if (found.status !== REASON_STATUS[found.reason] || found.total < 1 || found.examples.length > MAX_REASON_EXAMPLES ||
+      found.examples.length + found.omitted !== found.total ||
+      (before && PRESERVATION_REASONS.indexOf(before.reason) >= PRESERVATION_REASONS.indexOf(found.reason))) throw invalid();
+    worst = Math.max(worst, PRESERVATION_STATUSES.indexOf(found.status));
+  });
+  const merged = preservation.mergedContributions;
+  if ((merged.count === 0) !== (merged.digest === NOTHING_MERGED) || merged.digest === preservation.contributionsSha256 ||
+    preservation.contributionsByteLength < 1) throw invalid();
   const complete = preservation.status === "complete";
   if (preservation.status !== PRESERVATION_STATUSES[worst] || complete !== (preservation.markdownSha256 !== null) ||
     (preservation.markdownSha256 === null) !== (preservation.markdownByteLength === null) ||
@@ -294,7 +289,82 @@ function checkHeldInspection(inspected: HeldDocumentInspection): void {
     const bytes = Buffer.from(preservation.markdown, "utf8");
     if (bytes.length !== preservation.markdownByteLength ||
       createHash("sha256").update(bytes).digest("hex") !== preservation.markdownSha256) throw invalid();
-  } else if (complete && preservation.markdownByteLength! <= preservation.inbandLimitBytes) {
+  }
+}
+
+/** One valid tail's covered work, as the contribution artifact lists it. */
+export type HeldCoveredContributions = { namespace: string; contributions: RetainedContribution[] };
+
+/** The binding of a current inspection, every contribution it covers, and what merging added. */
+export type HeldContributions = {
+  binding: ReleasedLineageBinding;
+  coveredContributions: HeldCoveredContributions[];
+  mergedContributionIds: RetainedContribution[];
+};
+
+const CONTRIBUTIONS_KEYS = "binding,coveredContributions,mergedContributionIds,version";
+
+/**
+ * The contribution artifact `inspected` names, from its streamed `bytes`.
+ * They must be exactly the bytes its SHA-256 and length name, in canonical
+ * JSON of format version 1; the binding the one its digest names; each tail
+ * with valid coverage listed in the binding's order with exactly the work
+ * that tail commits to; and the merged contributions in canonical order,
+ * each covered, committing as the inspection says.
+ */
+export function decodeHeldContributions(bytes: Uint8Array, inspected: HeldDocumentInspection): HeldContributions {
+  const preservation = inspected.preservation;
+  const invalid = () => new ProtocolShapeError("held document contributions do not match their inspection");
+  if (inspected.status !== "current" || preservation === null || bytes.length !== preservation.contributionsByteLength ||
+    createHash("sha256").update(bytes).digest("hex") !== preservation.contributionsSha256) throw invalid();
+  let text: string, parsed: unknown;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    parsed = JSON.parse(text);
+  } catch {
     throw invalid();
   }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed) || canonicalJson(parsed) !== text ||
+    Object.keys(parsed).sort().join() !== CONTRIBUTIONS_KEYS) throw invalid();
+  const row = parsed as Record<string, unknown>;
+  if (row.version !== 1 || !Array.isArray(row.coveredContributions) || !Array.isArray(row.mergedContributionIds)) throw invalid();
+  let decoded: HeldContributions;
+  try {
+    decoded = {
+      binding: decodeReleasedLineageBinding(row.binding),
+      coveredContributions: row.coveredContributions.map((tail: unknown) => {
+        const listed = tail as Record<string, unknown>;
+        if (typeof tail !== "object" || tail === null || Object.keys(tail).sort().join() !== "contributions,namespace" ||
+          typeof listed.namespace !== "string" || !Array.isArray(listed.contributions)) throw invalid();
+        return { namespace: listed.namespace, contributions: listed.contributions.map(decodeRetainedContribution) };
+      }),
+      mergedContributionIds: row.mergedContributionIds.map(decodeRetainedContribution),
+    };
+  } catch {
+    throw invalid();
+  }
+  const { binding, coveredContributions, mergedContributionIds } = decoded;
+  if (releasedLineageBindingDigest(binding) !== inspected.bindingDigest || binding.objectId !== inspected.objectId) throw invalid();
+  const valid = (binding.tails ?? []).filter(tail => tail.unproven !== null);
+  if (coveredContributions.length !== valid.length) throw invalid();
+  const every = new Set<string>();
+  coveredContributions.forEach(({ namespace, contributions }, index) => {
+    const tail = valid[index]!;
+    const committed = tail.unproven!;
+    const commitment = contributions.length === 0 ? null : releasedTailContributionsCommitment(contributions);
+    if (namespace !== tail.namespace || commitment === null || commitment.count !== committed.count ||
+      commitment.digest !== committed.digest) throw invalid();
+    for (const contribution of contributions) every.add(canonicalRetainedContribution(contribution));
+  });
+  if (mergedContributionIds.some(merged => !every.has(canonicalRetainedContribution(merged)))) throw invalid();
+  let merged;
+  try {
+    merged = mergedContributionsCommitment(mergedContributionIds);
+  } catch {
+    throw invalid();
+  }
+  if (merged.count !== preservation.mergedContributions.count || merged.digest !== preservation.mergedContributions.digest) {
+    throw invalid();
+  }
+  return decoded;
 }
