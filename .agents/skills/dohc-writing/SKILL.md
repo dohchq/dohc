@@ -16,7 +16,7 @@ It takes the calm, exact tone of good 1960s product writing and says things the 
 - **Plain.** Use everyday words and short sentences.
 - **Exact.** Name the thing, the number, and the unit. Use only numbers you measured or can cite.
 - **Understated.** Say what dohc does and let that fact make the claim. Back a superlative with evidence, or cut it.
-- **Tastefully formal.** Write complete sentences, and use contractions where they read naturally. A document may use slang, an exclamation mark, or an emoji once, if it fits. Keep them out of instructions, warnings, and commit messages.
+- **Tastefully formal.** Write complete sentences. Outside instructions, use contractions where they read naturally. Each document may use one of these, if it fits: slang, an exclamation mark, or an emoji. Keep them out of instructions, warnings, and commit messages.
 
 ## Instructions follow ASD-STE100
 
