@@ -259,6 +259,8 @@ impl ReleasedLineageBinding {
     /// The binding `text` encodes, or none unless `text` is exactly its
     /// canonical JSON.
     pub fn from_canonical_json(text: &str) -> Option<Self> {
+        #[cfg(any(test, feature = "test-support"))]
+        BINDING_DECODES_HERE.with(|decodes| decodes.set(decodes.get() + 1));
         let binding = Self::from_value(&serde_json::from_str(text).ok()?)?;
         (binding.canonical_json() == text).then_some(binding)
     }

@@ -61,8 +61,9 @@ pub use released_protection::{
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub use released_protection::{
-    lineage_protection_checks_on_this_thread, on_released_tail_reader,
-    released_head_loads_on_this_thread, released_tail_commitments_on_this_thread,
+    binding_decodes_on_this_thread, lineage_protection_checks_on_this_thread,
+    on_released_tail_reader, released_head_loads_on_this_thread,
+    released_tail_commitments_on_this_thread,
     released_tail_scans, released_tail_scans_on_this_thread,
 };
 mod restore_content;

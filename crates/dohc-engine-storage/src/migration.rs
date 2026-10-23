@@ -3344,26 +3344,30 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
 /// history, seed captures, the journal rows native entries name, the
 /// document's head and lineage columns, and terminal blobs, and with the
 /// stored bytes of each entry's update, which a held document's inspection
-/// merges. A row that claims
-/// another document still moves the document whose entry holds its delivery,
-/// and an activation moves the documents of every activation whose chain
-/// passes through it.
-/// Each trigger finds those documents by index; a blob no entry names, a
-/// journal row no entry names, or a compaction whose bound passes
-/// no sequence an entry names, moves nothing. The first
-/// activation of a document creates its row, which outlives the document, so
-/// a recreated document never reads an earlier generation. A generation only
-/// advances, and a mutation that would take it past its bound fails, whatever
-/// conflict policy the mutation names.
+/// merges. It also moves with the state inspection loads that the
+/// inspection's own coordinates do not name: a journal row past the
+/// document's latest snapshot changing, going, or arriving below the top, and
+/// the bytes of a blob a journal row, snapshot or archived lineage names
+/// changing. Such a blob cannot arrive or go while its name holds it. A row
+/// that claims another document still moves the document whose entry holds
+/// its delivery, and an activation moves the documents of every activation
+/// whose chain passes through it. Each trigger finds those documents by
+/// index; a blob nothing names, an append, a row a compaction folded, or a
+/// compaction whose bound passes no sequence an entry names, moves nothing.
+/// The first activation of a document creates its row, which outlives the
+/// document, so a recreated document never reads an earlier generation. A
+/// generation only advances, and a mutation that would take it past its
+/// bound fails, whatever conflict policy the mutation names.
 ///
 /// A hosted document held for released retained work keeps the binding it
-/// holds against, how its work continues, and whether that binding went
-/// stale; no other hold carries them. Rebuilding the table keeps every row,
-/// its parked heads and aliases among them. A deferred Y.Doc update records
-/// which ingress deferred it, and a hosted one the feed it arrived on: its
-/// namespace, epoch, stream and relay sequence. A row deferred earlier is
-/// local in a workspace that is no hosted replica, and its feed is unknown
-/// in one that is.
+/// holds against with its digest, how its work continues, and whether that
+/// binding went stale; no other hold carries them. The binding comes last in
+/// the row, so reading the rest never reaches it. Rebuilding the table keeps
+/// every row, its parked heads and aliases among them. A deferred Y.Doc
+/// update records which ingress deferred it, and a hosted one the feed it
+/// arrived on: its namespace, epoch, stream and relay sequence. A row
+/// deferred earlier is local in a workspace that is no hosted replica, and
+/// its feed is unknown in one that is.
 ///
 /// A device's decision to keep a held document's retained version as an
 /// ordinary copy is keyed by the binding it answers and its attempt. It keeps
@@ -3695,6 +3699,40 @@ WHEN EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE terminal_blob_digest=O
          UNION SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
            JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.update_digest=OLD.sha256);
 END;
+DROP INDEX idx_ydoc_updates_doc_blob;
+CREATE INDEX idx_ydoc_updates_blob ON ydoc_updates(update_blob_sha256,workspace_id,version_id,object_id);
+CREATE INDEX ydoc_snapshots_blob ON ydoc_snapshots(snapshot_blob_sha256);
+CREATE INDEX ydoc_inactive_lineages_full_state ON ydoc_inactive_lineages(full_state_blob_sha256);
+CREATE TRIGGER released_tail_head_journal_insert AFTER INSERT ON ydoc_updates
+WHEN EXISTS(SELECT 1 FROM ydoc_updates WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id
+    AND object_id=NEW.object_id AND seq>NEW.seq) BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER released_tail_head_journal_update
+AFTER UPDATE OF workspace_id,version_id,object_id,seq,update_blob_sha256 ON ydoc_updates BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id;
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER released_tail_head_journal_delete AFTER DELETE ON ydoc_updates
+WHEN OLD.seq > coalesce((SELECT max(up_to_seq) FROM ydoc_snapshots WHERE workspace_id=OLD.workspace_id
+    AND version_id=OLD.version_id AND object_id=OLD.object_id),0) BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id;
+END;
+CREATE TRIGGER released_tail_state_blob_update AFTER UPDATE OF sha256,byte_length,bytes ON binary_blobs
+WHEN EXISTS(SELECT 1 FROM ydoc_updates WHERE update_blob_sha256 IN (OLD.sha256,NEW.sha256))
+  OR EXISTS(SELECT 1 FROM ydoc_snapshots WHERE snapshot_blob_sha256 IN (OLD.sha256,NEW.sha256))
+  OR EXISTS(SELECT 1 FROM ydoc_inactive_lineages WHERE full_state_blob_sha256 IN (OLD.sha256,NEW.sha256)) BEGIN
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (SELECT workspace_id,version_id,object_id FROM ydoc_updates WHERE update_blob_sha256 IN (OLD.sha256,NEW.sha256)
+         UNION SELECT workspace_id,version_id,object_id FROM ydoc_snapshots
+           WHERE snapshot_blob_sha256 IN (OLD.sha256,NEW.sha256)
+         UNION SELECT workspace_id,version_id,object_id FROM ydoc_inactive_lineages
+           WHERE full_state_blob_sha256 IN (OLD.sha256,NEW.sha256));
+END;
 INSERT INTO live_owner_activations (relay_database_namespace,activation_id,workspace_id,main_version_id,
     object_id,lineage_claim_id,origin_adoption_id,binding_json,source_moment_id,source_digest,source_byte_length,
     baseline_moment_relay_sequence,baseline_registered_at_ms,host_coordinate_json,evidence_digest,coverage_digest,
@@ -3730,9 +3768,11 @@ CREATE TABLE hosted_documents_next (
     backfill_cursor INTEGER NOT NULL DEFAULT 0 CHECK (backfill_cursor >= 0),
     scope_generation INTEGER NOT NULL CHECK (scope_generation >= 0),
     unmaterialized_seq INTEGER CHECK (unmaterialized_seq > 0),
-    released_hold_binding_json TEXT CHECK (json_valid(released_hold_binding_json)),
     released_hold_continuation TEXT CHECK (released_hold_continuation IN ('frozen','dependency-drain')),
     released_hold_binding_stale INTEGER NOT NULL DEFAULT 0 CHECK (released_hold_binding_stale IN (0,1)),
+    released_hold_binding_digest TEXT CHECK (length(released_hold_binding_digest) = 64
+      AND released_hold_binding_digest NOT GLOB '*[^0-9a-f]*'),
+    released_hold_binding_json TEXT CHECK (json_valid(released_hold_binding_json)),
     PRIMARY KEY (workspace_id, object_id),
     CHECK ((state = 'held') = (held_reason IS NOT NULL)),
     CHECK ((held_by IS NOT NULL) = (held_reason IS 'hosted-backfill-path-held')),
@@ -3742,6 +3782,7 @@ CREATE TABLE hosted_documents_next (
       'hosted-live-edit-unadmitted','released-lineage-unsettled') OR held_path IS NULL),
     CHECK (state <> 'parked' OR unmaterialized_seq IS NULL),
     CHECK ((released_hold_binding_json IS NOT NULL) = (held_reason IS 'released-lineage-unsettled')),
+    CHECK ((released_hold_binding_digest IS NOT NULL) = (held_reason IS 'released-lineage-unsettled')),
     CHECK ((released_hold_continuation IS NOT NULL) = (held_reason IS 'released-lineage-unsettled')),
     CHECK (held_reason IS 'released-lineage-unsettled' OR released_hold_binding_stale = 0)
 ) STRICT;
@@ -3914,6 +3955,10 @@ pub(crate) const RELEASED_TAIL_TRIGGERS: &[&str] = &[
     "released_tail_blob_insert",
     "released_tail_blob_update",
     "released_tail_blob_delete",
+    "released_tail_head_journal_insert",
+    "released_tail_head_journal_update",
+    "released_tail_head_journal_delete",
+    "released_tail_state_blob_update",
 ];
 
 /// A hosted document that left the scope parks instead of losing its state.
@@ -4931,7 +4976,7 @@ mod tests {
             ),
             (
                 "v2-live-owner-activations",
-                "aa781cd9fb9435be0d3f1c7e68eadc5b5a8335d8d9e4ee86e30b412b3542ec76",
+                "ec17fd416e7217cbdd01e5480d0984abe00e8007b0c4b3f3a188d732dc2e710c",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -5812,23 +5857,37 @@ mod tests {
         conn.execute(&format!("DELETE FROM blobs WHERE sha256='{text}'"), []).unwrap();
     }
 
-    /// A released-lineage hold carries its binding and continuation, and no
-    /// other hold does; a hosted deferral names its whole feed, and a local
-    /// one needs none.
+    /// A released-lineage hold carries its binding with its digest, and its
+    /// continuation, and no other hold does; the binding is the row's last
+    /// column. A hosted deferral names its whole feed, and a local one needs
+    /// none.
     fn released_hold_and_deferred_feed_constraints_hold(conn: &Connection) {
-        let new_columns: (Option<String>, Option<String>, i64) = conn
+        let new_columns: (Option<String>, Option<String>, Option<String>, i64) = conn
             .query_row(
-                "SELECT released_hold_binding_json,released_hold_continuation,released_hold_binding_stale \
+                "SELECT released_hold_binding_json,released_hold_binding_digest, \
+                 released_hold_continuation,released_hold_binding_stale \
                  FROM hosted_documents WHERE object_id='held'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
-        assert_eq!(new_columns, (None, None, 0));
-        for valid in [
+        assert_eq!(new_columns, (None, None, None, 0));
+        let last: String = conn
+            .query_row(
+                "SELECT name FROM pragma_table_info('hosted_documents') ORDER BY cid DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(last, "released_hold_binding_json");
+        let digest = "a".repeat(64);
+        let hold = format!(
             "UPDATE hosted_documents SET held_reason='released-lineage-unsettled',held_path=NULL, \
-             held_by=NULL,released_hold_binding_json='{}',released_hold_continuation='frozen' \
-             WHERE object_id='held'",
+             held_by=NULL,released_hold_binding_json='{{}}',released_hold_binding_digest='{digest}', \
+             released_hold_continuation='frozen' WHERE object_id='held'"
+        );
+        for valid in [
+            hold.as_str(),
             "UPDATE hosted_documents SET released_hold_continuation='dependency-drain', \
              released_hold_binding_stale=1 WHERE object_id='held'",
             "INSERT INTO ydoc_deferred_updates (workspace_id,version_id,object_id,origin_id,origin_seq, \
@@ -5856,6 +5915,10 @@ mod tests {
             "UPDATE hosted_documents SET released_hold_binding_json='{}', \
              released_hold_continuation='frozen' WHERE object_id='ready'",
             "UPDATE hosted_documents SET released_hold_binding_stale=1 WHERE object_id='ready'",
+            "UPDATE hosted_documents SET released_hold_binding_digest=NULL WHERE object_id='held'",
+            "UPDATE hosted_documents SET released_hold_binding_digest='abc' WHERE object_id='held'",
+            "UPDATE hosted_documents SET released_hold_binding_digest=upper(released_hold_binding_digest) \
+             WHERE object_id='held'",
             "UPDATE hosted_documents SET released_hold_binding_json='not json' WHERE object_id='held'",
             "UPDATE hosted_documents SET released_hold_continuation='thawed' WHERE object_id='held'",
             "UPDATE hosted_documents SET released_hold_binding_stale=2 WHERE object_id='held'",
@@ -5881,6 +5944,19 @@ mod tests {
             "UPDATE relay_deferred_ops SET envelope_json='{\"relaySeq\":\"4\"}' WHERE ingress_kind='hosted'",
         ] {
             assert!(conn.execute(invalid, []).is_err(), "{invalid}");
+        }
+        for invalid in [
+            format!("UPDATE hosted_documents SET released_hold_binding_digest='{digest}' WHERE object_id='ready'"),
+            format!(
+                "UPDATE hosted_documents SET state='held',held_reason='released-lineage-unsettled', \
+                 released_hold_binding_digest='{digest}',released_hold_continuation='frozen' \
+                 WHERE object_id='ready'"
+            ),
+            "UPDATE hosted_documents SET state='held',held_reason='released-lineage-unsettled', \
+             released_hold_binding_json='{}',released_hold_continuation='frozen' WHERE object_id='ready'"
+                .to_owned(),
+        ] {
+            assert!(conn.execute(&invalid, []).is_err(), "{invalid}");
         }
         conn.execute("DELETE FROM hosted_replicas", []).unwrap();
         let left: i64 = conn
@@ -8561,9 +8637,11 @@ mod tests {
     /// released tails read moves its generation, old and new rows alike. A
     /// delivery moves the document whose entry holds it, whatever document
     /// its row claims; an activation moves the document of every activation
-    /// whose chain passes through it. A blob no terminal entry holds, a
-    /// journal row no entry names, and a document column the tails never read
-    /// move nothing. The generation outlives its document.
+    /// whose chain passes through it. So does the state a held document's
+    /// inspection loads that its coordinates do not name (Sol's r2c-3c-1
+    /// finding 1). A blob nothing names, a folded journal row no entry names,
+    /// an append, and a document column neither reads move nothing. The
+    /// generation outlives its document.
     #[test]
     fn every_released_tail_input_moves_its_documents_generation() {
         let dir = tempdir();
@@ -8674,6 +8752,12 @@ mod tests {
                 "INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms) VALUES ('ws','main','a',{seq},'update',0)"
             )
         };
+        let snapshot = |seq: i64| {
+            format!("INSERT INTO ydoc_snapshots VALUES ('ws','main','a',{seq},'snapshot','vector',0)")
+        };
+        // Rows up to `a`'s latest snapshot, 4, are folded: inspection never
+        // loads them.
+        step(&snapshot(4), &[]);
         step(&journal(4), &[]);
         step(&journal(5), &["a"]);
         step("UPDATE ydoc_updates SET recorded_at_ms=1 WHERE seq=4", &[]);
@@ -8681,6 +8765,34 @@ mod tests {
         step("UPDATE ydoc_updates SET seq=5 WHERE seq=7", &["a"]);
         step("DELETE FROM ydoc_updates WHERE seq=4", &[]);
         step("DELETE FROM ydoc_updates WHERE seq=5", &["a"]);
+        // The rows past it, which inspection loads the head from, move `a`
+        // however they change, unless appended at the top, which the head's
+        // coordinates name; so do the bytes of any blob a journal row, a
+        // snapshot or an archive names. A compaction's own snapshot, and
+        // pruning the rows it folded, move nothing.
+        step(&journal(8), &[]);
+        step(&journal(9), &[]);
+        step(&journal(10), &[]);
+        step("DELETE FROM ydoc_updates WHERE seq=9", &["a"]);
+        step(&journal(9), &["a"]);
+        step("UPDATE ydoc_updates SET update_blob_sha256='other' WHERE seq=9", &["a"]);
+        step("UPDATE ydoc_updates SET recorded_at_ms=2 WHERE seq=9", &[]);
+        step(&snapshot(9), &[]);
+        step("DELETE FROM ydoc_updates WHERE object_id='a' AND seq<=9", &[]);
+        conn.execute_batch(
+            "INSERT INTO binary_blobs VALUES ('update',1,X'00'),('snapshot',1,X'00'),('archive',1,X'00')",
+        )
+        .unwrap();
+        step("UPDATE binary_blobs SET bytes=X'01' WHERE sha256='update'", &["a"]);
+        step("UPDATE binary_blobs SET bytes=X'01' WHERE sha256='snapshot'", &["a"]);
+        step(
+            "INSERT INTO ydoc_inactive_lineages(workspace_id,version_id,object_id,lineage_claim_id,disposition,
+               content_kind,full_state_blob_sha256,state_vector_blob_sha256,recorded_at_ms,updated_at_ms)
+             VALUES ('ws','main','b','archived','superseded-predecessor','richdoc','archive','vector',0,0)",
+            &[],
+        );
+        step("UPDATE binary_blobs SET byte_length=2 WHERE sha256='archive'", &["b"]);
+        step("DELETE FROM ydoc_updates WHERE seq=10", &["a"]);
         step(
             "UPDATE ydoc_docs SET head_update_seq=9,updated_at_ms=1,path='a.md' WHERE object_id='a'",
             &[],
@@ -8813,24 +8925,9 @@ mod tests {
     /// its work stays the same however long a lineage's history grows.
     #[test]
     fn released_tail_triggers_never_scan_retained_history() {
-        use std::sync::atomic::{AtomicU64, Ordering};
         let dir = tempdir();
         let conn = released_tail_store(&dir);
-        let steps = |sql: &str| {
-            let counted = std::sync::Arc::new(AtomicU64::new(0));
-            let counter = std::sync::Arc::clone(&counted);
-            conn.progress_handler(
-                1,
-                Some(move || {
-                    counter.fetch_add(1, Ordering::Relaxed);
-                    false
-                }),
-            )
-            .unwrap();
-            conn.execute_batch(sql).unwrap();
-            conn.progress_handler(0, None::<fn() -> bool>).unwrap();
-            counted.load(Ordering::Relaxed)
-        };
+        let steps = |sql: &str| vm_steps(&conn, sql);
         let journal = |seq: i64| {
             format!(
                 "INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms)
@@ -8878,6 +8975,142 @@ mod tests {
             assert!(
                 long < short + 100,
                 "{write}: {short} steps over one entry, {long} over 20,000"
+            );
+        }
+    }
+
+    /// How many virtual machine steps `sql` takes on `conn`, its triggers'
+    /// included.
+    fn vm_steps(conn: &Connection, sql: &str) -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let counted = std::sync::Arc::new(AtomicU64::new(0));
+        let counter = std::sync::Arc::clone(&counted);
+        conn.progress_handler(
+            1,
+            Some(move || {
+                counter.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        )
+        .unwrap();
+        conn.execute_batch(sql).unwrap();
+        conn.progress_handler(0, None::<fn() -> bool>).unwrap();
+        counted.load(Ordering::Relaxed)
+    }
+
+    /// What `EXPLAIN QUERY PLAN` details of `sql`, with `?1` and `?2` bound.
+    fn query_plan(conn: &Connection, sql: &str) -> Vec<String> {
+        let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let bound = statement.parameter_count();
+        let params = ["digest", "other"];
+        let plan = statement
+            .query_map(rusqlite::params_from_iter(&params[..bound]), |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        plan
+    }
+
+    /// Opus's r2c-3c-1 finding 5: a trigger that matches moves its documents
+    /// by the generations' key. Over 20,000 documents with generations,
+    /// entries naming blobs and journal rows past the latest snapshot, a
+    /// blob one entry names arriving and going, a blob one journal row names
+    /// changing, and an inner journal row going and coming back take as many
+    /// steps as over one, and every statement those triggers run searches by
+    /// index, never scans.
+    #[test]
+    fn released_tail_triggers_that_match_move_by_key() {
+        let dir = tempdir();
+        let conn = released_tail_store(&dir);
+        let grow = |from: i64, to: i64| {
+            conn.execute_batch("BEGIN").unwrap();
+            for n in from..to {
+                conn.execute_batch(&format!(
+                    "INSERT INTO released_tail_generations VALUES ('ws','main','doc-{n}',1);
+                     INSERT INTO owner_ydoc_outbox_entries(outbox_id,sequence,append_key,delivery_id,update_digest,
+                       byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state)
+                     VALUES ('outbox-b',{n},'key-b-{n}','delivery-b-{n}','merged-{n}',1,0,0,1,0,'active');
+                     INSERT INTO binary_blobs VALUES ('journal-{n}',1,X'00');
+                     INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms)
+                       VALUES ('ws','main','a',{n},'journal-{n}',0)"
+                ))
+                .unwrap();
+            }
+            conn.execute_batch("COMMIT").unwrap();
+        };
+        // Row `n` has a row past it, so it is inner.
+        let writes = |n: i64| {
+            [
+                format!("INSERT INTO binary_blobs VALUES ('merged-{n}',1,X'00')"),
+                format!("DELETE FROM binary_blobs WHERE sha256='merged-{n}'"),
+                format!("UPDATE binary_blobs SET bytes=X'01' WHERE sha256='journal-{n}'"),
+                format!("DELETE FROM ydoc_updates WHERE object_id='a' AND seq={n}"),
+                format!(
+                    "INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms)
+                     VALUES ('ws','main','a',{n},'journal-{n}',0)"
+                ),
+            ]
+        };
+        let moved = || {
+            released_tail_generation(&conn, "a").unwrap() + released_tail_generation(&conn, "b").unwrap()
+        };
+        grow(1, 3);
+        let short = writes(1).map(|write| {
+            let before = moved();
+            let steps = vm_steps(&conn, &write);
+            assert!(moved() > before, "{write} matches");
+            steps
+        });
+        grow(3, 20_002);
+        let long = writes(10_000).map(|write| vm_steps(&conn, &write));
+        for ((write, short), long) in writes(10_000).iter().zip(short).zip(long) {
+            assert!(
+                long < short + 100,
+                "{write}: {short} steps over one, {long} over 20,000"
+            );
+        }
+
+        let generations = "UPDATE released_tail_generations SET generation=generation+1 \
+            WHERE (workspace_id,version_id,object_id) IN";
+        for sql in [
+            format!(
+                "{generations} (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
+                   JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.terminal_blob_digest=?1
+                 UNION SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
+                   JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.update_digest=?1)"
+            ),
+            format!(
+                "{generations} (SELECT workspace_id,version_id,object_id FROM ydoc_updates
+                   WHERE update_blob_sha256 IN (?1,?2)
+                 UNION SELECT workspace_id,version_id,object_id FROM ydoc_snapshots
+                   WHERE snapshot_blob_sha256 IN (?1,?2)
+                 UNION SELECT workspace_id,version_id,object_id FROM ydoc_inactive_lineages
+                   WHERE full_state_blob_sha256 IN (?1,?2))"
+            ),
+        ] {
+            let plan = query_plan(&conn, &sql);
+            assert!(
+                plan.iter().any(|detail| detail.starts_with("SEARCH released_tail_generations")),
+                "{sql}: {plan:#?}"
+            );
+            assert!(
+                !plan.iter().any(|detail| detail.starts_with("SCAN")),
+                "{sql}: {plan:#?}"
+            );
+        }
+        for gate in [
+            "SELECT 1 FROM owner_ydoc_outbox_entries WHERE update_digest=?1",
+            "SELECT 1 FROM owner_ydoc_outbox_entries WHERE terminal_blob_digest=?1",
+            "SELECT 1 FROM ydoc_updates WHERE update_blob_sha256 IN (?1,?2)",
+            "SELECT 1 FROM ydoc_snapshots WHERE snapshot_blob_sha256 IN (?1,?2)",
+            "SELECT 1 FROM ydoc_inactive_lineages WHERE full_state_blob_sha256 IN (?1,?2)",
+            "SELECT 1 FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id='a' AND seq>5",
+            "SELECT max(up_to_seq) FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id='a'",
+        ] {
+            let plan = query_plan(&conn, gate);
+            assert!(
+                !plan.iter().any(|detail| detail.starts_with("SCAN")),
+                "{gate}: {plan:#?}"
             );
         }
     }

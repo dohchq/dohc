@@ -6339,6 +6339,90 @@ fn a_released_hold_whose_binding_does_not_read_back_is_never_stored() {
     assert_eq!(read_hosted_replica(&store, "ws").unwrap().unwrap(), before);
 }
 
+/// Sol's r2c-3c-1 finding 2: the store's writer admits a held proof, and
+/// releases it, with the same work however many relay namespaces its hold
+/// names: neither decodes the binding on the writer's thread, and a hold
+/// over 2,000 namespaces takes as many virtual machine steps as one over a
+/// single namespace, whether its answer stands or moved.
+#[test]
+fn a_held_proofs_work_on_the_writer_stays_the_same_however_many_namespaces_it_holds() {
+    use dohc_engine_collab::live_update_application::{
+        HeldProofJob, ProtectedTail, ProtectedTails, RetainedCoverage,
+        binding_decodes_on_this_thread,
+    };
+    let (_scratch, _path, mut store) = hosted_store();
+    host_document(&mut store, "doc");
+    let proofs = HeldProofs::default();
+    let steps = |store: &EngineStore, run: &mut dyn FnMut()| {
+        let counted = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&counted);
+        store
+            .read_with(|conn| {
+                conn.progress_handler(
+                    1,
+                    Some(move || {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                        false
+                    }),
+                )
+            })
+            .unwrap();
+        let decodes = binding_decodes_on_this_thread();
+        run();
+        assert_eq!(binding_decodes_on_this_thread(), decodes, "the writer decodes no binding");
+        store
+            .read_with(|conn| conn.progress_handler(0, None::<fn() -> bool>))
+            .unwrap();
+        counted.load(Ordering::Relaxed)
+    };
+    let mut work = |namespaces: usize| {
+        let mut binding = released_binding("doc", "doc.md", 1);
+        binding.tails = std::sync::Arc::new(ProtectedTails::Listed(
+            (0..namespaces)
+                .map(|index| ProtectedTail {
+                    namespace: format!("relay-{index:05}"),
+                    activation_id: format!("activation-{index:05}"),
+                    release: None,
+                    coverage: RetainedCoverage::Invalid,
+                })
+                .collect(),
+        ));
+        let held = store
+            .write_with(&NoFaults, |tx| {
+                crate::hosted::hold_released_in_tx(tx, &binding, ReleasedHoldContinuation::Frozen, false)
+            })
+            .unwrap();
+        assert!(matches!(held, TxnOutcome::Committed(true)), "{namespaces}");
+        let proof = prove_held_document(&HeldProofJob::of(&store), "ws", "doc").unwrap();
+        let admitted = steps(&store, &mut || {
+            drop(admit_held_proof(&store, &proofs, "ws", "doc").unwrap());
+        });
+        let released = steps(&store, &mut || {
+            assert!(release_held_proof(&store, &proof).unwrap().is_some());
+        });
+        let marked = store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE hosted_documents SET released_hold_binding_stale=1 WHERE object_id='doc'",
+                    [],
+                )
+                .map_err(SyncError::persist)
+            })
+            .unwrap();
+        assert!(matches!(marked, TxnOutcome::Committed(1)), "{namespaces}");
+        let moved = steps(&store, &mut || {
+            let answer = release_held_proof(&store, &proof).unwrap().unwrap();
+            assert_eq!(answer.status, HeldBindingStatus::Stale);
+        });
+        [admitted, released, moved]
+    };
+    let one = work(1);
+    let many = work(2_000);
+    for ((what, one), many) in ["admitted", "released", "moved"].iter().zip(one).zip(many) {
+        assert!(many < one + 50, "{what}: {one} steps over one namespace, {many} over 2,000");
+    }
+}
+
 /// Binding version 2 replaced version 1, which nothing reads: a hold that
 /// stored a version 1 binding reads as damage, never as no hold, and stays
 /// stored.
@@ -6364,9 +6448,10 @@ fn a_stored_version_1_binding_reads_as_damage() {
                 .map_err(SyncError::persist)?;
             tx.execute(
                 "INSERT INTO hosted_documents (workspace_id,object_id,path,state,scope_generation, \
-                   held_reason,released_hold_binding_json,released_hold_continuation) \
-                 VALUES ('ws','doc','doc.md','held',1,'released-lineage-unsettled',?1,'frozen')",
-                [&v1],
+                   held_reason,released_hold_binding_json,released_hold_binding_digest, \
+                   released_hold_continuation) \
+                 VALUES ('ws','doc','doc.md','held',1,'released-lineage-unsettled',?1,?2,'frozen')",
+                rusqlite::params![v1, "c".repeat(64)],
             )
             .map_err(SyncError::persist)
         })

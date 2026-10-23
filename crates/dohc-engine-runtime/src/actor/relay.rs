@@ -1985,13 +1985,19 @@ impl ActorHandle {
             HeldProofError::Closed => RuntimeError::ActorUnavailable,
             HeldProofError::Panicked => RuntimeError::WorkerPanicked,
         })?;
-        self.run(move |store, _cache| match &*proved {
-            Ok(proof) => {
-                dohc_engine_sync::release_held_proof(store, proof).map_err(RuntimeError::from)
-            }
-            Err(failure) => Err(dohc_engine_sync::shared_proof_failure(failure).into()),
-        })
-        .await
+        let proof = match &*proved {
+            Ok(proof) => proof,
+            Err(failure) => return Err(dohc_engine_sync::shared_proof_failure(failure).into()),
+        };
+        // Only the bounded freshness goes to the actor: the proof, however
+        // large, is dropped here, never there.
+        let freshness = proof.freshness().clone();
+        let release = self
+            .run(move |store, _cache| {
+                dohc_engine_sync::check_held_freshness(store, &freshness).map_err(RuntimeError::from)
+            })
+            .await?;
+        Ok(proof.released(release))
     }
 
     pub async fn dismiss_sync_refusal(

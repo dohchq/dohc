@@ -270,7 +270,7 @@ fn held_json(document: &HeldDocument) -> Value {
     json!({
         "objectId": document.object_id,
         "path": document.path,
-        "bindingDigest": document.binding.digest(),
+        "bindingDigest": document.binding_digest,
         "continuation": document.continuation.as_str(),
         "bindingStale": document.binding_stale,
     })
@@ -772,31 +772,40 @@ mod tests {
         }
     }
 
-    fn held(object_id: &str, path: &str, tails: ProtectedTails) -> HeldDocument {
-        HeldDocument {
+    fn binding(object_id: &str, path: &str, tails: ProtectedTails) -> ReleasedLineageBinding {
+        ReleasedLineageBinding {
+            workspace_id: "attached".into(),
+            main_version_id: "main".into(),
             object_id: object_id.into(),
-            path: path.into(),
-            binding: Box::new(ReleasedLineageBinding {
-                workspace_id: "attached".into(),
-                main_version_id: "main".into(),
-                object_id: object_id.into(),
-                lineage_claim_id: "a".repeat(64),
-                current_path: Some(path.into()),
-                restore_generation: Some(0),
-                incoming: IncomingCoordinate {
-                    relay_namespace: Some("relay".into()),
-                    replication_epoch: "epoch".into(),
-                    stream_identity: "stream".into(),
-                    origin_id: "desktop".into(),
-                    origin_seq: 1,
-                    relay_seq: 3,
-                },
-                head_digest: "b".repeat(64),
-                tails: Arc::new(tails),
-            }),
+            lineage_claim_id: "a".repeat(64),
+            current_path: Some(path.into()),
+            restore_generation: Some(0),
+            incoming: IncomingCoordinate {
+                relay_namespace: Some("relay".into()),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                origin_id: "desktop".into(),
+                origin_seq: 1,
+                relay_seq: 3,
+            },
+            head_digest: "b".repeat(64),
+            tails: Arc::new(tails),
+        }
+    }
+
+    /// The hold of `binding`'s document, as its row names it.
+    fn held_by(binding: &ReleasedLineageBinding) -> HeldDocument {
+        HeldDocument {
+            object_id: binding.object_id.clone(),
+            path: binding.current_path.clone().unwrap(),
+            binding_digest: binding.digest(),
             continuation: ReleasedHoldContinuation::Frozen,
             binding_stale: false,
         }
+    }
+
+    fn held(object_id: &str, path: &str, tails: ProtectedTails) -> HeldDocument {
+        held_by(&binding(object_id, path, tails))
     }
 
     /// The `index`th contribution of a large hold, its identities as long as
@@ -824,10 +833,13 @@ mod tests {
         }
     }
 
-    fn inspection(document: HeldDocument, preservation: Preservation) -> HeldDocumentInspection {
-        let contributions = ContributionArtifact::of(&document.binding, &preservation);
+    fn inspection(
+        binding: &ReleasedLineageBinding,
+        preservation: Preservation,
+    ) -> HeldDocumentInspection {
+        let contributions = ContributionArtifact::of(binding, &preservation);
         HeldDocumentInspection {
-            document,
+            document: held_by(binding),
             status: HeldBindingStatus::Current,
             preservation: Some(preservation),
             contributions: Some(contributions),
@@ -914,7 +926,7 @@ mod tests {
         findings.push(located(PreservationReason::MalformedAuthorship, Some("relay-c"), Some(1)));
         findings.push(located(PreservationReason::PendingContributionDependencies, None, None));
         let inspected = inspection(
-            held("object", "docs/object.md", ProtectedTails::Invalid),
+            &binding("object", "docs/object.md", ProtectedTails::Invalid),
             Preservation {
                 status: PreservationStatus::InvalidEvidence,
                 findings,
@@ -992,8 +1004,9 @@ mod tests {
             release: None,
             coverage: RetainedCoverage::Unproven(committed.clone()),
         };
+        let bound = binding("object", "docs/object.md", ProtectedTails::Listed(vec![tail]));
         let inspected = inspection(
-            held("object", "docs/object.md", ProtectedTails::Listed(vec![tail])),
+            &bound,
             Preservation {
                 status: PreservationStatus::Complete,
                 findings: Vec::new(),
@@ -1020,7 +1033,7 @@ mod tests {
         let listed: Value = serde_json::from_slice(&artifact.bytes).unwrap();
         let every: Vec<_> = covered.iter().map(RetainedContribution::to_json).collect();
         assert_eq!(listed["version"], 1);
-        assert_eq!(listed["binding"], inspected.document.binding.to_json());
+        assert_eq!(listed["binding"], bound.to_json());
         assert_eq!(listed["coveredContributions"], json!([{"namespace": "relay", "contributions": every}]));
         let read: Vec<_> = listed["mergedContributionIds"]
             .as_array()
@@ -1040,7 +1053,7 @@ mod tests {
     #[test]
     fn the_merged_list_commits_even_when_empty() {
         let inspected = inspection(
-            held("object", "docs/object.md", ProtectedTails::Invalid),
+            &binding("object", "docs/object.md", ProtectedTails::Invalid),
             Preservation {
                 status: PreservationStatus::InvalidEvidence,
                 findings: vec![PreservationFinding {

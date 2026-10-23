@@ -8144,7 +8144,7 @@ fn rebound(w: &mut RetainedWindow) -> Box<ReleasedLineageBinding> {
     else {
         panic!("the drain holds the fold again");
     };
-    assert_eq!(inspected_window(&w.store).document.binding, binding);
+    assert_eq!(inspected_window(&w.store).document.binding_digest, binding.digest());
     binding
 }
 
@@ -8169,7 +8169,7 @@ async fn inspection_preserves_integrated_retained_work_and_writes_nothing() {
         let (native, rows, ingress) = (w.native(), native_rows(&w.store), ingress_rows(&w.store));
 
         let inspection = inspected_window(&w.store);
-        assert_eq!(inspection.document.binding, binding, "{case}");
+        assert_eq!(inspection.document.binding_digest, binding.digest(), "{case}");
         assert_eq!(inspection.status, dohc_engine_sync::HeldBindingStatus::Current, "{case}");
         let preservation = inspection.preservation.expect("a current binding is inspected");
         assert_eq!(preservation.status, PreservationStatus::Complete, "{case}: {:?}", preservation.findings);
@@ -8187,7 +8187,7 @@ async fn inspection_preserves_integrated_retained_work_and_writes_nothing() {
             .expect("a hosted replica");
         assert_eq!(page.documents.len(), 1, "{case}: after a restart");
         assert_eq!(page.documents[0].object_id, "object");
-        assert_eq!(page.documents[0].binding, binding);
+        assert_eq!(page.documents[0].binding_digest, binding.digest());
         assert_eq!(page.documents[0].continuation, dohc_engine_sync::ReleasedHoldContinuation::Frozen);
         assert!(!page.has_more && !page.documents[0].binding_stale, "{case}");
         let after = dohc_engine_sync::list_held_documents(&w.store, "workspace", Some("object"), 1)
@@ -8213,10 +8213,10 @@ async fn inspection_preserves_integrated_retained_work_and_writes_nothing() {
 #[tokio::test]
 async fn an_outbox_only_contribution_is_preserved_without_changing_the_head() {
     let (mut w, desktop, _client) = held_for_a_queued_fold().await;
-    let earlier = inspected_window(&w.store).document.binding;
+    let earlier = inspected_window(&w.store).document.binding_digest;
     let contribution = outbox_only(&mut w, "Outbox only.", Stored::TheUpdate);
     let stale = inspected_window(&w.store);
-    assert_eq!(stale.document.binding, earlier, "nothing derived it again yet");
+    assert_eq!(stale.document.binding_digest, earlier, "nothing derived it again yet");
     assert_eq!(stale.status, dohc_engine_sync::HeldBindingStatus::Stale);
     assert_eq!(stale.preservation, None, "a stale binding claims nothing");
 
@@ -8385,8 +8385,12 @@ async fn an_archived_hold_is_inspected_against_its_archive() {
     let (native, rows) = (w.native(), native_rows(&w.store));
 
     let inspection = inspected_window(&w.store);
-    assert_eq!(inspection.document.binding.lineage_claim_id, w.lineage);
-    assert_eq!(inspection.document.binding.head_digest, archive);
+    let artifact: serde_json::Value =
+        serde_json::from_slice(&inspection.contributions.as_ref().unwrap().bytes).unwrap();
+    let bound = ReleasedLineageBinding::from_json(&artifact["binding"]).unwrap();
+    assert_eq!(bound.digest(), inspection.document.binding_digest);
+    assert_eq!(bound.lineage_claim_id, w.lineage);
+    assert_eq!(bound.head_digest, archive);
     assert_eq!(inspection.status, dohc_engine_sync::HeldBindingStatus::Current);
     let preservation = inspection.preservation.unwrap();
     assert_eq!(preservation.status, PreservationStatus::Complete, "{:?}", preservation.findings);

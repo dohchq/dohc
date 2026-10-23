@@ -2,8 +2,8 @@
 //! left, as their owner reviews them: found in object ID order from durable
 //! state alone, so discovery needs no editor and survives a restart, and each
 //! inspected against its stored binding. Inspection proves off the store's
-//! actor and is released there only while what it read still stands. Nothing
-//! here writes.
+//! actor and is released there only while what it read still stands. Only
+//! the proof decodes a binding; nothing here writes.
 
 use std::sync::Arc;
 
@@ -21,21 +21,23 @@ use crate::ydoc_apply::protection_failure;
 /// or why it failed.
 pub type ProvedHeld = Result<HeldProof, Arc<SyncError>>;
 
-/// The held-document proofs of one store's actor, each keyed by the whole
-/// freshness its caller reads at admission: callers share a proof only when
-/// they ask the same of the same state.
-pub type HeldProofs = live::HeldProofs<HeldFreshness, ProvedHeld>;
+/// The held-document proofs of one store's actor, each keyed by what its
+/// caller reads of the hold at admission: callers share a proof only when
+/// they ask the same of the same hold.
+pub type HeldProofs = live::HeldProofs<HeldKey, ProvedHeld>;
 
 /// [`admit_held_proof`]'s answer.
-pub type HeldProofAdmission = live::HeldProofAdmission<HeldFreshness, ProvedHeld>;
+pub type HeldProofAdmission = live::HeldProofAdmission<HeldKey, ProvedHeld>;
 
-/// One document the replica holds for released retained work.
+/// One document the replica holds for released retained work, as its hold
+/// names it. The binding itself stays stored; only a proof decodes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeldDocument {
     pub object_id: String,
     /// The path its scope names it at.
     pub path: String,
-    pub binding: Box<ReleasedLineageBinding>,
+    /// The digest of the binding the hold stores.
+    pub binding_digest: String,
     pub continuation: ReleasedHoldContinuation,
     /// The stored hold already claims no currency for its binding.
     pub binding_stale: bool,
@@ -102,7 +104,7 @@ pub fn list_held_documents(
         }
         let mut statement = conn
             .prepare_cached(&format!(
-                "SELECT object_id,path,state,{HELD_COLUMNS} FROM hosted_documents \
+                "SELECT {HELD_DOCUMENT_COLUMNS} FROM hosted_documents \
                  WHERE workspace_id=?1 AND held_reason=?2 AND (?3 IS NULL OR object_id>?3) \
                  AND scope_generation=(SELECT scope_generation FROM hosted_replicas \
                    WHERE workspace_id=?1) \
@@ -154,22 +156,21 @@ pub fn inspect_held_document(
 }
 
 /// What a held document's proof found, and what it read to find it. Only
-/// [`release_held_proof`] hands its inspection over.
+/// [`HeldProof::released`] hands its inspection over.
 #[derive(Debug)]
 pub struct HeldProof {
     inspection: Option<Arc<HeldDocumentInspection>>,
     freshness: HeldFreshness,
 }
 
-/// What a held document's proof read beyond the evidence its document's
-/// released tail generation covers, each by key, so the store's writer can
-/// compare it again without enumerating, replaying or hashing anything: the
-/// open and identity of the store, the workspace and its main version, the
-/// replica's scope and the feed it reads, the hold with its binding, reason,
-/// continuation and stale flag, and the coordinates of the lineage that
-/// binding names. Proofs are coalesced by it.
+/// What a request for a held document reads of its hold, by key and without
+/// the binding, so the store's writer reads it in a handful of statements
+/// however much the hold covers: the open and identity of the store, the
+/// workspace and its main version, the replica's scope and the feed it
+/// reads, and the hold with its binding's digest, its path, continuation and
+/// stale flag. Proofs are coalesced by it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HeldFreshness {
+pub struct HeldKey {
     opening: u64,
     engine: String,
     workspace_id: String,
@@ -181,16 +182,55 @@ pub struct HeldFreshness {
     /// The replication epoch and stream the replica reads.
     feed: Option<(String, String)>,
     hold: Option<HeldDocument>,
-    lineage: Option<LineageCoordinates>,
+}
+
+/// What a held document's proof read beyond the evidence its document's
+/// released tail generation covers, each by key, so the store's writer can
+/// compare it again without decoding, enumerating, replaying or hashing
+/// anything: the proof's [`HeldKey`], and the coordinates of the lineage the
+/// binding it decoded names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldFreshness {
+    key: HeldKey,
+    /// The binding's document and lineage, and where that lineage stood.
+    lineage: Option<(DocKey, String, LineageCoordinates)>,
+}
+
+/// What the store's writer finds of a proof once it ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeldRelease {
+    /// Everything the proof read still stands, and so does its inspection.
+    Current,
+    /// Something it read moved: the document as the store holds it now,
+    /// stale, with nothing preserved and no artifact, or none when nothing
+    /// holds it now. Nothing proves again.
+    Stale(Option<Arc<HeldDocumentInspection>>),
+}
+
+impl HeldProof {
+    /// What the proof read, for [`check_held_freshness`].
+    pub fn freshness(&self) -> &HeldFreshness {
+        &self.freshness
+    }
+
+    /// The proof's answer, once [`check_held_freshness`] found `release`.
+    /// Each caller that shared the proof releases it for itself.
+    pub fn released(&self, release: HeldRelease) -> Option<Arc<HeldDocumentInspection>> {
+        match release {
+            HeldRelease::Current => self.inspection.clone(),
+            HeldRelease::Stale(now) => now,
+        }
+    }
 }
 
 /// Inspect the held document `object_id` as [`inspect_held_document`]
 /// describes, off the store's writer: on `job`'s own reader, in one read
 /// transaction whose snapshot is fixed before the hold is read. Everything
-/// the inspection needs runs here: tail enumeration, provenance validation,
-/// replay, merging, projection and the contribution artifact, each checking
-/// between its units whether `job` stopped. The reader closes before this
-/// returns, however it returns.
+/// the inspection needs runs here: decoding the binding, tail enumeration,
+/// provenance validation, replay, merging and projection inside the
+/// transaction, then the contribution artifact once the reader closed, each
+/// checking between its units whether `job` stopped. The reader closes
+/// before this returns, however it returns.
 pub fn prove_held_document(
     job: &HeldProofJob,
     workspace_id: &str,
@@ -199,86 +239,131 @@ pub fn prove_held_document(
     let stop = job.stop();
     let mut reader = job.reader().map_err(protection_failure)?;
     let (tx, engine) = job.snapshot(&mut reader).map_err(protection_failure)?;
-    let freshness = freshness(&tx, job.opening(), engine, workspace_id, object_id)?;
-    let inspection = match &freshness.hold {
-        None => None,
-        Some(document) => {
-            let preservation = if document.binding_stale
-                || !feed_matches(&freshness, &document.binding)
-            {
-                None
-            } else {
-                match inspect_held(&tx, &document.binding, stop).map_err(protection_failure)? {
-                    HeldInspection::Current(preservation) => Some(preservation),
-                    HeldInspection::Stale => None,
-                }
+    let key = held_key(&tx, job.opening(), engine, workspace_id, object_id)?;
+    let binding = key
+        .hold
+        .as_ref()
+        .map(|document| held_binding(&tx, workspace_id, document))
+        .transpose()?;
+    let lineage = binding
+        .as_ref()
+        .map(|binding| {
+            let doc = DocKey {
+                workspace_id: binding.workspace_id.clone(),
+                version_id: binding.main_version_id.clone(),
+                object_id: binding.object_id.clone(),
             };
-            let contributions = match &preservation {
-                Some(preservation) => {
-                    stop.check(ProofStage::Encoding).map_err(protection_failure)?;
-                    let artifact = ContributionArtifact::of(&document.binding, preservation);
-                    stop.check(ProofStage::Encoding).map_err(protection_failure)?;
-                    Some(artifact)
-                }
-                None => None,
-            };
-            Some(Arc::new(HeldDocumentInspection {
-                document: document.clone(),
-                status: if preservation.is_some() {
-                    HeldBindingStatus::Current
-                } else {
-                    HeldBindingStatus::Stale
-                },
-                preservation,
-                contributions,
-            }))
+            LineageCoordinates::read(&tx, &doc, &binding.lineage_claim_id)
+                .map(|coordinates| (doc, binding.lineage_claim_id.clone(), coordinates))
+        })
+        .transpose()
+        .map_err(protection_failure)?;
+    let preservation = match (&key.hold, &binding) {
+        (Some(document), Some(binding))
+            if !document.binding_stale && feed_matches(&key, binding) =>
+        {
+            match inspect_held(&tx, binding, stop).map_err(protection_failure)? {
+                HeldInspection::Current(preservation) => Some(preservation),
+                HeldInspection::Stale => None,
+            }
         }
+        _ => None,
     };
     tx.rollback().map_err(SyncError::corrupt)?;
     drop(reader);
+    let contributions = match (&binding, &preservation) {
+        (Some(binding), Some(preservation)) => {
+            stop.check(ProofStage::Encoding).map_err(protection_failure)?;
+            let artifact = ContributionArtifact::of(binding, preservation);
+            stop.check(ProofStage::Encoding).map_err(protection_failure)?;
+            Some(artifact)
+        }
+        _ => None,
+    };
+    let inspection = key.hold.clone().map(|document| {
+        Arc::new(HeldDocumentInspection {
+            document,
+            status: if preservation.is_some() {
+                HeldBindingStatus::Current
+            } else {
+                HeldBindingStatus::Stale
+            },
+            preservation,
+            contributions,
+        })
+    });
     Ok(HeldProof {
         inspection,
-        freshness,
+        freshness: HeldFreshness { key, lineage },
     })
 }
 
 /// Admit a proof of the held document `object_id` to `proofs`, keyed by its
-/// freshness as `store`, the store's writer, reads it now with bounded
-/// reads: a caller that asks the same of the same state joins the running
-/// proof, and any other request for the workspace while one runs is busy.
+/// hold as `store`, the store's writer, reads it now with bounded reads: a
+/// caller that asks the same of the same hold joins the running proof, and
+/// any other request for the workspace while one runs is busy.
 pub fn admit_held_proof(
     store: &EngineStore,
     proofs: &HeldProofs,
     workspace_id: &str,
     object_id: &str,
 ) -> Result<HeldProofAdmission, SyncError> {
-    let key = current_freshness(store, workspace_id, object_id)?;
+    let opening = store.opening();
+    let key = store.read_with(|conn| {
+        read_only(conn, |tx| {
+            let engine = store_identity(tx).map_err(protection_failure)?;
+            held_key(tx, opening, engine, workspace_id, object_id)
+        })
+    })?;
     Ok(proofs.admit(store, workspace_id, key))
 }
 
-/// `proof`'s inspection, while everything it read still stands on `store`,
-/// the store's writer, as one read transaction of bounded reads finds it.
-/// Otherwise the document as the store holds it now, stale, with nothing
-/// preserved and no artifact; nothing proves again. None when nothing holds
-/// the document now. Each caller that shared the proof releases it for
-/// itself.
+/// Whether everything `freshness` names still stands on `store`, the store's
+/// writer, as one read transaction finds it: the hold's row without its
+/// binding, then, while that stands, the coordinates of the lineage the
+/// proof found the binding naming. Nothing decodes, enumerates, replays or
+/// hashes, however much the hold covers.
+pub fn check_held_freshness(
+    store: &EngineStore,
+    freshness: &HeldFreshness,
+) -> Result<HeldRelease, SyncError> {
+    let proved = &freshness.key;
+    let opening = store.opening();
+    store.read_with(|conn| {
+        read_only(conn, |tx| {
+            let engine = store_identity(tx).map_err(protection_failure)?;
+            let key = held_key(tx, opening, engine, &proved.workspace_id, &proved.object_id)?;
+            let stands = key == *proved
+                && match &freshness.lineage {
+                    None => true,
+                    Some((doc, lineage, coordinates)) => {
+                        LineageCoordinates::read(tx, doc, lineage).map_err(protection_failure)?
+                            == *coordinates
+                    }
+                };
+            Ok(if stands {
+                HeldRelease::Current
+            } else {
+                HeldRelease::Stale(key.hold.map(|document| {
+                    Arc::new(HeldDocumentInspection {
+                        document,
+                        status: HeldBindingStatus::Stale,
+                        preservation: None,
+                        contributions: None,
+                    })
+                }))
+            })
+        })
+    })
+}
+
+/// `proof`'s answer once [`check_held_freshness`] compared what it read on
+/// `store`, the store's writer.
 pub fn release_held_proof(
     store: &EngineStore,
     proof: &HeldProof,
 ) -> Result<Option<Arc<HeldDocumentInspection>>, SyncError> {
-    let proved = &proof.freshness;
-    let now = current_freshness(store, &proved.workspace_id, &proved.object_id)?;
-    if now == *proved {
-        return Ok(proof.inspection.clone());
-    }
-    Ok(now.hold.map(|document| {
-        Arc::new(HeldDocumentInspection {
-            document,
-            status: HeldBindingStatus::Stale,
-            preservation: None,
-            contributions: None,
-        })
-    }))
+    Ok(proof.released(check_held_freshness(store, &proof.freshness)?))
 }
 
 /// A failed proof's error, again for each caller that shared it: a busy
@@ -291,31 +376,15 @@ pub fn shared_proof_failure(error: &Arc<SyncError>) -> SyncError {
     SyncError::Storage(StorageError::corrupt_public(Arc::clone(error)))
 }
 
-/// What `store`, the store's writer, reads of a held document's freshness
-/// now, in one read transaction.
-fn current_freshness(
-    store: &EngineStore,
-    workspace_id: &str,
-    object_id: &str,
-) -> Result<HeldFreshness, SyncError> {
-    let opening = store.opening();
-    store.read_with(|conn| {
-        read_only(conn, |tx| {
-            let engine = store_identity(tx).map_err(protection_failure)?;
-            freshness(tx, opening, engine, workspace_id, object_id)
-        })
-    })
-}
-
-/// What `conn` reads of a held document's freshness, by key alone, on the
-/// store open `opening` whose identity is `engine`.
-fn freshness(
+/// What `conn` reads of a held document's hold, by key alone, on the store
+/// open `opening` whose identity is `engine`.
+fn held_key(
     conn: &Connection,
     opening: u64,
     engine: String,
     workspace_id: &str,
     object_id: &str,
-) -> Result<HeldFreshness, SyncError> {
+) -> Result<HeldKey, SyncError> {
     let main_version_id = conn
         .query_row(
             "SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1",
@@ -340,21 +409,7 @@ fn freshness(
         )
         .optional()
         .map_err(SyncError::corrupt)?;
-    let hold = held_in(conn, workspace_id, object_id)?;
-    let lineage = hold
-        .as_ref()
-        .map(|document| {
-            let binding = &document.binding;
-            let doc = DocKey {
-                workspace_id: binding.workspace_id.clone(),
-                version_id: binding.main_version_id.clone(),
-                object_id: binding.object_id.clone(),
-            };
-            LineageCoordinates::read(conn, &doc, &binding.lineage_claim_id)
-        })
-        .transpose()
-        .map_err(protection_failure)?;
-    Ok(HeldFreshness {
+    Ok(HeldKey {
         opening,
         engine,
         workspace_id: workspace_id.to_owned(),
@@ -362,8 +417,7 @@ fn freshness(
         main_version_id,
         scope_generation,
         feed,
-        hold,
-        lineage,
+        hold: held_in(conn, workspace_id, object_id)?,
     })
 }
 
@@ -395,16 +449,14 @@ fn held_in(
     workspace_id: &str,
     object_id: &str,
 ) -> Result<Option<HeldDocument>, SyncError> {
-    if !replica_exists(conn, workspace_id)? {
-        return Ok(None);
-    }
-    conn.query_row(
-        &format!(
-            "SELECT object_id,path,state,{HELD_COLUMNS} FROM hosted_documents \
-             WHERE workspace_id=?1 AND object_id=?2 AND held_reason=?3 \
-             AND scope_generation=(SELECT scope_generation FROM hosted_replicas \
-               WHERE workspace_id=?1)"
-        ),
+    conn.prepare_cached(&format!(
+        "SELECT {HELD_DOCUMENT_COLUMNS} FROM hosted_documents \
+         WHERE workspace_id=?1 AND object_id=?2 AND held_reason=?3 \
+         AND scope_generation=(SELECT scope_generation FROM hosted_replicas \
+           WHERE workspace_id=?1)"
+    ))
+    .map_err(SyncError::corrupt)?
+    .query_row(
         params![workspace_id, object_id, RELEASED_LINEAGE_UNSETTLED],
         held_row,
     )
@@ -414,36 +466,69 @@ fn held_in(
     .transpose()
 }
 
-type HeldRow = (String, String, String, HeldColumns);
-
-fn held_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HeldRow> {
-    Ok((row.get(0)?, row.get(1)?, row.get(2)?, HeldColumns::read(row, 3)?))
+/// The binding `document`'s hold stores, which must be the one its digest
+/// names. Only a proof decodes it.
+fn held_binding(
+    conn: &Connection,
+    workspace_id: &str,
+    document: &HeldDocument,
+) -> Result<ReleasedLineageBinding, SyncError> {
+    let stored: String = conn
+        .query_row(
+            "SELECT released_hold_binding_json FROM hosted_documents \
+             WHERE workspace_id=?1 AND object_id=?2",
+            params![workspace_id, document.object_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    ReleasedLineageBinding::from_canonical_json(&stored)
+        .filter(|binding| binding.digest() == document.binding_digest)
+        .ok_or_else(malformed)
 }
 
-fn held_document((object_id, path, state, held): HeldRow) -> Result<HeldDocument, SyncError> {
-    match decode_status(&path, &state, held)? {
-        HostedDocumentStatus::Held(HostedHold::ReleasedLineageUnsettled {
-            binding,
-            continuation,
-            binding_stale,
-        }) => Ok(HeldDocument {
-            object_id,
-            path,
-            binding,
-            continuation,
-            binding_stale,
-        }),
-        _ => Err(crate::error::local_corruption(
-            "a hosted document's state is malformed",
-        )),
-    }
+/// The `hosted_documents` columns that say what holds a document for
+/// released retained work, in [`held_row`]'s order: every one but the
+/// binding, which comes after them in the row, so reading them never reaches
+/// its bytes.
+const HELD_DOCUMENT_COLUMNS: &str = "object_id,path,released_hold_binding_digest,\
+    released_hold_continuation,released_hold_binding_stale";
+
+type HeldRow = (String, String, Option<String>, Option<String>, bool);
+
+fn held_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HeldRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+    ))
+}
+
+fn held_document(
+    (object_id, path, binding_digest, continuation, binding_stale): HeldRow,
+) -> Result<HeldDocument, SyncError> {
+    Ok(HeldDocument {
+        object_id,
+        path,
+        binding_digest: binding_digest.ok_or_else(malformed)?,
+        continuation: continuation
+            .as_deref()
+            .and_then(ReleasedHoldContinuation::parse)
+            .ok_or_else(malformed)?,
+        binding_stale,
+    })
+}
+
+fn malformed() -> SyncError {
+    crate::error::local_corruption("a hosted document's state is malformed")
 }
 
 /// Whether the replica still reads the feed `binding`'s update arrived on.
-fn feed_matches(freshness: &HeldFreshness, binding: &ReleasedLineageBinding) -> bool {
+fn feed_matches(key: &HeldKey, binding: &ReleasedLineageBinding) -> bool {
     let incoming = &binding.incoming;
-    freshness.workspace_id == binding.workspace_id
-        && freshness
+    key.workspace_id == binding.workspace_id
+        && key
             .feed
             .as_ref()
             .map(|(epoch, stream)| (epoch.as_str(), stream.as_str()))

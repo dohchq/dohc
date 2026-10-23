@@ -493,7 +493,8 @@ pub enum ProofStage {
     Merge,
     /// Before the merged state is projected, and before it is encoded.
     Projection,
-    /// Before and after the contribution artifact is encoded and hashed.
+    /// Before and after the contribution artifact is encoded and hashed,
+    /// once the reader closed.
     Encoding,
 }
 
@@ -539,7 +540,9 @@ pub fn store_identity(conn: &Connection) -> Result<String, ApplicationError> {
 /// released tail generation covers, each by key: that generation, the
 /// document's path and restore generation, and where the lineage's state
 /// stands. Reading them loads, replays and hashes nothing, however much the
-/// lineage holds.
+/// lineage holds. The generation covers the rest of the state the proof
+/// loads: the journal rows between the head's snapshot and its last row,
+/// and the bytes of every blob the head or an archive names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineageCoordinates {
     /// None before the document's first activation.
@@ -554,11 +557,14 @@ pub struct LineageCoordinates {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LineageState {
     /// The head holds it: its content kind, its last journal row and the
-    /// compaction its state loads from.
+    /// compaction its state loads from, as the document names them and as
+    /// the journal holds them, each row with the blob it names.
     Head {
         kind: ContentKind,
         update_seq: i64,
         snapshot_seq: i64,
+        snapshot: Option<(i64, String)>,
+        last_update: Option<(i64, String)>,
     },
     /// An archive keeps it: the digest of the full state kept, and its kind.
     Archived { full_state: String, kind: String },
@@ -576,6 +582,20 @@ impl LineageCoordinates {
                 kind: marker.content_kind,
                 update_seq: marker.head_update_seq,
                 snapshot_seq: marker.head_snapshot_seq,
+                snapshot: durable::latest_snapshot(conn, doc)?,
+                last_update: conn
+                    .prepare_cached(
+                        "SELECT seq,update_blob_sha256 FROM ydoc_updates
+                         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
+                         ORDER BY seq DESC LIMIT 1",
+                    )
+                    .map_err(read_sql)?
+                    .query_row(
+                        params![doc.workspace_id, doc.version_id, doc.object_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(read_sql)?,
             },
             None => conn
                 .query_row(

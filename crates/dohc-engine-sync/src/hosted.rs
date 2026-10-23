@@ -28,10 +28,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::{ReplicationEnvelope, SyncError};
 
 pub use held::{
-    HeldBindingStatus, HeldDocument, HeldDocumentInspection, HeldDocumentsPage, HeldProof,
-    HeldProofAdmission, HeldProofs, MAX_HELD_DOCUMENTS_PAGE, ProvedHeld, admit_held_proof,
-    inspect_held_document, list_held_documents, prove_held_document, release_held_proof,
-    shared_proof_failure,
+    HeldBindingStatus, HeldDocument, HeldDocumentInspection, HeldDocumentsPage, HeldFreshness,
+    HeldKey, HeldProof, HeldProofAdmission, HeldProofs, HeldRelease, MAX_HELD_DOCUMENTS_PAGE,
+    ProvedHeld, admit_held_proof, check_held_freshness, inspect_held_document,
+    list_held_documents, prove_held_document, release_held_proof, shared_proof_failure,
 };
 #[cfg(test)]
 pub(crate) use park::OCCUPANTS_READ;
@@ -700,16 +700,18 @@ impl HostedHold {
         }
     }
 
-    /// The binding's canonical JSON, continuation and staleness a
+    /// The binding's canonical JSON and digest, continuation and staleness a
     /// released-lineage hold stores; none and fresh for any other.
-    fn released(&self) -> Result<(Option<String>, Option<&'static str>, bool), SyncError> {
+    fn released(
+        &self,
+    ) -> Result<(Option<(String, String)>, Option<&'static str>, bool), SyncError> {
         Ok(match self {
             Self::ReleasedLineageUnsettled {
                 binding,
                 continuation,
                 binding_stale,
             } => (
-                Some(stored_binding(binding)?),
+                Some((stored_binding(binding)?, binding.digest())),
                 Some(continuation.as_str()),
                 *binding_stale,
             ),
@@ -959,6 +961,8 @@ pub(crate) fn adopt_scope(
                  held_conflict_id=CASE WHEN scope_generation=?3 THEN held_conflict_id END, \
                  released_hold_binding_json=CASE WHEN scope_generation=?3 \
                    THEN released_hold_binding_json END, \
+                 released_hold_binding_digest=CASE WHEN scope_generation=?3 \
+                   THEN released_hold_binding_digest END, \
                  released_hold_continuation=CASE WHEN scope_generation=?3 \
                    THEN released_hold_continuation END, \
                  released_hold_binding_stale=CASE WHEN scope_generation=?3 \
@@ -1168,11 +1172,12 @@ pub fn commit_hosted_cursor(
             let (binding, continuation, binding_stale) = hold
                 .as_ref()
                 .map_or(Ok((None, None, false)), HostedHold::released)?;
+            let (binding, binding_digest) = binding.unzip();
             tx.execute(
                 "UPDATE hosted_documents SET backfill_cursor=?3,state=?4, \
                  held_reason=?5,held_path=?6,held_by=?7,held_conflict_id=?8, \
                  released_hold_binding_json=?9,released_hold_continuation=?10, \
-                 released_hold_binding_stale=?11 \
+                 released_hold_binding_stale=?11,released_hold_binding_digest=?12 \
                  WHERE workspace_id=?1 AND object_id=?2",
                 params![
                     workspace_id,
@@ -1185,7 +1190,8 @@ pub fn commit_hosted_cursor(
                     hold.as_ref().and_then(HostedHold::held_conflict_id),
                     binding,
                     continuation,
-                    binding_stale
+                    binding_stale,
+                    binding_digest
                 ],
             )
             .map_err(SyncError::persist)?;
@@ -1435,7 +1441,8 @@ pub(crate) fn hold_released_in_tx(
         .execute(
             "UPDATE hosted_documents SET state='held',held_reason=?3,held_path=NULL,held_by=NULL, \
                held_conflict_id=NULL,released_hold_binding_json=?4,released_hold_continuation=?5, \
-               released_hold_binding_stale=?6,backfill_cursor=CASE WHEN state='ready' \
+               released_hold_binding_stale=?6,released_hold_binding_digest=?7, \
+               backfill_cursor=CASE WHEN state='ready' \
                  THEN MAX(backfill_cursor,(SELECT main_cursor FROM hosted_replicas WHERE workspace_id=?1)) \
                  ELSE backfill_cursor END \
              WHERE workspace_id=?1 AND object_id=?2 AND state<>'parked'",
@@ -1445,7 +1452,8 @@ pub(crate) fn hold_released_in_tx(
                 RELEASED_LINEAGE_UNSETTLED,
                 stored_binding(binding)?,
                 continuation.as_str(),
-                binding_stale
+                binding_stale,
+                binding.digest()
             ],
         )
         .map_err(SyncError::persist)?;

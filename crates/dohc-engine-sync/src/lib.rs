@@ -69,11 +69,12 @@ use error::ShareDisposition;
 pub use error::{ObservedBytes, RelayError, SyncError};
 pub use hosted::{
     DepartedDocument, DepartedHead, HOSTED_REPLICA_NOT_PRISTINE, HeldBindingStatus, HeldDocument,
-    HeldDocumentInspection, HeldDocumentsPage, HeldProof, HeldProofAdmission, HeldProofs,
-    HostedCommit, HostedCursor, HostedDocumentState, HostedDocumentStatus, HostedHold, HostedRead,
-    HostedReplicaState, MAX_HELD_DOCUMENTS_PAGE, PASSIVE_STORE_CANNOT_HOST, ProvedHeld,
-    ReleasedHoldContinuation, RetiredFile, SERVICE_HOST_ORIGIN_PREFIX, admit_held_proof,
-    commit_hosted_cursor, departed_hosted_documents, departed_hosted_materialization,
+    HeldDocumentInspection, HeldDocumentsPage, HeldFreshness, HeldKey, HeldProof,
+    HeldProofAdmission, HeldProofs, HeldRelease, HostedCommit, HostedCursor, HostedDocumentState,
+    HostedDocumentStatus, HostedHold, HostedRead, HostedReplicaState, MAX_HELD_DOCUMENTS_PAGE,
+    PASSIVE_STORE_CANNOT_HOST, ProvedHeld, ReleasedHoldContinuation, RetiredFile,
+    SERVICE_HOST_ORIGIN_PREFIX, admit_held_proof, check_held_freshness, commit_hosted_cursor,
+    departed_hosted_documents, departed_hosted_materialization,
     departed_hosted_object_ids, forget_retired_hosted_file, hosted_document_parkable,
     inspect_held_document, is_hosted_replica, list_held_documents, park_hosted_document,
     prove_held_document, read_hosted_replica, release_held_proof, retired_hosted_files,

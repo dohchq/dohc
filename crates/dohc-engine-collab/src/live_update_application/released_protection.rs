@@ -1304,6 +1304,13 @@ pub fn lineage_protection_checks_on_this_thread() -> u64 {
     LINEAGE_CHECKS_HERE.with(std::cell::Cell::get)
 }
 
+/// How many stored bindings the calling thread decoded.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn binding_decodes_on_this_thread() -> u64 {
+    BINDING_DECODES_HERE.with(std::cell::Cell::get)
+}
+
 /// How many times this process read a released window's tails from a store,
 /// on any connection, for measurements that compare revisions.
 #[cfg(any(test, feature = "test-support"))]
@@ -1350,6 +1357,7 @@ thread_local! {
     static COMMITMENTS_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static HEAD_LOADS_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static LINEAGE_CHECKS_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static BINDING_DECODES_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// The tails of the released window that protect the document's lineage, or

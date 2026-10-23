@@ -111,14 +111,66 @@ async fn the_actor_answers_other_work_while_a_held_proof_runs() {
 /// its snapshot; it answers how many rows changed.
 type Change = fn(&RetainedWindow) -> usize;
 
-/// Ruling B, item 5, and ruling 2: once anything the proof read moves after
-/// its snapshot, through another writer connection, the answer is stale and
-/// carries no preservation, projection or artifact, and nothing proves
-/// again. Each case changes one input alone: authorship a draft declares,
-/// a native update's author, a seed's capture, the bytes a contribution
-/// names, the hold, the path, the restore generation or fence, the
-/// lineage's head, the workspace's main version or the workspace itself,
-/// the feed, or the replica's scope, which leaves nothing held.
+/// What one case writes before its proof, whose answer must still be current.
+type Prepare = fn(&mut RetainedWindow);
+
+/// The window document's released tail generation.
+fn generation(w: &RetainedWindow) -> i64 {
+    w.store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT generation FROM released_tail_generations
+                 WHERE workspace_id='workspace' AND version_id='main' AND object_id='object'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
+}
+
+/// An update that changes nothing.
+const EMPTY_UPDATE: &[u8] = &[0, 0];
+
+/// The window document's journal row below its last, as `sql` names it.
+const INNER_ROW: &str = "object_id='object' AND seq=
+    (SELECT head_update_seq-1 FROM ydoc_docs WHERE object_id='object')";
+
+/// Append, past the store's checks, two updates that change nothing to the
+/// window document's journal, so the head has a row inside the journal its
+/// state loads from, and derive the hold again: the head's state, and so its
+/// binding, stay as they were.
+fn empty_appends(w: &mut RetainedWindow) {
+    let empty = hex_sha256(EMPTY_UPDATE);
+    changed(w, &format!("INSERT OR IGNORE INTO binary_blobs VALUES ('{empty}',2,X'0000')"));
+    for _ in 0..2 {
+        let appended = changed(
+            w,
+            &format!(
+                "INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms)
+                 SELECT workspace_id,version_id,object_id,head_update_seq+1,'{empty}',0 FROM ydoc_docs
+                 WHERE object_id='object'"
+            ),
+        );
+        assert_eq!(appended, 1);
+        changed(w, "UPDATE ydoc_docs SET head_update_seq=head_update_seq+1 WHERE object_id='object'");
+    }
+    rebound(w);
+}
+
+/// Ruling B, item 5, ruling 2, and Sol's r2c-3c-1 findings 1 and 3: once
+/// anything the proof read moves after its snapshot, through another writer
+/// connection, the answer is stale and carries no preservation, projection
+/// or artifact, and nothing proves again. Each case changes one input alone,
+/// and moves the document's released tail generation only when that is the
+/// input: authorship a draft declares, a native update's author, a seed's
+/// capture, the bytes a contribution names, the store's identity, the hold's
+/// binding, path, continuation and stale flag, the document's path, the
+/// restore generation or fence, the head's kind, last row and compaction,
+/// the head's snapshot row or its bytes, a journal row past the head or
+/// inside what it loads, or that row's bytes, the workspace's main version
+/// or the workspace itself, either coordinate of the feed, and
+/// the scope generation of the replica and its documents together. Moving
+/// the hold's reason, or the replica's scope alone, leaves nothing held.
 #[tokio::test]
 async fn an_answer_whose_proof_inputs_moved_is_stale_and_keeps_nothing() {
     /// A restore of the document from generation 0 to 1: resumed, or still
@@ -144,17 +196,26 @@ async fn an_answer_whose_proof_inputs_moved_is_stale_and_keeps_nothing() {
             ),
         )
     }
-    // Each case: its name, the work the window retains, whether a draft only
-    // the outbox holds joins it, and the change.
-    let cases: [(&str, Retained, bool, Change); 14] = [
-        ("draft authorship", Retained::Carried, true, |w| {
+    fn drafted(w: &mut RetainedWindow) {
+        outbox_only(w, "Drafted.", Stored::TheUpdate);
+        rebound(w);
+    }
+    /// The empty appends, the inner one gone again.
+    fn one_missing(w: &mut RetainedWindow) {
+        empty_appends(w);
+        assert_eq!(changed(w, &format!("DELETE FROM ydoc_updates WHERE {INNER_ROW}")), 1);
+    }
+    // Each case: its name, the work the window retains, what it writes
+    // before the proof, the change, and whether that moves the generation.
+    let cases: [(&str, Retained, Option<Prepare>, Change, bool); 29] = [
+        ("draft authorship", Retained::Carried, Some(drafted), |w| {
             changed(
                 w,
                 "UPDATE owner_ydoc_outbox_entries SET person_edit=1-COALESCE(person_edit,0)
                  WHERE delivery_id='outbox-only'",
             )
-        }),
-        ("native author", Retained::Carried, false, |w| {
+        }, true),
+        ("native author", Retained::Carried, None, |w| {
             changed(
                 w,
                 &format!(
@@ -165,93 +226,268 @@ async fn an_answer_whose_proof_inputs_moved_is_stale_and_keeps_nothing() {
                     w.retained_digest
                 ),
             )
-        }),
-        ("seed capture", Retained::Seed, false, |w| {
+        }, true),
+        ("seed capture", Retained::Seed, None, |w| {
             changed(
                 w,
                 "UPDATE ydoc_owner_activation_sources SET source_moment_id=source_moment_id||'-moved'
                  WHERE object_id='object'",
             )
-        }),
-        ("contribution bytes", Retained::Carried, true, |w| {
+        }, true),
+        ("contribution bytes", Retained::Carried, Some(drafted), |w| {
             changed(
                 w,
                 "DELETE FROM binary_blobs WHERE sha256=
                    (SELECT update_digest FROM owner_ydoc_outbox_entries WHERE delivery_id='outbox-only')",
             )
-        }),
-        ("hold continuation", Retained::Carried, false, |w| {
+        }, true),
+        ("engine identity", Retained::Carried, None, |w| {
+            changed(
+                w,
+                "UPDATE engine_ownership SET engine_uuid='another-engine' WHERE rowid_guard=1",
+            )
+        }, false),
+        ("hold binding", Retained::Carried, None, |w| {
+            changed(
+                w,
+                &format!(
+                    "UPDATE hosted_documents SET released_hold_binding_digest='{}' WHERE object_id='object'",
+                    "f".repeat(64)
+                ),
+            )
+        }, false),
+        ("hold reason", Retained::Carried, None, |w| {
+            changed(
+                w,
+                "UPDATE hosted_documents SET held_reason='hosted-backfill-work-waiting' WHERE object_id='object'",
+            )
+        }, false),
+        ("hold path", Retained::Carried, None, |w| {
+            changed(
+                w,
+                "UPDATE hosted_documents SET path='notes/elsewhere.md' WHERE object_id='object'",
+            )
+        }, false),
+        ("hold continuation", Retained::Carried, None, |w| {
             changed(
                 w,
                 "UPDATE hosted_documents SET released_hold_continuation='dependency-drain'
                  WHERE object_id='object'",
             )
-        }),
-        ("hold stale flag", Retained::Carried, false, |w| {
+        }, false),
+        ("hold stale flag", Retained::Carried, None, |w| {
             changed(
                 w,
                 "UPDATE hosted_documents SET released_hold_binding_stale=1 WHERE object_id='object'",
             )
-        }),
-        ("path", Retained::Carried, false, |w| {
+        }, false),
+        ("path", Retained::Carried, None, |w| {
             changed(
                 w,
                 "UPDATE path_aliases SET path='notes/renamed.md' WHERE object_id='object'",
             )
-        }),
-        ("restore generation", Retained::Carried, false, |w| fence(w, true)),
-        ("restore fence", Retained::Carried, false, |w| fence(w, false)),
-        ("lineage head", Retained::Carried, false, |w| {
+        }, false),
+        ("restore generation", Retained::Carried, None, |w| fence(w, true), false),
+        ("restore fence", Retained::Carried, None, |w| fence(w, false), false),
+        ("lineage head", Retained::Carried, None, |w| {
             changed(
                 w,
                 "UPDATE ydoc_docs SET head_update_seq=head_update_seq+1 WHERE object_id='object'",
             )
-        }),
-        ("workspace main version", Retained::Carried, false, |w| {
+        }, false),
+        ("head kind", Retained::Carried, None, |w| {
+            changed(
+                w,
+                "UPDATE ydoc_docs SET content_kind='plaintext' WHERE object_id='object'",
+            )
+        }, false),
+        // One below the compaction point, which no entry names.
+        ("head compaction", Retained::Carried, None, |w| {
+            changed(
+                w,
+                "UPDATE ydoc_docs SET head_snapshot_seq=head_snapshot_seq-1 WHERE object_id='object'",
+            )
+        }, false),
+        ("head snapshot replaced", Retained::Carried, None, |w| {
+            changed(
+                w,
+                &format!(
+                    "UPDATE ydoc_snapshots SET snapshot_blob_sha256='{}'
+                     WHERE object_id='object' AND up_to_seq=
+                       (SELECT max(up_to_seq) FROM ydoc_snapshots WHERE object_id='object')",
+                    "e".repeat(64)
+                ),
+            )
+        }, false),
+        ("head snapshot bytes", Retained::Carried, None, |w| {
+            changed(
+                w,
+                "UPDATE binary_blobs SET bytes=X'00',byte_length=1 WHERE sha256=
+                   (SELECT snapshot_blob_sha256 FROM ydoc_snapshots WHERE object_id='object'
+                    ORDER BY up_to_seq DESC LIMIT 1)",
+            )
+        }, true),
+        // A row past the head, which the head's coordinates do not name but
+        // its state loads.
+        ("journal row past the head", Retained::Carried, None, |w| {
+            changed(
+                w,
+                &format!(
+                    "INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms)
+                     SELECT workspace_id,version_id,object_id,head_update_seq+1,'{}',0 FROM ydoc_docs
+                     WHERE object_id='object'",
+                    hex_sha256(EMPTY_UPDATE)
+                ),
+            )
+        }, false),
+        ("journal row removed", Retained::Carried, Some(empty_appends), |w| {
+            changed(w, &format!("DELETE FROM ydoc_updates WHERE {INNER_ROW}"))
+        }, true),
+        ("journal row rewritten", Retained::Carried, Some(empty_appends), |w| {
+            changed(
+                w,
+                &format!(
+                    "UPDATE ydoc_updates SET update_blob_sha256='{}' WHERE {INNER_ROW}",
+                    "d".repeat(64)
+                ),
+            )
+        }, true),
+        ("journal row restored", Retained::Carried, Some(one_missing), |w| {
+            changed(
+                w,
+                &format!(
+                    "INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms)
+                     SELECT workspace_id,version_id,object_id,head_update_seq-1,'{}',0 FROM ydoc_docs
+                     WHERE object_id='object'",
+                    hex_sha256(EMPTY_UPDATE)
+                ),
+            )
+        }, true),
+        ("journal row bytes", Retained::Carried, Some(empty_appends), |w| {
+            changed(
+                w,
+                &format!(
+                    "UPDATE binary_blobs SET bytes=X'01',byte_length=1 WHERE sha256='{}'",
+                    hex_sha256(EMPTY_UPDATE)
+                ),
+            )
+        }, true),
+        ("workspace main version", Retained::Carried, None, |w| {
             changed(
                 w,
                 "UPDATE versioned_workspaces SET main_version_id='elsewhere'
                  WHERE workspace_id='workspace'",
             )
-        }),
-        ("workspace removed", Retained::Carried, false, |w| {
+        }, false),
+        ("workspace removed", Retained::Carried, None, |w| {
             changed(
                 w,
                 "DELETE FROM versioned_workspaces WHERE workspace_id='workspace'",
             )
-        }),
-        ("feed", Retained::Carried, false, |w| {
+        }, false),
+        ("feed stream", Retained::Carried, None, |w| {
             changed(
                 w,
                 "UPDATE sync_identity SET stream_identity='moved' WHERE workspace_id='workspace'",
             )
-        }),
-        ("replica scope", Retained::Carried, false, |w| {
+        }, false),
+        ("feed epoch", Retained::Carried, None, |w| {
+            changed(
+                w,
+                "UPDATE sync_identity SET replication_epoch='moved' WHERE workspace_id='workspace'",
+            )
+        }, false),
+        // The replica and its documents move scope together, so the hold
+        // reads as it did, but in another scope.
+        ("scope generation", Retained::Carried, None, |w| {
+            changed(
+                w,
+                "UPDATE hosted_replicas SET scope_generation=scope_generation+1
+                 WHERE workspace_id='workspace'",
+            ) + changed(
+                w,
+                "UPDATE hosted_documents SET scope_generation=scope_generation+1
+                 WHERE workspace_id='workspace'",
+            )
+        }, false),
+        ("replica scope", Retained::Carried, None, |w| {
             changed(
                 w,
                 "UPDATE hosted_replicas SET scope_generation=scope_generation+1
                  WHERE workspace_id='workspace'",
             )
-        }),
+        }, false),
     ];
-    for (case, retained, draft, change) in cases {
+    for (case, retained, prepare, change, moves) in cases {
         let (mut w, desktop, _client) = held_for_a_queued_fold_of(retained).await;
-        if draft {
-            outbox_only(&mut w, "Drafted.", Stored::TheUpdate);
-            rebound(&mut w);
+        if let Some(prepare) = prepare {
+            prepare(&mut w);
         }
         let before = inspected_window(&w.store);
         assert_eq!(before.status, HeldBindingStatus::Current, "{case}: current before");
         let (resume, request) = paused_inspection(&w).await;
+        let proved = generation(&w);
         assert!(change(&w) > 0, "{case}: the change wrote nothing");
-        match released(resume, request).await {
-            None => assert_eq!(case, "replica scope", "{case}: still held"),
-            Some(answer) => {
-                assert_eq!(answer.status, HeldBindingStatus::Stale, "{case}");
-                assert_eq!(answer.preservation, None, "{case}: no preservation");
-                assert_eq!(answer.contributions, None, "{case}: no artifact");
-            }
+        assert_eq!(generation(&w) > proved, moves, "{case}: whether the generation moved");
+        let answer = released(resume, request).await;
+        if matches!(case, "hold reason" | "replica scope") {
+            assert_eq!(answer, None, "{case}: nothing held");
+        } else {
+            let answer = answer.unwrap_or_else(|| panic!("{case}: still held"));
+            assert_eq!(answer.status, HeldBindingStatus::Stale, "{case}");
+            assert_eq!(answer.preservation, None, "{case}: no preservation");
+            assert_eq!(answer.contributions, None, "{case}: no artifact");
         }
+        desktop.close().await;
+        w.close().await;
+    }
+}
+
+/// Sol's r2c-3c-1 findings 1 and 3, on the archived-hold fixture: an
+/// archived hold's answer stands only while its archive does. The archive's
+/// digest or kind moving, its bytes damaged, or bytes the proof found damaged
+/// repaired, while the proof holds at its snapshot, each make it stale; only
+/// the bytes move the generation.
+#[tokio::test]
+async fn an_archived_answer_whose_archive_moved_is_stale() {
+    for case in ["archive digest", "archive kind", "archive damaged", "archive repaired"] {
+        let (mut w, desktop, client, queued, archive) = archived_window(2).await;
+        let first = committed_pass(&mut w.store, &client);
+        assert!(holds_archived(first.held.get("object"), &w.lineage, &archive, &queued[0]), "{case}: {first:?}");
+        let bytes = w.store.get_binary_blob(&archive).unwrap().unwrap();
+        let damage = format!("UPDATE binary_blobs SET bytes=X'00',byte_length=1 WHERE sha256='{archive}'");
+        let repair = format!(
+            "UPDATE binary_blobs SET bytes=X'{}',byte_length={} WHERE sha256='{archive}'",
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+            bytes.len()
+        );
+        if case == "archive repaired" {
+            assert_eq!(changed(&w, &damage), 1);
+        }
+        let before = inspected_window(&w.store);
+        assert_eq!(before.status, HeldBindingStatus::Current, "{case}: current before");
+        let (resume, request) = paused_inspection(&w).await;
+        let change = match case {
+            "archive digest" => format!(
+                "UPDATE ydoc_inactive_lineages SET full_state_blob_sha256='{}' WHERE lineage_claim_id='{}'",
+                "f".repeat(64),
+                w.lineage
+            ),
+            "archive kind" => format!(
+                "UPDATE ydoc_inactive_lineages SET content_kind='plaintext' WHERE lineage_claim_id='{}'",
+                w.lineage
+            ),
+            "archive damaged" => damage,
+            _ => repair,
+        };
+        let proved = generation(&w);
+        assert_eq!(changed(&w, &change), 1, "{case}");
+        let bytes_moved = matches!(case, "archive damaged" | "archive repaired");
+        assert_eq!(generation(&w) > proved, bytes_moved, "{case}: whether the generation moved");
+        let answer = released(resume, request).await.expect("held");
+        assert_eq!(answer.status, HeldBindingStatus::Stale, "{case}");
+        assert_eq!(answer.preservation, None, "{case}: no preservation");
+        assert_eq!(answer.contributions, None, "{case}: no artifact");
         desktop.close().await;
         w.close().await;
     }
@@ -325,11 +561,13 @@ fn releasing(event: TraceEvent<'_>) {
     }
 }
 
-/// Ruling B, item 5: releasing a proof on the store's writer reads by key
-/// alone: none of the tables the proof enumerates, replays or loads bytes
-/// from, and a handful of statements however much the hold covers. A change
-/// another writer connection makes between the proof and its release, and a
-/// proof of an earlier open of the store, release as stale.
+/// Ruling B, item 5, and Sol's r2c-3c-1 finding 2: releasing a proof on the
+/// store's writer reads by key alone: none of the tables the proof
+/// enumerates or loads bytes from, the journal and its snapshots only for
+/// their last row, never the hold's binding, and a handful of statements
+/// however much the hold covers. A change another writer connection makes
+/// between the proof and its release, and a proof of an earlier open of the
+/// store, release as stale.
 #[tokio::test]
 async fn the_writer_releases_a_proof_with_bounded_reads_alone() {
     let (mut w, desktop, _client) = held_for_a_queued_fold().await;
@@ -368,16 +606,24 @@ async fn the_writer_releases_a_proof_with_bounded_reads_alone() {
     for table in [
         "owner_ydoc_outbox_entries",
         "owner_ydoc_outboxes",
-        "ydoc_updates",
-        "ydoc_snapshots",
         "binary_blobs",
         "live_owner_activations",
         "live_accepted_updates",
         "live_device_update_applications",
         "ydoc_owner_activation_sources",
+        "released_hold_binding_json",
     ] {
         assert!(
             !statements.iter().any(|statement| statement.contains(table)),
+            "{table}: {statements:#?}"
+        );
+    }
+    for table in ["ydoc_updates", "ydoc_snapshots"] {
+        assert!(
+            statements
+                .iter()
+                .filter(|statement| statement.contains(table))
+                .all(|statement| statement.contains("DESC LIMIT 1")),
             "{table}: {statements:#?}"
         );
     }
@@ -487,7 +733,7 @@ async fn a_proof_stops_inside_a_statement_once_its_caller_leaves() {
 
 /// Ruling B, items 6 and 7: while a proof runs, a request for its workspace
 /// beyond the callers one proof answers, or asking anything else, here the
-/// same document once its path moved, is refused as busy at once, never
+/// same document once its hold moved, is refused as busy at once, never
 /// queued. Once the proof ends, the workspace proves again.
 #[tokio::test]
 async fn a_different_request_for_a_workspace_with_a_running_proof_is_busy() {
@@ -508,14 +754,15 @@ async fn a_different_request_for_a_workspace_with_a_running_proof_is_busy() {
     };
     let full = refuse().await.expect("refused at once");
     assert!(matches!(full, Err(RuntimeError::HeldReadBusy)), "{full:?}");
-    let sql = "UPDATE path_aliases SET path='notes/renamed.md' WHERE object_id='object'";
+    let sql = "UPDATE hosted_documents SET released_hold_continuation='dependency-drain'
+               WHERE object_id='object'";
     assert_eq!(changed(&w, sql), 1);
     let other = refuse().await.expect("refused at once");
     assert!(matches!(other, Err(RuntimeError::HeldReadBusy)), "{other:?}");
     drop(resume);
     for caller in callers {
         let answer = answered(caller).await.unwrap().expect("held");
-        assert_eq!(answer.status, HeldBindingStatus::Stale, "its path moved");
+        assert_eq!(answer.status, HeldBindingStatus::Stale, "its hold moved");
     }
     assert!(matches!(answered(inspection(&w, &CancellationToken::new())).await, Ok(Some(_))));
     assert_eq!(proofs.proofs_admitted(), 2);

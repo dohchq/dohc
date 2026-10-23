@@ -3219,7 +3219,7 @@ pub(crate) fn blob_seq_in_log(
 ) -> Result<Option<i64>, CollabError> {
     let seq: Option<i64> = conn
         .query_row(
-            "SELECT seq FROM ydoc_updates INDEXED BY idx_ydoc_updates_doc_blob \
+            "SELECT seq FROM ydoc_updates INDEXED BY idx_ydoc_updates_blob \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
                AND update_blob_sha256 = ?4 ORDER BY seq ASC LIMIT 1",
             rusqlite::params![key.workspace_id, key.version_id, key.object_id, sha],
