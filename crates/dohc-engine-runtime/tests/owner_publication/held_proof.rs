@@ -135,6 +135,21 @@ const EMPTY_UPDATE: &[u8] = &[0, 0];
 const INNER_ROW: &str = "object_id='object' AND seq=
     (SELECT head_update_seq-1 FROM ydoc_docs WHERE object_id='object')";
 
+/// The window document's latest snapshot, as `sql` names it.
+const LATEST_SNAPSHOT: &str = "object_id='object' AND up_to_seq=
+    (SELECT max(up_to_seq) FROM ydoc_snapshots WHERE object_id='object')";
+
+/// The columns of a snapshot row, in the order `sql` inserts them.
+const SNAPSHOT_COLUMNS: &str = "workspace_id,version_id,object_id,up_to_seq,snapshot_blob_sha256,\
+    state_vector_blob_sha256,recorded_at_ms";
+
+/// Run `sql` through a writer connection of its own with foreign keys on.
+fn changed_with_keys(w: &RetainedWindow, sql: &str) -> usize {
+    let raw = rusqlite::Connection::open(engine_db_path(&w.root).unwrap()).unwrap();
+    raw.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+    raw.execute(sql, []).unwrap()
+}
+
 /// Append, past the store's checks, two updates that change nothing to the
 /// window document's journal, so the head has a row inside the journal its
 /// state loads from, and derive the hold again: the head's state, and so its
@@ -167,10 +182,14 @@ fn empty_appends(w: &mut RetainedWindow) {
 /// binding, path, continuation and stale flag, the document's path, the
 /// restore generation or fence, the head's kind, last row and compaction,
 /// the head's snapshot row or its bytes, a journal row past the head or
-/// inside what it loads, or that row's bytes, the workspace's main version
-/// or the workspace itself, either coordinate of the feed, and
-/// the scope generation of the replica and its documents together. Moving
-/// the hold's reason, or the replica's scope alone, leaves nothing held.
+/// inside what it loads, or that row's bytes. Sol's r2c-3c-3 finding 2 and
+/// Opus's finding 1: so does state that changes and changes back, a newer
+/// snapshot folding the inner row before both go, the latest snapshot
+/// rebound around damage to its bytes, or reseeded as it was; and so do the
+/// workspace's main version or the workspace itself, either coordinate of
+/// the feed, and the scope generation of the replica and its documents
+/// together. Moving the hold's reason, or the replica's scope alone, leaves
+/// nothing held.
 #[tokio::test]
 async fn an_answer_whose_proof_inputs_moved_is_stale_and_keeps_nothing() {
     /// A restore of the document from generation 0 to 1: resumed, or still
@@ -205,9 +224,39 @@ async fn an_answer_whose_proof_inputs_moved_is_stale_and_keeps_nothing() {
         empty_appends(w);
         assert_eq!(changed(w, &format!("DELETE FROM ydoc_updates WHERE {INNER_ROW}")), 1);
     }
+    /// What the latest snapshot's `column` holds.
+    fn latest_snapshot(w: &RetainedWindow, column: &str) -> String {
+        w.store
+            .read_with(|conn| {
+                conn.query_row(
+                    &format!("SELECT {column} FROM ydoc_snapshots WHERE {LATEST_SNAPSHOT}"),
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap()
+    }
+    /// Sol's r2c-3c-3 finding 2: a snapshot covering the head folds the
+    /// inner row, which then goes, and the snapshot with it, so the latest
+    /// snapshot, last row and head read as proved.
+    fn folded_then_removed(w: &RetainedWindow) -> usize {
+        let head = "(SELECT head_update_seq FROM ydoc_docs WHERE object_id='object')";
+        changed(
+            w,
+            &format!(
+                "INSERT INTO ydoc_snapshots({SNAPSHOT_COLUMNS})
+                 SELECT workspace_id,version_id,object_id,{head},snapshot_blob_sha256,state_vector_blob_sha256,0
+                 FROM ydoc_snapshots WHERE {LATEST_SNAPSHOT}"
+            ),
+        ) + changed(w, &format!("DELETE FROM ydoc_updates WHERE {INNER_ROW}"))
+            + changed(
+                w,
+                &format!("DELETE FROM ydoc_snapshots WHERE object_id='object' AND up_to_seq={head}"),
+            )
+    }
     // Each case: its name, the work the window retains, what it writes
     // before the proof, the change, and whether that moves the generation.
-    let cases: [(&str, Retained, Option<Prepare>, Change, bool); 29] = [
+    let cases: [(&str, Retained, Option<Prepare>, Change, bool); 33] = [
         ("draft authorship", Retained::Carried, Some(drafted), |w| {
             changed(
                 w,
@@ -308,17 +357,53 @@ async fn an_answer_whose_proof_inputs_moved_is_stale_and_keeps_nothing() {
                 "UPDATE ydoc_docs SET head_snapshot_seq=head_snapshot_seq-1 WHERE object_id='object'",
             )
         }, false),
+        // Only the proof's own read of the latest snapshot sees this.
+        ("head snapshot added", Retained::Carried, None, |w| {
+            changed(
+                w,
+                &format!(
+                    "INSERT INTO ydoc_snapshots({SNAPSHOT_COLUMNS})
+                     SELECT workspace_id,version_id,object_id,up_to_seq+1,snapshot_blob_sha256,
+                       state_vector_blob_sha256,0
+                     FROM ydoc_snapshots WHERE {LATEST_SNAPSHOT}"
+                ),
+            )
+        }, false),
         ("head snapshot replaced", Retained::Carried, None, |w| {
             changed(
                 w,
                 &format!(
-                    "UPDATE ydoc_snapshots SET snapshot_blob_sha256='{}'
-                     WHERE object_id='object' AND up_to_seq=
-                       (SELECT max(up_to_seq) FROM ydoc_snapshots WHERE object_id='object')",
+                    "UPDATE ydoc_snapshots SET snapshot_blob_sha256='{}' WHERE {LATEST_SNAPSHOT}",
                     "e".repeat(64)
                 ),
             )
-        }, false),
+        }, true),
+        // Sol's r2c-3c-3 finding 2: rebound, its bytes damaged while nothing
+        // names them, and rebound back.
+        ("head snapshot rebound and back", Retained::Carried, None, |w| {
+            let original = latest_snapshot(w, "snapshot_blob_sha256");
+            let rebind = |digest: &str| {
+                format!("UPDATE ydoc_snapshots SET snapshot_blob_sha256='{digest}' WHERE {LATEST_SNAPSHOT}")
+            };
+            changed(w, &rebind("e".repeat(64).as_str()))
+                + changed(
+                    w,
+                    &format!("UPDATE binary_blobs SET bytes=X'00',byte_length=1 WHERE sha256='{original}'"),
+                )
+                + changed(w, &rebind(original.as_str()))
+        }, true),
+        ("folded, then the snapshot removed", Retained::Carried, Some(empty_appends), folded_then_removed, true),
+        // Opus's r2c-3c-3 finding 1: the latest snapshot removed and
+        // reseeded to identical coordinates.
+        ("head snapshot reseeded", Retained::Carried, None, |w| {
+            let row = latest_snapshot(
+                w,
+                "printf('(%Q,%Q,%Q,%d,%Q,%Q,%d)',workspace_id,version_id,object_id,up_to_seq,
+                   snapshot_blob_sha256,state_vector_blob_sha256,recorded_at_ms)",
+            );
+            changed(w, &format!("DELETE FROM ydoc_snapshots WHERE {LATEST_SNAPSHOT}"))
+                + changed(w, &format!("INSERT INTO ydoc_snapshots({SNAPSHOT_COLUMNS}) VALUES {row}"))
+        }, true),
         ("head snapshot bytes", Retained::Carried, None, |w| {
             changed(
                 w,
@@ -446,44 +531,77 @@ async fn an_answer_whose_proof_inputs_moved_is_stale_and_keeps_nothing() {
 /// Sol's r2c-3c-1 findings 1 and 3, on the archived-hold fixture: an
 /// archived hold's answer stands only while its archive does. The archive's
 /// digest or kind moving, its bytes damaged, or bytes the proof found damaged
-/// repaired, while the proof holds at its snapshot, each make it stale; only
-/// the bytes move the generation.
+/// repaired, while the proof holds at its snapshot, each make it stale. Sol's
+/// r2c-3c-3 findings 1 and 2: so do an archive the proof found missing
+/// restored, with foreign keys on, and its digest rebound around damage to
+/// its bytes and back. All but the kind move the generation.
 #[tokio::test]
 async fn an_archived_answer_whose_archive_moved_is_stale() {
-    for case in ["archive digest", "archive kind", "archive damaged", "archive repaired"] {
+    for case in [
+        "archive digest",
+        "archive kind",
+        "archive damaged",
+        "archive repaired",
+        "archive restored",
+        "archive rebound and back",
+    ] {
         let (mut w, desktop, client, queued, archive) = archived_window(2).await;
         let first = committed_pass(&mut w.store, &client);
         assert!(holds_archived(first.held.get("object"), &w.lineage, &archive, &queued[0]), "{case}: {first:?}");
         let bytes = w.store.get_binary_blob(&archive).unwrap().unwrap();
+        let hex = bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
         let damage = format!("UPDATE binary_blobs SET bytes=X'00',byte_length=1 WHERE sha256='{archive}'");
         let repair = format!(
-            "UPDATE binary_blobs SET bytes=X'{}',byte_length={} WHERE sha256='{archive}'",
-            bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+            "UPDATE binary_blobs SET bytes=X'{hex}',byte_length={} WHERE sha256='{archive}'",
             bytes.len()
         );
-        if case == "archive repaired" {
-            assert_eq!(changed(&w, &damage), 1);
+        let rebind = |digest: &str| {
+            format!(
+                "UPDATE ydoc_inactive_lineages SET full_state_blob_sha256='{digest}' WHERE lineage_claim_id='{}'",
+                w.lineage
+            )
+        };
+        match case {
+            "archive repaired" => assert_eq!(changed(&w, &damage), 1),
+            "archive restored" => assert_eq!(
+                changed(&w, &format!("DELETE FROM binary_blobs WHERE sha256='{archive}'")),
+                1
+            ),
+            _ => {}
         }
         let before = inspected_window(&w.store);
         assert_eq!(before.status, HeldBindingStatus::Current, "{case}: current before");
         let (resume, request) = paused_inspection(&w).await;
-        let change = match case {
-            "archive digest" => format!(
-                "UPDATE ydoc_inactive_lineages SET full_state_blob_sha256='{}' WHERE lineage_claim_id='{}'",
-                "f".repeat(64),
-                w.lineage
-            ),
-            "archive kind" => format!(
-                "UPDATE ydoc_inactive_lineages SET content_kind='plaintext' WHERE lineage_claim_id='{}'",
-                w.lineage
-            ),
-            "archive damaged" => damage,
-            _ => repair,
-        };
         let proved = generation(&w);
-        assert_eq!(changed(&w, &change), 1, "{case}");
-        let bytes_moved = matches!(case, "archive damaged" | "archive repaired");
-        assert_eq!(generation(&w) > proved, bytes_moved, "{case}: whether the generation moved");
+        match case {
+            "archive digest" => assert_eq!(changed(&w, &rebind("f".repeat(64).as_str())), 1),
+            "archive kind" => assert_eq!(
+                changed(
+                    &w,
+                    &format!(
+                        "UPDATE ydoc_inactive_lineages SET content_kind='plaintext' WHERE lineage_claim_id='{}'",
+                        w.lineage
+                    ),
+                ),
+                1
+            ),
+            "archive damaged" => assert_eq!(changed(&w, &damage), 1),
+            "archive repaired" => assert_eq!(changed(&w, &repair), 1),
+            "archive restored" => assert_eq!(
+                changed_with_keys(
+                    &w,
+                    &format!("INSERT INTO binary_blobs VALUES ('{archive}',{},X'{hex}')", bytes.len()),
+                ),
+                1
+            ),
+            _ => {
+                assert_eq!(changed(&w, &rebind("f".repeat(64).as_str())), 1);
+                assert_eq!(changed(&w, &damage), 1);
+                assert_eq!(changed(&w, &rebind(archive.as_str())), 1);
+            }
+        }
+        let moved = case != "archive kind";
+        assert_eq!(generation(&w) > proved, moved, "{case}: whether the generation moved");
         let answer = released(resume, request).await.expect("held");
         assert_eq!(answer.status, HeldBindingStatus::Stale, "{case}");
         assert_eq!(answer.preservation, None, "{case}: no preservation");
@@ -550,6 +668,36 @@ async fn writes_the_proof_never_reads_leave_its_answer_current() {
         desktop.close().await;
         w.close().await;
     }
+}
+
+/// Sol's r2c-3c-3 finding 3: the release compares the hold's digest, never
+/// its binding, so the binding cannot change while its digest stays. A
+/// writer that tries it, past the store's other checks, while the proof
+/// holds at its snapshot, is refused, and the answer is the one proved.
+#[tokio::test]
+async fn a_binding_changed_under_its_digest_is_refused() {
+    let (w, desktop, _client) = held_for_a_queued_fold().await;
+    let proved = inspected_window(&w.store);
+    assert_eq!(proved.status, HeldBindingStatus::Current);
+    let (resume, request) = paused_inspection(&w).await;
+    let raw = rusqlite::Connection::open(engine_db_path(&w.root).unwrap()).unwrap();
+    raw.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON")
+        .unwrap();
+    let refused = raw
+        .execute(
+            "UPDATE hosted_documents SET released_hold_binding_json='{}' WHERE object_id='object'",
+            [],
+        )
+        .expect_err("the binding changes only with its digest");
+    assert!(
+        refused.to_string().contains("a released hold binding changes with its digest"),
+        "{refused}"
+    );
+    drop(raw);
+    let answer = released(resume, request).await.expect("held");
+    assert_eq!(*answer, proved);
+    desktop.close().await;
+    w.close().await;
 }
 
 /// Every statement the store's connection ran while a proof was released.
@@ -663,7 +811,7 @@ async fn identical_callers_share_one_proof_and_one_leaving_stops_only_its_wait()
     reached("three callers wait", proofs.callers("workspace", 3)).await;
     leaving.cancel();
     assert!(matches!(answered(early).await, Err(RuntimeError::Cancelled)));
-    assert_eq!(proofs.running_proofs(), 1, "the others still wait for the proof");
+    assert_eq!(proofs.open_readers(), 1, "the others still wait for the proof");
     drop(resume);
     let first = answered(first).await.unwrap().expect("held");
     let last = answered(last).await.unwrap().expect("held");
@@ -706,7 +854,7 @@ async fn the_last_caller_leaving_stops_a_running_proof() {
         token.cancel();
         let left = answered(request).await;
         assert!(matches!(left, Err(RuntimeError::Cancelled)), "{stage:?}: {left:?}");
-        assert_eq!(proofs.running_proofs(), 0, "{stage:?}: its reader closed first");
+        assert_eq!(proofs.open_readers(), 0, "{stage:?}: its reader closed first");
         assert_eq!(proofs.checks_passed(), passed, "{stage:?}: it went no further");
         proofs.resume_proofs();
         let next = answered(inspection(&w, &CancellationToken::new())).await;
@@ -731,7 +879,7 @@ async fn a_proof_stops_inside_a_statement_once_its_caller_leaves() {
     reached("the proof runs its statement", proofs.stalled_proof()).await;
     token.cancel();
     assert!(matches!(answered(request).await, Err(RuntimeError::Cancelled)));
-    assert_eq!(proofs.running_proofs(), 0, "its reader closed");
+    assert_eq!(proofs.open_readers(), 0, "its reader closed");
     let next = answered(inspection(&w, &CancellationToken::new())).await;
     assert_eq!(next.unwrap().expect("held").status, HeldBindingStatus::Current);
     desktop.close().await;
@@ -808,7 +956,7 @@ async fn closing_the_store_stops_a_running_proof_and_waits_for_its_reader() {
     drop(store);
     owner.close().await.unwrap();
     supervisor.close_all().expect("close returns once the reader closed");
-    assert_eq!(proofs.running_proofs(), 0, "close returned after the reader closed");
+    assert_eq!(proofs.open_readers(), 0, "close returned after the reader closed");
     release.join().unwrap();
     let closed = answered(request).await;
     assert!(matches!(closed, Err(RuntimeError::ActorUnavailable)), "{closed:?}");
@@ -884,7 +1032,7 @@ async fn a_proof_gives_way_when_the_wal_presses_and_writes_keep_succeeding() {
     drop(resume);
     let gave_way = answered(request).await;
     assert!(matches!(gave_way, Err(RuntimeError::HeldReadBusy)), "{gave_way:?}");
-    assert_eq!(proofs.running_proofs(), 0, "its reader closed");
+    assert_eq!(proofs.open_readers(), 0, "its reader closed");
     for _ in 0..2 * writes {
         w.actor.write_for_test(WRITE).await.expect("writes go on succeeding");
     }
@@ -905,7 +1053,7 @@ async fn a_proof_past_its_deadline_answers_busy() {
     reached("the proof runs its statement", proofs.stalled_proof()).await;
     let expired = answered(request).await;
     assert!(matches!(expired, Err(RuntimeError::HeldReadBusy)), "{expired:?}");
-    assert_eq!(proofs.running_proofs(), 0, "its reader closed");
+    assert_eq!(proofs.open_readers(), 0, "its reader closed");
     proofs.set_proof_deadline(dohc_engine_collab::live_update_application::HELD_PROOF_DEADLINE);
     let next = answered(inspection(&w, &CancellationToken::new())).await;
     assert_eq!(next.unwrap().expect("held").status, HeldBindingStatus::Current);

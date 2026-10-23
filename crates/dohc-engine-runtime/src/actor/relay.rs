@@ -1928,12 +1928,13 @@ impl ActorHandle {
     /// meanwhile is stale, with nothing preserved, and nothing proves again.
     ///
     /// A caller that asks what the workspace's running proof asks, of the
-    /// same state, shares it; any other is busy, and so is a new proof past
-    /// the daemon's limit or while the store's WAL presses on held readers.
-    /// A request busy whatever it asks is refused before the actor reads
-    /// anything. `token`, the caller's own cancellation or deadline, ends
-    /// only its wait. The last caller to leave stops the proof, and answers
-    /// once its reader closed, or after twice SQLite's busy timeout. A proof
+    /// same state, shares it; any other is busy while that proof's reader is
+    /// open, and so is a new proof past the daemon's limit or while the
+    /// store's WAL presses on held readers. A request busy whatever it asks
+    /// is refused before the actor reads anything. `token`, the caller's own
+    /// cancellation or deadline, ends only its wait. The last caller to leave
+    /// stops the proof, and answers once the proof ended, its reader closed,
+    /// or after twice SQLite's busy timeout. A proof
     /// that gave way to writes or reached its deadline answers busy. The
     /// answer keeps the proof's result charged until the last caller drops
     /// it.

@@ -3345,15 +3345,19 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
 /// document's head and lineage columns, and terminal blobs, and with the
 /// stored bytes of each entry's update, which a held document's inspection
 /// merges. It also moves with the state inspection loads that the
-/// inspection's own coordinates do not name: a journal row past the
-/// document's latest snapshot changing, going, or arriving below the top, and
-/// the bytes of a blob a journal row, snapshot or archived lineage names
-/// changing. Such a blob cannot arrive or go while its name holds it. A row
-/// that claims another document still moves the document whose entry holds
-/// its delivery, and an activation moves the documents of every activation
-/// whose chain passes through it. Each trigger finds those documents by
-/// index; a blob nothing names, an append, a row a compaction folded, or a
-/// compaction whose bound passes no sequence an entry names, moves nothing.
+/// inspection's own coordinates do not name, so none of it can change and
+/// change back unseen: a journal row past the document's latest snapshot
+/// changing, going, or arriving below the top; the latest snapshot going or
+/// moving back, or any snapshot's key or digest changing; an archived
+/// lineage going, or its key or digest changing; and a blob a journal row,
+/// snapshot or archived lineage names arriving, or its bytes changing. While
+/// foreign keys are on such a blob cannot go, but one a damaged store lacks
+/// can arrive. A row that claims another document still moves the document
+/// whose entry holds its delivery, and an activation moves the documents of
+/// every activation whose chain passes through it. Each trigger finds those
+/// documents by index; a blob nothing names or one already stored, an
+/// append, a row a compaction folded, a snapshot a compaction superseded, or
+/// a compaction whose bound passes no sequence an entry names, moves nothing.
 /// The first activation of a document creates its row, which outlives the
 /// document, so a recreated document never reads an earlier generation. A
 /// generation only advances, and a mutation that would take it past its
@@ -3361,9 +3365,11 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
 ///
 /// A hosted document held for released retained work keeps the binding it
 /// holds against with its digest, how its work continues, and whether that
-/// binding went stale; no other hold carries them. The binding comes last in
-/// the row, so reading the rest never reaches it. Rebuilding the table keeps
-/// every row, its parked heads and aliases among them. A deferred Y.Doc
+/// binding went stale; no other hold carries them. The binding changes only
+/// with its digest, so a reader that never reads the binding still knows
+/// when it changed. The binding comes last in the row, so reading the rest
+/// never reaches it. Rebuilding the table keeps every row, its parked heads
+/// and aliases among them. A deferred Y.Doc
 /// update records which ingress deferred it, and a hosted one the feed it
 /// arrived on: its namespace, epoch, stream and relay sequence. A row
 /// deferred earlier is local in a workspace that is no hosted replica, and
@@ -3733,6 +3739,46 @@ WHEN EXISTS(SELECT 1 FROM ydoc_updates WHERE update_blob_sha256 IN (OLD.sha256,N
          UNION SELECT workspace_id,version_id,object_id FROM ydoc_inactive_lineages
            WHERE full_state_blob_sha256 IN (OLD.sha256,NEW.sha256));
 END;
+CREATE TRIGGER released_tail_state_blob_insert AFTER INSERT ON binary_blobs
+WHEN EXISTS(SELECT 1 FROM ydoc_updates WHERE update_blob_sha256=NEW.sha256)
+  OR EXISTS(SELECT 1 FROM ydoc_snapshots WHERE snapshot_blob_sha256=NEW.sha256)
+  OR EXISTS(SELECT 1 FROM ydoc_inactive_lineages WHERE full_state_blob_sha256=NEW.sha256) BEGIN
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (SELECT workspace_id,version_id,object_id FROM ydoc_updates WHERE update_blob_sha256=NEW.sha256
+         UNION SELECT workspace_id,version_id,object_id FROM ydoc_snapshots WHERE snapshot_blob_sha256=NEW.sha256
+         UNION SELECT workspace_id,version_id,object_id FROM ydoc_inactive_lineages
+           WHERE full_state_blob_sha256=NEW.sha256);
+END;
+CREATE TRIGGER released_tail_snapshot_update
+AFTER UPDATE OF workspace_id,version_id,object_id,up_to_seq,snapshot_blob_sha256 ON ydoc_snapshots
+WHEN OLD.workspace_id IS NOT NEW.workspace_id OR OLD.version_id IS NOT NEW.version_id
+  OR OLD.object_id IS NOT NEW.object_id OR OLD.up_to_seq IS NOT NEW.up_to_seq
+  OR OLD.snapshot_blob_sha256 IS NOT NEW.snapshot_blob_sha256 BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id;
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER released_tail_snapshot_delete AFTER DELETE ON ydoc_snapshots
+WHEN OLD.up_to_seq > coalesce((SELECT max(up_to_seq) FROM ydoc_snapshots WHERE workspace_id=OLD.workspace_id
+    AND version_id=OLD.version_id AND object_id=OLD.object_id),-1) BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id;
+END;
+CREATE TRIGGER released_tail_archive_update
+AFTER UPDATE OF workspace_id,version_id,object_id,lineage_claim_id,full_state_blob_sha256 ON ydoc_inactive_lineages
+WHEN OLD.workspace_id IS NOT NEW.workspace_id OR OLD.version_id IS NOT NEW.version_id
+  OR OLD.object_id IS NOT NEW.object_id OR OLD.lineage_claim_id IS NOT NEW.lineage_claim_id
+  OR OLD.full_state_blob_sha256 IS NOT NEW.full_state_blob_sha256 BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id;
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER released_tail_archive_delete AFTER DELETE ON ydoc_inactive_lineages BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id;
+END;
 INSERT INTO live_owner_activations (relay_database_namespace,activation_id,workspace_id,main_version_id,
     object_id,lineage_claim_id,origin_adoption_id,binding_json,source_moment_id,source_digest,source_byte_length,
     baseline_moment_relay_sequence,baseline_registered_at_ms,host_coordinate_json,evidence_digest,coverage_digest,
@@ -3792,6 +3838,11 @@ INSERT INTO hosted_documents_next (workspace_id,object_id,path,state,held_reason
     backfill_cursor,scope_generation,unmaterialized_seq FROM hosted_documents;
 DROP TABLE hosted_documents;
 ALTER TABLE hosted_documents_next RENAME TO hosted_documents;
+CREATE TRIGGER released_hold_binding_digest_moves BEFORE UPDATE OF released_hold_binding_json ON hosted_documents
+WHEN OLD.released_hold_binding_json IS NOT NEW.released_hold_binding_json
+  AND OLD.released_hold_binding_digest IS NEW.released_hold_binding_digest BEGIN
+    SELECT RAISE(ABORT,'a released hold binding changes with its digest');
+END;
 CREATE TABLE hosted_parked_snapshots (
     workspace_id TEXT NOT NULL,
     version_id TEXT NOT NULL,
@@ -3922,8 +3973,9 @@ CREATE TABLE released_hold_copy_decisions (
 CREATE INDEX released_hold_copy_decisions_projection ON released_hold_copy_decisions(projection_sha256);
 ";
 
-/// The triggers that keep and move a released tail generation. A store
-/// missing one would keep tails its rows no longer prove.
+/// The triggers that keep and move a released tail generation, and keep a
+/// hold's binding with its digest. A store missing one would keep tails, or
+/// release proofs, its rows no longer prove.
 pub(crate) const RELEASED_TAIL_TRIGGERS: &[&str] = &[
     "released_tail_generation_advance",
     "released_tail_generation_kept",
@@ -3959,6 +4011,12 @@ pub(crate) const RELEASED_TAIL_TRIGGERS: &[&str] = &[
     "released_tail_head_journal_update",
     "released_tail_head_journal_delete",
     "released_tail_state_blob_update",
+    "released_tail_state_blob_insert",
+    "released_tail_snapshot_update",
+    "released_tail_snapshot_delete",
+    "released_tail_archive_update",
+    "released_tail_archive_delete",
+    "released_hold_binding_digest_moves",
 ];
 
 /// A hosted document that left the scope parks instead of losing its state.
@@ -4976,7 +5034,7 @@ mod tests {
             ),
             (
                 "v2-live-owner-activations",
-                "ec17fd416e7217cbdd01e5480d0984abe00e8007b0c4b3f3a188d732dc2e710c",
+                "df2daeddd417e81818a09ed34ca018cfefe276cbf5e8ee1c69b1caacc0d487d6",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -5886,8 +5944,16 @@ mod tests {
              held_by=NULL,released_hold_binding_json='{{}}',released_hold_binding_digest='{digest}', \
              released_hold_continuation='frozen' WHERE object_id='held'"
         );
+        let rebound = format!(
+            "UPDATE hosted_documents SET released_hold_binding_json='{{\"rebound\":1}}', \
+             released_hold_binding_digest='{}' WHERE object_id='held'",
+            "b".repeat(64)
+        );
         for valid in [
             hold.as_str(),
+            rebound.as_str(),
+            "UPDATE hosted_documents SET released_hold_binding_json=released_hold_binding_json \
+             WHERE object_id='held'",
             "UPDATE hosted_documents SET released_hold_continuation='dependency-drain', \
              released_hold_binding_stale=1 WHERE object_id='held'",
             "INSERT INTO ydoc_deferred_updates (workspace_id,version_id,object_id,origin_id,origin_seq, \
@@ -5920,6 +5986,7 @@ mod tests {
             "UPDATE hosted_documents SET released_hold_binding_digest=upper(released_hold_binding_digest) \
              WHERE object_id='held'",
             "UPDATE hosted_documents SET released_hold_binding_json='not json' WHERE object_id='held'",
+            "UPDATE hosted_documents SET released_hold_binding_json='{}' WHERE object_id='held'",
             "UPDATE hosted_documents SET released_hold_continuation='thawed' WHERE object_id='held'",
             "UPDATE hosted_documents SET released_hold_binding_stale=2 WHERE object_id='held'",
             "UPDATE hosted_documents SET held_path='a.md' WHERE object_id='held'",
@@ -8639,9 +8706,12 @@ mod tests {
     /// its row claims; an activation moves the document of every activation
     /// whose chain passes through it. So does the state a held document's
     /// inspection loads that its coordinates do not name (Sol's r2c-3c-1
-    /// finding 1). A blob nothing names, a folded journal row no entry names,
-    /// an append, and a document column neither reads move nothing. The
-    /// generation outlives its document.
+    /// finding 1), including a latest snapshot removed after it folded rows,
+    /// an archive rebound, and a missing blob restored (Sol's r2c-3c-3
+    /// findings 1 and 2, Opus's finding 1). A blob nothing names, a folded
+    /// journal row no entry names, an append, a superseded snapshot pruned,
+    /// and a document column neither reads move nothing. The generation
+    /// outlives its document.
     #[test]
     fn every_released_tail_input_moves_its_documents_generation() {
         let dir = tempdir();
@@ -8779,19 +8849,70 @@ mod tests {
         step("UPDATE ydoc_updates SET recorded_at_ms=2 WHERE seq=9", &[]);
         step(&snapshot(9), &[]);
         step("DELETE FROM ydoc_updates WHERE object_id='a' AND seq<=9", &[]);
-        conn.execute_batch(
-            "INSERT INTO binary_blobs VALUES ('update',1,X'00'),('snapshot',1,X'00'),('archive',1,X'00')",
-        )
-        .unwrap();
-        step("UPDATE binary_blobs SET bytes=X'01' WHERE sha256='update'", &["a"]);
-        step("UPDATE binary_blobs SET bytes=X'01' WHERE sha256='snapshot'", &["a"]);
+        // Removing the latest snapshot once it folded rows moves `a`, so the
+        // folded rows cannot change unseen and the snapshot come back; so
+        // does moving it back or changing its digest. Pruning a snapshot a
+        // later one supersedes, or a compaction rewriting the latest as it
+        // was, moves nothing.
+        step("DELETE FROM ydoc_snapshots WHERE object_id='a' AND up_to_seq=9", &["a"]);
+        step(&snapshot(9), &[]);
         step(
-            "INSERT INTO ydoc_inactive_lineages(workspace_id,version_id,object_id,lineage_claim_id,disposition,
-               content_kind,full_state_blob_sha256,state_vector_blob_sha256,recorded_at_ms,updated_at_ms)
-             VALUES ('ws','main','b','archived','superseded-predecessor','richdoc','archive','vector',0,0)",
+            "DELETE FROM ydoc_snapshots WHERE object_id='a' AND up_to_seq>0 AND up_to_seq<9",
             &[],
         );
+        step(
+            "INSERT INTO ydoc_snapshots VALUES ('ws','main','a',9,'snapshot','vector',1)
+             ON CONFLICT(workspace_id,version_id,object_id,up_to_seq) DO UPDATE SET
+               snapshot_blob_sha256=excluded.snapshot_blob_sha256,recorded_at_ms=excluded.recorded_at_ms",
+            &[],
+        );
+        step("UPDATE ydoc_snapshots SET up_to_seq=8 WHERE object_id='a' AND up_to_seq=9", &["a"]);
+        step("UPDATE ydoc_snapshots SET up_to_seq=9 WHERE object_id='a' AND up_to_seq=8", &["a"]);
+        step("UPDATE ydoc_snapshots SET snapshot_blob_sha256='other' WHERE object_id='a'", &["a"]);
+        step("UPDATE ydoc_snapshots SET snapshot_blob_sha256='snapshot' WHERE object_id='a'", &["a"]);
+        step("UPDATE ydoc_snapshots SET object_id='b' WHERE object_id='a'", &["a", "b"]);
+        step("UPDATE ydoc_snapshots SET object_id='a' WHERE object_id='b'", &["a", "b"]);
+        // A blob a journal row or snapshot names, missing from a damaged
+        // store, moves its document once restored.
+        step("INSERT INTO binary_blobs VALUES ('update',1,X'00')", &["a"]);
+        step("INSERT INTO binary_blobs VALUES ('snapshot',1,X'00')", &["a"]);
+        step("INSERT INTO binary_blobs VALUES ('archive',1,X'00')", &[]);
+        step("UPDATE binary_blobs SET bytes=X'01' WHERE sha256='update'", &["a"]);
+        step("UPDATE binary_blobs SET bytes=X'01' WHERE sha256='snapshot'", &["a"]);
+        let archive = "INSERT INTO ydoc_inactive_lineages(workspace_id,version_id,object_id,lineage_claim_id,
+               disposition,content_kind,full_state_blob_sha256,state_vector_blob_sha256,recorded_at_ms,updated_at_ms)
+             VALUES ('ws','main','b','archived','superseded-predecessor','richdoc','archive','vector',0,0)";
+        step(archive, &[]);
         step("UPDATE binary_blobs SET byte_length=2 WHERE sha256='archive'", &["b"]);
+        // An archive moves its document as it goes or its key or digest
+        // changes, so neither can change and change back unseen; its kind
+        // and bookkeeping, which the proof compares or never reads, move
+        // nothing. Its blob restored moves it too.
+        step(
+            "UPDATE ydoc_inactive_lineages SET full_state_blob_sha256='other' WHERE lineage_claim_id='archived'",
+            &["b"],
+        );
+        step(
+            "UPDATE ydoc_inactive_lineages SET full_state_blob_sha256='archive' WHERE lineage_claim_id='archived'",
+            &["b"],
+        );
+        step(
+            "UPDATE ydoc_inactive_lineages SET content_kind='plaintext',updated_at_ms=1 WHERE lineage_claim_id='archived'",
+            &[],
+        );
+        step(
+            "UPDATE ydoc_inactive_lineages SET object_id='a' WHERE lineage_claim_id='archived'",
+            &["a", "b"],
+        );
+        step(
+            "UPDATE ydoc_inactive_lineages SET object_id='b' WHERE lineage_claim_id='archived'",
+            &["a", "b"],
+        );
+        step("DELETE FROM ydoc_inactive_lineages WHERE lineage_claim_id='archived'", &["b"]);
+        step(archive, &[]);
+        conn.execute_batch("DELETE FROM binary_blobs WHERE sha256='archive'")
+            .unwrap();
+        step("INSERT INTO binary_blobs VALUES ('archive',1,X'00')", &["b"]);
         step("DELETE FROM ydoc_updates WHERE seq=10", &["a"]);
         step(
             "UPDATE ydoc_docs SET head_update_seq=9,updated_at_ms=1,path='a.md' WHERE object_id='a'",
@@ -9011,13 +9132,17 @@ mod tests {
         plan
     }
 
-    /// Opus's r2c-3c-1 finding 5: a trigger that matches moves its documents
-    /// by the generations' key. Over 20,000 documents with generations,
-    /// entries naming blobs and journal rows past the latest snapshot, a
-    /// blob one entry names arriving and going, a blob one journal row names
-    /// changing, and an inner journal row going and coming back take as many
-    /// steps as over one, and every statement those triggers run searches by
-    /// index, never scans.
+    /// Opus's r2c-3c-1 finding 5 and r2c-3c-3 finding 2: a trigger that
+    /// matches moves its documents by the generations' key. Over 20,000
+    /// documents with generations, entries naming blobs, journal rows past
+    /// the latest snapshot, and snapshots and archives naming blobs of their
+    /// own, every installed trigger that matches takes as many steps as over
+    /// one: a blob one entry names arriving and going, the bytes of a blob a
+    /// journal row, a snapshot or an archive names changing, an inner journal
+    /// row going, coming back and changing its digest, a missing blob it
+    /// names arriving, a snapshot changing its digest, the latest snapshot
+    /// going, and an archive changing its digest and going. Every statement
+    /// those triggers run searches by index, never scans.
     #[test]
     fn released_tail_triggers_that_match_move_by_key() {
         let dir = tempdir();
@@ -9032,23 +9157,48 @@ mod tests {
                      VALUES ('outbox-b',{n},'key-b-{n}','delivery-b-{n}','merged-{n}',1,0,0,1,0,'active');
                      INSERT INTO binary_blobs VALUES ('journal-{n}',1,X'00');
                      INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms)
-                       VALUES ('ws','main','a',{n},'journal-{n}',0)"
+                       VALUES ('ws','main','a',{n},'journal-{n}',0);
+                     INSERT INTO binary_blobs VALUES ('snapshot-{n}',1,X'00');
+                     INSERT INTO ydoc_snapshots VALUES ('ws','main','b',{n},'snapshot-{n}','vector',0);
+                     INSERT INTO binary_blobs VALUES ('archive-{n}',1,X'00');
+                     INSERT INTO ydoc_inactive_lineages(workspace_id,version_id,object_id,lineage_claim_id,
+                       disposition,content_kind,full_state_blob_sha256,state_vector_blob_sha256,recorded_at_ms,
+                       updated_at_ms)
+                     VALUES ('ws','main','b','archived-{n}','superseded-predecessor','richdoc','archive-{n}',
+                       'vector',0,0)"
                 ))
                 .unwrap();
             }
             conn.execute_batch("COMMIT").unwrap();
         };
-        // Row `n` has a row past it, so it is inner.
+        // Row `n` has a row past it, so it is inner. `b`'s latest snapshot
+        // is the last one grown.
         let writes = |n: i64| {
+            let row = format!("workspace_id='ws' AND version_id='main' AND object_id='a' AND seq={n}");
+            let b = "workspace_id='ws' AND version_id='main' AND object_id='b'";
             [
                 format!("INSERT INTO binary_blobs VALUES ('merged-{n}',1,X'00')"),
                 format!("DELETE FROM binary_blobs WHERE sha256='merged-{n}'"),
                 format!("UPDATE binary_blobs SET bytes=X'01' WHERE sha256='journal-{n}'"),
-                format!("DELETE FROM ydoc_updates WHERE object_id='a' AND seq={n}"),
+                format!("DELETE FROM ydoc_updates WHERE {row}"),
                 format!(
                     "INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms)
                      VALUES ('ws','main','a',{n},'journal-{n}',0)"
                 ),
+                format!("UPDATE binary_blobs SET bytes=X'01' WHERE sha256='snapshot-{n}'"),
+                format!("UPDATE binary_blobs SET bytes=X'01' WHERE sha256='archive-{n}'"),
+                format!("UPDATE ydoc_updates SET update_blob_sha256='missing-{n}' WHERE {row}"),
+                format!("INSERT INTO binary_blobs VALUES ('missing-{n}',1,X'00')"),
+                format!("UPDATE ydoc_snapshots SET snapshot_blob_sha256='missing-{n}' WHERE {b} AND up_to_seq={n}"),
+                format!(
+                    "DELETE FROM ydoc_snapshots WHERE {b} AND up_to_seq=
+                       (SELECT max(up_to_seq) FROM ydoc_snapshots WHERE {b})"
+                ),
+                format!(
+                    "UPDATE ydoc_inactive_lineages SET full_state_blob_sha256='missing-{n}'
+                     WHERE {b} AND lineage_claim_id='archived-{n}'"
+                ),
+                format!("DELETE FROM ydoc_inactive_lineages WHERE {b} AND lineage_claim_id='archived-{n}'"),
             ]
         };
         let moved = || {
@@ -9087,6 +9237,12 @@ mod tests {
                  UNION SELECT workspace_id,version_id,object_id FROM ydoc_inactive_lineages
                    WHERE full_state_blob_sha256 IN (?1,?2))"
             ),
+            format!(
+                "{generations} (SELECT workspace_id,version_id,object_id FROM ydoc_updates WHERE update_blob_sha256=?1
+                 UNION SELECT workspace_id,version_id,object_id FROM ydoc_snapshots WHERE snapshot_blob_sha256=?1
+                 UNION SELECT workspace_id,version_id,object_id FROM ydoc_inactive_lineages
+                   WHERE full_state_blob_sha256=?1)"
+            ),
         ] {
             let plan = query_plan(&conn, &sql);
             assert!(
@@ -9104,6 +9260,9 @@ mod tests {
             "SELECT 1 FROM ydoc_updates WHERE update_blob_sha256 IN (?1,?2)",
             "SELECT 1 FROM ydoc_snapshots WHERE snapshot_blob_sha256 IN (?1,?2)",
             "SELECT 1 FROM ydoc_inactive_lineages WHERE full_state_blob_sha256 IN (?1,?2)",
+            "SELECT 1 FROM ydoc_updates WHERE update_blob_sha256=?1",
+            "SELECT 1 FROM ydoc_snapshots WHERE snapshot_blob_sha256=?1",
+            "SELECT 1 FROM ydoc_inactive_lineages WHERE full_state_blob_sha256=?1",
             "SELECT 1 FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id='a' AND seq>5",
             "SELECT max(up_to_seq) FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id='a'",
         ] {
