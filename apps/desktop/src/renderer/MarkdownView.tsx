@@ -76,6 +76,7 @@ import { LazyMarkdownReadView } from "./markdown/LazyMarkdownReadView";
 import { useAuthoritativeValueRevision } from "./useAuthoritativeValueRevision";
 import { useCollectionFieldMarks } from "./collections/collectionFieldMarks";
 import { dirnameOf } from "./path";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES, exceedsUtf8Bytes } from "../workspaces/workspaceTextLimits";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
@@ -106,8 +107,6 @@ export type HeadingTarget = HeadingNavigationTarget;
 const SOURCE_VIEW_UPDATE_DELAY_MS = 150;
 
 const SOURCE_VIEW_UPDATE_MAX_WAIT_MS = 500;
-
-const WYSIWYG_MARKDOWN_THRESHOLD_BYTES = 64 * 1024;
 
 const LazyPropertiesPanel = lazy(() =>
   import("./PropertiesPanel").then((mod) => ({
@@ -303,7 +302,7 @@ export function MarkdownView(props: {
   localBuffer: SharedLocalDocument;
 }) {
   const [mode, setMode] = useState<"read" | "wysiwyg" | "source">(() =>
-    props.truncated || props.body.length > WYSIWYG_MARKDOWN_THRESHOLD_BYTES
+    props.truncated || exceedsUtf8Bytes(props.body, WYSIWYG_MARKDOWN_THRESHOLD_BYTES)
       ? "read"
       : "wysiwyg",
   );
@@ -1770,7 +1769,7 @@ export function MarkdownView(props: {
       // expensive. Keep that performance boundary when editing starts: source
       // mode handles the full draft without building a ProseMirror document.
       switchMode(
-        props.body.length > WYSIWYG_MARKDOWN_THRESHOLD_BYTES
+        exceedsUtf8Bytes(props.body, WYSIWYG_MARKDOWN_THRESHOLD_BYTES)
           ? "source"
           : "wysiwyg",
       );

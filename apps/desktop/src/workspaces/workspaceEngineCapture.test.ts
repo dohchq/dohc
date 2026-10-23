@@ -688,6 +688,11 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(session.doc.getMap("frontmatter").toJSON()).toEqual(status === "ownerPending"
       ? { Name: "Manual", id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa" } : { Name: "Manual" });
     expect(open).toHaveBeenCalledTimes(2);
+    // The note open and the record's adoption both read a seed past the
+    // in-band cap, up to the WYSIWYG editor's limit (#2521).
+    for (const [options] of open.mock.calls) {
+      expect(options).toMatchObject({ largeSeed: { workspaceId: WORKSPACE_ID, maxBytes: 64 * 1024 } });
+    }
     expect(healthyEvict).toHaveBeenCalledTimes(1);
     expect(close).not.toHaveBeenCalled();
     expect(evict).not.toHaveBeenCalled();
