@@ -650,14 +650,29 @@ async fn write_output<W: AsyncWrite + Unpin>(
                 let retired = guard.retirement_signal();
                 let deadline = guard.deadline();
                 let mut offset = 0;
-                while offset < frame.len() {
-                    let write = std::future::poll_fn(|cx| {
+                // Set once a read's frame has started: it finishes, and only
+                // retirement interrupts it.
+                let mut finishing = false;
+                loop {
+                    let flushing = offset == frame.len();
+                    let step = std::future::poll_fn(|cx| {
                         let mut result = std::task::Poll::Pending;
-                        if !guard.with_current(&mut || {
-                            result = std::pin::Pin::new(&mut output)
-                                .poll_write(cx, &frame[offset..])
-                                .map(|result| result.map(Some));
-                        }) {
+                        let mut poll = || {
+                            let pinned = std::pin::Pin::new(&mut output);
+                            result = if flushing {
+                                pinned.poll_flush(cx).map(|result| result.map(|()| Some(0)))
+                            } else {
+                                pinned
+                                    .poll_write(cx, &frame[offset..])
+                                    .map(|result| result.map(Some))
+                            };
+                        };
+                        let admitted = if finishing {
+                            guard.with_unretired(&mut poll)
+                        } else {
+                            guard.with_current(&mut poll)
+                        };
+                        if !admitted {
                             return std::task::Poll::Ready(Ok(None));
                         }
                         result
@@ -665,20 +680,25 @@ async fn write_output<W: AsyncWrite + Unpin>(
                     let mut interruption_kind = io::ErrorKind::ConnectionAborted;
                     let count = tokio::select! {
                         biased;
-                        () = cancel.cancelled() => None,
+                        () = cancel.cancelled(), if !finishing => None,
                         () = retired.cancelled() => None,
                         () = async {
                             match deadline {
                                 Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
                                 None => std::future::pending().await,
                             }
-                        } => { interruption_kind = io::ErrorKind::TimedOut; None },
-                        count = write => count?,
+                        }, if !finishing => { interruption_kind = io::ErrorKind::TimedOut; None },
+                        count = step => count?,
                     };
                     let Some(count) = count else {
                         if offset == 0 {
+                            write_withheld_error(&mut output, &*guard, request_id, limits).await?;
                             lock(&active_egress).remove(&request_id);
                             continue 'items;
+                        }
+                        if !finishing && guard.withheld_error().is_some() {
+                            finishing = true;
+                            continue;
                         }
                         if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
                             interruption_kind = io::ErrorKind::TimedOut;
@@ -692,44 +712,13 @@ async fn write_output<W: AsyncWrite + Unpin>(
                             },
                         ));
                     };
+                    if flushing {
+                        break;
+                    }
                     if count == 0 {
                         return Err(io::Error::new(io::ErrorKind::WriteZero, "stdout closed"));
                     }
                     offset += count;
-                }
-                let flush = std::future::poll_fn(|cx| {
-                    let mut result = std::task::Poll::Pending;
-                    if !guard.with_current(&mut || {
-                        result = std::pin::Pin::new(&mut output).poll_flush(cx);
-                    }) {
-                        let expired =
-                            deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline);
-                        return std::task::Poll::Ready(Err(io::Error::new(
-                            if expired {
-                                io::ErrorKind::TimedOut
-                            } else {
-                                io::ErrorKind::ConnectionAborted
-                            },
-                            if expired {
-                                "live acknowledgement expired"
-                            } else {
-                                "live acknowledgement retired"
-                            },
-                        )));
-                    }
-                    result
-                });
-                tokio::select! {
-                    biased;
-                    () = cancel.cancelled() => return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "live acknowledgement retired")),
-                    () = retired.cancelled() => return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "live acknowledgement retired")),
-                    () = async {
-                        match deadline {
-                            Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
-                            None => std::future::pending().await,
-                        }
-                    } => return Err(io::Error::new(io::ErrorKind::TimedOut, "live acknowledgement expired")),
-                    result = flush => result?,
                 }
                 lock(&active_egress).remove(&request_id);
             }
@@ -779,6 +768,7 @@ async fn write_output<W: AsyncWrite + Unpin>(
             } => {
                 let request_id = response.id;
                 if !guard.is_current() {
+                    write_withheld_error(&mut output, &*guard, request_id, limits).await?;
                     lock(&active_egress).remove(&request_id);
                     continue 'items;
                 }
@@ -826,6 +816,8 @@ async fn write_output<W: AsyncWrite + Unpin>(
                             limits,
                         )
                         .await?;
+                    } else {
+                        write_withheld_error(&mut output, &*guard, request_id, limits).await?;
                     }
                     continue 'items;
                 }
@@ -875,6 +867,28 @@ async fn write_envelope<W: AsyncWrite + Unpin>(
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "response too large"))?;
     output.write_all(&bytes).await?;
     output.flush().await
+}
+
+/// Answers request `request_id` with what `guard` sends in place of output it
+/// no longer admits, if anything.
+async fn write_withheld_error<W: AsyncWrite + Unpin>(
+    output: &mut W,
+    guard: &dyn OutputGuard,
+    request_id: u64,
+    limits: &WireLimits,
+) -> Result<(), io::Error> {
+    let Some(error) = guard.withheld_error() else {
+        return Ok(());
+    };
+    write_envelope(
+        output,
+        &Envelope::Error(ErrorEnvelope {
+            id: Some(request_id),
+            error,
+        }),
+        limits,
+    )
+    .await
 }
 
 struct GuardedBlobWriter<'a, W> {
@@ -1638,6 +1652,8 @@ mod tests {
         retired: CancelSignal,
         deadline: Option<std::time::Instant>,
         dropped: Arc<AtomicBool>,
+        /// Guards a held read's answer rather than an acknowledgement.
+        read: bool,
     }
 
     impl Drop for TestOutputGuard {
@@ -1670,6 +1686,21 @@ mod tests {
             }
             action();
             true
+        }
+        // As the live host's read guard.
+        fn withheld_error(&self) -> Option<WireError> {
+            if !self.read || self.retired.is_cancelled() {
+                return None;
+            }
+            if self
+                .deadline
+                .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+            {
+                return Some(WireError::new(ErrorCode::DeadlineExceeded, "expired"));
+            }
+            self.cancel
+                .is_cancelled()
+                .then(|| WireError::new(ErrorCode::Cancelled, "cancelled"))
         }
     }
 
@@ -1757,6 +1788,7 @@ mod tests {
                     retired: retired.clone(),
                     deadline,
                     dropped: dropped.clone(),
+                    read: false,
                 });
                 let (tx, mut rx) = tokio::sync::mpsc::channel(2);
                 tx.send(guarded_blob(guard)).await.unwrap();
@@ -1853,6 +1885,7 @@ mod tests {
                 retired: retired.clone(),
                 deadline,
                 dropped: dropped.clone(),
+                read: false,
             });
             let (tx, mut rx) = tokio::sync::mpsc::channel(2);
             tx.send(guarded_blob(guard)).await.unwrap();
@@ -1930,6 +1963,7 @@ mod tests {
             retired: retired.clone(),
             deadline: None,
             dropped: Arc::new(AtomicBool::new(false)),
+            read: false,
         })))
         .await
         .unwrap();
@@ -2043,6 +2077,7 @@ mod tests {
                 retired: retired.clone(),
                 deadline,
                 dropped: dropped.clone(),
+                read: false,
             });
             let (tx, mut rx) = tokio::sync::mpsc::channel(2);
             tx.send(guarded_blob(guard)).await.unwrap();
@@ -2134,6 +2169,7 @@ mod tests {
                 retired: retired.clone(),
                 deadline: None,
                 dropped: dropped.clone(),
+                read: false,
             });
             let (tx, mut rx) = tokio::sync::mpsc::channel(1);
             tx.send(guarded_blob(guard)).await.unwrap();
@@ -2182,6 +2218,7 @@ mod tests {
                 retired,
                 deadline: expired.then(|| std::time::Instant::now() - Duration::from_secs(1)),
                 dropped: Arc::new(AtomicBool::new(false)),
+                read: false,
             })))
             .await
             .unwrap();
@@ -2255,6 +2292,7 @@ mod tests {
                     retired,
                     deadline: expired.then(|| std::time::Instant::now() - Duration::from_secs(1)),
                     dropped: Arc::new(AtomicBool::new(false)),
+                    read: false,
                 }),
             })
             .await
@@ -2298,6 +2336,7 @@ mod tests {
                 retired: CancelSignal::new(),
                 deadline: Some(std::time::Instant::now() + Duration::from_secs(10)),
                 dropped: Arc::new(AtomicBool::new(false)),
+                read: false,
             }),
         })
         .await
@@ -2336,6 +2375,7 @@ mod tests {
                     retired: retired.clone(),
                     deadline: None,
                     dropped: dropped.clone(),
+                    read: false,
                 });
                 let (tx, mut rx) = tokio::sync::mpsc::channel(1);
                 tx.send(OutputItem::Guarded {
@@ -2403,6 +2443,7 @@ mod tests {
                 retired: CancelSignal::new(),
                 deadline: Some(std::time::Instant::now() + Duration::from_secs(10)),
                 dropped: dropped.clone(),
+                read: false,
             }),
         })
         .await
@@ -2426,6 +2467,171 @@ mod tests {
         tokio::time::advance(Duration::from_secs(11)).await;
         task.await.unwrap().unwrap();
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    // A held details answer cancelled, or past its deadline, mid-frame
+    // finishes that frame, and the connection's next answer still arrives. A
+    // lost owner still stops it mid-frame.
+    #[tokio::test]
+    async fn held_read_cancelled_or_expired_mid_frame_finishes_its_answer() {
+        for interruption in [
+            ErrorCode::Cancelled,
+            ErrorCode::DeadlineExceeded,
+            ErrorCode::WorkspaceUnavailable,
+        ] {
+            let cancel = CancelSignal::new();
+            let retired = CancelSignal::new();
+            let dropped = Arc::new(AtomicBool::new(false));
+            let deadline = (interruption == ErrorCode::DeadlineExceeded)
+                .then(|| std::time::Instant::now() + Duration::from_secs(1));
+            // As large as a held answer gets, far more than a pipe holds.
+            let details = serde_json::json!({ "status": "current", "padding": "x".repeat(200 * 1024) });
+            let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+            tx.send(OutputItem::Guarded {
+                response: WireResponse {
+                    id: 9,
+                    result: details.clone(),
+                },
+                guard: Arc::new(TestOutputGuard {
+                    cancel: cancel.clone(),
+                    retired: retired.clone(),
+                    deadline,
+                    dropped: dropped.clone(),
+                    read: true,
+                }),
+            })
+            .await
+            .unwrap();
+            tx.send(OutputItem::Envelope(Envelope::Response(WireResponse {
+                id: 10,
+                result: serde_json::json!({ "ok": true }),
+            })))
+            .await
+            .unwrap();
+            drop(tx);
+            let active = Arc::new(Mutex::new(HashMap::from([(9, Some(cancel.clone()))])));
+            let limits = WireLimits::default();
+            let mut transcript = Vec::new();
+            let output = InterruptMidFrame {
+                output: &mut transcript,
+                completed: 0,
+                // The answer's own frame, interrupted halfway.
+                interrupt_after: 0,
+                interrupted: false,
+                waited: false,
+                interrupt: if interruption == ErrorCode::WorkspaceUnavailable {
+                    retired
+                } else {
+                    cancel
+                },
+                deadline,
+            };
+            let written = write_output(output, &mut rx, &limits, active.clone()).await;
+            assert!(dropped.load(Ordering::SeqCst));
+            let mut decoder = FrameDecoder::new(limits.clone());
+            decoder.push(&transcript);
+            if interruption == ErrorCode::WorkspaceUnavailable {
+                assert_eq!(written.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+                assert!(
+                    decoder.next_frame().unwrap().is_none(),
+                    "partial frame must not be followed by another envelope"
+                );
+                continue;
+            }
+            written.expect("a read's interrupted answer leaves the connection writing");
+            assert!(lock(&active).is_empty());
+            let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+                panic!("interrupted answer did not finish: {interruption:?}");
+            };
+            assert!(
+                matches!(decode_control(&payload, &limits).unwrap(), Envelope::Response(response) if response.id == 9 && response.result == details)
+            );
+            let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+                panic!("following response missing");
+            };
+            assert!(
+                matches!(decode_control(&payload, &limits).unwrap(), Envelope::Response(response) if response.id == 10 && response.result["ok"] == true)
+            );
+            assert!(decoder.next_frame().unwrap().is_none());
+        }
+    }
+
+    // A held read cancelled, or past its deadline, after its handler answered
+    // but before a byte of the answer was written is answered with that error,
+    // streamed or not, so its caller settles at once. One whose owner retired
+    // is still withheld. The connection's next answer arrives either way.
+    #[tokio::test]
+    async fn held_read_withheld_before_its_first_byte_answers_its_error() {
+        for streamed in [false, true] {
+            for interruption in [
+                ErrorCode::Cancelled,
+                ErrorCode::DeadlineExceeded,
+                ErrorCode::WorkspaceUnavailable,
+            ] {
+                let cancel = CancelSignal::new();
+                let retired = CancelSignal::new();
+                match interruption {
+                    ErrorCode::Cancelled => cancel.cancel(),
+                    ErrorCode::WorkspaceUnavailable => retired.cancel(),
+                    _ => {}
+                }
+                let guard = Arc::new(TestOutputGuard {
+                    cancel: cancel.clone(),
+                    retired,
+                    deadline: (interruption == ErrorCode::DeadlineExceeded)
+                        .then(|| std::time::Instant::now() - Duration::from_secs(1)),
+                    dropped: Arc::new(AtomicBool::new(false)),
+                    read: true,
+                });
+                let item = if streamed {
+                    guarded_blob(guard)
+                } else {
+                    OutputItem::Guarded {
+                        response: WireResponse {
+                            id: 9,
+                            result: serde_json::json!({ "status": "current" }),
+                        },
+                        guard,
+                    }
+                };
+                let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+                tx.send(item).await.unwrap();
+                tx.send(OutputItem::Envelope(Envelope::Response(WireResponse {
+                    id: 10,
+                    result: serde_json::Value::Null,
+                })))
+                .await
+                .unwrap();
+                drop(tx);
+                let active = Arc::new(Mutex::new(HashMap::from([(9, Some(cancel))])));
+                let mut output = Vec::new();
+                let limits = WireLimits::default();
+                write_output(&mut output, &mut rx, &limits, active.clone())
+                    .await
+                    .unwrap();
+                assert!(lock(&active).is_empty());
+                let mut decoder = FrameDecoder::new(limits.clone());
+                decoder.push(&output);
+                if interruption != ErrorCode::WorkspaceUnavailable {
+                    let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+                        panic!("the read's error missing: {interruption:?}, streamed: {streamed}");
+                    };
+                    let Envelope::Error(error) = decode_control(&payload, &limits).unwrap() else {
+                        panic!("a withheld read was answered");
+                    };
+                    assert_eq!(error.id, Some(9));
+                    assert_eq!(error.error.code, interruption);
+                }
+                let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+                    panic!("following response missing");
+                };
+                assert!(
+                    matches!(decode_control(&payload, &limits).unwrap(), Envelope::Response(response) if response.id == 10),
+                    "{interruption:?}, streamed: {streamed}"
+                );
+                assert!(decoder.next_frame().unwrap().is_none());
+            }
+        }
     }
 
     /// A pre-closed events channel for transports whose test does not
@@ -2661,6 +2867,7 @@ mod tests {
                 retired: CancelSignal::new(),
                 deadline: None,
                 dropped: Arc::new(AtomicBool::new(false)),
+                read: false,
             }) as Arc<dyn OutputGuard>
         };
         let blob = |id| BlobEgress {

@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import type { ServerResponse } from "node:http";
 import { describe, expect, it, vi } from "vitest";
-import { pipeResponseBody } from "./pipeResponseBody";
+import { DRAIN_TIMEOUT_MS, pipeResponseBody } from "./pipeResponseBody";
 
 class ControlledResponse extends EventEmitter {
   destroyed = false;
@@ -87,5 +87,42 @@ describe("pipeResponseBody", () => {
     expect(outgoing.destroyed).toBe(true);
     expect(cancelled).toBe(true);
     expect(body.locked).toBe(false);
+  });
+
+  it("destroys a response whose client takes nothing for the drain timeout, and cancels the source", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      let cancelled = false;
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            controller.enqueue(Uint8Array.of(1));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      const outgoing = new ControlledResponse();
+      const piping = pipeResponseBody(body, response(outgoing));
+      await vi.waitFor(() => expect(outgoing.writes).toHaveLength(1));
+
+      // A slow client that drains within the timeout keeps its response.
+      await vi.advanceTimersByTimeAsync(DRAIN_TIMEOUT_MS - 1_000);
+      outgoing.emit("drain");
+      await vi.waitFor(() => expect(outgoing.writes).toHaveLength(2));
+      await vi.advanceTimersByTimeAsync(DRAIN_TIMEOUT_MS - 1_000);
+      expect(outgoing.destroyed).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(outgoing.destroyed).toBe(true);
+      await piping;
+      expect(cancelled).toBe(true);
+      expect(body.locked).toBe(false);
+      expect(outgoing.writes).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

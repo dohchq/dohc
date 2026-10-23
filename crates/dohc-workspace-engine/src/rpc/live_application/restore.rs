@@ -216,6 +216,7 @@ impl EngineService {
                 host: host.clone(),
                 cancel: ctx.cancel.clone(),
                 deadline: ctx.deadline,
+                read: false,
             },
             _reservation: input.reservation.clone(),
         });

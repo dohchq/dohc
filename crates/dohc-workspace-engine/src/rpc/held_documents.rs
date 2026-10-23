@@ -175,7 +175,7 @@ impl EngineService {
         }
         let handle = handle.ok_or_else(workspace_unavailable)?;
         let open = self.held_documents_open(ctx, &handle, &params.workspace_id)?;
-        let guard = self.live_host_output_guard(ctx, &handle)?;
+        let guard = self.live_host_read_guard(ctx, &handle)?;
         let answer = |result: Value, blob_egress: Option<BlobEgress>| ServiceResponse {
             response: Response {
                 id: request_id,

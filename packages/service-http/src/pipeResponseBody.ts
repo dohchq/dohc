@@ -1,8 +1,12 @@
 import type { ServerResponse } from "node:http";
 
+/** How long a full response buffer may wait for its client to take bytes before the response is destroyed. */
+export const DRAIN_TIMEOUT_MS = 60_000;
+
 /**
  * Streams a fetch Response body into a node:http response with backpressure.
- * A closed or errored socket cancels the source stream so an upstream relay
+ * A closed or errored socket, or a client that takes nothing for
+ * {@link DRAIN_TIMEOUT_MS}, cancels the source stream so an upstream relay
  * stops producing bytes that nothing will read.
  */
 export async function pipeResponseBody(
@@ -40,7 +44,10 @@ export async function pipeResponseBody(
 function waitForDrain(outgoing: ServerResponse): Promise<boolean> {
   if (outgoing.destroyed) return Promise.resolve(false);
   return new Promise((resolve) => {
+    // Destroying the response closes it, which resolves this.
+    const stalled = setTimeout(() => outgoing.destroy(), DRAIN_TIMEOUT_MS);
     const cleanup = (): void => {
+      clearTimeout(stalled);
       outgoing.off("close", closed);
       outgoing.off("drain", drained);
     };

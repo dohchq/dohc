@@ -71,14 +71,22 @@ pub trait OutputGuard: std::fmt::Debug + Send + Sync {
         action();
         true
     }
-    /// [`Self::with_current`] for a blob frame already under way. A guard
-    /// whose cancellation and deadline can wait for the frame's end refuses
-    /// here only once its owner retired; the writer acts on the rest between
-    /// frames, so the connection's other requests go on.
+    /// [`Self::with_current`] for a blob frame, or a read's answer, already
+    /// under way. A guard whose cancellation and deadline can wait for the
+    /// frame's end refuses here only once its owner retired; the writer acts
+    /// on the rest once the frame ends, so the connection's other requests
+    /// go on.
     fn with_unretired(&self, action: &mut dyn FnMut()) -> bool {
         self.with_current(action)
     }
     fn deadline(&self) -> Option<Instant> {
+        None
+    }
+    /// What answers the request instead of output this guard no longer
+    /// admits, or `None` to withhold it. A read cancelled or expired while
+    /// its owner is still current is answered with that error, and a frame
+    /// of its answer already under way finishes; anything else is withheld.
+    fn withheld_error(&self) -> Option<WireError> {
         None
     }
 }

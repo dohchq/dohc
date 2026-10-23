@@ -194,6 +194,9 @@ struct HostOutputGuard {
     host: Arc<Host>,
     cancel: CancelSignal,
     deadline: Option<Instant>,
+    /// A read's answer, which has no side effect, so its caller is told
+    /// when it is cancelled or expires rather than left waiting.
+    read: bool,
 }
 
 impl OutputGuard for HostOutputGuard {
@@ -228,6 +231,23 @@ impl OutputGuard for HostOutputGuard {
         }
         action();
         true
+    }
+    fn withheld_error(&self) -> Option<WireError> {
+        if !self.read || !self.host.current(&self.host.connection) {
+            return None;
+        }
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Some(WireError::new(
+                ErrorCode::DeadlineExceeded,
+                "held document answer deadline elapsed",
+            ));
+        }
+        self.cancel.is_cancelled().then(|| {
+            WireError::new(ErrorCode::Cancelled, "held document answer cancelled")
+        })
     }
 }
 
@@ -313,8 +333,8 @@ fn read_owner_outbox(
 }
 
 impl EngineService {
-    /// A guard for output `workspace`'s live host answers on `ctx`'s behalf.
-    pub(super) fn live_host_output_guard(
+    /// A guard for a read `workspace`'s live host answers on `ctx`'s behalf.
+    pub(super) fn live_host_read_guard(
         &self,
         ctx: &RequestContext,
         workspace: &WorkspaceHandle,
@@ -328,6 +348,7 @@ impl EngineService {
             host,
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
+            read: true,
         };
         if !guard.is_current() {
             return Err(workspace_unavailable());
@@ -748,6 +769,7 @@ impl EngineService {
             host: host.clone(),
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
+            read: false,
         });
         let mut retirement = RetireOnCancellation(Some(host.clone()));
         let worker_host = host.clone();
@@ -2070,6 +2092,7 @@ mod tests {
             host: host.clone(),
             cancel: RequestContext::unbounded().cancel,
             deadline: None,
+            read: false,
         };
         assert!(guard.is_current());
         host.retire();
