@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import type { ServerResponse } from "node:http";
 import { describe, expect, it, vi } from "vitest";
-import { DRAIN_TIMEOUT_MS, pipeResponseBody } from "./pipeResponseBody";
+import { DRAIN_TIMEOUT_HEADER, DRAIN_TIMEOUT_MS, pipeResponseBody } from "./pipeResponseBody";
 
 class ControlledResponse extends EventEmitter {
   destroyed = false;
@@ -47,7 +47,7 @@ describe("pipeResponseBody", () => {
       { highWaterMark: 0 },
     );
     const outgoing = new ControlledResponse();
-    const piping = pipeResponseBody(body, response(outgoing));
+    const piping = pipeResponseBody(new Response(body), response(outgoing));
 
     await vi.waitFor(() => expect(outgoing.writes).toHaveLength(1));
     await Promise.resolve();
@@ -80,7 +80,7 @@ describe("pipeResponseBody", () => {
       { highWaterMark: 0 },
     );
     const outgoing = new ControlledResponse();
-    const piping = pipeResponseBody(body, response(outgoing));
+    const piping = pipeResponseBody(new Response(body), response(outgoing));
     await vi.waitFor(() => expect(outgoing.writes).toHaveLength(1));
     outgoing.emit("error", new Error("socket reset"));
     await piping;
@@ -89,40 +89,68 @@ describe("pipeResponseBody", () => {
     expect(body.locked).toBe(false);
   });
 
-  it("destroys a response whose client takes nothing for the drain timeout, and cancels the source", async () => {
+  it("destroys an opted-in response whose client takes nothing for the drain timeout, and keeps an ordinary one", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
-      let cancelled = false;
-      const body = new ReadableStream<Uint8Array>(
-        {
-          pull(controller) {
-            controller.enqueue(Uint8Array.of(1));
+      const piped = (headers: HeadersInit) => {
+        const source = { cancelled: false, pulls: 0 };
+        const body = new ReadableStream<Uint8Array>(
+          {
+            pull(controller) {
+              source.pulls += 1;
+              if (source.pulls > 3) controller.close();
+              else controller.enqueue(Uint8Array.of(source.pulls));
+            },
+            cancel() {
+              source.cancelled = true;
+            },
           },
-          cancel() {
-            cancelled = true;
-          },
-        },
-        { highWaterMark: 0 },
-      );
-      const outgoing = new ControlledResponse();
-      const piping = pipeResponseBody(body, response(outgoing));
-      await vi.waitFor(() => expect(outgoing.writes).toHaveLength(1));
+          { highWaterMark: 0 },
+        );
+        const outgoing = new ControlledResponse();
+        return { source, body, outgoing, piping: pipeResponseBody(new Response(body, { headers }), response(outgoing)) };
+      };
+      const held = piped({ [DRAIN_TIMEOUT_HEADER]: "1" });
+      const download = piped({});
+      await vi.waitFor(() => {
+        expect(held.outgoing.writes).toHaveLength(1);
+        expect(download.outgoing.writes).toHaveLength(1);
+      });
 
       // A slow client that drains within the timeout keeps its response.
       await vi.advanceTimersByTimeAsync(DRAIN_TIMEOUT_MS - 1_000);
-      outgoing.emit("drain");
-      await vi.waitFor(() => expect(outgoing.writes).toHaveLength(2));
+      held.outgoing.emit("drain");
+      await vi.waitFor(() => expect(held.outgoing.writes).toHaveLength(2));
       await vi.advanceTimersByTimeAsync(DRAIN_TIMEOUT_MS - 1_000);
-      expect(outgoing.destroyed).toBe(false);
+      expect(held.outgoing.destroyed).toBe(false);
 
       await vi.advanceTimersByTimeAsync(1_000);
-      expect(outgoing.destroyed).toBe(true);
-      await piping;
-      expect(cancelled).toBe(true);
-      expect(body.locked).toBe(false);
-      expect(outgoing.writes).toHaveLength(2);
+      expect(held.outgoing.destroyed).toBe(true);
+      await held.piping;
+      expect(held.source.cancelled).toBe(true);
+      expect(held.body.locked).toBe(false);
+      expect(held.outgoing.writes).toHaveLength(2);
+
+      // The ordinary download, paused for the same two minutes and more, resumes where it stopped.
+      await vi.advanceTimersByTimeAsync(DRAIN_TIMEOUT_MS);
+      expect(download.outgoing.destroyed).toBe(false);
+      for (const written of [2, 3]) {
+        download.outgoing.emit("drain");
+        await vi.waitFor(() => expect(download.outgoing.writes).toHaveLength(written));
+      }
+      download.outgoing.emit("drain");
+      await download.piping;
+      expect(download.outgoing.writableFinished).toBe(true);
+      expect(download.outgoing.destroyed).toBe(false);
+      expect(download.source.cancelled).toBe(false);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("ends a response without a body", async () => {
+    const outgoing = new ControlledResponse();
+    await pipeResponseBody(new Response(null, { headers: { [DRAIN_TIMEOUT_HEADER]: "1" } }), response(outgoing));
+    expect(outgoing.writableFinished).toBe(true);
   });
 });

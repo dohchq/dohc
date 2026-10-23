@@ -1,3 +1,4 @@
+import { DRAIN_TIMEOUT_HEADER } from "@dohc/service-http";
 import type { HeldDocumentInspection, HostedSyncMethodResultMap } from "@dohc/workspace-engine-client/relay-wire";
 import { badRequest, notFound, relayError } from "./errors";
 import { HeldReadBusyError } from "./liveHostRequests";
@@ -47,8 +48,15 @@ export const MAX_HELD_CONTRIBUTIONS_BYTES = 64 * 1024 * 1024;
 export const MAX_HELD_BODY_BYTES = 128 * 1024 * 1024;
 /** The most held reads one owner has admitted at once, across all their workspaces. */
 export const MAX_HELD_READS_PER_OWNER = 2;
-/** How long an answer's body may take to send whole before it fails and its slot and bytes free. */
-export const HELD_BODY_SEND_DEADLINE_MS = 5 * 60_000;
+/** The most of {@link MAX_HELD_BODY_BYTES} one owner's answers hold at once. */
+const MAX_HELD_BODY_BYTES_PER_OWNER = MAX_HELD_BODY_BYTES / 2;
+/**
+ * How long an answer's body of `byteLength` may take to send whole before it fails and its slot and bytes
+ * free: a minute, plus about 64 KB/s.
+ */
+export function heldBodySendDeadlineMs(byteLength: number): number {
+  return 60_000 + Math.ceil(byteLength / 64);
+}
 const HELD_BODY_CHUNK_BYTES = 256 * 1024;
 const DIGEST = /^[0-9a-f]{64}$/;
 
@@ -115,7 +123,7 @@ export function withStreamedContributions(inspected: HeldDocumentInspection, str
 
 /**
  * `bytes` as a body sent a view at a time, which calls `release` once it closes, is cancelled, or fails
- * at {@link HELD_BODY_SEND_DEADLINE_MS}.
+ * at its {@link heldBodySendDeadlineMs}.
  */
 function releasingBody(bytes: Uint8Array, release: () => void): ReadableStream<Uint8Array> {
   let offset = 0, deadline: ReturnType<typeof setTimeout> | undefined;
@@ -123,7 +131,7 @@ function releasingBody(bytes: Uint8Array, release: () => void): ReadableStream<U
   return new ReadableStream<Uint8Array>({
     start(controller) {
       deadline = setTimeout(() => {controller.error(new Error("Held document body send deadline elapsed.")); release();},
-        HELD_BODY_SEND_DEADLINE_MS);
+        heldBodySendDeadlineMs(bytes.length));
       deadline.unref();
     },
     pull(controller) {
@@ -156,32 +164,35 @@ function releasingBody(bytes: Uint8Array, release: () => void): ReadableStream<U
 export function createHeldDocumentRoutes(options: {storage: SyncRelayStorage; host(): HeldDocumentHost | undefined}) {
   // One admitted read per owner and workspace, and MAX_HELD_READS_PER_OWNER per owner, each until its
   // body is read or cancelled. The host's read ends on the request's signal and its own deadline.
-  const admitted = new Set<string>(), owners = new Map<string, number>();
+  const admitted = new Set<string>(), owners = new Map<string, {reads: number; bodyBytes: number}>();
   let bodyBytes = 0;
+  /** Whether `byteLength` more held bytes for `ownerUserId` fit the relay's budget and the owner's share of it. */
+  const fits = (ownerUserId: string, byteLength: number) => byteLength <= MAX_HELD_BODY_BYTES - bodyBytes &&
+    byteLength <= MAX_HELD_BODY_BYTES_PER_OWNER - (owners.get(ownerUserId)?.bodyBytes ?? 0);
   return async (request: Request, route: HeldDocumentRoute, ownerUserId: string) => {
     const {storage} = options, slot = JSON.stringify([ownerUserId, route.workspaceId]);
-    const reads = owners.get(ownerUserId) ?? 0;
-    if (admitted.has(slot) || reads >= MAX_HELD_READS_PER_OWNER) {
+    const owner = owners.get(ownerUserId) ?? {reads: 0, bodyBytes: 0};
+    if (admitted.has(slot) || owner.reads >= MAX_HELD_READS_PER_OWNER) {
       // A caller who no longer owns the workspace learns nothing from a read still running.
       if (!storage.workspaceIsOwnedBy(route.workspaceId, ownerUserId)) throw notFound();
       throw relayError("held_read_busy");
     }
-    admitted.add(slot); owners.set(ownerUserId, reads + 1);
+    admitted.add(slot); owner.reads += 1; owners.set(ownerUserId, owner);
     let charged = 0, released = false;
     const release = () => {
       if (released) return;
-      released = true; admitted.delete(slot); bodyBytes -= charged;
-      const left = owners.get(ownerUserId)! - 1;
-      if (left === 0) owners.delete(ownerUserId); else owners.set(ownerUserId, left);
+      released = true; admitted.delete(slot); bodyBytes -= charged; owner.bodyBytes -= charged;
+      if (--owner.reads === 0) owners.delete(ownerUserId);
     };
     try {
       const answer = await respond(request, route, ownerUserId);
       if (answer.held) {
-        if (answer.bytes.length > MAX_HELD_BODY_BYTES - bodyBytes) throw relayError("held_read_busy");
-        charged = answer.bytes.length; bodyBytes += charged;
+        if (!fits(ownerUserId, answer.bytes.length)) throw relayError("held_read_busy");
+        charged = answer.bytes.length; bodyBytes += charged; owner.bodyBytes += charged;
       }
+      // The answer holds its slot and bytes until it is sent, so a client that stops taking it loses it.
       return new Response(releasingBody(answer.bytes, release), {status: 200, headers: {"cache-control": "private, no-store",
-        "content-type": answer.contentType, "content-length": String(answer.bytes.length)}});
+        "content-type": answer.contentType, "content-length": String(answer.bytes.length), [DRAIN_TIMEOUT_HEADER]: "1"}});
     } catch (error) {
       release();
       throw error;
@@ -199,8 +210,8 @@ export function createHeldDocumentRoutes(options: {storage: SyncRelayStorage; ho
     const query = objectId === undefined ? page(url) : null;
     const wanted = read ? inspectedQuery(url) : null;
     if (objectId !== undefined && !read && url.search) throw badRequest("Invalid held document query.");
-    // A body the budget could not fit is refused before the host reads it.
-    if (read && bodyBytes > MAX_HELD_BODY_BYTES - (read === "contributions" ? MAX_HELD_CONTRIBUTIONS_BYTES : MAX_BLOB_BYTES)) {
+    // A body the budget or the owner's share could not fit is refused before the host reads it.
+    if (read && !fits(ownerUserId, read === "contributions" ? MAX_HELD_CONTRIBUTIONS_BYTES : MAX_BLOB_BYTES)) {
       throw relayError("held_read_busy");
     }
     const host = options.host();

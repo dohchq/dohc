@@ -83,9 +83,10 @@ pub trait OutputGuard: std::fmt::Debug + Send + Sync {
         None
     }
     /// What answers the request instead of output this guard no longer
-    /// admits, or `None` to withhold it. A read cancelled or expired while
-    /// its owner is still current is answered with that error, and a frame
-    /// of its answer already under way finishes; anything else is withheld.
+    /// admits, or `None` to withhold it. While its connection lasts, a read
+    /// is answered with its cancellation or expiry, or that its owner
+    /// retired, and a frame of its answer already under way finishes unless
+    /// its owner retired; anything else is withheld.
     fn withheld_error(&self) -> Option<WireError> {
         None
     }

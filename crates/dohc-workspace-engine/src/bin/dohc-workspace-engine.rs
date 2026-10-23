@@ -1652,8 +1652,9 @@ mod tests {
         retired: CancelSignal,
         deadline: Option<std::time::Instant>,
         dropped: Arc<AtomicBool>,
-        /// Guards a held read's answer rather than an acknowledgement.
-        read: bool,
+        /// For a held read's answer rather than an acknowledgement, the
+        /// connection it goes to, which ends when cancelled.
+        read_connection: Option<CancelSignal>,
     }
 
     impl Drop for TestOutputGuard {
@@ -1689,8 +1690,11 @@ mod tests {
         }
         // As the live host's read guard.
         fn withheld_error(&self) -> Option<WireError> {
-            if !self.read || self.retired.is_cancelled() {
+            if self.read_connection.as_ref().is_none_or(CancelSignal::is_cancelled) {
                 return None;
+            }
+            if self.retired.is_cancelled() {
+                return Some(WireError::new(ErrorCode::WorkspaceUnavailable, "retired"));
             }
             if self
                 .deadline
@@ -1788,7 +1792,7 @@ mod tests {
                     retired: retired.clone(),
                     deadline,
                     dropped: dropped.clone(),
-                    read: false,
+                    read_connection: None,
                 });
                 let (tx, mut rx) = tokio::sync::mpsc::channel(2);
                 tx.send(guarded_blob(guard)).await.unwrap();
@@ -1885,7 +1889,7 @@ mod tests {
                 retired: retired.clone(),
                 deadline,
                 dropped: dropped.clone(),
-                read: false,
+                read_connection: None,
             });
             let (tx, mut rx) = tokio::sync::mpsc::channel(2);
             tx.send(guarded_blob(guard)).await.unwrap();
@@ -1963,7 +1967,7 @@ mod tests {
             retired: retired.clone(),
             deadline: None,
             dropped: Arc::new(AtomicBool::new(false)),
-            read: false,
+            read_connection: None,
         })))
         .await
         .unwrap();
@@ -2077,7 +2081,7 @@ mod tests {
                 retired: retired.clone(),
                 deadline,
                 dropped: dropped.clone(),
-                read: false,
+                read_connection: None,
             });
             let (tx, mut rx) = tokio::sync::mpsc::channel(2);
             tx.send(guarded_blob(guard)).await.unwrap();
@@ -2169,7 +2173,7 @@ mod tests {
                 retired: retired.clone(),
                 deadline: None,
                 dropped: dropped.clone(),
-                read: false,
+                read_connection: None,
             });
             let (tx, mut rx) = tokio::sync::mpsc::channel(1);
             tx.send(guarded_blob(guard)).await.unwrap();
@@ -2218,7 +2222,7 @@ mod tests {
                 retired,
                 deadline: expired.then(|| std::time::Instant::now() - Duration::from_secs(1)),
                 dropped: Arc::new(AtomicBool::new(false)),
-                read: false,
+                read_connection: None,
             })))
             .await
             .unwrap();
@@ -2292,7 +2296,7 @@ mod tests {
                     retired,
                     deadline: expired.then(|| std::time::Instant::now() - Duration::from_secs(1)),
                     dropped: Arc::new(AtomicBool::new(false)),
-                    read: false,
+                    read_connection: None,
                 }),
             })
             .await
@@ -2336,7 +2340,7 @@ mod tests {
                 retired: CancelSignal::new(),
                 deadline: Some(std::time::Instant::now() + Duration::from_secs(10)),
                 dropped: Arc::new(AtomicBool::new(false)),
-                read: false,
+                read_connection: None,
             }),
         })
         .await
@@ -2375,7 +2379,7 @@ mod tests {
                     retired: retired.clone(),
                     deadline: None,
                     dropped: dropped.clone(),
-                    read: false,
+                    read_connection: None,
                 });
                 let (tx, mut rx) = tokio::sync::mpsc::channel(1);
                 tx.send(OutputItem::Guarded {
@@ -2443,7 +2447,7 @@ mod tests {
                 retired: CancelSignal::new(),
                 deadline: Some(std::time::Instant::now() + Duration::from_secs(10)),
                 dropped: dropped.clone(),
-                read: false,
+                read_connection: None,
             }),
         })
         .await
@@ -2497,7 +2501,7 @@ mod tests {
                     retired: retired.clone(),
                     deadline,
                     dropped: dropped.clone(),
-                    read: true,
+                    read_connection: Some(CancelSignal::new()),
                 }),
             })
             .await
@@ -2556,32 +2560,39 @@ mod tests {
         }
     }
 
-    // A held read cancelled, or past its deadline, after its handler answered
-    // but before a byte of the answer was written is answered with that error,
-    // streamed or not, so its caller settles at once. One whose owner retired
-    // is still withheld. The connection's next answer arrives either way.
+    // A held read cancelled, past its deadline, or whose owner retired, after
+    // its handler answered but before a byte of the answer was written is
+    // answered with that error, streamed or not, so its caller settles at
+    // once. One whose connection ended (`None`) is withheld. The connection's
+    // next answer arrives either way.
     #[tokio::test]
     async fn held_read_withheld_before_its_first_byte_answers_its_error() {
         for streamed in [false, true] {
             for interruption in [
-                ErrorCode::Cancelled,
-                ErrorCode::DeadlineExceeded,
-                ErrorCode::WorkspaceUnavailable,
+                Some(ErrorCode::Cancelled),
+                Some(ErrorCode::DeadlineExceeded),
+                Some(ErrorCode::WorkspaceUnavailable),
+                None,
             ] {
                 let cancel = CancelSignal::new();
                 let retired = CancelSignal::new();
+                let connection = CancelSignal::new();
                 match interruption {
-                    ErrorCode::Cancelled => cancel.cancel(),
-                    ErrorCode::WorkspaceUnavailable => retired.cancel(),
+                    Some(ErrorCode::Cancelled) => cancel.cancel(),
+                    Some(ErrorCode::WorkspaceUnavailable) => retired.cancel(),
+                    None => {
+                        connection.cancel();
+                        retired.cancel();
+                    }
                     _ => {}
                 }
                 let guard = Arc::new(TestOutputGuard {
                     cancel: cancel.clone(),
                     retired,
-                    deadline: (interruption == ErrorCode::DeadlineExceeded)
+                    deadline: (interruption == Some(ErrorCode::DeadlineExceeded))
                         .then(|| std::time::Instant::now() - Duration::from_secs(1)),
                     dropped: Arc::new(AtomicBool::new(false)),
-                    read: true,
+                    read_connection: Some(connection),
                 });
                 let item = if streamed {
                     guarded_blob(guard)
@@ -2612,7 +2623,7 @@ mod tests {
                 assert!(lock(&active).is_empty());
                 let mut decoder = FrameDecoder::new(limits.clone());
                 decoder.push(&output);
-                if interruption != ErrorCode::WorkspaceUnavailable {
+                if let Some(interruption) = interruption {
                     let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
                         panic!("the read's error missing: {interruption:?}, streamed: {streamed}");
                     };
@@ -2867,7 +2878,7 @@ mod tests {
                 retired: CancelSignal::new(),
                 deadline: None,
                 dropped: Arc::new(AtomicBool::new(false)),
-                read: false,
+                read_connection: None,
             }) as Arc<dyn OutputGuard>
         };
         let blob = |id| BlobEgress {

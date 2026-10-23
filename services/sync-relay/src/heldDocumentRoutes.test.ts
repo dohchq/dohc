@@ -2,12 +2,12 @@ import {createHash} from "node:crypto";
 import {EventEmitter} from "node:events";
 import type {ServerResponse} from "node:http";
 import {afterEach, describe, expect, it, vi} from "vitest";
-import {DRAIN_TIMEOUT_MS, pipeResponseBody} from "@dohc/service-http";
+import {DRAIN_TIMEOUT_HEADER, DRAIN_TIMEOUT_MS, pipeResponseBody} from "@dohc/service-http";
 import {UnauthorizedError} from "@dohc/workspace-auth/session";
 import {fixture as ticketFixture, scope} from "./liveTickets.test-helper";
 import {createSyncRelayHandler} from "./server";
 import {releasedLineageBindingDigest, type ReleasedLineageBinding} from "@dohc/workspace-engine-client/relay-wire";
-import {HELD_BODY_SEND_DEADLINE_MS, MAX_HELD_BODY_BYTES, MAX_HELD_DOCUMENTS_PAGE, withStreamedContributions, withStreamedMarkdown, type HeldContributionsRead,
+import {heldBodySendDeadlineMs, MAX_HELD_BODY_BYTES, MAX_HELD_DOCUMENTS_PAGE, withStreamedContributions, withStreamedMarkdown, type HeldContributionsRead,
   type HeldDocumentHost, type HeldDocumentInspection, type HeldDocumentsPage, type StreamedBlob} from "./heldDocumentRoutes";
 import {HeldReadBusyError} from "./liveHostRequests";
 
@@ -42,9 +42,9 @@ const contributionsPath = `${scope.workspaceId}/held-documents/${held.objectId}/
   `?bindingDigest=${held.bindingDigest}&sha256=${sha256(contributions)}`;
 
 // Each bearer names one account: the owner, a named Edit recipient, a View
-// recipient, and the owner of another workspace.
+// recipient, and the owners of two other workspaces.
 const accounts: Record<string, string> = {"Bearer owner": "owner-1", "Bearer editor": scope.userId,
-  "Bearer viewer": "viewer-1", "Bearer stranger": "owner-2"};
+  "Bearer viewer": "viewer-1", "Bearer stranger": "owner-2", "Bearer third": "owner-3"};
 
 async function relay(host: HeldDocumentHost | undefined) {
   const f = await ticketFixture(); cleanups.push(f.close);
@@ -314,6 +314,7 @@ describe("held document routes", () => {
     expect(artifact.headers.get("content-type")).toBe("application/json");
     expect(artifact.headers.get("cache-control")).toBe("private, no-store");
     expect(artifact.headers.get("content-length")).toBe(String(contributions.length));
+    expect(artifact.headers.has(DRAIN_TIMEOUT_HEADER), "a client that stops taking it loses it").toBe(true);
     expect(Buffer.from(await artifact.arrayBuffer())).toEqual(contributions);
     expect([markdownAsked, contributionsAsked]).toEqual([[], ["contributions"]]);
     // The Markdown route asks for the text alone, and the details for neither.
@@ -535,9 +536,9 @@ describe("held document read admission", () => {
     // Three artifacts that each fit, but not all at once.
     const large = Buffer.alloc(Math.floor(MAX_HELD_BODY_BYTES / 2.5));
     const f = await relay(fakeHost({heldContributions: async () => ({inspected: preserved, contributions: large})}));
-    const [second] = owned(f, "owner-1", "workspace-3");
+    const [second] = owned(f, "owner-3", "workspace-3");
     const artifact = (path: string) => `${path}/contributions?bindingDigest=${held.bindingDigest}&sha256=${sha256(contributions)}`;
-    const answered = [await f.get(contributionsPath), await f.get(artifact(second!))];
+    const answered = [await f.get(contributionsPath), await f.get(artifact(second!), {authorization: "Bearer third"})];
     expect(answered.map(response => response.status)).toEqual([200, 200]);
     const refused = await f.get(artifact(`workspace-2/held-documents/${held.objectId}`), {authorization: "Bearer stranger"});
     expect(refused.status).toBe(429);
@@ -552,8 +553,8 @@ describe("held document read admission", () => {
   });
 
   /**
-   * Two artifacts answered that together leave too little of the byte budget for another, and the paths
-   * that read them. `asked` lists each workspace the host read held work for.
+   * Two owners' artifacts answered that together leave too little of the byte budget for another, and the
+   * paths that read them. `asked` lists each workspace the host read held work for.
    */
   async function fullBudget(asked: string[] = []) {
     const large = Buffer.alloc(Math.floor(MAX_HELD_BODY_BYTES / 2.2));
@@ -561,14 +562,56 @@ describe("held document read admission", () => {
       heldContributions: async workspaceId => {asked.push(workspaceId); return {inspected: preserved, contributions: large};},
       heldDocument: async workspaceId => {asked.push(workspaceId); return preserved;},
     }));
-    owned(f, "owner-1", "workspace-3");
+    owned(f, "owner-3", "workspace-3");
     const artifact = (workspaceId: string) =>
       `${workspaceId}/held-documents/${held.objectId}/contributions?bindingDigest=${held.bindingDigest}&sha256=${sha256(contributions)}`;
-    const answered = [await f.get(artifact(scope.workspaceId)), await f.get(artifact("workspace-3"))];
+    const answered = [await f.get(artifact(scope.workspaceId)), await f.get(artifact("workspace-3"), {authorization: "Bearer third"})];
     expect(answered.map(response => response.status)).toEqual([200, 200]);
     const strangers = () => f.get(artifact("workspace-2"), {authorization: "Bearer stranger"});
-    return {f, answered, artifact, strangers};
+    return {f, answered, artifact, strangers, large};
   }
+
+  it("answer an owner's held bodies past half the byte budget 429, after the ownership check, and admit another owner", async () => {
+    // Two artifacts that fit the budget together, but not one owner's share of it.
+    const large = Buffer.alloc(Math.floor(MAX_HELD_BODY_BYTES / 3));
+    const asked: string[] = [];
+    let answer!: () => void;
+    const answering = new Promise<void>(resolve => {answer = resolve;});
+    const f = await relay(fakeHost({heldContributions: async workspaceId => {
+      asked.push(workspaceId); await answering; return {inspected: preserved, contributions: large};
+    }}));
+    owned(f, "owner-1", "workspace-3", "workspace-4");
+    const artifact = (workspaceId: string, authorization = "Bearer owner") => f.get(
+      `${workspaceId}/held-documents/${held.objectId}/contributions?bindingDigest=${held.bindingDigest}&sha256=${sha256(contributions)}`,
+      {authorization});
+    // Both reads fit before the host answers; the second answered is refused on its actual bytes.
+    const both = [artifact(scope.workspaceId), artifact("workspace-3")];
+    await vi.waitFor(() => expect(asked).toHaveLength(2));
+    answer();
+    const [answered, refused] = (await Promise.all(both)).sort((a, b) => a.status - b.status);
+    expect([answered!.status, refused!.status]).toEqual([200, 429]);
+    expect(await refused!.json()).toMatchObject({code: "held_read_busy"});
+    // While the owner's answer holds its bytes, another artifact read is refused before the host reads it.
+    const early = await artifact("workspace-4");
+    expect(early.status).toBe(429);
+    expect(await early.json()).toMatchObject({code: "held_read_busy"});
+    expect(asked).toHaveLength(2);
+    // A caller who doesn't own the workspace learns nothing about the owner's share.
+    expect((await artifact("workspace-4", "Bearer editor")).status).toBe(404);
+    // Another owner fits beside it.
+    const other = await artifact("workspace-2", "Bearer stranger");
+    expect(other.status).toBe(200);
+    await other.body!.cancel();
+    expect((await answered!.arrayBuffer()).byteLength).toBe(large.length);
+    const freed = await artifact("workspace-4");
+    expect(freed.status).toBe(200);
+    await freed.body!.cancel();
+  });
+
+  it("give a body a minute to send, and about a second more for each 64 KB", () => {
+    expect(heldBodySendDeadlineMs(1024)).toBe(60_016);
+    expect(heldBodySendDeadlineMs(64 * 1024 * 1024)).toBe(60_000 + 1_048_576);
+  });
 
   it("answer an artifact or Markdown read 429 without asking the host while the byte budget can't fit one, after the ownership check", async () => {
     const asked: string[] = [];
@@ -600,11 +643,11 @@ describe("held document read admission", () => {
   }
   const sending = (response: Response) => {
     const outgoing = new SlowResponse();
-    return {outgoing, piping: pipeResponseBody(response.body!, outgoing as unknown as ServerResponse)};
+    return {outgoing, piping: pipeResponseBody(response, outgoing as unknown as ServerResponse)};
   };
 
   it("free an unread body's slot and bytes after the drain timeout, and a slow body's at the send deadline", async () => {
-    const {f, answered, strangers} = await fullBudget();
+    const {answered, strangers, large} = await fullBudget();
     vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
     try {
       // Both clients read the headers, then take nothing.
@@ -620,7 +663,7 @@ describe("held document read admission", () => {
       // This client takes a view every 30 s, never slow enough for the drain timeout.
       const {outgoing, piping} = sending(slow);
       const step = 30_000;
-      for (let elapsed = step; elapsed < HELD_BODY_SEND_DEADLINE_MS; elapsed += step) {
+      for (let elapsed = step; elapsed < heldBodySendDeadlineMs(large.length); elapsed += step) {
         await vi.advanceTimersByTimeAsync(step);
         outgoing.emit("drain");
       }
@@ -631,7 +674,7 @@ describe("held document read admission", () => {
       outgoing.emit("drain");
       await piping;
       expect(outgoing.destroyed, "the unfinished body fails").toBe(true);
-      expect(outgoing.written).toBeLessThan(MAX_HELD_BODY_BYTES / 2.2);
+      expect(outgoing.written).toBeLessThan(large.length);
       await again.body!.cancel();
     } finally {vi.useRealTimers();}
   });
