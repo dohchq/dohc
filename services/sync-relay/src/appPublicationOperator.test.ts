@@ -1,11 +1,11 @@
 import { createConnection, createServer, type Socket } from "node:net";
 import { once } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { startPublicationOperator } from "./appPublicationOperator";
-import { operatorSocketPath } from "./appPublicationOperatorProtocol";
+import { operatorSecretPath, operatorSocketPath } from "./appPublicationOperatorProtocol";
 import { requestPublicationTakedown } from "./appPublicationOperatorClient";
 import { notFound } from "./errors";
 
@@ -72,4 +72,12 @@ it("rejects a bare disable-publication request before storage", async () => {
   const operator = await startPublicationOperator({disableAppPublication}, path, secretPath); cleanups.push(() => operator.close());
   expect(await exchange(path, {type: "disable-publication", publicationId: "a".repeat(64), reason: "Malware"})).toMatchObject({code: 1});
   expect(disableAppPublication).not.toHaveBeenCalled();
+});
+
+it("keeps a development relay's operator secret in its database's folder", () => {
+  const database = join(root, "relay.sqlite");
+  expect(dirname(operatorSecretPath({SYNC_RELAY_DB_PATH: database}))).toBe(root);
+  expect(operatorSecretPath({SYNC_RELAY_DB_PATH: database})).not.toBe(operatorSecretPath({SYNC_RELAY_DB_PATH: join(root, "other.sqlite")}));
+  expect(operatorSecretPath({DOHC_RELAY_DEPLOYMENT_CONFIG: join(root, "continuity", "deployment.json")}))
+    .toBe(join(root, "continuity", "publication-operator.secret"));
 });
