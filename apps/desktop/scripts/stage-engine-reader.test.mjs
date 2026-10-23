@@ -28,7 +28,7 @@ test("reader generations and staging files stay out of git", () => {
 test("unsupported reader targets leave desktop and self-host preparation available", async t => {
   const root = await mkdtemp(join(tmpdir(), "dohc-reader-unsupported-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  for (const [platform, arch] of [["darwin", "ia32"], ["linux", "arm64"], ["win32", "arm64"], ["freebsd", "x64"]]) {
+  for (const [platform, arch] of [["darwin", "x64"], ["darwin", "ia32"], ["linux", "arm64"], ["win32", "arm64"], ["freebsd", "x64"]]) {
     assert.deepEqual(await stageEngineReader({ resources: root, platform, arch, selfHost: true }), { supported: false });
     assert.equal(await requireEngineReader(root, platform, arch), undefined);
     assert.deepEqual(await readdir(root), []);
@@ -46,14 +46,14 @@ test("Windows signing keeps the pinned OpenJS Node executable unchanged", async 
   }
 });
 
-for (const [platform, arch] of [["linux", "x64"], ["darwin", "arm64"], ["darwin", "x64"]]) test(`${platform}-${arch} download checksum fails before extraction or execution`, async t => {
+for (const [platform, arch] of [["linux", "x64"], ["darwin", "arm64"]]) test(`${platform}-${arch} download checksum fails before extraction or execution`, async t => {
   const root = await mkdtemp(join(tmpdir(), "dohc-reader-download-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   await assert.rejects(stageEngineReader({ resources: root, platform, arch,
     fetchNode: async () => new Response("wrong archive") }), /checksum mismatch/);
 });
 
-for (const [platform, arch] of [["win32", "x64"], ["linux", "x64"], ["darwin", "arm64"], ["darwin", "x64"]]) test(`${platform}-${arch} packaged resources contain the verified reader closure`,
+for (const [platform, arch] of [["win32", "x64"], ["linux", "x64"], ["darwin", "arm64"]]) test(`${platform}-${arch} packaged resources contain the verified reader closure`,
   { timeout: 180000, skip: process.platform !== "win32" && platform === "win32" }, async t => {
   const root = await mkdtemp(join(tmpdir(), "dohc-reader-layout-"));
   t.after(async () => {
@@ -154,57 +154,6 @@ for (const [platform, arch] of [["win32", "x64"], ["linux", "x64"], ["darwin", "
     await chmod(oldRoot, 0o555);
     await writeFile(join(packaged, "engine-reader/selection.json"), JSON.stringify({ generation: staged.generation }));
   }
-  if (platform === "darwin") await t.test("signing pins final Node bytes before sealing the app", async () => {
-    const { default: signReader } = await import("./sign-engine-reader-macos.mjs");
-    const { cp } = await import("node:fs/promises");
-    const app = join(root, "dohc.app"), macResources = join(app, "Contents/Resources");
-    await cp(packaged, macResources, { recursive: true });
-    const original = await requireEngineReader(macResources, platform, arch);
-    const calls = [];
-    const options = { app, platform: "darwin", identity: arch === "arm64" ? "synthetic-app-identity" : "-", keychain: "/synthetic.keychain",
-      ignore: file => file.endsWith("already-ignored") };
-    await assert.rejects(signReader(options, {}, {
-      run: async () => { throw Error("synthetic signing failure"); }, signApp: () => assert.fail("must not seal failed signing"),
-    }), /synthetic signing failure/);
-    await signReader(options, {}, {
-      run: async (command, args) => {
-        assert.equal(command, "/usr/bin/codesign");
-        calls.push(args);
-        if (args.includes("--sign")) {
-          assert.equal(args[args.indexOf("--sign") + 1], options.identity);
-          assert.equal(args[args.indexOf("--options") + 1], "runtime");
-          assert.equal(args[args.indexOf("--keychain") + 1], options.keychain);
-          assert.ok(args.includes(options.identity === "-" ? "--timestamp=none" : "--timestamp"));
-          const plist = await readFile(args[args.indexOf("--entitlements") + 1], "utf8");
-          assert.deepEqual([...plist.matchAll(/<key>([^<]+)<[/]key>/g)].map(match => match[1]), ["com.apple.security.cs.allow-jit"]);
-          await writeFile(original.node, Buffer.concat([await readFile(original.node), Buffer.from("synthetic signature")]));
-        } else assert.deepEqual(args, ["--verify", "--strict", original.node]);
-      },
-      signApp: async signedOptions => {
-        assert.equal(calls.length, 2, "Node is signed and verified before the app");
-        const final = JSON.parse(installedReaderConfig(macResources, platform, arch));
-        const finalManifest = JSON.parse(await readFile(final.manifest, "utf8"));
-        assert.notEqual(final.node, original.node);
-        assert.equal(finalManifest.runtime.sha256, createHash("sha256").update(await readFile(final.node)).digest("hex"));
-        const { sources, buildSha256, ...identity } = finalManifest;
-        assert.equal(buildSha256, createHash("sha256").update(JSON.stringify(identity)).digest("hex"));
-        assert.equal(dirname(final.node), join(macResources, "engine-reader", buildSha256));
-        assert.ok(signedOptions.ignore(final.node));
-        assert.ok(signedOptions.ignore(join(macResources, "app-compiler/node")));
-        assert.ok(signedOptions.ignore("already-ignored"));
-        assert.equal(signedOptions.ignore(join(macResources, "workspace-engine/dohc-workspace-engine")), false);
-        assert.equal(signedOptions.optionsForFile, options.optionsForFile);
-      },
-    });
-    // The source closure stays official; signed bytes are trusted through the sealed app manifest.
-    await requireEngineReader(packaged, platform, arch);
-    const final = JSON.parse(installedReaderConfig(macResources, platform, arch));
-    const finalManifest = JSON.parse(await readFile(final.manifest, "utf8"));
-    await chmod(final.node, 0o755);
-    await writeFile(final.node, "changed after signing");
-    assert.notEqual(createHash("sha256").update(await readFile(final.node)).digest("hex"), finalManifest.runtime.sha256);
-    await chmod(dirname(final.node), 0o700);
-  });
   // Preserve an optional, task-owned layout for native engine integration.
   if (process.env.DOHC_READER_TEST_LAYOUT) {
     const { cp } = await import("node:fs/promises");
@@ -221,9 +170,7 @@ test("macOS signing uses the reader hook without enabling Electron Node mode", a
   assert.equal(typeof hook, "function");
 });
 
-test("unsigned macOS packaging stays unsigned and required signing refuses a missing identity", async () => {
-  const { default: signReader } = await import("./sign-engine-reader-macos.mjs");
-  const operations = { run: () => assert.fail("must not sign"), signApp: () => assert.fail("must not sign") };
-  await signReader({ platform: "darwin" }, { forceCodeSigning: false }, operations);
-  await assert.rejects(signReader({ platform: "darwin" }, { forceCodeSigning: true }, operations), /app identity/);
+test("the reader has no Intel Mac runtime pin", async () => {
+  const { PINNED_NODE } = await import("./pinned-node.mjs");
+  assert.equal(PINNED_NODE["darwin-x64"], undefined);
 });

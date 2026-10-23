@@ -38,6 +38,8 @@ asar: true
 # A direct electron-builder invocation must not be able to silently omit the
 # engine sidecar. The hook throws before packaging if staging did not happen.
 beforePack: scripts/require-workspace-engine.mjs
+afterPack: scripts/prepare-engine-reader-macos.mjs
+afterSign: scripts/require-macos-signature.mjs
 extraResources:
   - from: scripts/compiler-node-LICENSE.txt
     to: engine-reader/node-LICENSE.txt

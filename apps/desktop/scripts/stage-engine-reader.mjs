@@ -11,7 +11,7 @@ const desktop = fileURLToPath(new URL("..", import.meta.url));
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
 const run = promisify(execFile);
 const identity = (platform, arch) => ({ version: NODE_VERSION, platform, arch, unicode: "17.0", icu: "78.3" });
-const supported = (platform, arch) => (["win32", "linux"].includes(platform) && arch === "x64") || (platform === "darwin" && ["arm64", "x64"].includes(arch));
+const supported = (platform, arch) => (["win32", "linux"].includes(platform) && arch === "x64") || (platform === "darwin" && arch === "arm64");
 
 async function regular(path) {
   if (!(await lstat(path)).isFile()) throw new Error(`Reader asset is not a regular file: ${path}`);

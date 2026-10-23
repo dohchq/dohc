@@ -15,7 +15,7 @@ function fixture(selection: unknown) {
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
 describe("installed reader paths", () => {
-  it.each([["darwin", "arm64"], ["darwin", "x64"], ["linux", "x64"], ["win32", "x64"]] as const)(
+  it.each([["darwin", "arm64"], ["linux", "x64"], ["win32", "x64"]] as const)(
     "passes the selected %s-%s closure to the engine", (platform, arch) => {
       const generation = "a".repeat(64), resources = fixture({ generation });
       const root = resolve(resources, "engine-reader", generation);
@@ -24,6 +24,10 @@ describe("installed reader paths", () => {
         bundle: join(root, "reader.cjs"), manifest: join(root, "manifest.json"),
       });
     });
+
+  it("does not configure the reader on Intel Macs", () => {
+    expect(installedReaderConfig(fixture({ generation: "a".repeat(64) }), "darwin", "x64")).toBeUndefined();
+  });
 
   it("disables missing, malformed, and unsupported installations", () => {
     expect(installedReaderConfig(undefined, "darwin", "arm64")).toBeUndefined();

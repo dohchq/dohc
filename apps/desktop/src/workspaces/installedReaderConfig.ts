@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 
 /** Main-process installation paths only. Missing preparation disables the reader. */
 export function installedReaderConfig(resources: string | undefined, platform = process.platform, arch = process.arch): string | undefined {
-  const supported = platform === "darwin" ? ["arm64", "x64"].includes(arch) : ["win32", "linux"].includes(platform) && arch === "x64";
+  const supported = platform === "darwin" ? arch === "arm64" : ["win32", "linux"].includes(platform) && arch === "x64";
   if (!resources || !supported) return;
   try {
     const { generation } = JSON.parse(readFileSync(join(resources, "engine-reader/selection.json"), "utf8"));
