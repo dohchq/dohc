@@ -291,6 +291,27 @@ describe("edits the server refused", () => {
     await waitFor(() => expect(screen.queryByText("Live editing stopped for notes/plan.md")).toBeNull());
   });
 
+  // Try again found no release left: the row stays, offering only the copy, until a saved copy ends it.
+  it("offers only Save recovery copy once dohc can't finish writing the edits, until a saved copy ends the row", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    let status = quarantined({...quarantine, incident: "release:lineage:0", recovery: "cannot-write"});
+    bridge.getSyncStatus = vi.fn(async () => status);
+    bridge.saveOwnerLiveRecoveryCopy = vi.fn(async () => {
+      status = SYNC_STATUS;
+      return {copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "this-computer" as const};
+    });
+    renderShell(bridge);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(within(toast).getByText("Live editing stopped for notes/plan.md")).toBeTruthy();
+    expect(within(toast).getByText("dohc kept your unsent edits, but can't finish writing them to your file. Save a recovery copy to get them back.")).toBeTruthy();
+    expect(within(toast).queryByRole("button", {name: "Try again"})).toBeNull();
+    await userEvent.setup().click(within(toast).getByRole("button", {name: "Save recovery copy"}));
+    expect(await screen.findByText("Saved a recovery copy of notes/plan.md in notes. Your kept edits stay on this computer.")).toBeTruthy();
+    expect(bridge.stopOwnerLiveDocument).not.toHaveBeenCalled();
+    act(() => bridge.emitWorkspaceActivity());
+    await waitFor(() => expect(screen.queryByText("Live editing stopped for notes/plan.md")).toBeNull());
+  });
+
   // A Stop recorded on this computer whose server call failed: it waits, it is not stopped.
   it("files a waiting Stop quietly with Try again, and replaces it once background recovery finishes", async () => {
     const bridge = makeBridge(Promise.resolve(null));

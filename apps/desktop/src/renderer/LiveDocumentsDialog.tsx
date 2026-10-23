@@ -13,7 +13,7 @@ export type LiveDocumentRow = {
   canResume: boolean;
   deferredStop?: {unsentEdits: number; editable: boolean};
   /** The server refused this document's edits for good, and dohc keeps them where `storedOn` says. */
-  quarantine?: "paused" | "retrying" | "stopping" | "stopped-kept" | "not-written" | "copied";
+  quarantine?: "paused" | "retrying" | "stopping" | "stopped-kept" | "not-written" | "cannot-write" | "copied";
   storedOn?: "this-computer" | "server";
 };
 
@@ -151,7 +151,7 @@ function statusLabel(row: LiveDocumentRow): string {
   if (row.quarantine === "paused" || row.quarantine === "copied") return "Paused";
   if (row.quarantine === "retrying") return "Trying again";
   if (row.quarantine === "stopping") return "Stopping";
-  if (row.quarantine === "stopped-kept" || row.quarantine === "not-written") return "Stopped";
+  if (row.quarantine === "stopped-kept" || row.quarantine === "not-written" || row.quarantine === "cannot-write") return "Stopped";
   if (row.reason === "document-unavailable") return "File moved or removed";
   if (row.reason === "workspace-changed") return "Workspace changed";
   if (row.reason === "session-host-refused") return "Stopped by the server";
@@ -212,6 +212,8 @@ function quarantineNote(row: LiveDocumentRow): string | null {
       return "Live editing stopped. dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.";
     case "not-written":
       return "Live editing stopped. dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.";
+    case "cannot-write":
+      return "Live editing stopped. dohc kept your unsent edits, but can't finish writing them to your file. Save a recovery copy to get them back.";
     default:
       return null;
   }

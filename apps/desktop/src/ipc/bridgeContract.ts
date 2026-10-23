@@ -427,7 +427,8 @@ export const OwnerLiveQuarantine = z.object({
   // stopped-kept: a Stop finished but kept the queue. not-written: a Stop took
   // the edits into the document but could not write them to the file.
   // copied: the server keeps them, and a recovery copy is on this computer.
-  recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "copied"]),
+  // cannot-write: as not-written, but dohc can only save a recovery copy.
+  recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write", "copied"]),
 }).strict();
 export type OwnerLiveQuarantine = z.infer<typeof OwnerLiveQuarantine>;
 export const RetryOwnerLiveQuarantinePayload = WorkspaceIdPayload.extend({

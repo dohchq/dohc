@@ -518,6 +518,19 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     expect(delivering.parts).not.toContain("checkpoint");
   });
 
+  it("reads a checkpoint that changed since the header, or between its pages, as a changed read", async () => {
+    const checkpoint = Buffer.from([9, 8, 7, 6, 5, 4]), successor = Buffer.from([1, 2, 3, 4, 5, 6, 7]);
+    const bound = {...pendingResult(), state: "quarantined", quarantineReason: "invalid-update", checkpointDigest: sha(checkpoint)};
+    const [first] = checkpointPages(checkpoint), [, second] = checkpointPages(successor);
+    const betweenPages = cursorReader([...pages(bound, 5), first!, second!]);
+    await expect(betweenPages.client.readRecovery("outbox-1")).rejects.toBeInstanceOf(OwnerYDocOutboxReadChangedError);
+    const sinceHeader = cursorReader([...pages(bound, 5), ...checkpointPages(successor)]);
+    await expect(sinceHeader.client.readRecovery("outbox-1")).rejects.toBeInstanceOf(OwnerYDocOutboxReadChangedError);
+    const presenceOnly = {...bound, checkpointDigest: "present"};
+    const malformed = cursorReader([...pages(presenceOnly, 5), ...checkpointPages(checkpoint)]);
+    await expect(malformed.client.readRecovery("outbox-1")).rejects.toThrow("checkpointDigest must be a SHA-256 digest.");
+  });
+
   it("discards a changed snapshot and does not automatically retry", async () => {
     const responses = pages(pendingResult());
     const last = responses.length - 1;

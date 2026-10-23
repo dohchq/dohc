@@ -878,6 +878,114 @@ fn a_refused_queue_reads_its_accepted_checkpoint_as_its_own_part() {
 }
 
 #[test]
+fn a_checkpoint_that_changes_between_pages_changes_the_read() {
+    use super::super::{
+        read_pending_page, OwnerOutboxPageResult, OwnerOutboxReadCursor, OwnerOutboxReadPart,
+    };
+    let (_dir, mut store, _observed, checkpoint, _unsent, _host) = enrolled_with_unsent_draft();
+    let outbox_id: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outbox_id FROM owner_ydoc_outbox_entries WHERE append_key='unsent'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    let OwnerOutboxPageResult::Page(header) =
+        read_pending_page(&store, "workspace", &outbox_id, None, 4096).unwrap()
+    else {
+        panic!("a first read never changed")
+    };
+    let first = OwnerOutboxReadCursor {
+        snapshot: header.cursor.snapshot.clone(),
+        part: OwnerOutboxReadPart::Checkpoint,
+        sequence: 0,
+        offset: 0,
+    };
+    let OwnerOutboxPageResult::Page(page) =
+        read_pending_page(&store, "workspace", &outbox_id, Some(first), 1).unwrap()
+    else {
+        panic!("the checkpoint has not changed yet")
+    };
+    // The binding's checkpoint changes to a shorter state between pages.
+    let shorter = bounded(&Ydoc::wire()).unwrap();
+    assert!(shorter.len() > 1 && shorter.len() < checkpoint.len());
+    store
+        .write_with(&NoFaults, |tx| {
+            let digest = hex_sha256(&shorter);
+            put_binary_blob_with_sha(tx, &shorter, &digest)?;
+            tx.execute("UPDATE ydoc_owner_bindings SET checkpoint_digest=?1", [&digest])
+                .map_err(write_sql)?;
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+    // Within the new bytes the page names their digest, which the client reads as a change.
+    let within = page.next_cursor.clone().unwrap();
+    assert_eq!(within.offset, 1);
+    let OwnerOutboxPageResult::Page(changed) =
+        read_pending_page(&store, "workspace", &outbox_id, Some(within.clone()), 4096).unwrap()
+    else {
+        panic!("an offset within the new checkpoint still reads")
+    };
+    assert_ne!(changed.digest, page.digest);
+    // Past them the engine answers that the read changed, not that the cursor is invalid.
+    let beyond = OwnerOutboxReadCursor {
+        offset: i64::try_from(shorter.len()).unwrap(),
+        ..within
+    };
+    assert!(matches!(
+        read_pending_page(&store, "workspace", &outbox_id, Some(beyond), 4096).unwrap(),
+        OwnerOutboxPageResult::ReadChanged
+    ));
+}
+
+#[test]
+fn a_queue_of_an_earlier_restore_generation_never_reads_its_successors_checkpoint() {
+    use super::super::{
+        read_pending_page, OwnerOutboxPageResult, OwnerOutboxReadCursor, OwnerOutboxReadPart,
+    };
+    let (_dir, mut store, observed, _checkpoint, _unsent, host) = enrolled_with_unsent_draft();
+    let outbox_id: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outbox_id FROM owner_ydoc_outbox_entries WHERE append_key='unsent'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    let header = |store: &EngineStore| {
+        let OwnerOutboxPageResult::Page(page) =
+            read_pending_page(store, "workspace", &outbox_id, None, 4096).unwrap()
+        else {
+            panic!("a first read never changed")
+        };
+        let raw: serde_json::Value = serde_json::from_slice(&page.bytes).unwrap();
+        (page.cursor.snapshot, raw)
+    };
+    assert!(header(&store).1["checkpointDigest"].is_string());
+    let next = next_generation(&observed);
+    let input = successor_input(&store, &next, host);
+    enroll(&mut store, &input, &observed.limits).unwrap();
+    // The older queue still waits; the successor's checkpoint need not hold what it builds on.
+    let (snapshot, raw) = header(&store);
+    assert_eq!(raw["binding"], serde_json::to_value(&observed.binding).unwrap());
+    assert!(raw["pendingEntryCount"].as_i64().unwrap() >= 1);
+    assert_eq!(raw["checkpointDigest"], serde_json::Value::Null);
+    let checkpoint = OwnerOutboxReadCursor {
+        snapshot,
+        part: OwnerOutboxReadPart::Checkpoint,
+        sequence: 0,
+        offset: 0,
+    };
+    assert!(matches!(
+        read_pending_page(&store, "workspace", &outbox_id, Some(checkpoint), 4096).unwrap(),
+        OwnerOutboxPageResult::ReadChanged
+    ));
+}
+
+#[test]
 fn explicit_recovery_keeps_old_writes_refused_and_installs_only_the_host_checkpoint() {
     use super::super::draft::{append_draft_in_tx, write_states_in, OwnerDraftWrite};
     let (dir, mut store, observed, checkpoint, unsent, host) = enrolled_with_unsent_draft();

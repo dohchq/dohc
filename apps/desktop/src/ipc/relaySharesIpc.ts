@@ -230,16 +230,18 @@ export function createRelaySharesIpcHandlers<
     operation.assertCurrent();assertOriginalWorkspace(operation.workspace);
     return withOwnerLiveStopTransition(input.workspaceId,input.path,async (): Promise<StopOwnerLiveDocumentResult> => {
       // Stop again writes the file a finished release could not, from that release alone.
+      // A release the engine no longer holds keeps its edits for Save recovery copy.
       const unwritten=stop && dependencies.ownerLiveQuarantines(operation.workspace).find(row => row.path===input.path && row.recovery==="not-written");
       if (unwritten) {
         const released=await dependencies.retryOwnerLiveRelease(operation.workspace,unwritten.objectId);
         operation.assertCurrent();
-        return {keptEdits:released ? keptEditsOf(released) : "none"};
+        return {keptEdits:released ? keptEditsOf(released) : "kept"};
       }
       const local=stop ? await dependencies.ownerLiveStop(operation.workspace,"request",input.path) : undefined;
       operation.assertCurrent();
-      // This computer's release can write only the edits it keeps. Edits the server keeps stay there.
-      const kept=local===undefined ? undefined : dependencies.ownerLiveQuarantines(operation.workspace).find(row => row.objectId===local.document.objectId);
+      // This computer's release can write only the edits it keeps. Edits the server keeps stay there,
+      // and edits an earlier release could not write are not this Stop's to claim.
+      const kept=local===undefined ? undefined : dependencies.ownerLiveQuarantines(operation.workspace).find(row => row.objectId===local.document.objectId && row.recovery!=="cannot-write");
       const quarantined=kept?.storedOn==="this-computer", onServer=kept?.storedOn==="server";
       if (stop && local && !local.retirementOwed) return {keptEdits:quarantined || onServer ? "kept" : "none"};
       let result: unknown;

@@ -379,11 +379,24 @@ describe("owner live document enrollment", () => {
       const tryAgain = () => h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "old name.md"});
       await expect(tryAgain()).resolves.toEqual({keptEdits: "recovered"});
       await expect(tryAgain()).resolves.toEqual({keptEdits: "kept"});
-      // The engine holds no such release any more: nothing is left to write.
-      await expect(tryAgain()).resolves.toEqual({keptEdits: "none"});
+      // The engine holds no such release any more: the edits stay kept for Save recovery copy.
+      await expect(tryAgain()).resolves.toEqual({keptEdits: "kept"});
       expect(h.retryOwnerLiveRelease.mock.calls).toEqual([[h.workspace, "object"], [h.workspace, "object"], [h.workspace, "object"]]);
       expect(h.ownerLiveStop).not.toHaveBeenCalled();
       expect(h.request).not.toHaveBeenCalled();
+    });
+
+    // Once only Save recovery copy remains, a Stop of the live document at
+    // that path is an ordinary Stop, never a release of the old record.
+    it("runs an ordinary Stop for a document whose kept edits can only be saved", async () => {
+      const h = harness(); h.ownerLiveQuarantines.mockReturnValue([{...quarantine, incident: "release:a:0", recovery: "cannot-write"}]);
+      h.request.mockResolvedValue(retired);
+      h.ownerLiveStop.mockImplementation(released());
+      // It claims nothing about the edits the earlier release kept.
+      await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "none"});
+      expect(h.retryOwnerLiveRelease).not.toHaveBeenCalled();
+      expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request", "release"]);
+      expect(h.request.mock.calls.map(call => call[2]?.method)).toEqual(["DELETE"]);
     });
 
     it("saves a recovery copy for the workspace's own path, and only there", async () => {

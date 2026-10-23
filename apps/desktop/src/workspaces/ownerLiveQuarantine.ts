@@ -26,21 +26,26 @@ const BINDING_QUARANTINES = new Set(["stale-binding", "restore-fenced", "binding
  * delivery. stopping: a Stop waits for the server to stop live editing.
  * stopped-kept: the Stop finished but kept the queue. not-written: the Stop
  * took the edits into the document but could not write its file.
+ * cannot-write: as not-written, but the engine no longer holds that release,
+ * so only Save recovery copy remains.
  */
-export type OwnerLiveRecovery = "paused" | "retrying" | "stopping" | "stopped-kept" | "not-written";
+export type OwnerLiveRecovery = "paused" | "retrying" | "stopping" | "stopped-kept" | "not-written" | "cannot-write";
 
 /** One document whose owner edits the server refused for good, as this computer's engine keeps them. */
-export type OwnerLiveQuarantineRecord = {
-  objectId: string;
-  path: string;
-  reason: string;
-  /** The refused queue; null once a Stop took its edits into the document. */
-  outboxId: string | null;
+export type OwnerLiveQuarantineRecord = {objectId: string; path: string; reason: string} & ({
+  /** The refused queue. */
+  outboxId: string;
   /** The binding generation the queue was refused at, which a Try again names. */
   binding: LiveObjectBinding;
-  headDeliveryId: string | null;
-  recovery: OwnerLiveRecovery;
-};
+  headDeliveryId: string;
+  recovery: Exclude<OwnerLiveRecovery, "not-written" | "cannot-write">;
+} | {
+  /** A Stop took the edits into the document; its record keeps the release's binding when it could read it. */
+  outboxId: null;
+  binding: LiveObjectBinding | null;
+  headDeliveryId: null;
+  recovery: "not-written" | "cannot-write";
+});
 
 type HeadFacts = {state: string; reason: string | null; binding: LiveObjectBinding; headDeliveryId: string | null; retryDeliveryId: string | null};
 /** What each queue's head said, by draft revision and size, so an unchanged queue is not read again. */
@@ -94,11 +99,11 @@ export async function readOwnerLiveQuarantines(client: EngineClient, workspace: 
     } while (after !== null);
   } finally {outbox.dispose();}
   for (const id of heads?.keys() ?? []) if (!listed.has(id)) heads!.delete(id);
-  // A release whose queue is still here did not commit: the queue speaks for it.
+  // While the document has a queue, its row speaks for the document.
   for (const release of options.unwritten ?? []) {
     if (found.some(row => row.objectId === release.objectId)) continue;
     found.push({objectId: release.objectId, path: release.path, reason: release.reason, outboxId: null,
-      binding: release.binding, headDeliveryId: null, recovery: "not-written"});
+      binding: release.binding, headDeliveryId: null, recovery: release.retry ? "not-written" : "cannot-write"});
   }
   return found;
 }

@@ -400,6 +400,8 @@ export class OwnerYDocOutbox {
         total ??= pageTotal;
         digest ??= pageDigest;
         if (pageTotal !== total || pageDigest !== digest) {
+          // The checkpoint sits outside the snapshot: an acceptance may advance it between pages.
+          if (part === "checkpoint") throw new OwnerYDocOutboxReadChangedError();
           throw new TypeError("Owner outbox part length or digest changed.");
         }
         const bytes = base64ToBytes(page.bytesBase64, "bytesBase64");
@@ -497,10 +499,12 @@ export class OwnerYDocOutbox {
       }
     }
     // Read after the entries, so it covers every entry accepted before them.
+    // Only this queue's own binding has one, and its bytes must match the header's digest.
     let checkpoint: Uint8Array | undefined;
-    if (withCheckpoint && nullableField(raw, "checkpointDigest", isText) !== null) {
+    const checkpointDigest = !withCheckpoint || raw.checkpointDigest === null ? null : digestField(raw, "checkpointDigest");
+    if (checkpointDigest !== null) {
       next = {snapshot: snapshot!, part: "checkpoint", sequence: 0, offset: 0};
-      checkpoint = await readPart("checkpoint", 0);
+      checkpoint = await readPart("checkpoint", 0, undefined, checkpointDigest);
     }
     const observed = raw.observedBinding;
     return {

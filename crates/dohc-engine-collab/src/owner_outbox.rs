@@ -1118,8 +1118,13 @@ pub fn read_pending_page(
                 (base_length, parent.base_update_digest, bytes, next_entry(0)?)
             }
             Checkpoint => {
-                let (digest, length) = accepted_checkpoint_in(&tx, &parent.binding)?
-                    .ok_or(OwnerOutboxError::InvalidInput("no accepted checkpoint"))?;
+                // Outside the snapshot, so a checkpoint that moved on, or that this
+                // queue's binding no longer holds, changes the read instead of failing it.
+                let Some((digest, length)) = accepted_checkpoint_in(&tx, &parent.binding)?
+                    .filter(|(_, length)| cursor.offset < *length)
+                else {
+                    return Ok(OwnerOutboxPageResult::ReadChanged);
+                };
                 let bytes = slice_blob(&tx, &digest, length, cursor.offset, max_bytes)?;
                 (length, digest, bytes, None)
             }
@@ -1220,23 +1225,29 @@ fn slice_header(
     ))
 }
 
-/// The digest and length of the accepted state this lineage's pending entries
-/// build on, while this computer still holds its binding.
+/// The digest and length of the accepted state this queue's pending entries
+/// build on, while this computer still holds the queue's own binding. A later
+/// restore generation's checkpoint need not contain them, so it is never offered.
 fn accepted_checkpoint_in(
     conn: &Connection,
     binding: &LiveObjectBinding,
 ) -> Result<Option<(String, i64)>, OwnerOutboxError> {
-    let digest: Option<String> = conn
+    let row: Option<(String, String)> = conn
         .query_row(
-            "SELECT checkpoint_digest FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+            "SELECT checkpoint_digest,binding_json FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
             params![binding.workspace_id, binding.main_version_id, binding.object_id, binding.lineage_claim_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(read_sql)?;
-    let Some(digest) = digest else {
+    let Some((digest, held)) = row else {
         return Ok(None);
     };
+    let held: LiveObjectBinding =
+        serde_json::from_str(&held).map_err(|_| OwnerOutboxError::Corrupt)?;
+    if held != *binding {
+        return Ok(None);
+    }
     let length: i64 = conn
         .query_row(
             "SELECT byte_length FROM binary_blobs WHERE sha256=?1",

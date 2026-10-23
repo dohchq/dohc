@@ -19,7 +19,7 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   classifyEndProbe,
@@ -304,6 +304,17 @@ describe("createDurableFile", () => {
     expect(hasEngineIgnoredSegment(`notes/${temporary}`, process.platform)).toBe(true);
     stopped.resolve();
     await expect(creating).rejects.toThrow("dohc stopped");
+    expect(await readdir(join(root, "notes"))).toEqual([]);
+  });
+
+  it("refuses on a drive without hard links and never writes the final name directly", async () => {
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    const opened: string[] = [];
+    const open = async (path: string, flags: string, mode?: number) => {opened.push(path); return actual.open(path, flags, mode);};
+    const link = async () => {throw Object.assign(new Error("EPERM: operation not permitted, link"), { code: "EPERM" });};
+    await expect(createDurableFile(root, "notes/kept.md", "complete recovery text", { open, link }))
+      .rejects.toThrow("This drive can't save a recovery copy safely, so dohc saved nothing. Your kept edits stay on this computer.");
+    expect(opened.filter((path) => basename(path) === "kept.md")).toEqual([]);
     expect(await readdir(join(root, "notes"))).toEqual([]);
   });
 

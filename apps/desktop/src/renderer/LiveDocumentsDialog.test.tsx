@@ -1108,6 +1108,17 @@ describe("LiveDocumentsDialog", () => {
       expect(h.stop).toHaveBeenCalledExactlyOnceWith("ws", "docs/a.md");
     });
 
+    it("offers only a recovery copy once dohc can't finish writing the edits, and Stop for a document live again", async () => {
+      const h = harness();
+      h.load.mockResolvedValue(page([row("docs/a.md", { status: "retired", quarantine: "cannot-write" }), row("docs/b.md", { quarantine: "cannot-write" })]));
+      render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+      const kept = await screen.findByTestId("live-document-row-docs/a.md");
+      expect(within(kept).getByText("Stopped")).toBeTruthy();
+      expect(kept.textContent).toContain("Live editing stopped. dohc kept your unsent edits, but can't finish writing them to your file. Save a recovery copy to get them back.");
+      expect(actions("docs/a.md")).toEqual(["Save recovery copy"]);
+      expect(actions("docs/b.md")).toEqual(["Stop live editing", "Save recovery copy"]);
+    });
+
     it("disables a row's Save recovery copy while its save runs", async () => {
       const h = harness();
       h.load.mockResolvedValue(page([row("docs/a.md", { status: "retired", quarantine: "not-written" })]));

@@ -115,7 +115,11 @@ function fixture(options: {ownerLiveReleases?: UnwrittenReleases} = {}) {
         unwritten.splice(0, unwritten.length, ...unwritten.filter(row => row.objectId !== release.objectId), release);
       },
       recovery: async (_id, objectId) => recoveries.get(objectId) ?? null,
+      endRetry: async (id, objectId) => {
+        unwritten.splice(0, unwritten.length, ...unwritten.map(row => row.workspaceId === id && row.objectId === objectId ? {...row, retry: false} : row));
+      },
       remove: async (id, objectId) => {
+        if (!unwritten.some(row => row.workspaceId === id && row.objectId === objectId)) return;
         recoveries.delete(objectId);
         unwritten.splice(0, unwritten.length, ...unwritten.filter(row => row.workspaceId !== id || row.objectId !== objectId));
       },
@@ -1061,7 +1065,7 @@ describe("server owner peer lifecycle", () => {
       currentPath: "notes/plan.md", selectorPaths: ["notes/plan.md"], restoreFenceGeneration: 1};
     const rootPath = await createTestScratch("dohc-quarantine-stop-restart-");
     const file = join(await createTestScratch("dohc-unwritten-releases-"), "owner-live-releases.json");
-    if (recovery === "not-written") await createUnwrittenReleases(() => file).put({workspaceId: "owner", objectId: "object", path: "notes/plan.md", reason: "invalid-update", binding}, "{}");
+    if (recovery === "not-written") await createUnwrittenReleases(() => file).put({workspaceId: "owner", objectId: "object", path: "notes/plan.md", reason: "invalid-update", binding, retry: true}, "{}");
     quarantineMock.read.mockImplementation(async (_client, _handle, options: {unwritten?: unknown[]}) => recovery === "stopping"
       ? [{objectId: "object", path: "notes/plan.md", reason: "invalid-update", outboxId: "outbox", binding, headDeliveryId: "delivery", recovery}]
       : (options.unwritten ?? []).map(() => ({objectId: "object", path: "notes/plan.md", reason: "invalid-update", outboxId: null, binding, headDeliveryId: null, recovery})));
@@ -1146,25 +1150,29 @@ describe("server owner peer lifecycle", () => {
   });
 
   // A release took refused edits but could not write the file. Resume does
-  // not write it either, so the record, its Save recovery copy and its Try
-  // again outlive Resume and a restart. Try again settles that release again
-  // by the record's binding and never asks for a new Stop.
+  // not write it either, and an engine store reset forgets the release, so
+  // the record and its stored package outlive both and a restart. Try again
+  // settles that release again by the record's binding and never asks for a
+  // new Stop. When the engine no longer holds the release, only Save recovery
+  // copy remains, and the record ends once it has written the stored package.
   it.each([
-    ["writes the file", "materialized"],
-    ["finds no release left", "conflict"],
-    ["fails again", "failed"],
-  ] as const)("keeps a release owed to a renamed file through Resume and a restart until a Try again %s", async (_title, outcome) => {
+    ["Resume, then a Try again that writes the file", "resume", "materialized"],
+    ["Resume, then a Try again that fails again", "resume", "failed"],
+    ["Resume, then a Try again that finds no release left", "resume", "conflict"],
+    ["an engine store reset, then a Try again that finds no release left", "reset", "conflict"],
+  ] as const)("keeps the edits a release owed to a renamed file through %s, until the file or a recovery copy holds them", async (_title, before, outcome) => {
     const binding = {workspaceId: "owner", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
       currentPath: "notes/plan.md", selectorPaths: ["notes/plan.md"], restoreFenceGeneration: 1};
     const rootPath = await createTestScratch("dohc-unwritten-resume-");
     const file = join(await createTestScratch("dohc-unwritten-resume-state-"), "owner-live-releases.json");
     const {liveRecoveryPackage} = await import("./ownerLiveRecoveryCopy");
     // The record keeps the path the document had when it stopped; it has since been renamed.
-    await createUnwrittenReleases(() => file).put({workspaceId: "owner", objectId: "object", path: "notes/old plan.md", reason: "invalid-update", binding},
+    await createUnwrittenReleases(() => file).put({workspaceId: "owner", objectId: "object", path: "notes/old plan.md", reason: "invalid-update", binding, retry: true},
       JSON.stringify(liveRecoveryPackage(recoveryQueue(binding).queue, {path: "notes/old plan.md", reason: "invalid-update", storedOn: "this-computer"})));
     quarantineMock.read.mockImplementation(async (_client, _handle, options?: {unwritten?: UnwrittenRelease[]}) => (options?.unwritten ?? []).map(release =>
-      ({objectId: release.objectId, path: release.path, reason: release.reason, outboxId: null, binding: release.binding, headDeliveryId: null, recovery: "not-written"})));
-    const launch = async () => {
+      ({objectId: release.objectId, path: release.path, reason: release.reason, outboxId: null, binding: release.binding, headDeliveryId: null,
+        recovery: release.retry ? "not-written" : "cannot-write"})));
+    const launch = async (recovery: "not-written" | "cannot-write" = "not-written") => {
       const f = fixture({ownerLiveReleases: createUnwrittenReleases(() => file)});
       Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
       const methods: string[] = [];
@@ -1182,25 +1190,42 @@ describe("server owner peer lifecycle", () => {
       await f.engine.start();
       const workspace = {workspaceId: "owner", rootPath};
       await f.engine.sessions!.run(workspace, async () => undefined);
-      await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{objectId: "object", path: "notes/old plan.md", recovery: "not-written"}]));
+      await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{objectId: "object", path: "notes/old plan.md", recovery}]));
       return {f, workspace, methods};
     };
-    const first = await launch();
-    try {await first.f.engine.clearOwnerLiveStop(first.workspace, "notes/plan.md");}
-    finally {await first.f.close();}
-    const {f, workspace, methods} = await launch();
+    const stopMethods = (methods: string[]) => methods.filter(method => method.startsWith("ydoc.ownerStop.") && method !== "ydoc.ownerStop.list");
     try {
-      // Save recovery copy still has the edits, from the package saved before the release.
-      const saved = await f.engine.saveOwnerLiveRecoveryCopy(workspace, "notes/old plan.md");
-      expect(await readFile(join(rootPath, saved.copyPath!), "utf8")).toContain("kept");
-      const released = await f.engine.retryOwnerLiveRelease(workspace, "object");
-      expect(methods.filter(method => method.startsWith("ydoc.ownerStop.") && method !== "ydoc.ownerStop.list")).toEqual(["ydoc.ownerStop.release"]);
-      expect(released?.materialized).toBe(outcome === "conflict" ? undefined : outcome === "materialized");
-      const kept = outcome === "failed";
-      expect(await createUnwrittenReleases(() => file).list("owner")).toHaveLength(kept ? 1 : 0);
-      expect(await createUnwrittenReleases(() => file).recovery("owner", "object")).toEqual(kept ? expect.any(String) : null);
-      await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toHaveLength(kept ? 1 : 0));
-    } finally {await f.close(); quarantineMock.read.mockReset();}
+      const first = await launch();
+      try {if (before === "resume") await first.f.engine.clearOwnerLiveStop(first.workspace, "notes/plan.md");}
+      finally {await first.f.close();}
+      // Nothing was exported before the Try again.
+      const second = await launch();
+      try {
+        const released = await second.f.engine.retryOwnerLiveRelease(second.workspace, "object");
+        expect(stopMethods(second.methods)).toEqual(["ydoc.ownerStop.release"]);
+        expect(released?.materialized).toBe(outcome === "conflict" ? undefined : outcome === "materialized");
+      } finally {await second.f.close();}
+      if (outcome === "materialized") {
+        expect(await createUnwrittenReleases(() => file).list("owner")).toEqual([]);
+        expect(await createUnwrittenReleases(() => file).recovery("owner", "object")).toBeNull();
+        return;
+      }
+      // After a restart the row stays, offering Try again only while the engine may still hold the release.
+      const {f, workspace, methods} = await launch(outcome === "conflict" ? "cannot-write" : "not-written");
+      try {
+        if (outcome === "conflict") await expect(f.engine.retryOwnerLiveRelease(workspace, "object")).rejects.toThrow("This document changed.");
+        expect(await createUnwrittenReleases(() => file).recovery("owner", "object")).toEqual(expect.any(String));
+        // Save recovery copy writes the stored package into the workspace, which ends the record.
+        const saved = await f.engine.saveOwnerLiveRecoveryCopy(workspace, "notes/old plan.md");
+        expect(await readFile(join(rootPath, saved.copyPath!), "utf8")).toContain("kept");
+        expect(await readFile(join(rootPath, saved.packagePath), "utf8")).toContain("dohc.live-recovery");
+        expect(stopMethods(methods)).toEqual([]);
+        expect(await createUnwrittenReleases(() => file).list("owner")).toEqual([]);
+        expect(await createUnwrittenReleases(() => file).recovery("owner", "object")).toBeNull();
+        // Nothing is left to route a Stop of the live document into a release.
+        await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toEqual([]));
+      } finally {await f.close();}
+    } finally {quarantineMock.read.mockReset();}
   });
 
   // Save recovery copy reads the whole queue and writes next to the file. It
