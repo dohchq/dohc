@@ -10,9 +10,10 @@ let issued = 0;
 const pass = (patch: Partial<HostedSyncMethodResultMap["sync.pullHosted"]> = {}) => ({fetched: 1, applied: 1, refused: 0, skipped: 0,
   conflictsOpened: 0, hasMore: false, pendingCursor: {kind: "hosted" as const, token: `issued-${++issued}`},
   changedPaths: [{versionId: "main", path: "docs/a.md", operation: "write" as const, contentKind: "text" as const}],
-  refusals: [], sharingDeclined: [], held: [], heldThrough: null, departed: [], ...patch});
+  changedPathsOmitted: 0, refusals: [], refusalsOmitted: 0, sharingDeclined: [], sharingDeclinedOmitted: 0, held: [], heldThrough: null,
+  newlyHeld: [], departed: [], departedOmitted: 0, ...patch});
 const commit = (patch: Partial<HostedSyncMethodResultMap["sync.commitCursor"]> = {}) =>
-  ({committed: true, hasMore: false, retirement: null, departed: [], sharingDeclined: [], ...patch});
+  ({committed: true, hasMore: false, retirement: null, departed: [], departedOmitted: 0, sharingDeclined: [], ...patch});
 const diverged = () => new EngineRequestError(1, {code: "INVALID_PARAMS", message: "relay-origin-diverged", retry: "no"});
 
 function fixture(config = attachment()) {
@@ -150,18 +151,63 @@ it("tells the caller of a commit that stands before the retirement after it fail
 
 it("keeps each departed document the engine still holds until a reply that read them drops it", async () => {
   const f = fixture();
-  expect(f.driver.departed).toBeNull();
+  expect(f.driver.departed("doc-b")).toBeUndefined();
+  expect(f.driver.departedNone).toBe(false);
   const passes = [pass({pendingCursor: null, departed: ["doc-b"]}), pass({departed: ["doc-b"]}), pass({departed: ["doc-b"]}), pass()];
   const failed = {code: "INTERNAL", message: "hosted file unexpected: docs/b.md", retry: "no"};
   // The rows retired but the file did not go; then the departed list went unread; then the file went.
   const commits = [commit({hasMore: true, retirement: failed, departed: ["doc-b"]}), commit({hasMore: true, departed: null}), commit()];
   f.answers["sync.pullHosted"] = () => passes.shift();
   f.answers["sync.commitCursor"] = () => commits.shift();
-  const seen: Array<string[] | null> = [];
-  const record = () => seen.push(f.driver.departed && [...f.driver.departed]);
+  const seen: Array<boolean | undefined> = [];
+  const record = () => seen.push(f.driver.departed("doc-b"));
   await expect(f.driver.pull(undefined, record)).rejects.toThrow("Hosted retirement failed");
   await f.driver.pull(undefined, record);
-  expect(seen).toEqual([["doc-b"], ["doc-b"], ["doc-b"], []]);
+  expect(seen).toEqual([true, true, true, false]);
+  expect(f.driver.departedNone).toBe(true);
+});
+
+// Proves: a departed list the engine cut to fit its answer says nothing past
+// the last document it names, so none there reads as gone, and the documents
+// it leaves out before there are. A later reply that reaches them decides.
+it("reads no document past where a cut departed list stops as gone, until a list that reaches it", async () => {
+  const f = fixture();
+  const passes = [pass({departed: ["doc-b"], departedOmitted: 2}), pass({departed: [], departedOmitted: 3}), pass({departed: ["doc-c"]})];
+  const commits = [commit({departed: ["doc-b"], departedOmitted: 2}), commit({departed: null}), commit({departed: ["doc-c"]})];
+  f.answers["sync.pullHosted"] = () => passes.shift();
+  f.answers["sync.commitCursor"] = () => commits.shift();
+  const known = () => ["doc-a", "doc-b", "doc-c", "doc-d"].map(objectId => f.driver.departed(objectId));
+  await f.driver.pull();
+  expect(known()).toEqual([false, true, undefined, undefined]);
+  expect(f.driver.departedNone).toBe(false);
+  // Its commit could not read them, so the pass's empty but cut list stands.
+  await f.driver.pull();
+  expect(known()).toEqual([undefined, undefined, undefined, undefined]);
+  expect(f.driver.departedNone).toBe(false);
+  await f.driver.pull();
+  expect(known()).toEqual([false, false, true, false]);
+});
+
+// Proves: a pass whose page activation never heard, as when its commit's
+// reply is lost, leaves the held cursor where it was, so the next pass lists
+// the same documents again and none is skipped.
+it("asks after the last held list activation heard when a pass fails before its page", async () => {
+  const f = fixture(), work = (objectId: string) => ({objectId, reason: "hosted-backfill-work-waiting" as const});
+  const passes = [pass({held: [work("a")], heldThrough: "a"}), pass({held: [work("a")], heldThrough: "a"}), pass({held: [work("b")]})];
+  f.answers["sync.pullHosted"] = () => passes.shift();
+  const original = f.answers["sync.commitCursor"]!;
+  f.answers["sync.commitCursor"] = () => {f.answers["sync.commitCursor"] = original; throw new Error("the engine stopped answering");};
+  const heard = vi.fn();
+  await expect(f.driver.pull(undefined, heard)).rejects.toThrow("stopped answering");
+  expect(heard).not.toHaveBeenCalled();
+  expect(f.driver.heldSweepUnfinished).toBe(false);
+  await f.driver.pull(undefined, heard);
+  expect(f.driver.heldSweepUnfinished).toBe(true);
+  await f.driver.pull(undefined, heard);
+  expect(f.driver.heldSweepUnfinished).toBe(false);
+  const asked = f.sendRequest.mock.calls.map(([request]) => request).filter(request => request.method === "sync.pullHosted")
+    .map(request => request.params);
+  expect(asked).toEqual([{workspaceId: "workspace"}, {workspaceId: "workspace"}, {workspaceId: "workspace", heldAfter: "a"}]);
 });
 
 it("leaves a pass uncommitted when a reply is lost, and the next pull carries on", async () => {

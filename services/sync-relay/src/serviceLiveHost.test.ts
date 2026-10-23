@@ -181,9 +181,10 @@ it("registers only the discovered engine identity and releases its incarnation o
 
 // The engine's hosted replica replies, with fields a test can override.
 const hostedPass = (overrides: Record<string, unknown> = {}) => ({fetched: 0, applied: 0, refused: 0, skipped: 0, conflictsOpened: 0, hasMore: false,
-  pendingCursor: {kind: "hosted", token: "pending"}, changedPaths: [], refusals: [], sharingDeclined: [], held: [], heldThrough: null, departed: [],
-  ...overrides});
-const hostedCommit = (overrides: Record<string, unknown> = {}) => ({committed: true, hasMore: false, retirement: null, departed: [], sharingDeclined: [], ...overrides});
+  pendingCursor: {kind: "hosted", token: "pending"}, changedPaths: [], changedPathsOmitted: 0, refusals: [], refusalsOmitted: 0, sharingDeclined: [],
+  sharingDeclinedOmitted: 0, held: [], heldThrough: null, newlyHeld: [], departed: [], departedOmitted: 0, ...overrides});
+const hostedCommit = (overrides: Record<string, unknown> = {}) => ({committed: true, hasMore: false, retirement: null, departed: [], departedOmitted: 0,
+  sharingDeclined: [], ...overrides});
 const pushReply = {status: "complete", hasMore: false, pushed: 0, sharingDeclined: [], ownerAdmissionPending: []};
 
 it("gives the engine a configured hosted replica's relay without registering a partly activated live host", async () => {
@@ -2095,6 +2096,84 @@ it("keeps a released-lineage hold a cut held list leaves out, until a list that 
   o.replies.pass = {};
   o.refuseCapture(undefined);
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+});
+
+// Sol's review: an owner whose activation never finishes keeps its workspace
+// from being ready and reuses its owner, so nothing pulls. When the pull
+// before its capture held its document past where its held list stopped, no
+// later list reached it: the owner stayed, and ended holds stayed blocked.
+// Proves: passes go on paging a cut held list while the workspace is not
+// ready, so the next pull names the hold and drops the owner, after which
+// the workspace pulls again and an ended hold is freed.
+it("pages a cut held list while an unfinished owner holds its workspace back, until it names the hold past it", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  let pulls = () => 0, reached: number | undefined;
+  const driver = heldDriver(held => {if (reached === undefined && held.releasedHold(o.sibling) !== undefined) reached = pulls();});
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  await o.host.close();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  // One hold a pass, so the first list stops at "another", before the sibling's "object".
+  const hold = releasedHold(), waiting = {objectId: "another", reason: "hosted-backfill-work-waiting"};
+  o.replies.heldPerPass = 1;
+  o.replies.pass = {held: [waiting, hold]};
+  // The engine retired the session its owner captured, so its activation never finishes.
+  vi.spyOn(OwnerCommittedDelivery.prototype, "drain").mockRejectedValue(new Error("live-registration-unavailable"));
+  const restarted = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
+  cleanup.push(() => restarted.close());
+  pulls = o.pullCount;
+  await restarted.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(driver()?.releasedHold(o.sibling)).toBe(digest(hold)));
+  // Its capture's pull, then the one that pages on.
+  expect(reached).toBe(2);
+  expect(driver()!.ownerDocument(o.sibling)).toBeUndefined();
+  o.replies.pass = {held: [waiting]};
+  await vi.waitFor(() => expect(driver()!.releasedHold(o.sibling)).toBeUndefined());
+});
+
+// Opus's review: a document held while it was edited live, past where its
+// pass's held list stopped, kept its owner, so the relay kept it open until a
+// later list reached it. Proves: the pass names what it moved from ready to
+// held, and that page drops its owner. That list only adds: one that leaves a
+// held document out frees nothing.
+it("drops the owner of a document held mid-edit on the page that holds it, however its held list was cut", async () => {
+  const seen: {covers: boolean; owned: boolean}[] = [];
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  const driver = heldDriver((held, window) => seen.push({covers: hostedHeldWindowCovers(window, "object"), owned: held.ownerDocument(o.sibling) !== undefined}));
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCapture(unready());
+  const hold = releasedHold(), waiting = {objectId: "another", reason: "hosted-backfill-work-waiting" as const};
+  const holding = seen.length;
+  o.replies.heldPerPass = 1;
+  o.replies.pass = {held: [waiting, hold], newlyHeld: [hold]};
+  await vi.waitFor(() => expect(driver()?.releasedHold(o.sibling)).toBe(digest(hold)));
+  const dropped = seen.findIndex((row, index) => index >= holding && !row.owned);
+  expect(seen[dropped]).toEqual({covers: false, owned: false});
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  driver()!.hold("workspace", [], {after: undefined, through: "another"}, [waiting]);
+  expect(driver()!.releasedHold(o.sibling)).toBe(digest(hold));
+});
+
+// Proves: a departed list cut to fit the engine's answer says nothing of a
+// document past where it stops, so the host retains it until a list that
+// reaches it no longer names it.
+it("retains a departed document a cut departed list leaves out until a list that reaches it", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  const left = {workspaceId: "workspace", objectId: "object-left", path: "docs/left.md", shareId: "share"};
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  // Every reply names one departed document before it and leaves the rest out.
+  o.replies.pass = {departed: ["object-a"], departedOmitted: 1};
+  o.replies.commit = {departed: ["object-a"], departedOmitted: 1};
+  await o.host.update({workspaces, documents: [o.sibling], departing: [left]});
+  await o.nextPull(); await o.nextPull();
+  expect(o.host.pulledAfterDeparture(left)).toBe(true);
+  expect(o.host.retains(left)).toBe(true);
+  o.replies.pass = {}; o.replies.commit = {};
+  await vi.waitFor(() => expect(o.host.retains(left)).toBe(false));
 });
 
 // Proves: a restore's capture of a document held for released retained work

@@ -163,6 +163,9 @@ pub struct HostedPassOutcome {
     pub held: BTreeMap<String, crate::HostedHold>,
     /// The path its scope names each held document at, by object id.
     pub held_paths: BTreeMap<String, String>,
+    /// The held documents this pass moved from ready: ready in the replica
+    /// it fetched, held now. What it read bounds them.
+    pub newly_held: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2440,11 +2443,21 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         // A read stops before its document's first row that did not apply;
         // nothing of it was retained, so its next read fetches it again.
         let redelivered = std::mem::take(&mut pass.redelivered);
-        let (reads, held, unparks, standing, heads) = store
+        let (reads, held, held_paths, newly_held, unparks, standing, heads) = store
             .read_with(|conn| {
                 // What holds each path, read once for every document.
                 let mut occupancy = crate::hosted::Occupancy::new(conn, workspace_id);
                 let mut held = BTreeMap::new();
+                let mut held_paths = BTreeMap::new();
+                let mut newly_held = BTreeSet::new();
+                // Each held document's path, and whether this pass moved it
+                // from ready, kept as it is held.
+                let mut hold_at = |object_id: &String, document: &crate::HostedDocumentState| {
+                    held_paths.insert(object_id.clone(), document.path.clone());
+                    if document.status == crate::HostedDocumentStatus::Ready {
+                        newly_held.insert(object_id.clone());
+                    }
+                };
                 let mut settled = BTreeMap::new();
                 // A document whose parked heads this pass freed the paths of
                 // comes back on the next pass.
@@ -2507,6 +2520,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     };
                     match read.hold(&mut occupancy, &object_id)? {
                         Some(hold) => {
+                            let Some(document) = replica.documents.get(&object_id) else {
+                                return Err(crate::error::local_corruption(
+                                    "a hosted read has no document",
+                                ));
+                            };
+                            hold_at(&object_id, document);
                             held.insert(object_id.clone(), hold);
                         }
                         None if read.complete => {
@@ -2539,10 +2558,19 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         && let Some(hold) =
                             crate::hosted::recorded_hold(conn, workspace_id, object_id)?
                     {
+                        hold_at(object_id, document);
                         held.insert(object_id.clone(), hold);
                     }
                 }
-                Ok::<_, SyncError>((settled, held, unparks, standing, heads))
+                Ok::<_, SyncError>((
+                    settled,
+                    held,
+                    held_paths,
+                    newly_held,
+                    unparks,
+                    standing,
+                    heads,
+                ))
             })
             .map_err(local)?;
         for change in standing {
@@ -2562,13 +2590,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             || reads
                 .values()
                 .any(|read| read.stopped.is_none() && !read.complete);
-        let held_paths = held
-            .keys()
-            .filter_map(|object_id| {
-                let document = replica.documents.get(object_id)?;
-                Some((object_id.clone(), document.path.clone()))
-            })
-            .collect();
         Ok(HostedPassOutcome {
             fetched,
             has_more: more,
@@ -2589,6 +2610,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             record_facts: pass.record_facts,
             held,
             held_paths,
+            newly_held,
         })
     }
 
