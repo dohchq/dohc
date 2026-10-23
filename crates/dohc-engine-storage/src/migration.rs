@@ -5685,7 +5685,8 @@ mod tests {
         let roots = adoptions(&conn);
 
         assert_eq!(
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade"),
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults)
+                .expect("upgrade"),
             MigrationOutcome::Applied { newly_applied: 1 }
         );
         assert_eq!(
@@ -5937,7 +5938,8 @@ mod tests {
         );
         assert_eq!(adoptions(&conn), roots);
         assert_eq!(
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("reopen"),
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults)
+                .expect("reopen"),
             MigrationOutcome::Applied { newly_applied: 0 }
         );
     }
@@ -6651,7 +6653,7 @@ mod tests {
         conn.execute_batch(HOSTED_AND_DEFERRED_ROWS).unwrap();
         let kept = hosted_and_deferred_rows(&conn);
         assert_eq!(
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
             MigrationOutcome::Applied { newly_applied: 1 }
         );
         assert_eq!(hosted_and_deferred_rows(&conn), kept);

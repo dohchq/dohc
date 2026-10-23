@@ -11,12 +11,20 @@ pub struct SettledBaseEvidence {
     pub binding: LiveObjectBinding,
     pub terminal_cursor: i64,
     pub state_vector_digest: String,
-    /// The file's exact text: accepted state's settled-source projection.
+    /// The file's exact text: accepted state's projection by the reader's
+    /// proof or the settled-source rule.
     pub source: String,
 }
 
+const UNEXPLAINED: &str = "ordinary activation source does not match imported document";
+
 pub(super) fn unexplained() -> ApplicationError {
-    invalid("ordinary activation source does not match imported document")
+    invalid(UNEXPLAINED)
+}
+
+/// Whether `error` is [`unexplained`]'s refusal.
+pub(super) fn is_unexplained(error: &ApplicationError) -> bool {
+    matches!(error, ApplicationError::InvalidInput(message) if *message == UNEXPLAINED)
 }
 
 /// The Y.Doc the file at `path` showed, rebuilt from accepted history. The
@@ -24,7 +32,8 @@ pub(super) fn unexplained() -> ApplicationError {
 /// `at` when the caller names it, that recorded the file's moment and bytes
 /// with a canonical binding at this document, lineage and path. Accepted
 /// state at its terminal, its blobs charged to `budget`, must have the
-/// settlement's state vector and project to exactly the file by the
+/// settlement's state vector and project to exactly the file: by the
+/// `resolver`'s proof for a note the engine's reader built, or else by the
 /// settled-source rule. Anything else refuses.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn settled_base(
@@ -36,6 +45,7 @@ pub(super) fn settled_base(
     (moment, source_digest, source_length): (&str, &str, i64),
     at: Option<i64>,
     budget: &mut restore_content::Budget,
+    resolver: Option<&crate::reader_resolver::ReaderResolver>,
 ) -> Result<(Ydoc, SettledBaseEvidence), ApplicationError> {
     type Settled = (i64, String, String, String, String, String, String);
     let settled: Option<Settled> = conn.query_row(
@@ -79,18 +89,48 @@ pub(super) fn settled_base(
         return Err(unexplained());
     }
     let projection = state.project(ContentKind::Richdoc)?.content;
-    let text = state
-        .settled_markdown_source(&projection, || {
-            conn.query_row(
-                "SELECT text FROM blobs WHERE sha256=?1",
-                [source_digest],
-                |row| row.get(0),
-            )
-            .optional()
-            .map(Option::flatten)
-            .map_err(read_sql)
-        })?
-        .unwrap_or(projection);
+    // A note the reader built shows its file by the reader's proof. One the
+    // reader cannot prove, as an edited one, falls to the settled-source rule.
+    let proved = if state.has_reader_source() {
+        let authority = serde_json::to_string(&(namespace, &binding, terminal))
+            .map_err(|_| ApplicationError::Corrupt)?;
+        match crate::reader_snapshot::resolve(
+            conn,
+            key,
+            &state,
+            &projection,
+            &crate::reader_snapshot::SnapshotIdentity {
+                moment,
+                path,
+                digest: source_digest,
+                lineage,
+                restore_fence: None,
+                authority: &authority,
+            },
+            resolver,
+        ) {
+            Ok(text) => Some(text),
+            Err(CollabError::MarkdownReaderUnavailable) => None,
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        None
+    };
+    let text = match proved {
+        Some(text) => text,
+        None => state
+            .settled_markdown_source(&projection, || {
+                conn.query_row(
+                    "SELECT text FROM blobs WHERE sha256=?1",
+                    [source_digest],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map(Option::flatten)
+                .map_err(read_sql)
+            })?
+            .unwrap_or(projection),
+    };
     if text.len() as i64 != source_length || hex_sha256(text.as_bytes()) != source_digest {
         return Err(unexplained());
     }
@@ -220,6 +260,8 @@ pub fn released_capture(
     let mut refused = None;
     for namespace in &tails {
         let source = (moment.as_str(), digest.as_str(), length);
+        // Disk capture runs without the reader, so a note it built folds only
+        // over a base the settled-source rule proves.
         match settled_base(
             conn,
             namespace,
@@ -229,6 +271,7 @@ pub fn released_capture(
             source,
             None,
             &mut budget,
+            None,
         ) {
             Ok((base, _)) => {
                 if base.has_missing_updates() || head.has_missing_updates() {

@@ -224,10 +224,6 @@ pub struct WorkspaceActor {
     /// The store's released tails, whose worker validates off the actor.
     released_tails: ReleasedTails,
     /// The store's held-document proofs, which run off the actor.
-    // MERGE-REVIEW: held proofs and released-tail validation reopen the store
-    // by `EngineStore::database_path`, which `StoreLocation` keeps valid only
-    // while the actor or a handle lives. A held reader still open after a close
-    // that failed with `StoreInUse` can outlive both; `HeldReader` keeps it.
     held_proofs: HeldProofs,
     pulls: relay::PullPermit,
     pub(crate) link_resolvers: Arc<std::sync::Mutex<crate::links::cache::Cache>>,

@@ -315,7 +315,7 @@ fn a_renamed_succession_commits_whole_and_replays_after_restart() {
     };
     let (mut f, _) = renamed();
     let before = rows(&f, &SUCCESSION_WRITES);
-    let failed = adopt_owner_committed(&mut f.store, &f.handle, f.cut.clone(), 1_000_000, 100, 10, &NoFaults, |tx, _, _, _| {
+    let failed = adopt_owner_committed(&mut f.store, &f.handle, f.cut.clone(), 1_000_000, 100, 10, &NoFaults, None, |tx, _, _, _| {
         let mut query = tx
             .prepare("SELECT current_path,state FROM owner_ydoc_outboxes ORDER BY current_path")
             .map_err(read_sql)?;
@@ -334,7 +334,7 @@ fn a_renamed_succession_commits_whole_and_replays_after_restart() {
     for point in [FaultPoint::StorageBeforePersist, FaultPoint::StorageAfterCommitBeforeAck] {
         let (mut f, id) = renamed();
         let before = rows(&f, &SUCCESSION_WRITES);
-        let crashed = adopt_owner_committed(&mut f.store, &f.handle, f.cut.clone(), 1_000_000, 100, 10, &CrashAt(point), |_, _, _, _| Ok(()));
+        let crashed = adopt_owner_committed(&mut f.store, &f.handle, f.cut.clone(), 1_000_000, 100, 10, &CrashAt(point), None, |_, _, _, _| Ok(()));
         assert!(crashed.is_err(), "{point:?}");
         let committed = point == FaultPoint::StorageAfterCommitBeforeAck;
         if !committed {
@@ -480,7 +480,7 @@ fn the_chain_walk_counts_each_activation() {
     assert!(matches!(walk(&f, 1), Err(ApplicationError::InvalidInput("owner adoption retained outbox coverage exceeds its budget"))));
     assert_eq!(walk(&f, 2).unwrap(), 1);
     let adopt = |f: &mut Fixture, max_events| {
-        adopt_owner_committed(&mut f.store, &f.handle, f.cut.clone(), 1_000_000, max_events, 10, &NoFaults, |_, _, _, _| Ok(()))
+        adopt_owner_committed(&mut f.store, &f.handle, f.cut.clone(), 1_000_000, max_events, 10, &NoFaults, None, |_, _, _, _| Ok(()))
     };
     let before = rows(&f, &SUCCESSION_WRITES);
     let refused = adopt(&mut f, 1);

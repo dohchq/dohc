@@ -1345,12 +1345,16 @@ type AdoptionSourceMetadata = (
     Option<super::activation::ImportedOwnerSource>,
 );
 
+/// The adoption's verified source. A note the reader built proves its file
+/// as its capture did, the released boundary's exception included, within
+/// `max_bytes` of boundary proof.
 pub(super) fn read_adoption_source(
     conn: &Connection,
     namespace: &str,
     adoption_id: &str,
     binding: &LiveObjectBinding,
     resolver: Option<&crate::reader_resolver::ReaderResolver>,
+    max_bytes: usize,
 ) -> Result<Option<VerifiedAdoptionSource>, ApplicationError> {
     let Some((moment, digest, length, imported)) =
         read_adoption_source_metadata(conn, namespace, adoption_id, binding)?
@@ -1371,13 +1375,14 @@ pub(super) fn read_adoption_source(
             if !doc.has_reader_source() {
                 return Err(ApplicationError::Corrupt);
             }
-            crate::reader_snapshot::resolve(
+            let key = DocKey::new(
+                &binding.workspace_id,
+                &binding.main_version_id,
+                &binding.object_id,
+            )?;
+            match crate::reader_snapshot::resolve(
                 conn,
-                &DocKey::new(
-                    &binding.workspace_id,
-                    &binding.main_version_id,
-                    &binding.object_id,
-                )?,
+                &key,
                 &doc,
                 &doc.project(ContentKind::Richdoc)?.content,
                 &crate::reader_snapshot::SnapshotIdentity {
@@ -1389,7 +1394,27 @@ pub(super) fn read_adoption_source(
                     authority: adoption_id,
                 },
                 resolver,
-            )?;
+            ) {
+                Ok(_) => {}
+                Err(CollabError::MarkdownReaderUnavailable) => {
+                    super::activation::reader_settled_at_boundary(
+                        conn,
+                        namespace,
+                        &key,
+                        &binding.current_path,
+                        &binding.lineage_claim_id,
+                        &doc,
+                        (
+                            &source.source_moment_id,
+                            &source.source_digest,
+                            source.source_byte_length,
+                        ),
+                        max_bytes,
+                        resolver,
+                    )?;
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
     }
     let text: String = text::read_sized(conn, &digest, length).map_err(read_sql)?;
@@ -1541,7 +1566,7 @@ pub fn adopt_owner_committed(
         let present:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM snapshots s JOIN path_aliases p USING(workspace_id,version_id,object_id,path) WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.path=?4 AND s.content_kind='text')",
             params![b.workspace_id,b.main_version_id,b.object_id,b.current_path],|r|r.get(0)).map_err(read_sql)?;
         if !present { return Err(ApplicationError::Conflict); }
-        let (moment,digest,length,text,imported_source) = read_adoption_source(tx,&held.namespace,&cut.adoption_id,b,resolver)?
+        let (moment,digest,length,text,imported_source) = read_adoption_source(tx,&held.namespace,&cut.adoption_id,b,resolver,max_bytes)?
             .ok_or(invalid("owner adoption source evidence missing"))?;
         let evidence_digest = if let Some(source) = &imported_source {
             if source.native_head_sequence != cut.expected_local_sequence { return Err(ApplicationError::Conflict); }

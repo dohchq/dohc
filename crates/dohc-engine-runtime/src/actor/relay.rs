@@ -1977,7 +1977,10 @@ impl ActorHandle {
         let mut wait = match admission {
             HeldProofAdmission::Started(run, wait) => {
                 // Nothing awaits the thread: the proof answers its callers,
-                // and an unrun one ends as closed.
+                // and an unrun one ends as closed. Its reader opens by the
+                // store's path, so the thread keeps the store's location
+                // until the proof returns, after the actor and every handle.
+                let location = self.location();
                 drop(tokio::task::spawn_blocking(move || {
                     run.prove(|job| {
                         let proved =
@@ -1988,6 +1991,7 @@ impl ActorHandle {
                             .map_or(0, dohc_engine_sync::HeldProof::retained_bytes);
                         (proved, retained)
                     });
+                    drop(location);
                 }));
                 wait
             }

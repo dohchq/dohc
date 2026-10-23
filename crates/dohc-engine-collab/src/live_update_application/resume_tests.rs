@@ -192,6 +192,47 @@ fn a_partly_applied_suffix_resumes_again_from_its_new_boundary() {
     replays(&mut f, &last, |f| settled(f, Some(seed.clone()), "second-resumed"));
 }
 
+/// Sol's merge-review finding 3: a note the reader built stops and resumes
+/// with its file settled at B while its Y.Doc also holds a Carried edit. The
+/// reader cannot prove that file shows the whole Y.Doc, so capture, resume
+/// and adoption each prove accepted state at B and replay the Carried edit
+/// onto it.
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn a_reader_built_note_resumes_over_the_file_its_predecessor_settled() {
+    let mut f = reader_fixture_case("valid");
+    let resolver = reader_resolver();
+    let root = prove_activation(&mut f, &resolver).unwrap().activation_id;
+    f.cut.adoption_id = root.clone();
+    reader_adopt(&mut f, &resolver);
+    let update = f.doc.richdoc_append_paragraph("Covered");
+    let covered = native_tail_record_at_depth(&mut f, update, 11, Some("owner"), 1);
+    native_tail_apply(&mut f, covered.update.clone(), covered.delivery_id.clone(), 3);
+    let covered = receipt_of(&covered.delivery_id, &covered.update_digest, 3);
+    acknowledge_entry(&mut f, &covered);
+    let update = f.doc.richdoc_append_paragraph("Carried");
+    let carried = native_tail_record_at_depth(&mut f, update, 12, Some("owner"), 1);
+    let carried = receipt_of(&carried.delivery_id, &carried.update_digest, 5);
+    acknowledge_entry(&mut f, &carried);
+    host_document(&mut f, true, true);
+    retire_settled(&mut f, Some(covered), "retired").unwrap();
+    release_parked(&mut f);
+    assert_eq!(manifest(&f, &root), vec![carried_delivery(&f, &carried)]);
+    returned(&mut f);
+    let file = moment_text(&f, "retired");
+    assert!(file.contains("Covered") && !file.contains("Carried"), "{file}");
+    let id = reader_successor(&mut f, &resolver);
+    assert_eq!(f.cut.source_moment_id, "retired", "the capture's source is the settlement at B");
+    let resumed = reader_application_result(|| {
+        resume_imported_owner_activation(&mut f.store, "namespace", &f.key, "owner.md", &id, 1_000_000, Some(&resolver))
+    })
+    .expect("its source is still current");
+    assert_eq!(resumed.activation_id, id);
+    let ack = reader_adopt(&mut f, &resolver);
+    assert!(!ack.adoption_replayed);
+    assert_eq!(ack.adoption_id, id);
+}
+
 /// A damage the settled-B proof must refuse, and the refusal it gives.
 type SourceDamage = (&'static str, fn(&ApplicationError) -> bool, fn(&mut Fixture));
 

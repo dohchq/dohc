@@ -188,6 +188,19 @@ pub(super) fn origin_stamp_in(
     Ok(hex_sha256(json.as_bytes()))
 }
 
+/// Check `bytes`, the state `doc` holds, as accepted state: a note the
+/// engine's reader built by the reader's rule, any other by the strict public
+/// rule. Initialization, native replay and every checkpoint use it, so a
+/// lineage whose baseline the reader built replays and checkpoints too.
+fn validate_baseline(doc: &Ydoc, bytes: &[u8]) -> Result<(), ApplicationError> {
+    if doc.has_reader_source() {
+        doc.validate_reader_baseline(bytes)?;
+    } else {
+        doc.validate_public_baseline(bytes)?;
+    }
+    Ok(())
+}
+
 pub(super) fn initialize(
     tx: &Transaction<'_>,
     held: &Registration,
@@ -198,11 +211,7 @@ pub(super) fn initialize(
     }
     let doc = Ydoc::wire();
     doc.apply(baseline)?;
-    if doc.has_reader_source() {
-        doc.validate_reader_baseline(baseline)?;
-    } else {
-        doc.validate_public_baseline(baseline)?;
-    }
+    validate_baseline(&doc, baseline)?;
     let checkpoint = NativeAcceptedCheckpoint {
         canonical_version: None,
         restore_operation_id: None,
@@ -770,11 +779,7 @@ fn append_inner(
         if reconstruction.is_none() {
             budget.charge(state.len())?;
         }
-        if restored.is_some() && doc.has_reader_source() {
-            doc.validate_reader_baseline(&state)?;
-        } else {
-            doc.validate_public_baseline(&state)?;
-        }
+        validate_baseline(doc, &state)?;
         insert_checkpoint(
             tx,
             held,

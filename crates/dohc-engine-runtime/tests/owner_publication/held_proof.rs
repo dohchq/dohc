@@ -1208,6 +1208,64 @@ async fn a_dead_actors_reader_keeps_its_store_fenced() {
     desktop.close().await;
 }
 
+/// Sol's and Opus's merge-review finding 1: a proof's reader still opening
+/// past the close bound keeps its store's location once close failed, its
+/// caller was answered, and the actor and every handle went. On Linux the
+/// reader opens by this process's descriptor for the store's folder, so
+/// while a second workspace opens, that path still names the first store,
+/// and the reader opens it once it goes on.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_reader_opening_past_the_close_bound_keeps_its_store() {
+    use std::os::unix::fs::MetadataExt;
+    let file = |path: &std::path::Path| {
+        let found = std::fs::metadata(path).unwrap();
+        (found.dev(), found.ino())
+    };
+    let (w, desktop, _client) = held_for_a_queued_fold().await;
+    let proofs = w.actor.held_proofs();
+    let resume = Resume(proofs.clone());
+    proofs.set_close_bound(Duration::ZERO);
+    proofs.pause_inside_reader_opens();
+    let request = inspection(&w, &CancellationToken::new());
+    let opening = proofs.clone();
+    reached("the reader opens", async move {
+        tokio::task::spawn_blocking(move || opening.wait_for_paused_inside_open())
+            .await
+            .unwrap();
+    })
+    .await;
+    let location = std::sync::Arc::downgrade(&w.actor.location());
+    let held = w.actor.database_path().to_path_buf();
+    let RetainedWindow {
+        owner,
+        actor,
+        supervisor,
+        store,
+        root,
+        ..
+    } = w;
+    drop(store);
+    owner.close().await.unwrap();
+    let db = engine_db_path(&root).unwrap();
+    let closed = supervisor.close_all();
+    assert!(matches!(closed, Err(RuntimeError::StoreInUse)), "{closed:?}");
+    let answered = answered(request).await;
+    assert!(matches!(answered, Err(RuntimeError::ActorUnavailable)), "{answered:?}");
+    drop(actor);
+    assert!(location.upgrade().is_some(), "the reader let its store's folder go");
+    let other = ScratchDir::new().unwrap();
+    let other_db = engine_db_path(&other).unwrap();
+    let second = supervisor.open(&other_db, 2).unwrap();
+    assert_ne!(file(&other_db), file(&db));
+    assert_eq!(file(&held), file(&db), "the reader's path names the first store");
+    drop(resume);
+    proofs.wait_for_drained();
+    drop(second);
+    supervisor.close_all().unwrap();
+    desktop.close().await;
+}
+
 /// Sol's r2c-3c-2 finding 4 and Opus's "old finding 2": a proof held at its
 /// merge while writes through the actor push the WAL past the mark where
 /// held readers give way. Every write succeeds; a new proof is busy while the

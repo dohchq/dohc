@@ -150,7 +150,8 @@ pub fn release_imported_owner_activation(
 /// B proves the file is accepted state at B. The chain's Carried updates,
 /// each resolved and validated, replay onto that state to exactly the local
 /// Y.Doc, with no missing dependency. The proof and the replay share one
-/// `max_bytes` budget. Anything else refuses.
+/// `max_bytes` budget; a note the reader built proves its file by
+/// `resolver`. Anything else refuses.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn settled_at_boundary(
     conn: &rusqlite::Connection,
@@ -161,6 +162,7 @@ pub(super) fn settled_at_boundary(
     local: &Ydoc,
     source: (&str, &str, i64),
     max_bytes: usize,
+    resolver: Option<&crate::reader_resolver::ReaderResolver>,
 ) -> Result<(), ApplicationError> {
     let unexplained = super::settled_base::unexplained;
     if owner_activations::current_activation(conn, None, key, lineage)?.is_some() {
@@ -191,6 +193,7 @@ pub(super) fn settled_at_boundary(
         source,
         Some(through),
         &mut budget,
+        resolver,
     )?;
     for inherited in
         super::retirement::inherited_entries(conn, namespace, key, lineage, Some(&tail))?
@@ -226,6 +229,31 @@ pub(super) fn settled_at_boundary(
         return Err(unexplained());
     }
     Ok(())
+}
+
+/// [`settled_at_boundary`] for a note the reader built, once the reader could
+/// not prove its file shows the whole local Y.Doc. Where no released boundary
+/// explains the difference, the reader's refusal stands.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn reader_settled_at_boundary(
+    conn: &rusqlite::Connection,
+    namespace: &str,
+    key: &DocKey,
+    path: &str,
+    lineage: &str,
+    local: &Ydoc,
+    source: (&str, &str, i64),
+    max_bytes: usize,
+    resolver: Option<&crate::reader_resolver::ReaderResolver>,
+) -> Result<(), ApplicationError> {
+    settled_at_boundary(conn, namespace, key, path, lineage, local, source, max_bytes, resolver)
+        .map_err(|error| {
+            if super::settled_base::is_unexplained(&error) {
+                CollabError::MarkdownReaderUnavailable.into()
+            } else {
+                error
+            }
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -298,22 +326,33 @@ pub fn capture_imported_owner_activation(
         let projection = local.project(ContentKind::Richdoc)?.content;
         // The same rule as the version's settled file, so a document whose
         // file keeps a body the engine reads differently still activates.
+        // A reader-built file the reader cannot prove, as one settled at a
+        // released boundary before the Y.Doc's Carried edits, has no text.
         let text = if reader_source {
             let authority = serde_json::to_string(&(&namespace, &epoch, &stream))
                 .map_err(|_| ApplicationError::Corrupt)?;
-            crate::reader_snapshot::resolve(tx, key, &local, &projection,
+            match crate::reader_snapshot::resolve(tx, key, &local, &projection,
                 &crate::reader_snapshot::SnapshotIdentity {
                     moment: &moment, path, digest: &source_digest, lineage: &lineage, restore_fence: None, authority: &authority,
-                }, resolver)?
-        } else { local
+                }, resolver) {
+                Ok(text) => Some(text),
+                Err(CollabError::MarkdownReaderUnavailable) => None,
+                Err(error) => return Err(error.into()),
+            }
+        } else { Some(local
             .settled_markdown_source(&projection, || {
                 text::read(tx, &source_digest)
                     .optional()
                     .map_err(read_sql)
             })?
-            .unwrap_or(projection) };
-        if text.len() as i64 != source_length || hex_sha256(text.as_bytes()) != source_digest {
-            settled_at_boundary(tx, namespace, key, path, &lineage, &local, (&moment, &source_digest, source_length), max_bytes)?;
+            .unwrap_or(projection)) };
+        let file = (moment.as_str(), source_digest.as_str(), source_length);
+        match text {
+            None => reader_settled_at_boundary(tx, namespace, key, path, &lineage, &local, file, max_bytes, resolver)?,
+            Some(text) if text.len() as i64 != source_length || hex_sha256(text.as_bytes()) != source_digest => {
+                settled_at_boundary(tx, namespace, key, path, &lineage, &local, file, max_bytes, resolver)?;
+            }
+            Some(_) => {}
         }
         let full_state = local.encode_full_state_bounded(max_bytes.saturating_sub(baseline_length as usize).min(crate::limits::MAX_YDOC_UPDATE_BYTES))
             .ok_or(ApplicationError::ConfiguredByteBudgetExceeded)?;
@@ -406,7 +445,7 @@ pub fn resume_imported_owner_activation(
         let binding=LiveObjectBinding {workspace_id:key.workspace_id.clone(),main_version_id:key.version_id.clone(),
             object_id:key.object_id.clone(),lineage_claim_id:source.lineage_claim_id.clone(),current_path:path.to_owned(),
             selector_paths:vec![path.to_owned()],restore_fence_generation:1};
-        let verified=adoption::read_adoption_source(conn,namespace,activation_id,&binding,resolver)?
+        let verified=adoption::read_adoption_source(conn,namespace,activation_id,&binding,resolver,max_bytes)?
             .and_then(|(_,_,_,_,source)|source).ok_or(ApplicationError::Corrupt)?;
         if verified!=source { return Err(ApplicationError::Corrupt); }
         if cursor<source.committed_cursor || epoch!=source.replication_epoch || stream!=source.stream_identity {

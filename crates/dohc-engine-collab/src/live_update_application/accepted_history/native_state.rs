@@ -813,7 +813,7 @@ pub(super) fn read(
     {
         let baseline = budget.blob(conn, &c.state_digest)?;
         doc.apply(&baseline)?;
-        doc.validate_public_baseline(&baseline)?;
+        validate_baseline(&doc, &baseline)?;
     }
     let p = parameters(held);
     let mut query=conn.prepare(&format!("SELECT event_count,journal_cursor,update_sha256,suffix_count,suffix_bytes FROM live_accepted_updates WHERE {DOCUMENT} AND event_count>?6 AND journal_cursor<=?7 AND length(CAST(update_sha256 AS BLOB))=64 ORDER BY event_count LIMIT 4096")).map_err(read_sql)?;

@@ -1799,7 +1799,7 @@ fn a_retiring_activation_never_serves_again_after_a_restart() {
             source_moment_id: "other-original".into(),
             ..f.cut.clone()
         };
-        adopt_owner_committed(&mut f.store, &unrelated_handle, cut, 1_000_000, 100, 10, &NoFaults, |_, _, _, _| Ok(()))
+        adopt_owner_committed(&mut f.store, &unrelated_handle, cut, 1_000_000, 100, 10, &NoFaults, None, |_, _, _, _| Ok(()))
             .unwrap();
         host_document(&mut f, true, adopted);
         assert!(

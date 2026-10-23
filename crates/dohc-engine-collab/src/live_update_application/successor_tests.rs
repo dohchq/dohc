@@ -104,6 +104,27 @@ fn release_parked(f: &mut Fixture) -> Option<RetainedPrefixBody> {
 /// cut its retained prefix. Returns its ID.
 fn successor(f: &mut Fixture) -> String {
     let captured = capture_imported(f, 1_000_000).unwrap();
+    follow(f, captured)
+}
+
+/// [`successor`] for a note the reader built, its capture proven by `resolver`.
+fn reader_successor(f: &mut Fixture, resolver: &crate::reader_resolver::ReaderResolver) -> String {
+    let captured = prove_activation(f, resolver).unwrap();
+    follow(f, captured)
+}
+
+/// The fixture's cut adopted through its handle, each reader proof it waits
+/// for resolved by `resolver`.
+fn reader_adopt(f: &mut Fixture, resolver: &crate::reader_resolver::ReaderResolver) -> OwnerAdoptionAck {
+    reader_application_result(|| {
+        adopt_owner_committed(&mut f.store, &f.handle, f.cut.clone(), 1_000_000, 100, 10, &NoFaults, Some(resolver), |_, _, _, _| Ok(()))
+    })
+    .unwrap()
+}
+
+/// Register `captured`, the released chain tail's successor, by name, and cut
+/// its retained prefix. Returns its ID.
+fn follow(f: &mut Fixture, captured: ImportedOwnerActivation) -> String {
     let tail = chain_tail(f, "namespace").unwrap().expect("a released tail");
     assert_eq!(captured.source.predecessor_activation_id.as_deref(), Some(tail.as_str()));
     let boundary = f
@@ -1199,7 +1220,7 @@ fn a_successor_reopens_the_outbox_a_refused_seed_quarantined() {
     let id = successor(&mut f);
     let abandoned = query_rows(&f, "SELECT * FROM owner_ydoc_outbox_entries");
     let before = rows(&f, &SUCCESSION_WRITES);
-    let failed = adopt_owner_committed(&mut f.store, &f.handle, f.cut.clone(), 1_000_000, 100, 10, &NoFaults, |tx, _, _, _| {
+    let failed = adopt_owner_committed(&mut f.store, &f.handle, f.cut.clone(), 1_000_000, 100, 10, &NoFaults, None, |tx, _, _, _| {
         let state: String = tx
             .query_row("SELECT state FROM owner_ydoc_outboxes", [], |r| r.get(0))
             .map_err(read_sql)?;
@@ -1581,8 +1602,95 @@ fn a_first_adoption_refuses_what_its_coverage_cannot_account_for() {
         }
         let max_events = if case == "capacity" { 2 } else { 100 };
         let before = rows(&f, &SUCCESSION_WRITES);
-        let adopted = adopt_owner_committed(&mut f.store, &f.handle, f.cut.clone(), 1_000_000, max_events, 10, &NoFaults, |_, _, _, _| Ok(()));
+        let adopted = adopt_owner_committed(&mut f.store, &f.handle, f.cut.clone(), 1_000_000, max_events, 10, &NoFaults, None, |_, _, _, _| Ok(()));
         assert!(adopted.is_err(), "{case}: {adopted:?}");
         assert_eq!(rows(&f, &SUCCESSION_WRITES), before, "{case}");
     }
+}
+
+/// Sol's merge-review finding 2: the successor of a lineage whose baseline
+/// the reader built adopts its released prefix, its accepted state at B
+/// replayed from that baseline by the reader's rule.
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn a_reader_built_lineage_adopts_its_successor() {
+    let mut f = reader_fixture_case("valid");
+    let resolver = reader_resolver();
+    let root = prove_activation(&mut f, &resolver).unwrap().activation_id;
+    f.cut.adoption_id = root.clone();
+    reader_adopt(&mut f, &resolver);
+    release_parked(&mut f).expect("an adopted release keeps its boundary");
+    returned(&mut f);
+    let id = reader_successor(&mut f, &resolver);
+    let ack = reader_adopt(&mut f, &resolver);
+    assert!(!ack.adoption_replayed);
+    assert_eq!(ack.adoption_id, id);
+    let (origin, predecessor, _, current, _) = succession_row(&f, &id);
+    assert_eq!(origin.as_deref(), Some(root.as_str()));
+    assert_eq!(predecessor.as_deref(), Some(root.as_str()));
+    assert!(current);
+}
+
+/// Sol's merge-review finding 2: a lineage whose baseline the reader built
+/// writes its checkpoint at the native cadence, and its accepted state
+/// replays from that checkpoint.
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn a_reader_built_lineage_checkpoints_at_the_native_cadence() {
+    let mut f = reader_fixture_case("valid");
+    let resolver = reader_resolver();
+    f.cut.adoption_id = prove_activation(&mut f, &resolver).unwrap().activation_id;
+    reader_adopt(&mut f, &resolver);
+    let bytes = f.doc.encode_full_state();
+    let held = f.handle.registration.lock().unwrap();
+    let appended = f
+        .store
+        .write_with(&NoFaults, |tx| -> Result<(), ApplicationError> {
+            for cursor in 1..=accepted_history::CHECKPOINT_EVENTS {
+                let event = AdmittedLiveUpdate {
+                    metadata: AdmittedLiveUpdateMetadata {
+                        accepted: RelayAcceptedLiveUpdate {
+                            receipt: LiveUpdateReceipt {
+                                delivery_id: format!("cadence-{cursor}"),
+                                update_digest: hex_sha256(&bytes),
+                                journal_cursor: cursor,
+                                accepting_host_epoch: 1,
+                            },
+                            binding: f.binding.clone(),
+                            authority: ServerDerivedLiveUpdateAuthority::Owner { principal_id: "owner".into() },
+                            received_at_ms: cursor,
+                        },
+                        first_seen: vec![],
+                        canonical_version: Some(2),
+                        author_snapshot: Some(vec![]),
+                        first_seen_deletes: Some(vec![]),
+                        checkpoint_coverage: None,
+                    },
+                    update_bytes: bytes.clone(),
+                };
+                accepted_history::append_native(tx, &held, &event, 8 * 1024 * 1024)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(appended, TxnOutcome::Committed(())));
+    // The event or the byte cadence, whichever the updates reach first.
+    let checkpoint: i64 = f
+        .store
+        .read_with(|conn| conn.query_row("SELECT max(event_count) FROM live_accepted_checkpoints", [], |r| r.get(0)))
+        .unwrap();
+    assert!(checkpoint > 0, "a checkpoint past the adoption's");
+    let replayed = f
+        .store
+        .read_with(|conn| {
+            accepted_history::read_state(
+                conn,
+                &held,
+                accepted_history::CHECKPOINT_EVENTS,
+                NativeHistoryReconstruction { working_reserve_bytes: 8 * 1024 * 1024 },
+            )
+        })
+        .unwrap();
+    assert!(replayed.has_reader_source());
+    assert!(crate::replay_parity::structurally_equal_v2(&replayed, &f.doc).unwrap());
 }

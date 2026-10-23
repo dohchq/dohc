@@ -725,7 +725,8 @@ async fn write_output<W: AsyncWrite + Unpin>(
                 // the connection, so the guard then ignores the Cancel. Every
                 // poll still runs under the guard's own check: no byte goes
                 // out once retirement, a workspace close, or the deadline has
-                // ended the answer, even if its request was cancelled.
+                // ended the answer, except that a read's started frame
+                // finishes unless its owner retired.
                 let mut offset = 0;
                 // Set once a read's started frame meets its deadline: it
                 // finishes, and only retirement interrupts it.
@@ -866,14 +867,15 @@ async fn write_output<W: AsyncWrite + Unpin>(
                     output: &mut output,
                     guard: &guard,
                     cancelled: cancel.cancelled(),
+                    expiry: deadline
+                        .map(|deadline| Box::pin(tokio::time::sleep_until(deadline.into()))),
                     wrote: false,
                     frame_pending: false,
                 };
                 // Cancellation and the deadline end the stream between frames,
-                // so the connection's other requests go on. Only retirement
-                // interrupts a frame.
-                // MERGE-REVIEW: main also ended a started frame at the
-                // deadline; the branch's rule, that only retirement does, wins.
+                // so the connection's other requests go on, and either wakes a
+                // writer waiting to start one. Only retirement interrupts a
+                // frame.
                 let result = tokio::select! {
                     biased;
                     ()=retired.cancelled()=>Err(io::Error::new(io::ErrorKind::ConnectionAborted,"native restore output retired")),
@@ -989,6 +991,9 @@ struct GuardedBlobWriter<'a, W> {
     guard: &'a Arc<dyn OutputGuard>,
     /// Wakes a writer waiting to start a frame when its request is cancelled.
     cancelled: Cancelled,
+    /// Wakes a writer waiting to start a frame once the guard's deadline
+    /// passes.
+    expiry: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
     wrote: bool,
     /// Bytes from the current frame remain unflushed.
     frame_pending: bool,
@@ -1003,6 +1008,9 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for GuardedBlobWriter<'_, W> {
         let cancellable = !this.frame_pending;
         if cancellable {
             let _ = std::future::Future::poll(std::pin::Pin::new(&mut this.cancelled), cx);
+            if let Some(expiry) = &mut this.expiry {
+                let _ = std::future::Future::poll(expiry.as_mut(), cx);
+            }
         }
         let mut result = std::task::Poll::Pending;
         let mut poll = || {
@@ -2475,6 +2483,104 @@ mod tests {
                 }
                 assert!(dropped.load(Ordering::SeqCst));
             }
+        }
+    }
+
+    /// Leaves its first write waiting with nothing to wake it, as a client
+    /// that stopped reading leaves a full pipe, then writes through.
+    struct StalledFirstWrite {
+        output: Vec<u8>,
+        deadline: std::time::Instant,
+        /// Set by the first write: whether it waited before `deadline`.
+        waited_in_time: Option<bool>,
+    }
+
+    impl AsyncWrite for StalledFirstWrite {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.waited_in_time.is_none() {
+                self.waited_in_time = Some(std::time::Instant::now() < self.deadline);
+                return Poll::Pending;
+            }
+            Pin::new(&mut self.output).poll_write(cx, bytes)
+        }
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.output).poll_flush(cx)
+        }
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.output).poll_shutdown(cx)
+        }
+    }
+
+    // Sol's merge-review finding 4: a guarded blob waiting for its first byte
+    // wakes at its deadline, with nothing else to wake it. It drops the blob
+    // and its reservations, writes none of it, answers a read with its
+    // expiry, and the connection's next answer still goes out.
+    #[tokio::test]
+    async fn guarded_blob_deadline_before_the_first_byte_releases_it() {
+        for read in [false, true] {
+            let dropped = Arc::new(AtomicBool::new(false));
+            let deadline = std::time::Instant::now() + Duration::from_secs(1);
+            let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+            tx.send(guarded_blob(Arc::new(TestOutputGuard {
+                cancel: CancelSignal::new(),
+                retired: CancelSignal::new(),
+                deadline: Some(deadline),
+                dropped: dropped.clone(),
+                read_connection: read.then(CancelSignal::new),
+            })))
+            .await
+            .unwrap();
+            tx.send(OutputItem::Envelope(Envelope::Response(WireResponse {
+                id: 10,
+                result: serde_json::json!({ "ok": true }),
+            })))
+            .await
+            .unwrap();
+            drop(tx);
+            let active = Arc::new(Mutex::new(HashMap::from([(9, None)])));
+            let limits = WireLimits::default();
+            let mut output = StalledFirstWrite {
+                output: Vec::new(),
+                deadline,
+                waited_in_time: None,
+            };
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                write_output(&mut output, &mut rx, &limits, active.clone()),
+            )
+            .await
+            .expect("the deadline wakes the waiting blob")
+            .expect("an expired blob leaves the connection writing");
+            assert_eq!(output.waited_in_time, Some(true), "{read}: the first byte waited");
+            assert!(dropped.load(Ordering::SeqCst), "{read}: the reservations went");
+            assert!(lock(&active).is_empty());
+            let mut decoder = FrameDecoder::new(limits.clone());
+            decoder.push(&output.output);
+            if read {
+                let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+                    panic!("the read's expiry missing");
+                };
+                let Envelope::Error(error) = decode_control(&payload, &limits).unwrap() else {
+                    panic!("the expired blob went out");
+                };
+                assert_eq!(error.id, Some(9));
+                assert_eq!(error.error.code, ErrorCode::DeadlineExceeded);
+            }
+            let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+                panic!("following response missing");
+            };
+            assert!(
+                matches!(decode_control(&payload, &limits).unwrap(), Envelope::Response(response) if response.id == 10 && response.result["ok"] == true),
+                "{read}: the expired blob went out"
+            );
+            assert!(decoder.next_frame().unwrap().is_none());
         }
     }
 

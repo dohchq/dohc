@@ -177,7 +177,7 @@ fn coverage_across_outboxes_has_one_budget() {
     let (mut f, coverage) = carried_across_two_renames();
     assert_eq!(coverage.len(), 4);
     let adopt = |f: &mut Fixture, max_events| {
-        adopt_owner_committed(&mut f.store, &f.handle, f.cut.clone(), 1_000_000, max_events, 10, &NoFaults, |_, _, _, _| Ok(()))
+        adopt_owner_committed(&mut f.store, &f.handle, f.cut.clone(), 1_000_000, max_events, 10, &NoFaults, None, |_, _, _, _| Ok(()))
     };
     let before = rows(&f, &SUCCESSION_WRITES);
     let refused = adopt(&mut f, 3);
