@@ -26,8 +26,9 @@ export function parseDisableRequest(value: unknown): DisablePublicationRequest {
 }
 
 // Deployment configuration lives on /continuity, outside every replica store.
+// A development or test relay keeps the secret beside its database, so
+// removing the database's folder removes the secret too.
 export function operatorSecretPath(env: NodeJS.ProcessEnv = process.env): string {
   if (env.DOHC_RELAY_DEPLOYMENT_CONFIG) return join(dirname(resolve(env.DOHC_RELAY_DEPLOYMENT_CONFIG)), "publication-operator.secret");
-  const key = createHash("sha256").update(resolve(env.SYNC_RELAY_DB_PATH ?? join(tmpdir(), "dohc-sync-relay.sqlite"))).digest("hex").slice(0, 24);
-  return join(tmpdir(), `dohc-relay-continuity-${key}`, "publication-operator.secret");
+  return `${resolve(env.SYNC_RELAY_DB_PATH ?? join(tmpdir(), "dohc-sync-relay.sqlite"))}.operator-secret`;
 }
