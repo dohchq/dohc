@@ -311,10 +311,7 @@ export class ServiceActivationDriver {
     const check=()=>{signal.throwIfAborted();o.assertCurrent();};
     const request=()=>({id:o.nextRequestId(),workspace:workspace.handle,deadlineMs:o.deadlineMs});
     check();
-    const key=targetKey(target),block=this.#blocked.get(key);
-    if(block && !(block.reason==="without-lineage" && this.#latestUpdate(target)>block.update)){
-      return {kind:"pending" as const,reason:"Hosted document is blocked until the owner tries again."};
-    }
+    const key=targetKey(target);
     const releaseStale=async()=>{
       const lease=this.#staleLeases.get(key);
       if(!lease)return;
@@ -322,7 +319,12 @@ export class ServiceActivationDriver {
       if(configRecord(released.result,["released"]).released!==true)throw new Error("Stale native activation lease was not released.");
       this.#staleLeases.delete(key);
     };
+    // A blocked target still releases the lease its failed capture left.
     await releaseStale();
+    const block=this.#blocked.get(key);
+    if(block && !(block.reason==="without-lineage" && this.#latestUpdate(target)>block.update)){
+      return {kind:"pending" as const,reason:"Hosted document is blocked until the owner tries again."};
+    }
     let saved=this.#store.read(target.workspaceId,target.path,c.maxCaptureBytes);
     if(!saved)this.#completedTargets.delete(key);
     if(saved && saved.shareId!==target.shareId)throw new Error("Service activation share changed.");
@@ -346,6 +348,8 @@ export class ServiceActivationDriver {
       let capture:NativeOwnerActivation;
       try{capture=await o.client.captureOwnerActivation(request(),target.path,c.maxCaptureBytes,signal,saved?.activationId);}
       catch(error){this.#refused(key,saved!==null,update,error);throw error;}
+      // A fresh capture's lease stays recorded until the relay retains it, so a pass releases it after any failure, as at the pass deadline.
+      if(!saved)this.#staleLeases.set(key,{activationId:capture.activationId,sessionId:capture.sessionId});
       check();
       this.#blocked.delete(key);this.#held.delete(key);this.#objects.set(key,capture.source.objectId);
       if(capture.source.workspaceId!==target.workspaceId || capture.source.relayDatabaseNamespace!==o.history.namespace ||
@@ -360,12 +364,12 @@ export class ServiceActivationDriver {
         }catch(error){
           const tooLarge=error instanceof ServiceActivationTooLarge;
           if(!(error instanceof ServiceActivationStaleCut) && !(error instanceof ServiceActivationBusy) && !tooLarge)throw error;
-          this.#staleLeases.set(key,{activationId:capture.activationId,sessionId:capture.sessionId});
           // The same capture would run its validation out of memory again, so it waits for its owner.
           if(tooLarge)this.#blocked.set(key,{reason:"refused"});
           await releaseStale();
           return {kind:"pending" as const,reason:error instanceof ServiceActivationStaleCut?"Hosted replication advanced before activation.":error.message};
         }
+        this.#staleLeases.delete(key);
         o.registered();
         saved=this.#store.read(target.workspaceId,target.path,c.maxCaptureBytes)!;
       }
