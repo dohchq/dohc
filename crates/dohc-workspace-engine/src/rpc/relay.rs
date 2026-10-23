@@ -2551,8 +2551,8 @@ mod tests {
             held,
             ..HostedPassOutcome::default()
         };
-        let pages = pages(&pass, &[]);
-        let first = &pages[0];
+        let cut = pages(&pass, &[]);
+        let first = &cut[0];
         let listed = object_ids(&first["newlyHeld"]);
         let omitted = first["newlyHeldOmitted"].as_u64().expect("count");
         assert!(listed.len() > 300 && omitted > 0, "{} listed", listed.len());

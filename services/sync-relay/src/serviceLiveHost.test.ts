@@ -444,6 +444,40 @@ it("keeps activation polling when logging throws and resets repeated errors afte
   } finally {await host.close(); vi.useRealTimers(); log.mockRestore(); activate.mockRestore(); pull.mockRestore();}
 });
 
+// Sol's review: each target with no owner pulled its workspace itself, so
+// several whose pulls had more pages pulled it as many times a pass, while
+// it stayed unready. Proves: they share one catch-up pull a pass, and the
+// workspace pulls no more than that.
+it("gives several unfinished targets in one workspace one catch-up pull a pass", async () => {
+  const f = await fixture();
+  await configureActivation(f, {maxDocumentsPerPass: 3, pollIntervalMs: 20,
+    targets: ["a", "b", "c"].map(name => ({workspaceId: "workspace", path: `${name}.md`, shareId: "share"}))});
+  const events: string[] = [];
+  spawn.mockImplementation(async options => {
+    const captured = clientFrom(options), discovery = captured.client.sendRequest.getMockImplementation()!;
+    captured.client.sendRequest.mockImplementation(async (...args: unknown[]) => {
+      const request = args[0] as {method: string};
+      if (request.method === "liveApplication.hosts") return discovery();
+      if (request.method === "sync.createHostedReplica") return {result: {hosted: true}} as never;
+      if (request.method === "sync.materializePendingCursor") return {result: {materialized: true}} as never;
+      if (request.method === "sync.commitCursor") return {result: hostedCommit({hasMore: true})} as never;
+      events.push("pull");
+      return {result: hostedPass({hasMore: true, fetched: 1, applied: 1})} as never;
+    });
+    return captured.client;
+  });
+  // Each pass asks whether the workspace is ready once, after its activations.
+  const workspaceReady = ServiceActivationDriver.prototype.workspaceReady;
+  const ready = vi.spyOn(ServiceActivationDriver.prototype, "workspaceReady").mockImplementation(function (this: ServiceActivationDriver, workspaceId) {
+    events.push("pass"); return workspaceReady.call(this, workspaceId);
+  });
+  const host = await startServiceLiveHost(f);
+  try {
+    await vi.waitFor(() => expect(events.filter(event => event === "pass").length).toBeGreaterThanOrEqual(3));
+    expect(events.slice(0, 6)).toEqual(["pull", "pass", "pull", "pass", "pull", "pass"]);
+  } finally {await host.close(); ready.mockRestore();}
+});
+
 const {DatabaseSync} = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
@@ -2004,7 +2038,8 @@ const heldDriver = (heard?: (driver: ServiceActivationDriver, window: HostedWind
   let driver: ServiceActivationDriver | undefined;
   const hold = ServiceActivationDriver.prototype.hold;
   vi.spyOn(ServiceActivationDriver.prototype, "hold").mockImplementation(function (this: ServiceActivationDriver, ...args) {
-    driver = this; hold.apply(this, args); heard?.(this, args[2]);
+    driver = this; const dropped = hold.apply(this, args); heard?.(this, args[2]);
+    return dropped;
   });
   return () => driver;
 };
@@ -2252,6 +2287,116 @@ it("lets a parked document after a stuck departed prefix go within a sweep of pu
   const parked = o.pullCount();
   await vi.waitFor(() => expect(o.host.retains(left)).toBe(false));
   expect(o.pullCount() - parked).toBeLessThanOrEqual(5);
+});
+
+// Sol's review: a pull after a departure counted as its replica's chance to
+// retire it even when its departed list stopped short of it, so the relay
+// moved on to its next page of retired enrollments, and the document came
+// back only on pulls whose lists stopped short of it again: it was never
+// confirmed gone. Proves: while the relay rotates its pages, as the
+// self-hosted relay does with a sibling keeping the workspace attached, a
+// page keeps its turn until a departed list reaches each of its documents,
+// so a parked document is confirmed gone within a few pulls, and never while
+// a list names it.
+it("confirms a parked document gone while its retired enrollment pages rotate, and never while a list names it", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  const left = {workspaceId: "workspace", objectId: "object-z", path: "docs/left.md", shareId: "share"};
+  const stuck = {workspaceId: "workspace", objectId: "object-a1", path: "docs/stuck.md", shareId: "share"};
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const list = (ids: string[]) => {o.replies.pass = {departed: ids}; o.replies.commit = {departed: ids};};
+  // Each page is one retired enrollment. As on the self-hosted relay, the next page gets its turn once the host says each
+  // document on this one had its replica's pull after it departed.
+  const pages = [[stuck], [left]];
+  let turn = 0;
+  const select = () => o.host.update({workspaces, documents: [o.sibling], departing: pages[turn]!});
+  // One pull at a time, then the next selection before the next pass.
+  const pull = async () => {
+    const parked = o.park("sync.pullHosted");
+    await parked.entered.promise;
+    const finished = select();
+    parked.release.resolve();
+    await finished;
+  };
+  const rotate = async () => {
+    if (pages[turn]!.every(row => o.host.pulledAfterDeparture(row))) turn = (turn + 1) % pages.length;
+    await select();
+  };
+  // Two departed documents an answer, so lists alternate between "object-a1".."object-a2" and those after.
+  o.replies.departedPerPass = 2;
+  const first = o.park("sync.pullHosted");
+  await first.entered.promise;
+  list(["object-a1", "object-a2", "object-a3", left.objectId]);
+  const selected = select();
+  first.release.resolve();
+  await selected;
+  for (let pulls = 0; pulls < 8; pulls++) {
+    await pull();
+    expect(o.host.retains(left)).toBe(true);
+    await rotate();
+  }
+  // The engine parks it.
+  list(["object-a1", "object-a2", "object-a3"]);
+  for (let pulls = 1; ; pulls++) {
+    await pull();
+    if (!o.host.retains(left)) break;
+    expect(pulls).toBeLessThan(4);
+    await rotate();
+  }
+});
+
+// Opus's review: a page whose departed list reached thousands of documents
+// this host waits on looked each one up in that list, quadratic work on the
+// event loop. Proves: a page listing 40,000 departing documents is heard in
+// time linear in them.
+it("hears a departed list reaching thousands of waiting documents in linear time", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const pull = ServiceHostedReplication.prototype.pull, heard: number[] = [];
+  vi.spyOn(ServiceHostedReplication.prototype, "pull").mockImplementation(function (this: ServiceHostedReplication, signal, onPage) {
+    return pull.call(this, signal, page => {const started = performance.now(); onPage?.(page); heard.push(performance.now() - started);});
+  });
+  const departing = Array.from({length: 40_000}, (_, index) => ({workspaceId: "workspace", objectId: `object-d${String(index).padStart(5, "0")}`,
+    path: `docs/d${index}.md`, shareId: "share"}));
+  const ids = departing.map(row => row.objectId);
+  o.replies.pass = {departed: ids}; o.replies.commit = {departed: ids};
+  await o.host.update({workspaces, documents: [o.sibling], departing});
+  const seen = heard.length;
+  await o.nextPull();
+  expect(o.host.pulledAfterDeparture(departing.at(-1)!)).toBe(true);
+  expect(o.host.retains(departing[0]!)).toBe(true);
+  // A lookup in the list for each would compare hundreds of millions of IDs.
+  expect(Math.max(...heard.slice(seen))).toBeLessThan(250);
+});
+
+// Opus's review: a page whose newly held list may leave some out drops every
+// owner past its held window, and nothing said so, though each drop forces a
+// capture again. Proves: the count of owners dropped is reported once per
+// change, however many pages drop them again, and again once a complete
+// list cleared it.
+it("reports owners dropped for a newly held list that may leave some out once per change in their count", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  const reports = () => log.mock.calls.filter(([message]) => message === "Hosted pull dropped live document owners its held list may leave out.");
+  const captures = () => o.client().captureOwnerActivation.mock.calls.length;
+  const waiting = (objectId: string) => ({objectId, reason: "hosted-backfill-work-waiting"});
+  const incomplete = {held: [waiting("another"), waiting("zebra")], newlyHeldOmitted: 1};
+  // One hold a pass, so every other list stops at "another", before the sibling's "object", and drops its owner.
+  o.replies.heldPerPass = 1;
+  o.replies.pass = incomplete;
+  const captured = captures();
+  await vi.waitFor(() => expect(captures()).toBeGreaterThan(captured + 2));
+  expect(reports()).toEqual([[expect.any(String), "workspace", 1]]);
+  o.replies.pass = {};
+  await o.nextPull();
+  expect(reports()).toHaveLength(1);
+  o.replies.pass = incomplete;
+  await vi.waitFor(() => expect(reports()).toHaveLength(2));
+  expect(reports()[1]).toEqual([expect.any(String), "workspace", 1]);
 });
 
 // Proves: a restore's capture of a document held for released retained work

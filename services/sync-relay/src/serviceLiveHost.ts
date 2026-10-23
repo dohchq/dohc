@@ -1,5 +1,5 @@
 import {workspaceIsDeleted} from "./storage/accountDeletion";
-import {parseServiceActivationConfig,parseServiceActivationTarget,ServiceActivationDriver,type ServiceActivationBlock,type ServiceActivationConfig,type ServiceActivationTarget} from "./serviceActivationDriver";
+import {parseServiceActivationConfig,parseServiceActivationTarget,ServiceActivationDriver,type ServiceActivationBlock,type ServiceActivationConfig,type ServiceActivationTarget,type ServiceCatchUp} from "./serviceActivationDriver";
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
 import {liveHostSignal, withLiveHostSignal} from "./liveHostSignal.js";
 import {observeRelayWrites, type LiveHostChanges} from "./relayWriteChanges.js";
@@ -158,13 +158,20 @@ const held = new WeakSet<SyncRelayStorage>();
  * An attached workspace's hosted replica. `pulls` counts the pulls started and
  * `confirmed` numbers the last one that succeeded. A departing document is
  * gone from the replica only once a pull numbered at least its `announced`
- * value succeeded, and `gone` numbers the last pull whose departed list
- * reached a document this host waits on without listing it.
+ * value succeeded. `reached` numbers the last pull whose departed list
+ * reached a document this host waits on, and says whether it listed it.
+ * `dropped` is how many owners the last report said a page dropped because
+ * its newly held list may leave some out, or 0 since a complete list.
  */
 interface HostedAttachment {
   readonly handle: string; readonly hosted: ServiceHostedReplication; readonly replica: ServiceActivationReplica;
-  pulls: number; confirmed: number; readonly announced: Map<string, number>; readonly gone: Map<string, number>;
+  pulls: number; confirmed: number; readonly announced: Map<string, number>;
+  readonly reached: Map<string, {pull: number; listed: boolean}>; dropped: number;
 }
+// Whether the departed list of a pull numbered at least `required` reached the document; for `goneSince`, without listing it.
+const reachedSince = (attached: HostedAttachment, objectId: string, required: number) => (attached.reached.get(objectId)?.pull ?? 0) >= required;
+const goneSince = (attached: HostedAttachment, objectId: string, required: number) =>
+  reachedSince(attached, objectId, required) && !attached.reached.get(objectId)!.listed;
 
 /** Owns one configured service incarnation and its durable delivery consumers. */
 export async function startServiceLiveHost(options: {
@@ -366,25 +373,34 @@ export async function startServiceLiveHost(options: {
       if (!attachment) return;
       const replica = new ServiceHostedReplication({client, workspace: handle, workspaceId: workspace.workspaceId, nextRequestId,
         deadlineMs: config.client.requestDeadlineMs, signal, assertCurrent: checkPreparing}, attachment);
-      const attached: HostedAttachment = {handle, hosted: replica, pulls: 0, confirmed: 0, announced: new Map(), gone: new Map(), replica: {
+      const attached: HostedAttachment = {handle, hosted: replica, pulls: 0, confirmed: 0, announced: new Map(), reached: new Map(), dropped: 0, replica: {
         pull: joined => pull(attached, joined), publish: joined => replica.publish(joined)}};
       attachments.set(workspace.workspaceId, attached);
     };
     // Every pull of a hosted replica runs here. A page that leaves documents held clears their readiness,
     // and each page that read its documents says which still are, within its held list's window.
     // Within its departed list's window, it says which of the documents this host waits on are gone.
+    // Owners dropped because a newly held list may leave some out are reported once per change in their count, until a complete list.
     const pull = async (attached: HostedAttachment, joined: AbortSignal) => {
       const number = ++attached.pulls, workspaceId = attached.hosted.connection.workspaceId;
       const result = await attached.hosted.pull(joined, page => {
-        if (!page.adoptedScope) activation?.hold(workspaceId, page.held, page.heldWindow, page.newlyHeld);
+        if (!page.adoptedScope && activation) {
+          const dropped = activation.hold(workspaceId, page.held, page.heldWindow, page.newlyHeld);
+          if (page.newlyHeld.complete) attached.dropped = 0;
+          else if (dropped > 0 && dropped !== attached.dropped) {
+            attached.dropped = dropped;
+            try {console.error("Hosted pull dropped live document owners its held list may leave out.", workspaceId, dropped);}
+            catch { /* Reporting must not stop the pull. */ }
+          }
+        }
         const waiting = new Set([...attached.announced.keys(), ...[...parking.keys()].flatMap(key => {
           const row = hosted.get(key);
           return row?.target.workspaceId === workspaceId ? [row.objectId] : [];
         })]);
-        for (const objectId of attached.gone.keys()) if (!waiting.has(objectId)) attached.gone.delete(objectId);
+        for (const objectId of attached.reached.keys()) if (!waiting.has(objectId)) attached.reached.delete(objectId);
+        const listed = new Set(page.departed.listed);
         for (const objectId of waiting) {
-          if (!hostedWindowCovers(page.departed.window, objectId)) continue;
-          if (page.departed.listed.includes(objectId)) attached.gone.delete(objectId); else attached.gone.set(objectId, number);
+          if (hostedWindowCovers(page.departed.window, objectId)) attached.reached.set(objectId, {pull: number, listed: listed.has(objectId)});
         }
       });
       attached.confirmed = number;
@@ -496,7 +512,7 @@ export async function startServiceLiveHost(options: {
       if (required !== undefined) {
         if (attached.confirmed < required) return PARKING;
         parking.delete(key);
-        if ((attached.gone.get(row.objectId) ?? 0) >= required) {forget(key); return undefined;}
+        if (goneSince(attached, row.objectId, required)) {forget(key); return undefined;}
       }
       const publish = async (operation: AbortSignal) => (await attached.hosted.publish(operation)).hasMore ? "Hosted publication has more pages." : undefined;
       if (authorityLost(row)) {
@@ -528,7 +544,7 @@ export async function startServiceLiveHost(options: {
       // Resuming loads what an earlier daemon left, and delivers and settles it, as for a document that left this one.
       if (recovering.has(key) && activation!.retained(row.target)) {
         let outcome;
-        try {outcome = await activation!.activate(row.target, joined, settleTarget, false);}
+        try {outcome = await activation!.activate(row.target, joined, settleTarget);}
         catch (error) {
           if (!isHostedDocumentUnready(error)) throw error;
           return awaitParking(key, row);
@@ -620,7 +636,7 @@ export async function startServiceLiveHost(options: {
           throw new Error("Hosted replication has more pages.");
         }
         activation!.wake(row.target); touch(key);
-        await activation!.activate(row.target, joined, settleTarget, false);
+        await activation!.activate(row.target, joined, settleTarget);
       }));
     };
     // A held-document read asks the engine for a workspace this daemon replicates,
@@ -783,22 +799,23 @@ export async function startServiceLiveHost(options: {
           const key=JSON.stringify([target.workspaceId,target.path]),row=hosted.get(key);
           return !activation!.dormant(target) && !unloading.has(key) && !(row && leaving.has(key) && authorityLost(row));
         });
-        const pulled=new Map([...attachments].map(([workspaceId,attached])=>[workspaceId,attached.pulls]));
+        // Targets with no owner share one catch-up pull of their workspace a pass.
+        const catchUp:ServiceCatchUp=new Map();
         await step(async()=>{
           for(let visited=0;visited<Math.min(bounds.maxDocumentsPerPass,targets.length);visited++){
             index%=targets.length;
             const target=targets[index]!;index=(index+1)%targets.length;
             // Settlement runs in the activation's own document work. A restore
             // fence during it leaves the pass pending rather than ready.
-            await activation!.activate(target,passSignal,settleTarget);
+            await activation!.activate(target,passSignal,settleTarget,catchUp);
           }
         });
         // Every ready workspace pushes, then pulls. One with no documents still pulls, so its replica retires what left.
-        // One that is not ready only pulls, once a pass unless an activation above already did, so its held lists page
+        // One that is not ready only pulls, once a pass unless an activation above caught it up, so its held lists page
         // on and an ended hold is freed, however long another document holds readiness back.
         for(const [workspaceId,attached] of [...attachments]){
           if(activation!.workspaceReady(workspaceId))await step(async()=>{await attached.hosted.push(passSignal);await pull(attached,passSignal);});
-          else if(attached.pulls===pulled.get(workspaceId))await step(()=>pull(attached,passSignal));
+          else if(!catchUp.has(workspaceId))await step(()=>pull(attached,passSignal));
         }
         // A diverged replica runs nothing more. Its workspace detaches for good, and its store stays.
         // It counts as diverged before the detach, which a lost reply or an exiting engine can fail.
@@ -878,16 +895,18 @@ export async function startServiceLiveHost(options: {
       retains(document: {workspaceId: string; objectId: string}): boolean {
         const attached = attachments.get(document.workspaceId), required = attached?.announced.get(document.objectId);
         return hostedKey(document) !== undefined || !attached || required === undefined || attached.confirmed < required ||
-          (attached.gone.get(document.objectId) ?? 0) < required;
+          !goneSince(attached, document.objectId, required);
       },
       /**
        * Whether its replica has had its chance to retire the departed
-       * document: nothing of it is loaded, and a pull that started after it
-       * departed has succeeded. One it still retains then waits on the engine.
+       * document: nothing of it is loaded, a pull that started after it
+       * departed has succeeded, and the departed list of such a pull reached
+       * it, listed or not. One it still retains then waits on the engine.
        */
       pulledAfterDeparture(document: {workspaceId: string; objectId: string}): boolean {
         const attached = attachments.get(document.workspaceId), required = attached?.announced.get(document.objectId);
-        return hostedKey(document) === undefined && required !== undefined && attached!.confirmed >= required;
+        return hostedKey(document) === undefined && required !== undefined && attached!.confirmed >= required &&
+          reachedSince(attached!, document.objectId, required);
       },
       /** Whether this daemon has delivered and settled the hosted document, in an activation pass or before it unloaded idle. */
       settled(document: {workspaceId: string; objectId: string}): boolean {
