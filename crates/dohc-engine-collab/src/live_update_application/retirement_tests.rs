@@ -1627,6 +1627,7 @@ fn a_restore_waits_while_its_activation_retires() {
         let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
         f._owner.fence_restore(
             &mut f.store,
+            None,
             NativeRestoreFence {
                 operation_id: "restore".into(),
                 relay_database_namespace: "namespace".into(),

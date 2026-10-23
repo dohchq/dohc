@@ -341,17 +341,18 @@ fn resumed_at_one() -> (Fixture, LiveObjectBinding) {
         },
     };
     f._owner
-        .apply_restore(&mut f.store, &mut WriterDocCache::new(), input.clone(), coordinate.clone(), 2_000_000, 100, 90, &NoFaults, |_, _, _, _| Ok(()))
+        .apply_restore(&mut f.store, None, &mut WriterDocCache::new(), input.clone(), coordinate.clone(), 2_000_000, 100, 90, &NoFaults, |_, _, _, _| Ok(()))
         .unwrap();
     let settlement = f
         ._owner
-        .with_restore_settlement(&mut f.store, input.clone(), coordinate.clone(), 2_000_000, 100, |store, audit| {
+        .with_restore_settlement(&mut f.store, None, input.clone(), coordinate.clone(), 2_000_000, 100, |store, audit| {
             restore_content::tests::record_test_projection(store, audit, "resumed-owner")
         })
         .unwrap();
     f._owner
         .resume_restore(
             &mut f.store,
+            None,
             NativeRestoreResume { application: input, settlement_id: settlement.settlement_id },
             coordinate.clone(),
             2_000_000,

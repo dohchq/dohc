@@ -35,6 +35,10 @@ cargo install cargo-nextest --locked --version 0.9.143
 The separate `doctests` row is required: nextest runs no doctests by
 design, and that row is what proves the workspace's doctests still ran.
 
+The `reader tests` row is required too. The workspace run skips the ignored
+Markdown reader regressions. This row builds a reader and runs exactly those
+regressions with it.
+
 ## What the gate does for you
 
 On a host with a build-slot root, the gate enforces a shared build budget so

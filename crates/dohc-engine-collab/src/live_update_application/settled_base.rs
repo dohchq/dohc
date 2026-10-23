@@ -27,14 +27,24 @@ pub(super) fn is_unexplained(error: &ApplicationError) -> bool {
     matches!(error, ApplicationError::InvalidInput(message) if *message == UNEXPLAINED)
 }
 
+/// Which of the namespace's settlements of a lineage a proof reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Settlement {
+    /// The latest.
+    Latest,
+    /// The latest, which must end at this cursor.
+    LatestAt(i64),
+    /// The one ending at this cursor, whatever settled after it.
+    At(i64),
+}
+
 /// The Y.Doc the file at `path` showed, rebuilt from accepted history. The
-/// namespace's latest settlement of the lineage must be an ordinary one, at
-/// `at` when the caller names it, that recorded the file's moment and bytes
-/// with a canonical binding at this document, lineage and path. Accepted
-/// state at its terminal, its blobs charged to `budget`, must have the
-/// settlement's state vector and project to exactly the file: by the
-/// `resolver`'s proof for a note the engine's reader built, or else by the
-/// settled-source rule. Anything else refuses.
+/// settlement `at` selects must be an ordinary one that recorded the file's
+/// moment and bytes with a canonical binding at this document, lineage and
+/// path. Accepted state at its terminal, its blobs charged to `budget`, must
+/// have the settlement's state vector and project to exactly the file: by
+/// the `resolver`'s proof for a note the engine's reader built, or else by
+/// the settled-source rule. Anything else refuses.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn settled_base(
     conn: &Connection,
@@ -43,16 +53,21 @@ pub(super) fn settled_base(
     path: &str,
     lineage: &str,
     (moment, source_digest, source_length): (&str, &str, i64),
-    at: Option<i64>,
+    at: Settlement,
     budget: &mut restore_content::Budget,
     resolver: Option<&crate::reader_resolver::ReaderResolver>,
 ) -> Result<(Ydoc, SettledBaseEvidence), ApplicationError> {
     type Settled = (i64, String, String, String, String, String, String);
+    let exact = match at {
+        Settlement::At(cursor) => Some(cursor),
+        Settlement::Latest | Settlement::LatestAt(_) => None,
+    };
     let settled: Option<Settled> = conn.query_row(
         "SELECT terminal_cursor,settlement_kind,moment_id,markdown_digest,source_state_vector_digest,binding_json,host_coordinate_json
          FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3
-           AND object_id=?4 AND lineage_claim_id=?5 ORDER BY terminal_cursor DESC LIMIT 1",
-        params![namespace, key.workspace_id, key.version_id, key.object_id, lineage],
+           AND object_id=?4 AND lineage_claim_id=?5 AND (?6 IS NULL OR terminal_cursor=?6)
+         ORDER BY terminal_cursor DESC LIMIT 1",
+        params![namespace, key.workspace_id, key.version_id, key.object_id, lineage, exact],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
     ).optional().map_err(read_sql)?;
     let Some((terminal, kind, settled_moment, markdown, vector, binding, coordinate)) = settled
@@ -64,7 +79,7 @@ pub(super) fn settled_base(
     binding
         .validate_canonical()
         .map_err(|_| ApplicationError::Corrupt)?;
-    if at.is_some_and(|at| at != terminal)
+    if matches!(at, Settlement::LatestAt(cursor) if cursor != terminal)
         || kind != "ordinary"
         || settled_moment != moment
         || markdown != source_digest
@@ -269,7 +284,7 @@ pub fn released_capture(
             path,
             lineage,
             source,
-            None,
+            Settlement::Latest,
             &mut budget,
             None,
         ) {

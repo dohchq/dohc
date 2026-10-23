@@ -157,7 +157,7 @@ fn proof_bytes(f: &Fixture) -> usize {
     let mut budget = restore_content::Budget { remaining: RELEASED_CAPTURE_PROOF_BYTES };
     f.store
         .read_with(|conn| {
-            settled_base::settled_base(conn, "namespace", &f.key, "owner.md", &f.binding.lineage_claim_id, ("retired", &digest, length), None, &mut budget, None)
+            settled_base::settled_base(conn, "namespace", &f.key, "owner.md", &f.binding.lineage_claim_id, ("retired", &digest, length), settled_base::Settlement::Latest, &mut budget, None)
         })
         .unwrap();
     RELEASED_CAPTURE_PROOF_BYTES - budget.remaining
@@ -266,7 +266,7 @@ fn a_successor_proof_and_its_carried_replay_share_one_budget() {
     let lineage = f.binding.lineage_claim_id.clone();
     let proof = |max_bytes| {
         f.store.read_with(|conn| {
-            activation::settled_at_boundary(conn, "namespace", &f.key, "owner.md", &lineage, &local, ("retired", &digest, file.len() as i64), max_bytes, None)
+            activation::settled_at_boundary(conn, "namespace", &f.key, "owner.md", &lineage, None, &local, ("retired", &digest, file.len() as i64), max_bytes, None)
         })
     };
     let largest = reconstruction.max(replay);

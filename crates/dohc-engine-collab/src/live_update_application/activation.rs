@@ -151,7 +151,9 @@ pub fn release_imported_owner_activation(
 /// each resolved and validated, replay onto that state to exactly the local
 /// Y.Doc, with no missing dependency. The proof and the replay share one
 /// `max_bytes` budget; a note the reader built proves its file by
-/// `resolver`. Anything else refuses.
+/// `resolver`. A successor `activation_id` that already adopted proves its
+/// source again at the boundary its adoption recorded, whatever settled
+/// after it. Anything else refuses.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn settled_at_boundary(
     conn: &rusqlite::Connection,
@@ -159,28 +161,22 @@ pub(super) fn settled_at_boundary(
     key: &DocKey,
     path: &str,
     lineage: &str,
+    activation_id: Option<&str>,
     local: &Ydoc,
     source: (&str, &str, i64),
     max_bytes: usize,
     resolver: Option<&crate::reader_resolver::ReaderResolver>,
 ) -> Result<(), ApplicationError> {
+    use super::settled_base::Settlement;
     let unexplained = super::settled_base::unexplained;
-    if owner_activations::current_activation(conn, None, key, lineage)?.is_some() {
-        return Err(unexplained());
-    }
-    let Some(tail) = owner_activations::released_chain_tail(conn, namespace, key, lineage)? else {
-        return Err(unexplained());
+    let adopted = adopted_boundary(conn, namespace, key, lineage, activation_id)?;
+    let (tail, settlement) = match adopted {
+        Some((tail, cursor)) => (tail, Settlement::At(cursor)),
+        None => {
+            let (tail, cursor) = released_boundary(conn, namespace, key, lineage)?;
+            (tail, Settlement::LatestAt(cursor))
+        }
     };
-    let Some(boundary) = super::retirement::released_tail(conn, namespace, &tail)?.0 else {
-        return Err(unexplained());
-    };
-    if super::retirement::accepted_endpoint(conn, namespace, key, lineage)? != boundary {
-        return Err(unexplained());
-    }
-    let through = boundary
-        .terminal_receipt
-        .as_ref()
-        .map_or(0, |receipt| receipt.journal_cursor);
     let mut budget = super::restore_content::Budget {
         remaining: max_bytes,
     };
@@ -191,7 +187,7 @@ pub(super) fn settled_at_boundary(
         path,
         lineage,
         source,
-        Some(through),
+        settlement,
         &mut budget,
         resolver,
     )?;
@@ -231,6 +227,83 @@ pub(super) fn settled_at_boundary(
     Ok(())
 }
 
+/// The journal cursor a boundary's accepted history ends at.
+fn through(boundary: &RetainedPrefixBody) -> i64 {
+    boundary
+        .terminal_receipt
+        .as_ref()
+        .map_or(0, |receipt| receipt.journal_cursor)
+}
+
+/// The exact released tail a first adoption follows, and where the boundary
+/// it kept ends: no activation holds the lineage, and its accepted history
+/// still ends at that boundary.
+fn released_boundary(
+    conn: &rusqlite::Connection,
+    namespace: &str,
+    key: &DocKey,
+    lineage: &str,
+) -> Result<(String, i64), ApplicationError> {
+    let unexplained = super::settled_base::unexplained;
+    if owner_activations::current_activation(conn, None, key, lineage)?.is_some() {
+        return Err(unexplained());
+    }
+    let Some(tail) = owner_activations::released_chain_tail(conn, namespace, key, lineage)? else {
+        return Err(unexplained());
+    };
+    let Some(boundary) = super::retirement::released_tail(conn, namespace, &tail)?.0 else {
+        return Err(unexplained());
+    };
+    if super::retirement::accepted_endpoint(conn, namespace, key, lineage)? != boundary {
+        return Err(unexplained());
+    }
+    Ok((tail, through(&boundary)))
+}
+
+/// The released tail an adopted successor `activation_id` follows, and where
+/// the boundary its adoption recorded ends, as that tail's release kept it.
+/// None for any other activation, or none named.
+fn adopted_boundary(
+    conn: &rusqlite::Connection,
+    namespace: &str,
+    key: &DocKey,
+    lineage: &str,
+    activation_id: Option<&str>,
+) -> Result<Option<(String, i64)>, ApplicationError> {
+    let Some(activation) = activation_id else {
+        return Ok(None);
+    };
+    let recorded: Option<(String, String)> = conn
+        .query_row(
+            "SELECT predecessor_activation_id,boundary_json FROM live_owner_activations
+             WHERE relay_database_namespace=?1 AND activation_id=?2 AND workspace_id=?3
+               AND main_version_id=?4 AND object_id=?5 AND lineage_claim_id=?6
+               AND predecessor_activation_id IS NOT NULL AND boundary_json IS NOT NULL",
+            params![
+                namespace,
+                activation,
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                lineage
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(read_sql)?;
+    let Some((tail, boundary)) = recorded else {
+        return Ok(None);
+    };
+    let prefix: RetainedPrefix =
+        serde_json::from_str(&boundary).map_err(|_| ApplicationError::Corrupt)?;
+    let (released, _) = super::retirement::released_tail(conn, namespace, &tail)?;
+    let boundary = prefix.body();
+    if prefix.predecessor_activation_id != tail || released.as_ref() != Some(&boundary) {
+        return Err(ApplicationError::Corrupt);
+    }
+    Ok(Some((tail, through(&boundary))))
+}
+
 /// [`settled_at_boundary`] for a note the reader built, once the reader could
 /// not prove its file shows the whole local Y.Doc. Where no released boundary
 /// explains the difference, the reader's refusal stands.
@@ -241,19 +314,31 @@ pub(super) fn reader_settled_at_boundary(
     key: &DocKey,
     path: &str,
     lineage: &str,
+    activation_id: Option<&str>,
     local: &Ydoc,
     source: (&str, &str, i64),
     max_bytes: usize,
     resolver: Option<&crate::reader_resolver::ReaderResolver>,
 ) -> Result<(), ApplicationError> {
-    settled_at_boundary(conn, namespace, key, path, lineage, local, source, max_bytes, resolver)
-        .map_err(|error| {
-            if super::settled_base::is_unexplained(&error) {
-                CollabError::MarkdownReaderUnavailable.into()
-            } else {
-                error
-            }
-        })
+    settled_at_boundary(
+        conn,
+        namespace,
+        key,
+        path,
+        lineage,
+        activation_id,
+        local,
+        source,
+        max_bytes,
+        resolver,
+    )
+    .map_err(|error| {
+        if super::settled_base::is_unexplained(&error) {
+            CollabError::MarkdownReaderUnavailable.into()
+        } else {
+            error
+        }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -348,9 +433,9 @@ pub fn capture_imported_owner_activation(
             .unwrap_or(projection)) };
         let file = (moment.as_str(), source_digest.as_str(), source_length);
         match text {
-            None => reader_settled_at_boundary(tx, namespace, key, path, &lineage, &local, file, max_bytes, resolver)?,
+            None => reader_settled_at_boundary(tx, namespace, key, path, &lineage, None, &local, file, max_bytes, resolver)?,
             Some(text) if text.len() as i64 != source_length || hex_sha256(text.as_bytes()) != source_digest => {
-                settled_at_boundary(tx, namespace, key, path, &lineage, &local, file, max_bytes, resolver)?;
+                settled_at_boundary(tx, namespace, key, path, &lineage, None, &local, file, max_bytes, resolver)?;
             }
             Some(_) => {}
         }

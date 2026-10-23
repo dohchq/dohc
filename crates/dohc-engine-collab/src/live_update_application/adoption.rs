@@ -1347,7 +1347,8 @@ type AdoptionSourceMetadata = (
 
 /// The adoption's verified source. A note the reader built proves its file
 /// as its capture did, the released boundary's exception included, within
-/// `max_bytes` of boundary proof.
+/// `max_bytes` of boundary proof. Once the adoption committed, that
+/// exception proves it at the boundary the adoption recorded.
 pub(super) fn read_adoption_source(
     conn: &Connection,
     namespace: &str,
@@ -1403,6 +1404,7 @@ pub(super) fn read_adoption_source(
                         &key,
                         &binding.current_path,
                         &binding.lineage_claim_id,
+                        Some(adoption_id),
                         &doc,
                         (
                             &source.source_moment_id,

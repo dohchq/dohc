@@ -196,9 +196,12 @@ fn a_partly_applied_suffix_resumes_again_from_its_new_boundary() {
 /// with its file settled at B while its Y.Doc also holds a Carried edit. The
 /// reader cannot prove that file shows the whole Y.Doc, so capture, resume
 /// and adoption each prove accepted state at B and replay the Carried edit
-/// onto it.
+/// onto it. Sol's merge-fix finding 1: once adopted, the successor proves
+/// that source again at B, by an adoption replay after a lost
+/// acknowledgement and by resume, after a restart and after it settles past
+/// B, with no writes.
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn a_reader_built_note_resumes_over_the_file_its_predecessor_settled() {
     let mut f = reader_fixture_case("valid");
     let resolver = reader_resolver();
@@ -217,7 +220,8 @@ fn a_reader_built_note_resumes_over_the_file_its_predecessor_settled() {
     host_document(&mut f, true, true);
     retire_settled(&mut f, Some(covered), "retired").unwrap();
     release_parked(&mut f);
-    assert_eq!(manifest(&f, &root), vec![carried_delivery(&f, &carried)]);
+    let carried = carried_delivery(&f, &carried);
+    assert_eq!(manifest(&f, &root), vec![carried.clone()]);
     returned(&mut f);
     let file = moment_text(&f, "retired");
     assert!(file.contains("Covered") && !file.contains("Carried"), "{file}");
@@ -231,6 +235,25 @@ fn a_reader_built_note_resumes_over_the_file_its_predecessor_settled() {
     let ack = reader_adopt(&mut f, &resolver);
     assert!(!ack.adoption_replayed);
     assert_eq!(ack.adoption_id, id);
+    for case in ["replay", "restart", "settled past B"] {
+        match case {
+            "restart" => reopen(&mut f),
+            "settled past B" => {
+                accept_seed(&mut f, 7);
+                apply_carried(&mut f, &carried);
+                settled(&mut f, Some(carried.receipt.clone()), "resumed").unwrap();
+            }
+            _ => {}
+        }
+        let before = rows(&f, &SUCCESSION_WRITES);
+        assert!(reader_adopt(&mut f, &resolver).adoption_replayed, "{case}");
+        let resumed = reader_application_result(|| {
+            resume_imported_owner_activation(&mut f.store, "namespace", &f.key, "owner.md", &id, 1_000_000, Some(&resolver))
+        })
+        .expect(case);
+        assert_eq!(resumed.activation_id, id, "{case}");
+        assert_eq!(rows(&f, &SUCCESSION_WRITES), before, "{case}");
+    }
 }
 
 /// A damage the settled-B proof must refuse, and the refusal it gives.

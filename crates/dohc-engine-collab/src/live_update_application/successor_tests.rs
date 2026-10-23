@@ -1612,7 +1612,7 @@ fn a_first_adoption_refuses_what_its_coverage_cannot_account_for() {
 /// the reader built adopts its released prefix, its accepted state at B
 /// replayed from that baseline by the reader's rule.
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn a_reader_built_lineage_adopts_its_successor() {
     let mut f = reader_fixture_case("valid");
     let resolver = reader_resolver();
@@ -1635,7 +1635,7 @@ fn a_reader_built_lineage_adopts_its_successor() {
 /// writes its checkpoint at the native cadence, and its accepted state
 /// replays from that checkpoint.
 #[test]
-#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+#[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn a_reader_built_lineage_checkpoints_at_the_native_cadence() {
     let mut f = reader_fixture_case("valid");
     let resolver = reader_resolver();
