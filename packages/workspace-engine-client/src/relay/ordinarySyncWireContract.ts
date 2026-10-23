@@ -116,6 +116,12 @@ const HostedHold = Schema.Union([
   // binding, whose tails are unbounded, never rides a pull.
   mutableStruct({ reason: Schema.Literal("released-lineage-unsettled"), ...HeldDocumentFields, binding: Schema.optionalKey(Schema.Never) }),
 ]);
+// A document a pass moved from ready to held, with only what holding it needs.
+const NewlyHeld = Schema.Union([
+  mutableStruct({ objectId: Text, reason: Schema.Literals(["hosted-backfill-path-held", "hosted-conflict-parent-withheld",
+    "hosted-backfill-work-waiting", "hosted-scope-path-mismatch", "hosted-live-edit-unadmitted"]) }),
+  mutableStruct({ objectId: Text, reason: Schema.Literal("released-lineage-unsettled"), bindingDigest: Digest }),
+]);
 const RetirementError = mutableStruct({ code: Text, message: Text, retry: Text });
 
 // The documents that left the scope and are not gone from the replica: their
@@ -170,10 +176,10 @@ const Preservation = mutableStruct({
 // - A pass lists the documents it holds after the pull's `heldAfter`, in
 //   object ID order, through its `heldThrough`, the last listed, or to the
 //   last of them when that is null.
+// - Departed documents page the same way, after the pull's `departedAfter`
+//   through `departedThrough`, in the pass and in its commit.
 // - `newlyHeld` names documents the pass moved from ready to held, wherever
-//   they fall; it may leave some out, which `held` names in turn.
-// - Departed documents are in object ID order. With `departedOmitted` above
-//   zero, the list says nothing past the last one it names.
+//   they fall. With `newlyHeldOmitted` above zero it left some out.
 // - The other counts say how many changed paths, refusals and declined
 //   shares the pass reports beyond those listed; the engine keeps them all.
 const HostedSyncResultSchemas = {
@@ -194,9 +200,10 @@ const HostedSyncResultSchemas = {
     sharingDeclinedOmitted: Count,
     held: Schema.mutable(Schema.Array(HostedHold)),
     heldThrough: Schema.NullOr(Text),
-    newlyHeld: Schema.mutable(Schema.Array(HostedHold)),
+    newlyHeld: Schema.mutable(Schema.Array(NewlyHeld)),
+    newlyHeldOmitted: Count,
     departed: Departed,
-    departedOmitted: Count,
+    departedThrough: Schema.NullOr(Text),
   }),
   "sync.materializePendingCursor": OrdinarySyncResultSchemas["sync.materializePendingCursor"],
   "sync.commitCursor": mutableStruct({
@@ -204,7 +211,7 @@ const HostedSyncResultSchemas = {
     hasMore: Schema.Boolean,
     retirement: Schema.NullOr(RetirementError),
     departed: Schema.NullOr(Departed),
-    departedOmitted: Count,
+    departedThrough: Schema.NullOr(Text),
     sharingDeclined: Schema.mutable(Schema.Array(SharingDeclined)),
   }),
   "sync.push": OrdinarySyncResultSchemas["sync.push"],
@@ -238,16 +245,17 @@ export function decodeHostedSyncResult<M extends HostedSyncMethod>(
   if (method === "sync.pullHosted") {
     const pass = result as HostedSyncMethodResultMap["sync.pullHosted"];
     // A list that stops early stops at the last document it lists.
-    if (!ascending(pass.held.map(hold => hold.objectId)) || !ascending(pass.newlyHeld.map(hold => hold.objectId)) ||
-      (pass.heldThrough !== null && pass.heldThrough !== pass.held.at(-1)?.objectId)) {
+    if (!pagedList(pass.held.map(hold => hold.objectId), pass.heldThrough) || !ascending(pass.newlyHeld.map(hold => hold.objectId))) {
       throw new ProtocolShapeError(`hosted ${method} result: held documents do not match where their list stops`);
     }
-    if (!ascending(pass.departed)) throw new ProtocolShapeError(`hosted ${method} result: departed documents are out of order`);
+    if (!pagedList(pass.departed, pass.departedThrough)) {
+      throw new ProtocolShapeError(`hosted ${method} result: departed documents do not match where their list stops`);
+    }
   } else if (method === "sync.commitCursor") {
     const commit = result as HostedSyncMethodResultMap["sync.commitCursor"];
-    // Unread, nothing of it was left out.
-    if (commit.departed === null ? commit.departedOmitted !== 0 : !ascending(commit.departed)) {
-      throw new ProtocolShapeError(`hosted ${method} result: departed documents do not match what they omit`);
+    // Unread, it stops nowhere.
+    if (commit.departed === null ? commit.departedThrough !== null : !pagedList(commit.departed, commit.departedThrough)) {
+      throw new ProtocolShapeError(`hosted ${method} result: departed documents do not match where their list stops`);
     }
   } else if (method === "sync.heldDocuments") {
     const page = result as HostedSyncMethodResultMap["sync.heldDocuments"];
@@ -265,23 +273,16 @@ export function decodeHostedSyncResult<M extends HostedSyncMethod>(
 // The engine orders object IDs by their UTF-8 bytes.
 const compareObjectIds = (a: string, b: string) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
 const ascending = (ids: readonly string[]) => ids.every((id, index) => index === 0 || compareObjectIds(ids[index - 1]!, id) < 0);
+const pagedList = (ids: readonly string[], through: string | null) => ascending(ids) && (through === null || through === ids.at(-1));
 
 /**
- * Whether an answer's departed list names the document as departed: false
- * when it does not, and undefined past the last one a list that left some
- * out names, where it says nothing.
+ * Where a hosted pass's held or departed list runs: after `after`, from the
+ * first when undefined, through `through`, or to the last when null.
  */
-export function hostedDeparted(departed: { readonly listed: readonly string[]; readonly omitted: number }, objectId: string): boolean | undefined {
-  if (departed.listed.includes(objectId)) return true;
-  const last = departed.listed.at(-1);
-  return departed.omitted > 0 && (last === undefined || compareObjectIds(objectId, last) > 0) ? undefined : false;
-}
+export type HostedWindow = { readonly after: string | undefined; readonly through: string | null };
 
-/** Where a pass's held list runs: after `after`, from the first when undefined, through `through`, or to the last when null. */
-export type HostedHeldWindow = { readonly after: string | undefined; readonly through: string | null };
-
-/** Whether a pass's held list speaks for the document: inside its window, a document it does not list is not held. */
-export function hostedHeldWindowCovers(window: HostedHeldWindow, objectId: string): boolean {
+/** Whether a list speaks for the document: inside its window, a document it does not list is not held, or not departed. */
+export function hostedWindowCovers(window: HostedWindow, objectId: string): boolean {
   return (window.after === undefined || compareObjectIds(objectId, window.after) > 0) &&
     (window.through === null || compareObjectIds(objectId, window.through) <= 0);
 }

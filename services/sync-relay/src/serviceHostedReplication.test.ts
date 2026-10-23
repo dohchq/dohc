@@ -1,7 +1,7 @@
 import {describe, expect, it, vi} from "vitest";
 import {EngineRequestError, type EngineClient} from "@dohc/workspace-engine-client/daemon";
-import type {HostedSyncMethodResultMap} from "@dohc/workspace-engine-client/relay-wire";
-import {parseServiceHostedReplicationConfig, ServiceHostedReplication} from "./serviceHostedReplication.js";
+import {hostedWindowCovers, type HostedSyncMethodResultMap} from "@dohc/workspace-engine-client/relay-wire";
+import {parseServiceHostedReplicationConfig, ServiceHostedReplication, type ServiceHostedPullPage} from "./serviceHostedReplication.js";
 
 const attachment = (maxPagesPerPull = 3) => ({relay: {baseUrl: "https://relay.example", bearerToken: "service-credential"},
   identity: {replicationEpoch: "actual-epoch", streamIdentity: "actual-stream"}, maxPagesPerPull});
@@ -11,9 +11,12 @@ const pass = (patch: Partial<HostedSyncMethodResultMap["sync.pullHosted"]> = {})
   conflictsOpened: 0, hasMore: false, pendingCursor: {kind: "hosted" as const, token: `issued-${++issued}`},
   changedPaths: [{versionId: "main", path: "docs/a.md", operation: "write" as const, contentKind: "text" as const}],
   changedPathsOmitted: 0, refusals: [], refusalsOmitted: 0, sharingDeclined: [], sharingDeclinedOmitted: 0, held: [], heldThrough: null,
-  newlyHeld: [], departed: [], departedOmitted: 0, ...patch});
+  newlyHeld: [], newlyHeldOmitted: 0, departed: [], departedThrough: null, ...patch});
 const commit = (patch: Partial<HostedSyncMethodResultMap["sync.commitCursor"]> = {}) =>
-  ({committed: true, hasMore: false, retirement: null, departed: [], departedOmitted: 0, sharingDeclined: [], ...patch});
+  ({committed: true, hasMore: false, retirement: null, departed: [], departedThrough: null, sharingDeclined: [], ...patch});
+// What a page says of a departed document: whether it is, or undefined past its list's window.
+const says = (page: ServiceHostedPullPage, objectId: string) =>
+  hostedWindowCovers(page.departed.window, objectId) ? page.departed.listed.includes(objectId) : undefined;
 const diverged = () => new EngineRequestError(1, {code: "INVALID_PARAMS", message: "relay-origin-diverged", retry: "no"});
 
 function fixture(config = attachment()) {
@@ -151,7 +154,6 @@ it("tells the caller of a commit that stands before the retirement after it fail
 
 it("keeps each departed document the engine still holds until a reply that read them drops it", async () => {
   const f = fixture();
-  expect(f.driver.departed("doc-b")).toBeUndefined();
   expect(f.driver.departedNone).toBe(false);
   const passes = [pass({pendingCursor: null, departed: ["doc-b"]}), pass({departed: ["doc-b"]}), pass({departed: ["doc-b"]}), pass()];
   const failed = {code: "INTERNAL", message: "hosted file unexpected: docs/b.md", retry: "no"};
@@ -160,54 +162,80 @@ it("keeps each departed document the engine still holds until a reply that read 
   f.answers["sync.pullHosted"] = () => passes.shift();
   f.answers["sync.commitCursor"] = () => commits.shift();
   const seen: Array<boolean | undefined> = [];
-  const record = () => seen.push(f.driver.departed("doc-b"));
+  const record = (page: ServiceHostedPullPage) => seen.push(says(page, "doc-b"));
   await expect(f.driver.pull(undefined, record)).rejects.toThrow("Hosted retirement failed");
   await f.driver.pull(undefined, record);
   expect(seen).toEqual([true, true, true, false]);
   expect(f.driver.departedNone).toBe(true);
 });
 
-// Proves: a departed list the engine cut to fit its answer says nothing past
-// the last document it names, so none there reads as gone, and the documents
-// it leaves out before there are. A later reply that reaches them decides.
-it("reads no document past where a cut departed list stops as gone, until a list that reaches it", async () => {
+// Sol's review: departed documents the engine cannot park filled every
+// answer's departed list from the first, so one after them was never named.
+// Proves: each pass asks for the departed documents after where the last
+// list stopped, its commit's list starts where the pass's did, and a page
+// says nothing past its window. A list that reached the last starts the
+// next from the first, and one listing a document before where it was asked
+// is refused.
+it("asks each pass for the departed documents after where the last list stopped", async () => {
   const f = fixture();
-  const passes = [pass({departed: ["doc-b"], departedOmitted: 2}), pass({departed: [], departedOmitted: 3}), pass({departed: ["doc-c"]})];
-  const commits = [commit({departed: ["doc-b"], departedOmitted: 2}), commit({departed: null}), commit({departed: ["doc-c"]})];
+  const passes = [pass({departed: ["doc-a"], departedThrough: "doc-a"}), pass({departed: ["doc-c"], departedThrough: "doc-c"}), pass(), pass()];
+  // The first commit lists further than its pass. The second could not read them, so its pass's list stands.
+  const commits = [commit({departed: ["doc-a", "doc-b"], departedThrough: "doc-b"}), commit({departed: null}), commit(), commit()];
   f.answers["sync.pullHosted"] = () => passes.shift();
   f.answers["sync.commitCursor"] = () => commits.shift();
-  const known = () => ["doc-a", "doc-b", "doc-c", "doc-d"].map(objectId => f.driver.departed(objectId));
-  await f.driver.pull();
-  expect(known()).toEqual([false, true, undefined, undefined]);
-  expect(f.driver.departedNone).toBe(false);
-  // Its commit could not read them, so the pass's empty but cut list stands.
-  await f.driver.pull();
-  expect(known()).toEqual([undefined, undefined, undefined, undefined]);
-  expect(f.driver.departedNone).toBe(false);
-  await f.driver.pull();
-  expect(known()).toEqual([false, false, true, false]);
+  const seen: Array<Array<boolean | undefined>> = [], none: boolean[] = [];
+  const record = (page: ServiceHostedPullPage) => seen.push(["doc-a", "doc-b", "doc-c", "doc-d"].map(objectId => says(page, objectId)));
+  for (let index = 0; index < 4; index++) {await f.driver.pull(undefined, record); none.push(f.driver.departedNone);}
+  expect(seen).toEqual([[true, true, undefined, undefined], [undefined, undefined, true, undefined],
+    [undefined, undefined, undefined, false], [false, false, false, false]]);
+  expect(none).toEqual([false, false, false, true]);
+  const asked = () => f.sendRequest.mock.calls.map(([request]) => request).filter(request => request.method === "sync.pullHosted")
+    .map(request => request.params);
+  expect(asked()).toEqual([{workspaceId: "workspace"}, {workspaceId: "workspace", departedAfter: "doc-b"},
+    {workspaceId: "workspace", departedAfter: "doc-c"}, {workspaceId: "workspace"}]);
+  for (const [answer, method] of [[() => pass({departed: ["doc-a"], departedThrough: "doc-a"}), "sync.pullHosted"],
+    [() => commit({departed: ["doc-a"]}), "sync.commitCursor"]] as const) {
+    f.answers["sync.pullHosted"] = () => pass({departed: ["doc-b"], departedThrough: "doc-b"});
+    f.answers["sync.commitCursor"] = () => commit({departed: ["doc-b"], departedThrough: "doc-b"});
+    await f.driver.pull();
+    f.answers["sync.pullHosted"] = () => pass(); f.answers["sync.commitCursor"] = () => commit();
+    f.answers[method] = answer;
+    await expect(f.driver.pull()).rejects.toThrow(`hosted ${method} result`);
+    expect(asked().at(-1)).toEqual({workspaceId: "workspace", departedAfter: "doc-b"});
+    f.answers["sync.pullHosted"] = () => pass(); f.answers["sync.commitCursor"] = () => commit();
+    await f.driver.pull();
+  }
 });
 
 // Proves: a pass whose page activation never heard, as when its commit's
 // reply is lost, leaves the held cursor where it was, so the next pass lists
-// the same documents again and none is skipped.
-it("asks after the last held list activation heard when a pass fails before its page", async () => {
+// the same documents again and none is skipped. That pass may have held
+// documents, so the next page says its newly held list may leave some out,
+// as does a pass that left some out; the page after says it is whole again.
+// A pass that adopted a scope says nothing, so the page after it says so.
+it("asks after the last held list activation heard when a pass fails before its page, and says what it may have held is unknown", async () => {
   const f = fixture(), work = (objectId: string) => ({objectId, reason: "hosted-backfill-work-waiting" as const});
-  const passes = [pass({held: [work("a")], heldThrough: "a"}), pass({held: [work("a")], heldThrough: "a"}), pass({held: [work("b")]})];
+  const passes = [pass({held: [work("a")], heldThrough: "a"}), pass({held: [work("a")], heldThrough: "a"}), pass({held: [work("b")]}),
+    pass({newlyHeldOmitted: 1}), pass()];
   f.answers["sync.pullHosted"] = () => passes.shift();
   const original = f.answers["sync.commitCursor"]!;
   f.answers["sync.commitCursor"] = () => {f.answers["sync.commitCursor"] = original; throw new Error("the engine stopped answering");};
-  const heard = vi.fn();
-  await expect(f.driver.pull(undefined, heard)).rejects.toThrow("stopped answering");
-  expect(heard).not.toHaveBeenCalled();
-  expect(f.driver.heldSweepUnfinished).toBe(false);
-  await f.driver.pull(undefined, heard);
-  expect(f.driver.heldSweepUnfinished).toBe(true);
-  await f.driver.pull(undefined, heard);
-  expect(f.driver.heldSweepUnfinished).toBe(false);
+  const heard: boolean[] = [], hear = (page: ServiceHostedPullPage) => heard.push(page.newlyHeld.complete);
+  await expect(f.driver.pull(undefined, hear)).rejects.toThrow("stopped answering");
+  expect(heard).toEqual([]);
+  for (let index = 0; index < 4; index++) await f.driver.pull(undefined, hear);
+  expect(heard).toEqual([false, true, false, true]);
   const asked = f.sendRequest.mock.calls.map(([request]) => request).filter(request => request.method === "sync.pullHosted")
     .map(request => request.params);
-  expect(asked).toEqual([{workspaceId: "workspace"}, {workspaceId: "workspace"}, {workspaceId: "workspace", heldAfter: "a"}]);
+  expect(asked.slice(0, 3)).toEqual([{workspaceId: "workspace"}, {workspaceId: "workspace"}, {workspaceId: "workspace", heldAfter: "a"}]);
+  f.answers["sync.pullHosted"] = () => {throw new Error("the engine stopped answering");};
+  await expect(f.driver.pull(undefined, hear)).rejects.toThrow("stopped answering");
+  const after = [pass({pendingCursor: null}), pass(), pass()];
+  f.answers["sync.pullHosted"] = () => after.shift();
+  heard.length = 0;
+  await f.driver.pull(undefined, hear);
+  await f.driver.pull(undefined, hear);
+  expect(heard).toEqual([false, false, true]);
 });
 
 it("leaves a pass uncommitted when a reply is lost, and the next pull carries on", async () => {

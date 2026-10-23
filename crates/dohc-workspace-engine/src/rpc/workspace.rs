@@ -3645,6 +3645,7 @@ mod tests {
                 materialization_paths: Vec::new(),
                 materialized: false,
                 reconcile_collections: false,
+                departed_after: None,
                 issue: 1,
                 cursor: IssuedCursor::Relay(dohc_engine_sync::RelayCursor {
                     bootstrap_complete: true,
