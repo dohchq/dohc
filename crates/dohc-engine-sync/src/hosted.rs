@@ -16,6 +16,7 @@
 //! scope while its row carries the replica's scope generation; one that left
 //! keeps its state until it parks, and keeps what its return needs after.
 
+mod held;
 mod park;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,6 +27,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{ReplicationEnvelope, SyncError};
 
+pub use held::{
+    HeldBindingStatus, HeldDocument, HeldDocumentInspection, HeldDocumentsPage,
+    MAX_HELD_DOCUMENTS_PAGE, inspect_held_document, list_held_documents,
+};
 #[cfg(test)]
 pub(crate) use park::OCCUPANTS_READ;
 pub use park::{

@@ -7,6 +7,7 @@ pub(crate) mod configured_live_host;
 pub(super) mod conflicts;
 pub(super) mod dispatch;
 pub(super) mod error;
+pub(super) mod held_documents;
 pub(super) mod history;
 pub(super) mod kept_copies;
 pub(crate) mod live_application;

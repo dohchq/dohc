@@ -163,6 +163,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "ydoc_inactive_lineages",
     "ydoc_base_relay_candidates",
     "ydoc_recovery_decisions",
+    "released_hold_copy_decisions",
     "owner_ydoc_outboxes",
     "owner_ydoc_outbox_entries",
     "owner_live_stops",
@@ -844,6 +845,7 @@ mod tests {
             "ydoc_base_relay_candidates",
             "ydoc_recovery_decisions",
             "ydoc_drain_reports",
+            "released_hold_copy_decisions",
         ] {
             assert!(
                 REQUIRED_TABLES.contains(&table),

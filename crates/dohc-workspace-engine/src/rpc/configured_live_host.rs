@@ -591,6 +591,27 @@ impl EngineService {
         })
     }
 
+    /// The configured host's own current connection is the caller, and
+    /// `workspace` is one of the ordinary workspaces it attached. A handler
+    /// checks this again after each wait, since either can end meanwhile.
+    pub(super) fn configured_ordinary_workspace(
+        &self,
+        ctx: &RequestContext,
+        workspace: &WorkspaceHandle,
+    ) -> Result<(), WireError> {
+        let discovery = self.configured_host_caller(ctx)?;
+        if !lock(&self.live_applications).hosts_current(&discovery.connection) {
+            return Err(WireError::new(
+                ErrorCode::SessionExpired,
+                "live host connection is not current",
+            ));
+        }
+        if !discovery.is_ordinary(workspace) {
+            return Err(super::error::workspace_unavailable());
+        }
+        Ok(())
+    }
+
     pub(super) fn configured_live_hosts(
         &self,
         ctx: &RequestContext,

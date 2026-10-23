@@ -7983,7 +7983,19 @@ async fn held_for_a_queued_fold() -> (
     Desktop,
     dohc_engine_sync::RelaySyncClient<HostedFeed>,
 ) {
-    let mut w = retained_window(Retained::Carried).await;
+    held_for_a_queued_fold_of(Retained::Carried).await
+}
+
+/// [`held_for_a_queued_fold`], with the window retaining its work as
+/// `retained`.
+async fn held_for_a_queued_fold_of(
+    retained: Retained,
+) -> (
+    RetainedWindow,
+    Desktop,
+    dohc_engine_sync::RelaySyncClient<HostedFeed>,
+) {
+    let mut w = retained_window(retained).await;
     let desktop = desktop_of(&w.base, &w.lineage, &[]).await;
     let (fold, fold_bytes) = desktop
         .fold(&format!("{}\nA desktop edit.\n", desktop.file()))
@@ -8019,6 +8031,326 @@ fn completed_waiting(store: &EngineStore, pass: &dohc_engine_sync::HostedPassOut
         "{pass:?}"
     );
     assert_eq!(queued_updates(store).len(), 1, "the fold stays queued");
+}
+
+/// The window document's inspection, as the host answers its owner.
+fn inspected_window(store: &EngineStore) -> dohc_engine_sync::HeldDocumentInspection {
+    dohc_engine_sync::inspect_held_document(store, "workspace", "object")
+        .unwrap()
+        .expect("the window document is held")
+}
+
+/// Every row that holds a document's native state, its blobs' bytes among
+/// them: what inspection must leave exactly as it was.
+fn native_rows(store: &EngineStore) -> Vec<String> {
+    table_rows(
+        store,
+        &[
+            "ydoc_docs",
+            "ydoc_updates",
+            "ydoc_snapshots",
+            "ydoc_inactive_lineages",
+            "binary_blobs",
+            "hosted_documents",
+            "hosted_replicas",
+        ],
+    )
+}
+
+/// What [`outbox_only`] stores under its entry's digest.
+enum Stored {
+    TheUpdate,
+    Other(&'static [u8]),
+    Nothing,
+}
+
+/// The same native state: what `a` and `b` integrated and what they show.
+fn same_state(a: &[u8], b: &[u8]) -> bool {
+    let [a, b] = [a, b].map(|bytes| {
+        let doc = Ydoc::wire();
+        doc.apply(bytes).unwrap();
+        doc
+    });
+    a.encode_state_vector() == b.encode_state_vector()
+        && a.encode_delete_set() == b.encode_delete_set()
+        && a.canonical_content() == b.canonical_content()
+}
+
+/// Queue, past the store's checks, an owner edit only the released lineage's
+/// outbox holds: a pending entry beside the retained delivery's, whose bytes
+/// add `text` to the head, with `stored` under its digest. Answers its
+/// contribution.
+fn outbox_only(w: &mut RetainedWindow, text: &str, stored: Stored) -> RetainedContribution {
+    let writer = Ydoc::wire();
+    writer.apply(&w.native()).unwrap();
+    let update = writer.richdoc_append_paragraph(text);
+    let digest = hex_sha256(&update);
+    match stored {
+        Stored::TheUpdate => {
+            w.store.put_binary_blob(&update).unwrap();
+        }
+        Stored::Other(bytes) => write_unchecked(
+            w,
+            &format!(
+                "INSERT INTO binary_blobs (sha256,byte_length,bytes) VALUES ('{digest}',{},X'{}')",
+                bytes.len(),
+                bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+            ),
+        ),
+        Stored::Nothing => {}
+    }
+    write_unchecked(
+        w,
+        &format!(
+            "CREATE TEMP TABLE drafted AS SELECT * FROM owner_ydoc_outbox_entries WHERE delivery_id='{}';
+             UPDATE drafted SET sequence=sequence+100,append_key='outbox-only',delivery_id='outbox-only',
+               update_digest='{digest}',native_source_json=NULL,accepted_receipt_json=NULL,
+               update_blob_digest='{digest}',byte_length={},pending=1,terminal_reason=NULL,
+               terminal_blob_digest=NULL;
+             INSERT INTO owner_ydoc_outbox_entries SELECT * FROM drafted",
+            w.retained_delivery,
+            update.len()
+        ),
+    );
+    let (outbox_id, sequence): (String, i64) = w
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outbox_id,sequence FROM owner_ydoc_outbox_entries WHERE delivery_id='outbox-only'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .unwrap();
+    RetainedContribution::Outbox {
+        outbox_id,
+        sequence,
+        delivery_id: "outbox-only".into(),
+        update_digest: digest,
+    }
+}
+
+/// The hold the drain derives again for the queued fold, stored.
+fn rebound(w: &mut RetainedWindow) -> Box<ReleasedLineageBinding> {
+    let Some(dohc_engine_sync::HostedHold::ReleasedLineageUnsettled {
+        binding,
+        binding_stale: false,
+        ..
+    }) = settled_drain(&mut w.store).released_hold
+    else {
+        panic!("the drain holds the fold again");
+    };
+    assert_eq!(inspected_window(&w.store).document.binding, binding);
+    binding
+}
+
+/// Plan r3, Round 2: discovery finds a held document from durable state
+/// alone, after a restart with no editor, in object ID order and bounded.
+/// Inspection of integrated but unproven Carried, seed and Own work finds it
+/// all in the head: preservation is complete, merges nothing, and keeps the
+/// retained text. Inspection writes nothing: the head and every native row
+/// stay byte for byte.
+#[tokio::test]
+async fn inspection_preserves_integrated_retained_work_and_writes_nothing() {
+    for retained in [Retained::Carried, Retained::Seed, Retained::Own] {
+        let case = format!("{retained:?}");
+        let (mut w, desktop, _client) = held_for_a_queued_fold_of(retained).await;
+        let dohc_engine_sync::HostedDocumentStatus::Held(hold) = hosted_status(&w.store, "object")
+        else {
+            panic!("{case}: held");
+        };
+        let dohc_engine_sync::HostedHold::ReleasedLineageUnsettled { binding, .. } = hold else {
+            panic!("{case}: not held for released work");
+        };
+        let (native, rows, ingress) = (w.native(), native_rows(&w.store), ingress_rows(&w.store));
+
+        let inspection = inspected_window(&w.store);
+        assert_eq!(inspection.document.binding, binding, "{case}");
+        assert_eq!(inspection.status, dohc_engine_sync::HeldBindingStatus::Current, "{case}");
+        let preservation = inspection.preservation.expect("a current binding is inspected");
+        assert_eq!(preservation.status, PreservationStatus::Complete, "{case}: {:?}", preservation.findings);
+        assert!(preservation.merged.is_empty(), "{case}: the head holds it all: {:?}", preservation.merged);
+        let preserved = preservation.preserved.expect("complete");
+        assert!(preserved.markdown.contains(RETAINED), "{case}: {}", preserved.markdown);
+        assert!(same_state(&preserved.full_state, &native), "{case}: the merge is the head");
+        assert_eq!(w.native(), native, "{case}: the head is unchanged");
+        assert_eq!(native_rows(&w.store), rows, "{case}: native rows");
+        assert_eq!(ingress_rows(&w.store), ingress, "{case}: retained records");
+
+        w.store = EngineStore::open(&engine_db_path(&w.root).unwrap(), 0).unwrap();
+        let page = dohc_engine_sync::list_held_documents(&w.store, "workspace", None, 1)
+            .unwrap()
+            .expect("a hosted replica");
+        assert_eq!(page.documents.len(), 1, "{case}: after a restart");
+        assert_eq!(page.documents[0].object_id, "object");
+        assert_eq!(page.documents[0].binding, binding);
+        assert_eq!(page.documents[0].continuation, dohc_engine_sync::ReleasedHoldContinuation::Frozen);
+        assert!(!page.has_more && !page.documents[0].binding_stale, "{case}");
+        let after = dohc_engine_sync::list_held_documents(&w.store, "workspace", Some("object"), 1)
+            .unwrap()
+            .unwrap();
+        assert!(after.documents.is_empty() && !after.has_more, "{case}: {after:?}");
+        assert!(
+            dohc_engine_sync::list_held_documents(&w.store, "workspace", None, 0).is_err(),
+            "{case}: a page holds at least one document"
+        );
+        assert_eq!(dohc_engine_sync::list_held_documents(&w.store, "elsewhere", None, 1).unwrap(), None);
+        assert_eq!(dohc_engine_sync::inspect_held_document(&w.store, "workspace", "elsewhere").unwrap(), None);
+        assert_eq!(native_rows(&w.store), rows, "{case}: discovery writes nothing");
+        desktop.close().await;
+        w.close().await;
+    }
+}
+
+/// Plan r3, Round 2: work only an outbox holds merges into scratch state,
+/// is named in `mergedContributionIds`, and appears in the preserved text
+/// and native state, while the canonical head stays byte for byte without
+/// it. A binding derived before that work existed no longer stands.
+#[tokio::test]
+async fn an_outbox_only_contribution_is_preserved_without_changing_the_head() {
+    let (mut w, desktop, _client) = held_for_a_queued_fold().await;
+    let earlier = inspected_window(&w.store).document.binding;
+    let contribution = outbox_only(&mut w, "Outbox only.", Stored::TheUpdate);
+    let stale = inspected_window(&w.store);
+    assert_eq!(stale.document.binding, earlier, "nothing derived it again yet");
+    assert_eq!(stale.status, dohc_engine_sync::HeldBindingStatus::Stale);
+    assert_eq!(stale.preservation, None, "a stale binding claims nothing");
+
+    rebound(&mut w);
+    let (native, rows) = (w.native(), native_rows(&w.store));
+    let inspection = inspected_window(&w.store);
+    assert_eq!(inspection.status, dohc_engine_sync::HeldBindingStatus::Current);
+    let preservation = inspection.preservation.unwrap();
+    assert_eq!(preservation.status, PreservationStatus::Complete, "{:?}", preservation.findings);
+    assert_eq!(preservation.merged, vec![contribution]);
+    let preserved = preservation.preserved.unwrap();
+    assert!(preserved.markdown.contains("Outbox only.") && preserved.markdown.contains(RETAINED), "{}", preserved.markdown);
+    let pinned = Ydoc::wire();
+    pinned.apply(&preserved.full_state).unwrap();
+    assert!(pinned.project(ContentKind::Richdoc).unwrap().content.contains("Outbox only."));
+    assert!(!w.text().contains("Outbox only."), "the head never takes it");
+    assert_eq!(w.native(), native);
+    assert_eq!(native_rows(&w.store), rows);
+    desktop.close().await;
+    w.close().await;
+}
+
+/// Plan r3, Round 2: absent bytes, stored bytes another digest names, and
+/// retained evidence that contradicts itself never preserve, and name what
+/// they concern.
+#[tokio::test]
+async fn missing_corrupt_or_contradictory_evidence_never_preserves() {
+    let (mut w, desktop, _client) = held_for_a_queued_fold().await;
+    let contribution = outbox_only(&mut w, "Never stored.", Stored::Nothing);
+    rebound(&mut w);
+    let preservation = inspected_window(&w.store).preservation.unwrap();
+    assert_eq!(preservation.status, PreservationStatus::MissingEvidence);
+    assert_eq!(
+        preservation
+            .findings
+            .iter()
+            .map(|found| (found.reason, found.contribution.clone()))
+            .collect::<Vec<_>>(),
+        [(PreservationReason::SourceMissing, Some(contribution))]
+    );
+    assert_eq!(preservation.preserved, None);
+    desktop.close().await;
+    w.close().await;
+
+    let (mut w, desktop, _client) = held_for_a_queued_fold().await;
+    outbox_only(&mut w, "Stored wrong.", Stored::Other(b"x"));
+    rebound(&mut w);
+    let preservation = inspected_window(&w.store).preservation.unwrap();
+    assert_eq!(preservation.status, PreservationStatus::InvalidEvidence);
+    assert!(
+        preservation
+            .findings
+            .iter()
+            .any(|found| found.reason == PreservationReason::DigestMismatch),
+        "{:?}",
+        preservation.findings
+    );
+    assert_eq!(preservation.preserved, None);
+    desktop.close().await;
+    w.close().await;
+
+    let (mut w, desktop, _client) = held_for_a_queued_fold().await;
+    write_unchecked(
+        &w,
+        &format!(
+            "UPDATE owner_ydoc_outbox_entries SET accepted_receipt_json=json_set(accepted_receipt_json,'$.journalCursor',99) \
+             WHERE delivery_id='{}'",
+            w.retained_delivery
+        ),
+    );
+    rebound(&mut w);
+    let preservation = inspected_window(&w.store).preservation.unwrap();
+    assert_eq!(preservation.status, PreservationStatus::InvalidEvidence);
+    assert_eq!(
+        preservation.findings.iter().map(|found| found.reason).collect::<Vec<_>>(),
+        [PreservationReason::ContradictoryEvidence]
+    );
+    assert_eq!(preservation.preserved, None);
+    desktop.close().await;
+    w.close().await;
+}
+
+/// Plan r3, Round 2: a hold its store marks stale, a binding whose path
+/// moved since, and a feed the replica no longer reads all inspect as stale,
+/// with nothing actionable.
+#[tokio::test]
+async fn a_binding_that_no_longer_stands_inspects_as_stale() {
+    let damages: [(&str, &str); 3] = [
+        ("marked stale", "UPDATE hosted_documents SET released_hold_binding_stale=1 WHERE object_id='object'"),
+        ("moved", "UPDATE path_aliases SET path='notes/moved.md' WHERE object_id='object'"),
+        ("another feed", "UPDATE sync_identity SET stream_identity='another-stream'"),
+    ];
+    for (case, damage) in damages {
+        let (w, desktop, _client) = held_for_a_queued_fold().await;
+        assert_eq!(inspected_window(&w.store).status, dohc_engine_sync::HeldBindingStatus::Current, "{case}");
+        write_unchecked(&w, damage);
+        let inspection = inspected_window(&w.store);
+        assert_eq!(inspection.status, dohc_engine_sync::HeldBindingStatus::Stale, "{case}");
+        assert_eq!(inspection.preservation, None, "{case}");
+        desktop.close().await;
+        w.close().await;
+    }
+}
+
+/// Sol's archived-binding ruling: inspection selects native state by the
+/// binding's lineage. An archived hold is inspected against the state its
+/// archive keeps, never the head's, even once the head's own lineage moved
+/// on, and both stay as they were.
+#[tokio::test]
+async fn an_archived_hold_is_inspected_against_its_archive() {
+    let (mut w, desktop, client, queued, archive) = archived_window(2).await;
+    let first = committed_pass(&mut w.store, &client);
+    assert!(holds_archived(first.held.get("object"), &w.lineage, &archive, &queued[0]), "{first:?}");
+    let head = hex_sha256(b"the winning lineage");
+    let (current, current_bytes) = safe_row(&[&w.native()], &head, "A paragraph of the head.");
+    let current = client.transport().serve(current, current_bytes);
+    let pass = hosted_pass(&mut w.store, &client, &mut dohc_engine_collab::WriterDocCache::new());
+    assert!(journaled(&w.store, &current), "{pass:?}");
+    assert!(pass_commit(&mut w.store, &client, &pass).committed);
+    assert!(w.text().contains("A paragraph of the head."));
+    let (native, rows) = (w.native(), native_rows(&w.store));
+
+    let inspection = inspected_window(&w.store);
+    assert_eq!(inspection.document.binding.lineage_claim_id, w.lineage);
+    assert_eq!(inspection.document.binding.head_digest, archive);
+    assert_eq!(inspection.status, dohc_engine_sync::HeldBindingStatus::Current);
+    let preservation = inspection.preservation.unwrap();
+    assert_eq!(preservation.status, PreservationStatus::Complete, "{:?}", preservation.findings);
+    let preserved = preservation.preserved.unwrap();
+    assert!(preserved.markdown.contains(RETAINED), "{}", preserved.markdown);
+    assert!(!preserved.markdown.contains("A paragraph of the head."), "the archive, not the head: {}", preserved.markdown);
+    let archived = w.store.get_binary_blob(&archive).unwrap().unwrap();
+    assert!(same_state(&preserved.full_state, &archived), "the archive holds it all");
+    assert_eq!(archived_state(&w.store, &w.lineage), archive);
+    assert_eq!(w.native(), native);
+    assert_eq!(native_rows(&w.store), rows);
+    desktop.close().await;
+    w.close().await;
 }
 
 /// The commit stored `object` waiting, and it still is after a restart. The

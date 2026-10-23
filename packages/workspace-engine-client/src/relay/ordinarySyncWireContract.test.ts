@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ProtocolShapeError } from "../wireSchema";
 import { decodeHostedSyncResult, decodeOrdinarySyncResult, releasedLineageBindingDigest } from "./ordinarySyncWireContract";
@@ -146,5 +147,67 @@ describe("hosted native sync contract", () => {
     expect(() => decodeHostedSyncResult("sync.commitCursor", { committed: true, hasMore: false, retirement: null, sharingDeclined: [] }))
       .toThrow(ProtocolShapeError);
     expect(() => decodeHostedSyncResult("sync.createHostedReplica", { hosted: false })).toThrow(ProtocolShapeError);
+  });
+});
+
+describe("held document inspection contract", () => {
+  const bound = JSON.parse(vectors.valid[0]!.canonical);
+  const held = { objectId: bound.objectId, path: "notes/plan.md", binding: bound, bindingDigest: vectors.valid[0]!.digest,
+    continuation: "frozen", bindingStale: false };
+  const markdown = "# Plan\n\nRetained.\n";
+  const sha = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
+  const carried = { kind: "carried", deliveryId: "delivery-1", updateDigest: "c".repeat(64), journalCursor: 7 };
+  const outbox = { kind: "outbox", outboxId: "outbox", sequence: 3, deliveryId: "delivery-2", updateDigest: "d".repeat(64) };
+  const complete = { status: "complete", reasons: [], mergedContributionIds: [outbox], markdown,
+    markdownSha256: sha(markdown), markdownByteLength: Buffer.byteLength(markdown), inbandLimitBytes: 49152 };
+  const inspected = { ...held, status: "current", preservation: complete, resolution: null };
+
+  it("keeps a page of held documents and each binding's digest", () => {
+    const page = { documents: [held], hasMore: true };
+    expect(decodeHostedSyncResult("sync.heldDocuments", page)).toEqual(page);
+    expect(decodeHostedSyncResult("sync.heldDocuments", { documents: [], hasMore: false }).documents).toEqual([]);
+  });
+
+  it("keeps complete preservation, its merged contributions and its exact text", () => {
+    expect(decodeHostedSyncResult("sync.heldDocument", inspected)).toEqual(inspected);
+    // Text above the in-band limit streams; its digest and length still name it.
+    const streamed = { ...complete, markdown: null, inbandLimitBytes: 4 };
+    expect(decodeHostedSyncResult("sync.heldDocument", { ...inspected, preservation: streamed })?.preservation).toEqual(streamed);
+    expect(decodeHostedSyncResult("sync.heldDocument", null)).toBeNull();
+  });
+
+  it("keeps each machine-readable reason preservation is incomplete, and a stale binding claims nothing", () => {
+    const reasons = [
+      { reason: "pending-head-dependencies", status: "pending-dependencies", namespace: null, contribution: null },
+      { reason: "pending-contribution-dependencies", status: "pending-dependencies", namespace: null, contribution: null },
+      { reason: "source-missing", status: "missing-evidence", namespace: "relay", contribution: outbox },
+      { reason: "contradictory-evidence", status: "invalid-evidence", namespace: "relay", contribution: null },
+      { reason: "digest-mismatch", status: "invalid-evidence", namespace: "relay", contribution: carried },
+    ];
+    for (const reason of reasons) {
+      const incomplete = { status: reason.status, reasons: [reason], mergedContributionIds: [], markdown: null,
+        markdownSha256: null, markdownByteLength: null, inbandLimitBytes: 49152 };
+      expect(decodeHostedSyncResult("sync.heldDocument", { ...inspected, preservation: incomplete })?.preservation).toEqual(incomplete);
+    }
+    const stale = { ...inspected, status: "stale", preservation: null, bindingStale: true };
+    expect(decodeHostedSyncResult("sync.heldDocument", stale)).toEqual(stale);
+  });
+
+  it.each([
+    ["another binding's digest", { bindingDigest: "0".repeat(64) }],
+    ["another object", { objectId: "elsewhere" }],
+    ["a stale binding that preserves", { status: "stale" }],
+    ["a current binding with nothing inspected", { preservation: null }],
+    ["text its digest does not name", { preservation: { ...complete, markdown: `${markdown}!` } }],
+    ["text its length does not name", { preservation: { ...complete, markdownByteLength: 1 } }],
+    ["in-band text left out", { preservation: { ...complete, markdown: null } }],
+    ["complete with a reason", { preservation: { ...complete, reasons: [{ reason: "source-missing", status: "missing-evidence", namespace: null, contribution: null }] } }],
+    ["incomplete with text", { preservation: { ...complete, status: "missing-evidence",
+      reasons: [{ reason: "source-missing", status: "missing-evidence", namespace: null, contribution: null }] } }],
+    ["an unknown reason", { preservation: { ...complete, status: "invalid-evidence",
+      reasons: [{ reason: "guess", status: "invalid-evidence", namespace: null, contribution: null }], markdown: null, markdownSha256: null, markdownByteLength: null } }],
+    ["a resolution this round never records", { resolution: {} }],
+  ])("rejects %s", (_case, patch) => {
+    expect(() => decodeHostedSyncResult("sync.heldDocument", { ...inspected, ...patch })).toThrow(ProtocolShapeError);
   });
 });

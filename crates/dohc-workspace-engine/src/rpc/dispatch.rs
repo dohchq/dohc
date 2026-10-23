@@ -94,6 +94,9 @@ impl EngineService {
                 | "sync.push"
                 | "sync.createHostedReplica"
                 | "sync.pullHosted"
+                // Read only; each handler checks the caller and attachment again.
+                | "sync.heldDocuments"
+                | "sync.heldDocument"
                 // The claim ledger, so the relay's automations can run the
                 // field changes this host claims when it accepts a live frame.
                 // Nothing that writes files, chats, schedules, or presses.
@@ -245,6 +248,20 @@ impl EngineService {
             let (result, blob_egress) = self
                 .versioned_binary_read_blob(&ctx, request.workspace, request.params, id)
                 .await?;
+            return Ok(ServiceResponse {
+                output_guard: None,
+                response: Response { id, result },
+                blob_egress,
+            });
+        }
+        if request.method == "sync.heldDocument" {
+            let (result, blob_egress) = Box::pin(self.sync_held_document(
+                &ctx,
+                request.workspace,
+                request.params,
+                id,
+            ))
+            .await?;
             return Ok(ServiceResponse {
                 output_guard: None,
                 response: Response { id, result },
@@ -413,6 +430,9 @@ impl EngineService {
             }
             "sync.pullHosted" => {
                 Box::pin(self.sync_pull_hosted(&ctx, request.workspace, request.params)).await?
+            }
+            "sync.heldDocuments" => {
+                Box::pin(self.sync_held_documents(&ctx, request.workspace, request.params)).await?
             }
             "keys.upload" => {
                 Box::pin(self.keys_upload(&ctx, request.workspace, request.params)).await?
@@ -1264,6 +1284,8 @@ mod tests {
             "sync.push",
             "sync.createHostedReplica",
             "sync.pullHosted",
+            "sync.heldDocuments",
+            "sync.heldDocument",
         ] {
             request.method = method.into();
             request.workspace = Some(attached_handle.clone());
@@ -1563,6 +1585,8 @@ mod tests {
             "sync.materializePendingCursor",
             "sync.commitCursor",
             "sync.createHostedReplica",
+            "sync.heldDocument",
+            "sync.heldDocuments",
             "sync.probe",
             "sync.pull",
             "sync.pullHosted",

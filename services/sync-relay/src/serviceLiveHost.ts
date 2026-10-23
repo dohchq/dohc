@@ -29,6 +29,7 @@ import {snapshotStopRestoreLookup} from "./liveRestoreDelivery.js";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation.js";
 import {parseLiveRestoreConfig, LiveRestorePreparation, type LiveRestoreConfig} from "./liveRestorePreparation.js";
 import {parseServiceHostedReplicationConfig, ServiceHostedReplication} from "./serviceHostedReplication.js";
+import {decodeHostedSyncResult} from "@dohc/workspace-engine-client/relay-wire";
 import type {ServiceActivationReplica} from "./serviceActivationDriver";
 interface ServiceLiveHostConfig {
   readonly version: 1;
@@ -602,6 +603,23 @@ export async function startServiceLiveHost(options: {
         await activation!.activate(row.target, joined, settleTarget, false);
       }));
     };
+    // A held-document read asks the engine for a workspace this daemon replicates,
+    // and answers only while this registration and that attachment still stand.
+    // It writes nothing, so it takes no turn and no pass waits on it.
+    const heldRead = async <M extends "sync.heldDocuments" | "sync.heldDocument">(workspaceId: string, method: M,
+      params: Record<string, JsonValue>, callerSignal?: AbortSignal) => {
+      check();
+      const attached = attachments.get(workspaceId);
+      if (!attached) return null;
+      return withLiveHostSignal(signal, callerSignal, async joined => {
+        const response = await client.sendRequest({id: nextRequestId(), method, workspace: attached.handle,
+          params: {workspaceId, ...params}, deadlineMs: config.client.requestDeadlineMs}, joined);
+        joined.throwIfAborted();
+        check();
+        if (attachments.get(workspaceId) !== attached) throw new Error("Hosted replica changed while it was read.");
+        return decodeHostedSyncResult(method, response.result);
+      });
+    };
     // Restore work takes a turn, so no idle unload runs beside it. A step that
     // registers on a dormant document reloads it, and passes then settle it.
     const restoring = <T>(value: StopRestoreLookup, callerSignal: AbortSignal | undefined,
@@ -892,6 +910,19 @@ export async function startServiceLiveHost(options: {
         return Object.freeze({client: attachments.has(document.workspaceId)?activation!.consumer(document).transport.client:client!, workspace: consumer.workspace,
           registrationId: registration.id, binding: registration.binding, coordinate, invalidated: AbortSignal.any([signal, registration.invalidated]),
           changes, nextRequestId, deadlineMs: config.client.requestDeadlineMs, drain});
+      },
+      /**
+       * The documents a hosted replica of this daemon holds for retained work a
+       * released chain left, in object ID order after `afterObjectId`. Null for a
+       * workspace it does not replicate.
+       */
+      async heldDocuments(workspaceId: string, page: {afterObjectId?: string; limit: number}, callerSignal?: AbortSignal) {
+        return heldRead(workspaceId, "sync.heldDocuments",
+          {...(page.afterObjectId === undefined ? {} : {afterObjectId: page.afterObjectId}), limit: page.limit}, callerSignal);
+      },
+      /** One held document, whether its binding stands, and what that binding preserves. Null when nothing is held there. */
+      async heldDocument(workspaceId: string, objectId: string, callerSignal?: AbortSignal) {
+        return heldRead(workspaceId, "sync.heldDocument", {objectId}, callerSignal);
       },
       get restoreConfigured() { return restore !== undefined; },
       async prepareRestore(value: StopRestoreLookup, callerSignal?: AbortSignal) {

@@ -12,6 +12,11 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::task::{Poll, Waker};
 
 mod binding;
+mod preservation;
+pub use preservation::{
+    inspect_held, HeldInspection, Preservation, PreservationFinding, PreservationReason,
+    PreservationStatus, PreservedState,
+};
 
 /// The synced update protection is decided for: the feed it arrived on and
 /// its coordinate there.
@@ -1221,8 +1226,31 @@ fn protected_tails(
         SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         SCANS_HERE.with(|scans| scans.set(scans.get() + 1));
     }
+    Ok(window_work(conn, doc, lineage)?.map(|work| match work {
+        WindowWork::Listed(tails) => {
+            ProtectedTails::Listed(tails.into_iter().map(|(tail, _)| tail).collect())
+        }
+        WindowWork::Invalid => ProtectedTails::Invalid,
+    }))
+}
+
+/// The protected tails of the released window, each with the retained work
+/// its commitment names.
+enum WindowWork {
+    /// In namespace order. A tail whose coverage is invalid names no work.
+    Listed(Vec<(ProtectedTail, Vec<RetainedContribution>)>),
+    /// As [`ProtectedTails::Invalid`].
+    Invalid,
+}
+
+/// [`protected_tails`], keeping the work each tail retains.
+fn window_work(
+    conn: &Connection,
+    doc: &DocKey,
+    lineage: &str,
+) -> Result<Option<WindowWork>, ApplicationError> {
     let Some(window) = readable(super::settled_base::released_window(conn, doc, lineage))? else {
-        return Ok(Some(ProtectedTails::Invalid));
+        return Ok(Some(WindowWork::Invalid));
     };
     let mut tails = Vec::new();
     for (namespace, activation_id) in window {
@@ -1247,17 +1275,23 @@ fn protected_tails(
             ))?,
             None => None,
         };
-        let coverage = match unproven.map(UnprovenCommitment::of) {
-            Some(Some(unproven)) => RetainedCoverage::Unproven(unproven),
-            Some(None) => continue,
-            None => RetainedCoverage::Invalid,
+        // `unproven_retained` answers its work in canonical order.
+        let (coverage, work) = match unproven {
+            Some(work) => match UnprovenCommitment::of_sorted(&work) {
+                Some(unproven) => (RetainedCoverage::Unproven(unproven), work),
+                None => continue,
+            },
+            None => (RetainedCoverage::Invalid, Vec::new()),
         };
-        tails.push(ProtectedTail {
-            namespace,
-            activation_id,
-            release,
-            coverage,
-        });
+        tails.push((
+            ProtectedTail {
+                namespace,
+                activation_id,
+                release,
+                coverage,
+            },
+            work,
+        ));
     }
-    Ok((!tails.is_empty()).then_some(ProtectedTails::Listed(tails)))
+    Ok((!tails.is_empty()).then_some(WindowWork::Listed(tails)))
 }

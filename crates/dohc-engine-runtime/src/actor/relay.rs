@@ -1896,6 +1896,40 @@ impl ActorHandle {
         .await
     }
 
+    /// A page of the documents the hosted replica holds for released
+    /// retained work; none for a workspace that is not hosted.
+    pub async fn held_documents(
+        &self,
+        workspace_id: String,
+        after_object_id: Option<String>,
+        limit: usize,
+    ) -> Result<Option<dohc_engine_sync::HeldDocumentsPage>, RuntimeError> {
+        self.run(move |store, _cache| {
+            dohc_engine_sync::list_held_documents(
+                store,
+                &workspace_id,
+                after_object_id.as_deref(),
+                limit,
+            )
+            .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
+    /// One held document and what its binding preserves, read on the
+    /// store's writer so nothing changes it meanwhile.
+    pub async fn held_document(
+        &self,
+        workspace_id: String,
+        object_id: String,
+    ) -> Result<Option<dohc_engine_sync::HeldDocumentInspection>, RuntimeError> {
+        self.run(move |store, _cache| {
+            dohc_engine_sync::inspect_held_document(store, &workspace_id, &object_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     pub async fn dismiss_sync_refusal(
         &self,
         workspace_id: String,

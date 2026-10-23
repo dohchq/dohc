@@ -1,9 +1,10 @@
+import { createHash } from "node:crypto";
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import { ProtocolShapeError, mutableStruct } from "../wireSchema";
-import { decodeReleasedLineageBinding, type ReleasedLineageBinding } from "./releasedLineageBinding";
+import { decodeReleasedLineageBinding, releasedLineageBindingDigest, type ReleasedLineageBinding } from "./releasedLineageBinding";
 
 export { releasedLineageBindingDigest, type ReleasedLineageBinding } from "./releasedLineageBinding";
 
@@ -112,6 +113,39 @@ const RetirementError = mutableStruct({ code: Text, message: Text, retry: Text }
 // rows or their file remain.
 const Departed = Schema.mutable(Schema.Array(Text));
 
+const Digest = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
+const RetainedContributionSchema = Schema.Union([
+  mutableStruct({ kind: Schema.Literal("carried"), deliveryId: Text, updateDigest: Text, journalCursor: Count }),
+  mutableStruct({ kind: Schema.Literal("outbox"), outboxId: Text, sequence: Count, deliveryId: Text, updateDigest: Text }),
+]);
+// A document the hosted replica holds for retained work a released chain left.
+const HeldDocumentFields = {
+  objectId: Text,
+  path: Text,
+  binding: ReleasedLineageBindingSchema,
+  bindingDigest: Digest,
+  continuation: Schema.Literals(["frozen", "dependency-drain"]),
+  bindingStale: Schema.Boolean,
+};
+const PreservationStatus = Schema.Literals(["complete", "pending-dependencies", "missing-evidence", "invalid-evidence"]);
+// Whether merged state keeps every retained contribution, why not, and what merging added.
+const Preservation = mutableStruct({
+  status: PreservationStatus,
+  reasons: Schema.mutable(Schema.Array(mutableStruct({
+    reason: Schema.Literals(["source-missing", "pending-head-dependencies", "pending-contribution-dependencies",
+      "digest-mismatch", "malformed-update", "contradictory-evidence", "missing-feed-identity"]),
+    status: PreservationStatus,
+    namespace: Schema.NullOr(Text),
+    contribution: Schema.NullOr(RetainedContributionSchema),
+  }))),
+  mergedContributionIds: Schema.mutable(Schema.Array(RetainedContributionSchema)),
+  // Null above the in-band limit, when the engine streams it instead.
+  markdown: Schema.NullOr(Schema.String),
+  markdownSha256: Schema.NullOr(Digest),
+  markdownByteLength: Schema.NullOr(Count),
+  inbandLimitBytes: Count,
+});
+
 // A session host's hosted replica. A pass that adopted a new scope has no
 // cursor; a commit can stand while the retirement after it failed, and while
 // its departed documents could not be read (null).
@@ -140,6 +174,17 @@ const HostedSyncResultSchemas = {
     sharingDeclined: Schema.mutable(Schema.Array(SharingDeclined)),
   }),
   "sync.push": OrdinarySyncResultSchemas["sync.push"],
+  "sync.heldDocuments": mutableStruct({
+    documents: Schema.mutable(Schema.Array(mutableStruct(HeldDocumentFields))),
+    hasMore: Schema.Boolean,
+  }),
+  // Null when nothing is held there. A stale binding claims nothing, so it carries no preservation.
+  "sync.heldDocument": Schema.NullOr(mutableStruct({
+    ...HeldDocumentFields,
+    status: Schema.Literals(["current", "stale"]),
+    preservation: Schema.NullOr(Preservation),
+    resolution: Schema.Null,
+  })),
 } as const;
 
 export type HostedSyncMethod = keyof typeof HostedSyncResultSchemas;
@@ -155,5 +200,43 @@ export function decodeHostedSyncResult<M extends HostedSyncMethod>(
   if (Result.isFailure(decoded)) {
     throw new ProtocolShapeError(`hosted ${method} result: ${decoded.failure.message}`);
   }
-  return decoded.success as HostedSyncMethodResultMap[M];
+  const result = decoded.success as HostedSyncMethodResultMap[M];
+  if (method === "sync.heldDocuments") {
+    for (const held of (result as HostedSyncMethodResultMap["sync.heldDocuments"]).documents) checkHeldDocument(method, held);
+  } else if (method === "sync.heldDocument") {
+    const inspected = result as HostedSyncMethodResultMap["sync.heldDocument"];
+    if (inspected !== null) checkHeldInspection(inspected);
+  }
+  return result;
+}
+
+type HeldDocument = HostedSyncMethodResultMap["sync.heldDocuments"]["documents"][number];
+export type HeldDocumentInspection = NonNullable<HostedSyncMethodResultMap["sync.heldDocument"]>;
+
+function checkHeldDocument(method: HostedSyncMethod, held: HeldDocument): void {
+  if (releasedLineageBindingDigest(held.binding) !== held.bindingDigest || held.binding.objectId !== held.objectId) {
+    throw new ProtocolShapeError(`hosted ${method} result: binding digest or object does not match its binding`);
+  }
+}
+
+// Only a current binding may preserve, and only complete preservation carries
+// text, whose digest and length must name it.
+function checkHeldInspection(inspected: HeldDocumentInspection): void {
+  const method = "sync.heldDocument";
+  checkHeldDocument(method, inspected);
+  const preservation = inspected.preservation;
+  const invalid = () => new ProtocolShapeError(`hosted ${method} result: preservation does not match its status`);
+  if ((inspected.status === "current") !== (preservation !== null)) throw invalid();
+  if (preservation === null) return;
+  const complete = preservation.status === "complete";
+  if (complete !== (preservation.reasons.length === 0) || complete !== (preservation.markdownSha256 !== null) ||
+    (preservation.markdownSha256 === null) !== (preservation.markdownByteLength === null) ||
+    (!complete && preservation.markdown !== null)) throw invalid();
+  if (preservation.markdown !== null) {
+    const bytes = Buffer.from(preservation.markdown, "utf8");
+    if (bytes.length !== preservation.markdownByteLength ||
+      createHash("sha256").update(bytes).digest("hex") !== preservation.markdownSha256) throw invalid();
+  } else if (complete && preservation.markdownByteLength! <= preservation.inbandLimitBytes) {
+    throw invalid();
+  }
 }

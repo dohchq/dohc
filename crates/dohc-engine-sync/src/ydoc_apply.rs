@@ -3096,7 +3096,7 @@ fn retained_unrecorded(conn: &Connection, op: &ReplicationEnvelope) -> Result<bo
     .map_err(SyncError::corrupt)
 }
 
-fn protection_failure(
+pub(crate) fn protection_failure(
     error: dohc_engine_collab::live_update_application::ApplicationError,
 ) -> SyncError {
     use dohc_engine_collab::live_update_application::ApplicationError;

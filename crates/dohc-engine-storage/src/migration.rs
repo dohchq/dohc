@@ -3362,6 +3362,14 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
 /// namespace, epoch, stream and relay sequence. A row deferred earlier is
 /// local in a workspace that is no hosted replica, and its feed is unknown
 /// in one that is.
+///
+/// A device's decision to keep a held document's retained version as an
+/// ordinary copy is keyed by the binding it answers and its attempt. It keeps
+/// that binding, the copy's text by digest and length, the contributions the
+/// copy merged, the copy's identities and allocated path, and, once known, the
+/// relay coordinate that accepted the copy and the resolution's terminal
+/// outcome. The copy's text outlives no decision that names it; the copy
+/// itself may go.
 const V2_LIVE_OWNER_ACTIVATIONS_DDL: &str = "\
 CREATE UNIQUE INDEX live_owner_adoptions_lineage ON live_owner_adoptions
     (relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id);
@@ -3825,6 +3833,41 @@ BEGIN
       AND NOT EXISTS (SELECT 1 FROM ydoc_deferred_updates u WHERE u.workspace_id=NEW.workspace_id
         AND u.version_id=NEW.version_id AND u.object_id=NEW.object_id);
 END;
+CREATE TABLE released_hold_copy_decisions (
+    workspace_id TEXT NOT NULL,
+    binding_digest TEXT NOT NULL CHECK (length(binding_digest)=64 AND binding_digest NOT GLOB '*[^0-9a-f]*'),
+    attempt INTEGER NOT NULL CHECK (attempt BETWEEN 0 AND 9007199254740991),
+    binding_json TEXT NOT NULL CHECK (json_valid(binding_json) AND json_type(binding_json)='object'
+      AND json_extract(binding_json,'$.workspaceId') IS workspace_id),
+    projection_sha256 TEXT NOT NULL
+      CHECK (length(projection_sha256)=64 AND projection_sha256 NOT GLOB '*[^0-9a-f]*'),
+    projection_byte_length INTEGER NOT NULL CHECK (projection_byte_length BETWEEN 0 AND 9007199254740991),
+    merged_contribution_ids_json TEXT NOT NULL
+      CHECK (json_valid(merged_contribution_ids_json) AND json_type(merged_contribution_ids_json)='array'),
+    recovery_object_id TEXT NOT NULL CHECK (length(recovery_object_id) > 0),
+    recovery_moment_id TEXT NOT NULL CHECK (length(recovery_moment_id) > 0),
+    recovered_path TEXT NOT NULL CHECK (length(recovered_path) > 0),
+    collision_ordinal TEXT NOT NULL
+      CHECK (length(collision_ordinal) > 0 AND collision_ordinal NOT GLOB '*[^0-9]*'),
+    recovery_author_json TEXT NOT NULL CHECK (json_valid(recovery_author_json)),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms BETWEEN 0 AND 9007199254740991),
+    accepted_recovery_origin_id TEXT CHECK (length(accepted_recovery_origin_id) > 0),
+    accepted_recovery_origin_seq INTEGER CHECK (accepted_recovery_origin_seq BETWEEN 0 AND 9007199254740991),
+    accepted_recovery_relay_seq INTEGER CHECK (accepted_recovery_relay_seq BETWEEN 1 AND 9007199254740991),
+    resolution_outcome TEXT CHECK (resolution_outcome IN ('resolved','stale')),
+    resolution_outcome_at_ms INTEGER CHECK (resolution_outcome_at_ms BETWEEN 0 AND 9007199254740991),
+    CHECK ((accepted_recovery_origin_id IS NULL AND accepted_recovery_origin_seq IS NULL
+            AND accepted_recovery_relay_seq IS NULL)
+        OR (accepted_recovery_origin_id IS NOT NULL AND accepted_recovery_origin_seq IS NOT NULL
+            AND accepted_recovery_relay_seq IS NOT NULL)),
+    CHECK ((resolution_outcome IS NULL) = (resolution_outcome_at_ms IS NULL)),
+    PRIMARY KEY (workspace_id, binding_digest, attempt),
+    UNIQUE (workspace_id, recovery_object_id),
+    UNIQUE (workspace_id, recovery_moment_id),
+    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY (projection_sha256) REFERENCES blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX released_hold_copy_decisions_projection ON released_hold_copy_decisions(projection_sha256);
 ";
 
 /// The triggers that keep and move a released tail generation. A store
@@ -4877,7 +4920,7 @@ mod tests {
             ),
             (
                 "v2-live-owner-activations",
-                "319580cc44af92c61b5250f42c7565bdac7fd21abed9c8470f525b4a8926d00b",
+                "2d0b60ade044856058c7d781884589242d40b5c674e18445eb9eb353c404ca0e",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -5665,6 +5708,97 @@ mod tests {
             |row| row.get(0),
         )
         .unwrap()
+    }
+
+    /// Plan r3's local decision table: one row per binding and attempt, with
+    /// unique copy identities in a workspace, every digest, length, integer
+    /// and JSON value checked, accepted coordinates and terminal outcomes
+    /// whole or absent, the copy's text pinned while a decision names it, and
+    /// the rows gone with their workspace.
+    #[test]
+    fn released_hold_copy_decisions_check_every_column() {
+        let ctx = MigrationContext::current(1);
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("decisions.db"));
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let text = "c".repeat(64);
+        conn.execute_batch(&format!(
+            "INSERT INTO versioned_workspaces VALUES ('ws','main'),('other','main');
+             INSERT INTO blobs VALUES ('{text}',4,'copy');"
+        ))
+        .unwrap();
+        let digest = "a".repeat(64);
+        // A decision of `attempt` naming `copy` and `moment`, its binding in
+        // `bound`'s workspace and its text at `projection`.
+        let insert = |attempt: i64, copy: &str, moment: &str, bound: &str, projection: &str| {
+            format!(
+                "INSERT INTO released_hold_copy_decisions (workspace_id,binding_digest,attempt,binding_json,
+                   projection_sha256,projection_byte_length,merged_contribution_ids_json,recovery_object_id,
+                   recovery_moment_id,recovered_path,collision_ordinal,recovery_author_json,created_at_ms)
+                 VALUES ('ws','{digest}',{attempt},'{{\"workspaceId\":\"{bound}\"}}','{projection}',4,'[]',
+                   '{copy}','{moment}','notes/plan (retained).md','0','{{}}',1)"
+            )
+        };
+        conn.execute(&insert(0, "copy", "moment", "ws", &text), []).unwrap();
+        for valid in [
+            "UPDATE released_hold_copy_decisions SET accepted_recovery_origin_id='owner', \
+             accepted_recovery_origin_seq=0,accepted_recovery_relay_seq=7",
+            "UPDATE released_hold_copy_decisions SET resolution_outcome='resolved',resolution_outcome_at_ms=2",
+            "UPDATE released_hold_copy_decisions SET resolution_outcome='stale'",
+            "UPDATE released_hold_copy_decisions SET collision_ordinal='12', \
+             merged_contribution_ids_json='[{\"kind\":\"carried\"}]'",
+        ] {
+            conn.execute(valid, []).unwrap();
+        }
+        // Another attempt at the same binding names other copy identities.
+        conn.execute(&insert(1, "copy-1", "moment-1", "ws", &text), []).unwrap();
+        let unstored = "d".repeat(64);
+        for invalid in [
+            // The same attempt, or another attempt reusing a copy identity.
+            insert(0, "copy-2", "moment-2", "ws", &text),
+            insert(2, "copy", "moment-2", "ws", &text),
+            insert(2, "copy-2", "moment", "ws", &text),
+            // A binding of another workspace, a projection never stored.
+            insert(3, "copy-3", "moment-3", "other", &text),
+            insert(3, "copy-3", "moment-3", "ws", &unstored),
+        ] {
+            assert!(conn.execute(&invalid, []).is_err(), "{invalid}");
+        }
+        for invalid in [
+            "UPDATE released_hold_copy_decisions SET binding_digest='ABC' WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET attempt=-1 WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET attempt=9007199254740992 WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET binding_json='not json' WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET binding_json='[]' WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET projection_byte_length=-1 WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET merged_contribution_ids_json='{}' WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET recovered_path='' WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET collision_ordinal='' WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET collision_ordinal='-1' WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET recovery_author_json='not json' WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET created_at_ms=-1 WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET accepted_recovery_relay_seq=NULL WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET accepted_recovery_relay_seq=0 WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET accepted_recovery_origin_id='' WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET resolution_outcome=NULL WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET resolution_outcome_at_ms=NULL WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET resolution_outcome='refused' WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET recovery_object_id='copy-1' WHERE attempt=0",
+            "UPDATE released_hold_copy_decisions SET recovery_moment_id='moment-1' WHERE attempt=0",
+        ] {
+            assert!(conn.execute(invalid, []).is_err(), "{invalid}");
+        }
+        assert!(
+            conn.execute(&format!("DELETE FROM blobs WHERE sha256='{text}'"), []).is_err(),
+            "a decision pins its copy's text"
+        );
+        conn.execute("DELETE FROM versioned_workspaces WHERE workspace_id='ws'", []).unwrap();
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM released_hold_copy_decisions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "decisions leave with their workspace");
+        conn.execute(&format!("DELETE FROM blobs WHERE sha256='{text}'"), []).unwrap();
     }
 
     /// A released-lineage hold carries its binding and continuation, and no

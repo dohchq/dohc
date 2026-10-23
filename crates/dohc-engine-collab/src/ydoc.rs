@@ -802,6 +802,15 @@ impl Ydoc {
         self.doc.transact().store().pending_ds().cloned()
     }
 
+    /// What the doc holds that it could not integrate, encoded: its parked
+    /// structs and its pending deletes.
+    pub(crate) fn pending_state(&self) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+        (
+            self.pending_update_v1(),
+            self.pending_delete_set().map(|deletes| deletes.encode_v1()),
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn replace_pending_delete_set_for_test(&self, replacement: IdSet) {
         use yrs::WriteTxn;

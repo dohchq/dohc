@@ -18,12 +18,17 @@ impl UnprovenCommitment {
     /// count, and `SHA256(UTF8("dohc:released-tail-contributions:v1\0") ||
     /// canonical JSON of all of them in canonical order)` in lowercase hex.
     pub fn of(mut contributions: Vec<RetainedContribution>) -> Option<Self> {
+        contributions.sort();
+        Self::of_sorted(&contributions)
+    }
+
+    /// [`Self::of`] for `contributions` already in canonical order.
+    pub(super) fn of_sorted(contributions: &[RetainedContribution]) -> Option<Self> {
         if contributions.is_empty() {
             return None;
         }
         #[cfg(any(test, feature = "test-support"))]
         COMMITMENTS_HERE.with(|commitments| commitments.set(commitments.get() + 1));
-        contributions.sort();
         let mut out = String::new();
         write_canonical(
             &Value::Array(contributions.iter().map(contribution_value).collect()),
@@ -35,6 +40,13 @@ impl UnprovenCommitment {
             count: contributions.len() as i64,
             digest: hex_sha256(&input),
         })
+    }
+}
+
+impl RetainedContribution {
+    /// The contribution's identity as a commitment names it, for inspection.
+    pub fn to_json(&self) -> Value {
+        contribution_value(self)
     }
 }
 
