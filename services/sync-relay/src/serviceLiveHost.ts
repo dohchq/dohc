@@ -30,7 +30,7 @@ import type {StopRestoreLookup} from "./storage/liveRestoreOperation.js";
 import {parseLiveRestoreConfig, LiveRestorePreparation, type LiveRestoreConfig} from "./liveRestorePreparation.js";
 import {parseServiceHostedReplicationConfig, ServiceHostedReplication} from "./serviceHostedReplication.js";
 import {decodeHostedSyncResult, type HostedSyncMethodResultMap} from "@dohc/workspace-engine-client/relay-wire";
-import {withStreamedContributions, withStreamedMarkdown, type HeldReadInvalidated} from "./heldDocumentRoutes";
+import {withStreamedContributions, withStreamedMarkdown, type HeldReadInvalidated, type StreamedBlob} from "./heldDocumentRoutes";
 import type {ServiceActivationReplica} from "./serviceActivationDriver";
 interface ServiceLiveHostConfig {
   readonly version: 1;
@@ -622,7 +622,7 @@ export async function startServiceLiveHost(options: {
     const heldReads = heldReadLane({...HELD_READS, deadlineMs: config.client.requestDeadlineMs, signal});
     const heldRead = async <M extends "sync.heldDocuments" | "sync.heldDocument">(workspaceId: string, method: M,
       params: Record<string, JsonValue>, stream: boolean, callerSignal?: AbortSignal,
-    ): Promise<{result: HostedSyncMethodResultMap[M]; streamed?: Uint8Array} | HeldReadInvalidated | null> => {
+    ): Promise<{result: HostedSyncMethodResultMap[M]; streamed?: StreamedBlob} | HeldReadInvalidated | null> => {
       available();
       if (!registrationStands()) return {invalidated: "registration"};
       const attached = attachments.get(workspaceId);
@@ -631,15 +631,20 @@ export async function startServiceLiveHost(options: {
         : attachments.get(workspaceId) !== attached ? {invalidated: "attachment"} : undefined;
       let read;
       try {
-        read = await heldReads(workspaceId, JSON.stringify([attached.handle, method, params, stream]), callerSignal, async joined => {
+        read = await heldReads(workspaceId, JSON.stringify([attached.handle, method, params, stream]), callerSignal, async cancelled => {
+          cancelled.throwIfAborted();
           const id = nextRequestId();
-          let streamed: Uint8Array | undefined;
-          const stop = stream ? native.onBlob(blob => {if (blob.requestId === id) streamed = blob.bytes;}) : () => {};
+          let streamed: StreamedBlob | undefined;
+          const stop = stream ? native.onBlob(blob => {if (blob.requestId === id) streamed = blob;}) : () => {};
+          // A cancelled read waits for the engine's answer, so its lane slot frees only once the engine stops.
+          const cancel = () => {void native.cancelRequest(id).catch(() => undefined);};
+          cancelled.addEventListener("abort", cancel, {once: true});
           try {
             const response = await native.sendRequest({id, method, workspace: attached.handle,
-              params: {workspaceId, ...params}, deadlineMs: config.client.requestDeadlineMs}, joined);
+              params: {workspaceId, ...params}, deadlineMs: config.client.requestDeadlineMs});
             return {result: decodeHostedSyncResult(method, response.result), ...(streamed ? {streamed} : {})};
           } finally {
+            cancelled.removeEventListener("abort", cancel);
             stop();
           }
         });

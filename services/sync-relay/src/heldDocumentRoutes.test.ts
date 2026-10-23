@@ -4,8 +4,8 @@ import {UnauthorizedError} from "@dohc/workspace-auth/session";
 import {fixture as ticketFixture, scope} from "./liveTickets.test-helper";
 import {createSyncRelayHandler} from "./server";
 import {releasedLineageBindingDigest, type ReleasedLineageBinding} from "@dohc/workspace-engine-client/relay-wire";
-import {MAX_HELD_DOCUMENTS_PAGE, withStreamedContributions, withStreamedMarkdown, type HeldContributionsRead, type HeldDocumentHost,
-  type HeldDocumentInspection, type HeldDocumentsPage} from "./heldDocumentRoutes";
+import {MAX_HELD_BODY_BYTES, MAX_HELD_DOCUMENTS_PAGE, withStreamedContributions, withStreamedMarkdown, type HeldContributionsRead,
+  type HeldDocumentHost, type HeldDocumentInspection, type HeldDocumentsPage, type StreamedBlob} from "./heldDocumentRoutes";
 import {HeldReadBusyError} from "./liveHostRequests";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -22,6 +22,9 @@ const held: HeldDocumentsPage["documents"][number] = {objectId: binding.objectId
 const page: HeldDocumentsPage = {documents: [held], hasMore: false};
 const inspection: HeldDocumentInspection = {...held, status: "stale", preservation: null, resolution: null};
 const sha256 = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+// A blob as the engine client hands it over, after checking it against what it announced.
+const blob = (bytes: Uint8Array, announced: {sha256?: string; totalBytes?: number} = {}): StreamedBlob =>
+  ({bytes, sha256: sha256(bytes), totalBytes: bytes.length, ...announced});
 // Preserved text past the engine's in-band limit, as the session host answers it whole.
 const markdown = "# Plan\n\n" + "Kept paragraph with ünïcode.\n\n".repeat(4096);
 // The binding and the work it covers, as the engine streams them; the details name them by digest.
@@ -72,7 +75,7 @@ function fakeHost(overrides: Partial<HeldDocumentHost> = {}): HeldDocumentHost &
 function streaming(inspected: HeldDocumentInspection, asked: string[] = []): HeldDocumentHost["heldContributions"] {
   return async () => {
     asked.push("contributions");
-    return withStreamedContributions(inspected, inspected.preservation ? contributions : undefined);
+    return withStreamedContributions(inspected, inspected.preservation ? blob(contributions) : undefined);
   };
 }
 
@@ -307,10 +310,13 @@ describe("held document routes", () => {
     expect(artifact.status).toBe(200);
     expect(artifact.headers.get("content-type")).toBe("application/json");
     expect(artifact.headers.get("cache-control")).toBe("private, no-store");
+    expect(artifact.headers.get("content-length")).toBe(String(contributions.length));
     expect(Buffer.from(await artifact.arrayBuffer())).toEqual(contributions);
     expect([markdownAsked, contributionsAsked]).toEqual([[], ["contributions"]]);
     // The Markdown route asks for the text alone, and the details for neither.
-    expect((await f.get(markdownPath)).status).toBe(200);
+    const text = await f.get(markdownPath);
+    expect(text.status).toBe(200);
+    await text.arrayBuffer();
     expect((await f.get(`${scope.workspaceId}/held-documents/${held.objectId}`)).status).toBe(200);
     expect([markdownAsked, contributionsAsked]).toEqual([[true, false], ["contributions"]]);
   });
@@ -361,15 +367,24 @@ describe("held document routes", () => {
 
 describe("streamed held document contributions", () => {
   it("keeps the artifact the engine streamed when it is exactly what the inspection names", () => {
-    expect(withStreamedContributions(preserved, contributions)).toEqual({inspected: preserved, contributions});
+    expect(withStreamedContributions(preserved, blob(contributions))).toEqual({inspected: preserved, contributions});
   });
 
   it("refuses a stream that is missing or not the artifact the inspection names", () => {
     expect(() => withStreamedContributions(preserved, undefined)).toThrow();
-    expect(() => withStreamedContributions(preserved, Buffer.concat([contributions, Buffer.from(" ")]))).toThrow();
+    expect(() => withStreamedContributions(preserved, blob(Buffer.concat([contributions, Buffer.from(" ")])))).toThrow();
     const swapped = Buffer.from(contributions);
     swapped[swapped.length - 2] = 0x21;
-    expect(() => withStreamedContributions(preserved, swapped)).toThrow();
+    expect(() => withStreamedContributions(preserved, blob(swapped))).toThrow();
+  });
+
+  it("compares what the stream announced with the inspection, and never hashes it again", () => {
+    expect(() => withStreamedContributions(preserved, blob(contributions, {sha256: "e".repeat(64)})), "another SHA-256").toThrow();
+    expect(() => withStreamedContributions(preserved, blob(contributions, {totalBytes: contributions.length + 1})), "another length").toThrow();
+    expect(() => withStreamedContributions(preserved, {bytes: contributions}), "nothing announced").toThrow();
+    // The engine client already refused bytes unlike their announcement, so the relay takes the announcement.
+    const unhashed = Buffer.alloc(contributions.length);
+    expect(withStreamedContributions(preserved, blob(unhashed, {sha256: sha256(contributions)})).contributions).toBe(unhashed);
   });
 
   it("names no artifact for an inspection that is not current", () => {
@@ -409,8 +424,10 @@ describe("held document read admission", () => {
     h.reads[1]!.answer();
     expect((await other).status).toBe(200);
     h.reads[0]!.answer();
-    expect((await first).status).toBe(200);
-    // Completion frees the slot.
+    const answered = await first;
+    expect(answered.status).toBe(200);
+    // Reading the answer frees the slot.
+    await answered.json();
     const next = f.get(details);
     await h.asked(3);
     h.reads[2]!.answer();
@@ -463,21 +480,90 @@ describe("held document read admission", () => {
     expect(refused.status).toBe(429);
     expect(await refused.json()).toMatchObject({code: "held_read_busy"});
   });
+
+  it("hold the slot until the answer's body is read or cancelled", async () => {
+    const f = await relay(fakeHost({heldContributions: streaming(preserved)}));
+    const unread = await f.get(contributionsPath);
+    expect(unread.status).toBe(200);
+    expect((await f.get(contributionsPath)).status, "a body nobody read").toBe(429);
+    expect(Buffer.from(await unread.arrayBuffer())).toEqual(contributions);
+    const cancelled = await f.get(contributionsPath);
+    expect(cancelled.status).toBe(200);
+    expect((await f.get(details)).status).toBe(429);
+    await cancelled.body!.cancel();
+    const next = await f.get(details);
+    expect(next.status).toBe(200);
+    await next.json();
+  });
+
+  /** The details paths of more workspaces `ownerUserId` owns, beside the fixture's. */
+  function owned(f: Awaited<ReturnType<typeof relay>>, ownerUserId: string, ...workspaceIds: string[]) {
+    for (const workspaceId of workspaceIds) {
+      f.raw.prepare("INSERT INTO sync_relay_workspaces (workspace_id, owner_user_id, created_at_ms) VALUES (?, ?, 0)").run(workspaceId, ownerUserId);
+    }
+    return workspaceIds.map(workspaceId => `${workspaceId}/held-documents/${held.objectId}`);
+  }
+
+  it("answer an owner's third held read across their workspaces 429, and admit another owner", async () => {
+    const h = heldReads(), f = await relay(h.host);
+    const [second, third] = owned(f, "owner-1", "workspace-3", "workspace-4");
+    const reading = [f.get(details), f.get(second!)];
+    await h.asked(2);
+    let refused: Response | undefined;
+    void f.get(third!).then(response => {refused = response;});
+    await vi.waitFor(() => {expect(h.reads).toHaveLength(2); expect(refused?.status).toBe(429);});
+    expect(await refused!.json()).toMatchObject({code: "held_read_busy"});
+    expect((await f.get("workspace-2/held-documents")).status, "a workspace they don't own").toBe(404);
+    expect(h.reads).toHaveLength(2);
+    const other = f.get("workspace-2/held-documents", {authorization: "Bearer stranger"});
+    await h.asked(3);
+    for (const read of h.reads) read.answer();
+    for (const response of [...await Promise.all(reading), await other]) {
+      expect(response.status).toBe(200);
+      await response.json();
+    }
+    const freed = f.get(third!);
+    await h.asked(4);
+    h.reads[3]!.answer();
+    expect((await freed).status).toBe(200);
+  });
+
+  it("answer held bodies past the relay's byte budget 429 until earlier ones finish, after the ownership recheck", async () => {
+    // Three artifacts that each fit, but not all at once.
+    const large = Buffer.alloc(Math.floor(MAX_HELD_BODY_BYTES / 2.5));
+    const f = await relay(fakeHost({heldContributions: async () => ({inspected: preserved, contributions: large})}));
+    const [second] = owned(f, "owner-1", "workspace-3");
+    const artifact = (path: string) => `${path}/contributions?bindingDigest=${held.bindingDigest}&sha256=${sha256(contributions)}`;
+    const answered = [await f.get(contributionsPath), await f.get(artifact(second!))];
+    expect(answered.map(response => response.status)).toEqual([200, 200]);
+    const refused = await f.get(artifact(`workspace-2/held-documents/${held.objectId}`), {authorization: "Bearer stranger"});
+    expect(refused.status).toBe(429);
+    expect(await refused.json()).toMatchObject({code: "held_read_busy"});
+    // A caller who doesn't own the workspace learns nothing about the budget.
+    expect((await f.get(contributionsPath, {authorization: "Bearer editor"})).status).toBe(404);
+    expect((await answered[0]!.arrayBuffer()).byteLength).toBe(large.length);
+    await answered[1]!.body!.cancel();
+    const admitted = await f.get(artifact(`workspace-2/held-documents/${held.objectId}`), {authorization: "Bearer stranger"});
+    expect(admitted.status).toBe(200);
+    await admitted.body!.cancel();
+  });
 });
 
 describe("streamed held document Markdown", () => {
   const streamedOut: HeldDocumentInspection = {...preserved, preservation: {...preserved.preservation!, markdown: null}};
 
   it("restores the text the engine streamed in place of the in-band text", () => {
-    expect(withStreamedMarkdown(streamedOut, Buffer.from(markdown))).toEqual(preserved);
+    expect(withStreamedMarkdown(streamedOut, blob(Buffer.from(markdown)))).toEqual(preserved);
   });
 
   it("refuses a stream that is missing or not the text the result names", () => {
     expect(() => withStreamedMarkdown(streamedOut, undefined)).toThrow();
-    expect(() => withStreamedMarkdown(streamedOut, Buffer.from(markdown + "x"))).toThrow();
+    expect(() => withStreamedMarkdown(streamedOut, blob(Buffer.from(markdown + "x")))).toThrow();
     const swapped = Buffer.from(markdown);
     swapped[swapped.length - 1] = 0x21;
-    expect(() => withStreamedMarkdown(streamedOut, swapped)).toThrow();
+    expect(() => withStreamedMarkdown(streamedOut, blob(swapped))).toThrow();
+    expect(() => withStreamedMarkdown(streamedOut, blob(Buffer.from(markdown), {sha256: "e".repeat(64)})), "another SHA-256").toThrow();
+    expect(() => withStreamedMarkdown(streamedOut, blob(Buffer.from(markdown), {totalBytes: 1})), "another length").toThrow();
   });
 
   it("leaves inspections without streamed text as they are", () => {

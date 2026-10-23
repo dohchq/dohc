@@ -11,6 +11,7 @@ import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots, type Servi
 import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
 import {hasRelayWriteObservers, notifyRelayWrite, observeRelayWrites} from "./relayWriteChanges.js";
 import {createNamedFrameChanges} from "./liveHostChanges.js";
+import {HeldReadBusyError} from "./liveHostRequests.js";
 import {captureOwnerLiveFrameHost} from "./namedLiveFrameHost.js";
 import type {LiveHostConnectionCoordinate} from "./storage.js";
 import {ServiceActivationDriver} from "./serviceActivationDriver.js";
@@ -58,7 +59,7 @@ function clientFrom(options: { env: Record<string, string> }) {
   const config = JSON.parse(readFileSync(nativePath, "utf8"));
   const client = { sendRequest: vi.fn(async () => ({ result: { relayNamespace: config.relayNamespace, host: config.host,
     workspaces: config.workspaces.map((row: { workspaceId: string }) => ({ workspaceId: row.workspaceId, workspaceHandle: "actual-open-handle" })) } })),
-    close: vi.fn(), waitForExit: vi.fn(async () => {}) };
+    cancelRequest: vi.fn(async (_id: number) => {}), close: vi.fn(), waitForExit: vi.fn(async () => {}) };
   return { client, config, nativePath };
 }
 
@@ -863,16 +864,17 @@ it("answers a held-document read its detach or retired registration overtook as 
 
 // Proves: held reads run in their own lane on the native client, so a held
 // read neither waits behind an ordinary engine request nor holds one back, and
-// its caller's signal ends the engine request it waits on.
+// its caller's signal cancels the engine request it waits on. The cancelled read
+// keeps its workspace until the engine answers.
 it("answers held reads beside ordinary engine requests, and cancels one on its caller's signal", async () => {
   const o = await emptyServiceHost({frameChanges: true}), workspaces = [o.workspace];
   await o.host.update({workspaces, documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
   const send = o.client().sendRequest, through = send.getMockImplementation()! as (...args: unknown[]) => ReturnType<typeof send>;
-  let engine: (signal: AbortSignal) => Promise<unknown> = async () => null;
+  let engine: (args: unknown[]) => Promise<unknown> = async () => null;
   send.mockImplementation(async (...args: unknown[]) => {
     const request = args[0] as {id: number; method: string};
-    return request.method === "sync.heldDocument" ? {id: request.id, result: await engine(args[1] as AbortSignal)} as never : through(...args);
+    return request.method === "sync.heldDocument" ? {id: request.id, result: await engine(args)} as never : through(...args);
   });
 
   // An ordinary pull holds the only ordinary slot while a held read completes.
@@ -893,16 +895,18 @@ it("answers held reads beside ordinary engine requests, and cancels one on its c
   answer.resolve();
   await expect(reading).resolves.toBeNull();
 
-  const entered = deferred<AbortSignal>(), caller = new AbortController();
-  engine = signal => {
-    entered.resolve(signal);
-    return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), {once: true}));
-  };
+  const entered = deferred<unknown[]>(), stopped = deferred<void>(), caller = new AbortController();
+  engine = async args => {entered.resolve(args); await stopped.promise; throw new Error("cancelled by the engine");};
   const cancelled = o.host.heldDocument("workspace", "object", {markdown: false}, caller.signal);
-  const engineSignal = await entered.promise;
+  const [sent, engineSignal] = await entered.promise as [{id: number}, AbortSignal | undefined];
+  expect(engineSignal).toBeUndefined();
   const refused = expect(cancelled).rejects.toThrow("caller left");
   caller.abort(new Error("caller left")); await refused;
-  expect(engineSignal.aborted).toBe(true);
+  expect(o.client().cancelRequest).toHaveBeenCalledWith(sent.id);
+  await expect(o.host.heldDocument("workspace", "object", {markdown: false})).rejects.toBeInstanceOf(HeldReadBusyError);
+  engine = async () => null;
+  stopped.resolve();
+  await vi.waitFor(() => expect(o.host.heldDocument("workspace", "object", {markdown: false})).resolves.toBeNull());
 });
 
 // Proves: a workspace whose last document left stays attached until the

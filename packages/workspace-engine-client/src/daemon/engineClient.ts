@@ -1252,6 +1252,12 @@ export class EngineClient implements EngineTransport {
       this.pending.delete(wireId);
       if (pending && transmitted) this.abandonedRequestIds.add(wireId);
       if (pending?.deadlineTimer) clearTimeout(pending.deadlineTimer);
+      // Its streams' later frames are dropped, so their buffers leave the budget now.
+      for (const [streamId, stream] of this.blobStreams) {
+        if (stream.start.requestId !== wireId) continue;
+        this.releaseBlobStream(streamId, stream);
+        this.abandonedBlobStreamIds.add(streamId);
+      }
       pending?.reject(error);
       unsent?.abort(error);
       if (cancel && transmitted) void this.writeEnvelope({ type: "cancel", id: wireId }).catch(() => undefined);

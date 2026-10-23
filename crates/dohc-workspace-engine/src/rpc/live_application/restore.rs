@@ -86,6 +86,9 @@ impl OutputGuard for RestoreOutputGuard {
     fn with_current(&self, action: &mut dyn FnMut()) -> bool {
         self.fence.with_current(action)
     }
+    fn with_unretired(&self, action: &mut dyn FnMut()) -> bool {
+        self.fence.with_unretired(action)
+    }
 }
 
 struct BoundedBytes {

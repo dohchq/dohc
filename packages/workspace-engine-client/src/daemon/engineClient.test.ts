@@ -3163,6 +3163,42 @@ describe("EngineClient", () => {
     transport.close();
   });
 
+  it("frees an abandoned request's mid-stream blob allocation and drops its late frames", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { maxBlobBytes: 6 });
+    peer.acknowledge();
+    await transport.ready();
+    const onBlob = vi.fn();
+    transport.onBlob(onBlob);
+    const controller = new AbortController();
+    const stopped = new Error("caller left");
+    const abandoned = transport.sendRequest(request(26, "blob.abandoned"), controller.signal);
+    const rejected = expect(abandoned).rejects.toBe(stopped);
+    await nextImmediate();
+    peer.send({ type: "blobStart", requestId: 1, streamId: 84, totalBytes: 6, sha256: null });
+    peer.sendRaw(blobChunkFrame(84, Buffer.from("abc"), false));
+    controller.abort(stopped);
+    await rejected;
+    expect(peer.received).toContainEqual({ type: "cancel", id: 1 });
+
+    // The engine stops at a frame boundary: one more chunk, then its cancellation.
+    peer.sendRaw(blobChunkFrame(84, Buffer.from("de"), false));
+    peer.send({ type: "error", id: 1, error: { code: "CANCELLED", message: "cancelled", retry: "no" } });
+
+    const following = transport.sendRequest(request(27, "blob.after.abandon"));
+    await nextImmediate();
+    peer.send({ type: "blobStart", requestId: 2, streamId: 85, totalBytes: 6, sha256: null });
+    peer.sendRaw(blobChunkFrame(85, Buffer.from("abcdef"), true));
+    peer.send({ type: "response", id: 2, result: null });
+
+    await expect(following).resolves.toMatchObject({ id: 27 });
+    expect(onBlob).toHaveBeenCalledOnce();
+    expect(onBlob).toHaveBeenCalledWith(
+      expect.objectContaining({ streamId: 85, bytes: Buffer.from("abcdef") }),
+    );
+    transport.close();
+  });
+
   it("refuses a configured frame limit the engine cannot honor", () => {
     // The engine clamps a requested limit up to 1 MiB; a client that asked
     // for less would otherwise have its receive cap raised by the ack.

@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { HeldDocumentInspection, HostedSyncMethodResultMap } from "@dohc/workspace-engine-client/relay-wire";
 import { badRequest, notFound, relayError } from "./errors";
 import { HeldReadBusyError } from "./liveHostRequests";
@@ -44,6 +43,11 @@ const DEFAULT_HELD_DOCUMENTS_PAGE = 50;
 export const MAX_HELD_OBJECT_ID_CHARS = 512;
 /** The largest contribution artifact answered: the most the engine streams as one blob. */
 export const MAX_HELD_CONTRIBUTIONS_BYTES = 64 * 1024 * 1024;
+/** The most held artifact and Markdown bytes the relay's answers hold at once, until each body is read or cancelled. */
+export const MAX_HELD_BODY_BYTES = 128 * 1024 * 1024;
+/** The most held reads one owner has admitted at once, across all their workspaces. */
+export const MAX_HELD_READS_PER_OWNER = 2;
+const HELD_BODY_CHUNK_BYTES = 256 * 1024;
 const DIGEST = /^[0-9a-f]{64}$/;
 
 function page(url: URL): {afterObjectId?: string; limit: number} {
@@ -71,18 +75,26 @@ function inspectedQuery(url: URL): {bindingDigest: string; sha256: string} {
   return {bindingDigest: bindingDigest!, sha256: sha256!};
 }
 
+/** A blob the engine client received whole, and refused unless it matched the SHA-256 and length it announced. */
+export type StreamedBlob = {readonly bytes: Uint8Array; readonly sha256?: string | null; readonly totalBytes?: number | null};
+
+/** Whether `streamed` announced, and so is, exactly the bytes with `sha256` and `byteLength`. */
+function announces(streamed: StreamedBlob | undefined, sha256: string | null, byteLength: number | null): streamed is StreamedBlob {
+  return streamed !== undefined && typeof streamed.sha256 === "string" && streamed.sha256 === sha256 &&
+    streamed.totalBytes === byteLength && streamed.bytes.length === byteLength;
+}
+
 /**
  * `inspected` with the Markdown the engine streamed in place of the in-band
  * text it left out. The stream must be the text the result names.
  */
-export function withStreamedMarkdown(inspected: HeldDocumentInspection, streamed: Uint8Array | undefined): HeldDocumentInspection {
+export function withStreamedMarkdown(inspected: HeldDocumentInspection, streamed: StreamedBlob | undefined): HeldDocumentInspection {
   const preservation = inspected.preservation;
   if (preservation?.status !== "complete" || preservation.markdown !== null) return inspected;
-  if (!streamed || streamed.length !== preservation.markdownByteLength ||
-    createHash("sha256").update(streamed).digest("hex") !== preservation.markdownSha256) {
+  if (!announces(streamed, preservation.markdownSha256, preservation.markdownByteLength)) {
     throw new Error("Held document Markdown does not match its inspection.");
   }
-  const markdown = new TextDecoder("utf-8", {fatal: true, ignoreBOM: true}).decode(streamed);
+  const markdown = new TextDecoder("utf-8", {fatal: true, ignoreBOM: true}).decode(streamed.bytes);
   return {...inspected, preservation: {...preservation, markdown}};
 }
 
@@ -90,14 +102,26 @@ export function withStreamedMarkdown(inspected: HeldDocumentInspection, streamed
  * `inspected` with the contribution artifact the engine streamed for it. A
  * current inspection names one, and the stream must be exactly its bytes.
  */
-export function withStreamedContributions(inspected: HeldDocumentInspection, streamed: Uint8Array | undefined): HeldContributionsRead {
+export function withStreamedContributions(inspected: HeldDocumentInspection, streamed: StreamedBlob | undefined): HeldContributionsRead {
   const preservation = inspected.preservation;
   if (preservation === null) return {inspected, contributions: null};
-  if (!streamed || streamed.length !== preservation.contributionsByteLength ||
-    createHash("sha256").update(streamed).digest("hex") !== preservation.contributionsSha256) {
+  if (!announces(streamed, preservation.contributionsSha256, preservation.contributionsByteLength)) {
     throw new Error("Held document contributions do not match their inspection.");
   }
-  return {inspected, contributions: streamed};
+  return {inspected, contributions: streamed.bytes};
+}
+
+/** `bytes` as a body sent a view at a time, which calls `release` once it closes or is cancelled. */
+function releasingBody(bytes: Uint8Array, release: () => void): ReadableStream<Uint8Array> {
+  let offset = 0;
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (offset === bytes.length) {controller.close(); release(); return;}
+      const end = Math.min(bytes.length, offset + HELD_BODY_CHUNK_BYTES);
+      controller.enqueue(bytes.subarray(offset, end)); offset = end;
+    },
+    cancel: release,
+  }, {highWaterMark: 0});
 }
 
 /**
@@ -119,21 +143,43 @@ export function withStreamedContributions(inspected: HeldDocumentInspection, str
  * still name it.
  */
 export function createHeldDocumentRoutes(options: {storage: SyncRelayStorage; host(): HeldDocumentHost | undefined}) {
-  // One admitted read per owner and workspace. The host's read ends on the request's signal and its own deadline.
-  const admitted = new Set<string>();
+  // One admitted read per owner and workspace, and MAX_HELD_READS_PER_OWNER per owner, each until its
+  // body is read or cancelled. The host's read ends on the request's signal and its own deadline.
+  const admitted = new Set<string>(), owners = new Map<string, number>();
+  let bodyBytes = 0;
   return async (request: Request, route: HeldDocumentRoute, ownerUserId: string) => {
     const {storage} = options, slot = JSON.stringify([ownerUserId, route.workspaceId]);
-    if (admitted.has(slot)) {
+    const reads = owners.get(ownerUserId) ?? 0;
+    if (admitted.has(slot) || reads >= MAX_HELD_READS_PER_OWNER) {
       // A caller who no longer owns the workspace learns nothing from a read still running.
       if (!storage.workspaceIsOwnedBy(route.workspaceId, ownerUserId)) throw notFound();
       throw relayError("held_read_busy");
     }
-    admitted.add(slot);
-    try {return await respond(request, route, ownerUserId);}
-    finally {admitted.delete(slot);}
+    admitted.add(slot); owners.set(ownerUserId, reads + 1);
+    let charged = 0, released = false;
+    const release = () => {
+      if (released) return;
+      released = true; admitted.delete(slot); bodyBytes -= charged;
+      const left = owners.get(ownerUserId)! - 1;
+      if (left === 0) owners.delete(ownerUserId); else owners.set(ownerUserId, left);
+    };
+    try {
+      const answer = await respond(request, route, ownerUserId);
+      if (answer.held) {
+        if (answer.bytes.length > MAX_HELD_BODY_BYTES - bodyBytes) throw relayError("held_read_busy");
+        charged = answer.bytes.length; bodyBytes += charged;
+      }
+      return new Response(releasingBody(answer.bytes, release), {status: 200, headers: {"cache-control": "private, no-store",
+        "content-type": answer.contentType, "content-length": String(answer.bytes.length)}});
+    } catch (error) {
+      release();
+      throw error;
+    }
   };
 
-  async function respond(request: Request, route: HeldDocumentRoute, ownerUserId: string) {
+  /** The answer's bytes; `held` for an artifact or Markdown body, which counts against {@link MAX_HELD_BODY_BYTES}. */
+  async function respond(request: Request, route: HeldDocumentRoute, ownerUserId: string):
+    Promise<{bytes: Uint8Array; contentType: string; held: boolean}> {
     const {storage} = options;
     if (!storage.workspaceIsOwnedBy(route.workspaceId, ownerUserId)) throw notFound();
     if (request.method !== "GET") throw relayError("method_not_allowed");
@@ -159,7 +205,6 @@ export function createHeldDocumentRoutes(options: {storage: SyncRelayStorage; ho
     }
     signal.throwIfAborted();
     if (!standing() || answered === null || "invalidated" in answered) throw notFound();
-    const headers = {"cache-control": "private, no-store"};
     if (wanted && read === "contributions") {
       const {inspected, contributions} = answered as HeldContributionsRead;
       if (inspected.status !== "current" || inspected.bindingDigest !== wanted.bindingDigest || contributions === null ||
@@ -167,7 +212,7 @@ export function createHeldDocumentRoutes(options: {storage: SyncRelayStorage; ho
       if (contributions.length > MAX_HELD_CONTRIBUTIONS_BYTES) {
         throw relayError("payload_too_large", "Held document contributions exceed the blob limit.");
       }
-      return new Response(Buffer.from(contributions), {status: 200, headers: {...headers, "content-type": "application/json"}});
+      return {bytes: contributions, contentType: "application/json", held: true};
     }
     if (wanted) {
       const inspected = answered as HeldDocumentInspection, preservation = inspected.preservation;
@@ -175,10 +220,10 @@ export function createHeldDocumentRoutes(options: {storage: SyncRelayStorage; ho
         preservation?.status !== "complete" || preservation.markdown === null || preservation.markdownSha256 !== wanted.sha256) throw notFound();
       const bytes = Buffer.from(preservation.markdown, "utf8");
       if (bytes.length > MAX_BLOB_BYTES) throw relayError("payload_too_large", "Held document Markdown exceeds the blob limit.");
-      return new Response(bytes, {status: 200, headers: {...headers, "content-type": "text/markdown; charset=utf-8"}});
+      return {bytes, contentType: "text/markdown; charset=utf-8", held: true};
     }
-    const body = JSON.stringify(answered);
-    if (Buffer.byteLength(body) > MAX_PAYLOAD_JSON_BYTES) throw relayError("payload_too_large", "Held document details exceed the metadata limit.");
-    return new Response(body, {status: 200, headers: {...headers, "content-type": "application/json"}});
+    const bytes = Buffer.from(JSON.stringify(answered), "utf8");
+    if (bytes.length > MAX_PAYLOAD_JSON_BYTES) throw relayError("payload_too_large", "Held document details exceed the metadata limit.");
+    return {bytes, contentType: "application/json", held: false};
   }
 }
