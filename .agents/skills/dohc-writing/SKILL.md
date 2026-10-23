@@ -10,7 +10,7 @@ dohc shares its name with the double overhead camshaft, and its site shows a Jag
 Write the way the engine makers of the 1950s and 1960s wrote about their work: formally, exactly, and without hype.
 
 David Ogilvy's Rolls-Royce advertisement is the model: "At 60 miles an hour the loudest noise in this new Rolls-Royce comes from the electric clock."
-One measured fact did all the selling.
+Its headline makes the case with one measured fact.
 
 ## The voice
 
@@ -21,7 +21,8 @@ One measured fact did all the selling.
 
 ## Instructions read like a workshop manual
 
-For procedures, runbooks, skills, AGENTS.md, and product invariants, follow ASD-STE100, the controlled English written for aircraft maintenance manuals.
+Use ASD-STE100, the controlled English written for aircraft maintenance manuals.
+It applies to procedures, runbooks, skills, AGENTS.md, product invariants, and any step inside another document.
 
 - Write one instruction per sentence, in 20 words or fewer.
 - Put the condition first: "If you changed a crate, rebuild the engine."
@@ -53,7 +54,7 @@ For docs, specs, plans, PR bodies, and code comments, follow the six rules from 
 
 > Before: dohc is a blazing-fast, AI-native workspace that seamlessly brings all your work together.
 >
-> After: dohc keeps your work in ordinary files on your computer. It works without an account or a network connection.
+> After: dohc keeps your work on your computer. It works without an account or a network connection.
 
 > Before: Note that the engine binary may need to be rebuilt in cases where changes have been made to any of the crates.
 >
@@ -72,5 +73,5 @@ When you revise, leave code, identifiers, commands, and attributed quotations un
 You are done when:
 
 - every fact, warning, command, and link from the source is still there;
-- every claim matches the code or a cited source, and proposed behavior reads as proposed;
+- every factual claim matches the code or a cited source, and proposed behavior reads as proposed;
 - the text sounds like a careful engineer describing work they are proud of.
