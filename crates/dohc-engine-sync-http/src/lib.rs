@@ -1440,6 +1440,7 @@ define_server_error_codes! {
     "discussion_rate_limited" => |_| RelayError::DiscussionRateLimited,
     "empty_selector" => |_| RelayError::BadRequest,
     "epoch_superseded" => |_| RelayError::EpochSuperseded,
+    "held_read_busy" => |_| RelayError::HttpStatus(429),
     "identity_not_recognized" => |_| RelayError::IdentityNotRecognized,
     "identity_required" => |_| RelayError::IdentityRequired,
     "settlement_proof_budget" => |_| RelayError::SettlementProofBudget,

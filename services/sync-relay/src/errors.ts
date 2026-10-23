@@ -21,6 +21,7 @@ export const RELAY_ERROR_STATUSES = Object.freeze({
   discussion_rate_limited: 429,
   empty_selector: 400,
   epoch_superseded: 409,
+  held_read_busy: 429,
   identity_not_recognized: 409,
   identity_required: 409,
   internal_error: 500,
@@ -90,6 +91,7 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
   discussion_rate_limited: "discussion message rate limit reached",
   empty_selector: "selector is empty",
   epoch_superseded: "replication epoch has been superseded",
+  held_read_busy: "another held document read is running",
   // The coordinate is unknown or newer, not proven stale: clients keep local
   // state and must not discard or reseed it.
   identity_not_recognized: "replication coordinate is not recognized",

@@ -6,6 +6,7 @@ import {createSyncRelayHandler} from "./server";
 import {releasedLineageBindingDigest, type ReleasedLineageBinding} from "@dohc/workspace-engine-client/relay-wire";
 import {MAX_HELD_DOCUMENTS_PAGE, withStreamedMarkdown, type HeldDocumentHost, type HeldDocumentInspection,
   type HeldDocumentsPage} from "./heldDocumentRoutes";
+import {HeldReadBusyError} from "./liveHostRequests";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {for (const close of cleanups.splice(0).reverse()) await close();});
@@ -46,8 +47,8 @@ async function relay(host: HeldDocumentHost | undefined) {
   });
   let current = host;
   const handler = createSyncRelayHandler({storage: f.storage, resolveActor, heldDocumentHost: () => current});
-  const get = (path: string, headers: Record<string, string> = {authorization: "Bearer owner"}, method = "GET") =>
-    handler(new Request(`http://relay.test/sync/${path}`, {method, headers}));
+  const get = (path: string, headers: Record<string, string> = {authorization: "Bearer owner"}, method = "GET", signal?: AbortSignal) =>
+    handler(new Request(`http://relay.test/sync/${path}`, {method, headers, signal}));
   return {...f, get, resolveActor, replaceHost(next: HeldDocumentHost | undefined) {current = next;}};
 }
 
@@ -275,6 +276,94 @@ describe("held document routes", () => {
     const refused = await transferred;
     expect(refused.status).toBe(404);
     expect(await refused.text()).not.toContain("Kept paragraph");
+  });
+});
+
+describe("held document read admission", () => {
+  const details = `${scope.workspaceId}/held-documents/${held.objectId}`;
+  /** A host whose reads wait until the test answers or fails each one, and end at once when their signal aborts. */
+  function heldReads() {
+    const reads: {signal?: AbortSignal; answer(): void; fail(error: Error): void}[] = [];
+    const read = <T>(value: T, signal?: AbortSignal) => new Promise<T>((resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(signal.reason), {once: true});
+      reads.push({signal, answer: () => resolve(value), fail: reject});
+    });
+    const host = fakeHost({heldDocument: (_workspaceId, _objectId, _read, signal) => read(inspection, signal),
+      heldDocuments: (_workspaceId, _page, signal) => read(page, signal)});
+    return {host, reads, asked: (count: number) => vi.waitFor(() => expect(reads).toHaveLength(count))};
+  }
+
+  it("answer a second read by the same owner of the same workspace 429 while one runs, without asking the host", async () => {
+    const h = heldReads(), f = await relay(h.host);
+    const first = f.get(details);
+    await h.asked(1);
+    const refused: Response[] = [];
+    for (const path of [`${scope.workspaceId}/held-documents`, details, markdownPath]) void f.get(path).then(response => refused.push(response));
+    await vi.waitFor(() => expect(refused).toHaveLength(3));
+    for (const response of refused) {
+      expect(response.status).toBe(429);
+      expect(await response.json()).toMatchObject({code: "held_read_busy"});
+    }
+    expect(h.reads).toHaveLength(1);
+    // Another owner reading their own workspace is admitted beside it.
+    const other = f.get("workspace-2/held-documents", {authorization: "Bearer stranger"});
+    await h.asked(2);
+    h.reads[1]!.answer();
+    expect((await other).status).toBe(200);
+    h.reads[0]!.answer();
+    expect((await first).status).toBe(200);
+    // Completion frees the slot.
+    const next = f.get(details);
+    await h.asked(3);
+    h.reads[2]!.answer();
+    expect((await next).status).toBe(200);
+  });
+
+  it("answer a caller who lost ownership while their read runs as a missing document, not 429", async () => {
+    const h = heldReads(), f = await relay(h.host);
+    const first = f.get(details);
+    await h.asked(1);
+    f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='owner-2' WHERE workspace_id=?").run(scope.workspaceId);
+    const refused = await f.get(details);
+    expect(refused.status).toBe(404);
+    expect(await refused.json()).toMatchObject({code: "not_found"});
+    h.reads[0]!.answer();
+    expect((await first).status).toBe(404);
+    expect(h.reads).toHaveLength(1);
+  });
+
+  it("free the slot after a failed read, the host's deadline, and a client that disconnected", async () => {
+    const h = heldReads(), f = await relay(h.host), log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const failed = f.get(details);
+      await h.asked(1);
+      h.reads[0]!.fail(new Error("engine transport failed"));
+      expect((await failed).status).toBe(500);
+
+      const expired = f.get(details);
+      await h.asked(2);
+      h.reads[1]!.fail(new Error("Held read deadline exceeded."));
+      expect((await expired).status).toBe(500);
+
+      const disconnect = new AbortController();
+      const left = f.get(details, {authorization: "Bearer owner"}, "GET", disconnect.signal);
+      await h.asked(3);
+      disconnect.abort(new Error("client disconnected"));
+      await left;
+      expect(h.reads[2]!.signal?.aborted).toBe(true);
+
+      const next = f.get(details);
+      await h.asked(4);
+      h.reads[3]!.answer();
+      expect((await next).status).toBe(200);
+    } finally {log.mockRestore();}
+  });
+
+  it("answer the host refusing a different read for the workspace as 429 while ownership stands", async () => {
+    const f = await relay(fakeHost({heldDocument: async () => {throw new HeldReadBusyError();}}));
+    const refused = await f.get(details);
+    expect(refused.status).toBe(429);
+    expect(await refused.json()).toMatchObject({code: "held_read_busy"});
   });
 });
 
