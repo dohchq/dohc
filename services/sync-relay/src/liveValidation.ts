@@ -121,9 +121,11 @@ export function createLiveValidationExecutor(heapLimitMb = 512) {
       notify();
     };
     // Listen before touching stdio: a fork refused with EMFILE has none, then errors and closes.
-    // A failed child must not crash the relay. A fork refused with EAGAIN has unopened pipes and never closes.
+    // A failed child must not crash the relay. A fork refused with EAGAIN has unopened pipes and may never close.
     child.on("error", () => {
-      if (child.pid === undefined) release();
+      if (child.pid !== undefined) return;
+      if (child.connected) child.disconnect();
+      release();
     });
     // `close` follows the exit and the end of stderr, so its verdict is complete.
     child.once("close", release);

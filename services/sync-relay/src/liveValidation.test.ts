@@ -123,7 +123,7 @@ it.each([
 });
 
 // Node returns before creating stdio for EMFILE, then emits `error` and `close`.
-// For EAGAIN it wraps the unopened pipes, emits `error`, and never emits `close`.
+// For EAGAIN it wraps the unopened pipes, emits `error`, and may never emit `close`.
 it.each(["EMFILE", "EAGAIN"] as const)("fails a job whose fork is refused with %s, frees its slot, and keeps the relay up", async code => {
   const {pool, input, validate} = fixture(), {checkpoint} = nestedEmphasis(3000);
   // The held job runs far longer than the test, so only the failed fork's slot can free capacity.
@@ -142,6 +142,27 @@ it.each(["EMFILE", "EAGAIN"] as const)("fails a job whose fork is refused with %
   expect((await validate(input)).kind).toBe("accepted");
   held.abort(new Error("released")); expect(await other).toMatchObject({message: "released"});
   await pool.close();
+}, 30_000);
+
+it("retains no pipe of a fork refused with EAGAIN", async () => {
+  const script = `const {createHook} = await import("node:async_hooks");
+    const {createLiveValidationExecutor} = await import(process.argv[1]);
+    const pool = createLiveValidationExecutor(), validate = pool.validator(${JSON.stringify(policy)});
+    const {Process} = process.binding("process_wrap"), spawn = Process.prototype.spawn, errno = process.binding("uv").UV_EAGAIN;
+    const pipes = new Set();
+    const hook = createHook({init(id, type) {if (type === "PIPEWRAP") pipes.add(id);}, destroy(id) {pipes.delete(id);}}).enable();
+    Process.prototype.spawn = () => errno;
+    // A refused fork never receives its job.
+    for (let i = 0; i < 20; i++) await validate({}).catch(() => {});
+    Process.prototype.spawn = spawn;
+    await pool.close();
+    // Closed pipes become collectable on the next turn; their destroy hooks run on the turn after collection.
+    await new Promise(setImmediate); globalThis.gc(); await new Promise(setImmediate);
+    hook.disable();
+    console.log(pipes.size);`;
+  const {stdout} = await promisify(execFile)(process.execPath, ["--expose-gc", "--import", pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href,
+    "--input-type=module", "-e", script, new URL("./liveValidation.ts", import.meta.url).href]);
+  expect(stdout.trim()).toBe("0");
 }, 30_000);
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
