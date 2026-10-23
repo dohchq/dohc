@@ -535,6 +535,14 @@ describe("mcp tools operate on allowed paths", () => {
       expect(unanswered).toMatchObject({ synced: true });
       expect(unanswered).not.toHaveProperty("collectionsWaiting");
       expect(unanswered).not.toHaveProperty("keptEdits");
+      // A share profile holds no kept edits of its own, so it does not ask.
+      const asked: string[] = [];
+      const shared = await workspaceStatus({ ...ctx, shareAccess: "edit", request: async (request) => {
+        asked.push(request.verb);
+        return { ok: true, waiting: false };
+      } });
+      expect(shared).not.toHaveProperty("keptEdits");
+      expect(asked).toEqual(["collectionsWaiting"]);
     });
   });
 

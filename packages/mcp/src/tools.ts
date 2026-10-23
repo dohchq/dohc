@@ -1070,7 +1070,7 @@ export async function workspaceStatus(ctx: ToolContext) {
     loadCloudCredentials(ctx),
     findWorkspaceEntry(ctx),
     requestCli(ctx, "collectionsWaiting", {}),
-    requestCli(ctx, "liveKeptEdits", {}),
+    ctx.shareAccess === undefined ? requestCli(ctx, "liveKeptEdits", {}) : null,
   ]);
   const serverUrl = remote?.serverUrl ?? manifest?.serverUrl;
   const synced = !entry?.pausedRemote && (remote !== null || nonEmptyString(manifest?.serverUrl));
@@ -1092,7 +1092,7 @@ export async function workspaceStatus(ctx: ToolContext) {
     synced,
     ...(syncPause ? { syncPause } : {}),
     ...(waiting.ok ? { collectionsWaiting: waiting.waiting } : {}),
-    ...(kept.ok ? { keptEdits: kept.keptEdits } : {}),
+    ...(kept?.ok ? { keptEdits: kept.keptEdits } : {}),
     ...removedShareStatus(entry),
     scope: synced ? ("cloud" as const) : ("local" as const),
     ...credential,

@@ -198,7 +198,7 @@ Returns `{ ok: true, status: "saved", path } | { ok: true, status: "gone" } | { 
 
 ### `dohc_save_recovery_copy`
 
-Save a live document's kept edits next to the document. Kept edits are edits the server refused, which dohc keeps on this computer; dohc_workspace_status lists them as `keptEdits`. dohc writes a recovery package with every kept edit, and a readable Markdown copy when it can read the edits as a document. `copyPath` is null when it cannot. The kept edits stay on this computer. Owner workspace only.
+Save a live document's kept edits next to the document. Kept edits are edits the server refused, which dohc keeps on this computer; dohc_workspace_status lists them as `keptEdits`. dohc writes a recovery package with every kept edit, and a readable Markdown copy when it can read the edits as a document. `copyPath` is null when it cannot. dohc writes these files itself, not as the agent that asked. The kept edits stay on this computer. Accepts every `recovery` except `not-written`. A `not-written` document needs live editing stopped again; only dohc offers that for now, as Try again on its row in Notices. Owner workspace only.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -208,7 +208,7 @@ Returns `{ ok: true, copyPath, packagePath, folder } | { ok: false, reason }`.
 
 ### `dohc_retry_kept_edits`
 
-Send a live document's kept edits to the server once more, as Try again does in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Only a document whose `recovery` is `paused` can try again. Then read dohc_workspace_status: `retrying` until the server answers, `paused` with a new `incident` if it refuses again. Owner workspace only.
+Send a live document's kept edits to the server once more, as Try again does in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Accepts only a `recovery` of `paused`. Then read dohc_workspace_status: `retrying` until the server answers, `paused` with a new `incident` if it refuses again. A `not-written` or `stopping` document needs live editing stopped again; only dohc offers that for now, as Try again on its row in Notices. Owner workspace only.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -853,7 +853,7 @@ dohc document save-recovery-copy <path> [options]
 
 Save a document's kept edits next to it. The edits stay kept on this computer.
 
-dohc writes a recovery package with every kept edit, and a readable copy when it can read the edits as a document.
+Accepts every recovery except not-written. A not-written document needs live editing stopped again. Only dohc offers that for now, as Try again on its row in Notices. dohc writes a recovery package with every kept edit, and a readable copy when it can read the edits as a document. dohc writes these files itself, not as the agent that asked.
 
 With `--json`, prints `{ schemaVersion, ok: true, copyPath, packagePath, folder }`.
 
@@ -865,7 +865,7 @@ dohc document retry-kept-edits <path> <incident> [options]
 
 Send a document's kept edits to the server once more.
 
-Take the incident from kept-edits. Only a document whose recovery is paused can try again. Run kept-edits again to follow it: retrying until the server answers, paused with a new incident if it refuses again.
+Take the incident from kept-edits. Accepts only a recovery of paused. A not-written or stopping document needs live editing stopped again. Only dohc offers that for now, as Try again on its row in Notices. Run kept-edits again to follow it: retrying until the server answers, paused with a new incident if it refuses again.
 
 With `--json`, prints `{ schemaVersion, ok: true, path }`.
 
