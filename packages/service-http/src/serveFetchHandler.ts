@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { Readable } from "node:stream";
-import { pipeResponseBody } from "./pipeResponseBody";
+import { DRAIN_TIMEOUT_HEADER, pipeResponseBody } from "./pipeResponseBody";
 
 export interface ServeFetchHandlerOptions {
   handler: (request: Request) => Promise<Response>;
@@ -132,7 +132,7 @@ async function writeResponse(
   }
   outgoing.statusCode = response.status;
   for (const [key, value] of response.headers) {
-    if (key !== "set-cookie") outgoing.setHeader(key, value);
+    if (key !== "set-cookie" && key !== DRAIN_TIMEOUT_HEADER) outgoing.setHeader(key, value);
   }
   const setCookies = response.headers.getSetCookie();
   if (setCookies.length > 0) outgoing.setHeader("set-cookie", setCookies);
@@ -143,9 +143,5 @@ async function writeResponse(
     outgoing.end(Buffer.from(await response.arrayBuffer()), () => closeAfter.destroy());
     return;
   }
-  if (!response.body) {
-    outgoing.end();
-    return;
-  }
-  await pipeResponseBody(response.body, outgoing);
+  await pipeResponseBody(response, outgoing);
 }

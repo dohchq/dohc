@@ -195,7 +195,8 @@ struct HostOutputGuard {
     cancel: CancelSignal,
     deadline: Option<Instant>,
     /// A read's answer, which has no side effect, so its caller is told
-    /// when it is cancelled or expires rather than left waiting.
+    /// when it is cancelled, expires, or its host retires, rather than left
+    /// waiting, for as long as its connection lasts.
     read: bool,
 }
 
@@ -233,8 +234,14 @@ impl OutputGuard for HostOutputGuard {
         true
     }
     fn withheld_error(&self) -> Option<WireError> {
-        if !self.read || !self.host.current(&self.host.connection) {
+        if !self.read || !self.host.connection.is_current() {
             return None;
+        }
+        if !self.host.current(&self.host.connection) {
+            return Some(WireError::new(
+                ErrorCode::WorkspaceUnavailable,
+                "held document answer retired",
+            ));
         }
         if self
             .deadline
@@ -2106,6 +2113,41 @@ mod tests {
                 .is_err()
         );
         service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// A held read whose host retires while its connection lasts is told its
+    /// workspace is unavailable, so its caller's slot frees at once rather
+    /// than at its deadline. Once the connection is gone, nothing answers, and
+    /// an acknowledgement is withheld either way.
+    #[tokio::test]
+    async fn held_read_on_a_retired_host_answers_while_its_connection_lasts() {
+        let (_scratch, service, owner, workspace, _registration, _) = fixture().await;
+        let workspace = WorkspaceHandle(workspace);
+        let read = service
+            .live_host_read_guard(&RequestContext::unbounded(), &workspace)
+            .unwrap();
+        let acknowledgement = HostOutputGuard {
+            host: lock(&service.live_applications)
+                .hosts
+                .get(&workspace)
+                .unwrap()
+                .clone(),
+            cancel: RequestContext::unbounded().cancel,
+            deadline: None,
+            read: false,
+        };
+        assert!(read.withheld_error().is_none());
+        service.workspace_close(Some(workspace)).await.unwrap();
+        assert!(!read.is_current());
+        assert!(owner.handle().is_current());
+        assert_eq!(
+            read.withheld_error().map(|error| error.code),
+            Some(ErrorCode::WorkspaceUnavailable)
+        );
+        assert!(acknowledgement.withheld_error().is_none());
+        drop(owner);
+        assert!(read.withheld_error().is_none());
+        assert!(acknowledgement.withheld_error().is_none());
     }
 
     async fn settle_queued_interruption(deadline: bool) {

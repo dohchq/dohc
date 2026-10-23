@@ -1,6 +1,7 @@
 import { request as httpRequest, type IncomingMessage, type Server } from "node:http";
 import { connect } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DRAIN_TIMEOUT_HEADER } from "./pipeResponseBody";
 import { serveFetchHandler, type ServeFetchHandlerOptions } from "./serveFetchHandler";
 
 const servers: Server[] = [];
@@ -211,12 +212,13 @@ describe("serveFetchHandler", () => {
     const { port } = await serve({
       handler: async (request) => {
         received = new Uint8Array(await request.arrayBuffer());
-        return new Response(Buffer.from(received), { headers: { "x-echo": "1" } });
+        return new Response(Buffer.from(received), { headers: { "x-echo": "1", [DRAIN_TIMEOUT_HEADER]: "1" } });
       },
     });
     const response = await fetch(`http://127.0.0.1:${port}/blob`, { method: "PUT", body: bytes });
     expect(response.status).toBe(200);
     expect(response.headers.get("x-echo")).toBe("1");
+    expect(response.headers.has(DRAIN_TIMEOUT_HEADER), "the drain timeout stays on the server").toBe(false);
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes);
     expect(received).toEqual(bytes);
   });
