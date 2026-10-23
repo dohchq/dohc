@@ -711,8 +711,12 @@ async fn write_output<W: AsyncWrite + Unpin>(
         match item {
             OutputItem::Guarded { response, guard } => {
                 let request_id = response.id;
-                let frame = encode_reply_or_limit_error(&Envelope::Response(response), limits)
+                let mut frame = encode_reply_or_limit_error(&Envelope::Response(response), limits)
                     .map_err(|error| io::Error::other(format!("response encode: {error:?}")))?;
+                let length = frame.len();
+                let last = [frame
+                    .pop()
+                    .ok_or_else(|| io::Error::other("empty response frame"))?];
                 let cancel = guard.cancel_signal();
                 let retired = guard.retirement_signal();
                 let deadline = guard.deadline();
@@ -723,20 +727,21 @@ async fn write_output<W: AsyncWrite + Unpin>(
                 // out once retirement, a workspace close, or the deadline has
                 // ended the answer, even if its request was cancelled.
                 let mut offset = 0;
-                while offset < frame.len() {
+                while offset < length {
                     // The client cannot read the response before its last
-                    // byte, so the reservations go just before it.
-                    let end = if offset + 1 < frame.len() {
-                        frame.len() - 1
+                    // byte, so the frame and the reservations go just before it.
+                    let bytes = if offset + 1 < length {
+                        &frame[offset..]
                     } else {
+                        frame = Vec::new();
                         guard.release();
-                        frame.len()
+                        &last[..]
                     };
                     let write = std::future::poll_fn(|cx| {
                         let mut result = std::task::Poll::Pending;
                         if !guard.with_current(offset == 0, &mut || {
                             result = std::pin::Pin::new(&mut output)
-                                .poll_write(cx, &frame[offset..end])
+                                .poll_write(cx, bytes)
                                 .map(|result| result.map(Some));
                         }) {
                             return std::task::Poll::Ready(Ok(None));
@@ -900,6 +905,9 @@ async fn write_output<W: AsyncWrite + Unpin>(
                                 "native restore output retired",
                             )
                         };
+                        // The interrupted write dropped the blob, and the
+                        // client acts on this error, so the reservations go first.
+                        guard.release();
                         write_envelope(
                             &mut output,
                             &Envelope::Error(ErrorEnvelope {
@@ -1043,66 +1051,57 @@ async fn write_blob_egress<W: AsyncWrite + Unpin>(
             )
         }
     };
-    if egress.cancel.is_cancelled()
-        || egress
-            .deadline
-            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
-    {
-        return write_envelope(
-            output,
-            &Envelope::Error(ErrorEnvelope {
-                id: Some(response.id),
+    let interrupted = |egress: &BlobEgress| {
+        (egress.cancel.is_cancelled()
+            || egress
+                .deadline
+                .is_some_and(|deadline| std::time::Instant::now() >= deadline))
+        .then(|| {
+            Envelope::Error(ErrorEnvelope {
+                id: Some(request_id),
                 error: interruption(egress.deadline),
+            })
+        })
+    };
+    let encode = |envelope: &Envelope| {
+        encode_reply_or_limit_error(envelope, limits)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "response too large"))
+    };
+    // The client finishes the request on the frame after the blob, its
+    // response or an error, so the blob and the reservations go before it.
+    let last = 'blob: {
+        if let Some(error) = interrupted(&egress) {
+            break 'blob encode(&error)?;
+        }
+        let Ok(response_frame) = encode_control(&Envelope::Response(response), limits) else {
+            break 'blob encode(&response_limit_error(Some(request_id)))?;
+        };
+        write_envelope(
+            output,
+            &Envelope::BlobStart(BlobStart {
+                request_id,
+                stream_id: egress.stream_id,
+                total_bytes: Some(egress.bytes.len() as u64),
+                sha256: Some(egress.sha256.clone()),
             }),
             limits,
         )
-        .await;
-    }
-    let response_frame = match encode_control(&Envelope::Response(response), limits) {
-        Ok(frame) => frame,
-        Err(_) => {
-            return write_envelope(output, &response_limit_error(Some(request_id)), limits).await;
+        .await?;
+        let chunk_bytes = limits.max_blob_chunk_bytes as usize;
+        for (fin, chunk) in blob_chunks(&egress.bytes, chunk_bytes) {
+            if let Some(error) = interrupted(&egress) {
+                break 'blob encode(&error)?;
+            }
+            let frame = encode_blob_chunk_frame(egress.stream_id, fin, chunk, limits)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "blob chunk too large"))?;
+            output.write_all(&frame).await?;
+            output.flush().await?;
         }
+        response_frame
     };
-    write_envelope(
-        output,
-        &Envelope::BlobStart(BlobStart {
-            request_id,
-            stream_id: egress.stream_id,
-            total_bytes: Some(egress.bytes.len() as u64),
-            sha256: Some(egress.sha256.clone()),
-        }),
-        limits,
-    )
-    .await?;
-
-    let chunk_bytes = limits.max_blob_chunk_bytes as usize;
-    for (fin, chunk) in blob_chunks(&egress.bytes, chunk_bytes) {
-        if egress.cancel.is_cancelled()
-            || egress
-                .deadline
-                .is_some_and(|deadline| std::time::Instant::now() >= deadline)
-        {
-            return write_envelope(
-                output,
-                &Envelope::Error(ErrorEnvelope {
-                    id: Some(request_id),
-                    error: interruption(egress.deadline),
-                }),
-                limits,
-            )
-            .await;
-        }
-        let frame = encode_blob_chunk_frame(egress.stream_id, fin, chunk, limits)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "blob chunk too large"))?;
-        output.write_all(&frame).await?;
-        output.flush().await?;
-    }
-    // The client finishes the request when the response after the blob
-    // arrives, so the blob and the reservations go before the response.
     drop(egress);
     release();
-    output.write_all(&response_frame).await?;
+    output.write_all(&last).await?;
     output.flush().await
 }
 
@@ -2352,26 +2351,39 @@ mod tests {
         }
     }
 
-    /// Records how much of the transcript was written when the guard released.
+    /// Records how much of the transcript was written when the guard
+    /// released. Each write waits once and takes at most 512 bytes.
     struct ReleaseRecorder {
         released: Arc<AtomicBool>,
         transcript: Vec<u8>,
         released_at: Option<usize>,
+        ready: bool,
+        /// Cancelled when the first frame is flushed.
+        cancel: Option<CancelSignal>,
     }
 
     impl AsyncWrite for ReleaseRecorder {
         fn poll_write(
             mut self: Pin<&mut Self>,
-            _: &mut TaskContext<'_>,
+            cx: &mut TaskContext<'_>,
             bytes: &[u8],
         ) -> Poll<io::Result<usize>> {
+            if !std::mem::replace(&mut self.ready, false) {
+                self.ready = true;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
             if self.released_at.is_none() && self.released.load(Ordering::SeqCst) {
                 self.released_at = Some(self.transcript.len());
             }
-            self.transcript.extend_from_slice(bytes);
-            Poll::Ready(Ok(bytes.len()))
+            let count = bytes.len().min(512);
+            self.transcript.extend_from_slice(&bytes[..count]);
+            Poll::Ready(Ok(count))
         }
-        fn poll_flush(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        fn poll_flush(mut self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            if let Some(cancel) = self.cancel.take() {
+                cancel.cancel();
+            }
             Poll::Ready(Ok(()))
         }
         fn poll_shutdown(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
@@ -2379,15 +2391,17 @@ mod tests {
         }
     }
 
-    /// Writes `item`, and returns the transcript's length when its guard
-    /// released and the transcript's total length.
-    async fn release_offset(
+    /// Writes `item`, cancelled after its first frame if `cancel`, and
+    /// returns the transcript after the guard released.
+    async fn after_release(
         item: impl FnOnce(Arc<dyn OutputGuard>) -> OutputItem,
-    ) -> (Option<usize>, usize) {
+        cancel: bool,
+    ) -> Vec<u8> {
         let released = Arc::new(AtomicBool::new(false));
+        let signal = CancelSignal::new();
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         tx.send(item(Arc::new(ReleaseGuard {
-            cancel: CancelSignal::new(),
+            cancel: signal.clone(),
             released: released.clone(),
         })))
         .await
@@ -2397,6 +2411,8 @@ mod tests {
             released,
             transcript: Vec::new(),
             released_at: None,
+            ready: false,
+            cancel: cancel.then_some(signal),
         };
         write_output(
             &mut output,
@@ -2406,31 +2422,41 @@ mod tests {
         )
         .await
         .unwrap();
-        (output.released_at, output.transcript.len())
+        let released_at = output.released_at.expect("the guard released");
+        output.transcript.split_off(released_at)
+    }
+
+    /// The one complete envelope in `bytes`.
+    fn only_envelope(bytes: &[u8]) -> Envelope {
+        let limits = WireLimits::default();
+        let mut decoder = FrameDecoder::new(limits.clone());
+        decoder.push(bytes);
+        let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+            panic!("one control frame expected");
+        };
+        assert!(decoder.next_frame().unwrap().is_none());
+        decode_control(&payload, &limits).unwrap()
     }
 
     #[tokio::test]
     async fn guarded_output_releases_reservations_before_the_client_can_read_the_response() {
-        // A client acting on the response must find its reservations free.
-        let (released_at, length) = release_offset(|guard| OutputItem::Guarded {
+        // A client acting on the answer must find its reservations free.
+        let acknowledgement = |guard| OutputItem::Guarded {
             response: WireResponse {
                 id: 9,
                 result: serde_json::json!({"content": "x".repeat(1024)}),
             },
             guard,
-        })
-        .await;
-        assert_eq!(released_at, Some(length - 1));
-        let response = encode_control(
-            &Envelope::Response(WireResponse {
-                id: 9,
-                result: serde_json::json!({"status":"prepared"}),
-            }),
-            &WireLimits::default(),
-        )
-        .unwrap();
-        let (released_at, length) = release_offset(guarded_blob).await;
-        assert_eq!(released_at, Some(length - response.len()));
+        };
+        assert_eq!(after_release(acknowledgement, false).await.len(), 1);
+        assert!(matches!(
+            only_envelope(&after_release(guarded_blob, false).await),
+            Envelope::Response(response) if response.id == 9
+        ));
+        assert!(matches!(
+            only_envelope(&after_release(guarded_blob, true).await),
+            Envelope::Error(ErrorEnvelope { id: Some(9), .. })
+        ));
     }
 
     impl AsyncWrite for BlockedWriter {
