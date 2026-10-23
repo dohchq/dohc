@@ -20,10 +20,10 @@
 
 #![forbid(unsafe_code)]
 
-/// The heap profiler the held-proof memory measurement reads.
+// The heap profiler the held-proof memory measurement reads, as the unit
+// tests' global allocator.
 #[cfg(all(test, feature = "held-proof-memory"))]
-#[global_allocator]
-static ALLOC: dhat::Alloc = dhat::Alloc;
+extern crate dohc_heap_profiler;
 
 pub mod author_coverage;
 pub mod canonical_json;

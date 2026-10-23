@@ -1225,8 +1225,10 @@ fn a_window_of_many_tails_reserves_its_largest_tail_not_their_sum() {
 /// Opus's r2c-3c-8 check 1: under the default limit and deadline, a held
 /// document of more than 5 MiB of full state proves alone: current, its
 /// preservation complete with its Markdown, and its contribution artifact
-/// within its cap. Its wall time is printed.
+/// within its cap. Its wall time is printed. It runs in release, where its
+/// deadline is the production one.
 #[test]
+#[cfg_attr(debug_assertions, ignore = "release deadline pin")]
 fn a_held_document_of_five_mebibytes_proves_alone_under_the_default_limit() {
     let (mut f, _, _, _) = released_at_b();
     let grown = local_doc(&f);
@@ -1294,17 +1296,18 @@ fn held_proof(
     answer.expect("the proof ran")
 }
 
-/// The fixture released with nothing Carried, then `count` drafts of its
-/// lineage queued and never sent, each one paragraph appended to its head,
-/// written in one transaction with their bytes: retained work no proof
-/// covers. With the binding that protects it and the work its tail commits
+/// The fixture released with nothing Carried, then `count` entries of its
+/// lineage's outbox queued and never sent, each one paragraph appended to
+/// its head, written in one transaction with their bytes: retained work no
+/// proof covers. They are pending entries, not drafts: none names a draft
+/// binding. With the binding that protects it and the work its tail commits
 /// to, in canonical order.
-fn released_with_drafts(count: usize) -> (Fixture, ReleasedLineageBinding, Vec<RetainedContribution>) {
+fn released_with_pending_entries(count: usize) -> (Fixture, ReleasedLineageBinding, Vec<RetainedContribution>) {
     let mut f = released_without_carried();
     let writer = Ydoc::wire();
     writer.apply(&local_doc(&f).encode_full_state()).unwrap();
     let updates: Vec<Vec<u8>> = (0..count)
-        .map(|index| writer.richdoc_append_paragraph(&format!("Draft {index}")))
+        .map(|index| writer.richdoc_append_paragraph(&format!("Pending entry {index}")))
         .collect();
     let (outbox_id, sequence): (String, i64) = f
         .store
@@ -1334,7 +1337,7 @@ fn released_with_drafts(count: usize) -> (Fixture, ReleasedLineageBinding, Vec<R
                     .execute(rusqlite::params![
                         outbox_id,
                         sequence + 1 + index as i64,
-                        format!("draft-{index:06}"),
+                        format!("pending-{index:06}"),
                         sha,
                         update.len() as i64,
                     ])
@@ -1343,58 +1346,61 @@ fn released_with_drafts(count: usize) -> (Fixture, ReleasedLineageBinding, Vec<R
             Ok::<_, ApplicationError>(())
         })
         .unwrap();
-    let drafts: Vec<RetainedContribution> = updates
+    let entries: Vec<RetainedContribution> = updates
         .iter()
         .enumerate()
         .map(|(index, update)| RetainedContribution::Outbox {
             outbox_id: outbox_id.clone(),
             sequence: sequence + 1 + index as i64,
-            delivery_id: format!("draft-{index:06}"),
+            delivery_id: format!("pending-{index:06}"),
             update_digest: hex_sha256(update),
             authors: RetainedAuthors::credited(None, None).unwrap(),
         })
         .collect();
-    let binding = protected(&f).expect("its drafts protect it");
-    assert_eq!(coverage_of(binding.clone()), [committed(drafts.clone())], "the tail commits to every draft");
-    (f, binding, drafts)
+    let binding = protected(&f).expect("its pending entries protect it");
+    assert_eq!(coverage_of(binding.clone()), [committed(entries.clone())], "the tail commits to every entry");
+    (f, binding, entries)
 }
 
 /// Sol's r2c-3c-10 finding 2: under the default limit and deadline, a real
 /// released hold of 50,000 stored entries proves alone through the whole
 /// inspection: the window, each activation, validating every entry, the
 /// tail's commitment, the merge, the projection and the artifact, each
-/// reserved as it runs. Every draft merges, the preservation is complete
+/// reserved as it runs. Every entry merges, the preservation is complete
 /// with its Markdown, and its artifact, naming every one, is within its
-/// cap. Its wall time is printed.
+/// cap. Its wall time is printed. It runs in release, where its deadline is
+/// the production one.
 #[test]
+#[cfg_attr(debug_assertions, ignore = "release deadline pin")]
 fn a_released_hold_of_fifty_thousand_entries_proves_alone_under_the_default_limit() {
-    let (f, binding, drafts) = released_with_drafts(50_000);
+    let (f, binding, entries) = released_with_pending_entries(50_000);
     let (inspected, artifact, stopped) = held_proof(&f, &binding, "FIFTY_THOUSAND_ENTRY_PROOF_WALL_MS");
     assert_eq!(stopped, None, "it fits alone within {HELD_PROOF_DEADLINE:?}");
     let HeldInspection::Current(preservation) = inspected.unwrap() else {
         panic!("the binding was just derived")
     };
     assert_eq!(preservation.status, PreservationStatus::Complete, "{:?}", preservation.findings);
-    assert_eq!(preservation.merged, drafts, "every draft merged");
+    assert_eq!(preservation.merged, entries, "every entry merged");
     let markdown = &preservation.preserved.as_ref().expect("its Markdown").markdown;
-    assert!(markdown.contains("Draft 0") && markdown.contains("Draft 49999"));
+    assert!(markdown.contains("Pending entry 0") && markdown.contains("Pending entry 49999"));
     let artifact = artifact.expect("encoded").unwrap().expect("within its cap");
-    assert_eq!(artifact.merged, UnprovenCommitment::of_listed(&drafts));
+    assert_eq!(artifact.merged, UnprovenCommitment::of_listed(&entries));
 }
 
 /// Sol's r2c-3c-10 finding 1: each contradiction validation keeps, its
 /// namespace among it, is reserved before it is made. A tail in a namespace
-/// of 1,000 bytes, whose 1,000 drafts each declare an agent that does not
-/// validate, reserves at its peak, beside the window, the other tail's
-/// kept work and its own activation and validation, every contradiction's
-/// namespace once as validation makes it and again in the work it keeps.
+/// of 1,000 bytes, whose 1,000 pending entries each declare an agent that
+/// does not validate, reserves at its peak, beside the window, the other
+/// tail's kept work and its own activation and validation, every
+/// contradiction's namespace once as validation makes it and again in the
+/// work it keeps.
 #[test]
 fn a_tail_reserves_each_contradiction_before_it_keeps_it() {
     let long = "n".repeat(1_000);
-    let (mut f, _, _) = released_with_drafts(1_000);
+    let (mut f, _, _) = released_with_pending_entries(1_000);
     write_unchecked(&mut f, &format!("PRAGMA foreign_keys=OFF;
         UPDATE owner_ydoc_outbox_entries SET agent_declaration_json='{{\"agentId\":\"\",\"onBehalfOf\":null,\"depth\":0}}'
-        WHERE delivery_id LIKE 'draft-%';
+        WHERE delivery_id LIKE 'pending-%';
         CREATE TEMP TABLE copied AS SELECT * FROM live_owner_activations WHERE activation_id='adoption';
         UPDATE copied SET relay_database_namespace='{long}';
         INSERT INTO live_owner_activations SELECT * FROM copied"));
@@ -1408,7 +1414,7 @@ fn a_tail_reserves_each_contradiction_before_it_keeps_it() {
     let (tail, work) = &listed[1];
     assert_eq!(tail.coverage, RetainedCoverage::Invalid);
     let found = work.contradictions.len() as u64;
-    assert!(found >= 1_000, "every draft contradicts its tail: {found}");
+    assert!(found >= 1_000, "every entry contradicts its tail: {found}");
     assert!(work.contradictions.iter().all(|contradiction| contradiction.namespace.as_deref() == Some(long.as_str())));
     let kept: Vec<u64> = listed.iter().map(|(tail, work)| released_protection::tail_kept_bytes(tail, work)).collect();
     let (activation, validation) = tails[1];

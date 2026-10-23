@@ -1014,8 +1014,8 @@ struct Found<'a, 'w> {
 impl Found<'_, '_> {
     /// A contradiction of the work `locator` names, or of the tail when no
     /// reader could locate that work: its namespace, the work it names, and
-    /// its place with room for the contradictions to double, reserved before
-    /// it is made.
+    /// its place with room for the contradictions to double, the old list
+    /// and the new held at once as they do, reserved before it is made.
     fn contradiction(
         &mut self,
         reason: PreservationReason,
@@ -1024,7 +1024,7 @@ impl Found<'_, '_> {
         let contribution = locator.readable().then_some(locator);
         let bytes = self.namespace.len()
             + contribution.map_or(0, ContributionLocator::text_bytes)
-            + 2 * std::mem::size_of::<PreservationFinding>();
+            + 3 * std::mem::size_of::<PreservationFinding>();
         self.working.grow(u64::try_from(bytes).unwrap_or(u64::MAX))?;
         self.tail.contradictions.push(PreservationFinding {
             reason,

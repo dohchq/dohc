@@ -26,7 +26,7 @@ pub use preservation::{
     PreservationStatus, PreservedState,
 };
 #[cfg(all(test, feature = "held-proof-memory"))]
-pub(super) use preservation::preserve_lineage;
+pub(super) use preservation::{lineage_workload, preserve_lineage};
 
 /// The synced update protection is decided for: the feed it arrived on and
 /// its coordinate there.

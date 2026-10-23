@@ -6,22 +6,35 @@
 // whose limit never refuses. The tail's work is built before the profiler
 // starts and reserved as the window keeps it. dhat, the unit tests' global
 // allocator under the `held-proof-memory` feature, measures the heap's peak
-// over the proof; the proof's limit records the most it reserved. Before
-// that, a bare `Ydoc` applying the lineage's full state measures what the
-// state keeps, reported as the kept-state factor; the rest of the peak is
-// reported as the projection's. A measurement counts only once its
-// preservation is complete, with the Markdown the case expects and every
-// contribution merged.
+// over the proof; the proof's limit records the most it reserved.
+//
+// Before that, what the merged state keeps is measured on its own, kept as
+// the proof keeps it: the lineage loaded from its store as the proof loads
+// it, its snapshot and then each journal row after it one by one, and then
+// every contribution applied. With S the stored bytes loading reads and Σb
+// the contributions', it reports the kept state per stored byte over S + Σb,
+// what the factor 24 reserves for, and what the contributions added per
+// byte of Σb on its own. The rest of the peak is reported as the
+// projection's. A measurement counts only once its preservation is complete,
+// with the Markdown the case expects and every contribution merged.
+//
+// Calibrate against the measured peak, not the reserved one: at the
+// projection's peak the proof reserves the state it kept, 28·M for the
+// projection and `retained_bytes()` for the preservation, and the
+// projection's 28·M already counts the merged full state and Markdown the
+// preservation keeps, so about M and the Markdown are reserved twice.
 //
 // The cases: plaintext and rich documents of 1, 5 and 10 MiB of content;
 // documents of 1 and 5 MiB rewritten from exact Markdown source the
 // projection writes otherwise, whose preservation rebuilds and reprojects
-// that source; one typed a character at a time by interleaved clients; one
-// with heavy history; a snapshot with many journal rows after it; holds of
-// 10,000 and 50,000 small contributions; and a real released hold of 50,000
-// stored entries, measured through the whole inspection. Only that last case
-// reads a window and validates, and SQLite's own copies of what it reads never
-// reach the heap profile, so validation's factors stay estimates.
+// that source; one typed a keystroke at a time by interleaved clients, with
+// backspaces, merged with an edit and a removal of what they typed; one whose
+// deletions span 2,000 clients, merged with an edit and a removal; one with
+// heavy history; a snapshot with many journal rows after it; holds of 10,000
+// and 50,000 small contributions; and a real released hold of 50,000 stored
+// entries, measured through the whole inspection. Only that last case reads a
+// window and validates, and SQLite's own copies of what it reads never reach
+// the heap profile, so validation's factors stay estimates.
 //
 // Run it through the Rust gate with `cargo test -p dohc-engine-collab
 // --release --lib --features held-proof-memory held_proof_memory --
@@ -86,26 +99,58 @@ fn plaintext(content: usize, block_bytes: usize) -> Ydoc {
     doc
 }
 
-/// A rich document of one paragraph of `content` characters typed one at a
-/// time at its end by `clients` writers in turn, each catching up on the
-/// others first: no two neighbouring characters share a client, so none
-/// merge.
-fn typed(content: usize, clients: usize) -> Ydoc {
+/// A rich document of one paragraph typed `keystrokes` keystrokes at a time
+/// at its end by `clients` writers in turn, every eighth a backspace over the
+/// character before it: no two neighbouring characters share a client, so
+/// none merge, and the backspaces delete across clients. Each keystroke goes
+/// to the document and every other writer as it is typed, so typing costs
+/// each keystroke's own size and the walk to the paragraph's end.
+fn typed(keystrokes: usize, clients: usize) -> Ydoc {
     const LETTERS: &[u8] = b"abcdefghij ";
     let doc = Ydoc::wire();
     let _ = doc.richdoc_append_paragraph("");
-    let writers: Vec<Ydoc> = (0..clients).map(|_| Ydoc::wire()).collect();
+    let writers: Vec<Ydoc> = (0..clients)
+        .map(|_| {
+            let writer = Ydoc::wire();
+            writer.apply(&doc.encode_full_state()).unwrap();
+            writer
+        })
+        .collect();
     let mut rng = Rng(4);
-    for index in 0..content {
-        let writer = &writers[index % clients];
-        writer
-            .apply(&doc.diff(&writer.encode_state_vector()).expect("diff"))
-            .expect("catch up");
-        let letter = char::from(LETTERS[rng.below(LETTERS.len())]);
-        let keystroke = writer
-            .richdoc_insert_text(0, u32::try_from(index).expect("offset"), &letter.to_string())
+    let mut length = 0u32;
+    for index in 0..keystrokes {
+        let typist = index % clients;
+        let (offset, delete, text) = if index % 8 == 7 && length > 0 {
+            length -= 1;
+            (length, 1, String::new())
+        } else {
+            length += 1;
+            (length - 1, 0, char::from(LETTERS[rng.below(LETTERS.len())]).to_string())
+        };
+        let keystroke = writers[typist]
+            .richdoc_keystroke(0, offset, delete, &text)
             .expect("a paragraph to type in");
         doc.apply(&keystroke).expect("keystroke");
+        for (other, writer) in writers.iter().enumerate() {
+            if other != typist {
+                writer.apply(&keystroke).expect("keystroke");
+            }
+        }
+    }
+    doc
+}
+
+/// A rich document of `content` bytes over which `clients` other writers
+/// each wrote a paragraph and removed it: its deletions span `clients`
+/// clients, one range each, what keeps most per range in the index of what
+/// the merge deleted.
+fn sparse_deletions(content: usize, clients: usize) -> Ydoc {
+    let doc = rich(content, 400);
+    for _ in 0..clients {
+        let writer = Ydoc::wire();
+        let _ = writer.richdoc_append_paragraph("A note someone removed.");
+        let _ = writer.richdoc_remove_block(0);
+        doc.apply(&writer.encode_full_state()).expect("a removed note");
     }
     doc
 }
@@ -245,16 +290,35 @@ enum Expected<'a> {
     Exactly(&'a str),
 }
 
-/// What a Y.Doc keeps of `full_state` once it applied it: the heap it still
-/// holds, the encoding itself not counted.
-fn kept_state(full_state: &[u8]) -> u64 {
+/// What the merged state keeps, kept as a proof keeps it: `key`'s lineage
+/// loaded from `store` as a proof loads it, then every one of `updates`
+/// applied. The stored bytes loading reads, and the heap still held once
+/// the lineage loaded and once every update applied; what loading and
+/// applying only read is not counted.
+fn kept_state(store: &EngineStore, key: &DocKey, claim: &str, updates: &[Vec<u8>]) -> Kept {
+    let (_, stored, _) = store
+        .read_with(|conn| released_protection::lineage_workload(conn, key, claim))
+        .expect("the lineage's stored length");
     let profiler = dhat::Profiler::builder().testing().build();
-    let state = Ydoc::wire();
-    state.apply(full_state).expect("the lineage's state applies");
-    let kept = dhat::HeapStats::get().curr_bytes as u64;
+    let state = store
+        .read_with(|conn| durable::load_doc_between::<CollabError>(conn, key, &mut || Ok(())))
+        .expect("the lineage loads");
+    let loaded = dhat::HeapStats::get().curr_bytes as u64;
+    for update in updates {
+        state.apply(update).expect("each contribution applies");
+    }
+    let merged = dhat::HeapStats::get().curr_bytes as u64;
     drop(state);
     drop(profiler);
-    kept
+    Kept { stored, loaded, merged }
+}
+
+/// What [`kept_state`] measured.
+#[derive(Clone, Copy)]
+struct Kept {
+    stored: u64,
+    loaded: u64,
+    merged: u64,
 }
 
 /// Refuse a measurement whose preservation is not the complete one its case
@@ -277,7 +341,7 @@ struct Measured<'a> {
     /// The contributions' bytes.
     merged: usize,
     contributions: usize,
-    kept: u64,
+    kept: Kept,
     peak: u64,
     reserved: u64,
     markdown: usize,
@@ -285,22 +349,29 @@ struct Measured<'a> {
 }
 
 fn report(measured: &Measured<'_>) {
-    let ratio = |bytes: u64, of: usize| bytes as f64 / of.max(1) as f64;
-    let projection = measured.peak.saturating_sub(measured.kept);
+    let ratio = |bytes: u64, of: u64| bytes as f64 / of.max(1) as f64;
+    let Kept { stored, loaded, merged: kept } = measured.kept;
+    let contributed = measured.merged as u64;
+    let growth = kept.saturating_sub(loaded);
+    let projection = measured.peak.saturating_sub(kept);
     println!(
         "HELD_PROOF_MEMORY {}",
         serde_json::json!({
             "case": measured.case,
+            "storedBytes": stored,
             "fullStateBytes": measured.full_state,
             "contributions": measured.contributions,
-            "contributionBytes": measured.merged,
+            "contributionBytes": contributed,
             "markdownBytes": measured.markdown,
             "artifactBytes": measured.artifact,
-            "keptStateBytes": measured.kept,
-            "keptStatePerFullStateByte": ratio(measured.kept, measured.full_state),
+            "keptLoadedBytes": loaded,
+            "keptStateBytes": kept,
+            "keptPerStoredByte": ratio(kept, stored + contributed),
+            "contributionGrowthBytes": growth,
+            "contributionGrowthPerContributionByte": ratio(growth, contributed),
             "measuredPeakBytes": measured.peak,
             "projectionBytes": projection,
-            "projectionPerMergedByte": ratio(projection, measured.full_state + measured.merged),
+            "projectionPerMergedByte": ratio(projection, measured.full_state as u64 + contributed),
             "reservedPeakBytes": measured.reserved,
         })
     );
@@ -309,7 +380,7 @@ fn report(measured: &Measured<'_>) {
 /// Measure one hold: `lineage` merged with `updates`, whose preserved
 /// Markdown must be as `expected` says.
 fn measure(case: &str, lineage: &Lineage, updates: &[Vec<u8>], expected: &Expected<'_>) {
-    let kept = kept_state(&lineage.full_state);
+    let kept = kept_state(&lineage.store, &lineage.key, &lineage.claim, updates);
     let covered = covered(updates);
     let tail = ProtectedTail {
         namespace: "relay".into(),
@@ -367,24 +438,29 @@ fn measure(case: &str, lineage: &Lineage, updates: &[Vec<u8>], expected: &Expect
     });
 }
 
-/// Measure a real released hold of `count` drafts through the whole
-/// inspection: its window, each activation, validating every entry, the
-/// tail's commitment, the merge, the projection and the artifact.
+/// Measure a real released hold of `count` pending entries through the
+/// whole inspection: its window, each activation, validating every entry,
+/// the tail's commitment, the merge, the projection and the artifact.
 fn measure_released_hold(count: usize) {
     let case = format!("released hold of {count} stored entries");
-    let (f, binding, drafts) = released_with_drafts(count);
+    let (f, binding, entries) = released_with_pending_entries(count);
     let full_state = local_doc(&f).encode_full_state();
-    let kept = kept_state(&full_state);
-    let merged = f
+    let updates = f
         .store
         .read_with(|conn| {
-            conn.query_row(
-                "SELECT coalesce(sum(byte_length),0) FROM owner_ydoc_outbox_entries WHERE delivery_id LIKE 'draft-%'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
+            entries
+                .iter()
+                .map(|entry| {
+                    let (RetainedContribution::Outbox { update_digest, .. }
+                    | RetainedContribution::Carried { update_digest, .. }) = entry;
+                    conn.query_row("SELECT bytes FROM binary_blobs WHERE sha256=?1", [update_digest], |row| {
+                        row.get::<_, Vec<u8>>(0)
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
         })
         .unwrap();
+    let kept = kept_state(&f.store, &f.key, &binding.lineage_claim_id, &updates);
     let limit = HeldProofLimit::new(1, 1 << 40, 0);
     let proofs: HeldProofs<(), ()> = HeldProofs::new(limit.clone());
     proofs.set_proof_deadline(std::time::Duration::from_secs(3_600));
@@ -410,13 +486,13 @@ fn measure_released_hold(count: usize) {
     let HeldInspection::Current(preservation) = inspected.unwrap() else {
         panic!("{case}: the binding was just derived")
     };
-    accepted(&case, &preservation, &drafts, &Expected::Containing(&format!("Draft {}", count - 1)));
+    accepted(&case, &preservation, &entries, &Expected::Containing(&format!("Pending entry {}", count - 1)));
     let artifact = artifact.expect("encoded").unwrap();
     report(&Measured {
         case: &case,
         full_state: full_state.len(),
-        merged: usize::try_from(merged).unwrap_or(0),
-        contributions: drafts.len(),
+        merged: updates.iter().map(Vec::len).sum(),
+        contributions: entries.len(),
         kept,
         peak: heap.max_bytes as u64,
         reserved: limit.peak_reserved_bytes(),
@@ -433,6 +509,17 @@ fn one_edit(state: &Ydoc, kind: ContentKind) -> Vec<Vec<u8>> {
         ContentKind::Plaintext => writer.plaintext_insert(0, "A retained edit.\n\n"),
         _ => writer.richdoc_append_paragraph("A retained edit."),
     }]
+}
+
+/// A small edit and the removal of `state`'s first block, each by another
+/// writer, for a hold to cover: the removal deletes everything that block
+/// holds, and with it the merge reads the state's deletions.
+fn edit_and_removal(state: &Ydoc) -> Vec<Vec<u8>> {
+    let mut edits = one_edit(state, ContentKind::Richdoc);
+    let remover = Ydoc::wire();
+    remover.apply(&state.encode_full_state()).unwrap();
+    edits.push(remover.richdoc_remove_block(0));
+    edits
 }
 
 /// `count` small paragraphs one writer appended over `state`, in order.
@@ -482,10 +569,19 @@ fn measure_held_proof_peak_heap() {
             &Expected::Exactly(&source),
         );
     }
-    let keystrokes = typed(256 * 1024, 4);
-    let edit = one_edit(&keystrokes, ContentKind::Richdoc);
-    let stored = lineage(&keystrokes, ContentKind::Richdoc, &[], &edit);
-    measure("typed a character at a time by 4 clients, 256 KiB", &stored, &edit, &edited);
+    let keystrokes = typed(64 * 1024, 4);
+    let edits = edit_and_removal(&keystrokes);
+    let stored = lineage(&keystrokes, ContentKind::Richdoc, &[], &edits);
+    measure(
+        "64 Ki keystrokes by 4 clients, every eighth a backspace, then an edit and the paragraph's removal",
+        &stored,
+        &edits,
+        &edited,
+    );
+    let sparse = sparse_deletions(64 * 1024, 2_000);
+    let edits = edit_and_removal(&sparse);
+    let stored = lineage(&sparse, ContentKind::Richdoc, &[], &edits);
+    measure("64 KiB with deletions by 2,000 clients, then an edit and a removal", &stored, &edits, &edited);
     let history = rewritten(256 * 1024, 32);
     let edit = one_edit(&history, ContentKind::Richdoc);
     let stored = lineage(&history, ContentKind::Richdoc, &[], &edit);

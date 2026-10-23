@@ -1,6 +1,7 @@
 # The dohc Rust workspace. `dohc-workspace-engine` builds the daemon the
 # desktop app runs; `dohc-compiler-owner` bounds macOS app compiles; the other
-# crates are the engine's parts, test support, and property targets.
+# crates are the engine's parts, test support, a test heap profiler, and
+# property targets.
 [workspace]
 resolver = "3"
 members = [
@@ -18,6 +19,7 @@ members = [
     "crates/dohc-test-scratch",
     "crates/dohc-engine-crypto",
     "crates/dohc-engine-collab",
+    "crates/dohc-heap-profiler",
     "crates/dohc-engine-sync",
     "crates/dohc-engine-sync-http",
     "crates/dohc-workspace-engine",
@@ -110,6 +112,11 @@ debug-assertions = true
 overflow-checks = true
 
 [profile.test.package.libsqlite3-sys]
+opt-level = 2
+debug-assertions = true
+overflow-checks = true
+
+[profile.test.package.yrs]
 opt-level = 2
 debug-assertions = true
 overflow-checks = true
