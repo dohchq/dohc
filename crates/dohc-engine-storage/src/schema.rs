@@ -159,6 +159,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "ydoc_updates",
     "ydoc_snapshots",
     "ydoc_deferred_updates",
+    "ydoc_drain_reports",
     "ydoc_inactive_lineages",
     "ydoc_base_relay_candidates",
     "ydoc_recovery_decisions",
@@ -839,7 +840,11 @@ mod tests {
 
     #[test]
     fn current_schema_requires_ydoc_arbitration_tables() {
-        for table in ["ydoc_base_relay_candidates", "ydoc_recovery_decisions"] {
+        for table in [
+            "ydoc_base_relay_candidates",
+            "ydoc_recovery_decisions",
+            "ydoc_drain_reports",
+        ] {
             assert!(
                 REQUIRED_TABLES.contains(&table),
                 "open must reject a store missing {table}"

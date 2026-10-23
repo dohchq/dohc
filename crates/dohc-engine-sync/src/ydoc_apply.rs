@@ -266,6 +266,10 @@ pub struct YdocDrainResult {
     /// row and every later one stay queued. Once validation completes, the
     /// caller drains again and adds what that drain reports.
     pub waiting: Option<Box<dohc_engine_collab::live_update_application::PendingValidation>>,
+    /// The head moment the drain's last projection keys: a base's own, or the
+    /// final projection's, by its last projected row, once that committed. A
+    /// drain of the same rows again keys the same one.
+    pub(crate) projected_moment: Option<String>,
 }
 
 pub(crate) fn redelivered_materialization_changes(
@@ -827,19 +831,7 @@ pub(crate) fn drain_released_holds(
             result.waiting = drained.waiting;
             return Ok(result);
         }
-        let mut changes = Vec::new();
-        // A lineage the drain replaced left its side at a recovered path.
-        for replacement in &drained.lineage_replacements {
-            for path in &replacement.recovered_paths {
-                changes.push(crate::MomentMaterializationChange {
-                    version_id: key.version_id.clone(),
-                    path: path.clone(),
-                    operation: "write",
-                    content_kind: "text",
-                });
-            }
-        }
-        changes.extend(drained_head_change(store, &key, before.as_ref())?);
+        let changes = drained_changes(store, &key, &drained, before.as_ref())?;
         let hold = match drained.released_hold.take().or(archived) {
             Some(hold) => Some(hold),
             None => standing_released_hold(store, &key, Some(&cleanup))?,
@@ -856,7 +848,7 @@ pub(crate) fn drain_released_holds(
                 InactiveScope::Document(&key, &cleanup.consumed()),
                 &cache.released_tails(store),
                 &mut Vec::new(),
-                InactiveReport::Durable,
+                DrainReporting::Durable,
                 faults,
             ) {
                 Ok(inactive) => {
@@ -880,6 +872,7 @@ pub(crate) fn drain_released_holds(
                 conflicts_opened: drained.conflicts_opened,
                 sharing_declined: std::mem::take(&mut drained.sharing_declined),
                 changes,
+                ..Default::default()
             });
         }
         completed.push((drained.refusals, cleanup));
@@ -917,8 +910,40 @@ pub(crate) fn standing_released_hold(
         .map(crate::HostedHold::stale))
 }
 
+/// The files a drain of `key` that did not wait changed: each side of a
+/// lineage it replaced, at its recovered path, and the head it moved from
+/// `before`, as [`drained_head`] read it before the drain.
+pub(crate) fn drained_changes(
+    store: &EngineStore,
+    key: &DocKey,
+    drained: &YdocDrainResult,
+    before: Option<&(String, String)>,
+) -> Result<Vec<crate::MomentMaterializationChange>, SyncError> {
+    let mut changes = Vec::new();
+    for replacement in &drained.lineage_replacements {
+        for path in &replacement.recovered_paths {
+            changes.push(crate::MomentMaterializationChange {
+                version_id: key.version_id.clone(),
+                path: path.clone(),
+                operation: "write",
+                content_kind: "text",
+            });
+        }
+    }
+    changes.extend(drained_head_change(
+        store,
+        key,
+        before,
+        drained.projected_moment.as_deref(),
+    )?);
+    Ok(changes)
+}
+
 /// `key`'s head, as its path and moment.
-fn drained_head(store: &EngineStore, key: &DocKey) -> Result<Option<(String, String)>, SyncError> {
+pub(crate) fn drained_head(
+    store: &EngineStore,
+    key: &DocKey,
+) -> Result<Option<(String, String)>, SyncError> {
     store.read_with(|conn| {
         conn.query_row(
             "SELECT path,latest_moment_id FROM snapshots \
@@ -931,18 +956,22 @@ fn drained_head(store: &EngineStore, key: &DocKey) -> Result<Option<(String, Str
     })
 }
 
-/// A write of `key`'s head once a drain moved it from `before`, or while
-/// the projection that wrote it still waits to be written to its file: an
-/// earlier attempt of the drain may have committed it and then waited.
-pub(crate) fn drained_head_change(
+/// A write of `key`'s head once a drain moved it from `before`, or once its
+/// head is `projected`, the moment the drain's own projection keys: an
+/// earlier attempt of the drain may have committed it and then waited while
+/// its file was written. Or while the projection that wrote it still waits
+/// to be written to its file.
+fn drained_head_change(
     store: &EngineStore,
     key: &DocKey,
     before: Option<&(String, String)>,
+    projected: Option<&str>,
 ) -> Result<Option<crate::MomentMaterializationChange>, SyncError> {
     let Some((path, moment)) = drained_head(store, key)? else {
         return Ok(None);
     };
     let changed = before.is_none_or(|(_, before)| *before != moment)
+        || projected == Some(moment.as_str())
         || store.read_with(|conn| {
             conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM materialization_jobs WHERE workspace_id=?1 \
@@ -972,17 +1001,21 @@ fn drain_deferred_ydoc_in_batch(
     faults: &dyn FaultInjector,
     batch: bool,
 ) -> Result<YdocDrainResult, SyncError> {
-    let mode = if batch {
-        DeferredDrainMode::Batch
+    let (mode, before) = if batch {
+        (DeferredDrainMode::Batch, drained_head(store, key)?)
     } else {
-        DeferredDrainMode::All
+        (DeferredDrainMode::All, None)
     };
     let (mut drained, mut cleanup) = drain_deferred_ydoc(store, cache, key, mode, faults, None)?;
+    // Nothing else reports the files this drain changed: the pass reports
+    // only the envelope's own, and the queued base's row keeps its
+    // replacement only until the cleanup removes it.
     if batch && drained.waiting.is_none() && !cleanup.consumed().is_empty() {
         cleanup.report_durably(crate::drain_report::DrainExtras {
             conflicts_opened: std::mem::take(&mut drained.conflicts_opened),
             sharing_declined: std::mem::take(&mut drained.sharing_declined),
-            changes: Vec::new(),
+            changes: drained_changes(store, key, &drained, before.as_ref())?,
+            ..Default::default()
         });
         drained.record_facts.clear();
     }
@@ -1132,11 +1165,16 @@ fn complete_drain_cleanup(
                     params![key.workspace_id,key.version_id,key.object_id], |row|row.get(0),
                 ).map_err(SyncError::corrupt)?;
                 if pending_artifact {
-                    let pending_job: bool = tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM materialization_jobs WHERE workspace_id=?1 AND target_path=?2 AND status='pending')",
-                        params![key.workspace_id,path], |row|row.get(0),
+                    // Its file is written, or still to be, even while
+                    // unrelated rows stay queued and keep its mark.
+                    let owed: bool = tx.query_row(
+                        "SELECT NOT EXISTS(SELECT 1 FROM materialization_jobs WHERE workspace_id=?1 AND target_path=?2 AND status='pending') \
+                         AND NOT EXISTS(SELECT 1 FROM ydoc_docs d JOIN snapshots s ON s.workspace_id=d.workspace_id \
+                           AND s.version_id=d.version_id AND s.object_id=d.object_id AND s.blob_sha256=d.last_settled_sha \
+                           WHERE d.workspace_id=?1 AND d.version_id=?3 AND d.object_id=?4 AND d.settled_update_seq=d.head_update_seq)",
+                        params![key.workspace_id,path,key.version_id,key.object_id], |row|row.get(0),
                     ).map_err(SyncError::corrupt)?;
-                    if !pending_job {
+                    if owed {
                         crate::moment_apply::open_artifacts::record_recovery_failure_in_tx(tx,key)?;
                     }
                 }
@@ -1309,8 +1347,9 @@ pub struct YdocDrainCleanup {
     key: DocKey,
     coordinates: Vec<(String, i64)>,
     projection_refusal: Option<crate::ReplicationRefusal>,
-    /// Refusals of rows whose bytes the drain applied first. Each persists
-    /// as its row leaves, so until then the row keeps its facts.
+    /// Refusals of rows whose bytes this drain or an earlier one applied
+    /// first. Each persists as its row leaves, so until then the row keeps
+    /// its facts.
     applied_refusals: Vec<crate::ReplicationRefusal>,
     /// Refusals of rows of another lineage than the head's that its archive
     /// would not take. Each persists as its row leaves.
@@ -1343,8 +1382,16 @@ impl YdocDrainCleanup {
     }
 
     /// Have the cleanup write what its rows owe, with `extras`, the drain's
-    /// own report, for a pass to claim.
-    pub(crate) fn report_durably(&mut self, extras: crate::drain_report::DrainExtras) {
+    /// own report, and the refusals it persists, for a pass to claim.
+    pub(crate) fn report_durably(&mut self, mut extras: crate::drain_report::DrainExtras) {
+        extras.refusals.extend(
+            self.projection_refusal
+                .iter()
+                .chain(&self.applied_refusals)
+                .chain(&self.off_head_refusals)
+                .chain(&self.live_refusals)
+                .cloned(),
+        );
         self.report = Some(extras);
     }
 }
@@ -1614,6 +1661,7 @@ fn drain_deferred_ydoc(
     let mut off_head_refusals = Vec::new();
     let mut live_refusals = Vec::new();
     let mut projected_lineage = None;
+    let mut projected_moment = None;
     // Rows held for released retained work while the head waits for
     // dependencies, earliest first. Each stays queued, and each row applied
     // past them brings them back to be decided against the new head.
@@ -1684,14 +1732,24 @@ fn drain_deferred_ydoc(
                 store, key, &origin_id, origin_seq,
             )?);
             // A refused row leaves with the cleanup, as an applied one does,
-            // so a drain that waits first keeps it and what it parked.
-            if echo {
-                drained_coordinates.push((origin_id, origin_seq));
-            } else {
-                let refusal =
-                    deferred_ydoc_refusal(key, &origin_id, origin_seq, LIVE_UNADMITTED_UPDATE);
-                refusals.push(refusal.clone());
-                live_refusals.push(refusal);
+            // so a drain that waits first keeps it and what it parked. One
+            // whose bytes an earlier drain applied keeps the refusal that
+            // apply was owed: a session that later binds neither replaces
+            // nor discharges it, and the head already holds those bytes.
+            match parked_refusal(store, key, &origin_id, origin_seq)? {
+                Some(reason) => {
+                    let refusal = deferred_ydoc_refusal(key, &origin_id, origin_seq, reason);
+                    refusals.push(refusal.clone());
+                    applied_refusals.push(refusal);
+                    drained_coordinates.push((origin_id, origin_seq));
+                }
+                None if echo => drained_coordinates.push((origin_id, origin_seq)),
+                None => {
+                    let refusal =
+                        deferred_ydoc_refusal(key, &origin_id, origin_seq, LIVE_UNADMITTED_UPDATE);
+                    refusals.push(refusal.clone());
+                    live_refusals.push(refusal);
+                }
             }
             continue;
         }
@@ -1766,6 +1824,9 @@ fn drain_deferred_ydoc(
                 Err(error) => return Err(error),
             }
             requeue_held(&mut queue, &mut held_rows, &mut released_hold);
+            // A base writes the head itself, keyed by its own coordinate.
+            let moment = ydoc_apply_moment_id(key, &payload.path, &origin_id, origin_seq);
+            projected_moment = Some(moment);
             conflicts_opened += store.read_with(|conn| {
                 conn.query_row("SELECT payload_hash FROM engine_requests WHERE request_id=?1 AND kind='sync-ydoc-conflict'",
                     [ydoc_conflict_coordinate_id(&key.workspace_id, &origin_id, origin_seq)],
@@ -2057,6 +2118,8 @@ fn drain_deferred_ydoc(
                 .map_err(map_collab_hard_error)?
                 .and_then(|marker| marker.lineage_claim_id)
                 .map(|lineage| (key.clone(), lineage));
+            let moment = ydoc_apply_moment_id(key, &payload.path, drain_origin, drain_seq);
+            projected_moment = Some(moment);
         }
         match projected {
             Ok(TxnOutcome::Committed(crate::BaseOrigination::Declined(declined))) => {
@@ -2123,6 +2186,7 @@ fn drain_deferred_ydoc(
             released_hold,
             archived_hold,
             waiting,
+            projected_moment,
         },
         YdocDrainCleanup {
             key: key.clone(),
@@ -4674,11 +4738,11 @@ pub(crate) struct InactiveDrain {
     pub(crate) cleared: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
 }
 
-/// Where an inactive drain reports the facts its removed rows parked: in the
-/// drain reports their transaction writes, for a pass, or in its answer, for
-/// a caller that reports them itself.
+/// Where a drain reports what its removed rows owe: in the drain reports
+/// their transaction writes, for a pass, or in its answer, for a caller that
+/// reports them itself.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InactiveReport {
+pub(crate) enum DrainReporting {
     Durable,
     Returned,
 }
@@ -4706,7 +4770,7 @@ pub(crate) fn drain_inactive_ydoc_updates(
     scope: InactiveScope<'_>,
     tails: &ReleasedTails,
     protected: &mut Vec<[String; 3]>,
-    report: InactiveReport,
+    report: DrainReporting,
     faults: &dyn FaultInjector,
 ) -> Result<InactiveDrain, SyncError> {
     let workspace_id = scope.workspace_id();
@@ -4789,19 +4853,27 @@ pub(crate) fn drain_inactive_ydoc_updates(
             }
             let reasons = apply_archived_rows_in_tx(tx, &key, &rows, search_policy.as_ref())?;
             for ((origin,seq,..), reason) in rows.iter().zip(reasons) {
-                if let Some(reason) = owed_refusals.remove(&(origin.clone(), *seq)).or(reason) {
-                    let refusal = deferred_ydoc_refusal(&key, origin, *seq, reason);
-                    crate::apply::persist_refusal(tx, &refusal)?;
-                    refusals.push(refusal);
+                let refusal = owed_refusals
+                    .remove(&(origin.clone(), *seq))
+                    .or(reason)
+                    .map(|reason| deferred_ydoc_refusal(&key, origin, *seq, reason));
+                if let Some(refusal) = &refusal {
+                    crate::apply::persist_refusal(tx, refusal)?;
+                    refusals.push(refusal.clone());
                 }
                 match report {
-                    InactiveReport::Durable => crate::drain_report::record_in_tx(
+                    // A later batch's archive projection can clear the
+                    // refusal's notice, so its report keeps it too.
+                    DrainReporting::Durable => crate::drain_report::record_in_tx(
                         tx,
                         workspace_id,
                         &[(origin.clone(), *seq)],
-                        &crate::drain_report::DrainExtras::default(),
+                        &crate::drain_report::DrainExtras {
+                            refusals: refusal.into_iter().collect(),
+                            ..Default::default()
+                        },
                     )?,
-                    InactiveReport::Returned => {
+                    DrainReporting::Returned => {
                         if let Some(facts) = parked.remove(&(origin.clone(), *seq)) {
                             record_facts.push(parse_parked_record_facts(&facts)?);
                         }
@@ -6251,7 +6323,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 InactiveScope::Document(&key, &[]),
                 tails,
                 &mut Vec::new(),
-                InactiveReport::Returned,
+                DrainReporting::Returned,
                 faults,
             )?;
             // The envelope's own refusal decides its disposition first; the

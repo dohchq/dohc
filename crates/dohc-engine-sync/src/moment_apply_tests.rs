@@ -8308,6 +8308,151 @@ fn recover_ended(store: &mut EngineStore) -> Result<crate::OpenArtifactDrain, Sy
     )
 }
 
+/// Opus's fourth finding on 3409694c7: a document whose artifact is already
+/// written gets no recovery-failure notice while an unrelated queued row
+/// keeps its pending-artifact mark.
+#[test]
+fn recovery_posts_no_failure_for_a_written_artifact_while_other_rows_stay_queued() {
+    let (_scratch, mut store, _, _, _) = ended_recovery_fixture();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "CREATE TEMP TABLE kept_marks AS SELECT * FROM ydoc_pending_artifacts; \
+                 CREATE TEMP TABLE kept_rows AS SELECT * FROM ydoc_deferred_updates;",
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+    recover_ended(&mut store).unwrap();
+    assert_eq!(
+        store.table_row_count("ydoc_pending_artifacts").unwrap(),
+        0,
+        "recovery wrote the artifact"
+    );
+    // A row no drain of the document takes stays queued, its mark comes
+    // back with it, and the file is written.
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "UPDATE kept_rows SET origin_seq=2; \
+                 INSERT INTO ydoc_deferred_updates SELECT * FROM kept_rows; \
+                 INSERT INTO ydoc_pending_artifacts SELECT * FROM kept_marks; \
+                 UPDATE materialization_jobs SET status='complete',completed_at_ms=0 \
+                   WHERE status='pending'; \
+                 DROP TABLE kept_rows; DROP TABLE kept_marks;",
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+    recover_ended(&mut store).unwrap();
+    let left: (i64, i64, i64) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM replication_pending_refusals WHERE reason_code=?1), \
+                   (SELECT COUNT(*) FROM ydoc_pending_artifacts), \
+                   (SELECT COUNT(*) FROM ydoc_deferred_updates)",
+                [crate::moment_apply::open_artifacts::RECOVERY_FAILURE_CODE],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(left, (0, 1, 1), "no notice; the row and its mark stay");
+}
+
+/// Sol's third and Opus's first findings on 3409694c7: recovery in a pass
+/// writes what the rows of a document it completes committed as drain
+/// reports, in the transaction that removes them, so a later op's wait, an
+/// abandoned pass or a restart still reports them once, with no recovery
+/// failure. The direct recovery API answers the same results at once.
+#[test]
+fn recovery_in_a_pass_reports_what_it_removed_through_drain_reports() {
+    type Reported = (
+        Vec<(String, &'static str)>,
+        Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+        i64,
+    );
+    fn paths(changes: &[crate::MomentMaterializationChange]) -> Vec<(String, &'static str)> {
+        changes
+            .iter()
+            .map(|change| (change.path.clone(), change.operation))
+            .collect()
+    }
+    fn marks(store: &EngineStore) -> (i64, i64) {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM replication_pending_refusals WHERE reason_code=?1), \
+                       (SELECT COUNT(*) FROM ydoc_pending_artifacts)",
+                    [crate::moment_apply::open_artifacts::RECOVERY_FAILURE_CODE],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap()
+    }
+
+    let (_scratch, mut store, _, _, _) = ended_recovery_fixture();
+    let direct = recover_ended(&mut store).unwrap();
+    assert_eq!(store.table_row_count("ydoc_drain_reports").unwrap(), 0);
+    let expected: Reported = (
+        paths(&direct.changes),
+        direct.record_facts.clone(),
+        direct.conflicts_opened,
+    );
+    let direct_marks = marks(&store);
+    assert_eq!(direct_marks.0, 0, "no recovery failure");
+
+    for restart in [false, true] {
+        let (scratch, mut store, _, _, _) = ended_recovery_fixture();
+        let recovered = crate::moment_apply::open_artifacts::drain_open_document_artifacts_durably(
+            &mut store,
+            &mut Default::default(),
+            "ws",
+            &NoLiveLeases,
+            &NoFaults,
+        )
+        .unwrap();
+        assert!(recovered.waiting.is_none());
+        assert!(
+            recovered.changes.is_empty()
+                && recovered.record_facts.is_empty()
+                && recovered.conflicts_opened == 0,
+            "restart={restart}: the drain reports carry them"
+        );
+        assert_eq!(marks(&store), direct_marks, "restart={restart}");
+
+        // A later op of the pass waits and the pass is abandoned, or the
+        // store restarts; the next pass claims the reports.
+        let mut store = if restart {
+            drop(store);
+            EngineStore::open(&engine_db_path(&scratch).unwrap(), 3_000).unwrap()
+        } else {
+            store
+        };
+        let mut first = None;
+        let claimed = crate::drain_report::claim(&mut store, "ws", &mut first, &NoFaults).unwrap();
+        let reported: Reported = (
+            paths(&claimed.extras.changes),
+            claimed.record_facts,
+            claimed.extras.conflicts_opened,
+        );
+        assert_eq!(reported, expected, "restart={restart}");
+        let mut second = None;
+        let again = crate::drain_report::claim(&mut store, "ws", &mut second, &NoFaults).unwrap();
+        assert_eq!(paths(&again.extras.changes), expected.0);
+        store
+            .write_with(&NoFaults, |tx| {
+                crate::cursor::release_settlement_report_in_tx(
+                    tx,
+                    "ws",
+                    second.as_deref().expect("a report token"),
+                )
+            })
+            .unwrap();
+        assert_eq!(store.table_row_count("ydoc_drain_reports").unwrap(), 0);
+        assert_eq!(marks(&store), direct_marks, "restart={restart}");
+    }
+}
+
 #[test]
 fn ended_recovery_storage_failure_propagates_without_notice_or_fingerprint() {
     let (_scratch, mut store, _, _, _) = ended_recovery_fixture();

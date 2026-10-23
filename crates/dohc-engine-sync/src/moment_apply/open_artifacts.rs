@@ -1,4 +1,5 @@
 use super::*;
+use crate::ydoc_apply::DrainReporting;
 use dohc_engine_collab::WriterDocCache;
 use dohc_engine_storage::{StorageError, TxnOutcome};
 
@@ -143,6 +144,46 @@ pub fn drain_open_document_artifacts(
     leases: &dyn LeaseProbe,
     faults: &dyn FaultInjector,
 ) -> Result<OpenArtifactDrain, SyncError> {
+    recover(
+        store,
+        cache,
+        workspace_id,
+        leases,
+        DrainReporting::Returned,
+        faults,
+    )
+}
+
+/// [`drain_open_document_artifacts`] in a pass: the transaction that removes
+/// a document's queued rows writes what they committed as drain reports, so
+/// a later wait, an abandoned pass or a restart loses none of it. The answer
+/// keeps only refusals, holds, a wait, and a head an earlier attempt wrote
+/// that this one removed no row for.
+pub(crate) fn drain_open_document_artifacts_durably(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    workspace_id: &str,
+    leases: &dyn LeaseProbe,
+    faults: &dyn FaultInjector,
+) -> Result<OpenArtifactDrain, SyncError> {
+    recover(
+        store,
+        cache,
+        workspace_id,
+        leases,
+        DrainReporting::Durable,
+        faults,
+    )
+}
+
+fn recover(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    workspace_id: &str,
+    leases: &dyn LeaseProbe,
+    reporting: DrainReporting,
+    faults: &dyn FaultInjector,
+) -> Result<OpenArtifactDrain, SyncError> {
     let keys = store.read_with(|conn| {
         let mut stmt = conn.prepare("SELECT version_id,object_id FROM ydoc_pending_artifacts WHERE workspace_id=?1 ORDER BY rowid")
             .map_err(SyncError::corrupt)?;
@@ -180,32 +221,15 @@ pub fn drain_open_document_artifacts(
                 TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
                 TxnOutcome::Committed(true) => {}
             }
-            let before = store.read_with(|conn| {
-                select_snapshot_by_object(conn, workspace_id, &key.version_id, &key.object_id)
-            })?;
+            let before = crate::ydoc_apply::drained_head(store, &key)?;
             let (drained, cleanup) = crate::ydoc_apply::drain_ended_session_holding_cleanup(
                 store, cache, &key, leases, faults,
             )?;
             if drained.waiting.is_some() {
                 return Ok(Some((drained, cleanup, Vec::new())));
             }
-            let mut changes = Vec::new();
-            for replacement in &drained.lineage_replacements {
-                for path in &replacement.recovered_paths {
-                    changes.push(MomentMaterializationChange {
-                        version_id: key.version_id.clone(),
-                        path: path.clone(),
-                        operation: "write",
-                        content_kind: "text",
-                    });
-                }
-            }
-            let before = before.map(|head| (head.path, head.latest_moment_id));
-            changes.extend(crate::ydoc_apply::drained_head_change(
-                store,
-                &key,
-                before.as_ref(),
-            )?);
+            let changes =
+                crate::ydoc_apply::drained_changes(store, &key, &drained, before.as_ref())?;
             Ok(Some((drained, cleanup, changes)))
         })();
         match attempt {
@@ -238,7 +262,19 @@ pub fn drain_open_document_artifacts(
         }
         cache.remove(&key);
     }
-    for (key, drained, cleanup, changes) in completed {
+    for (key, mut drained, mut cleanup, mut changes) in completed {
+        // In a pass, what the rows the cleanup removes committed becomes
+        // their drain reports in that transaction; a drain that removes no
+        // row reports only a head an earlier attempt wrote.
+        if reporting == DrainReporting::Durable && !cleanup.consumed().is_empty() {
+            cleanup.report_durably(crate::drain_report::DrainExtras {
+                conflicts_opened: std::mem::take(&mut drained.conflicts_opened),
+                sharing_declined: std::mem::take(&mut drained.sharing_declined),
+                changes: std::mem::take(&mut changes),
+                ..Default::default()
+            });
+            drained.record_facts.clear();
+        }
         match crate::ydoc_apply::complete_ended_session_cleanup(
             store, &key, leases, cleanup, faults,
         ) {

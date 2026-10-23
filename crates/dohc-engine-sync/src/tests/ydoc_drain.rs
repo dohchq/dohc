@@ -1465,13 +1465,15 @@ fn parked_facts_after_a_lineage_change(route: OldLineageRoute, refused: bool) {
                 crate::ydoc_apply::InactiveScope::Workspace("ws"),
                 &tails,
                 &mut Vec::new(),
-                crate::ydoc_apply::InactiveReport::Durable,
+                crate::ydoc_apply::DrainReporting::Durable,
                 &NoFaults,
             )
             .expect("inactive drain");
             assert!(inactive.record_facts.is_empty(), "{route:?}");
             let claimed = crate::drain_report::claim(&mut engine, "ws", &mut None, &NoFaults)
                 .expect("claim the drain reports");
+            // The report keeps the refusal the drain persisted, as given.
+            assert_eq!(claimed.extras.refusals, inactive.refusals, "{route:?}");
             (claimed.record_facts, inactive.refusals)
         }
         // Sol's fourth ruling: the envelope's refusal decides its own
@@ -3564,7 +3566,7 @@ fn assert_parked_inactive_refusal(collision: bool, waiting: u8) {
             crate::ydoc_apply::InactiveScope::Document(&key, &[]),
             &tails,
             &mut Vec::new(),
-            crate::ydoc_apply::InactiveReport::Returned,
+            crate::ydoc_apply::DrainReporting::Returned,
             &NoFaults,
         )
         .unwrap();
@@ -3596,4 +3598,323 @@ fn ydoc_drain_waiting_empty_queue_leaves_inactive_update_queued() {
 #[test]
 fn ydoc_drain_waiting_nonempty_queue_leaves_inactive_update_queued() {
     assert_parked_inactive_refusal(true, 2);
+}
+
+/// Opus's seventh finding on 3409694c7: a drain report this build cannot
+/// read fails the claim that meets it once, and is gone after it; the
+/// reports beside it stay owed and the next claim reports them.
+#[test]
+fn an_unreadable_drain_report_fails_one_claim_and_the_rest_stay_owed() {
+    let (_scratch, _path, mut engine) = open_store();
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "INSERT INTO ydoc_drain_reports(workspace_id,origin_id,origin_seq,report_json) \
+                   VALUES ('ws','peer',1,'{\"changes\":[{\"versionId\":\"main\",\"path\":\"a.md\", \
+                     \"operation\":\"rename\",\"contentKind\":\"text\"}]}'); \
+                 INSERT INTO ydoc_drain_reports(workspace_id,origin_id,origin_seq,report_json) \
+                   VALUES ('ws','peer',2,'{\"conflictsOpened\":1}');",
+            )
+            .map_err(SyncError::persist)
+        })
+        .expect("store the reports");
+    let mut token = None;
+    assert!(matches!(
+        crate::drain_report::claim(&mut engine, "ws", &mut token, &NoFaults),
+        Err(SyncError::Storage(_))
+    ));
+    assert_eq!(engine.table_row_count("ydoc_drain_reports").unwrap(), 1);
+    let claimed = crate::drain_report::claim(&mut engine, "ws", &mut None, &NoFaults)
+        .expect("the next claim reports the rest");
+    assert_eq!(claimed.extras.conflicts_opened, 1);
+}
+
+/// The refusals of `origin` in `refusals`, as coordinate and reason.
+fn refusals_of(refusals: &[crate::ReplicationRefusal], origin: &str) -> Vec<(i64, String)> {
+    refusals
+        .iter()
+        .filter(|refusal| refusal.origin_id == origin)
+        .map(|refusal| (refusal.origin_seq, refusal.reason.message().to_owned()))
+        .collect()
+}
+
+/// Sol's first and Opus's second findings on 3409694c7: a queued row whose
+/// content kind the head refuses applies its bytes first, and a later row of
+/// the same lineage projects the head, so the cleanup clears the lineage's
+/// notices, the refusal it just persisted among them. Its drain report keeps
+/// that refusal, so a request abandoned at a later wait, or a restart, still
+/// reports it, once, until a commit acknowledges it.
+#[test]
+fn a_refusal_its_projection_clears_stays_in_the_drain_report() {
+    const RECORD_ID: &str = "rec_kkkkkkkkkkkkkkkkkkkkkkkkkk";
+    const OBJECT_ID: &str = "kind-refused-record-object";
+    const PATH: &str = "tasks/kind-refused.md";
+
+    for restart in [false, true] {
+        let (_scratch, store_path, mut engine, key, claim_id) =
+            queued_title_change(RECORD_ID, OBJECT_ID, PATH, "kind-peer");
+        let base = dohc_engine_collab::load_persisted(&engine, &key)
+            .expect("load head")
+            .expect("head")
+            .doc
+            .encode_full_state();
+        let remote = dohc_engine_collab::Ydoc::wire();
+        remote.apply(&base).expect("remote sees the base");
+        let paragraph = engine
+            .put_binary_blob(&remote.richdoc_append_paragraph("Later."))
+            .expect("store the paragraph");
+        let later = envelope(
+            "kind-later",
+            0,
+            "ydoc.update",
+            json!({
+                "versionId": "main", "objectId": OBJECT_ID, "path": PATH,
+                "contentKind": "richdoc", "updateBlobSha256": paragraph,
+                "lineageClaimId": claim_id, "isBaseState": false,
+                "actorOriginId": "remote-author"
+            }),
+        );
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &later,
+            &NoFaults,
+            &AlwaysLive,
+        )
+        .expect("queue the paragraph");
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE replication_log \
+                     SET payload_json=json_set(payload_json,'$.contentKind','plaintext') \
+                     WHERE origin_id='kind-peer'",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute_batch(&format!(
+                    "INSERT INTO hosted_replicas(workspace_id,scope_generation,created_at_ms, \
+                       main_cursor,last_outbound_seq) VALUES ('ws',1,0,1,-1); \
+                     INSERT INTO hosted_documents(workspace_id,object_id,path,state, \
+                       held_reason,scope_generation) VALUES ('ws','{OBJECT_ID}','{PATH}', \
+                       'held','hosted-backfill-work-waiting',1);"
+                ))
+                .map_err(SyncError::persist)
+            })
+            .expect("name another content kind, and hold the document");
+        let pending = |engine: &EngineStore| -> i64 {
+            engine
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM replication_pending_refusals \
+                         WHERE origin_id='kind-peer'",
+                        [],
+                        |row| row.get(0),
+                    )
+                })
+                .expect("pending refusals")
+        };
+
+        let released = crate::ydoc_apply::drain_released_holds(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &BTreeMap::new(),
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("drain the held document");
+        assert!(released.waiting.is_none());
+        let owed = refusals_of(&released.refusals, "kind-peer");
+        assert_eq!(owed.len(), 1, "restart={restart}: {:?}", released.refusals);
+        assert_eq!(
+            pending(&engine),
+            0,
+            "restart={restart}: the projection cleared its notice"
+        );
+
+        // The request is abandoned at a later wait, or the store restarts.
+        if restart {
+            drop(engine);
+            engine = EngineStore::open(&store_path, 3_000).expect("reopen");
+        }
+        let mut first = None;
+        let claimed = crate::drain_report::claim(&mut engine, "ws", &mut first, &NoFaults)
+            .expect("claim the drain reports");
+        assert_eq!(
+            refusals_of(&claimed.extras.refusals, "kind-peer"),
+            owed,
+            "restart={restart}: the report keeps the refusal"
+        );
+        // That request is abandoned too: the next one reports it once more.
+        let mut second = None;
+        let again = crate::drain_report::claim(&mut engine, "ws", &mut second, &NoFaults)
+            .expect("claim again");
+        assert_eq!(refusals_of(&again.extras.refusals, "kind-peer"), owed);
+        engine
+            .write_with(&NoFaults, |tx| {
+                crate::cursor::release_settlement_report_in_tx(
+                    tx,
+                    "ws",
+                    second.as_deref().expect("a report token"),
+                )
+            })
+            .expect("commit the cursor");
+        assert!(
+            crate::drain_report::claim(&mut engine, "ws", &mut None, &NoFaults)
+                .expect("claim nothing")
+                .extras
+                .refusals
+                .is_empty(),
+            "restart={restart}: acknowledged"
+        );
+    }
+}
+
+/// Sol's fourth finding on 3409694c7, ruled: a row an earlier drain applied,
+/// owing a refusal for the path it named, keeps that refusal once a device
+/// binds its document, whether that session saw the update or not. The
+/// drain that removes the row reports the original refusal, once; it is not
+/// "never admitted", and the head, which holds those bytes, is neither held
+/// nor made to keep the update's blob for it.
+#[test]
+fn a_live_classification_keeps_the_refusal_its_rows_apply_was_owed() {
+    for echo in [false, true] {
+        for restart in [false, true] {
+            live_classification_over_an_owed_refusal(echo, restart);
+        }
+    }
+}
+
+fn live_classification_over_an_owed_refusal(echo: bool, restart: bool) {
+    const RECORD_ID: &str = "rec_mmmmmmmmmmmmmmmmmmmmmmmmmm";
+    const OBJECT_ID: &str = "owed-live-record-object";
+    const PATH: &str = "tasks/owed-live.md";
+    const ELSEWHERE: &str = "tasks/owed-elsewhere.md";
+
+    let (_scratch, store_path, mut engine, key, claim_id) =
+        queued_title_change(RECORD_ID, OBJECT_ID, PATH, "owed-peer");
+    let (update_sha, update_length): (String, i64) = engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE replication_log SET payload_json=json_set(payload_json,'$.path',?1) \
+                 WHERE origin_id='owed-peer'",
+                [ELSEWHERE],
+            )
+            .map_err(SyncError::persist)?;
+            tx.query_row(
+                "SELECT b.sha256,b.byte_length FROM replication_log r JOIN binary_blobs b \
+                 ON b.sha256=json_extract(r.payload_json,'$.updateBlobSha256') \
+                 WHERE r.origin_id='owed-peer'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .map(|outcome| match outcome {
+            TxnOutcome::Committed(update) => update,
+            TxnOutcome::Crashed { .. } => panic!("no fault is injected"),
+        })
+        .expect("name another path");
+    let state = |engine: &EngineStore| -> (i64, i64, i64, i64) {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM collection_field_history WHERE record_id=?1), \
+                       (SELECT COUNT(*) FROM ydoc_deferred_updates), \
+                       (SELECT COUNT(*) FROM replication_pending_refusals WHERE origin_id='owed-peer'), \
+                       (SELECT COUNT(*) FROM replication_refused_ydoc_blobs WHERE origin_id='owed-peer')",
+                    [RECORD_ID],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+            })
+            .expect("state")
+    };
+
+    // The drain applies the update, owing its path refusal, and stops before
+    // its cleanup, as one that then waits does.
+    let (applied, _cleanup) = crate::drain_deferred_ydoc_for_key_holding_cleanup(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("stopped drain");
+    let owed = refusals_of(&applied.refusals, "owed-peer");
+    assert_eq!(owed.len(), 1, "echo={echo}: {applied:?}");
+    assert_eq!(state(&engine), (1, 1, 0, 0), "echo={echo}: nothing refused yet");
+
+    // A device binds the document; with `echo`, its session saw the update.
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO live_device_application_bindings VALUES \
+                 ('relay','ws','main',?1,?2,?3,'[]',0,'host',1,'instance','connection',1,NULL)",
+                params![OBJECT_ID, claim_id, ELSEWHERE],
+            )
+            .map_err(SyncError::persist)?;
+            if echo {
+                tx.execute(
+                    "INSERT INTO live_device_update_applications (relay_database_namespace, \
+                       workspace_id,delivery_id,main_version_id,object_id,lineage_claim_id, \
+                       current_path,selector_paths_json,restore_fence_generation,update_digest, \
+                       update_byte_length,journal_cursor,accepting_host_epoch,principal_kind, \
+                       principal_id,received_at_ms,first_seen_count,local_ydoc_sequence, \
+                       applied_host_id,applied_host_epoch,applied_instance_id, \
+                       applied_connection_id) VALUES \
+                     ('relay','ws','delivery','main',?1,?2,?3,'[]',0,?4,?5,7,1,'owner','owner', \
+                      0,0,1,'host',1,'instance','connection')",
+                    params![OBJECT_ID, claim_id, ELSEWHERE, update_sha, update_length],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "INSERT INTO live_device_application_first_seen VALUES \
+                     ('relay','ws','delivery',0,1,0,1)",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            Ok::<_, SyncError>(())
+        })
+        .expect("bind a device");
+
+    if restart {
+        drop(engine);
+        engine = EngineStore::open(&store_path, 3_000).expect("reopen");
+    }
+    let drained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("drain");
+    assert_eq!(
+        refusals_of(&drained.refusals, "owed-peer"),
+        owed,
+        "echo={echo} restart={restart}: the original refusal"
+    );
+    assert_eq!(drained.record_facts, applied.record_facts);
+    assert_eq!(
+        state(&engine),
+        (1, 0, 1, 0),
+        "echo={echo} restart={restart}: refused once, no blob kept for a live refusal"
+    );
+    let reason: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT reason_message FROM replication_pending_refusals WHERE origin_id='owed-peer'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("the persisted refusal");
+    assert_eq!(reason, owed[0].1);
+    let idle = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("idle drain");
+    assert!(idle.refusals.is_empty() && idle.record_facts.is_empty());
 }

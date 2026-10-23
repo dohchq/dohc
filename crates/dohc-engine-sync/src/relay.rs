@@ -2704,11 +2704,19 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     ) -> Result<Applying, RelayError> {
         let p = &mut progress;
         // Recovery that waits for validation leaves every drain's rows
-        // queued and runs again after it, reporting them then.
+        // queued and runs again after it, reporting them then. The rows one
+        // that completes removes leave drain reports, so a later wait loses
+        // none of what they committed.
         while p.recovering {
             let recovered =
-                crate::drain_open_document_artifacts(store, cache, workspace_id, leases, faults)
-                    .map_err(local)?;
+                crate::moment_apply::open_artifacts::drain_open_document_artifacts_durably(
+                    store,
+                    cache,
+                    workspace_id,
+                    leases,
+                    faults,
+                )
+                .map_err(local)?;
             for change in recovered.changes {
                 insert_changed_path(&mut p.pass.changed_paths, change);
             }
@@ -2807,7 +2815,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             crate::ydoc_apply::InactiveScope::Workspace(workspace_id),
             &cache.released_tails(store),
             &mut Vec::new(),
-            crate::ydoc_apply::InactiveReport::Durable,
+            crate::ydoc_apply::DrainReporting::Durable,
             faults,
         ) {
             Ok(drained) => {
@@ -2905,6 +2913,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             .conflicts_opened
             .checked_add(drained.extras.conflicts_opened)
             .ok_or(RelayError::InvalidResponse)?;
+        // A refusal a later projection's notice clearing removed from the
+        // pending refusals still reaches the pass, once with them.
+        for refusal in drained.extras.refusals {
+            push_refusal_once(&mut pass.refusals, refusal);
+        }
         // A drain refusal can commit before a later envelope fails hard, or
         // outside a pull during open/resync/close. Claim every relay-owned
         // pending sidecar under a unique local report token and return it here.
@@ -2957,7 +2970,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 crate::ydoc_apply::InactiveScope::Workspace(workspace_id),
                 &cache.released_tails(store),
                 &mut p.archived_protected,
-                crate::ydoc_apply::InactiveReport::Durable,
+                crate::ydoc_apply::DrainReporting::Durable,
                 faults,
             )
             .map_err(local)?;

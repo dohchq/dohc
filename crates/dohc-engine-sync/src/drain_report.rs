@@ -4,8 +4,9 @@
 //! abandoned, or meets a restart loses nothing it committed. The pass claims
 //! every report no other live pass owns under its settlement report token,
 //! and its cursor commit removes them, as it does its applied settlements.
-//! Refusals need no report: each persists as a pending refusal, which every
-//! pass reports.
+//! A report keeps the refusals its drain persisted too: a projection that
+//! settles their lineage clears their notices, and with them the pending
+//! refusals a pass would otherwise report.
 
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -13,21 +14,25 @@ use serde::{Deserialize, Serialize};
 use dohc_engine_domain::CollectionRecordApplyFacts;
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
 
-use crate::{MomentMaterializationChange, SharingDeclined, SyncError};
+use crate::{MomentMaterializationChange, ReplicationRefusal, SharingDeclined, SyncError};
 
 /// What a drain reported as a whole, not of one row: conflicts its bases
-/// opened, sharing its projection declined, and the files it changed. It
-/// rides with the drain's last removed row.
+/// opened, sharing its projection declined, the files it changed, and the
+/// refusals it persisted. It rides with the drain's last removed row.
 #[derive(Debug, Default)]
 pub(crate) struct DrainExtras {
     pub(crate) conflicts_opened: i64,
     pub(crate) sharing_declined: Vec<SharingDeclined>,
     pub(crate) changes: Vec<MomentMaterializationChange>,
+    pub(crate) refusals: Vec<ReplicationRefusal>,
 }
 
 impl DrainExtras {
     fn is_empty(&self) -> bool {
-        self.conflicts_opened == 0 && self.sharing_declined.is_empty() && self.changes.is_empty()
+        self.conflicts_opened == 0
+            && self.sharing_declined.is_empty()
+            && self.changes.is_empty()
+            && self.refusals.is_empty()
     }
 }
 
@@ -36,6 +41,38 @@ impl DrainExtras {
 pub(crate) struct ClaimedReports {
     pub(crate) record_facts: Vec<CollectionRecordApplyFacts>,
     pub(crate) extras: DrainExtras,
+}
+
+impl ClaimedReports {
+    /// Add `report`, a report of `workspace_id`, whole or not at all.
+    fn add(&mut self, workspace_id: &str, report: StoredReport) -> Result<(), SyncError> {
+        let conflicts_opened = self
+            .extras
+            .conflicts_opened
+            .checked_add(report.conflicts_opened)
+            .ok_or_else(malformed)?;
+        let sharing_declined = report
+            .sharing_declined
+            .into_iter()
+            .map(StoredDecline::declined)
+            .collect::<Result<Vec<_>, _>>()?;
+        let changes = report
+            .changes
+            .into_iter()
+            .map(StoredChange::change)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.record_facts.extend(report.record_facts);
+        self.extras.conflicts_opened = conflicts_opened;
+        self.extras.sharing_declined.extend(sharing_declined);
+        self.extras.changes.extend(changes);
+        self.extras.refusals.extend(
+            report
+                .refusals
+                .into_iter()
+                .map(|refusal| refusal.refusal(workspace_id)),
+        );
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -49,6 +86,8 @@ struct StoredReport {
     sharing_declined: Vec<StoredDecline>,
     #[serde(default)]
     changes: Vec<StoredChange>,
+    #[serde(default)]
+    refusals: Vec<StoredRefusal>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -71,6 +110,15 @@ struct StoredChange {
     path: String,
     operation: String,
     content_kind: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredRefusal {
+    origin_id: String,
+    origin_seq: i64,
+    op_kind: String,
+    reason: String,
 }
 
 fn malformed() -> SyncError {
@@ -130,9 +178,33 @@ impl StoredChange {
             content_kind: match self.content_kind.as_str() {
                 "text" => "text",
                 "binary" => "binary",
+                "secret" => "secret",
                 _ => return Err(malformed()),
             },
         })
+    }
+}
+
+impl StoredRefusal {
+    fn new(refusal: &ReplicationRefusal) -> Self {
+        Self {
+            origin_id: refusal.origin_id.clone(),
+            origin_seq: refusal.origin_seq,
+            op_kind: refusal.op_kind.clone(),
+            reason: refusal.reason.message().to_owned(),
+        }
+    }
+
+    fn refusal(self, workspace_id: &str) -> ReplicationRefusal {
+        ReplicationRefusal {
+            workspace_id: workspace_id.to_owned(),
+            origin_id: self.origin_id,
+            origin_seq: self.origin_seq,
+            op_kind: self.op_kind,
+            reason: crate::RefusalReason::InvalidInput {
+                reason: self.reason,
+            },
+        }
     }
 }
 
@@ -178,12 +250,17 @@ pub(crate) fn record_in_tx(
             } else {
                 Vec::new()
             },
+            refusals: if last {
+                extras.refusals.iter().map(StoredRefusal::new).collect()
+            } else {
+                Vec::new()
+            },
         };
         if report.record_facts.is_none() && (!last || extras.is_empty()) {
             continue;
         }
         tx.execute(
-            "INSERT OR REPLACE INTO ydoc_drain_reports \
+            "INSERT INTO ydoc_drain_reports \
              (workspace_id,origin_id,origin_seq,report_json,report_id) VALUES (?1,?2,?3,?4,NULL)",
             params![
                 workspace_id,
@@ -199,7 +276,10 @@ pub(crate) fn record_in_tx(
 
 /// Claim every drain report of `workspace_id` that `report_id` does not
 /// already own under it, creating the token when none exists yet, and answer
-/// what they report. One an abandoned pass claimed is claimed again.
+/// what they report. One an abandoned pass claimed is claimed again. A report
+/// this build cannot read is removed as the rest are claimed, and the claim
+/// then fails once, so the pass that meets it says so and the next one
+/// reports the rest.
 pub(crate) fn claim(
     store: &mut EngineStore,
     workspace_id: &str,
@@ -229,40 +309,48 @@ pub(crate) fn claim(
             .prepare(
                 "UPDATE ydoc_drain_reports SET report_id=?2 \
                  WHERE workspace_id=?1 AND COALESCE(report_id!=?2,1) \
-                 RETURNING rowid,report_json",
+                 RETURNING rowid,origin_id,origin_seq,report_json",
             )
             .map_err(SyncError::corrupt)?;
         let mut rows = statement
             .query_map(params![workspace_id, token], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
             })
             .map_err(SyncError::corrupt)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(SyncError::persist)?;
         // In the order the drains removed their rows.
-        rows.sort_by_key(|(rowid, _)| *rowid);
+        rows.sort_by_key(|(rowid, ..)| *rowid);
         drop(statement);
-        Ok::<_, SyncError>((token, rows))
+        let mut claimed = ClaimedReports::default();
+        let mut unreadable = false;
+        for (_, origin_id, origin_seq, json) in rows {
+            let added = serde_json::from_str::<StoredReport>(&json)
+                .map_err(|_| malformed())
+                .and_then(|report| claimed.add(workspace_id, report));
+            if added.is_err() {
+                tx.execute(
+                    "DELETE FROM ydoc_drain_reports \
+                     WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+                    params![workspace_id, origin_id, origin_seq],
+                )
+                .map_err(SyncError::persist)?;
+                unreadable = true;
+            }
+        }
+        Ok::<_, SyncError>((token, claimed, unreadable))
     })?;
-    let TxnOutcome::Committed((token, rows)) = outcome else {
+    let TxnOutcome::Committed((token, claimed, unreadable)) = outcome else {
         return Err(SyncError::FaultCrash);
     };
     *report_id = Some(token);
-    let mut claimed = ClaimedReports::default();
-    for (_, json) in rows {
-        let report: StoredReport = serde_json::from_str(&json).map_err(|_| malformed())?;
-        claimed.record_facts.extend(report.record_facts);
-        claimed.extras.conflicts_opened = claimed
-            .extras
-            .conflicts_opened
-            .checked_add(report.conflicts_opened)
-            .ok_or_else(malformed)?;
-        for declined in report.sharing_declined {
-            claimed.extras.sharing_declined.push(declined.declined()?);
-        }
-        for change in report.changes {
-            claimed.extras.changes.push(change.change()?);
-        }
+    if unreadable {
+        return Err(malformed());
     }
     Ok(claimed)
 }

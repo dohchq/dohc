@@ -113,6 +113,7 @@ const COMPARED_TABLES: &[&str] = &[
     "ydoc_updates",
     "ydoc_snapshots",
     "ydoc_deferred_updates",
+    "ydoc_drain_reports",
     "ydoc_inactive_lineages",
     "ydoc_base_relay_candidates",
     "ydoc_recovery_decisions",
@@ -717,7 +718,11 @@ mod tests {
 
     #[test]
     fn backup_compares_ydoc_arbitration_tables() {
-        for table in ["ydoc_base_relay_candidates", "ydoc_recovery_decisions"] {
+        for table in [
+            "ydoc_base_relay_candidates",
+            "ydoc_recovery_decisions",
+            "ydoc_drain_reports",
+        ] {
             assert!(
                 COMPARED_TABLES.contains(&table),
                 "backup restore verification must compare {table}"
