@@ -21,8 +21,10 @@ export function LinkChannelPanel({session, fallback}: {session: string; fallback
   useEffect(() => {
     const controller = new AbortController();
     setChannel(null); setEnded(false); setName(""); setNameSet(false);
-    // A failed check leaves the link's other panel in place.
-    void openLinkChannel(session, controller.signal).then(found => {if (!controller.signal.aborted) setChannel(found);}, () => {});
+    // A failed check leaves the link's other panel in place. A name set on an earlier visit is not asked for again.
+    void openLinkChannel(session, controller.signal).then(found => {
+      if (!controller.signal.aborted) {setChannel(found); setNameSet(found?.profileName != null);}
+    }, () => {});
     return () => controller.abort();
   }, [session]);
 

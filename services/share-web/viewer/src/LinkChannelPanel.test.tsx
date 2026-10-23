@@ -16,11 +16,12 @@ beforeEach(() => {
 });
 afterEach(async () => {await act(async () => root.unmount()); container.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals();});
 
-function server(options: {access?: "read-only" | "read-write"; channel?: boolean; post?: (body: Record<string, unknown>) => Response} = {}) {
+function server(options: {access?: "read-only" | "read-write"; channel?: boolean; profileName?: string; post?: (body: Record<string, unknown>) => Response} = {}) {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), "https://viewer.test"), signal = init?.signal ?? new AbortController().signal;
     if (url.pathname === "/api/view/chat/channels") return options.channel === false ? jsonResponse({ok: false, error: "not found"}, 404)
-      : jsonResponse({shareId: "share", channels: [{channelWireId: "wire", name: "Team", access: options.access ?? "read-write"}]});
+      : jsonResponse({shareId: "share", profileName: options.profileName ?? null,
+        channels: [{channelWireId: "wire", name: "Team", access: options.access ?? "read-write"}]});
     if (init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>; posts.push({headers: new Headers(init.headers), body});
       return options.post?.(body) ?? jsonResponse({shareId: "share", channelWireId: "wire",
@@ -54,6 +55,21 @@ it("posts from a read-write link with the name it sets once, and marks the post 
   expect(nameField()).toBeNull();
   setControlValue(composer()!, "And again"); await act(async () => send().click()); await settle(() => posts.length === 2 && composer()?.value === "");
   expect(posts[1]?.body).not.toHaveProperty("claimedName");
+});
+
+it("asks for no name when this browser set one on an earlier visit", async () => {
+  server({profileName: "Sam"}); await render(); await opened();
+  expect(nameField()).toBeNull();
+  setControlValue(composer()!, "Back again"); await act(async () => send().click()); await settle(() => composer()?.value === "");
+  expect(posts[0]?.body).not.toHaveProperty("claimedName");
+});
+
+it("says why the relay refused a post, in words", async () => {
+  const error = "The owner paused posts from share links. Try again later.";
+  server({post: () => jsonResponse({ok: false, code: "link_discussion_paused", error}, 403)});
+  await render(); await opened(); setControlValue(composer()!, "Hi"); await act(async () => send().click());
+  await settle(() => text().includes(error));
+  expect(composer()?.value).toBe("Hi");
 });
 
 it("holds a post until a name that is too long is shortened", async () => {

@@ -213,7 +213,8 @@ export function ChannelView({client, name, onEnded, composerField, holdSend = fa
         intent.current = null; setAccess("read-only"); return;
       }
       if (status === 409) intent.current = null;
-      setPostError(status === 0 || status >= 500 ? POST_UNKNOWN : status === 429 ? POST_BUSY : POST_REFUSED);
+      const refusal = error instanceof NamedChatError ? error.reason : null;
+      setPostError(status === 0 || status >= 500 ? POST_UNKNOWN : refusal ?? (status === 429 ? POST_BUSY : POST_REFUSED));
     } finally {if (!controller.signal.aborted) {postingRef.current = false; setPosting(false);}}
   };
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {

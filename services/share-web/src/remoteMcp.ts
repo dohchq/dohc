@@ -44,11 +44,8 @@ const discussionPostSchema = z.object({
   claimedName: z.string().describe("A nonempty display name, at most 40 normalized code points and 160 UTF-8 bytes.").refine(value => normalizeShareDiscussionDisplayName(value).ok, "The name must fit 40 code points and 160 UTF-8 bytes.").optional(),
 }).refine(value => Buffer.byteLength(JSON.stringify(value)) <= MAX_DISCUSSION_ENVELOPE_BYTES, "The discussion request exceeds 16 KiB.");
 // A link on a Group share reads, and with read-write access posts in, the Group's channel.
-const linkChannelSchema = z.object({
-  shareId: z.string(),
-  channels: z.tuple([z.object({channelWireId: z.string(), name: z.string().nullable(), access: z.enum(["read-only", "read-write"])})]),
-});
-type LinkChannel = z.infer<typeof linkChannelSchema>["channels"][0];
+const linkChannelSchema = z.object({channelWireId: z.string(), access: z.enum(["read-only", "read-write"])});
+type LinkChannel = z.infer<typeof linkChannelSchema>;
 const LINK_CHAT_BODY_BYTES = 8_000;
 const channelPostSchema = z.object({
   body: z.string().describe("Nonempty text, at most 8,000 UTF-8 bytes after line endings become LF and trailing space is trimmed.")
@@ -60,15 +57,6 @@ const channelPostSchema = z.object({
   claimedName: z.string().describe("Your display name. This link sets it once; later posts must send the same name or none.")
     .refine(value => normalizeShareDiscussionDisplayName(value).ok, "The name must fit 40 code points and 160 UTF-8 bytes.").optional(),
 });
-const CHANNEL_POST_REFUSALS: Readonly<Record<string, string>> = {
-  bad_request: "The relay refused this post as invalid. Check the thread ID and the body.",
-  conflict: "This idempotencyKey was used for another post, or this link already has another name.",
-  link_discussion_blocked: "The owner blocked this link holder from posting.",
-  link_discussion_paused: "The owner paused posts from share links.",
-  discussion_limit_reached: "This link has reached its post limit.",
-  quota_exceeded: "The owner's workspace is full.",
-  payload_too_large: "The post is too large.",
-};
 // Each file names its path and base, and its content as text or as base64: one or the other.
 const writtenFile = {
   path: z.string().min(1).max(1024).describe("The file's path exactly as dohc_list_files lists paths."),
@@ -228,18 +216,17 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>, 
         return text(await jsonResponse(await options.request(`/api/view/chat/messages?${query}`)));
       } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
     });
-    server.registerTool("dohc_post_channel", {
-      description: "Post in the Group channel this link shares, as this link's holder. Needs a read-write link; " +
-        `this link is ${channel.access}. The owner sees the post marked as from a link holder.`,
+    if (channel.access === "read-write") server.registerTool("dohc_post_channel", {
+      description: "Post in the Group channel this link shares, as this link's holder. The owner sees the post marked as from a link holder.",
       inputSchema: channelPostSchema,
     }, async ({body, idempotencyKey, threadId, claimedName}) => {
       try {
         const response = await options.request("/api/view/chat/messages", {method: "POST", body: JSON.stringify({...coordinates, body, idempotencyKey,
           ...(threadId === undefined ? {} : {threadId}), ...(claimedName === undefined ? {} : {claimedName})})});
+        // A refusal the agent can act on arrives as a sentence.
         if (!response.ok && response.status !== 404 && response.status !== 503) {
           const refusal = asRecord(await readBoundedJson(response.clone(), 4096, options.signal).catch(() => null));
-          const reason = typeof refusal?.code === "string" ? CHANNEL_POST_REFUSALS[refusal.code] : undefined;
-          if (reason) return text({ok: false, code: refusal!.code, error: reason});
+          if (typeof refusal?.code === "string" && typeof refusal.error === "string") return text({ok: false, code: refusal.code, error: refusal.error});
         }
         return text(await jsonResponse(response));
       } catch (e) { return error(e instanceof Error ? e.message : String(e)); }
@@ -289,11 +276,8 @@ export async function serveRemoteMcp(request: Request, options: RemoteOptions): 
   }
   const metadata = await json(metadataResponse, options.signal) as Record<string, unknown>;
   if (metadata.ok !== true) throw new Error("Share is unavailable.");
-  // Only a Group share's link has a channel; any other link's answer is a refusal.
-  const channelResponse = await options.request("/api/view/chat/channels");
-  let channel: LinkChannel | null = null;
-  if (channelResponse.ok) channel = linkChannelSchema.parse(await readBoundedJson(channelResponse, 64 * 1024, options.signal)).channels[0];
-  else await channelResponse.body?.cancel().catch(() => {});
+  // Only a Group share's link has a channel.
+  const channel = metadata.channel === undefined ? null : linkChannelSchema.parse(metadata.channel);
   const body = request.method === "POST"
     ? await readRequestJson(request, options.signal, collectionWritesAllowed(metadata) ? options.admitLargeBody : null)
     : {value: undefined, release: () => {}};

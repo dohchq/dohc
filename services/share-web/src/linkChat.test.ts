@@ -50,10 +50,14 @@ async function stack() {
   })));
   expect(shared.status, await shared.clone().text()).toBe(200);
   const shareId = String(((await shared.json()) as { shareId: string }).shareId);
+  const relayPaths: string[] = [];
   const app = createShareWebApplication({
     relayUrl: "http://relay.test", publicRelayUrl: "https://relay.test", relayExchangeKey: RELAY_EXCHANGE_KEY,
     publicHosts: new Set([HOST]), publicEditRelease: { version: 1 }, linkLive: { publicOrigin: ORIGIN, ...liveLimits },
-    fetchRelay: (incoming) => relay(incoming),
+    fetchRelay: (incoming) => {
+      relayPaths.push(new URL(incoming.url).pathname);
+      return relay(incoming);
+    },
   });
   const send = (path: string, init: RequestInit = {}) => {
     const headers = new Headers(init.headers);
@@ -74,7 +78,7 @@ async function stack() {
     const page = (await (await relay(request(OWNER, `/sync/${WORKSPACE}/log?since=0`))).json()) as { ops: LoggedOp[] };
     return page.ops.filter((op) => op.opKind === "chat.message.append" && op.originId.startsWith("relay:share-link:"));
   };
-  return { send, link, revoke, linkPosts, handle: app.handle };
+  return { send, link, revoke, linkPosts, relayPaths, handle: app.handle };
 }
 
 type Stack = Awaited<ReturnType<typeof stack>>;
@@ -122,7 +126,8 @@ it("lets a browser with a read-write link read the Group's channel and post as t
   const s = await stack();
   const link = await s.link("read-write");
   const b = await browser(s, link.secret);
-  expect(await (await b.read("channels")).json()).toMatchObject({ channels: [{ channelWireId: CHANNEL, name: "Team", access: "read-write" }] });
+  expect(await (await b.read("channels")).json())
+    .toMatchObject({ profileName: null, channels: [{ channelWireId: CHANNEL, name: "Team", access: "read-write" }] });
   expect(((await (await b.read(history)).json()) as { messages: unknown[] }).messages)
     .toEqual([expect.objectContaining({ messageId: "owner-first", authorKind: "human", authorDisplayName: "Ada", body: "Welcome" })]);
 
@@ -131,12 +136,15 @@ it("lets a browser with a read-write link read the Group's channel and post as t
   const { message } = (await posted.json()) as { message: Record<string, unknown> };
   expect(message).toMatchObject({ authorKind: "link", authorDisplayName: "Sam", authorOwnerDisplayName: null, body: "Count me in" });
   expect(message).not.toHaveProperty("authorUserId");
-  // A retry with the same key answers the same post; another name for this browser conflicts.
+  // A retry with the same key answers the same post; another name for this browser is refused in words.
   expect(((await (await b.post({ body: "Count me in", idempotencyKey: "post-1", claimedName: "Sam" })).json()) as { message: { messageId: string } })
     .message.messageId).toBe(message.messageId);
   const renamed = await b.post({ body: "Again", idempotencyKey: "post-2", claimedName: "Other" });
   expect(renamed.status).toBe(409);
-  expect(await renamed.json()).toEqual({ ok: false, code: "conflict" });
+  expect(await renamed.json()).toEqual({ ok: false, code: "link_name_already_set",
+    error: "This link holder already has a name. Post with that name, or with none." });
+  // After a reload, the channel answer already knows this browser's name.
+  expect(await (await b.read("channels")).json()).toMatchObject({ profileName: "Sam" });
 
   const [stored] = await s.linkPosts();
   expect(stored?.payload).toMatchObject({ messageId: message.messageId, authorKind: "link", linkGrantId: link.grantId, authorDisplayName: "Sam" });
@@ -186,6 +194,8 @@ it("lets an agent with only a read-write link read the channel and post, with th
   const link = await s.link("read-write");
   const mcp = await agent(s, link.secret);
   expect((await mcp.listTools()).tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(["dohc_read_channel", "dohc_post_channel"]));
+  // The share's own answer names its channel; listing tools asks the relay nothing more.
+  expect(s.relayPaths).not.toContain("/sync/link/chat/channels");
   const read = (await mcp.callTool({ name: "dohc_read_channel", arguments: {} })).structuredContent as { messages: unknown[]; nextCursor: number };
   expect(read.messages).toEqual([expect.objectContaining({ messageId: "owner-first", body: "Welcome" })]);
 
@@ -199,14 +209,20 @@ it("lets an agent with only a read-write link read the channel and post, with th
 
   const followed = (await mcp.callTool({ name: "dohc_read_channel", arguments: { since: read.nextCursor } })).structuredContent as { messages: unknown[] };
   expect(followed.messages).toEqual([expect.objectContaining({ authorKind: "link", body: "On it" })]);
+
+  // A refusal reaches the agent as a sentence it can act on.
+  const renamed = await mcp.callTool({ name: "dohc_post_channel", arguments: { body: "Again", idempotencyKey: "agent-2", claimedName: "Other" } });
+  expect(renamed.isError).toBe(true);
+  expect(renamed.structuredContent).toEqual({ ok: false, code: "link_name_already_set",
+    error: "This link holder already has a name. Post with that name, or with none." });
 });
 
-it("refuses a post from an agent with a read-only link", async () => {
+it("gives an agent with a read-only link the channel to read and no tool to post", async () => {
   const s = await stack();
   const mcp = await agent(s, (await s.link("read-only")).secret);
+  const tools = (await mcp.listTools()).tools.map((tool) => tool.name);
+  expect(tools).toContain("dohc_read_channel");
+  expect(tools).not.toContain("dohc_post_channel");
   expect((await mcp.callTool({ name: "dohc_read_channel", arguments: {} })).isError).toBeFalsy();
-  const refused = await mcp.callTool({ name: "dohc_post_channel", arguments: { body: "Hi", idempotencyKey: "agent-1" } });
-  expect(refused.isError).toBe(true);
-  expect(JSON.stringify(refused.content)).toContain("This link gives View access.");
   expect(await s.linkPosts()).toEqual([]);
 });

@@ -3,7 +3,7 @@ import { sha256Hex } from "@dohc/workspace-core/hash";
 import { linkChatOrigin, LINK_CHAT_MESSAGE_ID_PREFIX, LINK_CHAT_ORIGIN_PREFIX, LINK_CHAT_THREAD_ID_PREFIX } from "../relayLogInputs";
 import { authorizeLinkChatAction } from "../shareAuthorization";
 import type { StorageContext } from "./context";
-import { validLinkDiscussionIdempotencyKey } from "./discussion";
+import { nextShareDiscussionRevision, validLinkDiscussionIdempotencyKey } from "./discussion";
 import { DISCUSSION_MESSAGE_RATE_WINDOW_MS, LINK_CHAT_BODY_BYTE_LIMIT } from "./limits";
 import { commitLinkEnrollment, linkPrincipalLimitReached, linkPrincipalStorageBytes, linkWriteRefusal, readLinkEnrollment } from "./linkEnrollment";
 import { appendLogBatchInTransaction, fetchChatMessage, maxOriginSeq } from "./log";
@@ -11,7 +11,7 @@ import type { SyncRelayLogRow } from "./types";
 import { workspaceUsageBytes } from "./workspaces";
 
 export type AppendLinkChatPostResult =
-  | { ok: true; replayed: boolean; workspaceId: string; row: SyncRelayLogRow }
+  | { ok: true; replayed: boolean; workspaceId: string; shareId: string; enrolled: boolean; row: SyncRelayLogRow }
   | {
       ok: false;
       reason:
@@ -82,8 +82,10 @@ export function appendLinkChatPost(storage: StorageContext, input: {
     }
 
     const { principal } = enrollment;
+    // The profile's hash never leaves the relay, so nobody else can predict
+    // these IDs, and a retry from the same profile still finds its post.
     const ids = (principalId: string) => {
-      const key = sha256Hex(JSON.stringify([principalId, input.idempotencyKey]));
+      const key = sha256Hex(JSON.stringify([principalId, input.profileTokenHash, input.idempotencyKey]));
       return { originId: linkChatOrigin(principalId), messageId: `${LINK_CHAT_MESSAGE_ID_PREFIX}${key}`,
         threadId: input.threadId ?? `${LINK_CHAT_THREAD_ID_PREFIX}${key}` };
     };
@@ -93,7 +95,7 @@ export function appendLinkChatPost(storage: StorageContext, input: {
       if (existing) {
         const stored = JSON.parse(existing.payloadJson) as { body?: unknown; threadId?: unknown };
         return stored.body === body && stored.threadId === threadId
-          ? { ok: true, replayed: true, workspaceId, row: existing }
+          ? { ok: true, replayed: true, workspaceId, shareId, enrolled: false, row: existing }
           : { ok: false, reason: "idempotency-conflict" };
       }
     }
@@ -137,11 +139,13 @@ export function appendLinkChatPost(storage: StorageContext, input: {
     if (workspaceUsageBytes(storage, workspaceId) + addedBytes > storage.options.workspaceQuotaBytes) {
       return { ok: false, reason: "workspace-quota" };
     }
-    commitLinkEnrollment(storage, { ...input, enrollment, principalId, displayName: committedName,
-      createdAtMs, discussionRevision: Number(enrollment.authority.discussion_revision) });
+    // A new link holder, or one naming itself, is news to the owner's moderation feed.
+    const enrolled = !principal || (principal.displayName === null && committedName !== null);
+    commitLinkEnrollment(storage, { ...input, enrollment, principalId, displayName: committedName, createdAtMs,
+      discussionRevision: enrolled ? nextShareDiscussionRevision(storage, shareId) : Number(enrollment.authority.discussion_revision) });
     appendLogBatchInTransaction(storage, { workspaceId, originId, ops });
     const row = fetchChatMessage(storage, { workspaceId, originId, messageId });
     if (!row) throw new Error("appended link post is missing");
-    return { ok: true, replayed: false, workspaceId, row };
+    return { ok: true, replayed: false, workspaceId, shareId, enrolled, row };
   });
 }

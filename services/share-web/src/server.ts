@@ -598,19 +598,24 @@ async function linkChatPostInput(request: Request): Promise<string | null> {
   }
 }
 
-// A link post's refusals that the viewer and agents act on. Only the relay's
-// code passes, never its words.
-const LINK_CHAT_REFUSALS: Readonly<Record<number, readonly string[]>> = {
-  400: ["bad_request"],
-  403: ["link_discussion_blocked", "link_discussion_paused"],
-  409: ["conflict"],
-  413: ["discussion_limit_reached", "quota_exceeded", "payload_too_large"],
+// A link post's refusals that the viewer and agents act on, in this server's
+// words. Only the relay's code passes, never its own words.
+const LINK_CHAT_REFUSALS: Readonly<Record<string, { status: number; error: string }>> = {
+  bad_request: { status: 400, error: "dohc could not post this message. Check its thread and text, then try again." },
+  link_discussion_blocked: { status: 403, error: "The owner stopped this link holder from posting." },
+  link_discussion_paused: { status: 403, error: "The owner paused posts from share links. Try again later." },
+  conflict: { status: 409, error: "This message's key was already used for a different message. Send it as a new message." },
+  link_name_already_set: { status: 409, error: "This link holder already has a name. Post with that name, or with none." },
+  discussion_limit_reached: { status: 413, error: "This link has reached its message limit." },
+  quota_exceeded: { status: 413, error: "The owner's workspace is full, so this message can't be posted." },
+  payload_too_large: { status: 413, error: "This message is too long. Shorten it, then send it again." },
 };
 
 async function linkChatRefusal(relayResponse: Response): Promise<Response | null> {
   const code = asRecord(await relayResponse.json().catch(() => null))?.code;
-  return typeof code === "string" && LINK_CHAT_REFUSALS[relayResponse.status]?.includes(code)
-    ? jsonResponse({ ok: false, code }, { status: relayResponse.status })
+  const refusal = typeof code === "string" && Object.hasOwn(LINK_CHAT_REFUSALS, code) ? LINK_CHAT_REFUSALS[code] : undefined;
+  return refusal?.status === relayResponse.status
+    ? jsonResponse({ ok: false, code, error: refusal.error }, { status: refusal.status })
     : null;
 }
 
@@ -1601,11 +1606,19 @@ export function createShareWebApplication({
     if (pathname === "/api/view/chat/channels" || pathname === "/api/view/chat/messages") {
       const authenticated = readSession(request);
       if (!authenticated) return refused();
+      // An agent's session posts with its server-held profile only.
+      const cookieProfile = parseCookies(request.headers.get("cookie")).get(profileCookieName(authenticated.discriminator));
+      const agentProfile = authenticated.session.agentProfileSecret;
+      const profileSecret = cookieProfile && LINK_SECRET_PATTERN.test(cookieProfile) &&
+        (agentProfile === undefined || sameSecret(cookieProfile, agentProfile)) ? cookieProfile : null;
       if (request.method === "GET") {
-        const read = linkChatReadPath(request, pathname === "/api/view/chat/channels");
+        const channels = pathname === "/api/view/chat/channels";
+        const read = linkChatReadPath(request, channels);
         if (!read) return refused();
         return await callRelay(request, authenticated, {
           path: read.path, holdMs: read.holdMs, buffered: true, ifSessionChanged: true,
+          // The channel answer names this profile's name, once set.
+          ...(channels && profileSecret ? { headers: { "x-dohc-link-profile-secret": profileSecret } } : {}),
           ...(read.holdMs > 0 ? { limiter: activityHoldLimiter } : {}),
         });
       }
@@ -1615,16 +1628,8 @@ export function createShareWebApplication({
       if (
         request.method !== "POST" || pathname !== "/api/view/chat/messages" || search ||
         request.headers.get("origin") !== agentOrigin || (fetchSite !== null && fetchSite !== "same-origin") ||
-        !request.headers.has(LINK_SESSION_HEADER) ||
+        !request.headers.has(LINK_SESSION_HEADER) || !profileSecret ||
         request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json"
-      ) {
-        return refused();
-      }
-      const profileSecret = parseCookies(request.headers.get("cookie")).get(profileCookieName(authenticated.discriminator));
-      const agentProfile = authenticated.session.agentProfileSecret;
-      if (
-        !profileSecret || !LINK_SECRET_PATTERN.test(profileSecret) ||
-        (agentProfile !== undefined && !sameSecret(profileSecret, agentProfile))
       ) {
         return refused();
       }

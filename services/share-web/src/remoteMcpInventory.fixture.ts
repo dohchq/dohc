@@ -28,7 +28,7 @@ const linkLive: NonNullable<RemoteOptions["linkLive"]> = {
 };
 
 // Exercises the actual remoteMcp registration and HTTP transport, after admission.
-// No tools are called. The only relay responses are the admitted share metadata and its channel, if any.
+// No tools are called. The only relay response is the admitted share metadata, with its channel if any.
 export async function advertisedRemoteTools({ access, versionId, live, channel }: typeof REMOTE_MCP_INVENTORY_CASES[number]) {
   const client = new Client({ name: "main-inventory", version: "1" });
   try {
@@ -40,12 +40,9 @@ export async function advertisedRemoteTools({ access, versionId, live, channel }
           admitLargeBody: () => () => {},
           ...(live ? { linkLive, liveLimits } : {}),
           request: async path => {
-            if (path === "/api/view/chat/channels") {
-              return channel === null ? Response.json({ ok: false, error: "not found" }, { status: 404 })
-                : Response.json({ shareId: "share", channels: [{ channelWireId: "wire", name: "Team", access: channel }] });
-            }
             if (path !== "/api/view/meta") throw new Error(`Unexpected inventory request: ${path}`);
-            return Response.json({ ok: true, access, effectiveSelector: { access, versionId, paths: [] } });
+            return Response.json({ ok: true, access, effectiveSelector: { access, versionId, paths: [] },
+              ...(channel === null ? {} : { channel: { channelWireId: "wire", access: channel } }) });
           },
         });
         return new Response(result.body, { status: result.status, headers: result.headers });

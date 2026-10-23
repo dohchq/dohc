@@ -5,8 +5,9 @@ use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 
 use dohc_engine_domain::chats::{
-    bump_chat_conversation_revision, chat_thread_display_title,
-    index_replicated_chat_message_search_rows, upsert_chat_search_index_row,
+    LINK_ORIGIN_PREFIX, LINK_THREAD_ID_PREFIX, bump_chat_conversation_revision,
+    chat_thread_display_title, index_replicated_chat_message_search_rows,
+    upsert_chat_search_index_row,
 };
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup,
@@ -1253,6 +1254,15 @@ fn apply_thread(
     {
         return Err(SyncError::InvalidInput {
             reason: "chat thread payload is invalid",
+        });
+    }
+    // Only the relay names a link post's new thread, so no device can take
+    // one first and leave the link post on a thread of its own making.
+    if payload.thread_id.starts_with(LINK_THREAD_ID_PREFIX)
+        && !op.origin_id.starts_with(LINK_ORIGIN_PREFIX)
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "chat thread id is reserved for link posts",
         });
     }
     let channel_shape = payload.channel_slug.is_some() || payload.channel_wire_id.is_some();

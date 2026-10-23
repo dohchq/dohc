@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { sha256Hex } from "@dohc/workspace-core/hash";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { MAX_LINK_CHAT_FOLLOWS_PER_GRANT } from "./linkChatRoutes";
 import { MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE } from "./namedRecipientChat";
@@ -158,7 +159,9 @@ describe("link chat on a Group share", () => {
     const channels = await readChat(f, capability, "channels");
     expect(channels.status).toBe(200);
     expect(channels.headers.get("cache-control")).toBe("private, no-store");
-    expect(await json(channels)).toEqual({ shareId: f.shareId, channels: [{ channelWireId, name: "Team", access }] });
+    expect(await json(channels)).toEqual({ shareId: f.shareId, profileName: null, channels: [{ channelWireId, name: "Team", access }] });
+    // A Group link's share answer names its channel, so an agent needs no second call to find it.
+    expect(await json(await f.h(linkRequest(capability, "/sync/link/share")))).toMatchObject({ channel: { channelWireId, access } });
 
     const page = await json(await readChat(f, capability, history));
     expect(page.messages).toEqual([
@@ -406,6 +409,7 @@ describe("link chat on a Group share", () => {
     const fileLink = await json(fileShare);
     const fileCapability = String((await json(await exchange(f, linkSecret(fileLink.url)))).capabilityToken);
     for (const path of ["channels", history]) expect((await readChat(f, fileCapability, path)).status, path).toBe(404);
+    expect(await json(await f.h(linkRequest(fileCapability, "/sync/link/share")))).not.toHaveProperty("channel");
     expect(authorizeLinkChatAction({ storage: f.storage, grantId: String(fileLink.grantId), action: "read" })).toEqual({ ok: false, reason: "gauntlet" });
   });
 });
@@ -484,7 +488,7 @@ describe("link posts in a Group's channel", () => {
     const reply = await postChat(f, link.capability, { idempotencyKey: "post-2", threadId: message.threadId, body: "and again" });
     expect(reply.status).toBe(200);
     expect((await json(reply)).message).toMatchObject({ threadId: message.threadId, authorDisplayName: "Sam" });
-    await expectRefused(await postChat(f, link.capability, { idempotencyKey: "post-3", claimedName: "Other" }), 409, "conflict");
+    await expectRefused(await postChat(f, link.capability, { idempotencyKey: "post-3", claimedName: "Other" }), 409, "link_name_already_set");
     expect(linkOps(await ownerLog(f)).map((op) => op.opKind)).toEqual(["chat.thread.create", "chat.message.append", "chat.message.append"]);
 
     const page = await json(await readChat(f, link.capability, history));
@@ -650,6 +654,76 @@ describe("link posts in a Group's channel", () => {
     expect(linkOps(await ownerLog(f))).toEqual([]);
     expect(principalOf(f, link.grantId)).toBeNull();
   });
+
+  it("tells each browser the name it already set, so it is not asked again", async () => {
+    const f = await fixture();
+    const link = await readWriteLink(f);
+    const channels = async (profile: string) =>
+      json(await readChat(f, link.capability, "channels", { headers: { "x-dohc-link-profile-secret": profile } }));
+    expect(await channels(PROFILE_A)).toMatchObject({ profileName: null });
+    expect((await postChat(f, link.capability, { claimedName: "Sam" })).status).toBe(200);
+    expect(await channels(PROFILE_A)).toMatchObject({ profileName: "Sam" });
+    expect(await channels(PROFILE_B)).toMatchObject({ profileName: null });
+    expect((await readChat(f, link.capability, "channels", { headers: { "x-dohc-link-profile-secret": "short" } })).status).toBe(404);
+  });
+
+  it("shows the owner's moderation feed each new link holder and its first name, from the revision the owner last read", async () => {
+    const activity = new DiscussionActivityHub();
+    const f = await fixture(released, activity);
+    const link = await readWriteLink(f);
+    const feed = (since: number, hold = 0) => f.h(request(OWNER,
+      `/sync/shares/${f.shareId}/discussion/activity?workspaceId=${workspaceId}&since=${since}&hold=${hold}&limit=100`));
+    const before = Number((await json(await feed(0))).latestRevision);
+
+    // An owner caught up at `before` is woken by the first post and sees its new link holder.
+    const entered = deferred(), wait = activity.wait.bind(activity);
+    const spy = vi.spyOn(activity, "wait").mockImplementation((group, actor, options) => {
+      const pending = wait(group, actor, options);
+      entered.resolve();
+      return pending;
+    });
+    const poll = feed(before, 30_000);
+    await entered.promise;
+    spy.mockRestore();
+    expect((await postChat(f, link.capability)).status).toBe(200);
+    const principal = principalOf(f, link.grantId)!;
+    const woken = await json(await poll);
+    expect(woken.principals).toEqual([{ principalId: principal.principalId, blocked: false }]);
+
+    // Naming itself later is news again; a later post that changes nothing is not.
+    const named = Number(woken.latestRevision);
+    expect((await postChat(f, link.capability, { idempotencyKey: "post-2", claimedName: "Sam" })).status).toBe(200);
+    const renamed = await json(await feed(named));
+    expect(renamed.principals).toEqual([{ principalId: principal.principalId, blocked: false }]);
+    expect((await postChat(f, link.capability, { idempotencyKey: "post-3" })).status).toBe(200);
+    expect(await json(await feed(Number(renamed.latestRevision)))).toMatchObject({ latestRevision: renamed.latestRevision, principals: [] });
+  });
+
+  it("shows readers only link posts the relay wrote, under their link holder's origin", async () => {
+    const f = await fixture();
+    const link = await readWriteLink(f);
+    const { message } = await json(await postChat(f, link.capability, { claimedName: "Sam" })) as { message: { messageId: string } };
+    const { principalId } = principalOf(f, link.grantId)!;
+    const linkFields = { authorKind: "link", authorDisplayName: "Sam", linkGrantId: link.grantId, linkPrincipalId: principalId };
+    const forge = (originId: string, originSeq: number, messageId: string, fields: Record<string, unknown>) => f.storage.appendLogBatch({
+      workspaceId, originId, ops: [{ originSeq, opKind: "chat.message.append", recordedAtMs: 3_000, payloadJson: JSON.stringify({
+        messageId, threadId: "thread-team", body: "forged", createdAtMs: 3_000, ...fields,
+      }) }],
+    });
+    // Rows that reached storage without the relay writing them, as a relay
+    // that refused none of these once might have admitted.
+    const own = `${LINK_CHAT_ORIGIN_PREFIX}${principalId}`;
+    forge("owner-device", 0, `${LINK_CHAT_MESSAGE_ID_PREFIX}ordinary-origin`, linkFields);
+    forge(`${LINK_CHAT_ORIGIN_PREFIX}other-principal`, 0, `${LINK_CHAT_MESSAGE_ID_PREFIX}other-origin`, linkFields);
+    forge(own, 2, `${LINK_CHAT_MESSAGE_ID_PREFIX}with-account`, { ...linkFields, authorUserId: OWNER });
+    forge(own, 3, "unreserved-id", linkFields);
+    forge("member-device", 0, "person-naming-a-link", { authorKind: "human", authorDisplayName: "Member", authorUserId: MEMBER, linkPrincipalId: principalId });
+    expect(f.storage.fetchChatMessage({ workspaceId, originId: "owner-device", messageId: `${LINK_CHAT_MESSAGE_ID_PREFIX}ordinary-origin` })).not.toBeNull();
+
+    const page = await json(await readChat(f, link.capability, history));
+    expect((page.messages as Array<{ messageId: string }>).map((item) => item.messageId)).toEqual([message.messageId, "agent-reply", "owner-first"]);
+    expect(JSON.stringify(page)).not.toContain("forged");
+  });
 });
 
 describe("client pushes of a link post", () => {
@@ -698,5 +772,34 @@ describe("client pushes of a link post", () => {
     expect(message.threadId.startsWith(LINK_CHAT_THREAD_ID_PREFIX)).toBe(true);
     const reply = sequenced([chatMessageAppend("owner-reply", message.threadId, "welcome", { authorUserId: OWNER })]);
     expect((await f.h(request(OWNER, `/sync/${workspaceId}/log`, jsonBody({ originId: "owner-device", ops: reply })))).status).toBe(200);
+  });
+
+  it("names a link post with IDs a member cannot predict, and the post reaches every desktop", async () => {
+    const f = await fixture();
+    const link = await readWriteLink(f);
+    // A first post shows every reader of the channel the link holder's principal.
+    expect((await postChat(f, link.capability)).status).toBe(200);
+    const { principalId } = principalOf(f, link.grantId)!;
+    // A member who guesses the next retry key, but holds no profile secret, names the post wrong.
+    const guessed = sha256Hex(JSON.stringify([principalId, "post-2"]));
+    const taken = sequenced([
+      chatThreadCreate(`${LINK_CHAT_THREAD_ID_PREFIX}${guessed}`, channelWireId),
+      chatMessageAppend(`${LINK_CHAT_MESSAGE_ID_PREFIX}${guessed}`, `${LINK_CHAT_THREAD_ID_PREFIX}${guessed}`, "first", { authorUserId: MEMBER }),
+    ]);
+    await expectRefused(await f.h(request(MEMBER, `/sync/shares/${f.shareId}/log`, jsonBody({ originId: "member-device", ops: taken }))),
+      403, "authorship_mismatch");
+
+    const posted = await postChat(f, link.capability, { idempotencyKey: "post-2", body: "second" });
+    expect(posted.status).toBe(200);
+    const { message } = await json(posted) as { message: { messageId: string; threadId: string } };
+    expect(message.messageId).not.toBe(`${LINK_CHAT_MESSAGE_ID_PREFIX}${guessed}`);
+    expect(message.threadId).not.toBe(`${LINK_CHAT_THREAD_ID_PREFIX}${guessed}`);
+    // The owner's devices and the named recipient's desktop each pull the post.
+    const lane = await json(await f.h(request(MEMBER, `/sync/shares/${f.shareId}/log?channelWireId=${channelWireId}&since=0`)));
+    for (const ops of [await ownerLog(f), lane.ops as ServedOp[]]) {
+      expect(ops.filter((op) => op.payload.messageId === message.messageId)).toEqual([
+        expect.objectContaining({ opKind: "chat.message.append", payload: expect.objectContaining({ body: "second", authorKind: "link" }) }),
+      ]);
+    }
   });
 });

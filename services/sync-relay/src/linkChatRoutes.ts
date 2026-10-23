@@ -48,7 +48,7 @@ function refusePost(reason: Exclude<AppendLinkChatPostResult, { ok: true }>["rea
     case "lifetime-limit":
     case "share-limit": throw relayError("discussion_limit_reached", "chat message limit reached");
     case "workspace-quota": throw relayError("quota_exceeded");
-    case "name-already-set": throw relayError("conflict", "this link's name is already set");
+    case "name-already-set": throw relayError("link_name_already_set");
     case "idempotency-conflict": throw relayError("conflict", "idempotency key was already used for a different message");
     case "invalid-input": throw badRequest("chat message is invalid");
     case "not-authorized": throw notFound();
@@ -67,6 +67,7 @@ export function createLinkChatRoutes(options: {
     | "getShare"
     | "getShareGrant"
     | "getShareLabels"
+    | "getLinkPrincipalForGrantProfile"
     | "workspaceIsOwnedBy"
   >;
   linkKey: string | Uint8Array | undefined;
@@ -83,7 +84,7 @@ export function createLinkChatRoutes(options: {
   linkJsonResponse: (shareId: string, grantId: string, body: unknown) => Response;
   readLimiters: { capability: TokenBucketLimiter; grant: TokenBucketLimiter };
   followLimiters: { capability: TokenBucketLimiter; grant: TokenBucketLimiter };
-  activity: Pick<DiscussionActivityHub, "wait" | "wakeLog">;
+  activity: Pick<DiscussionActivityHub, "wait" | "wake" | "wakeLog">;
   reads: Pick<ReturnType<typeof createShareReadQueries>, "chatResolverFor">;
   maxResponseBytes?: number;
 }) {
@@ -136,7 +137,9 @@ export function createLinkChatRoutes(options: {
     });
     if (!result.ok) return refusePost(result.reason);
     if (!result.replayed) options.activity.wakeLog(result.workspaceId);
-    const message = messageFromOp({ relaySeq: result.row.relaySeq, opKind: result.row.opKind, payload: JSON.parse(result.row.payloadJson) });
+    if (result.enrolled) options.activity.wake(result.shareId);
+    const message = messageFromOp({ relaySeq: result.row.relaySeq, opKind: result.row.opKind, payload: JSON.parse(result.row.payloadJson) },
+      result.row.originId);
     if (!message) throw new Error("stored link post is not a chat message");
     const response = options.linkJsonResponse(fresh.shareId, fresh.grantId, { shareId: fresh.shareId, channelWireId, message: linkChatMessage(message) });
     response.headers.set("cache-control", "private, no-store");
@@ -170,9 +173,14 @@ export function createLinkChatRoutes(options: {
       return response;
     };
     if (channels) {
+      // The name this browser or agent already set, so it is not asked again.
+      const profile = request.headers.get("x-dohc-link-profile-secret"), { linkKey } = options;
+      if (profile !== null && (!linkKey || !LINK_SECRET_PATTERN.test(profile))) throw notFound();
+      const profileName = profile === null || !linkKey ? null
+        : storage.getLinkPrincipalForGrantProfile(capability.grantId, hashLinkProfileSecret(profile, linkKey))?.displayName ?? null;
       const name = storage.getShareLabels(share.shareId).subjectName;
       const fresh = current();
-      return respond({ shareId: share.shareId, channels: [{ channelWireId, name, access: fresh.effectiveSelector.access }] });
+      return respond({ shareId: share.shareId, profileName, channels: [{ channelWireId, name, access: fresh.effectiveSelector.access }] });
     }
     if (parseString(url.searchParams.get("channelWireId"), "channelWireId", 256) !== channelWireId) throw notFound();
     const following = url.searchParams.has("since");

@@ -85,6 +85,11 @@ pub const MAX_LINK_MESSAGE_BODY_BYTES: usize = 8_000;
 /// The relay names every link message with this prefix; no other message may
 /// use it, so no device can take a link post's id first.
 pub const LINK_MESSAGE_ID_PREFIX: &str = "link-message:";
+/// The relay names a link post's new thread with this prefix and writes it
+/// under the link holder's origin; a thread from any other origin may not use it.
+pub const LINK_THREAD_ID_PREFIX: &str = "link-thread:";
+/// The relay's origin for one link holder's posts.
+pub const LINK_ORIGIN_PREFIX: &str = "relay:share-link:";
 /// Thread title char cap (`normalizeThreadTitle`).
 const MAX_THREAD_TITLE_CHARS: usize = 200;
 /// Channel name char cap (`normalizeChannelName`).

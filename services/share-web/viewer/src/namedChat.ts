@@ -13,9 +13,14 @@ export interface NamedChatMessage {
   authorKind: "human" | "agent" | "automation" | "link"; authorOwnerDisplayName: string | null; createdAtMs: number; body: string | null;
 }
 
-/** A failed chat request. Status 0 means no usable answer arrived, so a post's outcome is unknown. */
+/**
+ * A failed chat request. Status 0 means no usable answer arrived, so a post's outcome is unknown.
+ * `reason` is share-web's sentence for a refusal the reader can act on.
+ */
 export class NamedChatError extends Error {
-  constructor(readonly status: number, readonly code: string | null = null) {super(`Named chat request failed (${status})`);}
+  constructor(readonly status: number, readonly code: string | null = null, readonly reason: string | null = null) {
+    super(`Named chat request failed (${status})`);
+  }
 }
 
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);

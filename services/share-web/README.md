@@ -35,8 +35,8 @@ The share page advertises `/api/mcp` through its HTTP `Link` header. That endpoi
 The agent can list files, read settled content, and read the share discussion.
 Comment and Edit links also expose discussion posting. The relay checks the grant again for every action.
 A link on a Group share also reads the Group's channel with `dohc_read_channel`.
-With `dohc_post_channel`, a read-write link posts there as its link holder, and the owner sees the post marked as from a link holder.
-The relay refuses a post from a read-only link.
+A read-write link also gets `dohc_post_channel`, which posts there as its link holder; the owner sees the post marked as from a link holder.
+The relay still refuses a post from a read-only link, and a refusal arrives as a sentence the agent can act on.
 Live document tools require the existing Public Edit release and live-link configuration described below.
 They support existing `.md` documents on main while the document host is online.
 The edit tool replaces one exact text occurrence inside a single formatting run. It preserves unrelated document content and frontmatter.

@@ -10,6 +10,7 @@ import { notFound, relayError, RelayError } from "./errors";
 import type { createLinkResponseStreams } from "./linkResponseStreams";
 import type { LinkEgressRateLimiter, ValidatedLinkCapability } from "./linkSecurity";
 import { assertSha256, parseCursor, parseLimit, parseLinkLogHold } from "./requestInputs";
+import { authorizeLinkChatAction } from "./shareAuthorization";
 import { targetVersionId } from "./shareFilter";
 import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
@@ -24,8 +25,11 @@ export type LinkReadRoute =
 export function createLinkReadRoutes(
   storage: Pick<
     SyncRelayStorage,
+    | "findChannelCreateKind"
     | "getShare"
+    | "getShareGrant"
     | "getShareLabels"
+    | "workspaceIsOwnedBy"
     | "getEpochLogFloor"
     | "readCurrentFileState"
     | "currentFileBlobByteLength"
@@ -90,12 +94,15 @@ export function createLinkReadRoutes(
       const presentation = createAccountlessPathProjection(
         fresh.effectiveSelector,
       );
+      // A Group link also reads, or with read-write access posts in, the Group's channel.
+      const group = authorizeLinkChatAction({ storage, grantId: fresh.grantId, action: "read" });
       return linkJsonResponse(fresh.shareId, fresh.grantId, {
         ok: true,
         receivedSource: identity.source(["link", fresh.grantId], share.workspaceId),
         effectiveSelector: presentation.selector,
         access: fresh.access,
         subjectName: storage.getShareLabels(fresh.shareId).subjectName,
+        ...(group.ok ? { channel: { channelWireId: group.effectiveSelector.channelWireId, access: group.effectiveSelector.access } } : {}),
         ...freshness,
       });
     }

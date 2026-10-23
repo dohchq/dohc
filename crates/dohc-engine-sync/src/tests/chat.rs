@@ -1615,6 +1615,76 @@ fn a_message_that_takes_a_link_message_id_is_refused() {
     assert_eq!(stored, ("link".to_owned(), "Hi".to_owned()));
 }
 
+/// Only the relay names a link post's new thread, under the link holder's
+/// origin. A device's thread that takes such an id first is refused, so the
+/// link post's own thread and message still apply when they arrive.
+#[test]
+fn a_thread_that_takes_a_link_thread_id_is_refused() {
+    use dohc_engine_domain::chats::{LINK_ORIGIN_PREFIX, LINK_THREAD_ID_PREFIX};
+
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let thread_id = format!("{LINK_THREAD_ID_PREFIX}taken");
+    let thread = |title: &str| {
+        json!({
+            "threadId": thread_id,
+            "title": title,
+            "createdAtMs": 25,
+            "channelSlug": "imported",
+            "channelWireId": "channel-imported",
+            "lane": "chat"
+        })
+    };
+    let taken = envelope("peer", 3, "chat.thread.create", thread("Taken"));
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &taken, &NoFaults));
+    let threads = |engine: &EngineStore| -> Vec<String> {
+        engine
+            .read_with(|conn| {
+                let mut statement = conn
+                    .prepare("SELECT title FROM chat_threads WHERE thread_id = ?1")
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+                let rows = statement
+                    .query_map([&thread_id], |row| row.get(0))
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+                rows.collect::<Result<Vec<String>, _>>()
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)
+            })
+            .expect("link threads")
+    };
+    assert!(threads(&engine).is_empty());
+
+    let origin = format!("{LINK_ORIGIN_PREFIX}principal-1");
+    apply_chat_envelope(
+        &mut engine,
+        &envelope(&origin, 0, "chat.thread.create", thread("")),
+        &NoFaults,
+    )
+    .expect("link thread");
+    let mut post = link_message_payload("link-message:in-link-thread", "Hi");
+    post["threadId"] = json!(thread_id);
+    assert_eq!(
+        apply_chat_envelope(
+            &mut engine,
+            &envelope(&origin, 1, "chat.message.append", post),
+            &NoFaults
+        )
+        .expect("link post"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    assert_eq!(threads(&engine), vec![String::new()]);
+    let stored: (String, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT thread_id, author_kind FROM chat_messages WHERE message_id = 'link-message:in-link-thread'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("link post");
+    assert_eq!(stored, (thread_id.clone(), "link".to_owned()));
+}
+
 /// A desktop that predates an author kind refuses its messages for good, the
 /// way this build refuses a kind newer than itself: the refusal is recorded
 /// and acked, nothing is stored, and the workspace's next op applies.

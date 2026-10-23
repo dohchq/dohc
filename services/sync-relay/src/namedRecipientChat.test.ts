@@ -115,6 +115,23 @@ describe("named browser chat authorization and replication", () => {
       .map(op => op.payload)).toEqual([payload]);
   });
 
+  it("drops a link-shaped row the relay did not write under its link holder's origin", async () => {
+    const f = await fixture();
+    const link = {authorKind: "link", authorDisplayName: "Owner", linkGrantId: "grant-link", linkPrincipalId: "principal"};
+    const rows: Array<[string, number, string, Record<string, unknown>]> = [
+      ["relay:share-link:principal", 0, "link-message:real", link],
+      ["owner", 7, "link-message:ordinary-origin", link],
+      ["relay:share-link:someone-else", 0, "link-message:other-origin", link],
+      ["relay:share-link:principal", 1, "link-message:with-account", {...link, authorOwnerDisplayName: "Owner"}],
+    ];
+    for (const [originId, originSeq, messageId, fields] of rows) {
+      f.storage.appendLogBatch({workspaceId, originId, ops: [{originSeq, opKind: "chat.message.append", recordedAtMs: 5,
+        payloadJson: JSON.stringify({messageId, threadId: "thread-team", body: "from a link", createdAtMs: 5, ...fields})}]});
+    }
+    const page = await json(await f.call(history));
+    expect((page.messages as Array<{messageId: string}>).map(message => message.messageId)).toEqual(["link-message:real", "owner-second", "owner-first"]);
+  });
+
   it("lets read-only recipients read and refuses writes at both relay entry points", async () => {
     const f = await fixture();
     expect((await f.call(history, "reader")).status).toBe(200);

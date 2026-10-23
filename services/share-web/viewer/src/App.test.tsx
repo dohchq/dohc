@@ -4375,7 +4375,7 @@ describe("App", () => {
       if (path === "/api/view/meta") return jsonResponse(viewMeta);
       if (path === `/api/view/blob/${file.blobSha256}`) return new Response("# Plan");
       if (path === "/api/view/chat/channels") {
-        return jsonResponse({ shareId: "share", channels: [{ channelWireId: "wire", name: "Team", access: "read-only" }] });
+        return jsonResponse({ shareId: "share", profileName: null, channels: [{ channelWireId: "wire", name: "Team", access: "read-only" }] });
       }
       if (path.startsWith("/api/view/chat/messages?") && !path.includes("since=")) {
         return jsonResponse({ shareId: "share", channelWireId: "wire", nextCursor: 3, olderCursor: null, messages: [{
