@@ -15,6 +15,8 @@ export type LiveDocumentRow = {
   /** The server refused this document's edits for good, and dohc keeps them where `storedOn` says. */
   quarantine?: "paused" | "retrying" | "stopping" | "stopped-kept" | "not-written" | "cannot-write" | "copied";
   storedOn?: "this-computer" | "server";
+  /** Those kept edits' incident, so Save recovery copy saves what the row shows. */
+  incident?: string;
 };
 
 /** What a Stop did with edits the server refused. */
@@ -50,8 +52,8 @@ export type LiveDocumentsDialogProps = {
   onStopped?: (path: string, keptEdits: "recovered" | "kept") => void;
   /** The row a notice opened this dialog for. */
   reveal?: string;
-  /** Writes a row's kept edits next to its file, settling when the save ends. The shell reports the result. */
-  saveRecoveryCopy?: (workspaceId: string, path: string) => Promise<void>;
+  /** Writes the kept edits a row shows next to its file, settling when the save ends. The shell reports the result. */
+  saveRecoveryCopy?: (workspaceId: string, path: string, incident?: string) => Promise<void>;
   /** One page of refused shares, from the share id the previous page ended on. */
   loadRefusals: (workspaceId: string, after?: string) => Promise<LiveRefusalPage>;
   /** Asks the engine to enrol one refused share again. */
@@ -659,7 +661,7 @@ export function LiveDocumentsDialog({
                     onClick={() => {
                       const key = `${workspaceId}\n${row.path}`;
                       setSavingCopies(saving => new Set(saving).add(key));
-                      void saveRecoveryCopy(workspaceId, row.path).finally(() => setSavingCopies(saving => {
+                      void saveRecoveryCopy(workspaceId, row.path, row.incident).finally(() => setSavingCopies(saving => {
                         const next = new Set(saving);
                         next.delete(key);
                         return next;

@@ -251,7 +251,8 @@ export interface CliKeptCopiesPort {
 // that kept them. Paths are workspace-relative.
 export interface CliKeptEditsPort {
   list(): Promise<Extract<CliResultByVerb["liveKeptEdits"], { ok: true }>["keptEdits"]>;
-  saveRecoveryCopy(path: string): Promise<Omit<Extract<CliResultByVerb["saveRecoveryCopy"], { ok: true }>, "ok" | "folder">>;
+  /** With an incident, saves exactly the kept edits it names. */
+  saveRecoveryCopy(path: string, incident?: string): Promise<Omit<Extract<CliResultByVerb["saveRecoveryCopy"], { ok: true }>, "ok" | "folder">>;
   retry(path: string, incident: string): Promise<void>;
   stopAgain(path: string, incident: string): Promise<Pick<Extract<CliResultByVerb["stopAgain"], { ok: true }>, "keptEdits">>;
 }
@@ -3018,7 +3019,7 @@ async function dispatchWorkspace(
       const keptEdits = context.keptEdits;
       if (!keptEdits || context.readOnly) return keptEditsUnavailable();
       try {
-        const saved = await keptEdits.saveRecoveryCopy(request.args.path);
+        const saved = await keptEdits.saveRecoveryCopy(request.args.path, request.args.incident);
         await notifyWrite(options, context);
         return { ok: true as const, copyPath: saved.copyPath, packagePath: saved.packagePath, folder: posix.dirname(saved.packagePath), storedOn: saved.storedOn, keptEdits: saved.keptEdits };
       } catch (error) {

@@ -1272,8 +1272,8 @@ async function keptEditsFixture(options: { engine?: boolean; caller?: string } =
   const row = (objectId: string, path: string, incident = "outbox:delivery:0", recovery: OwnerLiveQuarantine["recovery"] = "paused"): OwnerLiveQuarantine =>
     ({ objectId, path, reason: "invalid-update", storedOn: "this-computer", incident, recovery });
   const kept: Record<string, OwnerLiveQuarantine[]> = { workspace: [row("object-plan", "notes/plan.md")], other: [row("object-elsewhere", "elsewhere.md")] };
-  const save = vi.fn(async (workspace: RegistryEntry, path: string) => {
-    const found = kept[workspace.workspaceId]?.find(candidate => candidate.path === path);
+  const save = vi.fn(async (workspace: RegistryEntry, path: string, incident?: string) => {
+    const found = kept[workspace.workspaceId]?.find(candidate => candidate.path === path && (incident === undefined || candidate.incident === incident));
     if (!found) throw new Error("dohc has no kept edits for this file. Open Live documents to check it.");
     // A copy of edits the server keeps is confirmed to it, as the desktop engine does.
     if (found.storedOn === "server") found.recovery = "copied";
@@ -1285,12 +1285,12 @@ async function keptEditsFixture(options: { engine?: boolean; caller?: string } =
     if (!found || (found.recovery !== "paused" && !(found.storedOn === "server" && found.recovery === "copied"))) throw new Error("This document changed. Open Live documents to check it.");
     found.recovery = "retrying";
   });
-  // Stands in for the window's guarded Stop: a not-written release writes the file and its row ends.
+  // Stands in for the window's guarded Stop of the row's document: a not-written release writes the file and its row ends.
   const stoppedIn: string[] = [];
-  const stopAgain = vi.fn(async (operation: { workspace: RegistryEntry }, path: string) => {
+  const stopAgain = vi.fn(async (operation: { workspace: RegistryEntry }, again: { path: string; objectId: string; recovery: "not-written" | "stopping" }) => {
     stoppedIn.push(operation.workspace.workspaceId);
     const rows = kept[operation.workspace.workspaceId] ?? [];
-    const found = rows.find(candidate => candidate.path === path && candidate.recovery === "not-written");
+    const found = rows.find(candidate => candidate.objectId === again.objectId && again.recovery === "not-written" && candidate.recovery === "not-written");
     if (found) rows.splice(rows.indexOf(found), 1);
     return { keptEdits: found ? "recovered" as const : "kept" as const };
   });
@@ -1312,7 +1312,7 @@ async function keptEditsFixture(options: { engine?: boolean; caller?: string } =
   const doors = {
     cli: {
       list: () => cli("kept-edits"),
-      save: (path: string) => cli("save-recovery-copy", path),
+      save: (path: string, incident?: string) => incident === undefined ? cli("save-recovery-copy", path) : cli("save-recovery-copy", path, incident),
       retry: (path: string, incident: string) => cli("retry-kept-edits", path, incident),
       stopAgain: (path: string, incident: string) => cli("stop-again", path, incident),
     },
@@ -1321,7 +1321,7 @@ async function keptEditsFixture(options: { engine?: boolean; caller?: string } =
         const status = await workspaceStatus(ctx);
         return "keptEdits" in status ? { ok: true, keptEdits: status.keptEdits } : { ok: false, reason: "no keptEdits" };
       },
-      save: (path: string) => saveRecoveryCopy(ctx, { path }),
+      save: (path: string, incident?: string) => saveRecoveryCopy(ctx, incident === undefined ? { path } : { path, incident }),
       retry: (path: string, incident: string) => retryKeptEdits(ctx, { path, incident }),
       stopAgain: (path: string, incident: string) => stopAgainTool(ctx, { path, incident }),
     },
@@ -1340,8 +1340,15 @@ describe.each(["cli", "mcp"] as const)("kept edits through %s", door => {
     const f = await keptEditsFixture();
     expect(await f.doors[door].save("notes/plan.md")).toEqual({ ok: true,
       copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json", folder: "notes", storedOn: "this-computer", keptEdits: "kept" });
-    expect(f.save).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ workspaceId: "workspace" }), "notes/plan.md");
+    expect(f.save).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ workspaceId: "workspace" }), "notes/plan.md", undefined);
     expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith({ workspaceId: "workspace" });
+  });
+  // With two rows at one path, the incident the caller read names which kept edits it saves.
+  it("saves the row the incident names when two rows share a path", async () => {
+    const f = await keptEditsFixture();
+    f.kept.workspace = [f.row("object-released", "notes/plan.md", "release:a:0", "not-written"), f.row("object-plan", "notes/plan.md")];
+    expect(await f.doors[door].save("notes/plan.md", "outbox:delivery:0")).toMatchObject({ ok: true, keptEdits: "kept" });
+    expect(f.save).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ workspaceId: "workspace" }), "notes/plan.md", "outbox:delivery:0");
   });
   it("lists, saves and tries again edits the server keeps, as the window does", async () => {
     const f = await keptEditsFixture();
@@ -1373,12 +1380,14 @@ describe.each(["cli", "mcp"] as const)("kept edits through %s", door => {
     f.kept.workspace = [f.row("object-plan", "notes/plan.md", "release:a:0", "not-written")];
     expect(await f.doors[door].stopAgain("notes/plan.md", "release:a:0")).toEqual({ ok: true, path: "notes/plan.md", keptEdits: "recovered" });
     expect(f.stoppedIn).toEqual(["workspace"]);
-    expect(f.stopAgain.mock.calls.map(call => call[1])).toEqual(["notes/plan.md"]);
+    expect(f.stopAgain.mock.calls.map(call => call[1])).toEqual([{ path: "notes/plan.md", objectId: "object-plan", recovery: "not-written" }]);
     expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith({ workspaceId: "workspace" });
     expect(await f.doors[door].list()).toEqual({ ok: true, keptEdits: [] });
     // A waiting Stop runs again too; edits that wait for the owner are Try again's, not a Stop's.
-    f.kept.workspace = [f.row("object-plan", "notes/plan.md", "outbox:delivery:0", "stopping")];
+    // With a record row beside it at the same path, the incident names the waiting Stop's document.
+    f.kept.workspace = [f.row("object-released", "notes/plan.md", "release:a:0", "not-written"), f.row("object-plan", "notes/plan.md", "outbox:delivery:0", "stopping")];
     expect(await f.doors[door].stopAgain("notes/plan.md", "outbox:delivery:0")).toEqual({ ok: true, path: "notes/plan.md", keptEdits: "kept" });
+    expect(f.stopAgain.mock.lastCall?.[1]).toEqual({ path: "notes/plan.md", objectId: "object-plan", recovery: "stopping" });
     for (const recovery of ["paused", "cannot-write", "retrying"] as const) {
       f.kept.workspace = [f.row("object-plan", "notes/plan.md", "outbox:delivery:1", recovery)];
       expect(await f.doors[door].stopAgain("notes/plan.md", "outbox:delivery:1")).toMatchObject({ ok: false, reason: expect.stringContaining("No Stop of notes/plan.md is waiting") });

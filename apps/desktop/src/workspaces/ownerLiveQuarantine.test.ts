@@ -1,5 +1,7 @@
 import {expect, it, vi} from "vitest";
 import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
+import type {OwnerYDocOutboxRecovery} from "@dohc/workspace-engine-client";
+import {recoverySnapshot} from "./ownerLiveReleases";
 
 // The engine's queue heads, by outbox, as the outbox read answers them.
 const outboxes = vi.hoisted(() => ({heads: new Map<string, unknown>(), pending: new Map<string, unknown>(), retried: [] as unknown[],
@@ -10,7 +12,7 @@ vi.mock("@dohc/workspace-engine-client", async original => ({
     // A delivery head never transfers the base.
     readDeliveryHead(outboxId: string) {outboxes.reads.push(`delivery:${outboxId}`); return Promise.resolve(outboxes.heads.get(outboxId));}
     readHead(outboxId: string) {outboxes.reads.push(`head:${outboxId}`); return Promise.resolve(outboxes.heads.get(outboxId));}
-    readRecovery(outboxId: string) {return Promise.resolve(outboxes.pending.get(outboxId));}
+    readRecovery(outboxId: string) {outboxes.reads.push(`recovery:${outboxId}`); return Promise.resolve(outboxes.pending.get(outboxId));}
     retry(input: unknown) {outboxes.retried.push(input); return Promise.resolve({retryDeliveryId: "delivery-a"});}
     dispose() {}
   },
@@ -60,23 +62,38 @@ it("tells a waiting Stop from a finished one, and ignores a Stop for another ver
 });
 
 it("keeps a release that could not write the file only while the queue it came from is gone, with Try again only while it offers one", async () => {
-  head("q", "invalid-update"); head("rebuilt", "invalid-update");
+  outboxes.reads.length = 0;
+  head("q", "invalid-update"); head("rebuilt", "invalid-update"); head("restored", "invalid-update");
+  // The queue each record's package came from, and a restore that repeats a binding and head with fewer edits.
+  const contents = (objectId: string, deliveries: string[]) => ({outboxId: `outbox-${objectId}`, binding: binding(objectId), baseUpdateDigest: "b".repeat(64),
+    checkpoint: null, state: "quarantined", entries: deliveries.map((deliveryId, index) => ({sequence: index + 1, deliveryId, appendKey: deliveryId,
+      updateDigest: "d".repeat(64), update: new Uint8Array([index + 1]), byteLength: 1, createdAtMs: 1}))}) as unknown as OwnerYDocOutboxRecovery;
+  outboxes.pending.set("outbox-q", contents("q", ["delivery-q"]));
+  outboxes.pending.set("outbox-restored", contents("restored", ["delivery-restored"]));
   const client = {sendRequest: vi.fn(), ownerYDocStopList: vi.fn(async () => []),
-    ownerYDocListDrafts: vi.fn(async () => ({drafts: [draft("q", "quarantined"), draft("rebuilt", "quarantined")], next: null}))} as unknown as EngineClient;
-  const unwritten = [{workspaceId: "workspace", objectId: "q", path: "q.md", reason: "invalid-update", binding: binding("q"), headDeliveryId: "delivery-q", retry: true},
+    ownerYDocListDrafts: vi.fn(async () => ({drafts: [draft("q", "quarantined"), draft("rebuilt", "quarantined"), draft("restored", "quarantined")], next: null}))} as unknown as EngineClient;
+  const unwritten = [{workspaceId: "workspace", objectId: "q", path: "q.md", reason: "invalid-update", binding: binding("q"), headDeliveryId: "delivery-q",
+    snapshot: recoverySnapshot(contents("q", ["delivery-q"])), retry: true},
     // An engine store reset rebuilt this document's queue under the identical binding.
-    {workspaceId: "workspace", objectId: "rebuilt", path: "rebuilt.md", reason: "invalid-update", binding: binding("rebuilt"), headDeliveryId: "delivery-before-reset", retry: true},
-    {workspaceId: "workspace", objectId: "gone", path: "gone.md", reason: "capacity-refused", binding: binding("gone"), headDeliveryId: "delivery-gone", retry: true},
-    {workspaceId: "workspace", objectId: "ended", path: "ended.md", reason: "capacity-refused", binding: binding("ended"), headDeliveryId: "delivery-ended", retry: false},
-    {workspaceId: "workspace", objectId: "damaged", path: "damaged.md", reason: "unreadable-record", binding: null, headDeliveryId: null, retry: false}];
-  expect(await readOwnerLiveQuarantines(client, "handle", {unwritten})).toEqual([
+    {workspaceId: "workspace", objectId: "rebuilt", path: "rebuilt.md", reason: "invalid-update", binding: binding("rebuilt"), headDeliveryId: "delivery-before-reset", snapshot: "1".repeat(64), retry: true},
+    {workspaceId: "workspace", objectId: "restored", path: "restored.md", reason: "invalid-update", binding: binding("restored"), headDeliveryId: "delivery-restored",
+      snapshot: recoverySnapshot(contents("restored", ["delivery-restored", "delivery-later"])), retry: true},
+    {workspaceId: "workspace", objectId: "gone", path: "gone.md", reason: "capacity-refused", binding: binding("gone"), headDeliveryId: "delivery-gone", snapshot: "2".repeat(64), retry: true},
+    {workspaceId: "workspace", objectId: "ended", path: "ended.md", reason: "capacity-refused", binding: binding("ended"), headDeliveryId: "delivery-ended", snapshot: "3".repeat(64), retry: false},
+    {workspaceId: "workspace", objectId: "damaged", path: "damaged.md", reason: "unreadable-record", binding: null, headDeliveryId: null, snapshot: null, retry: false}];
+  const heads = new Map();
+  for (let pass = 0; pass < 2; pass++) expect(await readOwnerLiveQuarantines(client, "handle", {unwritten, heads})).toEqual([
     record("q", "paused"),
     record("rebuilt", "paused"),
+    record("restored", "paused"),
     {objectId: "rebuilt", path: "rebuilt.md", reason: "invalid-update", outboxId: null, binding: binding("rebuilt"), headDeliveryId: "delivery-before-reset", recovery: "not-written"},
+    {objectId: "restored", path: "restored.md", reason: "invalid-update", outboxId: null, binding: binding("restored"), headDeliveryId: "delivery-restored", recovery: "not-written"},
     {objectId: "gone", path: "gone.md", reason: "capacity-refused", outboxId: null, binding: binding("gone"), headDeliveryId: "delivery-gone", recovery: "not-written"},
     {objectId: "ended", path: "ended.md", reason: "capacity-refused", outboxId: null, binding: binding("ended"), headDeliveryId: "delivery-ended", recovery: "cannot-write"},
     {objectId: "damaged", path: "damaged.md", reason: "unreadable-record", outboxId: null, binding: null, headDeliveryId: null, recovery: "cannot-write"},
   ]);
+  // Only a queue a record may have come from is read whole, and once while its draft is unchanged.
+  expect(outboxes.reads.filter(read => read.startsWith("recovery:"))).toEqual(["recovery:outbox-q", "recovery:outbox-restored"]);
 });
 
 // A large parked queue is read once: its base never, its head only when the draft changed.

@@ -47,7 +47,7 @@ function harness() {
     retryRefusal: vi.fn((workspaceId: string, shareId: string) => Promise.resolve()),
     onClose: vi.fn(),
     onError: vi.fn((message: string, error: unknown, retry: () => boolean) => {}),
-    saveRecoveryCopy: vi.fn(async (workspaceId: string, path: string) => {}),
+    saveRecoveryCopy: vi.fn(async (workspaceId: string, path: string, incident?: string) => {}),
   };
 }
 
@@ -1025,7 +1025,7 @@ describe("LiveDocumentsDialog", () => {
   describe("edits the server refused", () => {
     it("reveals the asked-for row with its Stop, and promises only the recovery copy", async () => {
       const h = harness();
-      h.load.mockResolvedValue(page([row("docs/other.md"), row("docs/a.md", { quarantine: "paused" })]));
+      h.load.mockResolvedValue(page([row("docs/other.md"), row("docs/a.md", { quarantine: "paused", incident: "outbox:delivery:0" })]));
       render(<LiveDocumentsDialog workspaceId="ws" reveal="docs/a.md" {...h} />);
       const stop = await screen.findByRole("button", { name: "Stop live editing for docs/a.md" });
       await vi.waitFor(() => expect(document.activeElement).toBe(stop));
@@ -1039,7 +1039,8 @@ describe("LiveDocumentsDialog", () => {
       expect(revealed.textContent).not.toContain("writes them into your file");
       expect(actions("docs/a.md")).toEqual(["Stop live editing", "Save recovery copy"]);
       await userEvent.setup().click(within(revealed).getByRole("button", { name: "Save recovery copy of docs/a.md" }));
-      expect(h.saveRecoveryCopy).toHaveBeenCalledExactlyOnceWith("ws", "docs/a.md");
+      // Save names the kept edits the row shows.
+      expect(h.saveRecoveryCopy).toHaveBeenCalledExactlyOnceWith("ws", "docs/a.md", "outbox:delivery:0");
     });
 
     it("reads on through later pages to reveal a stopped row, each page once", async () => {
@@ -1137,7 +1138,7 @@ describe("LiveDocumentsDialog", () => {
       render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
       const save = await screen.findByRole("button", { name: "Save recovery copy of docs/a.md" });
       await userEvent.setup().click(save);
-      expect(h.saveRecoveryCopy).toHaveBeenCalledExactlyOnceWith("ws", "docs/a.md");
+      expect(h.saveRecoveryCopy).toHaveBeenCalledExactlyOnceWith("ws", "docs/a.md", undefined);
       expect(save).toHaveProperty("disabled", true);
       await act(async () => { saving.resolve(); await saving.promise; });
       expect(save).toHaveProperty("disabled", false);

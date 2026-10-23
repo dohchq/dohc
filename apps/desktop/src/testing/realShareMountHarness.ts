@@ -135,6 +135,7 @@ export function createRealShareMountHarness(input: {
     ownerLiveStop: unexpected,
     listOwnerLiveStops: unexpected,
     ownerLiveQuarantines: unexpected,
+    unwrittenOwnerLiveReleases: unexpected,
     retryOwnerLiveQuarantine: unexpected,
     retryOwnerLiveRelease: unexpected,
     saveOwnerLiveRecoveryCopy: unexpected,

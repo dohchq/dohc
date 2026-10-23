@@ -988,10 +988,10 @@ export function DesktopWorkspaceShell(props: {
     },
     [showSuccessNotice],
   );
-  // Save recovery copy, from a notice or the Live documents dialog. Set once
-  // the shell can open the copy it wrote.
-  const saveLiveRecoveryCopyRef = useRef<(id: string, path: string) => Promise<void>>(async () => undefined);
-  const saveLiveRecoveryCopyFromDialog = useCallback((id: string, path: string) => saveLiveRecoveryCopyRef.current(id, path), []);
+  // Save recovery copy, from a notice or the Live documents dialog, of the
+  // kept edits the row's incident names. Set once the shell can open the copy it wrote.
+  const saveLiveRecoveryCopyRef = useRef<(id: string, path: string, incident?: string) => Promise<void>>(async () => undefined);
+  const saveLiveRecoveryCopyFromDialog = useCallback((id: string, path: string, incident?: string) => saveLiveRecoveryCopyRef.current(id, path, incident), []);
 
   const reportCloudStatusUnavailable = useCallback(
     (retry: () => void) => {
@@ -1836,11 +1836,12 @@ export function DesktopWorkspaceShell(props: {
       const onServer=row.storedOn==="server";
       const details:ReadonlyArray<ErrorDetailField>=[["File",row.path,row.path.length],["Kept on",onServer ? "The server" : "This computer"],["Reason",row.reason],["Incident",row.incident]];
       const open={label:"Open Live documents",run:() => openLiveDocuments(workspaceId,row.path)};
-      const save={label:"Save recovery copy",run:() => {void saveLiveRecoveryCopyRef.current(workspaceId,row.path);},additional:[open]};
-      // A Stop runs again: it finishes a waiting Stop, or writes the file a finished one could not.
+      const save={label:"Save recovery copy",run:() => {void saveLiveRecoveryCopyRef.current(workspaceId,row.path,row.incident);},additional:[open]};
+      // A Stop runs again for this row's document: it finishes a waiting Stop, or writes the file a finished one could not.
+      const again=row.recovery==="not-written" || row.recovery==="stopping" ? {objectId:row.objectId,recovery:row.recovery} : undefined;
       const stopAgain=() => {
         let result:LiveDocumentStopResult={keptEdits:"none"};
-        void withClosedEngineDocSession(workspaceId,row.path,async () => {result=await bridge().stopOwnerLiveDocument({workspaceId,path:row.path});})
+        void withClosedEngineDocSession(workspaceId,row.path,async () => {result=await bridge().stopOwnerLiveDocument({workspaceId,path:row.path,...(again ? {again} : {})});})
           .then(() => {if (workspaceIdRef.current===workspaceId && result.keptEdits==="recovered") liveDocumentStopped(row.path,"recovered");},
             (error: unknown) => {
               if (workspaceIdRef.current!==workspaceId || workspaceAdmission.superseded) return;
@@ -2467,10 +2468,10 @@ export function DesktopWorkspaceShell(props: {
   // at a time, and asking again while it runs waits for it.
   const recoverySaves = useRef(new Map<string, Promise<void>>());
   useEffect(() => {
-    saveLiveRecoveryCopyRef.current = (id, path) => {
-      const key = `${id}\n${path}`, running = recoverySaves.current.get(key);
+    saveLiveRecoveryCopyRef.current = (id, path, incident) => {
+      const key = `${id}\n${path}\n${incident ?? ""}`, running = recoverySaves.current.get(key);
       if (running) return running;
-      const saving = bridge().saveOwnerLiveRecoveryCopy({ workspaceId: id, path }).then((saved) => {
+      const saving = bridge().saveOwnerLiveRecoveryCopy({ workspaceId: id, path, ...(incident === undefined ? {} : { incident }) }).then((saved) => {
         if (workspaceIdRef.current !== id) return;
         const opened = saved.copyPath ?? saved.packagePath;
         const slash = saved.packagePath.lastIndexOf("/");
@@ -2483,7 +2484,7 @@ export function DesktopWorkspaceShell(props: {
         undefined, undefined, { label: "Open", run: () => { if (workspaceIdRef.current === id) openFile(opened); } });
       }, (error: unknown) => {
         if (workspaceIdRef.current !== id) return;
-        reportShellError(`dohc could not save a recovery copy of ${path}.`, error, () => { void saveLiveRecoveryCopyRef.current(id, path); });
+        reportShellError(`dohc could not save a recovery copy of ${path}.`, error, () => { void saveLiveRecoveryCopyRef.current(id, path, incident); });
       }).finally(() => recoverySaves.current.delete(key));
       recoverySaves.current.set(key, saving);
       return saving;

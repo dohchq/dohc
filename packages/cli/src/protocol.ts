@@ -214,10 +214,11 @@ const deleteRetainedCopiesArgsSchema = z
 
 // Edits the server refused for good that this computer keeps for a live
 // document, found by the document's path. Try again and Stop again name the
-// refusal they answer, so a newer one is read before either runs.
+// refusal they answer, so a newer one is read before either runs. Save
+// recovery copy may name one, to save exactly those edits.
 const liveKeptEditsArgsSchema = z.object(argsBase).strict();
-const saveRecoveryCopyArgsSchema = z.object({ ...argsBase, path: documentPathArg }).strict();
 const keptEditsIncidentSchema = z.string().min(1).max(1024);
+const saveRecoveryCopyArgsSchema = z.object({ ...argsBase, path: documentPathArg, incident: keptEditsIncidentSchema.optional() }).strict();
 const retryKeptEditsArgsSchema = z
   .object({ ...argsBase, path: documentPathArg, incident: keptEditsIncidentSchema })
   .strict();

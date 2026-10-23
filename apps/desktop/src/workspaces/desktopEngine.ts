@@ -33,11 +33,11 @@ import type {DesktopOwnerDeliveryConfig, startDesktopOwnerDelivery} from "./desk
 import type {OwnerKnownRefusals} from "./ownerYDocOutbox";
 import {relayUrlsMatch} from "./syncCode";
 import {readyOwnerDeliveryDocuments, startServerOwnerDelivery} from "./serverOwnerDelivery";
-import {readOwnerLiveQuarantines, readOwnerLiveQueue, readServerKeptEdits, retryOwnerLiveQuarantine, type OwnerLiveHeadCache, type OwnerLiveQuarantineRecord, type ServerKeptEdits} from "./ownerLiveQuarantine";
+import {readOwnerLiveQuarantines, readOwnerLiveQueue, readServerKeptEdits, retryOwnerLiveQuarantine, sameGeneration, type OwnerLiveHeadCache, type OwnerLiveQuarantineRecord, type ServerKeptEdits} from "./ownerLiveQuarantine";
 import {decodeOwnerYDocOutboxRecovery} from "@dohc/workspace-engine-client";
 import {z} from "zod";
-import {keptEarlierError, keptEarlierRelease, sameBinding, type UnwrittenReleases} from "./ownerLiveReleases";
-import type {LiveRecoveryFiles} from "./ownerLiveRecoveryCopy";
+import {keptEarlierError, keptEarlierRelease, recoverySnapshot, sameRelease, type UnwrittenRelease, type UnwrittenReleases} from "./ownerLiveReleases";
+import type {LiveRecoveryFiles, LiveRecoveryPackage} from "./ownerLiveRecoveryCopy";
 import type {DocumentProjection} from "./documentProjection";
 import {createDurableFile} from "./workspaceFiles";
 import {lstat} from "node:fs/promises";
@@ -172,9 +172,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   const ownerQuarantineReads = new Map<string, number>();
   const ownerQuarantineAttempts = new Map<string, number>();
   const ownerQuarantineHeads = new Map<string, OwnerLiveHeadCache>();
+  const releaseIncident = (row: Pick<UnwrittenRelease, "objectId" | "binding">) =>
+    row.binding ? `release:${row.binding.lineageClaimId}:${row.binding.restoreFenceGeneration}` : `release:${row.objectId}`;
   const quarantineIncident = (row: OwnerLiveQuarantineRecord) => row.outboxId !== null
-    ? `${row.outboxId}:${row.headDeliveryId}:${ownerQuarantineAttempts.get(row.outboxId) ?? 0}`
-    : row.binding ? `release:${row.binding.lineageClaimId}:${row.binding.restoreFenceGeneration}` : `release:${row.objectId}`;
+    ? `${row.outboxId}:${row.headDeliveryId}:${ownerQuarantineAttempts.get(row.outboxId) ?? 0}` : releaseIncident(row);
   // Refused queues the server keeps for documents it hosts, as each pass last
   // read them from the server's live document list.
   const serverQuarantines = new Map<string, ServerKeptEdits[]>();
@@ -220,16 +221,18 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
    */
   async function releaseOwnerLiveStop(workspaceId: string, client: EngineClient, workspaceHandle: string,
     binding: LiveObjectBinding, acceptedCursor: number, signal?: AbortSignal) {
+    // Only the queue of the generation this release takes.
     const kept = (await readOwnerQuarantinesInto(workspaceId, client, workspaceHandle))
-      .find(row => row.objectId === binding.objectId && row.outboxId !== null && row.binding.lineageClaimId === binding.lineageClaimId);
+      .find(row => row.objectId === binding.objectId && row.outboxId !== null && sameGeneration(row.binding, binding));
     if (kept?.outboxId) {
       const release = {workspaceId, objectId: binding.objectId, path: kept.path, reason: kept.reason, binding, headDeliveryId: kept.headDeliveryId, retry: true};
-      // Checked before the whole queue is read; the put checks again under its lock.
+      // Checked before the whole queue is read; the put checks its edits too, under its lock.
       const earlier = keptEarlierRelease(await dependencies.ownerLiveReleases.list(workspaceId), release);
       if (earlier) throw keptEarlierError(earlier.path);
       const {liveRecoveryPackage} = await import("./ownerLiveRecoveryCopy");
       const queue = await readOwnerLiveQueue(client, workspaceHandle, kept);
-      await dependencies.ownerLiveReleases.put(release, JSON.stringify(liveRecoveryPackage(queue, {path: kept.path, reason: kept.reason, storedOn: "this-computer"})));
+      await dependencies.ownerLiveReleases.put({...release, snapshot: recoverySnapshot(queue)},
+        JSON.stringify(liveRecoveryPackage(queue, {path: kept.path, reason: kept.reason, storedOn: "this-computer"})));
     }
     const released = await client.ownerYDocRelease({id: 0, workspace: workspaceHandle, deadlineMs: 30_000}, binding, acceptedCursor, signal);
     // A written file ends this release's record. A deferred release leaves the
@@ -804,6 +807,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       });
       ownerDelivery?.retry?.(workspace.workspaceId);
     },
+    /** The records of Stops that took refused edits but could not write the file, read from their own file. */
+    unwrittenOwnerLiveReleases(workspaceId: string) {
+      return dependencies.ownerLiveReleases.list(workspaceId);
+    },
     /** A Stop's release, recorded until the file holds any refused edits it took. */
     releaseOwnerLiveStop(workspace: EngineWorkspace, binding: LiveObjectBinding, acceptedCursor: number) {
       return withEngineClient(workspace, (client, handle) => releaseOwnerLiveStop(workspace.workspaceId, client, handle, binding, acceptedCursor));
@@ -812,13 +819,12 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
      * Resume clears a document's Stop. A release still owed to the file keeps
      * its record and recovery package: resuming does not write the file. The
      * engine no longer holds that release, so only Save recovery copy remains,
-     * and the next Stop is an ordinary one.
+     * and the next Stop is an ordinary one. The engine names the Stop it
+     * cleared, including a finished one its list no longer shows.
      */
     clearOwnerLiveStop(workspace: EngineWorkspace, path: string): Promise<void> {
       return withEngineClient(workspace, async (client, handle) => {
-        const request = {id: 0, workspace: handle, deadlineMs: 30_000};
-        const cleared = (await client.ownerYDocStopList(request)).find(stop => stop.document.currentPath === path)?.binding;
-        await client.ownerYDocStopClear(request, path);
+        const cleared = (await client.ownerYDocStopClear({id: 0, workspace: handle, deadlineMs: 30_000}, path))?.binding;
         if (cleared) await dependencies.ownerLiveReleases.endRetry(workspace.workspaceId, cleared.objectId, cleared);
       });
     },
@@ -852,18 +858,30 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
      * The queue stays. It works while live editing is stopped, after a Stop
      * took the edits but could not write the file, and for any size. Saving a
      * Stop's stored package ends its record: the workspace now holds the edits.
+     * An incident saves exactly the row that shows it.
      */
-    async saveOwnerLiveRecoveryCopy(workspace: EngineWorkspace, path: string): Promise<LiveRecoveryFiles & {keptEdits: "kept" | "copied" | "ended"}> {
+    async saveOwnerLiveRecoveryCopy(workspace: EngineWorkspace, path: string, incident?: string): Promise<LiveRecoveryFiles & {keptEdits: "kept" | "copied" | "ended"}> {
       const recovery = await import("./ownerLiveRecoveryCopy");
       const releases = dependencies.ownerLiveReleases;
       const records = await releases.list(workspace.workspaceId);
-      const read = await withEngineClient(workspace, async (client, handle) => {
-        const row = (await readOwnerLiveQuarantines(client, handle)).find(candidate => candidate.path === path && candidate.outboxId !== null);
-        // A record goes first, unless it came from this very queue, which still holds its edits.
-        const record = records.find(candidate => candidate.path === path) ?? records.find(candidate => candidate.objectId === row?.objectId);
-        if (record && !(row?.outboxId && record.retry && sameBinding(record.binding, row.binding) && record.headDeliveryId === row.headDeliveryId)) return {record};
-        return row?.outboxId ? {queued: recovery.liveRecoveryPackage(await readOwnerLiveQueue(client, handle, row),
-          {path: row.path, reason: row.reason, storedOn: "this-computer"})} : {};
+      const changed = () => new Error("This document changed. Open Live documents to check it.");
+      const named = incident === undefined ? undefined : incident.startsWith("server:") ? "server" : incident.startsWith("release:") ? "record" : "queue";
+      const read: {record?: UnwrittenRelease; queued?: LiveRecoveryPackage} = named === "server" ? {} : await withEngineClient(workspace, async (client, handle) => {
+        if (named === "record") {
+          const record = records.find(candidate => candidate.path === path && releaseIncident(candidate) === incident);
+          if (!record) throw changed();
+          return {record};
+        }
+        const row = (await readOwnerLiveQuarantines(client, handle)).find(candidate => candidate.path === path && candidate.outboxId !== null &&
+          (named === undefined || quarantineIncident(candidate) === incident));
+        if (named === "queue" && !row) throw changed();
+        // Without a row, a record goes first, unless its package holds exactly this queue's edits, which the queue still holds.
+        const record = named ? undefined : records.find(candidate => candidate.path === path) ?? records.find(candidate => candidate.objectId === row?.objectId);
+        if (record && (!row?.outboxId || !record.retry || record.objectId !== row.objectId || record.headDeliveryId !== row.headDeliveryId)) return {record};
+        if (!row?.outboxId) return {};
+        const queue = await readOwnerLiveQueue(client, handle, row);
+        if (record && !sameRelease(record, {binding: row.binding, headDeliveryId: row.headDeliveryId, snapshot: recoverySnapshot(queue)})) return {record};
+        return {queued: recovery.liveRecoveryPackage(queue, {path: row.path, reason: row.reason, storedOn: "this-computer"})};
       });
       const writes = {
         create: (relative: string, text: string) => createDurableFile(workspace.rootPath, relative, text),
@@ -873,7 +891,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       // Edits the server keeps: read them whole, write them here, then tell
       // the server a durable copy of this refusal exists, so it may let the
       // document go. Until it hears, it keeps them.
-      const held = read.queued || read.record ? undefined : serverQuarantinesOf(workspace.workspaceId).find(row => row.path === path);
+      const held = read.queued || read.record ? undefined : serverQuarantinesOf(workspace.workspaceId)
+        .find(row => row.path === path && (named === undefined || serverIncident(row) === incident));
+      if (named === "server" && !held) throw changed();
       if (held) {
         const served = z.object({ok: z.literal(true), outboxId: z.literal(held.outboxId), generation: z.literal(held.generation), queue: z.unknown()})
           .parse(await withServerSession(workspace.workspaceId, (session, signal) =>

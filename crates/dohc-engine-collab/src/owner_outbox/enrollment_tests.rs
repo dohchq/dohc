@@ -1109,6 +1109,138 @@ fn work_on_an_accepted_prefix_rebuilds_from_its_queue_alone_after_a_generation_a
     assert!(!text.contains("restored on the host"));
 }
 
+// The server refused the edit on the accepted prefix before a later restore
+// generation arrived. The advance leaves it refused for its own reason, not
+// restore-fenced, and its queue keeps the checkpoint it builds on.
+#[test]
+fn an_already_refused_queue_keeps_its_refusal_and_checkpoint_across_a_generation_advance() {
+    use super::super::{
+        read_pending_page, OwnerOutboxPageResult, OwnerOutboxReadCursor, OwnerOutboxReadPart,
+    };
+    let (_dir, mut store, observed, checkpoint) = fixture();
+    let first = input(&store, &observed, checkpoint.clone());
+    enroll(&mut store, &first, &observed.limits).unwrap();
+    let edited = Ydoc::wire();
+    edited.apply(&checkpoint).unwrap();
+    let accepted = edited.richdoc_append_paragraph("accepted prefix");
+    accept_field_frame(&mut store, &observed.binding, accepted);
+    let refused = edited.richdoc_append_paragraph("refused on the accepted prefix");
+    let revision = store
+        .read_with(|conn| super::super::draft::read_observed_in(conn, &observed.binding))
+        .unwrap()
+        .unwrap()
+        .revision;
+    store
+        .write_with(&NoFaults, |tx| {
+            super::super::draft::append_draft_in_tx(
+                tx,
+                "workspace",
+                &observed.binding,
+                revision,
+                "refused".into(),
+                refused.clone(),
+                13,
+            )
+        })
+        .unwrap();
+    let outbox_id: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outbox_id FROM owner_ydoc_outbox_entries WHERE append_key='refused'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    super::super::quarantine(
+        &mut store,
+        "workspace",
+        OwnerOutboxQuarantineInput {
+            outbox_id: outbox_id.clone(),
+            reason: "invalid-update".into(),
+            observed_binding: None,
+        },
+        20,
+    )
+    .unwrap();
+    let own: String = store
+        .read_with(|conn| {
+            conn.query_row("SELECT checkpoint_digest FROM ydoc_owner_bindings", [], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap();
+    let host = Ydoc::wire();
+    host.apply(&checkpoint).unwrap();
+    host.richdoc_append_paragraph("restored on the host");
+    let restored = successor_input(&store, &next_generation(&observed), bounded(&host).unwrap());
+    enroll(&mut store, &restored, &observed.limits).unwrap();
+    let (state, reason, kept): (String, Option<String>, Option<String>) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT state,quarantine_reason,kept_checkpoint_digest FROM owner_ydoc_outboxes WHERE outbox_id=?1",
+                [&outbox_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        (state.as_str(), reason.as_deref(), kept.as_deref()),
+        ("quarantined", Some("invalid-update"), Some(own.as_str()))
+    );
+    let read = |cursor: Option<OwnerOutboxReadCursor>| {
+        match read_pending_page(&store, "workspace", &outbox_id, cursor, 4096).unwrap() {
+            OwnerOutboxPageResult::Page(page) => page,
+            OwnerOutboxPageResult::ReadChanged => panic!("nothing changed during the read"),
+        }
+    };
+    let header = read(None);
+    let raw: serde_json::Value = serde_json::from_slice(&header.bytes).unwrap();
+    assert_eq!(raw["checkpointDigest"], serde_json::json!(own));
+    let snapshot = header.cursor.snapshot.clone();
+    let mut parts: Vec<(OwnerOutboxReadPart, Vec<u8>)> = Vec::new();
+    let mut cursor = header.next_cursor;
+    while let Some(at) = cursor {
+        let page = read(Some(at));
+        cursor = page.next_cursor;
+        if page.cursor.offset > 0 {
+            parts.last_mut().unwrap().1.extend(page.bytes);
+        } else {
+            parts.push((page.cursor.part, page.bytes));
+        }
+    }
+    let part = |wanted: OwnerOutboxReadPart| {
+        parts
+            .iter()
+            .find(|(part, _)| *part == wanted)
+            .map(|(_, bytes)| bytes.clone())
+            .unwrap()
+    };
+    let (base, update) = (part(OwnerOutboxReadPart::Base), part(OwnerOutboxReadPart::Update));
+    assert_eq!(update, refused);
+    let mut kept = Vec::new();
+    let mut cursor = Some(OwnerOutboxReadCursor {
+        snapshot,
+        part: OwnerOutboxReadPart::Checkpoint,
+        sequence: 0,
+        offset: 0,
+    });
+    while let Some(at) = cursor {
+        let page = read(Some(at));
+        kept.extend(page.bytes);
+        cursor = page.next_cursor;
+    }
+    assert_eq!(hex_sha256(&kept), own);
+    let rebuilt = Ydoc::wire();
+    rebuilt.apply(&base).unwrap();
+    rebuilt.apply(&kept).unwrap();
+    rebuilt.apply(&update).unwrap();
+    assert!(!rebuilt.has_pending_dependencies());
+    let text = rebuilt.project(crate::ContentKind::Richdoc).unwrap().content;
+    assert!(text.contains("accepted prefix") && text.contains("refused on the accepted prefix"));
+    assert!(!text.contains("restored on the host"));
+}
+
 #[test]
 fn explicit_recovery_keeps_old_writes_refused_and_installs_only_the_host_checkpoint() {
     use super::super::draft::{append_draft_in_tx, write_states_in, OwnerDraftWrite};
@@ -1607,9 +1739,28 @@ fn stop_preserves_old_generation_work_and_start_can_enroll_again() {
             Ok::<_, OwnerOutboxError>(())
         })
         .unwrap();
-    store
+    // A finished Stop is no longer listed, but clearing it names it, so the
+    // desktop can end what that Stop held.
+    assert!(store
+        .read_with(|conn| release::list_requested_in(conn, "workspace"))
+        .unwrap()
+        .is_empty());
+    let cleared = store
         .write_with(&NoFaults, |tx| release::clear_in_tx(tx, &key))
         .unwrap();
+    let TxnOutcome::Committed(Some(cleared)) = cleared else {
+        panic!("the finished Stop was not cleared")
+    };
+    assert_eq!(
+        (cleared.state.as_str(), cleared.retirement_owed, cleared.binding.as_ref()),
+        ("released", false, Some(&next))
+    );
+    assert!(matches!(
+        store
+            .write_with(&NoFaults, |tx| release::clear_in_tx(tx, &key))
+            .unwrap(),
+        TxnOutcome::Committed(None)
+    ));
     let checkpoint = store
         .read_with(|conn| bounded(&crate::load_doc_in(conn, &key).map_err(collab)?))
         .unwrap();

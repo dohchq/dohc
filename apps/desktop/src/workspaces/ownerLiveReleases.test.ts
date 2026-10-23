@@ -1,7 +1,7 @@
 import {readdir, readFile, writeFile} from "node:fs/promises";
 import {dirname, join} from "node:path";
 import {expect, it, vi} from "vitest";
-import {createUnwrittenReleases} from "./ownerLiveReleases";
+import {createUnwrittenReleases, keptEarlierRelease, recoverySnapshot} from "./ownerLiveReleases";
 import {createTestScratch} from "./testTemp";
 
 const fs = vi.hoisted(() => ({copyFile: vi.fn(), rm: vi.fn()}));
@@ -14,8 +14,8 @@ vi.mock("node:fs/promises", async importOriginal => {
 
 const binding = (objectId: string, restoreFenceGeneration = 0) => ({workspaceId: "owner", mainVersionId: "main", objectId, lineageClaimId: "a".repeat(64),
   currentPath: `${objectId}.md`, selectorPaths: [`${objectId}.md`], restoreFenceGeneration});
-const release = (objectId: string, headDeliveryId = `${objectId}-outbox:1:digest`) =>
-  ({workspaceId: "owner", objectId, path: `${objectId}.md`, reason: "invalid-update", binding: binding(objectId), headDeliveryId, retry: true});
+const release = (objectId: string, headDeliveryId = `${objectId}-outbox:1:digest`, snapshot = "5".repeat(64)) =>
+  ({workspaceId: "owner", objectId, path: `${objectId}.md`, reason: "invalid-update", binding: binding(objectId), headDeliveryId, snapshot, retry: true});
 const asideFiles = async (file: string) => (await readdir(dirname(file))).filter(name => name.startsWith("owner-live-releases.json.unreadable-"));
 
 it("keeps a damaged record without Try again, skips an unreadable one, and sets their file aside once", async () => {
@@ -39,7 +39,7 @@ it("keeps a damaged record without Try again, skips an unreadable one, and sets 
     expect(await asideFiles(file)).toHaveLength(1);
     // The damaged record ends only when its stored package has been saved.
     await releases.written("owner", "bad", binding("bad"));
-    await releases.remove("owner", "bad", {binding: null, headDeliveryId: release("bad").headDeliveryId});
+    await releases.remove("owner", "bad", {binding: null, headDeliveryId: release("bad").headDeliveryId, snapshot: release("bad").snapshot});
     expect((await createUnwrittenReleases(() => file).list("owner")).map(row => row.objectId)).toEqual(["other", "unexplained"]);
   } finally {vi.restoreAllMocks();}
 });
@@ -78,7 +78,8 @@ it("keeps each record's recovery package until that record is removed by its own
   expect(await reopened.recovery("owner", "plan")).toBe("plan package");
   // A release of another generation of the same document ends nothing, nor does a save of another queue's record.
   await reopened.written("owner", "plan", binding("plan", 1));
-  await reopened.remove("owner", "plan", {binding: binding("plan"), headDeliveryId: "rebuilt-outbox:1:digest"});
+  await reopened.remove("owner", "plan", {binding: binding("plan"), headDeliveryId: "rebuilt-outbox:1:digest", snapshot: release("plan").snapshot});
+  await reopened.remove("owner", "plan", {...release("plan"), snapshot: "6".repeat(64)});
   expect(await reopened.recovery("owner", "plan")).toBe("plan package");
   // Another document at the same path keeps its own record.
   await reopened.remove("owner", "plan", release("plan"));
@@ -112,6 +113,42 @@ it("refuses a package from another queue under the identical binding, even while
   await expect(releases.put(release("plan", "rebuilt-outbox:1:digest"), "rebuilt package")).rejects.toThrow("Save a recovery copy of plan.md first.");
   expect(await createUnwrittenReleases(() => file).recovery("owner", "plan")).toBe("first package");
   expect(await createUnwrittenReleases(() => file).list("owner")).toEqual([release("plan")]);
+});
+
+// Restoring an earlier engine state can repeat the binding and the head with fewer edits behind it.
+it("refuses a package of other edits under the identical binding and head, and keeps the stored one", async () => {
+  const file = join(await createTestScratch("dohc-unwritten-restored-"), "owner-live-releases.json");
+  const releases = createUnwrittenReleases(() => file);
+  const both = release("plan", undefined, "e".repeat(64)), first = release("plan", undefined, "1".repeat(64));
+  await releases.put(both, "package of E1 and E2");
+  await expect(releases.put(first, "package of E1")).rejects.toThrow("Save a recovery copy of plan.md first.");
+  expect(keptEarlierRelease(await releases.list("owner"), first)).toEqual(both);
+  // Before its queue is read, the same queue's Stop is not yet refused.
+  const {snapshot: _unread, ...unread} = first;
+  expect(keptEarlierRelease(await releases.list("owner"), unread)).toBeUndefined();
+  const reopened = createUnwrittenReleases(() => file);
+  expect(await reopened.recovery("owner", "plan")).toBe("package of E1 and E2");
+  expect(await reopened.list("owner")).toEqual([both]);
+  // Save's removal of a record of other edits ends nothing.
+  await reopened.remove("owner", "plan", first);
+  expect(await reopened.list("owner")).toEqual([both]);
+  await reopened.remove("owner", "plan", both);
+  expect(await reopened.list("owner")).toEqual([]);
+});
+
+it("digests a queue's whole contents, not when it was read", async () => {
+  const update = new Uint8Array([1, 2, 3]);
+  const entry = (sequence: number) => ({sequence, appendKey: `e${sequence}`, deliveryId: `outbox:${sequence}:digest`, updateDigest: "d".repeat(64),
+    update, byteLength: 3, createdAtMs: sequence});
+  const queue = {outboxId: "outbox", binding: binding("plan"), baseUpdateDigest: "b".repeat(64), baseUpdate: update, state: "quarantined" as const,
+    pendingBytes: 6, oldestEntryAtMs: 1, quarantineReason: "invalid-update", observedBinding: null, retryDeliveryId: null,
+    entries: [entry(1), entry(2)], checkpoint: new Uint8Array([9])};
+  const snapshot = recoverySnapshot(queue);
+  expect(snapshot).toMatch(/^[0-9a-f]{64}$/);
+  expect(recoverySnapshot({...queue, oldestEntryAtMs: 5, retryDeliveryId: "outbox:1:digest", quarantineReason: "capacity-refused"})).toBe(snapshot);
+  expect(recoverySnapshot({...queue, entries: [entry(1)], pendingBytes: 3})).not.toBe(snapshot);
+  expect(recoverySnapshot({...queue, checkpoint: new Uint8Array([8])})).not.toBe(snapshot);
+  expect(recoverySnapshot({...queue, checkpoint: null})).not.toBe(snapshot);
 });
 
 it("reports a removed record as removed when its package cannot be deleted", async () => {

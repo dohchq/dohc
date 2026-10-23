@@ -2221,10 +2221,10 @@ export async function saveKeptCopy(ctx: ToolContext, args: { id: number }) {
 // A live document's edits the server refused, which dohc keeps on this
 // computer. The desktop's Notices row offers these same steps, and
 // dohc_workspace_status lists the documents as keptEdits.
-export async function saveRecoveryCopy(ctx: ToolContext, args: { path: string }) {
+export async function saveRecoveryCopy(ctx: ToolContext, args: { path: string; incident?: string }) {
   const resolved = await safeResolve(ctx, args.path, "write");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  return requestCli(ctx, "saveRecoveryCopy", { path: resolved.normalized });
+  return requestCli(ctx, "saveRecoveryCopy", { path: resolved.normalized, ...(args.incident === undefined ? {} : { incident: args.incident }) });
 }
 
 export async function retryKeptEdits(ctx: ToolContext, args: { path: string; incident: string }) {

@@ -101,18 +101,24 @@ describe("private owner delivery transport", () => {
   it("sends Stop request, release, list and cancellation with exact coordinates", async () => {
     const peer = new FakePeerConnection(), transport = client(peer);
     peer.acknowledge(); await transport.ready();
+    // The first cancellation clears a finished Stop, which no list shows; the second finds none.
+    const finished = {...stopTarget, state: "released", retirementOwed: false};
+    let cleared = 0;
     peer.onEnvelope = e => {
       if (e.type !== "request") return;
       const action = e.method.split(".").at(-1);
       expect(e.method).toBe(`ydoc.ownerStop.${action}`);
       expect(e.params).toEqual(action === "release" ? {binding: target.binding,acceptedCursor:0} : action === "list" ? {} : {path: "a.md"});
-      peer.send({type: "response", id: e.id, result: {stops: action === "clear" ? [] : [{...stopTarget, ...(action === "release" ? {state: "released", materialized: true} : {state: "requested"})}]}});
+      peer.send({type: "response", id: e.id, result: {stops: action === "clear" ? cleared++ === 0 ? [finished] : cleared === 2 ? [] : [finished, finished]
+        : [{...stopTarget, ...(action === "release" ? {state: "released", materialized: true} : {state: "requested"})}]}});
     };
     try {
       expect((await transport.ownerYDocStopRequest(request, "a.md")).state).toBe("requested");
       expect(await transport.ownerYDocRelease(request, target.binding, 0)).toMatchObject({state: "released", materialized: true});
       expect(await transport.ownerYDocStopList(request)).toEqual([{...stopTarget, state: "requested"}]);
-      await transport.ownerYDocStopClear(request, "a.md");
+      expect(await transport.ownerYDocStopClear(request, "a.md")).toEqual(finished);
+      expect(await transport.ownerYDocStopClear(request, "a.md")).toBeUndefined();
+      await expect(transport.ownerYDocStopClear(request, "a.md")).rejects.toThrow("Invalid Stop cancellation response.");
     } finally {transport.close();}
   });
   it.each(["binding", "state", "extra", "namespace", "unmaterialized", "materialized text"])("rejects an invalid Stop release response: %s", async scenario => {

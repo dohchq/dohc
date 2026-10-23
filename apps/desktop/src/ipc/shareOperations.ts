@@ -19,7 +19,7 @@ import {
   DismissShareSkipsPayload,
   ListOwnerLiveDocumentsPayload, OwnerLiveDocumentsResult,
   ListOwnerLiveRefusalsPayload, OwnerLiveRefusalsResult,
-  OwnerLiveDocumentActionPayload, StopOwnerLiveDocumentResult, RetryOwnerLiveQuarantinePayload,
+  OwnerLiveDocumentActionPayload, StopOwnerLiveDocumentPayload, StopOwnerLiveDocumentResult, RetryOwnerLiveQuarantinePayload,
   SaveOwnerLiveRecoveryCopyPayload, SaveOwnerLiveRecoveryCopyResult,
   ListRelaySharesResult, GetRelayReceivedSharePayload, GetRelayReceivedShareResult,
   RevokeRelaySharePayload, RevokeRelayShareResult, UndoRelaySharePayload, UndoRelayShareResult,
@@ -213,7 +213,7 @@ export const relayShareOperations = {
     capabilityId: "share.live.document.stop", channel: "desktop:stop-owner-live-document",
     scope: "workspace", guard: "active-workspace",
     inactiveMessage: "Live editing stopped because this window changed workspaces.",
-    payload: OwnerLiveDocumentActionPayload, result: StopOwnerLiveDocumentResult,
+    payload: StopOwnerLiveDocumentPayload, result: StopOwnerLiveDocumentResult,
   },
   resumeOwnerLiveDocument: {
     capabilityId: "share.live.document.resume", channel: "desktop:resume-owner-live-document",

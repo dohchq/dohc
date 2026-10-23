@@ -33,7 +33,8 @@ type CliCommandBody =
   | { verb: "accessObject"; ref: AccessObjectRef; cursor?: string }
   | { verb: "accessRefresh" }
   | { verb: "accessSharing"; lane: "granted" | "received"; cursor?: string }
-  | { verb: "documentRead" | "fileChats" | "saveRecoveryCopy"; path: string }
+  | { verb: "documentRead" | "fileChats"; path: string }
+  | { verb: "saveRecoveryCopy"; path: string; incident?: string }
   | { verb: "liveKeptEdits" }
   | { verb: "retryKeptEdits" | "stopAgain"; path: string; incident: string }
   | { verb: "fileChatStart"; path: string; title: string; body: string; stdin: boolean; agent?: string; requestId?: string; runId?: string }
@@ -343,14 +344,20 @@ const DOCUMENT_VERBS = {
   "save-recovery-copy": {
     capabilityId: "share.live.document.recovery.save",
     summary: "Save a document's kept edits next to it.",
-    operands: "<path>",
+    operands: "<path> [<incident>]",
     notes: ["Accepts every recovery.",
+      "With an incident from kept-edits, dohc saves exactly those kept edits. Without one, it saves edits a Stop could not write first.",
       "dohc writes a recovery package with every kept edit, and a readable copy when it can read the edits as a document.",
       "For edits the server keeps, dohc then tells the server the copy is saved, and the recovery becomes copied.",
       "keptEdits is kept when the edits stay where storedOn says, and copied when the server may now release them.",
       "It is ended for edits a Stop could not write: dohc no longer keeps them, and the copy holds them.",
       "dohc writes these files itself, not as the agent that asked."],
-    parse: input => ({ verb: "saveRecoveryCopy", path: parsePath(input, "document save-recovery-copy") }),
+    parse: input => {
+      const [path, incident, ...extra] = input.operands;
+      if (!path) fail("document save-recovery-copy requires a path");
+      noExtraArgs(extra, "document save-recovery-copy");
+      return { verb: "saveRecoveryCopy", path, ...(incident ? { incident } : {}) };
+    },
   },
   "retry-kept-edits": {
     capabilityId: "share.live.document.retry",

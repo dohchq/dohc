@@ -105,9 +105,14 @@ export interface OwnerLiveDocumentActionDependencies<Workspace> {
   ownerLiveStop(workspace: Workspace, action: "request" | "release" | "clear" | "retired", path: string, binding?: LiveObjectBinding | OwnerLiveStop["document"], acceptedCursor?: number): Promise<OwnerLiveStop | undefined>;
   // Documents whose edits the server refused for good, as this computer last read them.
   ownerLiveQuarantines(workspace: Workspace): readonly OwnerLiveQuarantine[];
+  // Stops that took refused edits but could not write the file, from their own records.
+  unwrittenOwnerLiveReleases(workspace: Workspace): Promise<readonly {objectId: string; path: string; retry: boolean}[]>;
   // Settles again a release that took refused edits but could not write the file. Undefined when no release remains.
   retryOwnerLiveRelease(workspace: Workspace, objectId: string): Promise<OwnerLiveStop | undefined>;
 }
+
+/** The kept edits a Stop again was asked for: its document, and whether its Stop waits or its release could not write the file. */
+export type OwnerLiveStopAgain = {objectId: string; recovery: "not-written" | "stopping"};
 
 /**
  * Stop and Resume of one owner live document, with the owner's credentials
@@ -119,17 +124,25 @@ export function createOwnerLiveDocumentActions<
   Operation extends { workspace: Workspace; assertCurrent(): void },
 >(dependencies: OwnerLiveDocumentActionDependencies<Workspace>) {
   const {remoteForWorkspace, currentCredentialGeneration, relayShareJsonWithCredentials} = dependencies;
+  const changed = () => new Error("This document changed. Open Live documents to check it.");
   // A Stop reports "recovered" only when the engine says settlement wrote the
   // refused edits into the file. Otherwise they stay kept: in their queue, or
   // in the document with a record that its file still needs them.
   const keptEditsOf = (released: OwnerLiveStop | undefined): StopOwnerLiveDocumentResult["keptEdits"] =>
     released?.materialized === true && !released.deferred ? "recovered" : "kept";
-  const ownerLiveDocumentAction = async (stop: boolean, input: {workspaceId: string; path: string}, operation: Operation): Promise<StopOwnerLiveDocumentResult> => {
+  const ownerLiveDocumentAction = async (stop: boolean, input: {workspaceId: string; path: string; again?: OwnerLiveStopAgain;
+    revalidate?: () => Promise<void>}, operation: Operation): Promise<StopOwnerLiveDocumentResult> => {
     operation.assertCurrent();assertOriginalWorkspace(operation.workspace);
     return withOwnerLiveStopTransition(input.workspaceId,input.path,async (): Promise<StopOwnerLiveDocumentResult> => {
-      // Stop again writes the file a finished release could not, from that release alone.
+      const {again}=input;
+      await input.revalidate?.();
+      // Stop again writes the file a finished release could not, from that release alone. The records
+      // decide, never a list not yet read, so no ordinary Stop starts over a release the file still needs.
       // A release the engine no longer holds keeps its edits for Save recovery copy.
-      const unwritten=stop && dependencies.ownerLiveQuarantines(operation.workspace).find(row => row.path===input.path && row.recovery==="not-written");
+      const unwritten=stop && again?.recovery!=="stopping" ? (await dependencies.unwrittenOwnerLiveReleases(operation.workspace))
+        .find(record => record.retry && (again ? record.objectId===again.objectId : record.path===input.path)) : undefined;
+      operation.assertCurrent();
+      if (again?.recovery==="not-written" && !unwritten) throw changed();
       if (unwritten) {
         const released=await dependencies.retryOwnerLiveRelease(operation.workspace,unwritten.objectId);
         operation.assertCurrent();
@@ -137,6 +150,8 @@ export function createOwnerLiveDocumentActions<
       }
       const local=stop ? await dependencies.ownerLiveStop(operation.workspace,"request",input.path) : undefined;
       operation.assertCurrent();
+      // A waiting Stop runs again only for the document its row names.
+      if (again && local?.document.objectId!==again.objectId) throw changed();
       // This computer's release can write only the edits it keeps. Edits the server keeps stay there,
       // and edits an earlier release could not write are not this Stop's to claim.
       const kept=local===undefined ? undefined : dependencies.ownerLiveQuarantines(operation.workspace).find(row => row.objectId===local.document.objectId && row.recovery!=="cannot-write");
@@ -164,6 +179,7 @@ export function createOwnerLiveDocumentActions<
         return {keptEdits:"none"};
       }
       let released: OwnerLiveStop | undefined;
+      await input.revalidate?.();
       try {
         released=await dependencies.ownerLiveStop(operation.workspace,local!.binding ? "release" : "retired",input.path,local!.binding ?? local!.document,response.acceptedCursor);
       } catch (error) {
@@ -180,8 +196,24 @@ export function createOwnerLiveDocumentActions<
     });
   };
   return {
-    stop: (input: {workspaceId: string; path: string}, operation: Operation) => ownerLiveDocumentAction(true, input, operation),
+    /** A Stop, or with `again` a Stop again of that row's document only. */
+    stop: (input: {workspaceId: string; path: string; again?: OwnerLiveStopAgain}, operation: Operation) => ownerLiveDocumentAction(true, input, operation),
     resume: async (input: {workspaceId: string; path: string}, operation: Operation) => { await ownerLiveDocumentAction(false, input, operation); },
+    /**
+     * An agent's Stop again of the kept edits it read. A record keeps the path
+     * its document had when it stopped, so editors are held off at the
+     * document's current path, which must still be its path when the Stop acts.
+     */
+    stopAgain: async (input: {workspaceId: string; path: string; again: OwnerLiveStopAgain}, operation: Operation, door: {
+      documentPath(objectId: string): Promise<string | null>;
+      withoutEditors<Result>(path: string, change: () => Promise<Result>): Promise<Result>;
+    }) => {
+      const pathNow = async () => await door.documentPath(input.again.objectId) ?? input.path;
+      const path = await pathNow();
+      operation.assertCurrent();
+      return door.withoutEditors(path, () => ownerLiveDocumentAction(true, {...input, path,
+        revalidate: async () => {if (await pathNow() !== path) throw changed();}}, operation));
+    },
   };
 }
 
@@ -204,7 +236,7 @@ export function createRelaySharesIpcHandlers<
   >;
   listOwnerLiveStops(workspace: Workspace): Promise<OwnerLiveStop[]>;
   retryOwnerLiveQuarantine(workspace: Workspace, objectId: string, incident: string): Promise<void>;
-  saveOwnerLiveRecoveryCopy(workspace: Workspace, path: string): Promise<SaveOwnerLiveRecoveryCopyResult>;
+  saveOwnerLiveRecoveryCopy(workspace: Workspace, path: string, incident?: string): Promise<SaveOwnerLiveRecoveryCopyResult>;
   // A grant changed on the relay. Null when the change names no workspace.
   sharesChanged(workspaceId: string | null): void;
   // An authenticated account listing, applied to this machine's received
@@ -269,7 +301,7 @@ export function createRelaySharesIpcHandlers<
         if (deferred) Object.assign(row, {deferredStop: deferred,
           canResume: row.reason !== "session-host-diverged" && row.reason !== "live-edit-unadmitted"});
         const quarantine = quarantines.find(candidate => candidate.path === row.path);
-        if (quarantine) Object.assign(row, {quarantine: quarantine.recovery, storedOn: quarantine.storedOn});
+        if (quarantine) Object.assign(row, {quarantine: quarantine.recovery, storedOn: quarantine.storedOn, incident: quarantine.incident});
       }
       return OwnerLiveDocumentsResult.parse({documents: [...documents.values()], nextCursor: stopped.nextCursor});
     }, assertOriginalWorkspace);
@@ -1072,11 +1104,12 @@ export function createRelaySharesIpcHandlers<
       await dependencies.retryOwnerLiveQuarantine(operation.workspace, input.objectId, input.incident);
       operation.assertCurrent();
     },
-    // Main finds the queue from the path in this computer's own state; the
-    // renderer names nothing else. It works while live editing is stopped.
+    // Main finds the kept edits from the path, and the row's incident, in
+    // this computer's own state; the renderer names nothing else. It works
+    // while live editing is stopped.
     saveOwnerLiveRecoveryCopy: async (input, { operation }) => {
       operation.assertCurrent(); assertOriginalWorkspace(operation.workspace);
-      const saved = SaveOwnerLiveRecoveryCopyResult.parse(await dependencies.saveOwnerLiveRecoveryCopy(operation.workspace, input.path));
+      const saved = SaveOwnerLiveRecoveryCopyResult.parse(await dependencies.saveOwnerLiveRecoveryCopy(operation.workspace, input.path, input.incident));
       operation.assertCurrent();
       return saved;
     },

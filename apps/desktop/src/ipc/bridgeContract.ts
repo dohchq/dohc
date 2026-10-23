@@ -436,7 +436,10 @@ export const RetryOwnerLiveQuarantinePayload = WorkspaceIdPayload.extend({
   incident: OwnerLiveQuarantine.shape.incident,
 }).strict();
 export type RetryOwnerLiveQuarantinePayload = z.infer<typeof RetryOwnerLiveQuarantinePayload>;
-export const SaveOwnerLiveRecoveryCopyPayload = WorkspaceIdPayload.extend({path: SAFE_RELATIVE_PATH}).strict();
+// With `incident`, Save writes exactly that row's kept edits; with a path
+// alone, the earliest a Stop still owes the file comes first.
+export const SaveOwnerLiveRecoveryCopyPayload = WorkspaceIdPayload.extend({path: SAFE_RELATIVE_PATH,
+  incident: OwnerLiveQuarantine.shape.incident.optional()}).strict();
 export type SaveOwnerLiveRecoveryCopyPayload = z.infer<typeof SaveOwnerLiveRecoveryCopyPayload>;
 // The readable copy is null when the kept edits could not be read as a document;
 // the package next to it always holds their original bytes. `storedOn` is
@@ -460,6 +463,8 @@ export const OwnerLiveDocument = z.object({
   // The server refused this document's edits for good, and dohc keeps them where `storedOn` says.
   quarantine: OwnerLiveQuarantine.shape.recovery.optional(),
   storedOn: OwnerLiveQuarantine.shape.storedOn.optional(),
+  // Those kept edits' incident, which Save recovery copy names to save them.
+  incident: OwnerLiveQuarantine.shape.incident.optional(),
 }).strict();
 export type OwnerLiveDocument = z.infer<typeof OwnerLiveDocument>;
 // What a Stop did with edits the server refused: wrote them into the file,
@@ -479,6 +484,11 @@ export const OwnerLiveDocumentsResult = z.object({
 export type OwnerLiveDocumentsResult = z.infer<typeof OwnerLiveDocumentsResult>;
 export const OwnerLiveDocumentActionPayload = WorkspaceIdPayload.extend({path: SAFE_RELATIVE_PATH}).strict();
 export type OwnerLiveDocumentActionPayload = z.infer<typeof OwnerLiveDocumentActionPayload>;
+// Stop again from a kept-edits row names that row's document, so it acts on no other.
+export const StopOwnerLiveDocumentPayload = OwnerLiveDocumentActionPayload.extend({
+  again: z.object({objectId: OwnerLiveQuarantine.shape.objectId, recovery: z.enum(["not-written", "stopping"])}).strict().optional(),
+}).strict();
+export type StopOwnerLiveDocumentPayload = z.infer<typeof StopOwnerLiveDocumentPayload>;
 
 const OWNER_LIVE_SHARE_ID = z.string().min(1).max(512).regex(/^[^\u0000-\u001f\u007f]+$/);
 export const OwnerLiveRefusal = z.object({

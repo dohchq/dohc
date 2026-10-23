@@ -36,6 +36,7 @@ import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { captureRefusal } from "../workspaces/engineCaptureGate";
 import { assertOriginalWorkspace } from "../ipc/ownerRelayShareHandler";
 import type { OwnerLiveQuarantine, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult } from "../ipc/bridgeContract";
+import type { OwnerLiveStopAgain } from "../ipc/relaySharesIpc";
 import {
   runCollectionRecordCreation,
   setCollectionRecordFields,
@@ -72,10 +73,11 @@ interface DesktopCliServerDependencies<State> {
   /** The desktop engine's refused live edits, and its Save recovery copy, Try again and Stop again for them. */
   ownerLiveRecovery?: {
     keptEdits(workspaceId: string): readonly OwnerLiveQuarantine[];
-    save(workspace: RegistryEntry, path: string): Promise<SaveOwnerLiveRecoveryCopyResult>;
+    /** With an incident, saves exactly that row's kept edits. */
+    save(workspace: RegistryEntry, path: string, incident?: string): Promise<SaveOwnerLiveRecoveryCopyResult>;
     retry(workspace: RegistryEntry, objectId: string, incident: string): Promise<void>;
-    /** The window's guarded Stop, run while no editor holds the document. */
-    stopAgain(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, path: string): Promise<StopOwnerLiveDocumentResult>;
+    /** The window's Stop of that row's document only, run while no editor holds the document where it is now. */
+    stopAgain(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, kept: { path: string } & OwnerLiveStopAgain): Promise<StopOwnerLiveDocumentResult>;
   };
   access?(workspaceId: string): NonNullable<CliWorkspaceContext["access"]>;
   recordSuccess?: CliServerOptions["recordSuccess"];
@@ -463,7 +465,7 @@ export function createDesktopCliServer<State>(
               keptEdits: {
                 list: () => withOwnerLiveRecovery(async operation =>
                   ownerLiveRecovery.keptEdits(operation.workspace.workspaceId).map(({ path, reason, storedOn, incident, recovery }) => ({ path, reason, storedOn, incident, recovery }))),
-                saveRecoveryCopy: (path: string) => withOwnerLiveRecovery(operation => ownerLiveRecovery.save(operation.workspace, path)),
+                saveRecoveryCopy: (path: string, incident?: string) => withOwnerLiveRecovery(operation => ownerLiveRecovery.save(operation.workspace, path, incident)),
                 retry: (path: string, incident: string) => withOwnerLiveRecovery(async operation => {
                   const kept = keptEditsAt(operation.workspace.workspaceId, path, incident);
                   await ownerLiveRecovery.retry(operation.workspace, kept.objectId, incident);
@@ -474,7 +476,7 @@ export function createDesktopCliServer<State>(
                   if (kept.recovery !== "not-written" && kept.recovery !== "stopping") {
                     throw new Error(`No Stop of ${path} is waiting to run again. List kept edits again to check it.`);
                   }
-                  return await ownerLiveRecovery.stopAgain(operation, path);
+                  return await ownerLiveRecovery.stopAgain(operation, { path, objectId: kept.objectId, recovery: kept.recovery });
                 }),
               },
             } : {}),

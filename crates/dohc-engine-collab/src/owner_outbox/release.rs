@@ -198,9 +198,16 @@ pub fn retired_in_tx(
     save_in_tx(tx, key, &stop, now_ms)
 }
 
-pub fn clear_in_tx(tx: &rusqlite::Transaction<'_>, key: &DocKey) -> Result<(), OwnerOutboxError> {
+/// Returns the Stop it cleared in any state, including a finished one that
+/// [`list_requested_in`] no longer shows, so the caller can end what that Stop
+/// held. A Stop that cannot be read is still cleared and names nothing.
+pub fn clear_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+) -> Result<Option<OwnerLiveStop>, OwnerOutboxError> {
+    let cleared = read_in(tx, key).ok().flatten();
     tx.execute("DELETE FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3",params![key.workspace_id,key.version_id,key.object_id]).map_err(write_sql)?;
-    Ok(())
+    Ok(cleared)
 }
 
 pub fn list_requested_in(

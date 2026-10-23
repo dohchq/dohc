@@ -40,6 +40,8 @@ it("lists, saves, tries again and stops again kept edits with only the caller's 
     .toEqual({ exitCode: 0, stdout: "plan.md · server · paused · outbox:delivery:0\n", stderr: "" });
   expect(await executeCli({ argv: ["document", "save-recovery-copy", "plan.md"], cwd: "/workspace", env: {}, request }))
     .toEqual({ exitCode: 0, stdout: "Saved plan (recovered).dohc-recovery.json\ndohc could not make a readable copy.\n", stderr: "" });
+  // An incident names exactly which kept edits to save.
+  expect((await executeCli({ argv: ["document", "save-recovery-copy", "plan.md", "outbox:delivery:0"], cwd: "/workspace", env: {}, request })).exitCode).toBe(0);
   expect(await executeCli({ argv: ["document", "retry-kept-edits", "plan.md", "outbox:delivery:0"], cwd: "/workspace", env: {}, request }))
     .toEqual({ exitCode: 0, stdout: "Trying again for plan.md\n", stderr: "" });
   expect(await executeCli({ argv: ["document", "stop-again", "plan.md", "release:a:0"], cwd: "/workspace", env: {}, request }))
@@ -47,9 +49,11 @@ it("lists, saves, tries again and stops again kept edits with only the caller's 
   expect(request.mock.calls.map(([sent]) => [sent.verb, sent.args])).toEqual([
     ["liveKeptEdits", { cwd: WORKSPACE, actor: "agent" }],
     ["saveRecoveryCopy", { cwd: WORKSPACE, actor: "agent", path: "plan.md" }],
+    ["saveRecoveryCopy", { cwd: WORKSPACE, actor: "agent", path: "plan.md", incident: "outbox:delivery:0" }],
     ["retryKeptEdits", { cwd: WORKSPACE, actor: "agent", path: "plan.md", incident: "outbox:delivery:0" }],
     ["stopAgain", { cwd: WORKSPACE, actor: "agent", path: "plan.md", incident: "release:a:0" }],
   ]);
+  expect((await executeCli({ argv: ["document", "save-recovery-copy", "plan.md", "outbox:delivery:0", "extra"], env: {}, request })).exitCode).toBe(1);
   expect(await executeCli({ argv: ["document", "retry-kept-edits", "plan.md"], env: {}, request }))
     .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: retry-kept-edits requires a path and an incident\n" });
   expect(await executeCli({ argv: ["document", "stop-again", "plan.md"], env: {}, request }))

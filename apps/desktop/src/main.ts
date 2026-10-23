@@ -4886,7 +4886,7 @@ const chatWrites = createChatWrites({
 
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
-let ownerLiveStopAgainForCli: ((operation: DesktopWorkspaceOperation, path: string) => Promise<import("./ipc/bridgeContract").StopOwnerLiveDocumentResult>) | undefined;
+let ownerLiveStopAgainForCli: ((operation: DesktopWorkspaceOperation, kept: { path: string } & import("./ipc/relaySharesIpc").OwnerLiveStopAgain) => Promise<import("./ipc/bridgeContract").StopOwnerLiveDocumentResult>) | undefined;
 const shareCopyReader = createShareCopyReader<RegistryEntry>({
   remoteForWorkspace, currentCredentialGeneration: () => credentialCacheGeneration,
   relayJson: (credentials, path) => relayShareJsonWithCredentials(credentials, path),
@@ -4924,11 +4924,11 @@ const { startDesktopCliServer } = createDesktopCliServer({
   shareCopy: shareCopyReader,
   ownerLiveRecovery: {
     keptEdits: workspaceId => desktopEngine.ownerLiveQuarantines(workspaceId),
-    save: (workspace, path) => desktopEngine.saveOwnerLiveRecoveryCopy(workspace, path),
+    save: (workspace, path, incident) => desktopEngine.saveOwnerLiveRecoveryCopy(workspace, path, incident),
     retry: (workspace, objectId, incident) => desktopEngine.retryOwnerLiveQuarantine(workspace, objectId, incident),
-    stopAgain: (operation, path) => {
+    stopAgain: (operation, kept) => {
       if (!ownerLiveStopAgainForCli) throw new Error("Live editing is not ready. Try again.");
-      return ownerLiveStopAgainForCli(operation, path);
+      return ownerLiveStopAgainForCli(operation, kept);
     },
   },
   access: workspaceId => accessCliQueries(accessOwner, work => withPhysicalWorkspaceOperation(workspaceId, work)),
@@ -6571,11 +6571,15 @@ function registerIpcHandlers(): void {
       return result;
     },
     ownerLiveQuarantines: workspace => desktopEngine.ownerLiveQuarantines(workspace.workspaceId),
+    unwrittenOwnerLiveReleases: workspace => desktopEngine.unwrittenOwnerLiveReleases(workspace.workspaceId),
     retryOwnerLiveRelease: (workspace,objectId) => desktopEngine.retryOwnerLiveRelease(workspace,objectId),
   };
   const agentOwnerLiveDocuments = createOwnerLiveDocumentActions<DesktopWorkspaceOperation["workspace"], DesktopWorkspaceOperation>(ownerLiveDocumentDependencies);
-  ownerLiveStopAgainForCli = (operation, path) => engineYDocSessionIpc.withLiveEditingChange(operation.workspace.attachmentId, path,
-    () => agentOwnerLiveDocuments.stop({workspaceId: operation.workspace.workspaceId, path}, operation));
+  ownerLiveStopAgainForCli = (operation, kept) => agentOwnerLiveDocuments.stopAgain(
+    {workspaceId: operation.workspace.workspaceId, path: kept.path, again: kept}, operation, {
+      documentPath: async objectId => await activity.engineCaptureFor(operation.workspace.workspaceId)?.filePathForObjectId(objectId) ?? null,
+      withoutEditors: (path, change) => engineYDocSessionIpc.withLiveEditingChange(operation.workspace.attachmentId, path, change),
+    });
   const relayShareHandlers = createRelaySharesIpcHandlers<
     WebContents,
     IpcMainInvokeEvent,
@@ -6594,7 +6598,7 @@ function registerIpcHandlers(): void {
       return client.ownerYDocStopList({id:0,workspace:session.workspace,deadlineMs:30_000});
     }),
     retryOwnerLiveQuarantine: (workspace,objectId,incident) => desktopEngine.retryOwnerLiveQuarantine(workspace,objectId,incident),
-    saveOwnerLiveRecoveryCopy: (workspace,path) => desktopEngine.saveOwnerLiveRecoveryCopy(workspace,path),
+    saveOwnerLiveRecoveryCopy: (workspace,path,incident) => desktopEngine.saveOwnerLiveRecoveryCopy(workspace,path,incident),
     sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); invalidateHistoryLabels(workspaceId); shareRosters.sharesChanged(workspaceId); },
     reconcileReceivedShares,
   });
