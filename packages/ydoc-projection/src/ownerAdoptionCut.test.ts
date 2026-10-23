@@ -17,7 +17,7 @@ it("retries an unmaterialized owner settlement and caches only its completed res
       sendRequest: vi.fn(async (request: {method: string}) => {
         if (request.method === "liveApplication.register") return {result: {registrationId: 1}};
         if (request.method === "liveApplication.ownerState") return {result: {adoptionId: "owner-origin",expectedLocalSequence: 0,throughCursor: 0,sessionId: "1"}};
-        if (request.method === "liveApplication.ownerOutbox") return {result: {outboxId: null,pendingBytes: 0,state: null}};
+        if (request.method === "liveApplication.ownerOutbox") return {result: {outboxId: null,pendingBytes: 0,state: null,retryDeliveryId: null}};
         if (request.method !== "liveApplication.settle") throw new Error(request.method);
         settles++;
         return {result: {status: "settled",settlement: {settlementId: "settlement",previousCursor: 0,terminalCursor: 0,applicationCount: 0,localYDocSequence: 0,

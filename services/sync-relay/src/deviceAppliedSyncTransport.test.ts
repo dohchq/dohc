@@ -66,7 +66,7 @@ async function fixture({sync = true, adopted = true, aggregateBytes = 200_000_00
   const singleton = {ready: vi.fn(async () => undefined), close: vi.fn(),
     sendRequest: vi.fn(async (request: {method: string}): Promise<{result: Record<string, unknown>}> => ({result:
       request.method === "liveApplication.register" ? {registrationId: 9} : request.method === "liveApplication.ownerState"
-        ? {adoptionId: "adoption", expectedLocalSequence: 0, throughCursor: 0, outboxId: null, pendingBytes: 0, outboxState: null} : {provisioned: true}})),
+        ? {adoptionId: "adoption", expectedLocalSequence: 0, throughCursor: 0, outboxId: null, pendingBytes: 0, outboxState: null, retryDeliveryId: null} : {provisioned: true}})),
     openLiveAppliedSync: vi.fn<EngineClient["openLiveAppliedSync"]>(async () => cut()),
     readNextLiveApplied: vi.fn<EngineClient["readNextLiveApplied"]>(async () => ({position: {eventCount: 1, journalCursor: 30, evidenceDigest: "c".repeat(64)}, ack, updateBytes})),
     readLiveApplicationAck: vi.fn<EngineClient["readLiveApplicationAck"]>(async () => ack),

@@ -3,12 +3,12 @@ import {OwnerYDocOutbox} from "@dohc/workspace-engine-client";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import {OwnerYDocOutboxDrainer, type OwnerYDocDelivery} from "./ownerYDocOutbox";
 
-function fixture(state: "active" | "sealed" | "quarantined") {
+function fixture(state: "active" | "sealed" | "quarantined", retryDeliveryId: string | null = null) {
   const pending: Awaited<ReturnType<OwnerYDocOutbox["readHead"]>> = {
     outboxId: "outbox",binding: {workspaceId: "workspace",mainVersionId: "main",objectId: "object",
       lineageClaimId: "a".repeat(64),currentPath: "a.md",selectorPaths: ["a.md"],restoreFenceGeneration: 1},
     baseUpdate: new Uint8Array([0,0]),baseUpdateDigest: "a".repeat(64),state,
-    pendingBytes: 20_000_000,oldestEntryAtMs: 0,quarantineReason: state === "quarantined" ? "binding changed" : null,observedBinding: null,
+    pendingBytes: 20_000_000,oldestEntryAtMs: 0,quarantineReason: state === "quarantined" ? "invalid-update" : null,observedBinding: null,retryDeliveryId,
     entry: {sequence: 7,appendKey: "append",deliveryId: "delivery",update: new Uint8Array([1,2]),updateDigest: "b".repeat(64),byteLength: 2,createdAtMs: 0},
   };
   const receipt = {deliveryId: "delivery",updateDigest: "b".repeat(64),journalCursor: 9,acceptingHostEpoch: parseHostEpoch(1)};
@@ -56,6 +56,37 @@ it("keeps quarantine frozen without requesting fresh authority or delivering", a
     expect(f.delivery.freshOwnerAuthority).not.toHaveBeenCalled();
     expect(f.delivery.deliver).not.toHaveBeenCalled();
     expect(f.outbox.acknowledge).not.toHaveBeenCalled();
+  } finally {f.close();}
+});
+
+it("delivers the head its owner asked to try again once, under its own delivery, and acknowledges acceptance", async () => {
+  const f = fixture("quarantined", "delivery");
+  try {
+    expect(await f.drainer.drainOnce()).toBe("acknowledged");
+    expect(f.delivery.freshOwnerAuthority).toHaveBeenCalledOnce();
+    expect(f.delivery.deliver).toHaveBeenCalledOnce();
+    expect(f.delivery.deliver.mock.calls[0]![1]).toMatchObject({deliveryId: "delivery", sequence: 7, updateDigest: "b".repeat(64)});
+    expect(f.outbox.acknowledge).toHaveBeenCalledWith("outbox",[f.receipt]);
+    expect(f.outbox.quarantine).not.toHaveBeenCalled();
+  } finally {f.close();}
+});
+
+it("re-quarantines a Try again the session host refuses again, with its reason", async () => {
+  const f = fixture("quarantined", "delivery");
+  try {
+    f.delivery.deliver.mockResolvedValueOnce({kind: "quarantine", reason: "invalid-update"});
+    expect(await f.drainer.drainOnce()).toBe("frozen");
+    expect(f.outbox.quarantine).toHaveBeenCalledWith({outboxId: "outbox", reason: "invalid-update"});
+    expect(f.outbox.acknowledge).not.toHaveBeenCalled();
+  } finally {f.close();}
+});
+
+it("keeps a queue frozen when its Try again names another delivery than the head", async () => {
+  const f = fixture("quarantined", "another-delivery");
+  try {
+    expect(await f.drainer.drainOnce()).toBe("frozen");
+    expect(f.delivery.freshOwnerAuthority).not.toHaveBeenCalled();
+    expect(f.delivery.deliver).not.toHaveBeenCalled();
   } finally {f.close();}
 });
 

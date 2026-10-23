@@ -95,6 +95,8 @@ impl EngineService {
                 | "liveApplication.adoptOwner"
                 | "ydoc.ownerOutbox.readPending"
                 | "ydoc.ownerOutbox.acknowledge"
+                | "ydoc.ownerOutbox.quarantine"
+                | "ydoc.ownerOutbox.retry"
                 | "sync.materializePendingCursor"
                 | "sync.commitCursor"
                 | "sync.push"
@@ -509,6 +511,10 @@ impl EngineService {
             }
             "ydoc.ownerOutbox.quarantine" => {
                 self.owner_ydoc_outbox_quarantine(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "ydoc.ownerOutbox.retry" => {
+                self.owner_ydoc_outbox_retry(&ctx, request.workspace, request.params)
                     .await?
             }
             "ydoc.adoptCollectionRecord" => {

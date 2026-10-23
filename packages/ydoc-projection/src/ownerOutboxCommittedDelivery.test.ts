@@ -32,7 +32,7 @@ it("replays a real journal admission and retains the owner entry until native ap
       sendRequest: vi.fn<EngineClient["sendRequest"]>(async request => {
         const params = request.params as Record<string,unknown>;
         if (request.method === "liveApplication.register") return {id: request.id,result: {registrationId: 1}};
-        if (request.method === "liveApplication.ownerOutbox") return {id: request.id,result: {outboxId: "outbox",pendingBytes: pending ? update.byteLength : 0,state: pending ? "sealed" : "active"}};
+        if (request.method === "liveApplication.ownerOutbox") return {id: request.id,result: {outboxId: "outbox",pendingBytes: pending ? update.byteLength : 0,state: pending ? "sealed" : "active",retryDeliveryId: null}};
         if (request.method === "liveApplication.acknowledgeOwnerOutbox") {
           const receipts = params.receipts as LiveUpdateReceipt[];
           expect(receipts).toHaveLength(1);
@@ -50,7 +50,7 @@ it("replays a real journal admission and retains the owner entry until native ap
           bytes = Buffer.from(JSON.stringify({outboxId: "outbox",binding,baseUpdateDigest: binding.lineageClaimId,
             baseByteLength: f.input.baselineBytes.byteLength,state: pending ? "sealed" : "active",pendingBytes: pending ? update.byteLength : 0,
             pendingEntryCount: pending ? 1 : 0,nextSequence: 2,oldestEntryAtMs: pending ? 10 : null,
-            quarantineReason: null,observedBinding: null,firstEntryCursor: pending ? cursor("entryHeader",1) : null}));
+            quarantineReason: null,observedBinding: null,retryDeliveryId: null,firstEntryCursor: pending ? cursor("entryHeader",1) : null}));
           nextCursor = cursor("base");
         } else if (current.part === "entryHeader") {
           expect(pending).toBe(true); bytes = Buffer.from(JSON.stringify(entry)); nextCursor = cursor("update",1);

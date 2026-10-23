@@ -322,7 +322,7 @@ it("continues applying incoming accepted edits while the retained owner outbox i
   vi.mocked(drainOwnerOutbox).mockImplementation(actual.drainOwnerOutbox);
   const original = f.client.sendRequest.getMockImplementation()!;
   f.client.sendRequest.mockImplementation(async input => input.method === "liveApplication.ownerOutbox"
-    ? {id: input.id, result: {outboxId: "outbox", pendingBytes: 1, state: "quarantined"}}
+    ? {id: input.id, result: {outboxId: "outbox", pendingBytes: 1, state: "quarantined", retryDeliveryId: null}}
     : original(input));
   expect(await f.consumer.drain(document)).toMatchObject({kind: "done"});
   expect(f.client.sendLiveApplication).toHaveBeenCalledTimes(1);

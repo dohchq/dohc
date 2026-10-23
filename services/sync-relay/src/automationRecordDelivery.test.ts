@@ -35,7 +35,7 @@ function fixture(count = 1, automationDeclaration?: AutomationDeclaration, claim
   };
   vi.spyOn(OwnerYDocOutbox.prototype, "readHead").mockImplementation(async () => ({outboxId: "outbox", binding, baseUpdateDigest: binding.lineageClaimId,
     baseUpdate: Uint8Array.of(0, 0), state: "active", pendingBytes: (count - head) * 2, oldestEntryAtMs: 1,
-    quarantineReason: null, observedBinding: null, entry: entries[head] ?? null}));
+    quarantineReason: null, observedBinding: null, retryDeliveryId: null, entry: entries[head] ?? null}));
   const acknowledge = vi.spyOn(OwnerYDocOutbox.prototype, "acknowledge").mockImplementation(async () => {
     head++; return {acknowledged: 1, pendingBytes: (count - head) * 2, oldestEntryAtMs: head === count ? null : 1};
   });

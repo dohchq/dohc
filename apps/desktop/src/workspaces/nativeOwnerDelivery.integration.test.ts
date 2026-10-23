@@ -45,7 +45,7 @@ async function deliver(accountId: string, declared: typeof agentDeclaration | nu
     return {send: async bytes => server!.receive(bytes), close: () => server!.close()};
   });
   vi.spyOn(OwnerYDocOutbox.prototype, "readHead").mockResolvedValue({outboxId: "outbox", binding, baseUpdate, baseUpdateDigest: hash(baseUpdate),
-    state: "active", pendingBytes: update.length, oldestEntryAtMs: 0, quarantineReason: null, observedBinding: null,
+    state: "active", pendingBytes: update.length, oldestEntryAtMs: 0, quarantineReason: null, observedBinding: null, retryDeliveryId: null,
     entry: {personEdit: true, sequence: 4, appendKey: "edit", deliveryId: receipt.deliveryId, updateDigest: hash(update), update, byteLength: update.length, createdAtMs: 0,
       ...(declared ? {agentDeclaration: declared} : {}), ...{accountId: "forged-outbox-account", authorContext: {kind: "account", accountId: "forged-outbox-account"}}}});
   const acknowledge = vi.spyOn(OwnerYDocOutbox.prototype, "acknowledge").mockResolvedValue({acknowledged: 1, pendingBytes: 0, oldestEntryAtMs: null});

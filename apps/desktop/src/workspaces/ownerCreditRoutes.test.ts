@@ -20,10 +20,10 @@ async function deliver(route: "desktop" | "outbox", f: ReturnType<typeof registe
   if (route === "outbox") {
     let pending = bytes.length;
     vi.spyOn(OwnerYDocOutbox.prototype, "readDeliveryHead").mockResolvedValue({...envelope, state: "active", pendingBytes: pending,
-      oldestEntryAtMs: 0, quarantineReason: null, observedBinding: null, entry: {...envelope, byteLength: pending, createdAtMs: 0}});
+      oldestEntryAtMs: 0, quarantineReason: null, observedBinding: null, retryDeliveryId: null, entry: {...envelope, byteLength: pending, createdAtMs: 0}});
     vi.spyOn(OwnerYDocOutbox.prototype, "acknowledge").mockImplementation(async () => {pending = 0; return {acknowledged: 1, pendingBytes: 0, oldestEntryAtMs: null};});
     const validateJournal = createLiveMarkdownJournalValidator(policy);
-    const result = await drainOwnerOutbox({storage: f.storage, client: {sendRequest: async () => ({result: {outboxId: "outbox", pendingBytes: pending, state: "active"}})} as never,
+    const result = await drainOwnerOutbox({storage: f.storage, client: {sendRequest: async () => ({result: {outboxId: "outbox", pendingBytes: pending, state: "active", retryDeliveryId: null}})} as never,
       admission: {trustedAccount: accountId => ({accountId, name: "Relay name"}), shares: new Map([["workspace", "share"]]), maxEntriesPerDrain: 1, maxBytesPerDrain: 10_000,
         validate: ({retainStateUpdate: _, ...input}) => validateJournal(input)},
       workspace: "handle", host: captured.host, registrationId: 1, binding, adoption: {adoptionId: "adoption", sequence: 0, applied() {}},

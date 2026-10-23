@@ -72,6 +72,31 @@ describe("OwnerYDocOutbox append boundary", () => {
   });
 });
 
+describe("OwnerYDocOutbox Try again", () => {
+  const binding = { workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64), currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 3 };
+
+  it("asks the engine for one more attempt at the binding generation the owner saw", async () => {
+    const requests: Request[] = [];
+    const client: DaemonRequesterClient = { async sendRequest(request) {
+      requests.push(request);
+      return { id: request.id, result: { retryDeliveryId: "delivery-1" } };
+    } };
+    expect(await outbox(client).retry({ outboxId: "outbox", binding })).toEqual({ retryDeliveryId: "delivery-1" });
+    expect(requests).toMatchObject([{ workspace: WORKSPACE, method: "ydoc.ownerOutbox.retry", params: { outboxId: "outbox", binding } }]);
+  });
+
+  it("refuses a malformed binding before the engine and a reply without its delivery", async () => {
+    const requests: Request[] = [];
+    const client: DaemonRequesterClient = { async sendRequest(request) {
+      requests.push(request);
+      return { id: request.id, result: {} };
+    } };
+    await expect(outbox(client).retry({ outboxId: "outbox", binding: { ...binding, restoreFenceGeneration: -1 } })).rejects.toThrow();
+    expect(requests).toEqual([]);
+    await expect(outbox(client).retry({ outboxId: "outbox", binding })).rejects.toThrow("retryDeliveryId");
+  });
+});
+
 describe("OwnerYDocOutbox receipt boundary", () => {
   it("forwards minimum and maximum safe receipt coordinates unchanged", async () => {
     const client = new RecordingRequester();
@@ -209,8 +234,9 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
         byteLength: 3,
         createdAtMs: 1,
       }],
-      quarantineReason: null,
+      quarantineReason: null as string | null,
       observedBinding: null,
+      retryDeliveryId: null as string | null,
     };
   }
 
@@ -283,6 +309,13 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     }});
     return {requests,read: () => client.readDeliveryHead("outbox-1",binding)};
   }
+
+  it("reads the head its owner asked to try again, and refuses a header without that field", async () => {
+    const granted = { ...pendingResult(), state: "quarantined", quarantineReason: "invalid-update", retryDeliveryId: "delivery-1" };
+    expect(await read(granted)).toMatchObject({ state: "quarantined", quarantineReason: "invalid-update", retryDeliveryId: "delivery-1" });
+    const { retryDeliveryId: _absent, ...missing } = pendingResult();
+    await expect(read(missing as ReturnType<typeof pendingResult>)).rejects.toThrow("retryDeliveryId");
+  });
 
   it("preserves non-empty base and update bytes with matching accounting", async () => {
     const pending = await read(pendingResult());

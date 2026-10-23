@@ -16,7 +16,7 @@ function nativeHost(adopted:boolean){
     }
     if(request.method==="liveApplication.ownerState" && request.params.sessionId===capture.sessionId){
       return {id:request.id,result:{adoptionId:adopted?capture.activationId:"native-default-adoption",expectedLocalSequence:2,
-        throughCursor:adopted?0:null,outboxId:null,pendingBytes:0,outboxState:null}};
+        throughCursor:adopted?0:null,outboxId:null,pendingBytes:0,outboxState:null,retryDeliveryId:null}};
     }
     throw new Error(`Unexpected native request ${request.method}.`);
   });

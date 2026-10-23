@@ -308,8 +308,8 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
         return {id: request.id, result: {adoptionId: result.adoptionId, expectedLocalSequence: result.expectedLocalSequence, throughCursor: result.throughCursor ?? 0, sessionId: nativeSession}};
       }
       if (request.method === "liveApplication.ownerOutbox") {
-        const result = (await owner.client.sendRequest({...request, method: "liveApplication.ownerState", params: {...(request.params as {[key: string]: JsonValue}), sessionId: nativeSession}}, signal)).result as {outboxId: string | null; pendingBytes: number; outboxState: string | null};
-        return {id: request.id, result: {outboxId: result.outboxId, pendingBytes: result.pendingBytes, state: result.outboxState}};
+        const result = (await owner.client.sendRequest({...request, method: "liveApplication.ownerState", params: {...(request.params as {[key: string]: JsonValue}), sessionId: nativeSession}}, signal)).result as {outboxId: string | null; pendingBytes: number; outboxState: string | null; retryDeliveryId: string | null};
+        return {id: request.id, result: {outboxId: result.outboxId, pendingBytes: result.pendingBytes, state: result.outboxState, retryDeliveryId: result.retryDeliveryId}};
       }
       if (request.method === "liveApplication.readOwnerOutbox" || request.method === "liveApplication.acknowledgeOwnerOutbox") {
         const params = request.params as {[key: string]: JsonValue};
@@ -849,8 +849,8 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
         return {id: request.id, result: {adoptionId: result.adoptionId, expectedLocalSequence: result.expectedLocalSequence, throughCursor: result.throughCursor ?? 0, sessionId: nativeSession}};
       }
       if (request.method === "liveApplication.ownerOutbox") {
-        const result = (await owner.client.sendRequest({...request, method: "liveApplication.ownerState", params: {...(request.params as {[key: string]: JsonValue}), sessionId: nativeSession}}, signal)).result as {outboxId: string | null; pendingBytes: number; outboxState: string | null};
-        return {id: request.id, result: {outboxId: result.outboxId, pendingBytes: result.pendingBytes, state: result.outboxState}};
+        const result = (await owner.client.sendRequest({...request, method: "liveApplication.ownerState", params: {...(request.params as {[key: string]: JsonValue}), sessionId: nativeSession}}, signal)).result as {outboxId: string | null; pendingBytes: number; outboxState: string | null; retryDeliveryId: string | null};
+        return {id: request.id, result: {outboxId: result.outboxId, pendingBytes: result.pendingBytes, state: result.outboxState, retryDeliveryId: result.retryDeliveryId}};
       }
       if (request.method === "liveApplication.readOwnerOutbox" || request.method === "liveApplication.acknowledgeOwnerOutbox") {
         const params = request.params as {[key: string]: JsonValue};

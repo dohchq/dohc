@@ -82,4 +82,5 @@ export {
   OwnerYDocOutbox,
   parseLiveObjectBinding,
   type LiveObjectBinding,
+  type OwnerYDocOutboxRetryInput,
 } from "./ydoc/ownerYDocOutbox";

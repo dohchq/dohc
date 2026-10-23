@@ -68,9 +68,11 @@ export async function drainOwnerOutbox(options: {
   const readStatus = async () => {
     const available = await client.sendRequest({...request(),method: "liveApplication.ownerOutbox",params: {registrationId}},signal);
     check();
-    const status = configRecord(available.result,["outboxId","pendingBytes","state"]);
+    const status = configRecord(available.result,["outboxId","pendingBytes","state","retryDeliveryId"]);
     if (typeof status.pendingBytes !== "number" || !Number.isSafeInteger(status.pendingBytes) || status.pendingBytes < 0) throw new Error("Invalid owner pending bytes.");
-    if (status.state === "quarantined") return {outboxId: status.outboxId, pendingBytes: status.pendingBytes, quarantined: true};
+    if (status.retryDeliveryId !== null && (status.state !== "quarantined" || typeof status.retryDeliveryId !== "string")) throw new Error("Invalid owner outbox retry.");
+    // Only the owner's Try again lets a quarantined queue reach admission, and only for its head.
+    if (status.state === "quarantined") return {outboxId: status.outboxId, pendingBytes: status.pendingBytes, quarantined: status.retryDeliveryId === null};
     if (status.pendingBytes > 0 && ((status.state !== "active" && status.state !== "sealed") || typeof status.outboxId !== "string")) throw new Error("Invalid owner outbox state.");
     return {outboxId: status.outboxId, pendingBytes: status.pendingBytes};
   };
@@ -101,7 +103,7 @@ export async function drainOwnerOutbox(options: {
       check();
       const pending = await outbox.readDeliveryHead(outboxId,binding); check();
       if (!isDeepStrictEqual(pending.binding,binding) || pending.baseUpdateDigest !== binding.lineageClaimId) throw new Error("Owner outbox binding changed.");
-      if (pending.state === "quarantined") {adoption.applied(); return {admittedEntries, hasMore: false};}
+      if (pending.state === "quarantined" && (!pending.entry || pending.entry.deliveryId !== pending.retryDeliveryId)) {adoption.applied(); return {admittedEntries, hasMore: false};}
       if (!pending.entry) {adoption.applied(); return {admittedEntries, hasMore: false};}
       const entry = pending.entry;
       // The seed is the queue's first entry, so a later head proves it applied.

@@ -248,6 +248,13 @@ struct OwnerYDocOutboxQuarantineParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OwnerYDocOutboxRetryParams {
+    outbox_id: String,
+    binding: dohc_engine_collab::LiveObjectBinding,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct YdocOpenParams {
     version_id: String,
     path: String,
@@ -953,6 +960,42 @@ impl EngineService {
             })?
             .map_err(map_owner_outbox)?;
         Ok(json!({ "quarantined": true }))
+    }
+
+    /// The owner's Try again for one quarantined outbox. The workspace handle
+    /// is the caller's authority; the engine checks the binding generation.
+    pub(super) async fn owner_ydoc_outbox_retry(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: OwnerYDocOutboxRetryParams = parse(params)?;
+        validate_owner_outbox_wire_binding(&params.binding)?;
+        let handle = handle.ok_or_else(workspace_unavailable)?;
+        let open = self.open(Some(&handle))?;
+        let cancellation = OperationCancellation::new(ctx);
+        let _serial = self
+            .mutation_session_guard(&open, &cancellation, "ydoc.ownerOutbox.retry (queued)")
+            .await?;
+        let open = self.open(Some(&handle))?;
+        let delivery_id = open
+            .actor
+            .owner_ydoc_outbox_retry(
+                open.workspace_id.clone(),
+                dohc_engine_collab::OwnerOutboxRetryInput {
+                    outbox_id: params.outbox_id,
+                    binding: params.binding,
+                },
+                cancellation.token(),
+            )
+            .await
+            .map_err(|error| match error {
+                RuntimeError::Cancelled => cancellation.interruption("ydoc.ownerOutbox.retry"),
+                error => map_runtime(error),
+            })?
+            .map_err(map_owner_outbox)?;
+        Ok(json!({ "retryDeliveryId": delivery_id }))
     }
 
     pub(super) async fn ydoc_open(

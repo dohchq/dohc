@@ -31,7 +31,7 @@ const receipt = {deliveryId: "delivery", updateDigest, journalCursor: 2, accepti
 
 function fixture() {
   relay.head = {outboxId: "outbox", binding, baseUpdate: new Uint8Array([0, 0]), baseUpdateDigest: "b".repeat(64), state: "active", pendingBytes: 3,
-    oldestEntryAtMs: 0, quarantineReason: null, observedBinding: null,
+    oldestEntryAtMs: 0, quarantineReason: null, observedBinding: null, retryDeliveryId: null,
     entry: {sequence: 1, appendKey: "append", deliveryId: "delivery", update, updateDigest, byteLength: 3, createdAtMs: 0, agentDeclaration}};
   relay.acknowledge.mockResolvedValue({acknowledged: 1, pendingBytes: 0, oldestEntryAtMs: null});
   relay.submit.mockResolvedValue({result: "success", ack: {...receipt, localYDocSequence: 1, applicationReplayed: false}});

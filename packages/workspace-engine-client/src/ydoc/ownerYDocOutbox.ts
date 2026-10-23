@@ -20,6 +20,7 @@ const OWNER_YDOC_OUTBOX_METHOD = {
   readPending: "ydoc.ownerOutbox.readPending",
   acknowledge: "ydoc.ownerOutbox.acknowledge",
   quarantine: "ydoc.ownerOutbox.quarantine",
+  retry: "ydoc.ownerOutbox.retry",
 } as const;
 
 interface OwnerYDocOutboxLimits {
@@ -63,6 +64,8 @@ export interface OwnerYDocOutboxPending {
   readonly entries: readonly OwnerYDocOutboxEntry[];
   readonly quarantineReason: string | null;
   readonly observedBinding: LiveObjectBinding | null;
+  /** The quarantined head its owner asked to try once more. */
+  readonly retryDeliveryId: string | null;
 }
 
 export interface OwnerYDocOutboxHead extends Omit<OwnerYDocOutboxPending, "entries"> {
@@ -114,6 +117,12 @@ export interface OwnerYDocOutboxQuarantineInput {
   readonly outboxId: string;
   readonly reason: string;
   readonly observedBinding?: LiveObjectBinding;
+}
+
+export interface OwnerYDocOutboxRetryInput {
+  readonly outboxId: string;
+  /** The binding generation the owner saw quarantined. */
+  readonly binding: LiveObjectBinding;
 }
 
 function record(value: unknown, name: string): Record<string, unknown> {
@@ -401,6 +410,7 @@ export class OwnerYDocOutbox {
       quarantineReason: nullableString(raw.quarantineReason, "quarantineReason"),
       observedBinding:
         observed === null ? null : parseLiveObjectBinding(observed),
+      retryDeliveryId: nullableString(raw.retryDeliveryId, "retryDeliveryId"),
     };
   }
 
@@ -451,5 +461,22 @@ export class OwnerYDocOutbox {
       } as unknown as JsonValue,
       { workspace: this.workspace },
     );
+  }
+
+  /**
+   * The owner's Try again: grants the quarantined head one more delivery
+   * attempt at this binding generation. Delivery takes it on its next pass.
+   */
+  async retry(input: OwnerYDocOutboxRetryInput): Promise<{ retryDeliveryId: string }> {
+    this.assertLive();
+    const raw = record(
+      await this.requester.request(
+        OWNER_YDOC_OUTBOX_METHOD.retry,
+        { outboxId: input.outboxId, binding: parseLiveObjectBinding(input.binding) } as unknown as JsonValue,
+        { workspace: this.workspace },
+      ),
+      "owner outbox retry result",
+    );
+    return { retryDeliveryId: stringField(raw, "retryDeliveryId") };
   }
 }

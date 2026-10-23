@@ -3373,6 +3373,15 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
               WHERE release_blocked IS NOT NULL;",
         sets_user_version: None,
     },
+    // The delivery a quarantined outbox's owner asked to try once more.
+    // Acceptance or another refusal clears it.
+    Migration {
+        ordinal: 68,
+        id: "v2-owner-outbox-retry",
+        sql: "ALTER TABLE owner_ydoc_outboxes ADD COLUMN retry_delivery_id TEXT \
+              CHECK (retry_delivery_id IS NULL OR (state = 'quarantined' AND length(retry_delivery_id) > 0));",
+        sets_user_version: None,
+    },
 ];
 
 /// Documents whose file a `ydoc.open` found on disk while the version had no
@@ -4447,6 +4456,10 @@ mod tests {
             (
                 "v2-retained-release-blocked",
                 "16b4bee68d7fde08b97ade0bd28c4969c185b73bb65bf54ceb6006bfeaee40ff",
+            ),
+            (
+                "v2-owner-outbox-retry",
+                "c74c63be023a44f934aedbd9179e19b6109577e48bdeed5d103e7a2af93f97b3",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

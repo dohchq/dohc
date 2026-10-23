@@ -149,7 +149,7 @@ it.each([
         },
         baseUpdate: new Uint8Array([0, 0]), baseUpdateDigest: "a".repeat(64),
         state: "active", pendingBytes: 1, oldestEntryAtMs: 0,
-        quarantineReason: null, observedBinding: null,
+        quarantineReason: null, observedBinding: null, retryDeliveryId: null,
         entry: { sequence: 1, appendKey: "append-1", deliveryId: "delivery-1",
           update: new Uint8Array([1]), updateDigest: "b".repeat(64), byteLength: 1, createdAtMs: 0 },
       };

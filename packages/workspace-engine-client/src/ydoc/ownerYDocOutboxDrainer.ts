@@ -116,8 +116,9 @@ export class OwnerYDocOutboxDrainer {
       throw error;
     }
     if (this.disposed) return "retry";
-    if (pending.state === "quarantined") return "frozen";
     const entry = pending.entry;
+    // A quarantined queue delivers only the head its owner asked to try again.
+    if (pending.state === "quarantined" && (entry === null || entry.deliveryId !== pending.retryDeliveryId)) return "frozen";
     if (entry === null) return "empty";
 
     const authority = await this.delivery.freshOwnerAuthority(pending.binding);

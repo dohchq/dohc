@@ -574,7 +574,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
           registrations.live = ++registrations.next;
           return reply({registrationId: registrations.live});
         case "liveApplication.ownerState": return reply({adoptionId: capture.activationId, expectedLocalSequence: 2, throughCursor: 0,
-          outboxId: null, pendingBytes: 0, outboxState: "active"});
+          outboxId: null, pendingBytes: 0, outboxState: "active", retryDeliveryId: null});
         case "liveApplication.settle": {
           const terminal = request.params.terminalReceipt as {journalCursor: number} | null;
           return reply({status: "settled", settlement: {settlementId: "settlement", previousCursor: 0, terminalCursor: terminal?.journalCursor ?? 0,

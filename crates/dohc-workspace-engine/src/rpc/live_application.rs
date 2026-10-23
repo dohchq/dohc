@@ -253,12 +253,12 @@ fn require_caller_deadline(request: &Request) -> Result<(), WireError> {
 fn read_owner_outbox(
     conn: &rusqlite::Connection,
     binding: &LiveObjectBinding,
-) -> Result<Option<(String, i64, String)>, dohc_engine_storage::StorageError> {
+) -> Result<Option<(String, i64, String, Option<String>)>, dohc_engine_storage::StorageError> {
     use rusqlite::OptionalExtension;
     conn.query_row(
-        "SELECT outbox_id,pending_bytes,state FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5",
+        "SELECT outbox_id,pending_bytes,state,retry_delivery_id FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5",
         rusqlite::params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,binding.restore_fence_generation],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )
     .optional()
     .map_err(dohc_engine_storage::StorageError::persist_public)
@@ -383,11 +383,11 @@ impl EngineService {
                 use rusqlite::OptionalExtension;
                 let prior: Option<(String,i64,i64)> = conn.query_row("SELECT adoption_id,local_ydoc_sequence,terminal_cursor FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5",
                     rusqlite::params![registration.host.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(dohc_engine_storage::StorageError::persist_public)?;
-                let (outbox_id,pending_bytes,outbox_state) = read_owner_outbox(conn,b)?.map_or((None,0,None),|(id,bytes,state)|(Some(id),bytes,Some(state)));
-                if let Some((id,sequence,cursor)) = prior { return Ok(json!({"adoptionId":id,"expectedLocalSequence":sequence,"throughCursor":cursor,"outboxId":outbox_id,"pendingBytes":pending_bytes,"outboxState":outbox_state})); }
+                let (outbox_id,pending_bytes,outbox_state,retry_delivery_id) = read_owner_outbox(conn,b)?.map_or((None,0,None,None),|(id,bytes,state,retry)|(Some(id),bytes,Some(state),retry));
+                if let Some((id,sequence,cursor)) = prior { return Ok(json!({"adoptionId":id,"expectedLocalSequence":sequence,"throughCursor":cursor,"outboxId":outbox_id,"pendingBytes":pending_bytes,"outboxState":outbox_state,"retryDeliveryId":retry_delivery_id})); }
                 let sequence: i64 = conn.query_row("SELECT head_update_seq FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",rusqlite::params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|r|r.get(0)).map_err(dohc_engine_storage::StorageError::persist_public)?;
                 let identity = serde_json::to_vec(&(&registration.host.namespace,&b.workspace_id,&b.main_version_id,&b.object_id,&b.lineage_claim_id)).map_err(dohc_engine_storage::StorageError::persist_public)?;
-                Ok(json!({"adoptionId":format!("owner-adoption-{}",dohc_engine_storage::hex_sha256(&identity)),"expectedLocalSequence":sequence,"throughCursor":Value::Null,"outboxId":outbox_id,"pendingBytes":pending_bytes,"outboxState":outbox_state}))
+                Ok(json!({"adoptionId":format!("owner-adoption-{}",dohc_engine_storage::hex_sha256(&identity)),"expectedLocalSequence":sequence,"throughCursor":Value::Null,"outboxId":outbox_id,"pendingBytes":pending_bytes,"outboxState":outbox_state,"retryDeliveryId":retry_delivery_id}))
             }).map_err(|_|workspace_unavailable())?;
             Ok::<_, WireError>(state)
             }).await.map_err(|_| workspace_unavailable())??;
@@ -1355,12 +1355,12 @@ mod tests {
             .read_with(|conn| {
                 assert_eq!(
                     read_owner_outbox(conn, &binding)?,
-                    Some(("old".into(), 64, "quarantined".into()))
+                    Some(("old".into(), 64, "quarantined".into(), None))
                 );
                 binding.restore_fence_generation = 1;
                 assert_eq!(
                     read_owner_outbox(conn, &binding)?,
-                    Some(("current".into(), 61, "active".into()))
+                    Some(("current".into(), 61, "active".into(), None))
                 );
                 binding.restore_fence_generation = 2;
                 assert_eq!(read_owner_outbox(conn, &binding)?, None);

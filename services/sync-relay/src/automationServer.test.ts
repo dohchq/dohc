@@ -763,7 +763,7 @@ describe("a server that pushes its copy of a workspace", () => {
     vi.spyOn(storage, "automationRecordBinding").mockReturnValue({binding, shareId: "share"});
     const readHead = vi.spyOn(OwnerYDocOutbox.prototype, "readHead").mockResolvedValue({outboxId: "outbox", binding,
       baseUpdate: Uint8Array.of(0, 0), baseUpdateDigest: binding.lineageClaimId, state: "active", pendingBytes: 10,
-      oldestEntryAtMs: 1, quarantineReason: null, observedBinding: null,
+      oldestEntryAtMs: 1, quarantineReason: null, observedBinding: null, retryDeliveryId: null,
       entry: {appendKey: "key", sequence: 1, deliveryId: "delivery", updateDigest: "b".repeat(64), update: Uint8Array.of(0, 0), byteLength: 2, createdAtMs: 1}});
     const currentBinding = vi.mocked(storage.automationRecordBinding);
     const s = await server(storage, h, {client: client as unknown as EngineClient,

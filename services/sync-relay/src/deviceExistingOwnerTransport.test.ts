@@ -38,7 +38,7 @@ it.each(["ownerState","register","missingOwner","missingAdoption","staleOwner"])
   });
   const client = {ready:async () => undefined,sendRequest:async (request:{method:string;params?:{binding?:{objectId?:string}}}) => ({result:
     request.method === "liveApplication.register" ? {registrationId:request.params?.binding?.objectId === "stale-owner" ? 10 : 9}
-      : {adoptionId:"adoption",expectedLocalSequence:0,throughCursor:null,outboxId:null,pendingBytes:0,outboxState:null}})} as unknown as EngineClient;
+      : {adoptionId:"adoption",expectedLocalSequence:0,throughCursor:null,outboxId:null,pendingBytes:0,outboxState:null,retryDeliveryId:null}})} as unknown as EngineClient;
   const stop = vi.fn();
   const transport = startExistingOwnerDeviceTransport({config:{client,workspaces:[{workspaceId:"workspace",workspaceHandle:"handle"}],ownerFor,
     maxQueuedBytes:2_000_000,maxFrameBytes:1_048_576,maxUploads:2,maxRegistrations:10,aggregateBytes:200_000_000,
@@ -110,7 +110,7 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
   } } as unknown as WebSocket;
   const owner = { nativeSessionId: "ordinary-session",onDurableLocalChange: () => () => undefined,assertCurrent: vi.fn(),prepareHandoff: vi.fn(async () => undefined),finishHandoff: vi.fn(async () => undefined),remoteApplied: vi.fn(async (_update: Uint8Array) => undefined) };
   const singleton = { ready: vi.fn(async () => undefined),close: vi.fn(),sendRequest: vi.fn(async (request: {method: string}): Promise<{result: Record<string,unknown>}> => ({ result:
-    request.method === "liveApplication.provisionOwner" ? { provisioned: true } : request.method === "liveApplication.register" ? { registrationId: 9 } : { adoptionId: "adoption",expectedLocalSequence: 0,throughCursor: null,outboxId: null,pendingBytes: 0,outboxState: null } })),
+    request.method === "liveApplication.provisionOwner" ? { provisioned: true } : request.method === "liveApplication.register" ? { registrationId: 9 } : { adoptionId: "adoption",expectedLocalSequence: 0,throughCursor: null,outboxId: null,pendingBytes: 0,outboxState: null,retryDeliveryId: null } })),
     forwardLiveOwnerAdoption: vi.fn(async (_request: { sessionId: string }) => ({ result: { status: "adopted",adoption: { adoptionId: "adoption",localYDocSequence: 0,terminalCursor: 0,adoptionReplayed: false } } })),
     sendLiveApplication: vi.fn(async (_request: unknown,_event: unknown) => ({result: {status: "applied",ack: {}}})) };
   const ownerFor = vi.fn(async () => owner);
@@ -172,7 +172,7 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     expect(owner.remoteApplied.mock.calls[0]![0]).toBe(received.updateBytes);
     expect(Buffer.from(received.updateBytes).equals(Buffer.from(updateBytes))).toBe(true);
     const binding = {workspaceId: "workspace",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64),currentPath: "a.md",selectorPaths: ["a.md"],restoreFenceGeneration: 1};
-    const durableOwner = {adoptionId: "adoption",expectedLocalSequence: 0,throughCursor: 0,outboxId: null,pendingBytes: 0,outboxState: null};
+    const durableOwner = {adoptionId: "adoption",expectedLocalSequence: 0,throughCursor: 0,outboxId: null,pendingBytes: 0,outboxState: null,retryDeliveryId: null};
     const handoffs = owner.prepareHandoff.mock.calls.length;
     singleton.sendRequest.mockResolvedValueOnce({result: durableOwner});
     await expect(peer!.sendRequest({id: 9,method: "liveApplication.register",workspace: "ws-ordinary",params: {binding,resumeAdoptionId: "wrong"}})).rejects.toThrow();
@@ -206,8 +206,10 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     expect(nativeRegisters()).toBe(registeredCount);
     singleton.sendRequest.mockResolvedValueOnce({result: durableOwner});
     expect((await resume(18)).result).toEqual({registrationId: 9});
-    singleton.sendRequest.mockResolvedValueOnce({result: {...durableOwner,outboxId: "outbox",pendingBytes: 1,outboxState: "frozen"}});
-    await peer!.sendRequest({id: 19,method: "liveApplication.ownerOutbox",workspace: "ws-ordinary",params: {registrationId: 9}});
+    // The owner's Try again reaches the drain with the queue's state.
+    singleton.sendRequest.mockResolvedValueOnce({result: {...durableOwner,outboxId: "outbox",pendingBytes: 1,outboxState: "quarantined",retryDeliveryId: "delivery-1"}});
+    expect((await peer!.sendRequest({id: 19,method: "liveApplication.ownerOutbox",workspace: "ws-ordinary",params: {registrationId: 9}})).result)
+      .toEqual({outboxId: "outbox",pendingBytes: 1,state: "quarantined",retryDeliveryId: "delivery-1"});
     singleton.sendRequest.mockResolvedValueOnce({result: durableOwner});
     await resume(20);
     singleton.sendRequest.mockResolvedValueOnce({result: {entries: []}});

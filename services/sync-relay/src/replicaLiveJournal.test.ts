@@ -131,7 +131,7 @@ it("reads the committed owner update while applyThrough is pending", async () =>
     let acknowledged = false;
     const client = {sendRequest: vi.fn(async (request: {id: number; method: string; params: Record<string, unknown>}) => {
       if (request.method === "liveApplication.ownerOutbox") return {id: request.id,
-        result: {outboxId: "outbox", pendingBytes: acknowledged ? 0 : update.byteLength, state: "active"}};
+        result: {outboxId: "outbox", pendingBytes: acknowledged ? 0 : update.byteLength, state: "active", retryDeliveryId: null}};
       if (request.method === "liveApplication.acknowledgeOwnerOutbox") {
         acknowledged = true;
         return {id: request.id, result: {acknowledged: 1, pendingBytes: 0, oldestEntryAtMs: null}};
@@ -140,7 +140,7 @@ it("reads the committed owner update while applyThrough is pending", async () =>
       const bytes = current.part === "header" ? Buffer.from(JSON.stringify({outboxId: "outbox", binding,
         baseUpdateDigest: binding.lineageClaimId, baseByteLength: f.input.baselineBytes.byteLength,
         state: "active", pendingBytes: update.byteLength, pendingEntryCount: 1, nextSequence: 2,
-        oldestEntryAtMs: 1, quarantineReason: null, observedBinding: null, firstEntryCursor: cursor("entryHeader")}))
+        oldestEntryAtMs: 1, quarantineReason: null, observedBinding: null, retryDeliveryId: null, firstEntryCursor: cursor("entryHeader")}))
         : current.part === "entryHeader" ? Buffer.from(JSON.stringify(entry)) : Buffer.from(update);
       return {id: request.id, result: {kind: "page", ...current, totalBytes: bytes.length, digest: hash(bytes),
         bytesBase64: bytes.toString("base64"), nextCursor: current.part === "header" ? cursor("base")

@@ -226,7 +226,7 @@ it('cuts a complete checkpoint when the owner outbox introduces the 960th identi
     const client = {sendRequest: async (request: {id: number; method: string; params: Record<string, unknown>}) => {
       const pendingBytes = pending.reduce((sum, entry) => sum + entry.byteLength, 0)
       if (request.method === 'liveApplication.ownerOutbox') {
-        return {id: request.id, result: {outboxId: 'outbox', pendingBytes, state: 'active'}}
+        return {id: request.id, result: {outboxId: 'outbox', pendingBytes, state: 'active', retryDeliveryId: null}}
       }
       if (request.method === 'liveApplication.acknowledgeOwnerOutbox') {
         const receipt = (request.params.receipts as Array<{deliveryId: string; updateDigest: string}>)[0]!
@@ -245,7 +245,7 @@ it('cuts a complete checkpoint when the owner outbox introduces the 960th identi
       if (at.part === 'header') {
         bytes = Buffer.from(JSON.stringify({outboxId: 'outbox', binding, baseUpdateDigest: binding.lineageClaimId,
           baseByteLength: f.input.baselineBytes.byteLength, state: 'active', pendingBytes, pendingEntryCount: pending.length,
-          nextSequence: 3, oldestEntryAtMs: pending[0]?.createdAtMs ?? null, quarantineReason: null, observedBinding: null,
+          nextSequence: 3, oldestEntryAtMs: pending[0]?.createdAtMs ?? null, quarantineReason: null, observedBinding: null, retryDeliveryId: null,
           firstEntryCursor: pending[0] ? cursor(snapshot, 'entryHeader', pending[0].sequence) : null}))
         nextCursor = cursor(snapshot, 'base')
       } else if (at.part === 'entryHeader') {

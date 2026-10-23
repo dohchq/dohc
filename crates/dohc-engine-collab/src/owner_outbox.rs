@@ -176,6 +176,8 @@ pub enum OwnerOutboxError {
     AppendKeyMismatch,
     #[error("owner Y.Doc outbox is frozen for recovery")]
     Frozen,
+    #[error("owner Y.Doc outbox is not quarantined")]
+    NotQuarantined,
     #[error("owner Y.Doc outbox was not found")]
     NotFound,
     #[error("owner Y.Doc outbox receipt does not match the pending prefix")]
@@ -277,6 +279,8 @@ pub struct OwnerOutboxPending {
     pub entries: Vec<OwnerOutboxEntry>,
     pub quarantine_reason: Option<String>,
     pub observed_binding: Option<LiveObjectBinding>,
+    /// The head delivery the owner asked to try once more while quarantined.
+    pub retry_delivery_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,6 +337,13 @@ pub struct OwnerOutboxQuarantineInput {
     pub outbox_id: String,
     pub reason: String,
     pub observed_binding: Option<LiveObjectBinding>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OwnerOutboxRetryInput {
+    pub outbox_id: String,
+    /// The binding generation the owner saw quarantined.
+    pub binding: LiveObjectBinding,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -465,6 +476,7 @@ struct ParentRow {
     next_sequence: i64,
     quarantine_reason: Option<String>,
     observed_binding: Option<LiveObjectBinding>,
+    retry_delivery_id: Option<String>,
 }
 
 pub fn append(
@@ -985,6 +997,7 @@ pub fn read_pending(
             entries,
             quarantine_reason: parent.quarantine_reason,
             observed_binding: parent.observed_binding,
+            retry_delivery_id: parent.retry_delivery_id,
         })
     })
 }
@@ -1039,6 +1052,7 @@ pub fn read_pending_page(
             "nextSequence": parent.next_sequence,
             "quarantineReason": parent.quarantine_reason,
             "observedBinding": parent.observed_binding,
+            "retryDeliveryId": parent.retry_delivery_id,
         });
         let snapshot = hex_sha256(&page_json(&header)?);
         if cursor.as_ref().is_some_and(|cursor| cursor.snapshot != snapshot) {
@@ -1234,7 +1248,13 @@ pub fn acknowledge(
     let outcome = store.write_with(&NoFaults, |tx| {
         let parent = read_parent(tx, outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
         require_workspace(workspace_id, &parent.binding.workspace_id)?;
-        if parent.state == OwnerOutboxState::Quarantined { return Err(OwnerOutboxError::Frozen); }
+        // A quarantined outbox accepts only the head its owner asked to try again.
+        if parent.state == OwnerOutboxState::Quarantined
+            && (receipts.len() != 1
+                || parent.retry_delivery_id.as_deref() != Some(receipts[0].delivery_id.as_str()))
+        {
+            return Err(OwnerOutboxError::Frozen);
+        }
         let observed = draft::read_observed_in(tx, &parent.binding)?.is_some();
         if observed && accepted::check_release_in(tx, &parent, receipts)? {
             return Ok(OwnerOutboxAcknowledgeResult {acknowledged: receipts.len() as i64,
@@ -1303,9 +1323,12 @@ pub fn acknowledge(
                 |row| row.get::<_, Option<i64>>(0),
             )
             .map_err(read_sql)?;
+        // Accepting the granted head ends the quarantine and resumes delivery.
         tx.execute(
             "UPDATE owner_ydoc_outboxes SET pending_bytes=?2,oldest_entry_at_ms=?3, \
-             state=CASE WHEN state='sealed' AND ?2=0 THEN 'active' ELSE state END WHERE outbox_id=?1",
+             quarantine_reason=CASE WHEN state='quarantined' THEN NULL ELSE quarantine_reason END, \
+             state=CASE WHEN state='quarantined' OR (state='sealed' AND ?2=0) THEN 'active' ELSE state END, \
+             retry_delivery_id=NULL WHERE outbox_id=?1",
             params![outbox_id, pending_bytes, oldest_entry_at_ms],
         )
         .map_err(write_sql)?;
@@ -1378,13 +1401,126 @@ pub(crate) fn quarantine_in_tx(
             )?;
         }
     }
+    // Another refusal uses up the owner's Try again.
     tx.execute(
         "UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason=?2,\
-         observed_binding_json=?3 WHERE outbox_id=?1",
+         observed_binding_json=?3,retry_delivery_id=NULL WHERE outbox_id=?1",
         params![input.outbox_id, input.reason, observed_binding_json],
     )
     .map_err(write_sql)?;
     Ok(())
+}
+
+/// The owner's Try again: one more delivery attempt of the quarantined head at
+/// the binding generation the owner saw. The attempt keeps its delivery
+/// identity and goes through ordinary admission. Accepting it resumes
+/// delivery; refusing it quarantines the outbox again. Delivery never grants
+/// itself an attempt. Returns the granted delivery.
+pub fn retry(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    input: OwnerOutboxRetryInput,
+) -> Result<String, OwnerOutboxError> {
+    let outcome = store.write_with(&NoFaults, |tx| retry_in_tx(tx, workspace_id, &input))?;
+    committed(outcome)
+}
+
+pub(crate) fn retry_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    input: &OwnerOutboxRetryInput,
+) -> Result<String, OwnerOutboxError> {
+    validate_identifier(&input.outbox_id, "outbox id must be non-empty and bounded")?;
+    let binding = input
+        .binding
+        .normalized()
+        .map_err(OwnerOutboxError::InvalidInput)?;
+    require_workspace(workspace_id, &binding.workspace_id)?;
+    let parent = read_parent(tx, &input.outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
+    require_workspace(workspace_id, &parent.binding.workspace_id)?;
+    if parent.binding != binding {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
+    if parent.state != OwnerOutboxState::Quarantined {
+        return Err(OwnerOutboxError::NotQuarantined);
+    }
+    // A moved binding recovers through enrollment; the same head cannot pass.
+    if parent.observed_binding.is_some()
+        || matches!(
+            parent.quarantine_reason.as_deref(),
+            Some("stale-binding" | "restore-fenced" | "binding-changed")
+        )
+    {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
+    let key = draft::key(&binding)?;
+    if release::blocked_in(tx, &key)? {
+        return Err(OwnerOutboxError::StopConflict);
+    }
+    let resumed = crate::live_update_application::restore_fence::resumed_binding(tx, &key)
+        .map_err(map_restore_error)?;
+    if resumed.as_ref().is_some_and(|current| current != &binding) {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
+    // The observed generation, if any, must still be this one.
+    draft::read_observed_in(tx, &binding)?;
+    let adopted: Option<String> = tx
+        .query_row(
+            "SELECT binding_json FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+            params![
+                binding.workspace_id,
+                binding.main_version_id,
+                binding.object_id,
+                binding.lineage_claim_id,
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(read_sql)?;
+    if let (Some(saved), None) = (adopted, &resumed) {
+        let saved: LiveObjectBinding =
+            serde_json::from_str(&saved).map_err(|_| OwnerOutboxError::Corrupt)?;
+        if saved != binding {
+            return Err(OwnerOutboxError::ParentMismatch);
+        }
+    }
+    let marker = crate::read_marker_in(tx, &key).map_err(draft::collab)?;
+    let newer: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND restore_fence_generation>?4)",
+            params![
+                binding.workspace_id,
+                binding.main_version_id,
+                binding.object_id,
+                binding.restore_fence_generation,
+            ],
+            |row| row.get(0),
+        )
+        .map_err(read_sql)?;
+    if newer
+        || marker.is_some_and(|marker| {
+            marker
+                .lineage_claim_id
+                .is_some_and(|lineage| lineage != binding.lineage_claim_id)
+        })
+    {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
+    let head: String = tx
+        .query_row(
+            "SELECT delivery_id FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence LIMIT 1",
+            [&input.outbox_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(read_sql)?
+        .ok_or(OwnerOutboxError::NotFound)?;
+    tx.execute(
+        "UPDATE owner_ydoc_outboxes SET retry_delivery_id=?2 WHERE outbox_id=?1 AND state='quarantined'",
+        params![input.outbox_id, head],
+    )
+    .map_err(write_sql)?;
+    Ok(head)
 }
 
 fn read_parent(conn: &Connection, outbox_id: &str) -> Result<Option<ParentRow>, OwnerOutboxError> {
@@ -1392,7 +1528,7 @@ fn read_parent(conn: &Connection, outbox_id: &str) -> Result<Option<ParentRow>, 
         "SELECT outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,\
          current_path,selector_paths_json,restore_fence_generation,base_update_digest,\
          base_blob_digest,state,pending_bytes,oldest_entry_at_ms,next_sequence,\
-         quarantine_reason,observed_binding_json \
+         quarantine_reason,observed_binding_json,retry_delivery_id \
          FROM owner_ydoc_outboxes WHERE outbox_id=?1",
         [outbox_id],
         parent_from_row,
@@ -1409,7 +1545,7 @@ fn find_parent_for_binding(
         "SELECT outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,\
          current_path,selector_paths_json,restore_fence_generation,base_update_digest,\
          base_blob_digest,state,pending_bytes,oldest_entry_at_ms,next_sequence,\
-         quarantine_reason,observed_binding_json \
+         quarantine_reason,observed_binding_json,retry_delivery_id \
          FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 \
          AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND current_path=?6 AND selector_paths_json=?7",
         params![
@@ -1471,6 +1607,7 @@ fn parent_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ParentRow> {
         next_sequence: row.get(13)?,
         quarantine_reason: row.get(14)?,
         observed_binding,
+        retry_delivery_id: row.get(16)?,
     })
 }
 
@@ -2367,5 +2504,196 @@ mod tests {
             read_pending(&store, "workspace-2", &outbox),
             Err(OwnerOutboxError::WorkspaceMismatch)
         ));
+    }
+
+    fn refused_queue(tag: &str) -> (ScratchDir, EngineStore, String, OwnerOutboxPending) {
+        let (dir, mut store) = store(tag);
+        let outbox = append(&mut store, "workspace-1", input("key-1", b"one", 10))
+            .expect("first")
+            .outbox_id;
+        append(&mut store, "workspace-1", input("key-2", b"two", 11)).expect("second");
+        append(&mut store, "workspace-1", input("key-3", b"three", 12)).expect("third");
+        refuse(&mut store, &outbox);
+        let pending = read_pending(&store, "workspace-1", &outbox).expect("quarantined");
+        (dir, store, outbox, pending)
+    }
+
+    fn refuse(store: &mut EngineStore, outbox: &str) {
+        quarantine(
+            store,
+            "workspace-1",
+            OwnerOutboxQuarantineInput {
+                outbox_id: outbox.to_owned(),
+                reason: "invalid-update".to_owned(),
+                observed_binding: None,
+            },
+            20,
+        )
+        .expect("quarantine");
+    }
+
+    fn try_again(outbox: &str) -> OwnerOutboxRetryInput {
+        OwnerOutboxRetryInput {
+            outbox_id: outbox.to_owned(),
+            binding: binding(),
+        }
+    }
+
+    #[test]
+    fn try_again_grants_the_head_one_attempt_whose_acceptance_resumes_delivery() {
+        let (_dir, mut store, outbox, pending) = refused_queue("owner-outbox-try-again");
+        let [head, second, third] = [0, 1, 2].map(|index| receipt(&pending.entries[index]));
+        assert!(matches!(
+            acknowledge(&mut store, "workspace-1", &outbox, &[head.clone()]),
+            Err(OwnerOutboxError::Frozen)
+        ));
+        let granted = retry(&mut store, "workspace-1", try_again(&outbox)).expect("try again");
+        assert_eq!(granted, head.delivery_id);
+        let held = read_pending(&store, "workspace-1", &outbox).expect("granted");
+        assert_eq!(held.state, OwnerOutboxState::Quarantined);
+        assert_eq!(held.retry_delivery_id.as_deref(), Some(granted.as_str()));
+        // The grant covers the head alone, never its suffix.
+        for receipts in [vec![second.clone()], vec![head.clone(), second.clone()]] {
+            assert!(matches!(
+                acknowledge(&mut store, "workspace-1", &outbox, &receipts),
+                Err(OwnerOutboxError::Frozen)
+            ));
+        }
+        acknowledge(&mut store, "workspace-1", &outbox, &[head]).expect("accepted head");
+        let resumed = read_pending(&store, "workspace-1", &outbox).expect("resumed");
+        assert_eq!(resumed.state, OwnerOutboxState::Active);
+        assert_eq!(resumed.quarantine_reason, None);
+        assert_eq!(resumed.retry_delivery_id, None);
+        assert_eq!(resumed.entries.len(), 2);
+        acknowledge(&mut store, "workspace-1", &outbox, &[second, third]).expect("suffix");
+        append(&mut store, "workspace-1", input("key-4", b"four", 13)).expect("new edit");
+    }
+
+    #[test]
+    fn a_repeated_refusal_requarantines_with_its_reason_and_uses_up_the_grant() {
+        let (_dir, mut store, outbox, pending) = refused_queue("owner-outbox-try-again-refused");
+        retry(&mut store, "workspace-1", try_again(&outbox)).expect("try again");
+        refuse(&mut store, &outbox);
+        let frozen = read_pending(&store, "workspace-1", &outbox).expect("refused again");
+        assert_eq!(frozen.state, OwnerOutboxState::Quarantined);
+        assert_eq!(frozen.quarantine_reason.as_deref(), Some("invalid-update"));
+        assert_eq!(frozen.retry_delivery_id, None);
+        assert_eq!(frozen.entries, pending.entries);
+        assert!(matches!(
+            acknowledge(&mut store, "workspace-1", &outbox, &[receipt(&pending.entries[0])]),
+            Err(OwnerOutboxError::Frozen)
+        ));
+        // Only another request from the owner opens another attempt.
+        retry(&mut store, "workspace-1", try_again(&outbox)).expect("try again later");
+        acknowledge(&mut store, "workspace-1", &outbox, &[receipt(&pending.entries[0])])
+            .expect("accepted on the second request");
+    }
+
+    #[test]
+    fn a_granted_attempt_survives_reopen_as_exactly_one_attempt() {
+        let (dir, mut store, outbox, pending) = refused_queue("owner-outbox-try-again-reopen");
+        retry(&mut store, "workspace-1", try_again(&outbox)).expect("try again");
+        drop(store);
+        let mut store = EngineStore::open(&dir.join("engine.db"), 20).expect("reopen granted");
+        let granted = read_pending(&store, "workspace-1", &outbox).expect("granted");
+        assert_eq!(
+            granted.retry_delivery_id.as_deref(),
+            Some(pending.entries[0].delivery_id.as_str())
+        );
+        refuse(&mut store, &outbox);
+        drop(store);
+        let mut store = EngineStore::open(&dir.join("engine.db"), 30).expect("reopen refused");
+        let frozen = read_pending(&store, "workspace-1", &outbox).expect("refused");
+        assert_eq!(frozen.retry_delivery_id, None);
+        assert!(matches!(
+            acknowledge(&mut store, "workspace-1", &outbox, &[receipt(&pending.entries[0])]),
+            Err(OwnerOutboxError::Frozen)
+        ));
+    }
+
+    #[test]
+    fn stale_try_again_requests_cannot_reopen_the_queue() {
+        let (_dir, mut store, outbox, _pending) = refused_queue("owner-outbox-try-again-stale");
+        assert!(matches!(
+            retry(&mut store, "workspace-2", try_again(&outbox)),
+            Err(OwnerOutboxError::WorkspaceMismatch)
+        ));
+        let mut other_workspace = try_again(&outbox);
+        other_workspace.binding.workspace_id = "workspace-2".to_owned();
+        assert!(matches!(
+            retry(&mut store, "workspace-1", other_workspace),
+            Err(OwnerOutboxError::WorkspaceMismatch)
+        ));
+        let changes: [fn(&mut LiveObjectBinding); 3] = [
+            |binding| binding.restore_fence_generation = 8,
+            |binding| binding.lineage_claim_id = "lineage-2".to_owned(),
+            |binding| binding.current_path = "notes/renamed.md".to_owned(),
+        ];
+        for change in changes {
+            let mut stale = try_again(&outbox);
+            change(&mut stale.binding);
+            assert!(matches!(
+                retry(&mut store, "workspace-1", stale),
+                Err(OwnerOutboxError::ParentMismatch)
+            ));
+        }
+        assert!(matches!(
+            retry(&mut store, "workspace-1", try_again("owner-outbox-unknown")),
+            Err(OwnerOutboxError::NotFound)
+        ));
+        // A later restore generation makes this one stale.
+        let mut successor = input("key-next", b"next", 30);
+        successor.binding.restore_fence_generation = 8;
+        append(&mut store, "workspace-1", successor).expect("next generation");
+        assert!(matches!(
+            retry(&mut store, "workspace-1", try_again(&outbox)),
+            Err(OwnerOutboxError::ParentMismatch)
+        ));
+        assert_eq!(
+            read_pending(&store, "workspace-1", &outbox)
+                .expect("still frozen")
+                .retry_delivery_id,
+            None
+        );
+    }
+
+    #[test]
+    fn try_again_needs_a_refused_queue_at_an_unmoved_binding() {
+        let (_dir, mut store) = store("owner-outbox-try-again-active");
+        let active = append(&mut store, "workspace-1", input("key-1", b"one", 10))
+            .expect("active")
+            .outbox_id;
+        assert!(matches!(
+            retry(&mut store, "workspace-1", try_again(&active)),
+            Err(OwnerOutboxError::NotQuarantined)
+        ));
+        // A moved binding recovers through enrollment, not another attempt.
+        quarantine(
+            &mut store,
+            "workspace-1",
+            OwnerOutboxQuarantineInput {
+                outbox_id: active.clone(),
+                reason: "restore-fenced".to_owned(),
+                observed_binding: Some(binding()),
+            },
+            20,
+        )
+        .expect("binding quarantine");
+        assert!(matches!(
+            retry(&mut store, "workspace-1", try_again(&active)),
+            Err(OwnerOutboxError::ParentMismatch)
+        ));
+        let illegal = store.write_with(&NoFaults, |tx| -> Result<usize, OwnerOutboxError> {
+            tx.execute(
+                "UPDATE owner_ydoc_outboxes SET state='active',retry_delivery_id='owner-delivery-x' \
+                 WHERE outbox_id=?1",
+                [&active],
+            )
+            .map_err(write_sql)
+        });
+        assert!(
+            illegal.is_err(),
+            "the schema must refuse a grant on an outbox that is not quarantined"
+        );
     }
 }

@@ -54,6 +54,7 @@ pub(super) fn map_owner_outbox(error: OwnerOutboxError) -> WireError {
         OwnerOutboxError::ParentMismatch => "owner-outbox-parent-mismatch",
         OwnerOutboxError::AppendKeyMismatch => "owner-outbox-append-key-mismatch",
         OwnerOutboxError::Frozen => "owner-outbox-frozen",
+        OwnerOutboxError::NotQuarantined => "owner-outbox-not-quarantined",
         OwnerOutboxError::NotFound => "owner-outbox-not-found",
         OwnerOutboxError::ReceiptMismatch => "owner-outbox-receipt-mismatch",
         OwnerOutboxError::Corrupt => {
