@@ -9,11 +9,11 @@ description: >-
 Write in plain and simple language.
 
 dohc's voice is tastefully formal.
-It takes the calm, exact tone of good 1960s product writing and says things the way people talk today.
+It takes the calm, exact tone of good 1960s product writing and puts it in today's plain language.
 
 ## The voice
 
-- **Plain.** Use everyday words and short sentences.
+- **Plain.** Use everyday words and short sentences. Every sentence states a fact, an instruction, or a reason.
 - **Exact.** Name the thing, the number, and the unit. Use only numbers you measured or can cite.
 - **Understated.** Say what dohc does and let that fact make the claim. Back a superlative with evidence, or cut it.
 - **Tastefully formal.** Write complete sentences. Outside instructions, use contractions where they read naturally. Each document may use one of these, if it fits: slang, an exclamation mark, or an emoji. Keep them out of instructions, warnings, and commit messages.
@@ -65,8 +65,14 @@ For docs, specs, plans, PR bodies, and code comments, follow the six rules from 
 
 ## Last pass
 
-Cut what marks the text as machine-written.
-That includes hype words, "not just X, but Y", trailing "-ing" clauses that claim a result, and lists of three made for rhythm.
+Cut what marks the text as machine-written:
+
+- hype words;
+- "not just X, but Y";
+- trailing "-ing" clauses that claim a result;
+- lists of three made for rhythm;
+- filler sentences with no fact in them, such as "That's it." or "Here's the thing."
+
 When you revise, leave code, identifiers, commands, and attributed quotations unchanged.
 
 You are done when:
