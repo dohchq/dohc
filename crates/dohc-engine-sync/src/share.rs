@@ -160,6 +160,12 @@ pub fn apply_shared_envelope(
     faults: &dyn FaultInjector,
 ) -> Result<ApplyOutcome<Vec<dohc_engine_domain::AutomationClaim>>, SyncError> {
     crate::model::bounded(&boundary.share_id, "share_id must be non-empty and bounded")?;
+    // `replicated_source_origin` reads the source after the first `:` of `shared:<shareId>:`.
+    if boundary.share_id.contains(':') {
+        return Err(SyncError::InvalidInput {
+            reason: "share_id must not contain ':'",
+        });
+    }
     // A file share carries chat about the files it shares, and chat
     // needs the store. `chat.message.append` carries no path, only a threadId,
     // so the file it belongs to is a fact the store holds — the same situation

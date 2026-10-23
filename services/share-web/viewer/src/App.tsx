@@ -102,6 +102,13 @@ class ViewResponseError extends Error {
   }
 }
 
+// The server stayed busy or unreachable for the whole retry budget; the link may still open.
+class RetryExhaustedError extends Error {
+  constructor() {
+    super("retry budget exhausted");
+  }
+}
+
 // A share-web ingress refusal describes the viewer/server wire mismatch.
 class VersionMismatchError extends Error {}
 
@@ -227,7 +234,7 @@ async function withBoundedRetry(
       if (!retryThrownFailures || signal?.aborted) throw error;
     }
     if (retryWaitedMs + retryDelayMs > RETRY_BUDGET_MS) {
-      throw new Error("refused");
+      throw new RetryExhaustedError();
     }
     await waitForRetry(retryDelayMs, signal);
     retryWaitedMs += retryDelayMs;
@@ -522,9 +529,13 @@ function scrubFragment(): void {
   history.replaceState(history.state, "", `${location.pathname}${location.search}`);
 }
 
-async function establishSession(signal?: AbortSignal): Promise<string> {
-  const secret = location.hash.slice(1);
-  if (/^[A-Za-z0-9_-]{43}$/u.test(secret)) {
+// The link's secret leaves the address bar at once, but stays in `pending`
+// until its exchange succeeds, so Try again can repeat the exchange.
+async function establishSession(pending: { secret: string | null }, signal?: AbortSignal): Promise<string> {
+  const fragment = location.hash.slice(1);
+  if (/^[A-Za-z0-9_-]{43}$/u.test(fragment)) pending.secret = fragment;
+  const secret = pending.secret;
+  if (secret !== null) {
     const exchange = withBoundedRetry(
       () => fetchShareWeb("/api/exchange", {
         method: "POST",
@@ -539,13 +550,14 @@ async function establishSession(signal?: AbortSignal): Promise<string> {
       true,
       signal,
     );
-    scrubFragment();
+    if (location.hash) scrubFragment();
     const response = await exchange;
     if (!response.ok) throw (await versionMismatch(response)) ?? new Error("refused");
     const body = (await response.json()) as { session?: unknown };
     if (typeof body.session !== "string" || !/^[A-Za-z0-9_-]{12}$/u.test(body.session)) {
       throw new Error("refused");
     }
+    pending.secret = null;
     history.replaceState(null, "", `/s/${body.session}${location.search}`);
     return body.session;
   }
@@ -685,6 +697,7 @@ function FileView(props: {
   const [fileStatus, setFileStatus] = useState<
     "ready" | "refreshing" | "unavailable"
   >("ready");
+  const [readAttempt, setReadAttempt] = useState(0);
   const rendersMarkdown = props.file.contentKind === "text" && isMarkdown(props.file.path);
   const rendersExcalidraw =
     props.file.contentKind === "text" && isExcalidraw(props.file.path);
@@ -745,16 +758,25 @@ function FileView(props: {
     props.file.path,
     props.onStaleBlob,
     props.session,
+    readAttempt,
     rendersTextPreview,
   ]);
 
-  if (fileStatus !== "ready") {
+  if (fileStatus === "refreshing") {
+    return <p className="file-status muted">This file changed. Refreshing.</p>;
+  }
+  if (fileStatus === "unavailable") {
     return (
-      <p className="file-status muted">
-        {fileStatus === "refreshing"
-          ? "This file changed. Refreshing."
-          : "This file isn't available right now."}
-      </p>
+      <div role="alert">
+        <p className="file-status muted">This file isn't available right now.</p>
+        <button
+          className="handoff-button secondary"
+          type="button"
+          onClick={() => setReadAttempt((attempt) => attempt + 1)}
+        >
+          Try again
+        </button>
+      </div>
     );
   }
   if (rendersMarkdown) {
@@ -1076,6 +1098,7 @@ function OpenInDohc(props: { session: string }) {
 export function App() {
   const [state, setState] = useState<ViewerState>({ status: "loading" });
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const pendingExchange = useRef<{ secret: string | null }>({ secret: null });
   const [selectedPath, setSelectedPath] = useState("");
   const [editing, setEditing] = useState<{discriminator: string; path: string; blobSha256: string} | null>(null);
   const readyStateRef = useRef<ReadyState | null>(null);
@@ -1112,7 +1135,7 @@ export function App() {
     const controller = new AbortController();
     void (async () => {
       try {
-        const session = await establishSession(controller.signal);
+        const session = await establishSession(pendingExchange.current, controller.signal);
         const log = await loadCurrentState(session, controller.signal);
         const files = filesFromAccumulator(log.fileAccumulator);
         if (current) {
@@ -1131,8 +1154,9 @@ export function App() {
         if (current) {
           setState(error instanceof VersionMismatchError
             ? { status: "version-mismatch", message: error.message }
-            // A lost answer or a lost connection says nothing about the link.
-            : (error instanceof ViewResponseError && error.status >= 500) || error instanceof TypeError
+            // A lost answer, a lost connection or a server that stayed busy says nothing about the link.
+            : (error instanceof ViewResponseError && error.status >= 500) ||
+                error instanceof TypeError || error instanceof RetryExhaustedError
               ? { status: "load-failed" }
               : { status: "refused" });
         }

@@ -1227,7 +1227,9 @@ export function createShareWebApplication({
     const release = call.limiter
       ? call.limiter.acquire(sessionKey(browser.discriminator, browser.token), browser.session.grantId)
       : () => {};
-    if (!release) return answer(refused());
+    // A full limiter is busy, not a refusal: the link still opens.
+    if (!release) return answer(call.retryable
+      ? jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}) : refused());
     let slotHeld = false;
     const holdSlot = (): (() => void) => {
       slotHeld = true;

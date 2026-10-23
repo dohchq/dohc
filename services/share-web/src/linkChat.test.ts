@@ -297,11 +297,22 @@ it("answers a lost files, change history, file or discussion answer as retryable
     ["GET /sync/link/discussion", "discussion"],
   ] as const) {
     const answered = (await b.view(path)).status;
-    s.lost.set(call, "connection");
-    const lost = await b.view(path);
-    expect(lost.status, path).toBe(503);
-    expect(await lost.json()).toMatchObject({ ok: false, code: "link_unavailable" });
-    expect((await b.view(path)).status, path).toBe(answered);
+    for (const loss of ["connection", "refusal"] as const) {
+      s.lost.set(call, loss);
+      const lost = await b.view(path);
+      expect(lost.status, `${path} ${loss}`).toBe(503);
+      expect(await lost.json()).toMatchObject({ ok: false, code: "link_unavailable" });
+      expect((await b.view(path)).status, `${path} ${loss}`).toBe(answered);
+    }
+  }
+  // An agent hears to try again, not that the link ended.
+  const mcp = await agent(s, (await s.link("read-write")).secret);
+  for (const [call, tool] of [["GET /sync/link/current", "dohc_list_files"], ["GET /sync/link/log", "dohc_list_changes"]] as const) {
+    s.lost.set(call, "refusal");
+    const lost = await mcp.callTool({ name: tool, arguments: {} });
+    expect(lost.isError, tool).toBe(true);
+    expect(lost.content, tool).toEqual([{ type: "text", text: "This link can't be reached right now. Try again in a moment." }]);
+    expect((await mcp.callTool({ name: tool, arguments: {} })).isError, tool).toBeFalsy();
   }
 });
 

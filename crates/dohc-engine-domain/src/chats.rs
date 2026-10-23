@@ -7468,3 +7468,54 @@ fn map_bookmark_row(
         failure_reason: row.get(16)?,
     }))
 }
+
+#[cfg(test)]
+mod replicated_origin_tests {
+    use super::{ChatMessageLinkAuthor, replicated_source_origin, validate_replicated_link_author};
+
+    #[test]
+    fn a_shared_origin_unwraps_once_and_any_other_origin_stays_as_written() {
+        for unchanged in ["relay:share-link:p", "origin_1", "shared:abc", "shared:"] {
+            assert_eq!(replicated_source_origin(unchanged), unchanged);
+        }
+        assert_eq!(
+            replicated_source_origin("shared:s:relay:share-link:p"),
+            "relay:share-link:p"
+        );
+        assert_eq!(
+            replicated_source_origin("shared:s2:shared:s1:relay:share-link:p"),
+            "shared:s1:relay:share-link:p"
+        );
+    }
+
+    #[test]
+    fn a_replicated_link_post_needs_its_own_principal_origin() {
+        let author = |origin: &str| {
+            validate_replicated_link_author(
+                origin,
+                "link-message:m",
+                "link",
+                Some("grant-1"),
+                Some("p"),
+                false,
+                "Hi",
+            )
+        };
+        let link = ChatMessageLinkAuthor {
+            grant_id: "grant-1".to_owned(),
+            principal_id: "p".to_owned(),
+        };
+        for applies in ["relay:share-link:p", "shared:s:relay:share-link:p"] {
+            assert_eq!(author(applies).expect(applies), Some(link.clone()));
+        }
+        for refused in [
+            "shared:s:relay:share-link:q",
+            "relay:share-link:q",
+            "shared:s2:shared:s1:relay:share-link:p",
+            "shared:s:relay:share-member:x",
+            "origin_1",
+        ] {
+            assert!(author(refused).is_err(), "{refused}");
+        }
+    }
+}

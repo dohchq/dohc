@@ -41,6 +41,38 @@ fn share_view_and_shared_channel_fail_closed_outside_boundary() {
     ));
 }
 
+/// A replicated origin reads its source after `shared:<shareId>:`, so a share
+/// id with `:` is refused before anything applies.
+#[test]
+fn a_share_id_with_a_colon_is_refused() {
+    let (_scratch, _path, mut engine) = open_store();
+    let boundary = ShareBoundary {
+        share_id: "share:relay".to_owned(),
+        surface: ShareSurface::SharedChannel,
+        channel_wire_id: Some("wire-allowed".to_owned()),
+        granted: None,
+    };
+    let op = envelope(
+        "peer",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "c-allow",
+            "name": "Allowed",
+            "slug": "allowed",
+            "kind": "channel",
+            "createdAtMs": 1,
+            "wireId": "wire-allowed"
+        }),
+    );
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &boundary, &op, &NoFaults),
+        Err(SyncError::InvalidInput {
+            reason: "share_id must not contain ':'"
+        })
+    ));
+}
+
 #[test]
 fn shared_channel_channel_create_without_wire_id_is_rejected() {
     let (_scratch, _path, mut engine) = open_store();
