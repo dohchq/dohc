@@ -73,6 +73,7 @@ const COMPARED_TABLES: &[&str] = &[
     "live_owner_activations",
     "live_owner_retirements",
     "released_tail_generations",
+    "released_hold_revisions",
     "live_device_bootstraps",
     "live_device_settlements",
     "live_settlement_publication_states",
@@ -592,6 +593,7 @@ mod tests {
             tx.execute("INSERT INTO live_owner_adoptions VALUES ('relay','adoption','workspace','main','owner',?1,'{}','source',?2,0,1,0,?1,?1,0,0,0,'null','{}',1000000,60000)",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO live_owner_activations VALUES ('relay','adoption','workspace','main','owner',?1,'adoption',NULL,'{}','source',?2,0,1,0,'{}',?1,?1,0,0,0,'null',1000000,60000,NULL,NULL,NULL,NULL,NULL,NULL)",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO live_owner_retirements VALUES ('relay','adoption','workspace','main','owner',?1,0)",[&sha]).unwrap();
+            tx.execute("INSERT INTO released_hold_revisions VALUES ('workspace','owner',1)",[]).unwrap();
             tx.execute("INSERT INTO replication_log VALUES ('workspace','peer',0,'moment.append','{}',0,1,'refused')",[]).unwrap();
             tx.execute("INSERT INTO replication_refused_moment_blobs VALUES ('workspace','peer',0,'payload-after',NULL,?1)",[&sha]).unwrap();
             tx.execute("INSERT INTO replication_refused_ydoc_blobs VALUES ('workspace','peer',0,?1)",[&sha]).unwrap();
@@ -635,6 +637,7 @@ mod tests {
             "live_owner_activations",
             "live_owner_retirements",
             "released_tail_generations",
+            "released_hold_revisions",
             "live_device_bootstraps",
             "live_device_settlements",
             "live_device_application_bindings",
@@ -659,6 +662,9 @@ mod tests {
                 } else if table == "released_tail_generations" {
                     // A generation outlives its document; only damage loses one.
                     format!("DROP TRIGGER released_tail_generation_kept; DELETE FROM {table}")
+                } else if table == "released_hold_revisions" {
+                    // So does a hold revision its hold.
+                    format!("DROP TRIGGER released_hold_revision_kept; DELETE FROM {table}")
                 } else {
                     format!("DELETE FROM {table}")
                 })
@@ -688,6 +694,7 @@ mod tests {
             "live_owner_activations",
             "live_owner_retirements",
             "released_tail_generations",
+            "released_hold_revisions",
             "live_device_bootstraps",
             "live_device_settlements",
             "live_device_application_bindings",

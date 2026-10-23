@@ -6318,13 +6318,15 @@ fn a_released_hold_nothing_still_justifies_frees_on_the_next_pass() {
     assert!(ready(&store, "doc-a"));
 }
 
-/// Sol's and Opus's r2c-3c-5 finding 1, through the production writers: a
-/// released hold stored, its binding replaced, and the hold freed by the
-/// next pass each move the document's released tail generation, so a held
-/// proof never reads a binding that changed as current. Storing the hold
-/// again as it was moves nothing.
+/// Sol's and Opus's r2c-3c-5 finding 1, through the production writers, as
+/// Sol's r2c-3c-7 ruling keeps it: a released hold stored, its binding
+/// replaced, and the hold freed by the next pass each advance the
+/// document's hold revision, so a held proof never reads a binding that
+/// changed as current. Storing the hold again as it was advances nothing,
+/// and no hold write moves the document's released tail generation, so the
+/// validations cached by it stand.
 #[test]
-fn storing_replacing_and_freeing_a_released_hold_moves_its_generation() {
+fn storing_replacing_and_freeing_a_released_hold_advances_its_revision() {
     let (_scratch, _path, mut store) = hosted_store();
     let feed = HostedFeed::new();
     feed.append(envelope("owner", 0, "workspace.init", json!({})));
@@ -6353,8 +6355,17 @@ fn storing_replacing_and_freeing_a_released_hold_moves_its_generation() {
                (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id='ws')",
         )
     };
-    let mut before = generation(&store);
-    for (what, relay_seq, moves) in [
+    let revision = |store: &EngineStore| {
+        count(
+            store,
+            "SELECT coalesce((SELECT revision FROM released_hold_revisions \
+             WHERE workspace_id='ws' AND object_id='doc-a'),0)",
+        )
+    };
+    let tails = generation(&store);
+    let mut before = revision(&store);
+    assert_eq!(before, 0, "no hold yet");
+    for (what, relay_seq, advances) in [
         ("stored", 8, true),
         ("as it was", 8, false),
         ("replaced", 9, true),
@@ -6370,12 +6381,13 @@ fn storing_replacing_and_freeing_a_released_hold_moves_its_generation() {
             })
             .unwrap();
         assert_eq!(held, TxnOutcome::Committed(true), "{what}");
-        assert_eq!(generation(&store) > before, moves, "{what}");
-        before = generation(&store);
+        assert_eq!(revision(&store) > before, advances, "{what}");
+        assert_eq!(generation(&store), tails, "{what}: the generation stays");
+        before = revision(&store);
     }
     sync(&client, &mut store);
     assert!(ready(&store, "doc-a"));
-    assert!(generation(&store) > before, "freed");
+    assert!(revision(&store) > before, "freed");
 }
 
 /// A binding names a relay position from 1. One at 0 would not read back,

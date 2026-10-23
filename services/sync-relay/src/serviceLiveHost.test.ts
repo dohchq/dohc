@@ -485,7 +485,7 @@ const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
 // A service owner whose activation completed under an earlier connection, as
 // after a restart. The started host resumes it from real relay storage; only
 // the engine is mocked. `park` holds the next engine request for one method.
-async function completedServiceOwner(options: {empty?: boolean; frameChanges?: boolean} = {}) {
+async function completedServiceOwner(options: {empty?: boolean; frameChanges?: boolean; maxDocumentsPerPass?: number} = {}) {
   const f = await fixture(), raw = new DatabaseSync(join(f.root, "relay", "relay.sqlite"));
   cleanup.push(async () => raw.close());
   const policy = {maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
@@ -544,7 +544,8 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   Object.assign(f.config, {settlement: {maxApplicationsPerSettlement: 8}});
   const target = {workspaceId: "workspace", path: "docs/a.md", shareId: "share"};
   // An empty host activates documents it gains on its next pass.
-  await configureActivation(f, {targets: options.empty ? [] : [target], passDeadlineMs: 10_000, validation: policy, ...(options.empty ? {pollIntervalMs: 20} : {})});
+  await configureActivation(f, {targets: options.empty ? [] : [target], passDeadlineMs: 10_000, validation: policy, ...(options.empty ? {pollIntervalMs: 20} : {}),
+    ...(options.maxDocumentsPerPass ? {maxDocumentsPerPass: options.maxDocumentsPerPass} : {})});
   // An empty host receives this workspace and document through `update`.
   const workspace = f.config.workspaces[0]! as ServiceWorkspace;
   if (options.empty) {f.config.workspaces = []; await f.save();}
@@ -575,11 +576,16 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   const membership: {method: string; workspace?: string; params: unknown}[] = [];
   let ownerRequests = 0, client!: ReturnType<typeof clientFrom>["client"] & {captureOwnerActivation: ReturnType<typeof vi.fn>;
     sendLiveApplication: ReturnType<typeof vi.fn>; readLiveApplicationAck: ReturnType<typeof vi.fn>};
-  // The engine's reason for refusing native capture, as for a document with an open sync conflict.
+  // The engine's reason for refusing native capture, as for a document with an open sync conflict, and its reasons for single paths.
   let refusal: Error | undefined, detachFailure: Error | undefined;
+  const refusals = new Map<string, Error>();
   spawn.mockImplementation(async options => {
     const captured = clientFrom(options), discovery = captured.client.sendRequest.getMockImplementation()!;
-    client = Object.assign(captured.client, {captureOwnerActivation: vi.fn(async () => {if (refusal) throw refusal; return capture;}),
+    client = Object.assign(captured.client, {captureOwnerActivation: vi.fn(async (_request: unknown, path: string) => {
+      const refused = refusals.get(path) ?? refusal;
+      if (refused) throw refused;
+      return capture;
+    }),
       sendLiveApplication: vi.fn(async (input: {id: number; registrationId: number}, event: {metadata: {accepted: {receipt: {deliveryId: string; journalCursor: number}}}}) => {
         if (retired(input.registrationId)) throw unavailable(input.id);
         const receipt = event.metadata.accepted.receipt;
@@ -672,6 +678,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
     ownerCalls: () => client.sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string; params: unknown})
       .filter(request => request.method.startsWith("liveApplication.")).map(request => [request.method, request.params]),
     refuseCapture(error: Error | undefined) {refusal = error;},
+    refuseCaptureAt(path: string, error: Error) {refusals.set(path, error);},
     refuseRegistration(error: Error | undefined) {registrationRefusal = error;},
     failDetach(error: Error | undefined) {detachFailure = error;},
     applied, lost,
@@ -816,7 +823,7 @@ it("reloads the retained activation after a restart only for a stop that registe
 
 // An empty host whose sibling document activates for real. The other document
 // counts as loaded but never activates, so only its unload reaches the engine.
-async function emptyServiceHost(options: {frameChanges?: boolean} = {}) {
+async function emptyServiceHost(options: {frameChanges?: boolean; maxDocumentsPerPass?: number} = {}) {
   const o = await completedServiceOwner({empty: true, ...options});
   const sibling = {workspaceId: "workspace", objectId: "object", path: "docs/a.md", shareId: "share"};
   const other = {workspaceId: "workspace", objectId: "object-b", path: "docs/b.md", shareId: "share"};
@@ -1710,6 +1717,34 @@ it("captures a document without lineage once more for an update that arrived dur
   await vi.waitFor(() => expect(captures()).toBe(2));
   await o.nextPull(); await o.nextPull();
   expect(captures()).toBe(2);
+});
+
+// Opus's r2c-3e4 review: nothing proved that a target sharing another's
+// catch-up pull blocks at that pull's head. Proves: a second ownerless target
+// whose document took an update after the first target's pull started, and
+// before its own activation read the latest, blocks at the head that pull
+// started at, so it captures once more on a later pass, and only once.
+it("captures a second target without lineage once more for an update during the pull it shared", async () => {
+  const o = await emptyServiceHost({maxDocumentsPerPass: 2}), workspaces = [o.workspace];
+  // The other document activates for real here, at a path the relay names it at.
+  vi.mocked(ServiceActivationDriver.prototype.activate).mockRestore();
+  vi.mocked(ServiceActivationDriver.prototype.loaded).mockRestore();
+  o.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,
+    content_kind,byte_length,recorded_at_ms) SELECT 'workspace',?,MAX(relay_seq),'other-moment','main',?,?,'text',0,0
+    FROM sync_relay_log WHERE workspace_id='workspace'`).run(o.other.objectId, o.other.path, "e".repeat(64));
+  const captures = () => o.client().captureOwnerActivation.mock.calls.filter(call => call[1] === o.other.path).length;
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCaptureAt(o.other.path, withoutLineage());
+  const pulling = o.park("sync.pullHosted");
+  await o.host.update({workspaces, documents: [o.sibling, o.other], ...stay});
+  await pulling.entered.promise;
+  appendDocumentRow(o.raw, "ydoc.update", o.other.objectId);
+  pulling.release.resolve();
+  await vi.waitFor(() => expect(o.host.blocked(o.other)).toBe("without-lineage"));
+  await vi.waitFor(() => expect(captures()).toBe(2));
+  await o.nextPull(); await o.nextPull();
+  expect(captures()).toBe(2);
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
 });
 
 // Proves: a diverged replica stops and detaches, its documents stay retained,

@@ -253,7 +253,8 @@ export async function startSelfHostedLiveHost(options: {
         // Once every retired document on the page left, or stayed through a pull
         // after it departed whose departed list reached it, the next page gets
         // its turn, so documents that stay cannot keep the ones after them from
-        // leaving, and none leaves the page before a list could confirm it gone.
+        // leaving. A list that reached a document before it unloaded cannot
+        // confirm it gone, so it waits for its page's next turn.
         const page = [...selected.departing, ...selected.obsolete].filter(row => row.retired);
         if ((selected.nextCursor || retiredCursor) && page.every(row =>
           left.has(documentKey(row)) || current?.pulledAfterDeparture(row))) {

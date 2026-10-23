@@ -3368,10 +3368,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
 /// binding went stale; no other hold carries them. The binding changes only
 /// with its digest, so a reader that never reads the binding still knows
 /// when it changed. Any change to the binding, a hold carrying one arriving
-/// or going, or such a hold moving to another document, also moves the
-/// released tail generation of its document in its workspace's main version,
-/// so two writes cannot change the binding and restore its digest unseen.
-/// Writers never `REPLACE` rows of `hosted_documents`, `ydoc_snapshots` or
+/// or going, or such a hold moving to another document, also advances the
+/// hold revision of each document it leaves or reaches, so two writes cannot
+/// change the binding and restore its digest unseen. The revision is its
+/// own, so a hold written never moves the released tail generation its
+/// document's validations are cached by. Like a generation, a revision only
+/// advances and outlives its hold. Writers never `REPLACE` rows of
+/// `hosted_documents`, `ydoc_snapshots` or
 /// `ydoc_inactive_lineages`: without recursive triggers its implicit delete
 /// fires no trigger, and it passes the binding's guard. The binding comes
 /// last in the row, so reading the rest never reaches it. Rebuilding the
@@ -3850,29 +3853,51 @@ WHEN OLD.released_hold_binding_json IS NOT NEW.released_hold_binding_json
   AND OLD.released_hold_binding_digest IS NEW.released_hold_binding_digest BEGIN
     SELECT RAISE(ABORT,'a released hold binding changes with its digest');
 END;
-CREATE TRIGGER released_tail_hold_insert AFTER INSERT ON hosted_documents
-WHEN NEW.released_hold_binding_json IS NOT NULL BEGIN
-    UPDATE released_tail_generations SET generation=generation+1
-        WHERE workspace_id=NEW.workspace_id AND object_id=NEW.object_id AND version_id=
-          (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=NEW.workspace_id);
+CREATE TABLE released_hold_revisions (
+    workspace_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision BETWEEN 1 AND 9007199254740991),
+    PRIMARY KEY (workspace_id, object_id)
+) STRICT;
+CREATE TRIGGER released_hold_revision_advance BEFORE UPDATE ON released_hold_revisions
+WHEN NEW.revision NOT BETWEEN OLD.revision+1 AND 9007199254740991 OR NEW.workspace_id IS NOT OLD.workspace_id
+  OR NEW.object_id IS NOT OLD.object_id BEGIN
+    SELECT RAISE(ABORT,'a released hold revision only advances, within its bound');
 END;
-CREATE TRIGGER released_tail_hold_update
+CREATE TRIGGER released_hold_revision_kept BEFORE DELETE ON released_hold_revisions BEGIN
+    SELECT RAISE(ABORT,'a released hold revision outlives its hold');
+END;
+CREATE TRIGGER released_hold_revision_insert AFTER INSERT ON hosted_documents
+WHEN NEW.released_hold_binding_json IS NOT NULL BEGIN
+    UPDATE released_hold_revisions SET revision=revision+1
+        WHERE workspace_id=NEW.workspace_id AND object_id=NEW.object_id;
+    INSERT INTO released_hold_revisions SELECT NEW.workspace_id,NEW.object_id,1
+        WHERE NOT EXISTS(SELECT 1 FROM released_hold_revisions
+          WHERE workspace_id=NEW.workspace_id AND object_id=NEW.object_id);
+END;
+CREATE TRIGGER released_hold_revision_update
 AFTER UPDATE OF workspace_id,object_id,released_hold_binding_json ON hosted_documents
 WHEN OLD.released_hold_binding_json IS NOT NEW.released_hold_binding_json
   OR (OLD.released_hold_binding_json IS NOT NULL
     AND (OLD.workspace_id IS NOT NEW.workspace_id OR OLD.object_id IS NOT NEW.object_id)) BEGIN
-    UPDATE released_tail_generations SET generation=generation+1
-        WHERE workspace_id=OLD.workspace_id AND object_id=OLD.object_id AND version_id=
-          (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=OLD.workspace_id);
-    UPDATE released_tail_generations SET generation=generation+1
-        WHERE workspace_id=NEW.workspace_id AND object_id=NEW.object_id AND version_id=
-          (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=NEW.workspace_id);
+    UPDATE released_hold_revisions SET revision=revision+1
+        WHERE workspace_id=OLD.workspace_id AND object_id=OLD.object_id;
+    INSERT INTO released_hold_revisions SELECT OLD.workspace_id,OLD.object_id,1
+        WHERE NOT EXISTS(SELECT 1 FROM released_hold_revisions
+          WHERE workspace_id=OLD.workspace_id AND object_id=OLD.object_id);
+    UPDATE released_hold_revisions SET revision=revision+1
+        WHERE workspace_id=NEW.workspace_id AND object_id=NEW.object_id;
+    INSERT INTO released_hold_revisions SELECT NEW.workspace_id,NEW.object_id,1
+        WHERE NOT EXISTS(SELECT 1 FROM released_hold_revisions
+          WHERE workspace_id=NEW.workspace_id AND object_id=NEW.object_id);
 END;
-CREATE TRIGGER released_tail_hold_delete AFTER DELETE ON hosted_documents
+CREATE TRIGGER released_hold_revision_delete AFTER DELETE ON hosted_documents
 WHEN OLD.released_hold_binding_json IS NOT NULL BEGIN
-    UPDATE released_tail_generations SET generation=generation+1
-        WHERE workspace_id=OLD.workspace_id AND object_id=OLD.object_id AND version_id=
-          (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=OLD.workspace_id);
+    UPDATE released_hold_revisions SET revision=revision+1
+        WHERE workspace_id=OLD.workspace_id AND object_id=OLD.object_id;
+    INSERT INTO released_hold_revisions SELECT OLD.workspace_id,OLD.object_id,1
+        WHERE NOT EXISTS(SELECT 1 FROM released_hold_revisions
+          WHERE workspace_id=OLD.workspace_id AND object_id=OLD.object_id);
 END;
 CREATE TABLE hosted_parked_snapshots (
     workspace_id TEXT NOT NULL,
@@ -4004,9 +4029,9 @@ CREATE TABLE released_hold_copy_decisions (
 CREATE INDEX released_hold_copy_decisions_projection ON released_hold_copy_decisions(projection_sha256);
 ";
 
-/// The triggers that keep and move a released tail generation, and keep a
-/// hold's binding with its digest. A store missing one would keep tails, or
-/// release proofs, its rows no longer prove.
+/// The triggers that keep and move a released tail generation, keep a hold's
+/// binding with its digest, and keep and advance its hold revision. A store
+/// missing one would keep tails, or release proofs, its rows no longer prove.
 pub(crate) const RELEASED_TAIL_TRIGGERS: &[&str] = &[
     "released_tail_generation_advance",
     "released_tail_generation_kept",
@@ -4048,9 +4073,11 @@ pub(crate) const RELEASED_TAIL_TRIGGERS: &[&str] = &[
     "released_tail_archive_update",
     "released_tail_archive_delete",
     "released_hold_binding_digest_moves",
-    "released_tail_hold_insert",
-    "released_tail_hold_update",
-    "released_tail_hold_delete",
+    "released_hold_revision_advance",
+    "released_hold_revision_kept",
+    "released_hold_revision_insert",
+    "released_hold_revision_update",
+    "released_hold_revision_delete",
 ];
 
 /// A hosted document that left the scope parks instead of losing its state.
@@ -5068,7 +5095,7 @@ mod tests {
             ),
             (
                 "v2-live-owner-activations",
-                "fb240511233eccb0ef864141a9f30c3a5ae635f3310f91b3a87f30783efdaf98",
+                "3cd8aabfe2ef82e606dd174dd956e46f8e112b3f7bc7f8e1ffd8bbb242679dd2",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -8742,8 +8769,7 @@ mod tests {
     /// inspection loads that its coordinates do not name (Sol's r2c-3c-1
     /// finding 1), including a latest snapshot removed after it folded rows,
     /// an archive rebound, and a missing blob restored (Sol's r2c-3c-3
-    /// findings 1 and 2, Opus's finding 1), and a hold's binding (their
-    /// r2c-3c-5 finding 1). A blob nothing names, a folded
+    /// findings 1 and 2, Opus's finding 1). A blob nothing names, a folded
     /// journal row no entry names, an append, a superseded snapshot pruned,
     /// and a document column neither reads move nothing. The generation
     /// outlives its document.
@@ -9020,13 +9046,50 @@ mod tests {
         step("INSERT INTO binary_blobs VALUES ('merged',1,X'00')", &["b"]);
         step("UPDATE binary_blobs SET bytes=X'01' WHERE sha256='merged'", &["b"]);
         step("DELETE FROM binary_blobs WHERE sha256='merged'", &["b"]);
-        // Sol's and Opus's r2c-3c-5 finding 1: a hold's binding moves its
-        // document in its workspace's main version as it is set, changes,
-        // moves to another document and back, goes and comes back, so two
-        // writes cannot change it and restore its digest unseen. Its digest
-        // alone, the binding rewritten as it was, the hold's other columns,
-        // and a document with no binding arriving or going move nothing.
-        step("INSERT INTO versioned_workspaces VALUES ('ws','main')", &[]);
+    }
+
+    fn released_hold_revision(conn: &Connection, object: &str) -> Option<i64> {
+        use rusqlite::OptionalExtension;
+        conn.query_row(
+            "SELECT revision FROM released_hold_revisions WHERE workspace_id='ws' AND object_id=?1",
+            [object],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    /// Sol's r2c-3c-7 ruling on their and Opus's r2c-3c-5 finding 1: a hold's
+    /// binding advances its document's hold revision as it is set, changes,
+    /// moves to another document and back, goes and comes back, so two
+    /// writes cannot change it and restore its digest unseen. Its digest
+    /// alone, the binding rewritten as it was, the hold's other columns, and
+    /// a document with no binding arriving or going advance nothing. No hold
+    /// write moves a released tail generation. A revision only advances,
+    /// within its bound, and outlives its hold.
+    #[test]
+    fn every_change_to_a_holds_binding_advances_its_revision() {
+        let dir = tempdir();
+        let conn = released_tail_store(&dir);
+        let objects = ["a", "b"];
+        let generations = objects.map(|object| released_tail_generation(&conn, object));
+        let step = |sql: &str, advanced: &[&str]| {
+            let before = objects.map(|object| released_hold_revision(&conn, object));
+            conn.execute_batch(sql).unwrap();
+            for (object, before) in objects.into_iter().zip(before) {
+                let after = released_hold_revision(&conn, object);
+                if advanced.contains(&object) {
+                    assert!(after > before, "{sql} advances {object}");
+                } else {
+                    assert_eq!(after, before, "{sql} keeps {object}");
+                }
+            }
+            assert_eq!(
+                objects.map(|object| released_tail_generation(&conn, object)),
+                generations,
+                "{sql} moves no generation"
+            );
+        };
         step(
             "INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation)
              VALUES ('ws','a','a.md','ready',0)",
@@ -9069,6 +9132,29 @@ mod tests {
             &[],
         );
         step("DELETE FROM hosted_documents", &[]);
+        for reset in [
+            "UPDATE released_hold_revisions SET revision=1 WHERE object_id='a'",
+            "UPDATE released_hold_revisions SET revision=revision WHERE object_id='a'",
+            "UPDATE released_hold_revisions SET object_id='c' WHERE object_id='a'",
+            "DELETE FROM released_hold_revisions WHERE object_id='a'",
+        ] {
+            let before = released_hold_revision(&conn, "a");
+            assert!(conn.execute_batch(reset).is_err(), "{reset}");
+            assert_eq!(released_hold_revision(&conn, "a"), before, "{reset}");
+        }
+        conn.execute_batch(
+            "UPDATE released_hold_revisions SET revision=9007199254740991 WHERE object_id='a'",
+        )
+        .unwrap();
+        assert!(
+            conn.execute_batch("INSERT INTO hosted_documents SELECT * FROM temp.kept_hold")
+                .is_err(),
+            "a hold whose revision is at its bound cannot arrive"
+        );
+        let held: i64 = conn
+            .query_row("SELECT COUNT(*) FROM hosted_documents", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(held, 0);
     }
 
     /// A generation at its bound fails the mutation that would move it, even
@@ -9226,8 +9312,7 @@ mod tests {
     /// row going, coming back and changing its digest, a missing blob it
     /// names arriving, a snapshot changing its digest, the latest snapshot
     /// going, and an archive changing its digest and going. Every statement
-    /// those triggers run, and the one a hold's binding moves its document
-    /// by, searches by index, never scans.
+    /// those triggers run searches by index, never scans.
     #[test]
     fn released_tail_triggers_that_match_move_by_key() {
         let dir = tempdir();
@@ -9328,10 +9413,6 @@ mod tests {
                  UNION SELECT workspace_id,version_id,object_id FROM ydoc_inactive_lineages
                    WHERE full_state_blob_sha256=?1)"
             ),
-            "UPDATE released_tail_generations SET generation=generation+1
-             WHERE workspace_id=?1 AND object_id=?2 AND version_id=
-               (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1)"
-                .to_owned(),
         ] {
             let plan = query_plan(&conn, &sql);
             assert!(

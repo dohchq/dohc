@@ -11,10 +11,21 @@ use rusqlite::trace::{TraceEvent, TraceEventCodes};
 use std::sync::Mutex;
 use std::time::Duration;
 
+/// A writer connection of its own to the window's store, which waits on the
+/// store's lock as long as the store's own connections do.
+fn writer(w: &RetainedWindow) -> rusqlite::Connection {
+    let raw = rusqlite::Connection::open(engine_db_path(&w.root).unwrap()).unwrap();
+    raw.busy_timeout(Duration::from_millis(u64::from(
+        dohc_engine_storage::ENGINE_SQLITE_BUSY_TIMEOUT_MS,
+    )))
+    .unwrap();
+    raw
+}
+
 /// Run `sql` through a writer connection of its own, past the store's
 /// checks, and answer how many rows it changed.
 fn changed(w: &RetainedWindow, sql: &str) -> usize {
-    let raw = rusqlite::Connection::open(engine_db_path(&w.root).unwrap()).unwrap();
+    let raw = writer(w);
     raw.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON")
         .unwrap();
     raw.execute(sql, []).unwrap()
@@ -145,7 +156,7 @@ const SNAPSHOT_COLUMNS: &str = "workspace_id,version_id,object_id,up_to_seq,snap
 
 /// Run `sql` through a writer connection of its own with foreign keys on.
 fn changed_with_keys(w: &RetainedWindow, sql: &str) -> usize {
-    let raw = rusqlite::Connection::open(engine_db_path(&w.root).unwrap()).unwrap();
+    let raw = writer(w);
     raw.execute_batch("PRAGMA foreign_keys=ON").unwrap();
     raw.execute(sql, []).unwrap()
 }
@@ -680,11 +691,7 @@ async fn a_binding_changed_under_its_digest_is_refused() {
     let proved = inspected_window(&w.store);
     assert_eq!(proved.status, HeldBindingStatus::Current);
     let (resume, request) = paused_inspection(&w).await;
-    let raw = rusqlite::Connection::open(engine_db_path(&w.root).unwrap()).unwrap();
-    raw.busy_timeout(Duration::from_millis(u64::from(
-        dohc_engine_storage::ENGINE_SQLITE_BUSY_TIMEOUT_MS,
-    )))
-    .unwrap();
+    let raw = writer(&w);
     raw.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON")
         .unwrap();
     let refused = raw
@@ -704,15 +711,30 @@ async fn a_binding_changed_under_its_digest_is_refused() {
     w.close().await;
 }
 
-/// Sol's and Opus's r2c-3c-5 finding 1: writes that change the hold's
-/// binding with its digest can leave the digest the proof read beside a
-/// binding it never read: two rewrites, or the hold removed and restored
-/// with another binding. Each moves the document's released tail
-/// generation, so while the proof holds at its snapshot the answer turns
-/// stale and keeps nothing.
+/// The window document's hold revision.
+fn hold_revision(w: &RetainedWindow) -> i64 {
+    w.store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT revision FROM released_hold_revisions
+                 WHERE workspace_id='workspace' AND object_id='object'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
+}
+
+/// Sol's and Opus's r2c-3c-5 finding 1, as Sol's r2c-3c-7 ruling keeps it:
+/// writes that change the hold's binding with its digest can leave the
+/// digest the proof read beside a binding it never read: two rewrites, the
+/// hold moved to another document and back, or the hold removed and
+/// restored with another binding. Each advances the document's hold
+/// revision, so while the proof holds at its snapshot the answer turns stale
+/// and keeps nothing. None moves the document's released tail generation.
 #[tokio::test]
 async fn a_binding_changed_back_to_its_digest_is_stale() {
-    for case in ["rewritten twice", "removed and restored"] {
+    for case in ["rewritten twice", "moved and back", "removed and restored"] {
         let (w, desktop, _client) = held_for_a_queued_fold().await;
         assert_eq!(inspected_window(&w.store).status, HeldBindingStatus::Current, "{case}");
         let (resume, request) = paused_inspection(&w).await;
@@ -726,40 +748,50 @@ async fn a_binding_changed_back_to_its_digest_is_stale() {
                 )
             })
             .unwrap();
-        let mut before = generation(&w);
-        if case == "rewritten twice" {
-            for (json, digest) in [
-                ("{\"rebound\":2}", "e".repeat(64)),
-                ("{\"rebound\":3}", proved.clone()),
-            ] {
-                let rebound = changed(
-                    &w,
-                    &format!(
-                        "UPDATE hosted_documents SET released_hold_binding_json='{json}',
-                           released_hold_binding_digest='{digest}' WHERE object_id='object'"
-                    ),
-                );
-                assert_eq!(rebound, 1, "{json}");
-                assert!(generation(&w) > before, "{json} moves the generation");
-                before = generation(&w);
+        let tails = generation(&w);
+        let mut before = hold_revision(&w);
+        match case {
+            "rewritten twice" => {
+                for (json, digest) in [
+                    ("{\"rebound\":2}", "e".repeat(64)),
+                    ("{\"rebound\":3}", proved.clone()),
+                ] {
+                    let rebound = changed(
+                        &w,
+                        &format!(
+                            "UPDATE hosted_documents SET released_hold_binding_json='{json}',
+                               released_hold_binding_digest='{digest}' WHERE object_id='object'"
+                        ),
+                    );
+                    assert_eq!(rebound, 1, "{json}");
+                    assert!(hold_revision(&w) > before, "{json} advances the revision");
+                    before = hold_revision(&w);
+                }
             }
-        } else {
-            let raw = rusqlite::Connection::open(engine_db_path(&w.root).unwrap()).unwrap();
-            raw.busy_timeout(Duration::from_millis(u64::from(
-                dohc_engine_storage::ENGINE_SQLITE_BUSY_TIMEOUT_MS,
-            )))
-            .unwrap();
-            raw.execute_batch(
-                "PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON;
-                 CREATE TEMP TABLE kept AS SELECT * FROM hosted_documents WHERE object_id='object';
-                 DELETE FROM hosted_documents WHERE object_id='object';
-                 UPDATE temp.kept SET released_hold_binding_json='{\"rebound\":4}';
-                 INSERT INTO hosted_documents SELECT * FROM temp.kept;",
-            )
-            .unwrap();
-            drop(raw);
-            assert!(generation(&w) > before, "{case} moves the generation");
+            "moved and back" => {
+                for (from, to) in [("object", "elsewhere"), ("elsewhere", "object")] {
+                    let moved = changed(
+                        &w,
+                        &format!("UPDATE hosted_documents SET object_id='{to}' WHERE object_id='{from}'"),
+                    );
+                    assert_eq!(moved, 1, "to {to}");
+                }
+                assert!(hold_revision(&w) > before, "{case} advances the revision");
+            }
+            _ => {
+                writer(&w)
+                    .execute_batch(
+                        "PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON;
+                         CREATE TEMP TABLE kept AS SELECT * FROM hosted_documents WHERE object_id='object';
+                         DELETE FROM hosted_documents WHERE object_id='object';
+                         UPDATE temp.kept SET released_hold_binding_json='{\"rebound\":4}';
+                         INSERT INTO hosted_documents SELECT * FROM temp.kept;",
+                    )
+                    .unwrap();
+                assert!(hold_revision(&w) > before, "{case} advances the revision");
+            }
         }
+        assert_eq!(generation(&w), tails, "{case} leaves the generation");
         let answer = released(resume, request).await.expect("held");
         assert_eq!(answer.document.binding_digest, proved, "{case}");
         assert_eq!(answer.status, HeldBindingStatus::Stale, "{case}");
@@ -768,6 +800,35 @@ async fn a_binding_changed_back_to_its_digest_is_stale() {
         desktop.close().await;
         w.close().await;
     }
+}
+
+/// Opus's r2c-3c-7 finding 2: a proof reads the state of the document its
+/// binding names, so a binding stored on another document's row proves
+/// nothing of that row. The window's hold copied, binding and digest as they
+/// were, onto a second document answers stale there, while the window's own
+/// still answers current.
+#[tokio::test]
+async fn a_binding_naming_another_document_is_stale() {
+    let (w, desktop, _client) = held_for_a_queued_fold().await;
+    let window = inspected_window(&w.store);
+    assert_eq!(window.status, HeldBindingStatus::Current);
+    writer(&w)
+        .execute_batch(
+            "PRAGMA foreign_keys=OFF;
+             CREATE TEMP TABLE kept AS SELECT * FROM hosted_documents WHERE object_id='object';
+             UPDATE temp.kept SET object_id='other',path='notes/other.md';
+             INSERT INTO hosted_documents SELECT * FROM temp.kept;",
+        )
+        .unwrap();
+    let other = dohc_engine_sync::inspect_held_document(&w.store, "workspace", "other")
+        .unwrap()
+        .expect("the copy is held");
+    assert_eq!(other.document.binding_digest, window.document.binding_digest);
+    assert_eq!(other.status, HeldBindingStatus::Stale);
+    assert_eq!((&other.preservation, &other.contributions), (&None, &None));
+    assert_eq!(inspected_window(&w.store), window);
+    desktop.close().await;
+    w.close().await;
 }
 
 /// Every statement the store's connection ran while a proof was released.

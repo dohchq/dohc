@@ -10291,6 +10291,84 @@ async fn a_pass_holds_a_protected_archived_lineage_and_continues_once_it_is_free
     w.close().await;
 }
 
+/// Opus's r2c-3c-7 finding 1: a pass's inactive drain decides one archived
+/// lineage of a document per transaction, so what deciding one wrote, its
+/// hold or its archive, never leaves another lineage of the document asking
+/// for validation of a generation only that transaction holds, which the
+/// worker answers uncommitted on every retry. Beside the window's protected
+/// archived lineage, a second archive of it takes a copy of its queued rows,
+/// later in relay order, in one batch with them: unprotected and decided
+/// after it, protected too, or unprotected and decided before it, so
+/// applying it moves the generation first. Each pass ends, the window holds
+/// with its own lineage's first row, and only an unprotected copy applies.
+#[tokio::test]
+async fn archived_lineages_of_one_document_drain_in_their_own_transactions() {
+    for case in ["held, then applied", "held, then held", "applied, then held"] {
+        let (mut w, desktop, client, queued, archive) = archived_window(2).await;
+        let rows = queued_feeds(&w.store);
+        // A batch decides its groups in lineage order.
+        let second = if case == "applied, then held" {
+            "0".repeat(64)
+        } else {
+            "f".repeat(64)
+        };
+        assert_ne!(second, w.lineage, "{case}");
+        write_unchecked(
+            &w,
+            &format!(
+                "CREATE TEMP TABLE archive AS SELECT * FROM ydoc_inactive_lineages WHERE lineage_claim_id='{first}';
+                 UPDATE temp.archive SET lineage_claim_id='{second}';
+                 INSERT INTO ydoc_inactive_lineages SELECT * FROM temp.archive;
+                 CREATE TEMP TABLE log AS SELECT * FROM replication_log
+                   WHERE (origin_id,origin_seq) IN (SELECT origin_id,origin_seq FROM ydoc_deferred_updates);
+                 UPDATE temp.log SET origin_seq=origin_seq+1000,
+                   payload_json=json_set(payload_json,'$.lineageClaimId','{second}');
+                 INSERT INTO replication_log SELECT * FROM temp.log;
+                 CREATE TEMP TABLE queued AS SELECT * FROM ydoc_deferred_updates;
+                 UPDATE temp.queued SET origin_seq=origin_seq+1000,lineage_claim_id='{second}',
+                   relay_seq=relay_seq+1000;
+                 INSERT INTO ydoc_deferred_updates SELECT * FROM temp.queued;",
+                first = w.lineage
+            ),
+        );
+        let protected = case == "held, then held";
+        if protected {
+            write_unchecked(
+                &w,
+                &format!(
+                    "CREATE TEMP TABLE activations AS SELECT * FROM live_owner_activations
+                       WHERE lineage_claim_id='{first}';
+                     UPDATE temp.activations SET activation_id=activation_id||'-second',
+                       predecessor_activation_id=predecessor_activation_id||'-second',
+                       lineage_claim_id='{second}';
+                     INSERT INTO live_owner_activations SELECT * FROM temp.activations;",
+                    first = w.lineage
+                ),
+            );
+        }
+        assert_eq!(queued_feeds(&w.store).len(), 2 * rows.len(), "{case}");
+        let pass = hosted_pass(
+            &mut w.store,
+            &client,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+        );
+        assert!(
+            holds_archived(pass.held.get("object"), &w.lineage, &archive, &queued[0]),
+            "{case}: {pass:?}"
+        );
+        assert_eq!(archived_state(&w.store, &w.lineage), archive, "{case}");
+        if protected {
+            assert_eq!(queued_feeds(&w.store).len(), 2 * rows.len(), "{case}: both stay");
+            assert_eq!(archived_state(&w.store, &second), archive, "{case}");
+        } else {
+            assert_eq!(queued_feeds(&w.store), rows, "{case}: the copy applied");
+            assert_ne!(archived_state(&w.store, &second), archive, "{case}");
+        }
+        desktop.close().await;
+        w.close().await;
+    }
+}
+
 /// Sol's fifth test, the drain a document's own operations run: its queued
 /// updates of an archived lineage released tails protect stay queued with
 /// their blobs and feeds, the archive keeps its state, and the drain reports
@@ -11773,10 +11851,10 @@ fn committed_counts(binding: &ReleasedLineageBinding) -> Vec<i64> {
 /// Sol's binding-cost ruling: a protected tail's binding names its unproven
 /// work by count and digest, so a hold over 50,000 retained entries is the
 /// size of a hold over one. The worker commits to the work once, as it
-/// validates, and once more after the hold is first stored, which moves its
-/// document's generation. Warm passes and their cursor commits then scan
-/// nothing and commit to nothing again, and the hold stores the binding's own
-/// canonical bytes.
+/// validates. Warm passes and their cursor commits scan nothing and commit to
+/// nothing again, storing the hold included, which moves its hold revision
+/// and never its document's generation, and the hold stores the binding's
+/// own canonical bytes.
 #[tokio::test]
 async fn a_hold_names_retained_work_by_one_commitment_at_any_size() {
     let (mut w, desktop, client, pass) = held_pass().await;
@@ -11793,19 +11871,13 @@ async fn a_hold_names_retained_work_by_one_commitment_at_any_size() {
         "only the count's digits differ in size"
     );
     assert_eq!(tails.validations(), 1);
-    let mut warm = None;
-    for round in 0..4 {
+    let (scans, commitments) = (
+        released_tail_scans_on_this_thread(),
+        released_tail_commitments_on_this_thread(),
+    );
+    for _ in 0..3 {
         let pass = hosted_pass(&mut w.store, &client, &mut cache);
         assert_eq!(held_object(&pass), many);
-        // The first commit stores the hold, which moves its document's
-        // generation, so the pass after it validates once more.
-        if round == 1 {
-            assert_eq!(tails.validations(), 2);
-            warm = Some((
-                released_tail_scans_on_this_thread(),
-                released_tail_commitments_on_this_thread(),
-            ));
-        }
         let commit = client
             .commit_hosted_cursor(
                 &mut w.store,
@@ -11820,14 +11892,13 @@ async fn a_hold_names_retained_work_by_one_commitment_at_any_size() {
             "{commit:?}"
         );
     }
-    let (scans, commitments) = warm.expect("a warm round");
     assert_eq!(
         (
             released_tail_scans_on_this_thread(),
             released_tail_commitments_on_this_thread(),
             tails.validations(),
         ),
-        (scans, commitments, 2),
+        (scans, commitments, 1),
         "warm passes and commits scan and commit to nothing"
     );
     let stored: String = w

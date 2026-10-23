@@ -909,10 +909,10 @@ export async function startServiceLiveHost(options: {
           !goneSince(attached, document.objectId, required);
       },
       /**
-       * Whether its replica has had its chance to retire the departed
-       * document: nothing of it is loaded, a pull that started after it
-       * departed has succeeded, and the departed list of such a pull reached
-       * it, listed or not. One it still retains then waits on the engine.
+       * Whether the departed document stayed through a pull after it
+       * departed whose departed list reached it, listed or not, and nothing
+       * of it is loaded now. That list may have reached it before it
+       * unloaded, so one it still retains waits for a later list.
        */
       pulledAfterDeparture(document: {workspaceId: string; objectId: string}): boolean {
         const attached = attachments.get(document.workspaceId), required = attached?.announced.get(document.objectId);

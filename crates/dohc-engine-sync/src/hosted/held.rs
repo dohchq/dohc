@@ -222,7 +222,7 @@ pub struct HeldProof {
 /// however much the hold covers: the open and identity of the store, the
 /// workspace and its main version, the replica's scope and the feed it
 /// reads, and the hold with its binding's digest, its path, continuation and
-/// stale flag. Proofs are coalesced by it.
+/// stale flag, and its revision. Proofs are coalesced by it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeldKey {
     opening: u64,
@@ -236,6 +236,10 @@ pub struct HeldKey {
     /// The replication epoch and stream the replica reads.
     feed: Option<(String, String)>,
     hold: Option<HeldDocument>,
+    /// What every change to the document's hold binding advances, so two
+    /// writes that change it and restore its digest still move the key.
+    /// None before its first hold.
+    hold_revision: Option<i64>,
 }
 
 /// What a held document's proof read beyond the evidence its document's
@@ -339,7 +343,7 @@ pub fn prove_held_document(
         .map_err(protection_failure)?;
     let preservation = match (&key.hold, &binding) {
         (Some(document), Some(binding))
-            if !document.binding_stale && feed_matches(&key, binding) =>
+            if !document.binding_stale && binding_matches(&key, binding) =>
         {
             match inspect_held(&tx, binding, stop).map_err(protection_failure)? {
                 HeldInspection::Current(preservation) => Some(preservation),
@@ -495,6 +499,14 @@ fn held_key(
         )
         .optional()
         .map_err(SyncError::corrupt)?;
+    let hold_revision = conn
+        .query_row(
+            "SELECT revision FROM released_hold_revisions WHERE workspace_id=?1 AND object_id=?2",
+            params![workspace_id, object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
     Ok(HeldKey {
         opening,
         engine,
@@ -504,6 +516,7 @@ fn held_key(
         scope_generation,
         feed,
         hold: held_in(conn, workspace_id, object_id)?,
+        hold_revision,
     })
 }
 
@@ -629,10 +642,14 @@ fn malformed() -> SyncError {
     crate::error::local_corruption("a hosted document's state is malformed")
 }
 
-/// Whether the replica still reads the feed `binding`'s update arrived on.
-fn feed_matches(key: &HeldKey, binding: &ReleasedLineageBinding) -> bool {
+/// Whether `binding` names the row that stores it, in its workspace's main
+/// version, and the replica still reads the feed its update arrived on. A
+/// binding naming another document proves that one, never this.
+fn binding_matches(key: &HeldKey, binding: &ReleasedLineageBinding) -> bool {
     let incoming = &binding.incoming;
     key.workspace_id == binding.workspace_id
+        && key.object_id == binding.object_id
+        && key.main_version_id.as_ref() == Some(&binding.main_version_id)
         && key
             .feed
             .as_ref()

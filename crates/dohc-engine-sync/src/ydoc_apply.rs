@@ -4819,12 +4819,23 @@ pub(crate) fn drain_inactive_ydoc_updates(
         let mut owed_refusals = std::collections::BTreeMap::new();
         let mut batch_bytes = 0;
         let mut processed = 0;
+        // The one lineage of each document the batch decides. A second waits
+        // for a later batch: what deciding the first wrote, its hold or its
+        // archive, would leave the second asking for validation of a
+        // generation only this transaction holds.
+        let mut lineages = std::collections::BTreeMap::<(String, String), String>::new();
         for ((origin, seq, relay_seq, at, lineage, json, feed), byte_length, facts, owed) in rows {
             let cost = usize::try_from(byte_length.ok_or(SyncError::BlobInvalid)?).map_err(SyncError::corrupt)?.saturating_add(json.len());
+            let payload: YdocUpdatePayload = serde_json::from_str(&json).map_err(SyncError::corrupt)?;
+            let document = (payload.version_id.clone(), payload.object_id.clone());
+            if lineages.get(&document).is_some_and(|decided| *decided != payload.lineage_claim_id) {
+                continue;
+            }
             if batch_bytes + cost > ARCHIVED_BATCH_BYTES {
                 if processed == 0 { return Err(SyncError::BlobInvalid); }
                 break;
             }
+            lineages.entry(document).or_insert_with(|| payload.lineage_claim_id.clone());
             batch_bytes += cost;
             processed += 1;
             if let Some(facts) = facts {
@@ -4833,7 +4844,6 @@ pub(crate) fn drain_inactive_ydoc_updates(
             if let Some(owed) = owed {
                 owed_refusals.insert((origin.clone(), seq), owed);
             }
-            let payload: YdocUpdatePayload = serde_json::from_str(&json).map_err(SyncError::corrupt)?;
             groups.entry((payload.version_id.clone(),payload.object_id.clone(),payload.lineage_claim_id.clone()))
                 .or_default().push((origin,seq,relay_seq,at,lineage,payload,feed));
         }
