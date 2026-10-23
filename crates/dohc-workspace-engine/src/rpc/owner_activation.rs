@@ -16,7 +16,7 @@ struct ActivationOutputGuard {
     connection: ConnectionHandle,
     cancel: CancelSignal,
     deadline: Option<Instant>,
-    _reservation: Arc<dyn Send + Sync>,
+    reservation: std::sync::Mutex<Option<Arc<dyn Send + Sync>>>,
 }
 impl std::fmt::Debug for ActivationOutputGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -36,6 +36,9 @@ impl OutputGuard for ActivationOutputGuard {
     }
     fn deadline(&self) -> Option<Instant> {
         self.deadline
+    }
+    fn release(&self) {
+        crate::lock(&self.reservation).take();
     }
 }
 
@@ -146,7 +149,7 @@ impl EngineService {
             connection: connection.clone(),
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
-            _reservation: reservation.clone(),
+            reservation: std::sync::Mutex::new(Some(reservation.clone())),
         });
         let workspace = request
             .workspace

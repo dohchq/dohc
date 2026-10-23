@@ -148,7 +148,7 @@ struct ApplicationOutputGuard {
     registration: Arc<Registration>,
     cancel: CancelSignal,
     deadline: Option<Instant>,
-    _reservation: Arc<dyn Send + Sync>,
+    reservation: Mutex<Option<Arc<dyn Send + Sync>>>,
 }
 
 struct RetireOnCancellation(Option<Arc<Host>>);
@@ -226,6 +226,9 @@ impl OutputGuard for ApplicationOutputGuard {
             && self
                 .deadline
                 .is_none_or(|deadline| Instant::now() < deadline)
+    }
+    fn release(&self) {
+        lock(&self.reservation).take();
     }
 }
 
@@ -307,7 +310,7 @@ impl EngineService {
             registration: registration.clone(),
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
-            _reservation: Arc::new(()),
+            reservation: Mutex::new(Some(Arc::new(()))),
         });
         if !guard.is_current() {
             return Err(workspace_unavailable());
@@ -442,7 +445,7 @@ impl EngineService {
             registration: registration.clone(),
             cancel: ctx.cancel,
             deadline: ctx.deadline,
-            _reservation: reservation.clone(),
+            reservation: Mutex::new(Some(reservation.clone())),
         });
         if !guard.is_current() {
             return Err(workspace_unavailable());
@@ -542,7 +545,7 @@ impl EngineService {
             registration: registration.clone(),
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
-            _reservation: reconstruction.reservation.clone(),
+            reservation: Mutex::new(Some(reconstruction.reservation.clone())),
         });
         let mut retirement = RetireOnCancellation(Some(host));
         let operation = tokio::spawn(async move {
@@ -1222,7 +1225,7 @@ impl EngineService {
             registration: input.registration.clone(),
             cancel: ctx.cancel,
             deadline: ctx.deadline,
-            _reservation: input.reservation.clone(),
+            reservation: Mutex::new(Some(input.reservation.clone())),
         });
         // Keep the workspace fence until the writer is terminal if the RPC is cancelled.
         let mut retirement = RetireOnCancellation(Some(host.clone()));

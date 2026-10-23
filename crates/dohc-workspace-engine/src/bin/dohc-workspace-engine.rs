@@ -724,11 +724,19 @@ async fn write_output<W: AsyncWrite + Unpin>(
                 // ended the answer, even if its request was cancelled.
                 let mut offset = 0;
                 while offset < frame.len() {
+                    // The client cannot read the response before its last
+                    // byte, so the reservations go just before it.
+                    let end = if offset + 1 < frame.len() {
+                        frame.len() - 1
+                    } else {
+                        guard.release();
+                        frame.len()
+                    };
                     let write = std::future::poll_fn(|cx| {
                         let mut result = std::task::Poll::Pending;
                         if !guard.with_current(offset == 0, &mut || {
                             result = std::pin::Pin::new(&mut output)
-                                .poll_write(cx, &frame[offset..])
+                                .poll_write(cx, &frame[offset..end])
                                 .map(|result| result.map(Some));
                         }) {
                             return std::task::Poll::Ready(Ok(None));
@@ -840,7 +848,7 @@ async fn write_output<W: AsyncWrite + Unpin>(
             }
             OutputItem::Blob { response, egress } => {
                 let request_id = response.id;
-                let outcome = write_blob_egress(&mut output, response, egress, limits).await;
+                let outcome = write_blob_egress(&mut output, response, egress, limits, || {}).await;
                 lock(&active_egress).remove(&request_id);
                 outcome?;
             }
@@ -872,7 +880,7 @@ async fn write_output<W: AsyncWrite + Unpin>(
                     biased;
                     ()=retired.cancelled()=>Err(io::Error::new(io::ErrorKind::ConnectionAborted,"native restore output retired")),
                     ()=async {match deadline {Some(deadline)=>tokio::time::sleep_until(deadline.into()).await,None=>std::future::pending().await}}=>Err(io::Error::new(io::ErrorKind::TimedOut,"native restore output expired")),
-                    result=write_blob_egress(&mut fenced,response,egress,limits)=>result,
+                    result=write_blob_egress(&mut fenced,response,egress,limits,|| guard.release())=>result,
                 };
                 lock(&active_egress).remove(&request_id);
                 if result.is_err() && !fenced.frame_pending && !guard.is_current() {
@@ -1019,6 +1027,7 @@ async fn write_blob_egress<W: AsyncWrite + Unpin>(
     response: Response,
     egress: BlobEgress,
     limits: &WireLimits,
+    release: impl FnOnce(),
 ) -> Result<(), io::Error> {
     let request_id = response.id;
     let interruption = |deadline: Option<std::time::Instant>| {
@@ -1061,7 +1070,7 @@ async fn write_blob_egress<W: AsyncWrite + Unpin>(
             request_id,
             stream_id: egress.stream_id,
             total_bytes: Some(egress.bytes.len() as u64),
-            sha256: Some(egress.sha256),
+            sha256: Some(egress.sha256.clone()),
         }),
         limits,
     )
@@ -1089,6 +1098,10 @@ async fn write_blob_egress<W: AsyncWrite + Unpin>(
         output.write_all(&frame).await?;
         output.flush().await?;
     }
+    // The client finishes the request when the response after the blob
+    // arrives, so the blob and the reservations go before the response.
+    drop(egress);
+    release();
     output.write_all(&response_frame).await?;
     output.flush().await
 }
@@ -2319,6 +2332,105 @@ mod tests {
             io::ErrorKind::TimedOut
         );
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[derive(Debug)]
+    struct ReleaseGuard {
+        cancel: CancelSignal,
+        released: Arc<AtomicBool>,
+    }
+
+    impl OutputGuard for ReleaseGuard {
+        fn is_current_ignoring_cancel(&self) -> bool {
+            true
+        }
+        fn cancel_signal(&self) -> CancelSignal {
+            self.cancel.clone()
+        }
+        fn release(&self) {
+            self.released.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Records how much of the transcript was written when the guard released.
+    struct ReleaseRecorder {
+        released: Arc<AtomicBool>,
+        transcript: Vec<u8>,
+        released_at: Option<usize>,
+    }
+
+    impl AsyncWrite for ReleaseRecorder {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _: &mut TaskContext<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.released_at.is_none() && self.released.load(Ordering::SeqCst) {
+                self.released_at = Some(self.transcript.len());
+            }
+            self.transcript.extend_from_slice(bytes);
+            Poll::Ready(Ok(bytes.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Writes `item`, and returns the transcript's length when its guard
+    /// released and the transcript's total length.
+    async fn release_offset(
+        item: impl FnOnce(Arc<dyn OutputGuard>) -> OutputItem,
+    ) -> (Option<usize>, usize) {
+        let released = Arc::new(AtomicBool::new(false));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.send(item(Arc::new(ReleaseGuard {
+            cancel: CancelSignal::new(),
+            released: released.clone(),
+        })))
+        .await
+        .unwrap();
+        drop(tx);
+        let mut output = ReleaseRecorder {
+            released,
+            transcript: Vec::new(),
+            released_at: None,
+        };
+        write_output(
+            &mut output,
+            &mut rx,
+            &WireLimits::default(),
+            Arc::new(Mutex::new(HashMap::new())),
+        )
+        .await
+        .unwrap();
+        (output.released_at, output.transcript.len())
+    }
+
+    #[tokio::test]
+    async fn guarded_output_releases_reservations_before_the_client_can_read_the_response() {
+        // A client acting on the response must find its reservations free.
+        let (released_at, length) = release_offset(|guard| OutputItem::Guarded {
+            response: WireResponse {
+                id: 9,
+                result: serde_json::json!({"content": "x".repeat(1024)}),
+            },
+            guard,
+        })
+        .await;
+        assert_eq!(released_at, Some(length - 1));
+        let response = encode_control(
+            &Envelope::Response(WireResponse {
+                id: 9,
+                result: serde_json::json!({"status":"prepared"}),
+            }),
+            &WireLimits::default(),
+        )
+        .unwrap();
+        let (released_at, length) = release_offset(guarded_blob).await;
+        assert_eq!(released_at, Some(length - response.len()));
     }
 
     impl AsyncWrite for BlockedWriter {
@@ -3568,7 +3680,7 @@ mod tests {
         };
         let limits = WireLimits::default();
         let (mut output, mut input) = tokio::io::duplex(bytes.len() + 4096);
-        write_blob_egress(&mut output, response.clone(), egress, &limits)
+        write_blob_egress(&mut output, response.clone(), egress, &limits, || {})
             .await
             .expect("write blob egress");
         output.shutdown().await.expect("close transcript");
@@ -3640,7 +3752,7 @@ mod tests {
         };
         let limits = WireLimits::default();
         let (mut output, mut input) = tokio::io::duplex(4096);
-        write_blob_egress(&mut output, response.clone(), egress, &limits)
+        write_blob_egress(&mut output, response.clone(), egress, &limits, || {})
             .await
             .expect("write empty blob egress");
         output.shutdown().await.expect("close transcript");
@@ -3708,7 +3820,7 @@ mod tests {
         };
         let limits = WireLimits::default();
         let (mut output, mut input) = tokio::io::duplex(4096);
-        write_blob_egress(&mut output, response, egress, &limits)
+        write_blob_egress(&mut output, response, egress, &limits, || {})
             .await
             .expect("write cancellation");
         output.shutdown().await.expect("close transcript");
