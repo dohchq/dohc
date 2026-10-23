@@ -368,8 +368,23 @@ impl EngineStore {
     }
 
     /// Measure the WAL now, for a held reader about to start; whether it
-    /// presses, which refuses the reader.
+    /// presses, which refuses the reader. With no held reader counted, a WAL
+    /// that presses first gets the writer's bounded checkpoint, and the
+    /// background worker is asked for the rest, before it is measured again:
+    /// an idle store whose last held reader gave way admits the next once
+    /// its WAL is backfilled, with no write needed to start that.
     pub fn measure_wal_pressure(&self) -> Result<bool, StorageError> {
+        let pressed = self
+            .wal_pressure
+            .measure(&self.conn)
+            .map_err(StorageError::persist)?;
+        if !pressed || self.wal_pressure.held() {
+            return Ok(pressed);
+        }
+        if let Some(checkpoints) = &self.checkpoints {
+            checkpoints.checkpoint_on_writer_if_needed(&self.conn);
+            checkpoints.request();
+        }
         self.wal_pressure
             .measure(&self.conn)
             .map_err(StorageError::persist)

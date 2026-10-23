@@ -18,7 +18,7 @@ pub use binding::ContributionArtifact;
 pub use held::{
     store_identity, Charged, HeldProofAdmission, HeldProofError, HeldProofJob, HeldProofLimit,
     HeldProofRun, HeldProofStop, HeldProofWait, HeldProofs, LineageCoordinates, ProofReader,
-    ProofStage, ProofStop, Stop, HELD_PROOF_DEADLINE, MAX_PROOF_WAITERS,
+    ProofStage, ProofStop, Stop, HELD_PROOF_CLOSE_BOUND, HELD_PROOF_DEADLINE, MAX_PROOF_WAITERS,
 };
 pub use preservation::{
     inspect_held, HeldInspection, Preservation, PreservationFinding, PreservationReason,

@@ -120,6 +120,12 @@ pub enum RuntimeError {
     #[error("another held document read is running for this workspace")]
     HeldReadBusy,
 
+    /// What a held document's proof would keep is more than held reads may
+    /// keep: the daemon's proof memory, or a contribution artifact's cap.
+    /// Asking again answers the same.
+    #[error("the held document's answer is larger than a held read may keep")]
+    HeldReadTooLarge,
+
     /// The actor closed, but a held proof's reader still had the store open
     /// past the close bound. Nothing may replace or delete the store's files
     /// until it closes; the caller asks again later.
@@ -193,6 +199,7 @@ impl RuntimeError {
             RuntimeError::WorkerPanicked => "worker-panicked",
             RuntimeError::Cancelled => "cancelled",
             RuntimeError::HeldReadBusy => "held-read-busy",
+            RuntimeError::HeldReadTooLarge => "held-read-too-large",
             RuntimeError::StoreInUse => "store-in-use",
             RuntimeError::OperationCrashed => "operation-crashed",
             RuntimeError::DrainWaiting(_) => "retryable-state",

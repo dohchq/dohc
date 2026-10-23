@@ -978,27 +978,54 @@ async fn closing_the_store_stops_a_running_proof_and_waits_for_its_reader() {
 /// Sol's and Opus's r2c-3c-2 finding 1: a proof's reader still open past the
 /// close bound fails close, which still closes the writer, so nothing
 /// replaces the store's files under it. The caller answers that the
-/// workspace is gone, and the reader closes once the proof goes on.
+/// workspace is gone, and the reader closes once the proof goes on. Sol's
+/// and Opus's r2c-3c-4 finding 1: until then the store drains. Closing it
+/// again, one store or all, answers that it is in use, and so does opening
+/// or restarting it; once its reader closed, closing finds nothing to close
+/// and the store opens again. Opus's finding 6: the close bound is the
+/// test's, not ten seconds.
 #[tokio::test]
 async fn closing_with_a_reader_past_the_bound_fails() {
     let (w, desktop, _client) = held_for_a_queued_fold().await;
     let proofs = w.actor.held_proofs();
     let resume = Resume(proofs.clone());
+    proofs.set_close_bound(Duration::ZERO);
     proofs.pause_proofs_at(ProofStage::Validation);
     proofs.linger_stopped_proofs();
     let request = inspection(&w, &CancellationToken::new());
     reached("the proof validates", proofs.paused_proof()).await;
     let RetainedWindow {
-        owner, supervisor, ..
+        owner,
+        supervisor,
+        store,
+        root,
+        ..
     } = w;
+    drop(store);
     owner.close().await.unwrap();
+    let db = engine_db_path(&root).unwrap();
     let closed = supervisor.close_all();
     assert!(matches!(closed, Err(RuntimeError::StoreInUse)), "{closed:?}");
     assert!(!proofs.drained(), "the reader is still open");
+    for (what, refused) in [
+        ("closed again", supervisor.close(&db).map(drop)),
+        ("all closed again", supervisor.close_all()),
+        ("reopened", supervisor.open(&db, 2).map(drop)),
+        ("restarted", supervisor.restart(&db, 2).map(drop)),
+    ] {
+        assert!(matches!(refused, Err(RuntimeError::StoreInUse)), "{what}: {refused:?}");
+    }
+    assert_eq!(supervisor.actor_count(), 0, "no successor started");
     drop(resume);
     let answered = answered(request).await;
     assert!(matches!(answered, Err(RuntimeError::ActorUnavailable)), "{answered:?}");
     proofs.wait_for_drained();
+    assert!(!supervisor.close(&db).unwrap(), "nothing left to close");
+    supervisor.close_all().unwrap();
+    let reopened = supervisor.open(&db, 3).unwrap();
+    assert!(reopened.created_actor, "the drained store opens again");
+    drop(reopened);
+    supervisor.close_all().unwrap();
     desktop.close().await;
 }
 
@@ -1036,6 +1063,46 @@ async fn a_proof_gives_way_when_the_wal_presses_and_writes_keep_succeeding() {
     for _ in 0..2 * writes {
         w.actor.write_for_test(WRITE).await.expect("writes go on succeeding");
     }
+    desktop.close().await;
+    w.close().await;
+}
+
+/// Opus's r2c-3c-4 finding 2: once a proof gave way to the WAL, an idle
+/// store proves again with no write after it. Each admission that finds the
+/// WAL pressing runs the writer's bounded checkpoint and asks the background
+/// worker for the rest, so a caller that asks again once busy is soon
+/// answered; with nothing checkpointing, every ask would stay busy.
+#[tokio::test]
+async fn an_idle_store_proves_again_after_a_proof_gave_way() {
+    const WRITE: &str = "INSERT INTO binary_blobs(sha256,byte_length,bytes)
+        SELECT lower(hex(randomblob(32))),65536,randomblob(65536)";
+    let (w, desktop, _client) = held_for_a_queued_fold().await;
+    let proofs = w.actor.held_proofs();
+    let resume = Resume(proofs.clone());
+    proofs.pause_proofs_at(ProofStage::Merge);
+    let request = inspection(&w, &CancellationToken::new());
+    reached("the proof merges", proofs.paused_proof()).await;
+    let mut writes = 0;
+    while !proofs.wal_pressed("workspace") {
+        assert!(writes < 1_000, "the WAL never pressed");
+        w.actor.write_for_test(WRITE).await.expect("every write succeeds");
+        writes += 1;
+    }
+    drop(resume);
+    let gave_way = answered(request).await;
+    assert!(matches!(gave_way, Err(RuntimeError::HeldReadBusy)), "{gave_way:?}");
+    let mut asked = 0;
+    let answer = loop {
+        match answered(inspection(&w, &CancellationToken::new())).await {
+            Err(RuntimeError::HeldReadBusy) => {
+                asked += 1;
+                assert!(asked < 10_000, "the idle store never proved again");
+                tokio::task::yield_now().await;
+            }
+            answer => break answer,
+        }
+    };
+    assert_eq!(answer.unwrap().expect("held").status, HeldBindingStatus::Current);
     desktop.close().await;
     w.close().await;
 }

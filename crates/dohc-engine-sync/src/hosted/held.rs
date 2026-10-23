@@ -12,7 +12,6 @@ use dohc_engine_collab::live_update_application::{
     self as live, Charged, ContributionArtifact, HeldInspection, HeldProofJob,
     LineageCoordinates, Preservation, inspect_held, store_identity,
 };
-use dohc_engine_storage::StorageError;
 
 use super::*;
 use crate::ydoc_apply::protection_failure;
@@ -254,21 +253,19 @@ impl HeldProof {
         }
     }
 
-    /// About how many bytes the proof's inspection keeps: its artifact,
-    /// once more for the covered and merged lists it was encoded from, and
-    /// the preserved Markdown and state.
+    /// The bytes the proof's inspection keeps: what its preservation keeps,
+    /// findings included, and its artifact.
     pub fn retained_bytes(&self) -> u64 {
         self.inspection.as_ref().map_or(0, |inspection| {
+            let preservation = inspection
+                .preservation
+                .as_ref()
+                .map_or(0, Preservation::retained_bytes);
             let artifact = inspection
                 .contributions
                 .as_ref()
-                .map_or(0, |artifact| artifact.bytes.len());
-            let preserved = inspection
-                .preservation
-                .as_ref()
-                .and_then(|preservation| preservation.preserved.as_ref())
-                .map_or(0, |preserved| preserved.markdown.len() + preserved.full_state.len());
-            (2 * artifact + preserved) as u64
+                .map_or(0, |artifact| artifact.bytes.capacity());
+            u64::try_from(preservation + artifact).unwrap_or(u64::MAX)
         })
     }
 }
@@ -279,9 +276,11 @@ impl HeldProof {
 /// the inspection needs runs here: decoding the binding, tail enumeration,
 /// provenance validation, replay, merging and projection inside the
 /// transaction, then the contribution artifact once the reader closed, each
-/// checking between its units whether `job` stopped. The reader closes
-/// before this returns, however it returns. A reader that cannot open is a
-/// locked store, never corrupt evidence.
+/// checking between its units whether `job` stopped. What the preservation
+/// keeps is reserved of `job`'s memory before the artifact grows, and the
+/// artifact reserves its own as it grows. The reader closes before this
+/// returns, however it returns. A reader that cannot open is a locked
+/// store, never corrupt evidence.
 pub fn prove_held_document(
     job: &HeldProofJob,
     workspace_id: &str,
@@ -323,9 +322,11 @@ pub fn prove_held_document(
     tx.rollback().map_err(SyncError::corrupt)?;
     drop(reader);
     let contributions = match (&binding, &preservation) {
-        (Some(binding), Some(preservation)) => Some(
-            ContributionArtifact::of(binding, preservation, stop).map_err(protection_failure)?,
-        ),
+        (Some(binding), Some(preservation)) => {
+            stop.reserve(preservation.retained_bytes())
+                .map_err(protection_failure)?;
+            Some(ContributionArtifact::of(binding, preservation, stop).map_err(protection_failure)?)
+        }
         _ => None,
     };
     let inspection = key.hold.clone().map(|document| {
@@ -420,23 +421,9 @@ pub fn release_held_proof(
 }
 
 /// A failed proof's error, again for each caller that shared it, in the
-/// class it answered with the proof's own error as its source where the
-/// class carries one: a busy store stays busy, a cancelled read cancelled,
-/// state not yet ready retryable, a refused permission refused, and
-/// anything else the corrupt evidence it read.
+/// class and with the message of the proof's own.
 pub fn shared_proof_failure(error: &Arc<SyncError>) -> SyncError {
-    let source = || -> Option<Box<dyn std::error::Error + Send + Sync>> {
-        Some(Box::new(Arc::clone(error)))
-    };
-    match &**error {
-        SyncError::Storage(StorageError::FileLocked) => SyncError::Storage(StorageError::FileLocked),
-        SyncError::Cancelled => SyncError::Cancelled,
-        SyncError::RetryableState { reason } => SyncError::RetryableState { reason: *reason },
-        SyncError::Storage(StorageError::PermissionDenied { .. }) => {
-            SyncError::Storage(StorageError::PermissionDenied { source: source() })
-        }
-        _ => SyncError::Storage(StorageError::corrupt_public(Arc::clone(error))),
-    }
+    SyncError::Shared(Arc::clone(error))
 }
 
 /// What `conn` reads of a held document's hold, by key alone, on the store
@@ -627,11 +614,14 @@ mod tests {
     }
 
     /// Sol's r2c-3c-2 finding 6 and Opus's finding 4: a stopped read stays
-    /// cancelled and a locked store locked, never corrupt evidence, and a
-    /// failure a proof's callers share keeps its public class for each.
+    /// cancelled and a locked store locked, never corrupt evidence. Opus's
+    /// r2c-3c-4 finding 5: a failure a proof's callers share keeps, for
+    /// each, the class, disposition and message of the original, whatever
+    /// its class.
     #[test]
     fn a_shared_failure_keeps_its_class_for_every_caller() {
         use dohc_engine_collab::live_update_application::ApplicationError;
+        use dohc_engine_storage::StorageError;
         assert!(matches!(protection_failure(ApplicationError::Cancelled), SyncError::Cancelled));
         assert!(matches!(
             protection_failure(ApplicationError::Storage(StorageError::FileLocked)),
@@ -644,12 +634,25 @@ mod tests {
                 reason: "live document is stopped",
             },
             SyncError::Storage(StorageError::PermissionDenied { source: None }),
+            SyncError::Storage(StorageError::persist_public(std::io::Error::other("disk"))),
+            SyncError::LiveDocumentBindingActive,
+            SyncError::ProjectionTooLarge {
+                constraint: "the projection limit",
+                actual_bytes: 2,
+                limit_bytes: 1,
+            },
+            SyncError::InvalidInput { reason: "bad" },
             malformed(),
         ] {
-            let code = failure.code();
+            let (code, disposition, message) =
+                (failure.code(), failure.share_disposition(), failure.to_string());
             let shared = Arc::new(failure);
             for caller in 0..2 {
-                assert_eq!(shared_proof_failure(&shared).code(), code, "caller {caller}");
+                let answered = shared_proof_failure(&shared);
+                assert_eq!(answered.code(), code, "caller {caller}");
+                assert_eq!(answered.share_disposition(), disposition, "caller {caller}");
+                assert_eq!(answered.to_string(), message, "caller {caller}");
+                assert!(std::ptr::eq(answered.original(), &*shared), "caller {caller}");
             }
         }
     }

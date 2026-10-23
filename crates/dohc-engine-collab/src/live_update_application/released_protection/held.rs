@@ -7,7 +7,9 @@
 //! ask the same of the same state, and stopped once none of them waits, its
 //! store closes, its store's WAL needs its reader gone, or its deadline
 //! passes. A daemon runs a few proofs at once, within a memory budget its
-//! proofs and their results share.
+//! proofs and their results share: a proof takes more of it before it grows
+//! what its result keeps past its reservation, and a result keeps only what
+//! fits.
 use super::*;
 use crate::ContentKind;
 use dohc_engine_storage::{HeldReader, WalPressure};
@@ -20,9 +22,17 @@ pub const MAX_PROOF_WAITERS: usize = 8;
 /// The longest a proof runs from its admission, however many callers join.
 pub const HELD_PROOF_DEADLINE: Duration = Duration::from_secs(60);
 
+/// How long its store's close, or a held read's last caller, waits for a
+/// stopped proof's reader to close: twice SQLite's busy timeout. A stopped
+/// proof ends at its next statement step or stage check; between them it
+/// may wait out that timeout, or replay, merge or encode one document's
+/// state.
+pub const HELD_PROOF_CLOSE_BOUND: Duration =
+    Duration::from_millis(2 * dohc_engine_storage::ENGINE_SQLITE_BUSY_TIMEOUT_MS as u64);
+
 /// How long a proof's reader waits out a lock. Neither the progress handler
-/// nor a stage check runs while SQLite waits, so this stays below half the
-/// ten seconds its store's close waits for a stopped proof.
+/// nor a stage check runs while SQLite waits, so this stays below half
+/// [`HELD_PROOF_CLOSE_BOUND`].
 const READER_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The proofs one daemon runs at once, across all its stores.
@@ -49,7 +59,7 @@ const PROOF_MEMORY_BYTES: u64 = 2 * PROOF_RESERVATION_BYTES;
 /// at its next [`Stop::check`]. Once its reader closed, the workspace takes
 /// the next proof while this one encodes and hands over its answer.
 /// [`Self::close`] stops every proof and waits, bounded, for their readers
-/// to close.
+/// to close, those still opening included.
 pub struct HeldProofs<K, T>(Arc<Proofs<K, T>>);
 
 /// What the proofs' handles and their blocking threads share. The lock is
@@ -63,6 +73,9 @@ struct Proofs<K, T> {
 }
 
 /// How many readers a store's proofs hold open, which its close waits for.
+/// A reader counts from before its connection opens, under this lock, which
+/// close takes once it stopped every proof: so close waits for a reader
+/// opening as for one open, and none starts opening after close began.
 #[derive(Default)]
 struct OpenReaders {
     open: Mutex<usize>,
@@ -79,6 +92,8 @@ struct ProofState<K, T> {
     closed: bool,
     /// How long a proof admitted now may run.
     deadline: Duration,
+    /// How long close waits for proofs' readers to close.
+    close_bound: Duration,
     #[cfg(any(test, feature = "test-support"))]
     admitted: u64,
 }
@@ -113,6 +128,11 @@ pub enum HeldProofError {
     /// its deadline. Its caller asks again later.
     #[error("the held document's proof gave way to the store's writes or its deadline")]
     Busy,
+    /// What the proof's result keeps is more than its daemon's proof memory
+    /// holds, or its contribution artifact more than one may hold. Asking
+    /// again answers the same.
+    #[error("the held document's answer is larger than a held read may keep")]
+    TooLarge,
     #[error("the held document's proof panicked")]
     Panicked,
 }
@@ -142,6 +162,12 @@ pub enum ProofStop {
     Preempted = 3,
     /// It reached its deadline.
     Deadline = 4,
+    /// Its daemon's proof memory could not hold more of what its result
+    /// keeps until other proofs and results free theirs.
+    Memory = 5,
+    /// What its result keeps would never fit: more than its daemon's proof
+    /// memory, or a contribution artifact past its cap.
+    TooLarge = 6,
 }
 
 impl ProofStop {
@@ -151,7 +177,18 @@ impl ProofStop {
             2 => Some(Self::Closed),
             3 => Some(Self::Preempted),
             4 => Some(Self::Deadline),
+            5 => Some(Self::Memory),
+            6 => Some(Self::TooLarge),
             _ => None,
+        }
+    }
+
+    /// What a proof stopped for this answers whoever still waits.
+    fn error(self) -> HeldProofError {
+        match self {
+            Self::Preempted | Self::Deadline | Self::Memory => HeldProofError::Busy,
+            Self::TooLarge => HeldProofError::TooLarge,
+            Self::Cancelled | Self::Closed => HeldProofError::Closed,
         }
     }
 }
@@ -212,20 +249,40 @@ impl Halt {
 }
 
 /// What every store's held proofs share in one daemon: how many run at once,
-/// and the memory they and the results their callers still hold keep. A
-/// proof takes its share only when it starts, and is busy beyond it, never
-/// queued; it frees its place once its reader closed and its result is
-/// handed over, and its result keeps its charge until the last caller drops
-/// it.
+/// and the memory they and the results their callers still hold keep, which
+/// never passes its capacity. A proof takes its reservation only when it
+/// starts, and is busy beyond it, never queued; it takes more before it
+/// grows what its result keeps past that, and is busy or too large when
+/// that does not fit. It frees its place once its reader closed and its
+/// result is handed over, and its result keeps what fits of its memory
+/// until the last caller drops it.
 #[derive(Clone)]
 pub struct HeldProofLimit(Arc<Mutex<Budget>>);
 
 struct Budget {
     running: usize,
     max_running: usize,
+    /// Never more than `capacity`.
     reserved: u64,
     capacity: u64,
     reservation: u64,
+}
+
+impl Budget {
+    /// Replace `held` of the bytes reserved with `bytes`, unless that would
+    /// pass capacity: too large when `bytes` alone would, and short of
+    /// memory while others hold theirs.
+    fn replace(&mut self, held: u64, bytes: u64) -> Result<(), ProofStop> {
+        let others = self.reserved - held;
+        if bytes > self.capacity {
+            return Err(ProofStop::TooLarge);
+        }
+        if others.saturating_add(bytes) > self.capacity {
+            return Err(ProofStop::Memory);
+        }
+        self.reserved = others + bytes;
+        Ok(())
+    }
 }
 
 impl Default for HeldProofLimit {
@@ -263,8 +320,13 @@ impl HeldProofLimit {
         budget.running += 1;
         budget.reserved += budget.reservation;
         Some(ProofPermit {
-            limit: self.clone(),
-            reserved: budget.reservation,
+            memory: Arc::new(ProofMemory {
+                limit: self.clone(),
+                taken: Mutex::new(Taken {
+                    held: budget.reservation,
+                    kept: 0,
+                }),
+            }),
         })
     }
 
@@ -276,31 +338,67 @@ impl HeldProofLimit {
     }
 }
 
-/// A running proof's place in its daemon's limit, with what it reserves.
+/// A running proof's place in its daemon's limit, with the memory it holds,
+/// which goes back when the permit drops unless its result took it.
 struct ProofPermit {
+    memory: Arc<ProofMemory>,
+}
+
+/// What a running proof holds of its daemon's proof memory, which its job
+/// grows through [`Stop::reserve`].
+struct ProofMemory {
     limit: HeldProofLimit,
-    reserved: u64,
+    taken: Mutex<Taken>,
+}
+
+struct Taken {
+    /// Bytes the proof holds of its daemon's proof memory: its reservation,
+    /// and what more it took. None once its result took them or it ended.
+    held: u64,
+    /// Bytes of what its result keeps that the proof reserved so far.
+    kept: u64,
+}
+
+impl ProofMemory {
+    /// Reserve `bytes` more of what the proof's result keeps, before they
+    /// are allocated, taking more of the daemon's proof memory once they
+    /// pass what the proof holds; why not, when that does not fit.
+    fn reserve(&self, bytes: u64) -> Result<(), ProofStop> {
+        let mut taken = lock(&self.taken);
+        let kept = taken.kept.saturating_add(bytes);
+        if kept > taken.held {
+            lock(&self.limit.0).replace(taken.held, kept)?;
+            taken.held = kept;
+        }
+        taken.kept = kept;
+        Ok(())
+    }
 }
 
 impl ProofPermit {
-    /// Turn the reservation into the charge of a result that keeps
-    /// `retained` bytes; the place stays taken until the permit drops.
-    fn charge(&mut self, retained: u64) -> ProofCharge {
-        let mut budget = lock(&self.limit.0);
-        budget.reserved = budget.reserved - self.reserved + retained;
-        self.reserved = 0;
-        ProofCharge {
-            limit: self.limit.clone(),
+    /// Turn the memory the proof holds into the charge of a result that
+    /// keeps `retained` bytes, unless that would pass capacity; the place
+    /// stays taken until the permit drops.
+    fn charge(&self, retained: u64) -> Result<ProofCharge, HeldProofError> {
+        let mut taken = lock(&self.memory.taken);
+        lock(&self.memory.limit.0)
+            .replace(taken.held, retained)
+            .map_err(ProofStop::error)?;
+        taken.held = 0;
+        Ok(ProofCharge {
+            limit: self.memory.limit.clone(),
             bytes: retained,
-        }
+        })
     }
 }
 
 impl Drop for ProofPermit {
     fn drop(&mut self) {
-        let mut budget = lock(&self.limit.0);
+        let mut taken = lock(&self.memory.taken);
+        let mut budget = lock(&self.memory.limit.0);
         budget.running -= 1;
-        budget.reserved -= self.reserved;
+        budget.reserved -= taken.held;
+        taken.held = 0;
     }
 }
 
@@ -352,6 +450,7 @@ impl<K, T> HeldProofs<K, T> {
                 ending: Vec::new(),
                 closed: false,
                 deadline: HELD_PROOF_DEADLINE,
+                close_bound: HELD_PROOF_CLOSE_BOUND,
                 #[cfg(any(test, feature = "test-support"))]
                 admitted: 0,
             }),
@@ -385,7 +484,9 @@ impl<K, T> HeldProofs<K, T> {
 impl<K: PartialEq, T> HeldProofs<K, T> {
     /// A proof of `store`'s committed state for `workspace_id`, asking `key`,
     /// or a wait for the workspace's proof when it asks the same. Admitting a
-    /// new proof measures the store's WAL and nothing else.
+    /// new proof measures the store's WAL and nothing else, after the
+    /// writer's bounded checkpoint when it presses and no held reader holds
+    /// it; see [`dohc_engine_storage::EngineStore::measure_wal_pressure`].
     pub fn admit(
         &self,
         store: &dohc_engine_storage::EngineStore,
@@ -420,7 +521,7 @@ impl<K: PartialEq, T> HeldProofs<K, T> {
                     Some(Instant::now() + state.deadline),
                     Some(store.wal_pressure()),
                 )),
-                fence: Mutex::new(()),
+                memory: Some(Arc::clone(&permit.memory)),
                 readers: Arc::clone(&self.0.readers),
                 #[cfg(any(test, feature = "test-support"))]
                 gate: Arc::clone(&self.0.gate),
@@ -457,24 +558,24 @@ impl<K: PartialEq, T> HeldProofs<K, T> {
 
 impl<K, T> HeldProofs<K, T> {
     /// Stop proving for good: refuse new proofs, stop queued and running
-    /// ones, answer everyone waiting as closed, and wait up to `bound` for
-    /// every reader a proof opened to close; no proof opens one once this
+    /// ones, answer everyone waiting as closed, and wait, within
+    /// [`HELD_PROOF_CLOSE_BOUND`] of this call, for every reader a proof
+    /// opened or is opening to close; no proof starts opening one once this
     /// began, and a proof still encoding its answer is not waited for.
     /// Whether they all closed. Call it off the actor, before the store's
     /// files are replaced.
-    pub fn close(&self, bound: Duration) -> bool {
+    pub fn close(&self) -> bool {
         let mut state = lock(&self.0.state);
+        let deadline = Instant::now() + state.close_bound;
         state.closed = true;
         let proofs: Vec<_> = state.running.values().chain(&state.ending).cloned().collect();
         drop(state);
+        // Each stops before close takes the readers' lock below, so a reader
+        // not yet counted finds its proof stopped.
         for proof in &proofs {
             proof.job.stop_for(ProofStop::Closed);
-            // A reader opening now finishes first; any later open finds the
-            // proof stopped.
-            drop(lock(&proof.job.fence));
             proof.complete(Err(HeldProofError::Closed));
         }
-        let deadline = Instant::now() + bound;
         #[cfg(any(test, feature = "test-support"))]
         if !self.drained() {
             self.0.gate.closing();
@@ -498,7 +599,7 @@ impl<K, T> HeldProofs<K, T> {
         true
     }
 
-    /// Whether every reader a proof opened has closed.
+    /// Whether every reader a proof opened, or began opening, has closed.
     pub fn drained(&self) -> bool {
         *lock(&self.0.readers.open) == 0
     }
@@ -595,12 +696,15 @@ impl<K, T> HeldProofRun<K, T> {
     /// Run `prove` on this thread with the proof's job, unless it stopped or
     /// its store closed first, and answer whoever still waits. `prove`
     /// answers the result and the bytes it keeps, which stay charged until
-    /// the last caller drops it. It opens at most one reader and closes it
+    /// the last caller drops it, and reserves through [`Stop::reserve`]
+    /// before it grows them past the proof's reservation. A result whose
+    /// bytes do not fit the daemon's proof memory answers busy, or too large
+    /// when they never would. `prove` opens at most one reader and closes it
     /// before it returns, a panic's unwinding included; the workspace takes
     /// another proof once it closed. A proof stopped meanwhile answers
     /// nobody, whatever `prove` returned: an interrupted reader is a stop,
-    /// never a storage failure. One preempted or past its deadline answers
-    /// busy.
+    /// never a storage failure. One preempted, past its deadline or short of
+    /// memory answers busy.
     pub fn prove(mut self, prove: impl FnOnce(&HeldProofJob) -> (T, u64)) {
         let Some(proof) = self.proof.take() else {
             return;
@@ -635,15 +739,17 @@ impl<K, T> HeldProofRun<K, T> {
             }
         }
         // A stopped proof has nobody to answer, unless close answered them,
-        // or it gave way to writes or its deadline.
+        // or it gave way to writes, its deadline or its memory.
         let result = match (result, proof.job.halt.reason()) {
-            (Some(Ok((value, retained))), None) => Ok(Arc::new(Charged {
-                value,
-                _charge: self.permit.as_mut().map(|permit| permit.charge(retained)),
-            })),
+            (Some(Ok((value, retained))), None) => self
+                .permit
+                .as_ref()
+                .map(|permit| permit.charge(retained))
+                .transpose()
+                .map(|charge| Arc::new(Charged { value, _charge: charge })),
             (Some(Err(panicked)), None) => Err(panicked),
-            (_, Some(ProofStop::Preempted | ProofStop::Deadline)) => Err(HeldProofError::Busy),
-            _ => Err(HeldProofError::Closed),
+            (_, Some(stop)) => Err(stop.error()),
+            (None, None) => Err(HeldProofError::Closed),
         };
         let stopping = {
             let mut outcome = lock(&proof.outcome);
@@ -757,9 +863,9 @@ pub struct HeldProofJob {
     /// Why it stops, once it should. Its reader stops at its next statement,
     /// and within [`READER_STEP_OPS`] steps of the one running.
     halt: Arc<Halt>,
-    /// Held while its reader opens, and taken by close once it stopped the
-    /// proof, so no reader opens after close began.
-    fence: Mutex<()>,
+    /// What it holds of its daemon's proof memory; none for a proof nothing
+    /// limits.
+    memory: Option<Arc<ProofMemory>>,
     /// The readers its store's proofs hold open, its own among them.
     readers: Arc<OpenReaders>,
     #[cfg(any(test, feature = "test-support"))]
@@ -774,7 +880,7 @@ impl HeldProofJob {
             opening: store.opening(),
             path: store.database_path().to_owned(),
             halt: Arc::new(Halt::new(None, None)),
-            fence: Mutex::new(()),
+            memory: None,
             readers: Arc::default(),
             #[cfg(any(test, feature = "test-support"))]
             gate: Arc::default(),
@@ -811,16 +917,27 @@ impl HeldProofJob {
 
     /// The proof's read-only connection to its store, which never
     /// checkpoints it, stops once the proof should, and counts as a held
-    /// reader of the store's WAL until it closes. None opens once the proof
-    /// stopped, or once its one reader closed. A store that is busy or cannot
-    /// open is locked, never corrupt.
+    /// reader of the store's WAL until it closes. It counts as its store's
+    /// open reader from before it opens, so close waits for it, bounded,
+    /// while it opens. None starts opening once the proof stopped, or once
+    /// its one reader closed, and one that opened as the proof stopped closes
+    /// again. A store that is busy or cannot open is locked, never corrupt.
     pub fn reader(&self) -> Result<ProofReader, ApplicationError> {
         #[cfg(any(test, feature = "test-support"))]
         self.gate.before_open();
-        let _fence = lock(&self.fence);
-        if self.halt.stopped().is_some() || self.halt.read() {
-            return Err(ApplicationError::Cancelled);
-        }
+        let closed = {
+            let mut open = lock(&self.readers.open);
+            if self.halt.stopped().is_some() || self.halt.read() {
+                return Err(ApplicationError::Cancelled);
+            }
+            *open += 1;
+            ReaderClosed {
+                halt: Arc::clone(&self.halt),
+                readers: Arc::clone(&self.readers),
+            }
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        self.gate.inside_open();
         let conn = open_reader(&self.path)?;
         conn.busy_timeout(READER_BUSY_TIMEOUT)
             .map_err(open_failure)?;
@@ -830,18 +947,17 @@ impl HeldProofJob {
             Some(move || halt.stopped().is_some()),
         )
         .map_err(open_failure)?;
+        if self.halt.stopped().is_some() {
+            return Err(ApplicationError::Cancelled);
+        }
         let held = self.halt.pressure.as_ref().map(WalPressure::hold);
         self.halt.reading.store(true, Ordering::Relaxed);
-        *lock(&self.readers.open) += 1;
         #[cfg(any(test, feature = "test-support"))]
         self.gate.opened();
         Ok(ProofReader {
             conn,
             _held: held,
-            _closed: ReaderClosed {
-                halt: Arc::clone(&self.halt),
-                readers: Arc::clone(&self.readers),
-            },
+            _closed: closed,
         })
     }
 
@@ -919,8 +1035,9 @@ pub enum ProofStage {
     Merge,
     /// Around the merged state's projection and its encoding.
     Projection,
-    /// Before the contribution artifact is encoded, every 1,024
-    /// contributions of it, and around each hash, once the reader closed.
+    /// Before the contribution artifact is encoded, every 1,024 of its
+    /// binding's tails and of its contributions, and around each hash, once
+    /// the reader closed.
     Encoding,
 }
 
@@ -951,6 +1068,32 @@ impl Stop<'_> {
         #[cfg(any(test, feature = "test-support"))]
         job.gate.passed();
         Ok(())
+    }
+
+    /// Reserve `bytes` more of what the proof's result keeps, before they
+    /// are allocated: within its reservation, or taking more of its daemon's
+    /// proof memory. Cancelled when that does not fit, and the proof then
+    /// answers busy, or too large when it never would.
+    pub fn reserve(self, bytes: usize) -> Result<(), ApplicationError> {
+        let Some(memory) = self.0.and_then(|job| job.memory.as_ref()) else {
+            return Ok(());
+        };
+        memory
+            .reserve(u64::try_from(bytes).unwrap_or(u64::MAX))
+            .map_err(|reason| self.refuse(reason))
+    }
+
+    /// Stop the proof for `reason`, a refusal of its memory, and what its
+    /// work answers: cancelled, the proof answering for that reason, or over
+    /// budget for a read with no proof.
+    pub(super) fn refuse(self, reason: ProofStop) -> ApplicationError {
+        match self.0 {
+            Some(job) => {
+                job.stop_for(reason);
+                ApplicationError::Cancelled
+            }
+            None => ApplicationError::ConfiguredByteBudgetExceeded,
+        }
     }
 }
 
@@ -1082,6 +1225,12 @@ struct GateState {
     pause_open: bool,
     /// Proofs holding there.
     opening: usize,
+    /// Whether proofs hold once their reader counts as open, before its
+    /// connection opens, as a thread descheduled inside a slow open would,
+    /// until resumed.
+    pause_inside_open: bool,
+    /// Proofs holding there.
+    inside_open: usize,
     /// Readers proofs opened.
     opened: u64,
     /// Whether a last caller holds once it stopped its proof, until resumed.
@@ -1159,6 +1308,26 @@ impl Gate {
                 .unwrap_or_else(PoisonError::into_inner);
         }
         state.opening -= 1;
+    }
+
+    /// Hold a proof once its reader counts as open, before its connection
+    /// opens, while proofs pause there. Stopping the proof does not release
+    /// it.
+    fn inside_open(&self) {
+        let mut state = lock(&self.state);
+        if !state.pause_inside_open {
+            return;
+        }
+        state.inside_open += 1;
+        Self::notify(&mut state);
+        self.changed.notify_all();
+        while state.pause_inside_open {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        state.inside_open -= 1;
     }
 
     fn opened(&self) {
@@ -1282,6 +1451,14 @@ impl<K, T> HeldProofs<K, T> {
         lock(&self.0.gate.state).pause_open = true;
     }
 
+    /// Hold every proof once its reader counts as open, before its
+    /// connection opens, until [`Self::resume_proofs`], whether or not it
+    /// stopped meanwhile.
+    #[doc(hidden)]
+    pub fn pause_inside_reader_opens(&self) {
+        lock(&self.0.gate.state).pause_inside_open = true;
+    }
+
     /// Hold the last caller of a proof once it stopped the proof, outside
     /// the lock joining takes, until [`Self::resume_proofs`].
     #[doc(hidden)]
@@ -1297,6 +1474,7 @@ impl<K, T> HeldProofs<K, T> {
             state.pause = None;
             state.skip = 0;
             state.pause_open = false;
+            state.pause_inside_open = false;
             state.pause_leave = false;
             state.linger = false;
         }
@@ -1313,6 +1491,13 @@ impl<K, T> HeldProofs<K, T> {
     #[doc(hidden)]
     pub fn wait_for_paused_open(&self) {
         self.0.gate.block_until(|state| state.opening > 0);
+    }
+
+    /// Block until a proof holds once its reader counts as open, before its
+    /// connection opens.
+    #[doc(hidden)]
+    pub fn wait_for_paused_inside_open(&self) {
+        self.0.gate.block_until(|state| state.inside_open > 0);
     }
 
     /// Block until a last caller holds once it stopped its proof.
@@ -1378,6 +1563,12 @@ impl<K, T> HeldProofs<K, T> {
     #[doc(hidden)]
     pub fn set_proof_deadline(&self, deadline: Duration) {
         lock(&self.0.state).deadline = deadline;
+    }
+
+    /// Let close wait `bound` for proofs' readers to close.
+    #[doc(hidden)]
+    pub fn set_close_bound(&self, bound: Duration) {
+        lock(&self.0.state).close_bound = bound;
     }
 
     /// Whether the store of `workspace_id`'s running proof presses on its
@@ -1629,7 +1820,8 @@ mod tests {
             releasing.wait_for_closing();
             releasing.resume_proofs();
         });
-        assert!(proofs.close(Duration::from_secs(30)), "the reader closed in time");
+        proofs.set_close_bound(Duration::from_secs(30));
+        assert!(proofs.close(), "the reader closed in time");
         assert_eq!(proofs.open_readers(), 0, "close returned after the reader closed");
         assert_eq!(answer(wait), Err(HeldProofError::Closed));
         assert!(matches!(admit(&proofs, &store, "workspace", "key"), HeldProofAdmission::Closed));
@@ -1642,7 +1834,8 @@ mod tests {
         let (run, _wait) = started(&lingering, &store, "key");
         let worker = merging(run);
         lingering.wait_for_paused_proof();
-        assert!(!lingering.close(Duration::ZERO), "the reader is still open");
+        lingering.set_close_bound(Duration::ZERO);
+        assert!(!lingering.close(), "the reader is still open");
         assert!(!lingering.drained());
         lingering.resume_proofs();
         worker.join().unwrap();
@@ -1657,7 +1850,8 @@ mod tests {
         let (_scratch, store) = store();
         let proofs = proofs();
         let (run, wait) = started(&proofs, &store, "key");
-        assert!(proofs.close(Duration::ZERO), "nothing started, nothing to wait for");
+        proofs.set_close_bound(Duration::ZERO);
+        assert!(proofs.close(), "nothing started, nothing to wait for");
         assert_eq!(answer(wait), Err(HeldProofError::Closed));
         run.prove(|job| {
             let _ = job.reader();
@@ -1681,7 +1875,8 @@ mod tests {
             run.prove(|job| (u32::from(job.reader().is_err()), 0));
         });
         proofs.wait_for_paused_open();
-        assert!(proofs.close(Duration::ZERO), "no reader is open");
+        proofs.set_close_bound(Duration::ZERO);
+        assert!(proofs.close(), "no reader is open");
         proofs.resume_proofs();
         worker.join().unwrap();
         assert_eq!(proofs.readers_opened(), 0, "no reader opened after close began");
@@ -1727,7 +1922,8 @@ mod tests {
             });
         });
         proofs.wait_for_paused_proof();
-        assert!(proofs.close(Duration::ZERO), "close waits for no encoding");
+        proofs.set_close_bound(Duration::ZERO);
+        assert!(proofs.close(), "close waits for no encoding");
         assert_eq!(answer(wait), Err(HeldProofError::Closed));
         worker.join().unwrap();
     }
@@ -1789,5 +1985,90 @@ mod tests {
             matches!(failed, Err(ApplicationError::Storage(StorageError::FileLocked))),
             "{failed:?}"
         );
+    }
+
+    /// Sol's r2c-3c-4 finding 3: a proof's thread suspended once its reader
+    /// counts as open, before its connection opens, as one inside a slow
+    /// open would be, never keeps close past its bound. Close says the
+    /// reader is still open, and once the thread goes on, its reader closes
+    /// again without staying open.
+    #[test]
+    fn close_returns_within_its_bound_while_a_reader_opens() {
+        let (_scratch, store) = store();
+        let proofs = proofs();
+        proofs.pause_inside_reader_opens();
+        let (run, _wait) = started(&proofs, &store, "key");
+        let worker = std::thread::spawn(move || {
+            run.prove(|job| (u32::from(job.reader().is_err()), 0));
+        });
+        proofs.wait_for_paused_inside_open();
+        proofs.set_close_bound(Duration::from_millis(50));
+        let began = Instant::now();
+        assert!(!proofs.close(), "the opening reader counts as open");
+        assert!(began.elapsed() < Duration::from_secs(5), "close kept to its bound");
+        assert!(!proofs.drained());
+        proofs.resume_proofs();
+        worker.join().unwrap();
+        assert!(proofs.drained(), "drained once the opening reader gave up");
+        assert_eq!(proofs.readers_opened(), 0, "no reader stayed open after close began");
+    }
+
+    /// Sol's r2c-3c-4 finding 2 and Opus's finding 4: what a daemon's proofs
+    /// and results keep never passes its proof memory. A proof reserves
+    /// before it grows past its reservation, and answers busy beside another
+    /// proof or too large past the whole memory; a result larger than its
+    /// reservation is charged only within capacity, so two results never
+    /// keep more than the memory holds.
+    #[test]
+    fn proof_memory_never_passes_its_capacity() {
+        let (_scratch, store) = store();
+        let (_other_scratch, other) = self::store();
+        let limit = HeldProofLimit::new(2, 200, 100);
+        let (one, two) = (Held::new(limit.clone()), Held::new(limit.clone()));
+        let (beside, beside_wait) = match admit(&two, &other, "elsewhere", "key") {
+            HeldProofAdmission::Started(run, wait) => (run, wait),
+            _ => panic!("a second proof runs beside the first"),
+        };
+
+        let (run, wait) = started(&one, &store, "key");
+        run.prove(|job| {
+            assert!(job.stop().reserve(100).is_ok(), "within its reservation");
+            let refused = job.stop().reserve(1);
+            assert!(matches!(refused, Err(ApplicationError::Cancelled)), "beside another proof");
+            assert_eq!(job.stopped(), Some(ProofStop::Memory));
+            (7, 0)
+        });
+        assert_eq!(answer(wait), Err(HeldProofError::Busy));
+        assert_eq!(limit.reserved_bytes(), 100, "only the other proof's reservation");
+
+        let (run, wait) = started(&one, &store, "key");
+        run.prove(|_| (7, 150));
+        assert_eq!(answer(wait), Err(HeldProofError::Busy), "a result past its reservation, beside another proof");
+        assert_eq!(limit.reserved_bytes(), 100);
+
+        drop((beside, beside_wait));
+        assert_eq!(limit.reserved_bytes(), 0);
+        let (run, wait) = started(&one, &store, "key");
+        run.prove(|job| {
+            job.stop().reserve(150).expect("alone, it takes more within capacity");
+            (7, 150)
+        });
+        let kept = block_on(wait).unwrap();
+        assert_eq!(limit.reserved_bytes(), 150, "the result keeps what it reserved");
+        assert!(matches!(admit(&two, &other, "elsewhere", "key"), HeldProofAdmission::Busy), "no room beside it for a reservation");
+        drop(kept);
+        assert_eq!(limit.reserved_bytes(), 0);
+
+        let (run, wait) = started(&one, &store, "key");
+        run.prove(|job| {
+            assert!(job.stop().reserve(201).is_err());
+            assert_eq!(job.stopped(), Some(ProofStop::TooLarge));
+            (7, 0)
+        });
+        assert_eq!(answer(wait), Err(HeldProofError::TooLarge));
+        let (run, wait) = started(&one, &store, "key");
+        run.prove(|_| (7, 201));
+        assert_eq!(answer(wait), Err(HeldProofError::TooLarge), "a result larger than the whole memory");
+        assert_eq!(limit.reserved_bytes(), 0, "nothing stays reserved");
     }
 }

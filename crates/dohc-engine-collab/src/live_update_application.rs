@@ -56,7 +56,8 @@ pub use released_protection::{
     PreservationReason, PreservationStatus, PreservedState, ProofReader, ProofStage, ProofStop,
     ProtectedTail, ProtectedTails, Protection, ProtectionKey, ReleasedLineageBinding,
     ReleasedTails, RetainedAuthors, RetainedContribution, RetainedCoverage, Stop, TailRelease,
-    UnprovenCommitment, Validation, ValidationError, HELD_PROOF_DEADLINE, MAX_PROOF_WAITERS,
+    UnprovenCommitment, Validation, ValidationError, HELD_PROOF_CLOSE_BOUND, HELD_PROOF_DEADLINE,
+    MAX_PROOF_WAITERS,
 };
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]

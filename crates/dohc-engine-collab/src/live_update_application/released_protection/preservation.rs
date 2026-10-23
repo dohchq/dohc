@@ -121,6 +121,86 @@ pub struct PreservedState {
     pub full_state: Vec<u8>,
 }
 
+impl Preservation {
+    /// The bytes the preservation keeps: its findings, its covered and
+    /// merged lists with every entry's text, and the preserved Markdown and
+    /// state.
+    pub fn retained_bytes(&self) -> usize {
+        use std::mem::size_of;
+        let findings = self.findings.capacity() * size_of::<PreservationFinding>()
+            + self
+                .findings
+                .iter()
+                .map(|found| {
+                    found.namespace.as_ref().map_or(0, String::capacity)
+                        + found.contribution.as_ref().map_or(0, ContributionLocator::text_bytes)
+                })
+                .sum::<usize>();
+        let listed = |contributions: &Vec<RetainedContribution>| {
+            contributions.capacity() * size_of::<RetainedContribution>()
+                + contributions
+                    .iter()
+                    .map(RetainedContribution::text_bytes)
+                    .sum::<usize>()
+        };
+        let covered = self.covered.capacity() * size_of::<(String, Vec<RetainedContribution>)>()
+            + self
+                .covered
+                .iter()
+                .map(|(namespace, contributions)| namespace.capacity() + listed(contributions))
+                .sum::<usize>();
+        let preserved = self.preserved.as_ref().map_or(0, |preserved| {
+            preserved.markdown.capacity() + preserved.full_state.capacity()
+        });
+        findings + covered + listed(&self.merged) + preserved
+    }
+}
+
+impl ContributionLocator {
+    /// The bytes its text keeps.
+    fn text_bytes(&self) -> usize {
+        match self {
+            Self::Carried {
+                delivery_id,
+                update_digest,
+                ..
+            } => delivery_id.capacity() + update_digest.capacity(),
+            Self::Outbox {
+                outbox_id,
+                delivery_id,
+                update_digest,
+                ..
+            } => outbox_id.capacity() + delivery_id.capacity() + update_digest.capacity(),
+        }
+    }
+}
+
+impl RetainedContribution {
+    /// The bytes its text keeps, its authors included.
+    fn text_bytes(&self) -> usize {
+        match self {
+            Self::Carried {
+                delivery_id,
+                update_digest,
+                authors,
+                ..
+            } => delivery_id.capacity() + update_digest.capacity() + authors.json().len(),
+            Self::Outbox {
+                outbox_id,
+                delivery_id,
+                update_digest,
+                authors,
+                ..
+            } => {
+                outbox_id.capacity()
+                    + delivery_id.capacity()
+                    + update_digest.capacity()
+                    + authors.json().len()
+            }
+        }
+    }
+}
+
 /// A contribution's stored bytes, as found by the digest that names them.
 enum Source {
     Bytes(Vec<u8>),
@@ -709,6 +789,35 @@ mod tests {
         assert_eq!(malformed.status, PreservationStatus::InvalidEvidence);
         assert_eq!(reasons(&malformed), [PreservationReason::MalformedUpdate]);
         assert_eq!(malformed.preserved, None);
+    }
+
+    /// Sol's r2c-3c-4 finding 2: what a preservation keeps counts its
+    /// findings, each with the contribution it names, as well as its lists
+    /// and preserved state, so many contradictions are charged.
+    #[test]
+    fn retained_bytes_count_every_finding() {
+        let (canonical, first, _, _) = edits();
+        let few = preserved(&canonical, vec![outbox(1, &first)], &stored(&[&first]));
+        let many = Preservation {
+            findings: (0..10_000)
+                .map(|sequence| {
+                    finding(
+                        PreservationReason::ContradictoryEvidence,
+                        Some("namespace"),
+                        Some(&outbox(sequence + 1, &first)),
+                    )
+                })
+                .collect(),
+            ..few.clone()
+        };
+        let per_finding = std::mem::size_of::<PreservationFinding>() + "namespace".len() + 64;
+        assert!(
+            many.retained_bytes() >= few.retained_bytes() + 10_000 * per_finding,
+            "{} against {}",
+            many.retained_bytes(),
+            few.retained_bytes()
+        );
+        assert!(few.retained_bytes() >= few.preserved.as_ref().unwrap().full_state.len());
     }
 
     /// Findings the caller brings, such as a tail whose evidence does not

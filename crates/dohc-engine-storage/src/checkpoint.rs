@@ -1031,6 +1031,45 @@ mod tests {
         write_after_checkpoint(&mut s, n, 4096);
     }
 
+    /// Opus's r2c-3c-4 finding 2: once the last held reader gave way with
+    /// the WAL past the mark, an idle store admits the next without any
+    /// write. Measuring for admission runs the writer's bounded checkpoint
+    /// and asks the background worker for the rest, and presses only while
+    /// the WAL still does.
+    #[test]
+    fn an_idle_store_admits_a_held_reader_once_its_wal_is_backfilled() {
+        let scratch = ScratchDir::new().unwrap();
+        let path = scratch.path().join("engine.db");
+        let mut s = store(&path);
+        let pressure = s.wal_pressure();
+        let reader = EngineStore::open_read_only(&path).unwrap();
+        reader
+            .read_with(|c| c.execute_batch("BEGIN; SELECT * FROM checkpoint_load"))
+            .unwrap();
+        let held = pressure.hold();
+        let mut n = 0;
+        while !pressure.raised() {
+            write(&mut s, n, 64 * 1024);
+            n += 1;
+        }
+        reader.read_with(|c| c.execute_batch("ROLLBACK")).unwrap();
+        drop(held);
+        drop(reader);
+        let mut asked = 0;
+        loop {
+            let before = s.checkpoint_completed_for_test();
+            if !s.measure_wal_pressure().unwrap() {
+                break;
+            }
+            asked += 1;
+            assert!(asked < 100, "the WAL never stopped pressing");
+            s.wait_for_checkpoint_completion_for_test(before);
+        }
+        assert!(!pressure.raised());
+        let (log, backfilled) = s.read_with(frames).unwrap();
+        assert!(log < HELD_READER_WAL_FRAMES || log == backfilled, "{log} against {backfilled}");
+    }
+
     #[test]
     fn stopped_worker_restarts_without_enabling_unbounded_autocheckpoint() {
         let scratch = ScratchDir::new().unwrap();

@@ -16,6 +16,7 @@
 use crate::actor::{ActorHandle, WorkspaceActor};
 use crate::error::RuntimeError;
 use dohc_engine_collab::live_update_application::HeldProofLimit;
+use dohc_engine_sync::HeldProofs;
 use crate::identity::EngineDbIdentity;
 use std::collections::HashMap;
 use std::path::Path;
@@ -32,6 +33,12 @@ enum Slot {
     Reserving,
     Closing,
     Active(WorkspaceActor),
+    /// The actor closed with a held proof's reader still open past the
+    /// close bound. Until its readers drain, closing the store answers
+    /// [`RuntimeError::StoreInUse`] and so does opening or restarting it, so
+    /// nothing replaces its files or starts a successor under that reader;
+    /// the first of them to find the readers drained removes the slot.
+    Draining(HeldProofs),
 }
 
 #[derive(Clone, Copy)]
@@ -45,6 +52,23 @@ impl Slot {
     /// Whether this slot is a transient placeholder that a waiter must wait out.
     fn is_busy(&self) -> bool {
         matches!(self, Slot::Reserving | Slot::Closing)
+    }
+}
+
+/// Settle a draining slot for `identity` before anything else uses it: one
+/// whose readers drained goes, and one still draining refuses as the store
+/// in use.
+fn settle_draining(
+    registry: &mut Registry,
+    identity: &EngineDbIdentity,
+) -> Result<(), RuntimeError> {
+    match registry.get(identity) {
+        Some(Slot::Draining(proofs)) if proofs.drained() => {
+            registry.remove(identity);
+            Ok(())
+        }
+        Some(Slot::Draining(_)) => Err(RuntimeError::StoreInUse),
+        _ => Ok(()),
     }
 }
 
@@ -79,20 +103,32 @@ pub struct WorkspaceClose<'a> {
 }
 
 impl WorkspaceClose<'_> {
-    /// Close the actor and release its registry marker.
+    /// Close the actor and release its registry marker. When a held proof's
+    /// reader outlives the close bound, the marker becomes the store's
+    /// draining slot instead, and this answers [`RuntimeError::StoreInUse`].
     pub fn finish(mut self) -> Result<(), RuntimeError> {
         let close_result = match self.actor.take() {
-            Some(mut actor) => actor.close(),
+            Some(actor) => self.close(actor),
             None => Ok(()),
         };
         self.clear_marker();
         close_result
     }
 
+    fn close(&mut self, mut actor: WorkspaceActor) -> Result<(), RuntimeError> {
+        let closed = actor.close();
+        if matches!(closed, Err(RuntimeError::StoreInUse)) && self.marker_active {
+            self.supervisor
+                .release_markers(&[], [(self.identity.clone(), actor.held_proofs())]);
+            self.marker_active = false;
+        }
+        closed
+    }
+
     fn clear_marker(&mut self) {
         if self.marker_active {
             self.supervisor
-                .clear_markers(std::slice::from_ref(&self.identity));
+                .release_markers(std::slice::from_ref(&self.identity), []);
             self.marker_active = false;
         }
     }
@@ -100,8 +136,8 @@ impl WorkspaceClose<'_> {
 
 impl Drop for WorkspaceClose<'_> {
     fn drop(&mut self) {
-        if let Some(mut actor) = self.actor.take() {
-            let _ = actor.close();
+        if let Some(actor) = self.actor.take() {
+            let _ = self.close(actor);
         }
         self.clear_marker();
     }
@@ -227,9 +263,14 @@ impl WorkspaceSupervisor {
                         }
                     }
                     Some(Slot::Reserving | Slot::Closing) => Action::Wait,
+                    Some(Slot::Draining(_)) => Action::Settle,
                     None => Action::Reserve,
                 };
                 match action {
+                    Action::Settle => {
+                        settle_draining(&mut guard, &identity)?;
+                        continue;
+                    }
                     Action::Return => {
                         if let Some(Slot::Active(actor)) = guard.get(&identity) {
                             if matches!(mode, ActorOpenMode::Passive)
@@ -325,6 +366,9 @@ impl WorkspaceSupervisor {
     /// Close and reopen the actor for `db_path`, incrementing its session
     /// generation. Generation continuity is preserved even if the predecessor's
     /// worker panicked (a dead predecessor is treated as already-closed).
+    /// While a held proof's reader keeps the store in use, from an earlier
+    /// close or this one, no successor starts: the store drains and this
+    /// answers [`RuntimeError::StoreInUse`].
     pub fn restart(&self, db_path: &Path, now_ms: i64) -> Result<ActorHandle, RuntimeError> {
         ensure_parent_dir(db_path)?;
 
@@ -335,6 +379,7 @@ impl WorkspaceSupervisor {
             while guard.get(&identity).is_some_and(Slot::is_busy) {
                 guard = wait(&self.ready, guard);
             }
+            settle_draining(&mut guard, &identity)?;
             let old = guard.remove(&identity);
             let next_generation = match &old {
                 Some(Slot::Active(actor)) => actor.generation().saturating_add(1),
@@ -349,9 +394,13 @@ impl WorkspaceSupervisor {
         };
 
         // Close the predecessor outside the lock; a WorkerPanicked from a dead
-        // predecessor is expected here, not an error.
+        // predecessor is expected here, not an error. A held proof's reader
+        // past the close bound is: the reservation becomes the draining slot.
         if let Some(Slot::Active(mut actor)) = old {
-            let _ = actor.close();
+            if let Err(RuntimeError::StoreInUse) = actor.close() {
+                self.release_markers(&[], [(identity, actor.held_proofs())]);
+                return Err(RuntimeError::StoreInUse);
+            }
         }
 
         let spawned = WorkspaceActor::spawn_with_mode(
@@ -371,6 +420,8 @@ impl WorkspaceSupervisor {
     ///
     /// The returned operation owns the actor and marker. It may be moved to a
     /// blocking task; dropping it still closes the actor before waking waiters.
+    /// A store still draining from an earlier close answers
+    /// [`RuntimeError::StoreInUse`]; one that drained has nothing to close.
     pub fn begin_close(&self, db_path: &Path) -> Result<Option<WorkspaceClose<'_>>, RuntimeError> {
         let Some(identity) = EngineDbIdentity::resolve_existing_opt(db_path)? else {
             return Ok(None);
@@ -380,6 +431,7 @@ impl WorkspaceSupervisor {
             while guard.get(&identity).is_some_and(Slot::is_busy) {
                 guard = wait(&self.ready, guard);
             }
+            settle_draining(&mut guard, &identity)?;
             match guard.remove(&identity) {
                 Some(Slot::Active(actor)) => {
                     guard.insert(identity.clone(), Slot::Closing);
@@ -407,47 +459,64 @@ impl WorkspaceSupervisor {
         closing.finish().map(|()| true)
     }
 
-    /// Close every open actor.
+    /// Close every open actor. A store still draining from an earlier
+    /// close, or left draining by this one, answers
+    /// [`RuntimeError::StoreInUse`]; drained ones go.
     pub fn close_all(&self) -> Result<(), RuntimeError> {
+        let mut first_err = None;
         let mut closing = Vec::new();
-        let drained: Vec<WorkspaceActor> = {
+        let actors: Vec<(EngineDbIdentity, WorkspaceActor)> = {
             let mut guard = lock(&self.registry);
-            let active_keys: Vec<EngineDbIdentity> = guard
+            let keys: Vec<EngineDbIdentity> = guard
                 .iter()
-                .filter(|(_, slot)| matches!(slot, Slot::Active(_)))
+                .filter(|(_, slot)| matches!(slot, Slot::Active(_) | Slot::Draining(_)))
                 .map(|(identity, _)| identity.clone())
                 .collect();
-            active_keys
-                .into_iter()
-                .filter_map(|identity| match guard.remove(&identity) {
-                    Some(Slot::Active(actor)) => {
-                        guard.insert(identity.clone(), Slot::Closing);
-                        closing.push(identity);
-                        Some(actor)
-                    }
-                    _ => None,
-                })
-                .collect()
+            let mut actors = Vec::new();
+            for identity in keys {
+                if let Err(err) = settle_draining(&mut guard, &identity) {
+                    first_err.get_or_insert(err);
+                    continue;
+                }
+                if let Some(Slot::Active(actor)) = guard.remove(&identity) {
+                    guard.insert(identity.clone(), Slot::Closing);
+                    closing.push(identity.clone());
+                    actors.push((identity, actor));
+                }
+            }
+            actors
         };
-        let mut first_err = None;
-        for mut actor in drained {
+        let mut draining = Vec::new();
+        for (identity, mut actor) in actors {
             if let Err(err) = actor.close() {
+                if matches!(err, RuntimeError::StoreInUse) {
+                    draining.push((identity, actor.held_proofs()));
+                }
                 first_err.get_or_insert(err);
             }
         }
-        self.clear_markers(&closing);
+        self.release_markers(&closing, draining);
         match first_err {
             Some(err) => Err(err),
             None => Ok(()),
         }
     }
 
-    /// Remove `Closing` markers and wake any threads waiting on those
-    /// identities.
-    fn clear_markers(&self, identities: &[EngineDbIdentity]) {
+    /// Under one lock, remove the markers of `closed`, then mark each store
+    /// of `draining` draining with its held proofs, whose readers kept its
+    /// actor's close from completing, in place of any marker it had; wake
+    /// any threads waiting on them.
+    fn release_markers(
+        &self,
+        closed: &[EngineDbIdentity],
+        draining: impl IntoIterator<Item = (EngineDbIdentity, HeldProofs)>,
+    ) {
         let mut guard = lock(&self.registry);
-        for identity in identities {
+        for identity in closed {
             guard.remove(identity);
+        }
+        for (identity, proofs) in draining {
+            guard.insert(identity, Slot::Draining(proofs));
         }
         self.ready.notify_all();
     }
@@ -503,6 +572,8 @@ enum Action {
     Evict,
     Wait,
     Reserve,
+    /// Remove a drained slot, or refuse while it drains.
+    Settle,
 }
 
 fn ensure_parent_dir(db_path: &Path) -> Result<(), RuntimeError> {

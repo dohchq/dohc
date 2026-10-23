@@ -1934,10 +1934,11 @@ impl ActorHandle {
     /// is refused before the actor reads anything. `token`, the caller's own
     /// cancellation or deadline, ends only its wait. The last caller to leave
     /// stops the proof, and answers once the proof ended, its reader closed,
-    /// or after twice SQLite's busy timeout. A proof
-    /// that gave way to writes or reached its deadline answers busy. The
-    /// answer keeps the proof's result charged until the last caller drops
-    /// it.
+    /// or after twice SQLite's busy timeout. A proof that gave way to
+    /// writes, reached its deadline or found no room in the daemon's proof
+    /// memory answers busy, and one whose answer would never fit answers too
+    /// large. The answer keeps the proof's result charged until the last
+    /// caller drops it.
     pub async fn held_document(
         &self,
         workspace_id: String,
@@ -1992,12 +1993,17 @@ impl ActorHandle {
             proved = &mut wait => Some(proved),
         };
         let Some(proved) = proved else {
-            let _ = tokio::time::timeout(super::HELD_PROOF_CLOSE_BOUND, wait.leave()).await;
+            let _ = tokio::time::timeout(
+                dohc_engine_collab::live_update_application::HELD_PROOF_CLOSE_BOUND,
+                wait.leave(),
+            )
+            .await;
             return Err(RuntimeError::Cancelled);
         };
         let proved = proved.map_err(|error| match error {
             HeldProofError::Closed => RuntimeError::ActorUnavailable,
             HeldProofError::Busy => RuntimeError::HeldReadBusy,
+            HeldProofError::TooLarge => RuntimeError::HeldReadTooLarge,
             HeldProofError::Panicked => RuntimeError::WorkerPanicked,
         })?;
         let proof = match &**proved {

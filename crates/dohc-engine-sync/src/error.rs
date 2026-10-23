@@ -128,6 +128,10 @@ pub enum SyncError {
     /// A read stopped because nobody waits for it any more.
     #[error("the read was cancelled")]
     Cancelled,
+    /// One failure several callers share, such as a held proof's: each
+    /// answers with the original's class and message.
+    #[error(transparent)]
+    Shared(std::sync::Arc<SyncError>),
 }
 
 /// What a share pull does with a refusal the boundary answered with.
@@ -152,8 +156,9 @@ impl SyncError {
     /// decides which it is. That is the whole reason this is a function on the
     /// error rather than a list of classes at each lane: a list can be
     /// forgotten, and forgetting it costs the share, not the count.
-    pub(crate) const fn share_disposition(&self) -> ShareDisposition {
+    pub(crate) fn share_disposition(&self) -> ShareDisposition {
         match self {
+            SyncError::Shared(original) => original.share_disposition(),
             // Refusals of the op: the relay served something this boundary
             // will not apply. One such op must not wedge the share.
             SyncError::InvalidInput { .. }
@@ -181,8 +186,9 @@ impl SyncError {
         }
     }
 
-    pub const fn code(&self) -> &'static str {
+    pub fn code(&self) -> &'static str {
         match self {
+            SyncError::Shared(original) => original.code(),
             SyncError::LiveDocumentBindingActive => "live-document-binding-active",
             SyncError::Storage(err) => err.code(),
             SyncError::InvalidInput { .. } => "invalid-input",
@@ -211,6 +217,15 @@ impl SyncError {
             | SyncError::BlobTooLarge { .. } => "invalid-input",
             SyncError::FaultCrash => "injected-crash",
             SyncError::Cancelled => "cancelled",
+        }
+    }
+
+    /// The failure this one carries the class of: itself, or the original a
+    /// shared failure wraps.
+    pub fn original(&self) -> &SyncError {
+        match self {
+            SyncError::Shared(original) => original.original(),
+            error => error,
         }
     }
 

@@ -82,6 +82,10 @@ pub(crate) fn store_busy(error: &RuntimeError) -> bool {
     if let RuntimeError::Search(SearchError::Storage(sqlite)) = error {
         return StorageError::is_transient_lock(sqlite);
     }
+    // A shared sync failure is busy when its original is.
+    if let RuntimeError::Sync(sync) = error {
+        return matches!(sync.original(), SyncError::Storage(StorageError::FileLocked));
+    }
     matches!(
         error,
         RuntimeError::Storage(StorageError::FileLocked)
@@ -90,7 +94,6 @@ pub(crate) fn store_busy(error: &RuntimeError) -> bool {
             ))
             | RuntimeError::Domain(DomainError::Storage(StorageError::FileLocked))
             | RuntimeError::Collab(CollabError::Storage(StorageError::FileLocked))
-            | RuntimeError::Sync(SyncError::Storage(StorageError::FileLocked))
             | RuntimeError::Search(SearchError::Store(StorageError::FileLocked))
             // The relay route carries it under its own type rather than a
             // storage error, because `RelayError` is where a relay operation's
@@ -266,6 +269,10 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::HeldReadBusy => {
             return WireError::new(ErrorCode::Overloaded, "held-read-busy");
         }
+        // The proof's answer can never fit; asking again answers the same.
+        RuntimeError::HeldReadTooLarge => {
+            return WireError::new(ErrorCode::PayloadTooLarge, "held-read-too-large");
+        }
         // The store closed with a held read's reader still open; its files
         // stay as they are until it closes. Ask again.
         RuntimeError::StoreInUse => {
@@ -274,10 +281,14 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::Relay(relay @ RelayError::BlobTooLarge { .. }) => {
             return WireError::new(ErrorCode::PayloadTooLarge, relay.to_string());
         }
-        RuntimeError::Sync(sync @ SyncError::ProjectionTooLarge { .. }) => {
+        RuntimeError::Sync(sync)
+            if matches!(sync.original(), SyncError::ProjectionTooLarge { .. }) =>
+        {
             return WireError::new(ErrorCode::PayloadTooLarge, sync.to_string());
         }
-        RuntimeError::Sync(SyncError::LiveDocumentBindingActive) => {
+        RuntimeError::Sync(sync)
+            if matches!(sync.original(), SyncError::LiveDocumentBindingActive) =>
+        {
             return WireError::new(ErrorCode::InvalidParams, "live-document-binding-active");
         }
         _ => {}
@@ -312,7 +323,7 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         }
         RuntimeError::Domain(error) => return map_domain(error),
         RuntimeError::Collab(error) => map_collab_code(error),
-        RuntimeError::Sync(error) => map_sync_code(error),
+        RuntimeError::Sync(error) => map_sync_code(&error),
         RuntimeError::Relay(error) => map_relay_code(error),
         RuntimeError::Search(error) => map_search_code(error),
         materialize @ RuntimeError::Materialize(_) => {
@@ -531,8 +542,9 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
     }
 }
 
-fn map_sync_code(error: SyncError) -> ErrorCode {
+fn map_sync_code(error: &SyncError) -> ErrorCode {
     match error {
+        SyncError::Shared(original) => map_sync_code(original),
         SyncError::Storage(_)
         | SyncError::SequenceGap
         | SyncError::CoordinateDiverged
@@ -652,6 +664,35 @@ mod tests {
     use dohc_engine_sync::ObservedBytes;
     use dohc_engine_sync::RelayError;
     use dohc_engine_sync::SyncError;
+
+    /// Opus's r2c-3c-4 finding 5: a held proof's failure, shared by its
+    /// callers, reaches the wire as its original does, and an answer too
+    /// large for a held read is a size refusal.
+    #[test]
+    fn a_shared_sync_failure_maps_as_its_original() {
+        use dohc_engine_storage::StorageError;
+        let originals: [fn() -> SyncError; 5] = [
+            || SyncError::Storage(StorageError::FileLocked),
+            || SyncError::Cancelled,
+            || SyncError::LiveDocumentBindingActive,
+            || SyncError::ProjectionTooLarge {
+                constraint: "MAX_PROJECTION_BYTES",
+                actual_bytes: 2,
+                limit_bytes: 1,
+            },
+            || SyncError::Storage(StorageError::corrupt_public(std::io::Error::other("bad"))),
+        ];
+        for original in originals {
+            let direct = map_runtime(RuntimeError::Sync(original()));
+            let shared = map_runtime(RuntimeError::Sync(SyncError::Shared(std::sync::Arc::new(
+                original(),
+            ))));
+            assert_eq!((shared.code, shared.message), (direct.code, direct.message));
+        }
+        let too_large = map_runtime(RuntimeError::HeldReadTooLarge);
+        assert_eq!(too_large.code, ErrorCode::PayloadTooLarge);
+        assert_eq!(too_large.message, "held-read-too-large");
+    }
 
     #[test]
     fn live_application_native_errors_preserve_refusal_and_failure_codes() {
@@ -1173,7 +1214,7 @@ mod tests {
         // ingest refusal before it reaches here; pinned so a second caller
         // cannot reintroduce the split.
         assert_eq!(
-            map_sync_code(SyncError::BlobTooLarge {
+            map_sync_code(&SyncError::BlobTooLarge {
                 constraint: "MAX_CAPTURE_BINARY_FILE_BYTES",
                 limit_bytes: 5 * 1024 * 1024,
                 observed_bytes: 5 * 1024 * 1024 + 1,

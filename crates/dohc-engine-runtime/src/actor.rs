@@ -123,13 +123,6 @@ impl ClaimAnnouncer {
 /// `Close` always has a home, so shutdown never spins or starves.
 const CHANNEL_CAPACITY: usize = COMMAND_QUEUE_CAPACITY + 1;
 
-/// How long close, or a held read's last caller, waits for a stopped held
-/// proof's reader to close: twice SQLite's busy timeout. A stopped proof
-/// ends at its next statement step or stage check; between them it may wait
-/// out that timeout, or replay, merge or encode one document's state.
-pub(crate) const HELD_PROOF_CLOSE_BOUND: std::time::Duration =
-    std::time::Duration::from_millis(2 * dohc_engine_storage::ENGINE_SQLITE_BUSY_TIMEOUT_MS as u64);
-
 /// The actor lifecycle, observable via [`ActorHandle::lifecycle`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleState {
@@ -459,6 +452,11 @@ impl WorkspaceActor {
         self.store_freshly_created
     }
 
+    /// The store's held-document proofs, whose readers its close waits for.
+    pub(crate) fn held_proofs(&self) -> HeldProofs {
+        self.held_proofs.clone()
+    }
+
     /// The current lifecycle state.
     pub fn lifecycle(&self) -> LifecycleState {
         LifecycleState::from_u8(self.state.load(Ordering::Acquire))
@@ -480,10 +478,12 @@ impl WorkspaceActor {
     /// later shard). A worker wedged inside a fault gate must be released by the
     /// caller before close (same contract as the storage writer).
     ///
-    /// A held proof's reader still open past the close bound, ten seconds,
-    /// fails close with [`RuntimeError::StoreInUse`] once the writer is gone,
-    /// and so does every later close until that reader closes: a caller
-    /// that replaces or deletes the store's files must not touch them first.
+    /// A held proof's reader still open, or opening, past the close bound,
+    /// ten seconds from when held proofs start closing, fails close with
+    /// [`RuntimeError::StoreInUse`] once the writer is gone, and so does
+    /// every later close until that reader closes: a caller that replaces or
+    /// deletes the store's files must not touch them first. The supervisor
+    /// keeps the store's entry draining meanwhile.
     pub fn close(&mut self) -> Result<(), RuntimeError> {
         let Some(worker) = self.worker.take() else {
             return if self.held_proofs.drained() {
@@ -502,10 +502,10 @@ impl WorkspaceActor {
         // before the store's files can be replaced. A request waiting on it
         // fails as unavailable.
         self.released_tails.close();
-        // So do held proofs, and no reader opens once this begins. One left
-        // running past the bound closes its reader at its next check; the
-        // writer still closes, and close then fails.
-        let drained = self.held_proofs.close(HELD_PROOF_CLOSE_BOUND);
+        // So do held proofs, and no reader starts opening once this begins.
+        // One left running past the bound closes its reader at its next
+        // check; the writer still closes, and close then fails.
+        let drained = self.held_proofs.close();
         match self.close_permit.take() {
             // Reserved slot: instant, fair, FIFO-respecting delivery.
             Some(permit) => {
