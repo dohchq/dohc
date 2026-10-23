@@ -32,9 +32,9 @@ pub enum RootBindingError {
     #[error("this computer's folder in .dohc could not be prepared")]
     LocalStateUnwritable,
     /// `.dohc`, the engine's folder or `.dohc/local`, the second field, is a
-    /// link, is not a folder, or is another user's, the first. On a Mac,
-    /// `NotPrivate` names it, with the same message.
-    #[cfg(not(target_os = "macos"))]
+    /// link, is not a folder, or is another user's, the first. On a Mac and
+    /// on Windows, `NotPrivate` names it, with the same message.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[error("engine-folder-not-private: {0} {1}")]
     NotPrivate(&'static str, &'static str),
     /// macOS refused dohc the root's folder. See
@@ -50,6 +50,12 @@ pub enum RootBindingError {
     #[cfg(target_os = "macos")]
     #[error("{0}")]
     NotPrivate(dohc_macos_files::NotPrivate),
+    /// `.dohc` or the engine's folder is a link, is not a folder, or is
+    /// another account's or this user can't change it, or something in the
+    /// engine's folder is, in the message a Mac sends as `NotPrivate`.
+    #[cfg(windows)]
+    #[error("engine-folder-not-private: {} {}", .0.reason.code(), .0.path)]
+    NotPrivate(dohc_windows_files::NotPrivate),
 }
 
 /// A macOS privacy refusal at `path`, a volume that shares new files, or a
@@ -66,6 +72,10 @@ fn io_failure(
         }
         #[cfg(target_os = "macos")]
         if let Some(refused) = dohc_macos_files::not_private(&error) {
+            return RootBindingError::NotPrivate(refused.clone());
+        }
+        #[cfg(windows)]
+        if let Some(refused) = dohc_windows_files::not_private(&error) {
             return RootBindingError::NotPrivate(refused.clone());
         }
         if dohc_engine_files::privacy_denied(&error, path) {
@@ -220,9 +230,13 @@ fn create_binding_dir(root: &Path) -> Result<BindingDir, RootBindingError> {
             marker: parent.join(name),
         })
     }
-    #[cfg(not(unix))]
+    // Windows opens a file for anyone its own DACL admits, even in a folder
+    // they can't list, so each open there gives the folder, and what is in
+    // it, the DACL of a user's profile folder, and refuses a link and what
+    // another account owns.
+    #[cfg(windows)]
     {
-        std::fs::create_dir_all(&parent)
+        dohc_windows_files::ensure_private_dir(root, relative)
             .map_err(io_failure(&parent, RootBindingError::Unwritable))?;
         Ok(BindingDir {
             marker: parent.join(name),
@@ -300,8 +314,15 @@ fn create_local_state_dir(root: &Path) -> Result<(), RootBindingError> {
         .map_err(refused)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn create_local_state_dir(root: &Path) -> Result<(), RootBindingError> {
+    use dohc_windows_files::{NotPrivate, NotPrivateReason};
+    let refused = |reason| {
+        RootBindingError::NotPrivate(NotPrivate {
+            path: LOCAL_STATE_RELATIVE_PATH.into(),
+            reason,
+        })
+    };
     let dir = root.join(LOCAL_STATE_RELATIVE_PATH);
     match std::fs::create_dir(&dir) {
         Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
@@ -315,16 +336,10 @@ fn create_local_state_dir(root: &Path) -> Result<(), RootBindingError> {
         .map_err(io_failure(&dir, RootBindingError::LocalStateUnwritable))?
         .file_type();
     if kind.is_symlink() {
-        return Err(RootBindingError::NotPrivate(
-            "link",
-            LOCAL_STATE_RELATIVE_PATH,
-        ));
+        return Err(refused(NotPrivateReason::Link));
     }
     if !kind.is_dir() {
-        return Err(RootBindingError::NotPrivate(
-            "not-folder",
-            LOCAL_STATE_RELATIVE_PATH,
-        ));
+        return Err(refused(NotPrivateReason::NotFolder));
     }
     Ok(())
 }

@@ -3306,6 +3306,55 @@ mod tests {
         assert_eq!(std::fs::read_dir(&engine).expect("replacement").count(), 0);
     }
 
+    /// On Windows, an open names a junction at `.dohc` or at the engine's
+    /// folder, and makes nothing in the folder it names.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_open_names_a_link_that_keeps_the_engine_folder_from_being_private() {
+        let service = &EngineService::new();
+        let open = |root: &std::path::Path| {
+            let params = open_params(root, "private", json!({ "captureMode": "none" }));
+            async move {
+                service
+                    .workspace_open(&RequestContext::unbounded(), params)
+                    .await
+            }
+        };
+        let elsewhere = ScratchDir::new().expect("scratch");
+        let junction = |at: std::path::PathBuf| {
+            let status = std::process::Command::new("cmd")
+                .args(["/c", "mklink", "/J"])
+                .arg(at)
+                .arg(elsewhere.path())
+                .stdout(std::process::Stdio::null())
+                .status()
+                .expect("mklink");
+            assert!(status.success());
+        };
+
+        let linked = ScratchDir::new().expect("scratch");
+        junction(linked.path().join(".dohc"));
+        let refused = open(linked.path()).await.expect_err("a linked .dohc");
+        assert_eq!(refused.code, ErrorCode::Internal);
+        assert_eq!(refused.message, "engine-folder-not-private: link .dohc");
+
+        let linked = ScratchDir::new().expect("scratch");
+        std::fs::create_dir(linked.path().join(".dohc")).expect("dohc");
+        junction(linked.path().join(".dohc").join("engine"));
+        let refused = open(linked.path())
+            .await
+            .expect_err("a linked engine folder");
+        assert_eq!(refused.code, ErrorCode::Internal);
+        assert_eq!(
+            refused.message,
+            "engine-folder-not-private: link .dohc/engine"
+        );
+        assert_eq!(
+            std::fs::read_dir(elsewhere.path()).expect("target").count(),
+            0
+        );
+    }
+
     /// Only an open that writes prepares `.dohc/local`, and its answer says
     /// whether this computer's state can go there. A second open of the live
     /// binding answers the same; a read-only open prepares nothing.
