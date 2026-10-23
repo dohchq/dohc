@@ -18,6 +18,11 @@ import type { RegistryEntry } from "./registryStore";
 import { deferred } from "../testing/deferred";
 import { createTestScratch } from "./testTemp";
 import { localStateDir } from "./workspaceLocalState";
+import { createUnwrittenReleases, type UnwrittenRelease, type UnwrittenReleases } from "./ownerLiveReleases";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import * as Y from "yjs";
 
 const ownerHostMock = vi.hoisted(() => ({ read: vi.fn(), start: vi.fn() }));
 vi.mock("./desktopOwnerHost", () => ({ readDesktopOwnerHostConfig: ownerHostMock.read, startDesktopOwnerHost: ownerHostMock.start }));
@@ -26,8 +31,9 @@ const ownerDeliveryMock = vi.hoisted(() => ({read: vi.fn(), start: vi.fn(), pass
 vi.mock("./desktopOwnerDelivery", () => ({readDesktopOwnerDeliveryConfig: ownerDeliveryMock.read, startDesktopOwnerDelivery: ownerDeliveryMock.start}));
 vi.mock("./nativeOwnerDelivery", () => ({runNativeOwnerDeliveryPass: ownerDeliveryMock.pass}));
 // Stands in for the engine's durable owner queues, which outlive every desktop process.
-const quarantineMock = vi.hoisted(() => ({read: vi.fn(), retry: vi.fn()}));
-vi.mock("./ownerLiveQuarantine", () => ({readOwnerLiveQuarantines: quarantineMock.read, retryOwnerLiveQuarantine: quarantineMock.retry}));
+const quarantineMock = vi.hoisted(() => ({read: vi.fn(), retry: vi.fn(), queue: vi.fn()}));
+vi.mock("./ownerLiveQuarantine", () => ({readOwnerLiveQuarantines: quarantineMock.read, retryOwnerLiveQuarantine: quarantineMock.retry,
+  readOwnerLiveQueue: quarantineMock.queue}));
 // Only Windows and Linux x64 install a reader, so these tests state Linux x64 on any host.
 vi.mock("./installedReaderConfig", async importOriginal => {
   const { installedReaderConfig } = await importOriginal<typeof import("./installedReaderConfig")>();
@@ -74,7 +80,7 @@ class Client implements EngineDaemonClient {
   waitForExit() { return this.exitWait; }
 }
 
-function fixture() {
+function fixture(options: {ownerLiveReleases?: UnwrittenReleases} = {}) {
   const rows = new Map<string, RegistryEntry>();
   const states = new Map<string, State>();
   const authorities = createWorkspaceAuthorityOwner({
@@ -88,19 +94,27 @@ function fixture() {
   });
   const client = new Client();
   let launch: (options: EngineClientSpawnOptions) => Promise<EngineDaemonClient> = async () => client;
-  let options!: EngineDaemonLifecycleOptions;
+  let daemonOptions!: EngineDaemonLifecycleOptions;
   let configureDaemon = (_daemon: ReturnType<typeof createRustEngineDaemon>) => {};
   const daemons: ReturnType<typeof createRustEngineDaemon>[] = [];
   const spawns: EngineClientSpawnOptions[] = [];
   let quitting = false;
+  // Stands in for the durable file of releases whose file write is not confirmed.
+  const unwritten: UnwrittenRelease[] = [];
   const dependencies: Dependencies = {
+    ownerLiveReleases: options.ownerLiveReleases ?? {
+      list: async id => unwritten.filter(row => row.workspaceId === id),
+      put: async release => {unwritten.splice(0, unwritten.length, ...unwritten.filter(row => row.objectId !== release.objectId), release);},
+      remove: async (id, match) => {unwritten.splice(0, unwritten.length, ...unwritten.filter(row => row.workspaceId !== id ||
+        ("objectId" in match ? row.objectId !== match.objectId : row.path !== match.path)));},
+    },
     resourcesBasePath: () => "resources",
     findWorkspace: id => rows.get(id) ?? null,
     app: { isPackaged: false, getAppPath: vi.fn(() => "app-root") },
     dialog: { showErrorBox: vi.fn() },
     process: { env: {}, resourcesPath: "resources" },
     createRustEngineDaemon: vi.fn((input) => {
-      options = input;
+      daemonOptions = input;
       const daemon = createRustEngineDaemon({ ...input,
         fileExists: () => true, launch: (spawnOptions) => { spawns.push(spawnOptions); return launch(spawnOptions); },
         sleep: async () => undefined,
@@ -121,8 +135,8 @@ function fixture() {
   };
   const engine = createDesktopEngine(dependencies);
   return {
-    engine, dependencies, client, rows, states, authorities, daemons, spawns,
-    options: () => options,
+    engine, dependencies, client, rows, states, authorities, daemons, spawns, unwritten,
+    options: () => daemonOptions,
     setQuitting: (value: boolean) => { quitting = value; },
     setLaunch: (value: typeof launch) => { launch = value; },
     setDaemon: (value: typeof configureDaemon) => { configureDaemon = value; },
@@ -146,7 +160,29 @@ function fixture() {
 beforeEach(() => {
   quarantineMock.read.mockReset().mockResolvedValue([]);
   quarantineMock.retry.mockReset().mockResolvedValue(undefined);
+  quarantineMock.queue.mockReset();
 });
+
+/** A server-owned workspace whose delivery offers these documents, for quarantine tests. */
+async function quarantinedOwner(documents: {path: string; objectId: string}[]) {
+  const f = fixture(), credentials = new AbortController();
+  Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+  const rootPath = await createTestScratch("dohc-owner-quarantine-");
+  f.rows.set("owner", {workspaceId: "owner", rootPath, kind: "personal", mode: "local-first"});
+  const bindingOf = (path: string, objectId: string) => ({workspaceId: "owner", mainVersionId: "main", objectId, lineageClaimId: "a".repeat(64),
+    currentPath: path, selectorPaths: [path], restoreFenceGeneration: 1});
+  const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
+    frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
+      maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
+    attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
+  f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
+    connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
+      retire: async () => 0, refusals: async () => {}, documents: async () => ({ok: true, documents: documents.map(({path, objectId}) =>
+        ({path, status: "ready", document: {binding: bindingOf(path, objectId), relayDatabaseNamespace: "namespace", shareId: "share"}}))})})};
+  const workspace = () => f.authorities.withAuthority("owner", lease =>
+    ({workspaceId: "owner", rootPath: lease.binding.canonicalRootPath, attachmentId: lease.binding.attachmentId}));
+  return {f, credentials, binding: bindingOf("notes/plan.md", "object"), workspace};
+}
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("desktop engine construction", () => {
@@ -984,6 +1020,114 @@ describe("server owner peer lifecycle", () => {
         expect(ownerDeliveryMock.pass).not.toHaveBeenCalled();
       } finally {await f.close();}
     }
+  });
+
+  // A Stop that waits for the server, or a release whose file write is not
+  // confirmed, is read again on open: the first from the engine's Stop rows,
+  // the second from this computer's durable record.
+  it.each(["stopping", "not-written"] as const)("shows a %s document again after a restart", async recovery => {
+    const binding = {workspaceId: "owner", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
+      currentPath: "notes/plan.md", selectorPaths: ["notes/plan.md"], restoreFenceGeneration: 1};
+    const rootPath = await createTestScratch("dohc-quarantine-stop-restart-");
+    const file = join(await createTestScratch("dohc-unwritten-releases-"), "owner-live-releases.json");
+    if (recovery === "not-written") await createUnwrittenReleases(() => file).put({workspaceId: "owner", objectId: "object", path: "notes/plan.md", reason: "invalid-update", binding});
+    quarantineMock.read.mockImplementation(async (_client, _handle, options: {unwritten?: unknown[]}) => recovery === "stopping"
+      ? [{objectId: "object", path: "notes/plan.md", reason: "invalid-update", outboxId: "outbox", binding, headDeliveryId: "delivery", recovery}]
+      : (options.unwritten ?? []).map(() => ({objectId: "object", path: "notes/plan.md", reason: "invalid-update", outboxId: null, binding, headDeliveryId: null, recovery})));
+    try {
+      for (let launch = 0; launch < 2; launch++) {
+        const f = fixture({ownerLiveReleases: createUnwrittenReleases(() => file)});
+        Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+        try {
+          await f.engine.start();
+          await f.engine.sessions!.run({workspaceId: "owner", rootPath}, async () => undefined);
+          await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toEqual([{objectId: "object", path: "notes/plan.md", reason: "invalid-update",
+            storedOn: "this-computer", recovery, incident: recovery === "stopping" ? "outbox:delivery:0" : `release:${"a".repeat(64)}:1`}]));
+        } finally {await f.close();}
+      }
+    } finally {quarantineMock.read.mockReset();}
+  });
+
+  // A parked document is revisited on every pass; its quarantine is read only
+  // when a pass could have changed it.
+  it("does not read a parked quarantine again on every frozen pass, nor on an unrelated acceptance", async () => {
+    const {f, credentials, binding} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}, {path: "other.md", objectId: "other"}]);
+    quarantineMock.read.mockResolvedValue([{objectId: "object", path: "notes/plan.md", reason: "invalid-update", outboxId: "outbox", binding, headDeliveryId: "delivery", recovery: "paused"}]);
+    ownerDeliveryMock.pass.mockImplementation(async options => options.document.binding.objectId === "object" ? "frozen" : "acknowledged");
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toHaveLength(1));
+      await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalledTimes(2));
+      const reads = quarantineMock.read.mock.calls.length;
+      for (let pass = 3; pass <= 8; pass++) {
+        f.engine.retryOwnerDelivery("owner");
+        await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalledTimes(pass));
+      }
+      expect(quarantineMock.read.mock.calls.length).toBe(reads);
+    } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset(); quarantineMock.read.mockReset();}
+  });
+
+  // The release failed, so the notice said the Stop waits; reconciliation
+  // finishes it in the background with no live document left to deliver.
+  it.each([true, false])("follows background Stop recovery in the notices when the release writes the file: %s", async materialized => {
+    const {f, credentials, binding} = await quarantinedOwner([]);
+    const stopRow = (state: "requested" | "released") => ({binding, document: {mainVersionId: "main", objectId: "object", currentPath: "notes/plan.md"},
+      relayDatabaseNamespace: "namespace", retirementOwed: state === "requested", state, ...(state === "released" ? {materialized} : {})});
+    let released = false, failRelease = true;
+    f.client.respond = async request => {
+      if (request.method === "ydoc.ownerStop.release") {
+        if (failRelease) throw new Error("dohc could not write the file.");
+        released = true;
+        return {id: request.id, result: {stops: [stopRow("released")]}};
+      }
+      if (request.method === "ydoc.ownerStop.list") return {id: request.id, result: {stops: released ? [] : [stopRow("requested")]}};
+      if (request.method === "ydoc.ownerStop.request") return {id: request.id, result: {stops: [stopRow("requested")]}};
+      return {id: request.id, result: request.method === "workspace.open" ? {workspace: "workspace-handle"} : request.method === "engine.ping" ? {ok: true} : null};
+    };
+    const queue = [{objectId: "object", path: "notes/plan.md", reason: "invalid-update", outboxId: "outbox", binding, headDeliveryId: "delivery", recovery: "stopping"}];
+    quarantineMock.read.mockImplementation(async () => released ? [] : queue);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(f.engine.ownerLiveStopFailures("owner")).toHaveLength(1));
+      expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{recovery: "stopping"}]);
+      // Written before the release, in case it commits and then fails.
+      expect(f.unwritten).toMatchObject([{workspaceId: "owner", objectId: "object", reason: "invalid-update"}]);
+      failRelease = false;
+      f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toEqual([]));
+      expect(f.engine.ownerLiveStopFailures("owner")).toEqual([]);
+      // Only a release that wrote the file ends the record; otherwise its notice and Try again stay.
+      expect(f.unwritten).toHaveLength(materialized ? 0 : 1);
+      expect(quarantineMock.read).toHaveBeenLastCalledWith(expect.anything(), "workspace-handle",
+        expect.objectContaining({unwritten: materialized ? [] : [expect.objectContaining({objectId: "object"})]}));
+    } finally {credentials.abort(); await f.close(); quarantineMock.read.mockReset(); vi.restoreAllMocks();}
+  });
+
+  // Save recovery copy reads the whole queue and writes next to the file. It
+  // asks the engine for nothing that changes the queue.
+  it("saves a recovery copy without touching the queue, which stays quarantined", async () => {
+    const {f, credentials, binding, workspace} = await quarantinedOwner([]);
+    const row = {objectId: "object", path: "notes/plan.md", reason: "capacity-refused", outboxId: "outbox", binding, headDeliveryId: "delivery", recovery: "stopped-kept"};
+    quarantineMock.read.mockResolvedValue([row]);
+    const doc = new Y.Doc(); doc.getMap("frontmatter").set("title", "Plan");
+    const baseUpdate = Y.encodeStateAsUpdate(doc); const before = Y.encodeStateVector(doc);
+    doc.getMap("frontmatter").set("status", "kept"); const update = Y.encodeStateAsUpdate(doc, before); doc.destroy();
+    const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+    quarantineMock.queue.mockResolvedValue({outboxId: "outbox", binding, baseUpdate, baseUpdateDigest: digest(baseUpdate), state: "quarantined",
+      pendingBytes: update.byteLength, oldestEntryAtMs: 1, quarantineReason: "capacity-refused", observedBinding: null, retryDeliveryId: null,
+      entries: [{sequence: 1, appendKey: "append", deliveryId: "delivery", updateDigest: digest(update), update, byteLength: update.byteLength, createdAtMs: 1}]});
+    try {
+      expect(await f.engine.start()).toBe(true);
+      const saved = await f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "notes/plan.md");
+      expect(saved).toEqual({copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json"});
+      const recovery = JSON.parse(await readFile(join(f.rows.get("owner")!.rootPath, saved.packagePath), "utf8"));
+      expect(recovery.updates.map((entry: {base64: string}) => Buffer.from(entry.base64, "base64"))).toEqual([Buffer.from(update)]);
+      expect(quarantineMock.queue).toHaveBeenCalledExactlyOnceWith(expect.any(EngineClient), "workspace-handle", row);
+      expect(f.client.requests.map(request => request.method).filter(method => /ownerStop\.(request|release|clear|retired)|ownerOutbox\./.test(method))).toEqual([]);
+      expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{recovery: "stopped-kept"}]);
+      await expect(f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "other.md")).rejects.toThrow("dohc has no kept edits for this file.");
+    } finally {credentials.abort(); await f.close(); quarantineMock.read.mockReset(); quarantineMock.queue.mockReset();}
   });
 
   // Proves: a document the server refused names the workspace's reason over

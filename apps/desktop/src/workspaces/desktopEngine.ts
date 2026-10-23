@@ -32,8 +32,12 @@ import type {readDesktopOwnerHostConfig,startDesktopOwnerHost} from "./desktopOw
 import type {DesktopOwnerDeliveryConfig, startDesktopOwnerDelivery} from "./desktopOwnerDelivery";
 import {relayUrlsMatch} from "./syncCode";
 import {readyOwnerDeliveryDocuments, startServerOwnerDelivery} from "./serverOwnerDelivery";
-import {readOwnerLiveQuarantines, retryOwnerLiveQuarantine, type OwnerLiveQuarantineRecord} from "./ownerLiveQuarantine";
+import {readOwnerLiveQuarantines, readOwnerLiveQueue, retryOwnerLiveQuarantine, type OwnerLiveHeadCache, type OwnerLiveQuarantineRecord} from "./ownerLiveQuarantine";
+import type {UnwrittenReleases} from "./ownerLiveReleases";
+import type {LiveRecoveryFiles} from "./ownerLiveRecoveryCopy";
+import {createDurableFile} from "./workspaceFiles";
 import type {OwnerLiveQuarantine} from "../ipc/bridgeContract";
+import type {LiveObjectBinding} from "@dohc/workspace-engine-client";
 
 export interface ServerOwnerDelivery {
   prepare(): Promise<Omit<DesktopOwnerDeliveryConfig, "relayUrl" | "documents">>;
@@ -77,6 +81,8 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   onWorkspaceOpened?(workspaceId: string): void;
   onRefusalsChanged?: () => void;
   serverOwnerDelivery?: ServerOwnerDelivery;
+  /** Stops that took refused edits out of their queue but did not write the file. */
+  ownerLiveReleases: UnwrittenReleases;
   ownerDeliveryCredentials?(): {bearer: string; accountId: string; relayUrl: string; signal: AbortSignal} | null;
   existingOwnerFor?: ExistingOwnerDeviceConfig["ownerFor"];
   findWorkspace(workspaceId: string): RegistryEntry | null;
@@ -153,17 +159,38 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   const ownerQuarantines = new Map<string, OwnerLiveQuarantineRecord[]>();
   const ownerQuarantineReads = new Map<string, number>();
   const ownerQuarantineAttempts = new Map<string, number>();
-  const quarantineIncident = (row: OwnerLiveQuarantineRecord) =>
-    `${row.outboxId}:${row.headDeliveryId}:${ownerQuarantineAttempts.get(row.outboxId) ?? 0}`;
-  async function readOwnerQuarantinesInto(workspaceId: string, client: EngineClient, workspaceHandle: string): Promise<void> {
+  const ownerQuarantineHeads = new Map<string, OwnerLiveHeadCache>();
+  const quarantineIncident = (row: OwnerLiveQuarantineRecord) => row.outboxId === null
+    ? `release:${row.binding.lineageClaimId}:${row.binding.restoreFenceGeneration}`
+    : `${row.outboxId}:${row.headDeliveryId}:${ownerQuarantineAttempts.get(row.outboxId) ?? 0}`;
+  // Returns its own rows, which the caller can trust even when a later read owns the cache.
+  async function readOwnerQuarantinesInto(workspaceId: string, client: EngineClient, workspaceHandle: string): Promise<OwnerLiveQuarantineRecord[]> {
     const read = (ownerQuarantineReads.get(workspaceId) ?? 0) + 1;
     ownerQuarantineReads.set(workspaceId, read);
-    const rows = await readOwnerLiveQuarantines(client, workspaceHandle);
+    const heads = ownerQuarantineHeads.get(workspaceId) ?? new Map();
+    ownerQuarantineHeads.set(workspaceId, heads);
+    const rows = await readOwnerLiveQuarantines(client, workspaceHandle,
+      {heads, unwritten: await dependencies.ownerLiveReleases.list(workspaceId)});
     // A later read owns the answer.
-    if (ownerQuarantineReads.get(workspaceId) !== read) return;
+    if (ownerQuarantineReads.get(workspaceId) !== read) return rows;
     const before = JSON.stringify(ownerQuarantines.get(workspaceId) ?? []);
     if (rows.length) ownerQuarantines.set(workspaceId, rows); else ownerQuarantines.delete(workspaceId);
     if (JSON.stringify(rows) !== before) notifyRenderer({workspaceId});
+    return rows;
+  }
+  /**
+   * Releases a Stop's queue into the document. For refused edits, a record is
+   * written first: once the release commits, the queue is gone, and the record
+   * keeps the notice and its Try again until the file holds the edits.
+   */
+  async function releaseOwnerLiveStop(workspaceId: string, client: EngineClient, workspaceHandle: string,
+    binding: LiveObjectBinding, acceptedCursor: number, signal?: AbortSignal) {
+    const kept = (await readOwnerQuarantinesInto(workspaceId, client, workspaceHandle))
+      .find(row => row.objectId === binding.objectId && row.binding.lineageClaimId === binding.lineageClaimId);
+    if (kept) await dependencies.ownerLiveReleases.put({workspaceId, objectId: binding.objectId, path: kept.path, reason: kept.reason, binding});
+    const released = await client.ownerYDocRelease({id: 0, workspace: workspaceHandle, deadlineMs: 30_000}, binding, acceptedCursor, signal);
+    if (kept && (released.deferred || released.materialized)) await dependencies.ownerLiveReleases.remove(workspaceId, {objectId: binding.objectId});
+    return released;
   }
   function refreshOwnerLiveQuarantines(workspace: EngineWorkspace): Promise<void> {
     const daemon = rustEngineDaemon, sessions = rustEngineWorkspaceSessions;
@@ -173,13 +200,25 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       if (client instanceof EngineClient) await readOwnerQuarantinesInto(workspace.workspaceId, client, binding.workspace);
     });
   }
+  async function withEngineClient<Result>(workspace: EngineWorkspace, work: (client: EngineClient, workspaceHandle: string) => Promise<Result>): Promise<Result> {
+    const daemon = rustEngineDaemon, sessions = rustEngineWorkspaceSessions;
+    if (!daemon || !sessions) throw new Error("dohc could not change live editing. Restart dohc and try again.");
+    return sessions.run(workspace, async binding => {
+      const client = daemon.currentClient();
+      if (!(client instanceof EngineClient)) throw new Error("dohc could not change live editing. Restart dohc and try again.");
+      return work(client, binding.workspace);
+    });
+  }
   // A failed read keeps the last answer: the queues are still on this computer.
   const readQuarantinesAfterPass = (workspaceId: string, client: EngineClient, workspaceHandle: string) =>
     readOwnerQuarantinesInto(workspaceId, client, workspaceHandle)
       .catch(error => console.error("[desktop] owner live quarantine read failed:", error));
-  // A refusal starts a quarantine; an acceptance can end only one already read.
-  const quarantinesMayChange = (workspaceId: string, outcome: string) =>
-    outcome === "frozen" || (outcome === "acknowledged" && ownerQuarantines.has(workspaceId));
+  // A refusal starts or renews a quarantine; one already read as waiting stays
+  // as read. An acceptance can end only a quarantine already read.
+  const quarantinesMayChange = (workspaceId: string, objectId: string, outcome: string) => {
+    const recovery = ownerQuarantines.get(workspaceId)?.find(row => row.objectId === objectId)?.recovery;
+    return outcome === "frozen" ? recovery === undefined || recovery === "retrying" : outcome === "acknowledged" && recovery !== undefined;
+  };
   const refusedPaths = (workspaceId: string) => new Set((ownerQuarantines.get(workspaceId) ?? []).map(row => row.path));
   const setOwnerDeliveryStatus = (workspaceId: string, status: OwnerLiveDeliveryStatus | undefined, reason?: OwnerLiveDeliveryReason) => {
     if (ownerDeliveryStatus.get(workspaceId) === status && ownerDeliveryReason.get(workspaceId) === reason) return;
@@ -226,15 +265,21 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               try {await sessions.run(operation.workspace,async binding => {
                 const client=daemon.currentClient();
                 if (!(client instanceof EngineClient)) throw new Error("Owner Stop requires the desktop daemon client.");
+                let stopsChanged=false;
                 await reconcileOwnerLiveStops({client,workspaceHandle:binding.workspace,workspaceId,signal,
+                  release:(target,acceptedCursor,releaseSignal) => releaseOwnerLiveStop(workspaceId,client,binding.workspace,target,acceptedCursor,releaseSignal),
                   onError:(row,error) => {
+                    stopsChanged=true;
                     const failures=ownerStopFailures.get(workspaceId) ?? new Map();
                     const detail=error instanceof Error ? error.message : String(error);
                     failures.set(row.document.objectId,{path:row.document.currentPath,detail});
                     ownerStopFailures.set(workspaceId,failures);notifyRenderer({workspaceId});
                   },
-                  onComplete:row => {if (ownerStopFailures.get(workspaceId)?.delete(row.document.objectId)) notifyRenderer({workspaceId});},
+                  onComplete:row => {stopsChanged=true;if (ownerStopFailures.get(workspaceId)?.delete(row.document.objectId)) notifyRenderer({workspaceId});},
                   retire:session.retire,assertCurrent:() => {check();sessions.assertCurrentBinding(operation.workspace,binding);}});
+                // A Stop that finished or failed in the background changes what the
+                // notices say, even when no live document remains to deliver.
+                if (stopsChanged) await readQuarantinesAfterPass(workspaceId,client,binding.workspace);
               });
               } catch (error) {check();console.error("[desktop] owner Stop discovery failed:",error);}
               const response = await session.documents(signal);
@@ -282,7 +327,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                 const outcome = await native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
                   document, config: {...profile, relayUrl: session.relayUrl, documents},
                   signal, bearer: session.bearer, accountId: session.accountId, assertCurrent});
-                if (quarantinesMayChange(workspaceId, outcome)) await readQuarantinesAfterPass(workspaceId, client, binding.workspace);
+                if (quarantinesMayChange(workspaceId, document.binding.objectId, outcome)) await readQuarantinesAfterPass(workspaceId, client, binding.workspace);
                 return outcome;
               });
               check();
@@ -331,7 +376,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               const result = await native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
                 document, config, signal, bearer: credentials.bearer, accountId: credentials.accountId, assertCurrent});
               assertCurrent();
-              if (quarantinesMayChange(document.binding.workspaceId, result)) await readQuarantinesAfterPass(document.binding.workspaceId, client, binding.workspace);
+              if (quarantinesMayChange(document.binding.workspaceId, document.binding.objectId, result)) await readQuarantinesAfterPass(document.binding.workspaceId, client, binding.workspace);
               if (result === "acknowledged" || result === "frozen") notifyRenderer({workspaceId: document.binding.workspaceId});
               return result;
             }));
@@ -678,23 +723,44 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     refreshOwnerLiveQuarantines,
     /** Grants the refused head one more attempt, if the owner saw this incident. */
     async retryOwnerLiveQuarantine(workspace: EngineWorkspace, objectId: string, incident: string): Promise<void> {
-      const daemon = rustEngineDaemon, sessions = rustEngineWorkspaceSessions;
-      if (!daemon || !sessions) throw new Error("dohc could not change live editing. Restart dohc and try again.");
-      await sessions.run(workspace, async binding => {
-        const client = daemon.currentClient();
-        if (!(client instanceof EngineClient)) throw new Error("dohc could not change live editing. Restart dohc and try again.");
+      await withEngineClient(workspace, async (client, handle) => {
         // Read again, so a Try again never names a queue that already changed.
-        await readOwnerQuarantinesInto(workspace.workspaceId, client, binding.workspace);
-        const row = ownerQuarantines.get(workspace.workspaceId)?.find(candidate => candidate.objectId === objectId);
-        if (!row || row.recovery !== "paused" || quarantineIncident(row) !== incident) {
+        const row = (await readOwnerQuarantinesInto(workspace.workspaceId, client, handle)).find(candidate => candidate.objectId === objectId);
+        if (!row || row.outboxId === null || row.recovery !== "paused" || quarantineIncident(row) !== incident) {
           throw new Error("This document changed. Open Live documents to check it.");
         }
-        await retryOwnerLiveQuarantine(client, binding.workspace, row);
-        ownerQuarantineAttempts.set(row.outboxId, (ownerQuarantineAttempts.get(row.outboxId) ?? 0) + 1);
+        const outboxId = row.outboxId;
+        await retryOwnerLiveQuarantine(client, handle, {...row, outboxId});
+        ownerQuarantineAttempts.set(outboxId, (ownerQuarantineAttempts.get(outboxId) ?? 0) + 1);
+        // The grant leaves the queue's size as it was, so its head is read again.
+        ownerQuarantineHeads.get(workspace.workspaceId)?.delete(outboxId);
         // The attempt is granted; a failed read must not report it as refused.
-        await readQuarantinesAfterPass(workspace.workspaceId, client, binding.workspace);
+        await readQuarantinesAfterPass(workspace.workspaceId, client, handle);
       });
       ownerDelivery?.retry?.(workspace.workspaceId);
+    },
+    /** A Stop's release, recorded until the file holds any refused edits it took. */
+    releaseOwnerLiveStop(workspace: EngineWorkspace, binding: LiveObjectBinding, acceptedCursor: number) {
+      return withEngineClient(workspace, (client, handle) => releaseOwnerLiveStop(workspace.workspaceId, client, handle, binding, acceptedCursor));
+    },
+    /** Resume ends a Stop, and with it any release still owed to the file. */
+    forgetOwnerLiveRelease(workspaceId: string, path: string): Promise<void> {
+      return dependencies.ownerLiveReleases.remove(workspaceId, {path});
+    },
+    /**
+     * Save recovery copy: writes a document's refused queue next to its file,
+     * as a readable copy when it can and always as a lossless package. The
+     * queue stays. It works while live editing is stopped, and for any size.
+     */
+    async saveOwnerLiveRecoveryCopy(workspace: EngineWorkspace, path: string): Promise<LiveRecoveryFiles> {
+      const [{saveLiveRecoveryCopy}, {pending, row}] = await Promise.all([import("./ownerLiveRecoveryCopy"),
+        withEngineClient(workspace, async (client, handle) => {
+          const row = (await readOwnerQuarantinesInto(workspace.workspaceId, client, handle)).find(candidate => candidate.path === path);
+          if (!row || row.outboxId === null) throw new Error("dohc has no kept edits for this file. Open Live documents to check it.");
+          return {row, pending: await readOwnerLiveQueue(client, handle, {...row, outboxId: row.outboxId})};
+        })]);
+      return saveLiveRecoveryCopy(pending, {path: row.path, reason: row.reason, storedOn: "this-computer"},
+        (relative, text) => createDurableFile(workspace.rootPath, relative, text));
     },
     clearOwnerLiveStopFailure(workspaceId:string,target:{objectId:string}|{path:string}) {
       const failures=ownerStopFailures.get(workspaceId);if (!failures) return;

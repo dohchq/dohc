@@ -7,6 +7,7 @@ import {
   OwnerLiveDocument,
   OwnerLiveDocumentsResult,
   type OwnerLiveQuarantine,
+  SaveOwnerLiveRecoveryCopyResult,
   type StopOwnerLiveDocumentResult,
   CreateRelayShareResult,
   GetRelayReceivedShareResult,
@@ -121,6 +122,7 @@ export function createRelaySharesIpcHandlers<
   // Documents whose edits the server refused for good, as this computer last read them.
   ownerLiveQuarantines(workspace: Workspace): readonly OwnerLiveQuarantine[];
   retryOwnerLiveQuarantine(workspace: Workspace, objectId: string, incident: string): Promise<void>;
+  saveOwnerLiveRecoveryCopy(workspace: Workspace, path: string): Promise<SaveOwnerLiveRecoveryCopyResult>;
   // A grant changed on the relay. Null when the change names no workspace.
   sharesChanged(workspaceId: string | null): void;
   // An authenticated account listing, applied to this machine's received
@@ -217,16 +219,25 @@ export function createRelaySharesIpcHandlers<
     }, assertOriginalWorkspace);
   };
 
-  // A Stop reports "recovered" only once the engine wrote the refused edits
-  // into the file. A release that kept them, or failed after the server
-  // stopped live editing, leaves them queued on this computer.
+  // A Stop reports "recovered" only when the engine says settlement wrote the
+  // refused edits into the file. Otherwise they stay kept: in their queue, or
+  // in the document with a record that its file still needs them.
+  const keptEditsOf = (released: OwnerLiveStop | undefined): StopOwnerLiveDocumentResult["keptEdits"] =>
+    released?.materialized === true && !released.deferred ? "recovered" : "kept";
   const ownerLiveDocumentAction = async (stop: boolean, input: {workspaceId: string; path: string}, operation: Operation): Promise<StopOwnerLiveDocumentResult> => {
     operation.assertCurrent();assertOriginalWorkspace(operation.workspace);
     return withOwnerLiveStopTransition(input.workspaceId,input.path,async (): Promise<StopOwnerLiveDocumentResult> => {
       const local=stop ? await dependencies.ownerLiveStop(operation.workspace,"request",input.path) : undefined;
       operation.assertCurrent();
-      const quarantined=local!==undefined && dependencies.ownerLiveQuarantines(operation.workspace).some(row => row.objectId===local.document.objectId);
-      if (stop && local && !local.retirementOwed) return {keptEdits:quarantined ? "kept" : "none"};
+      const quarantine=local && dependencies.ownerLiveQuarantines(operation.workspace).find(row => row.objectId===local.document.objectId);
+      const quarantined=quarantine!==undefined;
+      if (stop && local && !local.retirementOwed) {
+        // Stop again writes the file a finished release could not.
+        if (quarantine?.recovery!=="not-written" || !local.binding) return {keptEdits:quarantined ? "kept" : "none"};
+        const released=await dependencies.ownerLiveStop(operation.workspace,"release",input.path,local.binding,0);
+        operation.assertCurrent();
+        return {keptEdits:keptEditsOf(released)};
+      }
       let result: unknown;
       try {
         const {credentials,credentialGeneration}=await remoteForWorkspace(operation.workspace);
@@ -252,15 +263,16 @@ export function createRelaySharesIpcHandlers<
       try {
         released=await dependencies.ownerLiveStop(operation.workspace,local!.binding ? "release" : "retired",input.path,local!.binding ?? local!.document,response.acceptedCursor);
       } catch (error) {
-        // The server already stopped live editing. The engine kept the refused
-        // queue, and Stop reconciliation tries the release again.
+        // The server already stopped live editing. A release that did not
+        // commit kept the queue, and Stop reconciliation tries it again; one
+        // that committed left a record that the file still needs the edits.
         if (!quarantined) throw error;
         operation.assertCurrent();
         console.error("[desktop] owner live release kept the refused edits:",error);
         return {keptEdits:"kept"};
       }
       operation.assertCurrent();
-      return {keptEdits:!quarantined ? "none" : released?.deferred ? "kept" : "recovered"};
+      return {keptEdits:!quarantined ? "none" : keptEditsOf(released)};
     });
   };
 
@@ -1032,6 +1044,14 @@ export function createRelaySharesIpcHandlers<
       operation.assertCurrent(); assertOriginalWorkspace(operation.workspace);
       await dependencies.retryOwnerLiveQuarantine(operation.workspace, input.objectId, input.incident);
       operation.assertCurrent();
+    },
+    // Main finds the queue from the path in this computer's own state; the
+    // renderer names nothing else. It works while live editing is stopped.
+    saveOwnerLiveRecoveryCopy: async (input, { operation }) => {
+      operation.assertCurrent(); assertOriginalWorkspace(operation.workspace);
+      const saved = SaveOwnerLiveRecoveryCopyResult.parse(await dependencies.saveOwnerLiveRecoveryCopy(operation.workspace, input.path));
+      operation.assertCurrent();
+      return saved;
     },
     createRelayShare,
     listRelayShares,

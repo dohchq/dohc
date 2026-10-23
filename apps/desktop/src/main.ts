@@ -424,6 +424,7 @@ import {
 import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
 import { probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
 import { createDesktopEngine } from "./workspaces/desktopEngine";
+import { createUnwrittenReleases } from "./workspaces/ownerLiveReleases";
 import { onWorkspaceCaptureSettled } from "./workspaces/captureActivityBridge";
 import {createServerOwnerConnection} from "./workspaces/serverOwnerConnection";
 import { createReceivedShareEngineAccess } from "./workspaces/receivedShareEngineAccess";
@@ -5191,6 +5192,7 @@ const desktopEngine = createDesktopEngine({
     });
   },
   onRefusalsChanged: notifyNoticesChanged,
+  ownerLiveReleases: createUnwrittenReleases(() => join(stateDir(), "owner-live-releases.json")),
   serverOwnerDelivery: createServerOwnerConnection({stateDir, workspaces: listWorkspaces,
     onRefusalsChanged: workspaceId => notifyRenderer({workspaceId}),
     credentials: () => cachedCredentials ? {value: cachedCredentials, signal: ownerDeliveryCredentialLifetime.signal} : null,
@@ -6552,13 +6554,16 @@ function registerIpcHandlers(): void {
           if (!(client instanceof EngineClient)) throw new Error("dohc could not change live editing. Restart dohc and try again.");
           const request={id:0,workspace:session.workspace,deadlineMs:30_000};
           if (action==="request") return client.ownerYDocStopRequest(request,path);
-          if (action==="release" && binding && "lineageClaimId" in binding) return client.ownerYDocRelease(request,binding,acceptedCursor!);
           if (action==="retired") {await client.ownerYDocStopRetired(request,binding!);return undefined;}
-          await client.ownerYDocStopClear(request,path);return undefined;
+          if (action==="clear") {await client.ownerYDocStopClear(request,path);return undefined;}
+          return undefined;
         });
+        if (action==="release" && binding && "lineageClaimId" in binding) result=await desktopEngine.releaseOwnerLiveStop(workspace,binding,acceptedCursor!);
+        if (action==="clear") await desktopEngine.forgetOwnerLiveRelease(workspace.workspaceId,path);
       } finally {
-        // A release, failed or not, or a Resume changes which refused queues remain and how.
-        if (action!=="request") await desktopEngine.refreshOwnerLiveQuarantines(workspace)
+        // Each step of a Stop, failed or not, and a Resume change which refused
+        // queues remain and how: a requested Stop shows as waiting at once.
+        await desktopEngine.refreshOwnerLiveQuarantines(workspace)
           .catch(error => console.error("[desktop] owner live quarantine read failed:",error));
       }
       if ((result?.state==="released" && !result.retirementOwed) || action==="retired") {
@@ -6569,6 +6574,7 @@ function registerIpcHandlers(): void {
     },
     ownerLiveQuarantines: workspace => desktopEngine.ownerLiveQuarantines(workspace.workspaceId),
     retryOwnerLiveQuarantine: (workspace,objectId,incident) => desktopEngine.retryOwnerLiveQuarantine(workspace,objectId,incident),
+    saveOwnerLiveRecoveryCopy: (workspace,path) => desktopEngine.saveOwnerLiveRecoveryCopy(workspace,path),
     sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); invalidateHistoryLabels(workspaceId); shareRosters.sharesChanged(workspaceId); },
     reconcileReceivedShares,
   });

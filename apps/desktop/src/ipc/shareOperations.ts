@@ -20,6 +20,7 @@ import {
   ListOwnerLiveDocumentsPayload, OwnerLiveDocumentsResult,
   ListOwnerLiveRefusalsPayload, OwnerLiveRefusalsResult,
   OwnerLiveDocumentActionPayload, StopOwnerLiveDocumentResult, RetryOwnerLiveQuarantinePayload,
+  SaveOwnerLiveRecoveryCopyPayload, SaveOwnerLiveRecoveryCopyResult,
   ListRelaySharesResult, GetRelayReceivedSharePayload, GetRelayReceivedShareResult,
   RevokeRelaySharePayload, RevokeRelayShareResult, UndoRelaySharePayload, UndoRelayShareResult,
   PollRelayShareDiscussionActivityPayload, PollRelayShareDiscussionActivityResult,
@@ -226,6 +227,13 @@ export const relayShareOperations = {
     scope: "workspace", guard: "active-workspace",
     inactiveMessage: "Live editing stopped because this window changed workspaces.",
     payload: RetryOwnerLiveQuarantinePayload,
+  },
+  // Writes a document's kept edits next to its file. The edits stay queued.
+  saveOwnerLiveRecoveryCopy: {
+    capabilityId: "share.live.document.recovery.save", channel: "desktop:save-owner-live-recovery-copy",
+    scope: "workspace", guard: "active-workspace",
+    inactiveMessage: "Save recovery copy stopped because this window changed workspaces.",
+    payload: SaveOwnerLiveRecoveryCopyPayload, result: SaveOwnerLiveRecoveryCopyResult,
   },
   createRelayShare: {
     capabilityId: "share.create", channel: "desktop:create-relay-share",

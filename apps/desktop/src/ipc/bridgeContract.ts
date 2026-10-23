@@ -422,8 +422,10 @@ export const OwnerLiveQuarantine = z.object({
   storedOn: z.literal("this-computer"),
   incident: z.string().min(1).max(1024),
   // paused: waiting for the owner. retrying: the owner's Try again waits for
-  // delivery. stopped-kept: a Stop kept the edits but could not write them to the file.
-  recovery: z.enum(["paused", "retrying", "stopped-kept"]),
+  // delivery. stopping: a Stop waits for the server to stop live editing.
+  // stopped-kept: a Stop finished but kept the queue. not-written: a Stop took
+  // the edits into the document but could not write them to the file.
+  recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written"]),
 }).strict();
 export type OwnerLiveQuarantine = z.infer<typeof OwnerLiveQuarantine>;
 export const RetryOwnerLiveQuarantinePayload = WorkspaceIdPayload.extend({
@@ -431,6 +433,15 @@ export const RetryOwnerLiveQuarantinePayload = WorkspaceIdPayload.extend({
   incident: OwnerLiveQuarantine.shape.incident,
 }).strict();
 export type RetryOwnerLiveQuarantinePayload = z.infer<typeof RetryOwnerLiveQuarantinePayload>;
+export const SaveOwnerLiveRecoveryCopyPayload = WorkspaceIdPayload.extend({path: SAFE_RELATIVE_PATH}).strict();
+export type SaveOwnerLiveRecoveryCopyPayload = z.infer<typeof SaveOwnerLiveRecoveryCopyPayload>;
+// The readable copy is null when the kept edits could not be read as a document;
+// the package next to it always holds their original bytes.
+export const SaveOwnerLiveRecoveryCopyResult = z.object({
+  copyPath: SAFE_RELATIVE_PATH.nullable(),
+  packagePath: SAFE_RELATIVE_PATH,
+}).strict();
+export type SaveOwnerLiveRecoveryCopyResult = z.infer<typeof SaveOwnerLiveRecoveryCopyResult>;
 
 export const OwnerLiveDocument = z.object({
   path: SAFE_RELATIVE_PATH,

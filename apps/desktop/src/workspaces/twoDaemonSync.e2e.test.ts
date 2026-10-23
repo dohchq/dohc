@@ -981,7 +981,7 @@ it.skipIf(engine.missing).each([
           if (action === "clear") {await client.ownerYDocStopClear(request, stopPath);return;}
           if (action==="retired") {await client.ownerYDocStopRetired(request,binding!);return;}
           return action === "request" ? client.ownerYDocStopRequest(request, stopPath) : client.ownerYDocRelease(request, binding as import("@dohc/live-session-contract").LiveObjectBinding, acceptedCursor!);
-        }), ownerLiveQuarantines: () => [], retryOwnerLiveQuarantine: unexpected,
+        }), ownerLiveQuarantines: () => [], retryOwnerLiveQuarantine: unexpected, saveOwnerLiveRecoveryCopy: unexpected,
         sharesChanged: unexpected, reconcileReceivedShares: unexpected,
       });
       registerOperations({

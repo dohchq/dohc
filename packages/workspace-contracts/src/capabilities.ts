@@ -101,6 +101,7 @@ export const CAPABILITIES = {
   "share.live.document.stop": capability("Stop live editing for a document.", {ipc: ["stopOwnerLiveDocument"]}),
   "share.live.document.resume": capability("Resume live editing for a document.", {ipc: ["resumeOwnerLiveDocument"]}),
   "share.live.document.retry": capability("Try once more to send a document's edits the server refused.", {ipc: ["retryOwnerLiveQuarantine"]}),
+  "share.live.document.recovery.save": capability("Save a document's edits the server refused next to its file, keeping them queued.", {ipc: ["saveOwnerLiveRecoveryCopy"]}),
   "share.list": capability("List shares for the connected account.", {ipc: ["listRelayShares"]}),
   "share.received.read": capability("Read a received share.", {ipc: ["getRelayReceivedShare"]}),
   "share.revoke": capability("Remove a share.", {ipc: ["revokeRelayShare"]}),

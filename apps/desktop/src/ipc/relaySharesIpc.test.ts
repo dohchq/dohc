@@ -89,7 +89,9 @@ function harness() {
   const localStops = vi.fn<Dependencies["listOwnerLiveStops"]>(async () => []);
   const ownerLiveQuarantines = vi.fn<Dependencies["ownerLiveQuarantines"]>(() => []);
   const retryOwnerLiveQuarantine = vi.fn<Dependencies["retryOwnerLiveQuarantine"]>(async () => undefined);
-  const ownerLiveStop=vi.fn<Dependencies["ownerLiveStop"]>(async (_workspace,action,path) => action==="clear" || action==="retired" ? undefined : ({state:action==="release" || !enrolled ? "released" : "requested",relayDatabaseNamespace:enrolled ? "relay" : "",retirementOwed:true,document:{mainVersionId:"main",objectId:"object",currentPath:path},binding:enrolled ? {workspaceId,mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),currentPath:path,selectorPaths:[path],restoreFenceGeneration:0} : null}));
+  const saveOwnerLiveRecoveryCopy = vi.fn<Dependencies["saveOwnerLiveRecoveryCopy"]>(async () => ({copyPath: "notes/a (recovered).md", packagePath: "notes/a (recovered).dohc-recovery.json"}));
+  const ownerLiveStop=vi.fn<Dependencies["ownerLiveStop"]>(async (_workspace,action,path) => action==="clear" || action==="retired" ? undefined : ({state:action==="release" || !enrolled ? "released" : "requested",relayDatabaseNamespace:enrolled ? "relay" : "",retirementOwed:action!=="release",document:{mainVersionId:"main",objectId:"object",currentPath:path},binding:enrolled ? {workspaceId,mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),currentPath:path,selectorPaths:[path],restoreFenceGeneration:0} : null,
+    ...(action==="release" ? {materialized:true} : {})}));
   const ownerHandlers = createRelaySharesIpcHandlers<Sender, Event, Workspace, Operation>({
     remoteForWorkspace: remote,
     currentCredentialGeneration: () => generation,
@@ -103,6 +105,7 @@ function harness() {
     listOwnerLiveStops: localStops,
     ownerLiveQuarantines,
     retryOwnerLiveQuarantine,
+    saveOwnerLiveRecoveryCopy,
     sharesChanged,
     reconcileReceivedShares,
   });
@@ -130,6 +133,7 @@ function harness() {
     ownerLiveStop,
     ownerLiveQuarantines,
     retryOwnerLiveQuarantine,
+    saveOwnerLiveRecoveryCopy,
     retireRenderer: () => { rendererCurrent = false; },
     retirePhysical: () => { physicalCurrent = false; },
     rotateCredentials: () => { generation += 1; },
@@ -332,19 +336,48 @@ describe("owner live document enrollment", () => {
     const quarantine = {objectId: "object", path: "live.md", reason: "invalid-update", storedOn: "this-computer" as const,
       incident: "outbox:delivery:0", recovery: "paused" as const};
     const retired = {ok: true, path: "live.md", objectId: "object", status: "retired", acceptedCursor: 37};
-    const released = (deferred?: {unsentEdits: number; editable: boolean}) => async (...[, action, path]: Parameters<Dependencies["ownerLiveStop"]>) =>
+    const released = (deferred?: {unsentEdits: number; editable: boolean}, materialized = true, requested: "requested" | "released" = "requested") =>
+      async (...[, action, path]: Parameters<Dependencies["ownerLiveStop"]>) =>
       action === "request"
-        ? {state: "requested", relayDatabaseNamespace: "relay", retirementOwed: true, document: {mainVersionId: "main", objectId: "object", currentPath: path},
+        ? {state: requested, relayDatabaseNamespace: "relay", retirementOwed: requested === "requested", document: {mainVersionId: "main", objectId: "object", currentPath: path},
           binding: {workspaceId, mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64), currentPath: path, selectorPaths: [path], restoreFenceGeneration: 0}}
         : {state: "released", relayDatabaseNamespace: "relay", retirementOwed: false, document: {mainVersionId: "main", objectId: "object", currentPath: path},
           binding: {workspaceId, mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64), currentPath: path, selectorPaths: [path], restoreFenceGeneration: 0},
-          ...(deferred ? {deferred} : {})};
+          materialized, ...(deferred ? {deferred} : {})};
 
     it("says the edits are in the file only when the release wrote them", async () => {
       const h = harness(); h.ownerLiveQuarantines.mockReturnValue([quarantine]); h.request.mockResolvedValue(retired);
       h.ownerLiveStop.mockImplementation(released());
       await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "recovered"});
       expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request", "release"]);
+    });
+
+    // Settlement committed but a blocked materialization left the file as it was.
+    it("claims no recovery when the release did not write the file", async () => {
+      const h = harness(); h.ownerLiveQuarantines.mockReturnValue([quarantine]); h.request.mockResolvedValue(retired);
+      h.ownerLiveStop.mockImplementation(released(undefined, false));
+      await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "kept"});
+    });
+
+    // A Stop that finished but could not write the file: Stop again writes it, without asking the server.
+    it("writes the file again when the owner stops a document whose edits were not written", async () => {
+      const h = harness(); h.ownerLiveQuarantines.mockReturnValue([{...quarantine, incident: "release:a:0", recovery: "not-written"}]);
+      h.ownerLiveStop.mockImplementation(released(undefined, true, "released"));
+      await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "recovered"});
+      expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request", "release"]);
+      expect(h.request).not.toHaveBeenCalled();
+      h.ownerLiveStop.mockImplementation(released(undefined, false, "released"));
+      await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "kept"});
+    });
+
+    it("saves a recovery copy for the workspace's own path, and only there", async () => {
+      const h = harness();
+      await expect(h.invoke(relayShareOperations.saveOwnerLiveRecoveryCopy.channel, {workspaceId, path: "notes/a.md"}))
+        .resolves.toEqual({copyPath: "notes/a (recovered).md", packagePath: "notes/a (recovered).dohc-recovery.json"});
+      expect(h.saveOwnerLiveRecoveryCopy).toHaveBeenCalledExactlyOnceWith(h.workspace, "notes/a.md");
+      await expect(h.invoke(relayShareOperations.saveOwnerLiveRecoveryCopy.channel, {workspaceId: "other", path: "notes/a.md"})).rejects.toThrow();
+      await expect(h.invoke(relayShareOperations.saveOwnerLiveRecoveryCopy.channel, {workspaceId, path: "../outside.md"})).rejects.toThrow();
+      expect(h.saveOwnerLiveRecoveryCopy).toHaveBeenCalledOnce();
     });
 
     it("keeps the edits on this computer when the release defers", async () => {
@@ -595,6 +628,7 @@ describe("registered relay share handlers", () => {
       relayShareOperations.stopOwnerLiveDocument.channel,
       relayShareOperations.resumeOwnerLiveDocument.channel,
       relayShareOperations.retryOwnerLiveQuarantine.channel,
+      relayShareOperations.saveOwnerLiveRecoveryCopy.channel,
       relayShareOperations.createRelayShare.channel,
       relayShareOperations.listRelayShares.channel,
       relayShareOperations.getRelayReceivedShare.channel,
@@ -618,7 +652,7 @@ describe("registered relay share handlers", () => {
       relayShareOperations.promoteRelayShareGrant.channel,
       relayShareOperations.revokeRelayShareGrant.channel,
     ]);
-    expect(h.handlers.size).toBe(29);
+    expect(h.handlers.size).toBe(30);
     for (const channel of h.handlers.keys()) {
       await expect(h.invoke(channel, null, -1)).rejects.toThrow("untrusted sender");
     }
@@ -1102,6 +1136,7 @@ const ownerInputs = {
   resumeRelayShareDiscussion: {workspaceId, shareId: "share"},
   promoteRelayShareGrant: {workspaceId, shareId: "share", grantId: "grant", expectedParentGrantId: "parent", expectedParentGeneration: 2},
   revokeRelayShareGrant: {workspaceId, shareId: "share", grantId: "grant"},
+  saveOwnerLiveRecoveryCopy: {workspaceId, path: "notes/a.md"},
 } satisfies Record<keyof typeof relayShareOperations, unknown>;
 const ownerRows = Object.entries(relayShareOperations).map(([name, row]) => ({
   name, row, input: ownerInputs[name as keyof typeof ownerInputs],

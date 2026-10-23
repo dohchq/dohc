@@ -13,7 +13,7 @@ export type LiveDocumentRow = {
   canResume: boolean;
   deferredStop?: {unsentEdits: number; editable: boolean};
   /** The server refused this document's edits for good, and this computer keeps them. */
-  quarantine?: "paused" | "retrying" | "stopped-kept";
+  quarantine?: "paused" | "retrying" | "stopping" | "stopped-kept" | "not-written";
 };
 
 /** What a Stop did with edits the server refused. */
@@ -49,6 +49,8 @@ export type LiveDocumentsDialogProps = {
   onStopped?: (path: string, keptEdits: "recovered" | "kept") => void;
   /** The row a notice opened this dialog for. */
   reveal?: string;
+  /** Writes a row's kept edits next to its file. The shell reports the result. */
+  saveRecoveryCopy?: (workspaceId: string, path: string) => void;
   /** One page of refused shares, from the share id the previous page ended on. */
   loadRefusals: (workspaceId: string, after?: string) => Promise<LiveRefusalPage>;
   /** Asks the engine to enrol one refused share again. */
@@ -147,6 +149,8 @@ function mergeRows(
 function statusLabel(row: LiveDocumentRow): string {
   if (row.quarantine === "paused") return "Paused";
   if (row.quarantine === "retrying") return "Trying again";
+  if (row.quarantine === "stopping") return "Stopping";
+  if (row.quarantine === "stopped-kept" || row.quarantine === "not-written") return "Stopped";
   if (row.reason === "document-unavailable") return "File moved or removed";
   if (row.reason === "workspace-changed") return "Workspace changed";
   if (row.reason === "session-host-refused") return "Stopped by the server";
@@ -168,7 +172,7 @@ function statusLabel(row: LiveDocumentRow): string {
 }
 
 function statusTone(row: LiveDocumentRow): string {
-  if (row.quarantine === "paused" || row.quarantine === "stopped-kept") return "text-warning";
+  if (row.quarantine !== undefined && row.quarantine !== "retrying") return "text-warning";
   if (row.status === "ready") return "text-success";
   if (row.status === "unavailable") return "text-warning";
   return "text-muted";
@@ -192,18 +196,27 @@ function deferredStopNote(row: LiveDocumentRow, stop: NonNullable<LiveDocumentRo
   return `${row.status === "ready" ? "Live editing resumed. " : "Live editing stopped. "}${unsent}${resume}${stop.editable ? "You can keep editing." : "Editing is paused."}`;
 }
 
-// Edits the server refused: where they are, and what Stop does with them.
-// Stop writes them into the file only when the engine can; otherwise they stay queued.
+// Edits the server refused: where they are, and the one way back that always works.
 function quarantineNote(row: LiveDocumentRow): string | null {
-  if (row.quarantine === "paused") {
-    return "The server could not accept your edits. dohc kept them on this computer. Stop live editing writes them into your file.";
+  switch (row.quarantine) {
+    case "paused":
+      return "The server could not accept your edits. dohc kept them on this computer. Save a recovery copy to get them back.";
+    case "retrying":
+      return "dohc is sending your kept edits to the server once more.";
+    case "stopping":
+      return "dohc is waiting for the server to stop live editing. Your unsent edits stay on this computer.";
+    case "stopped-kept":
+      return "Live editing stopped. dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.";
+    case "not-written":
+      return "Live editing stopped. dohc kept your unsent edits, but could not write them to your file.";
+    default:
+      return null;
   }
-  if (row.quarantine === "retrying") return "dohc is sending your kept edits to the server once more.";
-  if (row.quarantine === "stopped-kept") {
-    return `Live editing stopped. dohc kept your unsent edits, but could not write them to your file.${
-      row.canResume ? " Resume live editing, then try again." : ""}`;
-  }
-  return null;
+}
+
+// Every state that still holds the queue can save it.
+function canSaveRecoveryCopy(row: LiveDocumentRow): boolean {
+  return row.quarantine !== undefined && row.quarantine !== "not-written";
 }
 
 function busyLabel(work: Work): string {
@@ -270,11 +283,13 @@ export function LiveDocumentsDialog({
   onError,
   onStopped,
   reveal,
+  saveRecoveryCopy,
 }: LiveDocumentsDialogProps) {
   const [state, setState] = useState<ListState>({ kind: "loading" });
   const listRef = useRef<HTMLUListElement | null>(null);
   // The row a notice asked for, revealed once per opening.
   const revealed = useRef<string | null>(null);
+  const revealPage = useRef<string | null>(null);
   const [busy, setBusy] = useState<Work | null>(null);
   const [shownWorkspaceId, setShownWorkspaceId] = useState(workspaceId);
   const request = useRequestSequence([workspaceId]);
@@ -477,16 +492,26 @@ export function LiveDocumentsDialog({
   }, [workspaceId]);
 
   // Brings the asked-for row into view and focuses its Stop live editing, or
-  // the row itself when it offers no Stop.
+  // the row itself when it offers no Stop. A stopped row can be on a later
+  // page, so the list reads on, through the same guarded reads, until it shows.
   useEffect(() => {
     if (state.kind !== "ready" || reveal === undefined || revealed.current === `${workspaceId}\n${reveal}`) return;
     const row = [...(listRef.current?.querySelectorAll<HTMLElement>("[data-live-document-path]") ?? [])]
       .find((element) => element.dataset.liveDocumentPath === reveal);
-    if (!row) return;
+    if (!row) {
+      // Each page once: a failed read reports itself and waits for its Try again.
+      const page = `${workspaceId}\n${reveal}\n${state.nextCursor}`;
+      if (state.nextCursor !== null && busy === null && revealPage.current !== page) {
+        revealPage.current = page;
+        perform({ kind: "more", cursor: state.nextCursor });
+      }
+      return;
+    }
     revealed.current = `${workspaceId}\n${reveal}`;
     row.scrollIntoView?.({ block: "nearest" });
     (row.querySelector<HTMLElement>("[data-live-document-stop]") ?? row).focus({ preventScroll: true });
-  }, [state, reveal, workspaceId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state, busy, reveal, workspaceId]);
 
   function close(): void {
     scope.current.live = false;
@@ -607,6 +632,29 @@ export function LiveDocumentsDialog({
                     onClick={() => perform({ kind: "stop", path: row.path })}
                   >
                     Stop live editing
+                  </SecondaryButton>
+                ) : null}
+                {/* The Stop runs again, and writes the file it could not before. */}
+                {row.quarantine === "not-written" ? (
+                  <SecondaryButton
+                    size="compact"
+                    className="shrink-0"
+                    disabled={listBusy}
+                    data-live-document-stop=""
+                    aria-label={`Try again to write your kept edits to ${row.path}`}
+                    onClick={() => perform({ kind: "stop", path: row.path })}
+                  >
+                    Try again
+                  </SecondaryButton>
+                ) : null}
+                {canSaveRecoveryCopy(row) && saveRecoveryCopy ? (
+                  <SecondaryButton
+                    size="compact"
+                    className="shrink-0"
+                    aria-label={`Save recovery copy of ${row.path}`}
+                    onClick={() => saveRecoveryCopy(workspaceId, row.path)}
+                  >
+                    Save recovery copy
                   </SecondaryButton>
                 ) : null}
                 {/* A Resume alone fails again until dohc has opened the document once. */}
