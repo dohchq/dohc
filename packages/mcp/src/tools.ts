@@ -72,6 +72,8 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_list_changes: ["history.list"],
   dohc_list_kept_copies: ["file.kept.list"],
   dohc_save_kept_copy: ["file.kept.save"],
+  dohc_save_recovery_copy: ["share.live.document.recovery.save"],
+  dohc_retry_kept_edits: ["share.live.document.retry"],
   dohc_list_retained_copies: ["file.retained.list"],
   dohc_delete_retained_copies: ["file.retained.delete"],
   dohc_chat_file_mentions: ["chat.read"],
@@ -1062,12 +1064,13 @@ export async function stopWorkspaceSync(ctx: ToolContext, agent?: string) {
 export async function workspaceStatus(ctx: ToolContext) {
   // The engine answers from the pull's durable token, so this holds whether
   // or not sync is running. Absent when the app cannot answer.
-  const [manifest, remote, credentials, entry, waiting] = await Promise.all([
+  const [manifest, remote, credentials, entry, waiting, kept] = await Promise.all([
     readSyncManifest(ctx),
     remoteForCurrentWorkspace(ctx),
     loadCloudCredentials(ctx),
     findWorkspaceEntry(ctx),
     requestCli(ctx, "collectionsWaiting", {}),
+    requestCli(ctx, "liveKeptEdits", {}),
   ]);
   const serverUrl = remote?.serverUrl ?? manifest?.serverUrl;
   const synced = !entry?.pausedRemote && (remote !== null || nonEmptyString(manifest?.serverUrl));
@@ -1089,6 +1092,7 @@ export async function workspaceStatus(ctx: ToolContext) {
     synced,
     ...(syncPause ? { syncPause } : {}),
     ...(waiting.ok ? { collectionsWaiting: waiting.waiting } : {}),
+    ...(kept.ok ? { keptEdits: kept.keptEdits } : {}),
     ...removedShareStatus(entry),
     scope: synced ? ("cloud" as const) : ("local" as const),
     ...credential,
@@ -2211,6 +2215,21 @@ export async function listKeptCopies(ctx: ToolContext) {
 
 export async function saveKeptCopy(ctx: ToolContext, args: { id: number }) {
   return requestCli(ctx, "saveKeptCopy", { id: args.id });
+}
+
+// A live document's edits the server refused, which dohc keeps on this
+// computer. The desktop's Notices row offers these same two steps, and
+// dohc_workspace_status lists the documents as keptEdits.
+export async function saveRecoveryCopy(ctx: ToolContext, args: { path: string }) {
+  const resolved = await safeResolve(ctx, args.path, "write");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "saveRecoveryCopy", { path: resolved.normalized });
+}
+
+export async function retryKeptEdits(ctx: ToolContext, args: { path: string; incident: string }) {
+  const resolved = await safeResolve(ctx, args.path, "write");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "retryKeptEdits", { path: resolved.normalized, incident: args.incident });
 }
 
 // Old file copies kept on a drive that cannot tell dohc whether a program

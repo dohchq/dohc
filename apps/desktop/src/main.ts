@@ -4919,6 +4919,11 @@ const serverAccountDeletion = createServerAccountDeletion({
 
 const { startDesktopCliServer } = createDesktopCliServer({
   shareCopy: shareCopyReader,
+  ownerLiveRecovery: {
+    keptEdits: workspaceId => desktopEngine.ownerLiveQuarantines(workspaceId),
+    save: (workspace, path) => desktopEngine.saveOwnerLiveRecoveryCopy(workspace, path),
+    retry: (workspace, objectId, incident) => desktopEngine.retryOwnerLiveQuarantine(workspace, objectId, incident),
+  },
   access: workspaceId => accessCliQueries(accessOwner, work => withPhysicalWorkspaceOperation(workspaceId, work)),
   recordSuccess: invocation => usageStore?.recordSuccess(invocation),
   serverAccount: serverAccountDeletion,

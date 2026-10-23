@@ -74,11 +74,11 @@ Returns `{ workspaces: { workspaceId, rootPath, kind, remote? }[] }`.
 
 ### `dohc_workspace_status`
 
-Report whether this workspace is local-only or cloud-synced.
+Report whether this workspace is local-only or cloud-synced. In the owning workspace, also list live documents whose edits the server refused, as keptEdits.
 
 No arguments.
 
-Returns `{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. The field is absent when the dohc app cannot answer.
+Returns `{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, keptEdits?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. `keptEdits` lists `{ path, reason, incident, recovery }` for each live document whose edits the server refused. Pass them to dohc_save_recovery_copy or dohc_retry_kept_edits. A shared view has no `keptEdits`. Both fields are absent when the dohc app cannot answer.
 
 ### `dohc_stop_workspace_sync`
 
@@ -195,6 +195,27 @@ Changes the workspace, so a shared view does not offer it.
 - `id`: `integer`. Required.
 
 Returns `{ ok: true, status: "saved", path } | { ok: true, status: "gone" } | { ok: true, status: "no-valid-name" } | { ok: false, reason }`.
+
+### `dohc_save_recovery_copy`
+
+Save a live document's kept edits next to the document. Kept edits are edits the server refused, which dohc keeps on this computer; dohc_workspace_status lists them as `keptEdits`. dohc writes a recovery package with every kept edit, and a readable Markdown copy when it can read the edits as a document. `copyPath` is null when it cannot. The kept edits stay on this computer. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `path`: `string`. Required.
+
+Returns `{ ok: true, copyPath, packagePath, folder } | { ok: false, reason }`.
+
+### `dohc_retry_kept_edits`
+
+Send a live document's kept edits to the server once more, as Try again does in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Only a document whose `recovery` is `paused` can try again. Then read dohc_workspace_status: `retrying` until the server answers, `paused` with a new `incident` if it refuses again. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `path`: `string`. Required.
+- `incident`: `string`. Required.
+
+Returns `{ ok: true, path } | { ok: false, reason }`.
 
 ### `dohc_list_retained_copies`
 
@@ -734,7 +755,7 @@ With `--json`, prints `{ schemaVersion, status: "active", shareCode, browserInvi
 
 ### `dohc document`
 
-Read, edit, and create live Markdown documents. List and start chats on tracked files.
+Read, edit, and create live Markdown documents. List and start chats on tracked files. Recover edits the server refused.
 
 Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP. A refusal exits with status 1 and prints its reason to stderr, including with --json.
 
@@ -811,6 +832,42 @@ Use - as the body to read it from stdin. The first message allows at most 64 KiB
 - `--run-id <id>`: Set the run ID. The value must not be empty. This flag overrides DOHC_RUN_ID.
 
 With `--json`, prints `{ schemaVersion, ok: true, path, threadId, messageId, warning? }`.
+
+#### `dohc document kept-edits`
+
+```sh
+dohc document kept-edits [options]
+```
+
+List live documents whose edits the server refused. dohc keeps those edits on this computer.
+
+A recovery of paused means the edits wait for you. Save a recovery copy, or try again. A new refusal changes the incident.
+
+With `--json`, prints `{ schemaVersion, ok: true, keptEdits: { path, reason, incident, recovery }[] }`.
+
+#### `dohc document save-recovery-copy`
+
+```sh
+dohc document save-recovery-copy <path> [options]
+```
+
+Save a document's kept edits next to it. The edits stay kept on this computer.
+
+dohc writes a recovery package with every kept edit, and a readable copy when it can read the edits as a document.
+
+With `--json`, prints `{ schemaVersion, ok: true, copyPath, packagePath, folder }`.
+
+#### `dohc document retry-kept-edits`
+
+```sh
+dohc document retry-kept-edits <path> <incident> [options]
+```
+
+Send a document's kept edits to the server once more.
+
+Take the incident from kept-edits. Only a document whose recovery is paused can try again. Run kept-edits again to follow it: retrying until the server answers, paused with a new incident if it refuses again.
+
+With `--json`, prints `{ schemaVersion, ok: true, path }`.
 
 ### `dohc chat`
 
