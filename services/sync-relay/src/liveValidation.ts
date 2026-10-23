@@ -4,6 +4,7 @@ import type { Socket } from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { OrderedLiveUpdateCutPolicy } from "@dohc/ydoc-projection/live-journal-validation";
 import type { OwnerOutboxAdmission, CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
+import type { OrdinaryActivationValidation, OrdinaryActivationValidator, OrdinaryActivationWork } from "./storage/ordinaryActivationSource.js";
 import type { LiveJournalValidation } from "./storage/types.js";
 
 export type SettlementNormalizationInput = {
@@ -33,16 +34,18 @@ export type SettlementNormalizationResult =
 export type LiveValidationWork = { policy: OrderedLiveUpdateCutPolicy } & (
   | { kind: "journal"; input: Parameters<OwnerOutboxAdmission["validate"]>[0] }
   | { kind: "settlement"; input: SettlementNormalizationInput }
+  | { kind: "activation"; input: OrdinaryActivationWork }
 );
 type CapacityRetry = {
   kind: "retry";
   reason: "admission-unavailable";
   waitForCapacity(signal?: AbortSignal): Promise<void>;
 };
-type Slot = { child: ChildProcess; busy: boolean; heapExhausted: boolean; exited: Promise<void> };
+type Slot = { child: ChildProcess; busy: boolean; activation: boolean; heapExhausted: boolean; exited: Promise<void> };
 /**
  * Two process-wide validation slots, with no retained waiting inputs. Each job
  * runs in a child process: a V8 heap-limit abort ends that child, not the relay.
+ * Activation holds at most one slot, so live edits always keep the other.
  */
 export function createLiveValidationExecutor(heapLimitMb = 512) {
   const slots = new Set<Slot>();
@@ -113,7 +116,7 @@ export function createLiveValidationExecutor(heapLimitMb = 512) {
     );
     let exit: () => void = () => {};
     const exited = new Promise<void>((resolve) => (exit = resolve));
-    const slot: Slot = { child, busy: false, heapExhausted: false, exited };
+    const slot: Slot = { child, busy: false, activation: false, heapExhausted: false, exited };
     slots.add(slot);
     const release = () => {
       slots.delete(slot);
@@ -150,7 +153,8 @@ export function createLiveValidationExecutor(heapLimitMb = 512) {
   ): Promise<Result | CapacityRetry> {
     signal?.throwIfAborted();
     if (closed) throw new Error("Live validation closed.");
-    const slot =
+    const activation = work.kind === "activation";
+    const slot = activation && [...slots].some((slot) => slot.activation) ? undefined :
       [...slots].find((slot) => !slot.busy) ??
       (slots.size < 2 ? spawn() : undefined);
     if (!slot)
@@ -160,6 +164,7 @@ export function createLiveValidationExecutor(heapLimitMb = 512) {
         waitForCapacity,
       };
     slot.busy = true;
+    slot.activation = activation;
     hold(slot, true);
     return new Promise<Result>((resolve, reject) => {
       let done = false;
@@ -189,6 +194,7 @@ export function createLiveValidationExecutor(heapLimitMb = 512) {
       const complete = (value: unknown) => {
         if (!settle()) return;
         slot.busy = false;
+        slot.activation = false;
         // A result that arrives after `close` began must not release its hold.
         if (!closed) hold(slot, false);
         resolve(value as Result);
@@ -222,6 +228,16 @@ export function createLiveValidationExecutor(heapLimitMb = 512) {
       );
     return Object.assign(validate, { waitForCapacity, hasCapacity });
   }
+  /** Activation does not wait for a slot: a busy pool answers `retry`, and a later pass captures again. */
+  function ordinaryActivation(policy: OrderedLiveUpdateCutPolicy): OrdinaryActivationValidator {
+    const ownedPolicy = Object.freeze({ ...policy });
+    return (input, signal) =>
+      submit<OrdinaryActivationValidation>(
+        { kind: "activation", policy: ownedPolicy, input },
+        { kind: "capacity-refused" },
+        signal,
+      );
+  }
   async function close() {
     closed = true;
     notify();
@@ -236,6 +252,7 @@ export function createLiveValidationExecutor(heapLimitMb = 512) {
   }
   return {
     validator,
+    ordinaryActivation,
     async normalizeSettlement(
       input: SettlementNormalizationInput,
       signal?: AbortSignal,

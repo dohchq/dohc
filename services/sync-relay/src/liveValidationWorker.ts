@@ -2,10 +2,15 @@ import {createLiveMarkdownRegistrationValidator} from "@dohc/ydoc-projection/liv
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
 import type {LiveValidationWork} from "./liveValidation.js";
 import { liveJournalCheckpointDue } from "./storage/liveJournalCheckpoint.js";
+import { validateOrdinaryActivation } from "./storage/ordinaryActivationSource.js";
 const send = process.send?.bind(process);
 if (!send) throw new Error("Live validation requires a child process.");
 process.on("message", message => {
   const work = message as LiveValidationWork;
+  if (work.kind === "activation") {
+    send(validateOrdinaryActivation(work.input, work.policy));
+    return;
+  }
   if (work.kind === "settlement") {
     const result=createLiveMarkdownRegistrationValidator(work.policy)(work.input);
     send(result.kind === "accepted" ? {kind:"accepted",evidence:{stateUpdateSha256:result.evidence.stateUpdateSha256,

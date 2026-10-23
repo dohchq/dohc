@@ -20,6 +20,7 @@ import type { NativeOwnerActivation } from "@dohc/workspace-engine-client/daemon
 import { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { markdownToYDoc } from "../../../packages/ydoc-projection/src/import-export.js";
 import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
+import { validateOrdinaryActivation } from "./storage/ordinaryActivationSource.js";
 
 const spawn = vi.hoisted(() => vi.fn());
 vi.mock("node:fs/promises",async importOriginal => {
@@ -484,7 +485,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   // Complete the activation under the earlier connection: adoption, seed, native application.
   const earlier = {mode: "service" as const, hostId: "service", hostEpoch: f.storage.getLiveHostControl()!.hostEpoch, instanceId: "instance", connectionId: "earlier"};
   const actor = {kind: "owner" as const, userId: "owner", shareId: "share"}, store = f.storage.createServiceActivationStore(f.history);
-  store.prepare({capture, host: earlier, shareId: "share", registeredAtMs: 3, guard() {}, validateBaseline, validateJournal,
+  await store.prepare({capture, host: earlier, shareId: "share", registeredAtMs: 3, guard() {}, validate: async work => validateOrdinaryActivation(work, policy),
     bounds: {maxCaptureBytes: 1_000_000, maxEntriesPerDrain: 10, maxBytesPerDrain: 1_000_000}});
   const access = store.pending(document, earlier), delivery = f.storage.createLiveCommittedDeliveryStore(f.history, access);
   const adoption = delivery.captureOwnerCut({host: earlier, document, actor, adoptionId: capture.activationId,

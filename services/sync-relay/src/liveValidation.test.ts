@@ -194,6 +194,17 @@ it.each(["journal", "settlement"] as const)("refuses %s work whose child runs ou
   expect((await validate(input)).kind).toBe("accepted");
 }, 60_000);
 
+it("keeps a slot for live edits while an activation validates", async () => {
+  const {pool, input, validate} = fixture(), {checkpoint} = nestedEmphasis(3000), activate = pool.ordinaryActivation(policy);
+  const work = {document: input.document, currentPath: input.currentPath, baselineBytes: checkpoint};
+  // The held job runs far longer than the test.
+  const held = new AbortController(), running = Promise.resolve(activate(work, held.signal)).catch((error: unknown) => error);
+  expect(await activate(work)).toMatchObject({kind: "retry", reason: "admission-unavailable"});
+  expect(validate.hasCapacity?.()).toBe(true);
+  expect((await validate(input)).kind).toBe("accepted");
+  held.abort(new Error("released")); expect(await running).toMatchObject({message: "released"});
+}, 60_000);
+
 it("fails a job whose child exits abnormally, and replaces the child", async () => {
   const {input, validate} = fixture();
   // The child cannot read a missing input and exits with an uncaught error.
