@@ -954,6 +954,45 @@ it('releases a capture and tries again on a later pass while live validation is 
     expect(f.raw.prepare('SELECT * FROM sync_relay_service_activations').all()).toEqual([])
   }finally{f.close()}
 })
+it('releases a heap-refused capture\'s lease on the next pass after its first release fails, while the target stays blocked',async()=>{
+  const f=fixture();try{
+    const send=vi.fn(async()=>({result:{released:true}}))
+    send.mockImplementationOnce(async()=>{throw new Error('release lost')})
+    const capture=vi.fn(async()=>f.capture)
+    const d=activationDriver(f,capture,send,undefined,undefined,{validateActivation:async()=>({kind:'capacity-refused'})})
+    await expect(d.driver.activate(d.target,new AbortController().signal)).rejects.toThrow('release lost')
+    expect(d.driver.blocked(d.target)).toBe('refused')
+    expect(await d.driver.activate(d.target,new AbortController().signal)).toEqual({kind:'pending',reason:'Hosted document is blocked until the owner tries again.'})
+    expect(send).toHaveBeenCalledTimes(2)
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({method:'liveApplication.releaseOwnerActivation',
+      params:{activationId:f.capture.activationId,sessionId:'real-session'}}),expect.any(AbortSignal))
+    await d.driver.activate(d.target,new AbortController().signal)
+    expect(send).toHaveBeenCalledTimes(2)
+    expect(capture).toHaveBeenCalledTimes(1)
+    expect(d.driver.blocked(d.target)).toBe('refused')
+  }finally{f.close()}
+})
+it('releases the lease of a capture the pass deadline aborted during validation before the next pass pulls',async()=>{
+  const f=fixture();try{
+    const order:string[]=[],send=vi.fn(async()=>{order.push('release');return {result:{released:true}}})
+    const deadline=new AbortController(),reason=new Error('Pass deadline reached.')
+    let validations=0
+    const validate:OrdinaryActivationValidator=async(_work,signal)=>{
+      if(validations++===0){deadline.abort(reason);signal?.throwIfAborted()}
+      return {kind:'retry',reason:'admission-unavailable'}
+    }
+    const capture=vi.fn(async()=>{order.push('capture');return f.capture})
+    const d=activationDriver(f,capture,send,undefined,undefined,{validateActivation:validate})
+    d.pull.mockImplementation(async()=>{order.push('pull');return {hasMore:false}})
+    await expect(d.driver.activate(d.target,deadline.signal)).rejects.toBe(reason)
+    expect(order).toEqual(['pull','capture'])
+    expect(await d.driver.activate(d.target,new AbortController().signal)).toEqual({kind:'pending',reason:'Live validation is busy.'})
+    expect(order).toEqual(['pull','capture','release','pull','capture','release'])
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({method:'liveApplication.releaseOwnerActivation',
+      params:{activationId:f.capture.activationId,sessionId:'real-session'}}),expect.any(AbortSignal))
+    expect(f.raw.prepare('SELECT * FROM sync_relay_service_activations').all()).toEqual([])
+  }finally{f.close()}
+})
 // A write can land between validation and the transaction without moving the relay cursor.
 it('refuses a capture as stale when its history changes after validation',async()=>{
   const f=fixture();try{
@@ -967,6 +1006,25 @@ it('refuses a capture as stale when its history changes after validation',async(
     expect(f.raw.prepare('SELECT * FROM sync_relay_live_documents').all()).toEqual([])
     expect(f.raw.prepare('SELECT * FROM sync_relay_service_activations').all()).toEqual([])
     expect(f.storage.getLiveHostControl()!.registeredConnectionId).toBeNull()
+  }finally{f.close()}
+})
+// A retained activation the read found can go before the transaction; its capture's history was never read or validated.
+it('refuses a capture as stale when the retained activation it read is gone by the transaction',async()=>{
+  const f=fixture();try{
+    await f.prepare()
+    const documents=f.raw.prepare('SELECT * FROM sync_relay_live_documents').all(),control=f.storage.getLiveHostControl()
+    const read=vi.spyOn(f.storage,'getBlob')
+    const validate:OrdinaryActivationValidator=async work=>{
+      expect(work.cut).toBeUndefined()
+      f.raw.exec('DELETE FROM sync_relay_service_activations')
+      return validateActivation(work)
+    }
+    await expect(f.prepare(bounds,validate)).rejects.toThrow(ServiceActivationStaleCut)
+    // It refuses before reading the history it never validated.
+    expect(read).not.toHaveBeenCalled()
+    expect(f.raw.prepare('SELECT * FROM sync_relay_service_activations').all()).toEqual([])
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_documents').all()).toEqual(documents)
+    expect(f.storage.getLiveHostControl()).toEqual(control)
   }finally{f.close()}
 })
 // Proves: a restarted driver catches its replica up before resuming, and the
