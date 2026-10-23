@@ -1,12 +1,18 @@
 //! The owner's copy of what a hosted replica holds for a released chain: an
-//! ordinary recovered file holding the merged projection the host inspected.
-//! One decision per attempt makes creating it exactly-once across crashes,
-//! lost responses and the owner's other devices. Creating it writes no native
-//! state and resolves nothing; the host decides that from the accepted
-//! creation.
+//! ordinary recovered file holding the merged projection the host inspected,
+//! credited to everyone whose retained work the binding covers. One decision
+//! per attempt makes creating it exactly-once across crashes, lost responses
+//! and the owner's other devices. Creating it writes no native state and
+//! resolves nothing; the host decides that from the accepted creation.
+
+use std::collections::BTreeSet;
 
 use dohc_engine_collab::DocKey;
-use dohc_engine_collab::live_update_application::{ReleasedLineageBinding, RetainedContribution};
+use dohc_engine_collab::author_coverage::Authors;
+use dohc_engine_collab::live_update_application::{
+    ProtectedTails, ReleasedLineageBinding, RetainedContribution, RetainedCoverage,
+    UnprovenCommitment,
+};
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -32,6 +38,9 @@ pub struct KeepRetainedVersion {
     pub binding: ReleasedLineageBinding,
     pub markdown: String,
     pub projection_sha256: String,
+    /// Every contribution each of the binding's tails commits to, with its
+    /// authors, by namespace in the binding's order.
+    pub covered_contributions: Vec<(String, Vec<RetainedContribution>)>,
     /// The contributions merging added, in canonical order.
     pub merged_contribution_ids: Vec<RetainedContribution>,
     pub now_ms: i64,
@@ -109,6 +118,9 @@ pub struct KeptRetainedVersion {
     pub created: bool,
     pub publication: CopyPublication,
     pub merged_contribution_ids: Vec<RetainedContribution>,
+    /// The canonical author list the copy's creation names: every author of
+    /// the work the binding covers.
+    pub recovery_author_json: String,
     /// The outcome resolution recorded, and when.
     pub resolution: Option<(CopyResolutionOutcome, i64)>,
 }
@@ -136,7 +148,10 @@ pub(crate) struct ReceivedCreation<'a> {
     pub after_blob_sha256: &'a str,
     pub after_byte_length: Option<i64>,
     pub correlation_id: Option<&'a str>,
-    pub has_authors: bool,
+    /// The authors the creation names, as the feed carries them.
+    pub authors: Option<&'a serde_json::Value>,
+    /// The creation says its attribution is unavailable.
+    pub attribution_unavailable: bool,
 }
 
 struct Decision {
@@ -148,6 +163,7 @@ struct Decision {
     recovery_object_id: String,
     recovery_moment_id: String,
     recovered_path: String,
+    recovery_author_json: String,
     accepted: Option<(String, i64, i64)>,
     resolution: Option<(CopyResolutionOutcome, i64)>,
 }
@@ -193,17 +209,15 @@ fn keep_retained_version_in_tx(
         .current_path
         .as_deref()
         .ok_or_else(|| invalid("the binding names no path"))?;
+    let author_json = covered_authors(
+        binding,
+        &input.covered_contributions,
+        &input.merged_contribution_ids,
+    )?;
     owner_lane(tx, workspace_id)?;
     let digest = binding.digest();
     let canonical = binding.canonical_json();
-    let merged_json = serde_json::to_string(
-        &input
-            .merged_contribution_ids
-            .iter()
-            .map(RetainedContribution::to_json)
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|_| invalid("merged contributions do not encode"))?;
+    let merged_json = merged_contributions_json(&input.merged_contribution_ids)?;
     let decisions = read_decisions(tx, workspace_id, &digest)?;
     let attempt = match decisions.last() {
         None => 0,
@@ -214,6 +228,7 @@ fn keep_retained_version_in_tx(
             if latest.projection_sha256 != input.projection_sha256
                 || latest.projection_byte_length != byte_length
                 || latest.merged_contribution_ids_json != merged_json
+                || latest.recovery_author_json != author_json
             {
                 return Err(invalid("this binding's copy kept other text"));
             }
@@ -245,7 +260,7 @@ fn keep_retained_version_in_tx(
         )
         .optional()
         .map_err(SyncError::corrupt)?;
-    let matches_stored = |tx: &Transaction<'_>| {
+    let matches_stored = |tx: &Transaction<'_>, authors: &dyn Fn(Option<&str>) -> bool| {
         stored_creation_matches(
             tx,
             workspace_id,
@@ -253,13 +268,17 @@ fn keep_retained_version_in_tx(
             &identity,
             &input.projection_sha256,
             byte_length,
+            authors,
         )
     };
     let (recovered_path, created) = match received {
         // Another of the owner's devices kept this attempt first and this
-        // one received it: the same copy, wherever its path now is.
+        // one received it: the same copy, wherever its path now is, naming
+        // the same authors as its push left them.
         Some(path) => {
-            if !matches_stored(tx)? {
+            let published = published_authors(&author_json);
+            let same = |stored: Option<&str>| published.contains(&parsed_authors(stored));
+            if !matches_stored(tx, &same)? {
                 return Err(SyncError::CoordinateDiverged);
             }
             (path, false)
@@ -290,14 +309,15 @@ fn keep_retained_version_in_tx(
                 &identity,
                 &path,
                 &input.markdown,
-                None,
+                Some(&author_json),
                 input.now_ms,
                 RecoveryCause::ReleasedRetained,
                 search_policy.as_ref(),
             )?;
             // What the store kept, not what was asked for, is what the host
             // later compares with its projection.
-            if !matches_stored(tx)? {
+            let credited = parsed_authors(Some(&author_json));
+            if !matches_stored(tx, &|stored| parsed_authors(stored) == credited)? {
                 return Err(local_corruption(
                     "the stored copy does not hold the kept text",
                 ));
@@ -316,7 +336,7 @@ fn keep_retained_version_in_tx(
              workspace_id,binding_digest,attempt,binding_json,projection_sha256,
              projection_byte_length,merged_contribution_ids_json,recovery_object_id,
              recovery_moment_id,recovered_path,collision_ordinal,recovery_author_json,created_at_ms
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'null',?12)",
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
         params![
             workspace_id,
             digest,
@@ -329,6 +349,7 @@ fn keep_retained_version_in_tx(
             identity.moment_id,
             recovered_path,
             collision_ordinal.to_string(),
+            author_json,
             input.now_ms,
         ],
     )
@@ -380,8 +401,8 @@ fn owner_lane(tx: &Transaction<'_>, workspace_id: &str) -> Result<(), SyncError>
 }
 
 /// Whether the stored creation `identity` names is the copy of exactly
-/// `projection_sha256`: a text write of a new object with no authors, whose
-/// stored bytes hash to the digest and have its length.
+/// `projection_sha256`: a text write of a new object whose stored bytes hash
+/// to the digest and have its length, and whose authors `authors` accepts.
 fn stored_creation_matches(
     tx: &Transaction<'_>,
     workspace_id: &str,
@@ -389,16 +410,16 @@ fn stored_creation_matches(
     identity: &RecoveryIdentity,
     projection_sha256: &str,
     byte_length: i64,
+    authors: &dyn Fn(Option<&str>) -> bool,
 ) -> Result<bool, SyncError> {
-    let stored: Option<(i64, String)> = tx
+    let stored: Option<(i64, String, Option<String>)> = tx
         .query_row(
-            "SELECT blob.byte_length,blob.text FROM moments AS moment
+            "SELECT blob.byte_length,blob.text,moment.author_json FROM moments AS moment
                JOIN blobs AS blob ON blob.sha256=moment.after_blob_sha256
               WHERE moment.workspace_id=?1 AND moment.moment_id=?2 AND moment.version_id=?3
                 AND moment.object_id=?4 AND moment.operation='write'
                 AND moment.after_content_kind='text' AND moment.before_present IN (0,1)
-                AND moment.after_blob_sha256=?5 AND moment.metadata_correlation_id=?6
-                AND moment.author_json IS NULL",
+                AND moment.after_blob_sha256=?5 AND moment.metadata_correlation_id=?6",
             params![
                 workspace_id,
                 identity.moment_id,
@@ -407,15 +428,98 @@ fn stored_creation_matches(
                 projection_sha256,
                 identity.correlation_id,
             ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(SyncError::corrupt)?;
-    Ok(stored.is_some_and(|(length, text)| {
+    Ok(stored.is_some_and(|(length, text, author_json)| {
         length == byte_length
             && i64::try_from(text.len()).is_ok_and(|actual| actual == length)
             && dohc_engine_storage::hex_sha256(text.as_bytes()) == projection_sha256
+            && authors(author_json.as_deref())
     }))
+}
+
+/// The one author list a copy names: the union of every covered
+/// contribution's authors, by the rules a settlement's interval follows,
+/// within a moment's limits and never truncated. Each tail's contributions
+/// must be exactly the ones its commitment names, so no request can credit
+/// other work under the binding; every merged contribution is among them.
+fn covered_authors(
+    binding: &ReleasedLineageBinding,
+    covered: &[(String, Vec<RetainedContribution>)],
+    merged: &[RetainedContribution],
+) -> Result<String, SyncError> {
+    let refused = || invalid("the covered contributions do not match the binding");
+    let ProtectedTails::Listed(tails) = &*binding.tails else {
+        return Err(refused());
+    };
+    if tails.len() != covered.len() {
+        return Err(refused());
+    }
+    let mut authors = Authors::default();
+    let mut every = BTreeSet::new();
+    for (tail, (namespace, contributions)) in tails.iter().zip(covered) {
+        let RetainedCoverage::Unproven(commitment) = &tail.coverage else {
+            return Err(refused());
+        };
+        if tail.namespace != *namespace
+            || !contributions.windows(2).all(|pair| pair[0] <= pair[1])
+            || UnprovenCommitment::of(contributions.clone()).as_ref() != Some(commitment)
+        {
+            return Err(refused());
+        }
+        for contribution in contributions {
+            authors
+                .union_json(contribution.authors().json())
+                .map_err(|_| refused())?;
+            every.insert(contribution);
+        }
+    }
+    if merged.iter().any(|contribution| !every.contains(contribution)) {
+        return Err(invalid("a merged contribution is not covered"));
+    }
+    if authors.len() > dohc_engine_domain::MAX_MOMENT_AUTHORS
+        || authors.journal_bytes() > dohc_engine_domain::MAX_AUTHOR_JSON_BYTES
+    {
+        return Err(invalid("the covered authors exceed what a moment names"));
+    }
+    Ok(authors.json())
+}
+
+/// The canonical JSON a decision keeps of the merged contributions.
+fn merged_contributions_json(merged: &[RetainedContribution]) -> Result<String, SyncError> {
+    serde_json::to_string(
+        &merged
+            .iter()
+            .map(RetainedContribution::to_json)
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|_| invalid("merged contributions do not encode"))
+}
+
+/// The author list `author_json` names, none for none or one that does not
+/// parse.
+fn parsed_authors(author_json: Option<&str>) -> Option<serde_json::Value> {
+    author_json.and_then(|json| serde_json::from_str(json).ok())
+}
+
+/// Each form of a copy's authors its creation can carry on the feed: as
+/// kept, or as an owner's push repairs them, which leaves out people only
+/// this installation names.
+fn published_authors(author_json: &str) -> Vec<Option<serde_json::Value>> {
+    let kept = parsed_authors(Some(author_json));
+    let mut forms = vec![kept.clone()];
+    let repairs: [fn(&mut serde_json::Value) -> bool; 2] = [
+        crate::outbound::omit_local_person_authors,
+        crate::outbound::omit_client_identity_authors,
+    ];
+    for repair in repairs {
+        let mut payload = serde_json::json!({"authors": kept.clone()});
+        repair(&mut payload);
+        forms.push(payload.get("authors").filter(|authors| !authors.is_null()).cloned());
+    }
+    forms
 }
 
 /// The coordinate this device journaled the creation of `moment_id` at.
@@ -534,6 +638,7 @@ fn answer(
         created,
         publication,
         merged_contribution_ids: input.merged_contribution_ids.clone(),
+        recovery_author_json: decision.recovery_author_json.clone(),
         resolution: decision.resolution,
     })
 }
@@ -544,26 +649,18 @@ fn read_decisions(
     binding_digest: &str,
 ) -> Result<Vec<Decision>, SyncError> {
     type Row = (
-        i64,
-        String,
-        String,
-        i64,
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<i64>,
-        Option<i64>,
-        Option<String>,
-        Option<i64>,
+        (i64, String, String, i64, Option<i64>, String, String),
+        (String, String, String),
+        (Option<String>, Option<i64>, Option<i64>, Option<String>, Option<i64>),
     );
     let mut statement = tx
         .prepare_cached(
             "SELECT attempt,binding_json,projection_sha256,projection_byte_length,
-                    merged_contribution_ids_json,recovery_object_id,recovery_moment_id,
-                    recovered_path,accepted_recovery_origin_id,accepted_recovery_origin_seq,
-                    accepted_recovery_relay_seq,resolution_outcome,resolution_outcome_at_ms
+                    (SELECT byte_length FROM blobs WHERE sha256=projection_sha256),
+                    merged_contribution_ids_json,recovery_author_json,recovery_object_id,
+                    recovery_moment_id,recovered_path,accepted_recovery_origin_id,
+                    accepted_recovery_origin_seq,accepted_recovery_relay_seq,resolution_outcome,
+                    resolution_outcome_at_ms
                FROM released_hold_copy_decisions
               WHERE workspace_id=?1 AND binding_digest=?2
               ORDER BY attempt",
@@ -572,19 +669,23 @@ fn read_decisions(
     let rows = statement
         .query_map(params![workspace_id, binding_digest], |row| {
             Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-                row.get(7)?,
-                row.get(8)?,
-                row.get(9)?,
-                row.get(10)?,
-                row.get(11)?,
-                row.get(12)?,
+                (
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ),
+                (row.get(7)?, row.get(8)?, row.get(9)?),
+                (
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
+                    row.get(13)?,
+                    row.get(14)?,
+                ),
             ))
         })
         .map_err(SyncError::corrupt)?
@@ -593,20 +694,27 @@ fn read_decisions(
     rows.into_iter()
         .map(
             |(
-                attempt,
-                binding_json,
-                projection_sha256,
-                projection_byte_length,
-                merged_contribution_ids_json,
-                recovery_object_id,
-                recovery_moment_id,
-                recovered_path,
-                origin_id,
-                origin_seq,
-                relay_seq,
-                outcome,
-                outcome_at_ms,
+                (
+                    attempt,
+                    binding_json,
+                    projection_sha256,
+                    projection_byte_length,
+                    stored_byte_length,
+                    merged_contribution_ids_json,
+                    recovery_author_json,
+                ),
+                (recovery_object_id, recovery_moment_id, recovered_path),
+                (origin_id, origin_seq, relay_seq, outcome, outcome_at_ms),
             )| {
+                if !decision_reads(
+                    binding_digest,
+                    &binding_json,
+                    &merged_contribution_ids_json,
+                    &recovery_author_json,
+                ) || stored_byte_length != Some(projection_byte_length)
+                {
+                    return Err(local_corruption("a copy decision does not read"));
+                }
                 let accepted = match (origin_id, origin_seq, relay_seq) {
                     (Some(origin_id), Some(origin_seq), Some(relay_seq)) => {
                         Some((origin_id, origin_seq, relay_seq))
@@ -632,6 +740,7 @@ fn read_decisions(
                     recovery_object_id,
                     recovery_moment_id,
                     recovered_path,
+                    recovery_author_json,
                     accepted,
                     resolution,
                 })
@@ -640,9 +749,56 @@ fn read_decisions(
         .collect()
 }
 
+/// Whether a decision's columns agree with each other and with its key: the
+/// binding's canonical JSON names `binding_digest`, the merged contributions
+/// are valid ones in canonical order as their canonical JSON, and the
+/// authors a canonical list within a moment's limits that credits every
+/// merged contribution's.
+fn decision_reads(
+    binding_digest: &str,
+    binding_json: &str,
+    merged_json: &str,
+    author_json: &str,
+) -> bool {
+    let binding_reads = ReleasedLineageBinding::from_canonical_json(binding_json)
+        .is_some_and(|binding| binding.digest() == binding_digest);
+    let merged = serde_json::from_str::<Vec<serde_json::Value>>(merged_json)
+        .ok()
+        .and_then(|values| {
+            values
+                .iter()
+                .map(RetainedContribution::from_json)
+                .collect::<Option<Vec<_>>>()
+        })
+        .filter(|merged| merged.windows(2).all(|pair| pair[0] < pair[1]))
+        .filter(|merged| {
+            merged_contributions_json(merged).is_ok_and(|canonical| canonical == merged_json)
+        });
+    let Some(merged) = merged else {
+        return false;
+    };
+    let mut authors = Authors::default();
+    if !binding_reads
+        || authors.union_json(author_json).is_err()
+        || authors.is_empty()
+        || authors.json() != author_json
+        || authors.len() > dohc_engine_domain::MAX_MOMENT_AUTHORS
+        || authors.journal_bytes() > dohc_engine_domain::MAX_AUTHOR_JSON_BYTES
+    {
+        return false;
+    }
+    merged.iter().all(|contribution| {
+        authors.union_json(contribution.authors().json()).is_ok()
+            && authors.json() == author_json
+    })
+}
+
 /// Whether `creation` is a copy this replica already holds: the same
 /// version, object and moment, a text creation of a new object with the same
-/// stored bytes, length and correlation, and no authors on either side.
+/// stored bytes, length and correlation, and the same retained authorship:
+/// the copy here and the creation each name the authors this device's
+/// decision credits, as kept or as an owner's push repairs them, or, with no
+/// decision here, the creation names exactly the copy's authors.
 /// Recording time and path do not decide it.
 pub(crate) fn equivalent_released_copy_in_tx(
     tx: &Transaction<'_>,
@@ -657,19 +813,23 @@ pub(crate) fn equivalent_released_copy_in_tx(
         || !matches!(creation.before_present, "absent" | "null")
         || !matches!(creation.after_content_kind, None | Some("text"))
         || !valid_claim_id(correlation_id)
-        || creation.has_authors
+        || creation.attribution_unavailable
     {
         return Ok(false);
     }
-    let stored: Option<(i64, String)> = tx
+    let stored: Option<(i64, String, Option<String>, Option<String>)> = tx
         .query_row(
-            "SELECT blob.byte_length,blob.text FROM moments AS moment
+            "SELECT blob.byte_length,blob.text,moment.author_json,decision.recovery_author_json
+               FROM moments AS moment
                JOIN blobs AS blob ON blob.sha256=moment.after_blob_sha256
+               LEFT JOIN released_hold_copy_decisions AS decision
+                 ON decision.workspace_id=moment.workspace_id
+                AND decision.recovery_moment_id=moment.moment_id
+                AND decision.binding_digest=moment.metadata_correlation_id
               WHERE moment.workspace_id=?1 AND moment.moment_id=?2 AND moment.version_id=?3
                 AND moment.object_id=?4 AND moment.operation='write'
                 AND moment.after_content_kind='text' AND moment.before_present IN (0,1)
-                AND moment.after_blob_sha256=?5 AND moment.metadata_correlation_id=?6
-                AND moment.author_json IS NULL",
+                AND moment.after_blob_sha256=?5 AND moment.metadata_correlation_id=?6",
             params![
                 workspace_id,
                 creation.moment_id,
@@ -678,14 +838,24 @@ pub(crate) fn equivalent_released_copy_in_tx(
                 creation.after_blob_sha256,
                 correlation_id,
             ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()
         .map_err(SyncError::corrupt)?;
-    Ok(stored.is_some_and(|(length, text)| {
+    Ok(stored.is_some_and(|(length, text, author_json, credited)| {
         creation.after_byte_length.is_none_or(|incoming| incoming == length)
             && i64::try_from(text.len()).is_ok_and(|actual| actual == length)
             && dohc_engine_storage::hex_sha256(text.as_bytes()) == creation.after_blob_sha256
+            && match credited {
+                Some(credited) => {
+                    let published = published_authors(&credited);
+                    published.contains(&parsed_authors(author_json.as_deref()))
+                        && published.contains(&creation.authors.cloned())
+                }
+                // Received here, never kept: the copy here is the first
+                // creation as it was published.
+                None => parsed_authors(author_json.as_deref()) == creation.authors.cloned(),
+            }
     }))
 }
 

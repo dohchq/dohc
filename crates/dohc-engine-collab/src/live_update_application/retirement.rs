@@ -5,7 +5,10 @@
 use super::owner_activations::{
     activation_by_id, current_activation, lineage_origin_id, ActivationAdoption, OwnerActivation,
 };
-use super::released_protection::RetainedContribution;
+use super::released_protection::{
+    readable, ContributionLocator, PreservationFinding, PreservationReason, RetainedAuthors,
+    RetainedContribution, TailWork,
+};
 use super::*;
 use crate::owner_outbox::{
     OwnerDeliveryReceipt, OwnerOutboxError, OwnerOutboxNativeOrigin, OwnerOutboxNativeSource,
@@ -566,64 +569,83 @@ fn resolve_manifest(
     let mut listed = BTreeSet::new();
     let mut inherited = Vec::with_capacity(manifest.len());
     for carried in manifest {
-        carried
-            .receipt
-            .validate()
-            .map_err(|_| ApplicationError::Corrupt)?;
         if !listed.insert(carried.receipt.delivery_id.clone()) {
             return Err(ApplicationError::Conflict);
         }
-        let entry = native_entries(
-            conn,
-            doc,
-            lineage,
-            "e.delivery_id=?5",
-            params![carried.receipt.delivery_id],
-        )?
-        .pop()
-        .ok_or(ApplicationError::Conflict)?;
-        let saved = entry.receipt.as_deref().map(saved_receipt).transpose()?;
-        if saved.as_ref() != Some(&carried.receipt)
-            || entry.update_digest != carried.receipt.update_digest
-            || entry.source.native_sequence != carried.native_sequence
-            || entry.pending
-            || entry.update_blob.is_some()
-            || entry.terminal_reason.is_some()
-            || entry.terminal_blob.is_some()
-        {
-            return Err(ApplicationError::Conflict);
-        }
-        let provenance = match entry.source.origin {
-            OwnerOutboxNativeOrigin::AdoptionSeed => {
-                captured_seed(conn, namespace, doc, lineage, &entry.source)?
-            }
-            OwnerOutboxNativeOrigin::NativeUpdate { .. } => {
-                entry
-                    .source
-                    .verify_retained_row(conn)
-                    .map_err(outbox_error)?;
-                true
-            }
-        };
-        if !provenance
-            || chained_retiring(
-                conn,
-                namespace,
-                doc,
-                lineage,
-                chain,
-                &entry.source.adoption_id,
-            )?
-            .is_none()
-        {
-            return Err(ApplicationError::Conflict);
-        }
-        inherited.push(InheritedEntry {
-            entry,
-            receipt: carried.receipt,
-        });
+        inherited.push(resolve_carried(conn, namespace, doc, lineage, carried, chain)?);
     }
     Ok(inherited)
+}
+
+/// One delivery of a chain's Carried manifest, resolved as
+/// [`inherited_entries`] describes.
+fn resolve_carried(
+    conn: &Connection,
+    namespace: &str,
+    doc: &DocKey,
+    lineage: &str,
+    carried: CarriedDelivery,
+    chain: &HashSet<String>,
+) -> Result<InheritedEntry, ApplicationError> {
+    carried
+        .receipt
+        .validate()
+        .map_err(|_| ApplicationError::Corrupt)?;
+    let entry = native_entries(
+        conn,
+        doc,
+        lineage,
+        "e.delivery_id=?5",
+        params![carried.receipt.delivery_id],
+    )?
+    .pop()
+    .ok_or(ApplicationError::Conflict)?;
+    let saved = entry.receipt.as_deref().map(saved_receipt).transpose()?;
+    if saved.as_ref() != Some(&carried.receipt)
+        || entry.update_digest != carried.receipt.update_digest
+        || entry.source.native_sequence != carried.native_sequence
+        || entry.pending
+        || entry.update_blob.is_some()
+        || entry.terminal_reason.is_some()
+        || entry.terminal_blob.is_some()
+    {
+        return Err(ApplicationError::Conflict);
+    }
+    if !native_provenance(conn, namespace, doc, lineage, &entry.source)?
+        || chained_retiring(
+            conn,
+            namespace,
+            doc,
+            lineage,
+            chain,
+            &entry.source.adoption_id,
+        )?
+        .is_none()
+    {
+        return Err(ApplicationError::Conflict);
+    }
+    Ok(InheritedEntry {
+        entry,
+        receipt: carried.receipt,
+    })
+}
+
+/// Whether what queued a native entry proves its source: a native update's
+/// own journal row, within its compaction, or a seed's capture.
+fn native_provenance(
+    conn: &Connection,
+    namespace: &str,
+    doc: &DocKey,
+    lineage: &str,
+    source: &OwnerOutboxNativeSource,
+) -> Result<bool, ApplicationError> {
+    match source.origin {
+        OwnerOutboxNativeOrigin::AdoptionSeed => captured_seed(conn, namespace, doc, lineage, source),
+        OwnerOutboxNativeOrigin::NativeUpdate { .. } => {
+            source.verify_retained_row(conn).map_err(outbox_error)?;
+            Ok(true)
+        }
+    }
 }
 
 /// Whether the entry at `sequence` of `outbox_id` is a delivery a host
@@ -782,46 +804,75 @@ pub(crate) fn released_binding(
 /// each Carried delivery its manifest lists that no host applied here, and
 /// each other outbox entry of the chain that is pending, saved a receipt
 /// nothing here applied or accepted, or holds neither a receipt nor a strict
-/// terminal representation. Every entry of the lineage is validated before
-/// it is set aside: its native source, and the exact application or accepted
-/// receipt that proves it. Missing or conflicting evidence refuses; it never
-/// reads as nothing retained.
+/// terminal representation, each with the authors its evidence credits.
+/// Every entry of the lineage is validated before it is set aside or kept:
+/// its native source, and the exact application or accepted receipt that
+/// proves it. A kept one's provenance is validated too: a native update's
+/// journal row, a seed's capture, a draft's declarations, and any receipt,
+/// acceptance or application its delivery has, a pending one's included.
+/// Pending proves nothing applied, and an acceptance or application a
+/// pending entry never recorded keeps it as it is.
+///
+/// Missing or conflicting evidence never reads as nothing retained. An entry
+/// whose evidence contradicts itself is a contradiction of the work it names,
+/// or of the tail when nothing names that work, and every other entry is
+/// still checked. Evidence that does not enumerate, or a storage failure, is
+/// an error.
 pub(crate) fn unproven_retained(
     conn: &Connection,
     namespace: &str,
     doc: &DocKey,
     lineage: &str,
     tail: &str,
-) -> Result<Vec<RetainedContribution>, ApplicationError> {
-    let mut unproven = Vec::new();
+) -> Result<TailWork, ApplicationError> {
+    let mut work = Found {
+        namespace,
+        tail: TailWork::default(),
+    };
     let mut listed = BTreeSet::new();
     let chain = chain_activations(conn, namespace, tail)?;
-    for inherited in inherited_in_chain(conn, namespace, doc, lineage, tail, &chain)? {
-        let receipt = inherited.receipt;
-        listed.insert(receipt.delivery_id.clone());
-        let accepted = accepted_receipt(
-            conn,
-            namespace,
-            doc,
-            lineage,
-            &receipt.delivery_id,
-            &receipt.update_digest,
-        )?;
-        if accepted.is_some_and(|accepted| accepted != receipt) {
-            return Err(ApplicationError::Conflict);
+    let (_, manifest) = released_tail(conn, namespace, tail)?;
+    for carried in manifest {
+        let receipt = &carried.receipt;
+        let locator = ContributionLocator::Carried {
+            delivery_id: receipt.delivery_id.clone(),
+            update_digest: receipt.update_digest.clone(),
+            journal_cursor: receipt.journal_cursor,
+        };
+        if !listed.insert(receipt.delivery_id.clone()) {
+            work.contradiction(PreservationReason::ContradictoryEvidence, &locator);
+            continue;
         }
-        if !applied(conn, namespace, doc, lineage, &receipt)? {
-            unproven.push(RetainedContribution::Carried {
-                delivery_id: receipt.delivery_id,
-                update_digest: receipt.update_digest,
-                journal_cursor: receipt.journal_cursor,
-            });
-        }
+        let unapplied = (|| -> Result<Option<RetainedEntry>, ApplicationError> {
+            let inherited = resolve_carried(conn, namespace, doc, lineage, carried, &chain)?;
+            let receipt = &inherited.receipt;
+            let accepted = accepted_receipt(
+                conn,
+                namespace,
+                doc,
+                lineage,
+                &receipt.delivery_id,
+                &receipt.update_digest,
+            )?;
+            if accepted.is_some_and(|accepted| accepted != *receipt) {
+                return Err(ApplicationError::Conflict);
+            }
+            Ok((!applied(conn, namespace, doc, lineage, receipt)?).then_some(inherited.entry))
+        })();
+        let Some(Some(entry)) = work.checked(&locator, unapplied)? else {
+            continue;
+        };
+        let authors = (|| -> Result<RetainedAuthors, ApplicationError> {
+            let (agent, automation, person) = declarations(conn, &entry.outbox_id, entry.sequence)?;
+            retained_authors(Some(&entry.source), agent, automation, person)
+        })();
+        work.authored(locator, authors)?;
     }
     let mut entries = conn
         .prepare(
             "SELECT e.outbox_id,e.sequence,e.append_key,e.delivery_id,e.update_digest,e.native_source_json,
-                length(CAST(e.native_source_json AS BLOB)),e.pending,e.accepted_receipt_json,e.terminal_reason
+                length(CAST(e.native_source_json AS BLOB)),e.pending,e.accepted_receipt_json,e.terminal_reason,
+                e.agent_declaration_json,e.automation_declaration_json,e.person_edit
              FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id
              WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4
              ORDER BY e.outbox_id,e.sequence",
@@ -838,34 +889,74 @@ pub(crate) fn unproven_retained(
     while let Some(row) = rows.next().map_err(read_sql)? {
         let outbox_id: String = row.get(0).map_err(read_sql)?;
         let sequence: i64 = row.get(1).map_err(read_sql)?;
+        let append_key: String = row.get(2).map_err(read_sql)?;
         let delivery_id: String = row.get(3).map_err(read_sql)?;
         let update_digest: String = row.get(4).map_err(read_sql)?;
+        let native: Option<String> = row.get(5).map_err(read_sql)?;
+        let native_length: Option<i64> = row.get(6).map_err(read_sql)?;
         let pending: bool = row.get(7).map_err(read_sql)?;
         let receipt: Option<String> = row.get(8).map_err(read_sql)?;
         let terminal: Option<String> = row.get(9).map_err(read_sql)?;
+        let agent: Option<String> = row.get(10).map_err(read_sql)?;
+        let automation: Option<String> = row.get(11).map_err(read_sql)?;
+        let person: Option<i64> = row.get(12).map_err(read_sql)?;
+        let locator = ContributionLocator::Outbox {
+            outbox_id: outbox_id.clone(),
+            sequence,
+            delivery_id: delivery_id.clone(),
+            update_digest: update_digest.clone(),
+        };
         // A native entry of another activation of the lineage is that
         // activation's work; one whose source names nothing it can be is not.
-        if let Some(json) = row.get::<_, Option<String>>(5).map_err(read_sql)? {
-            let source = native_source(
-                &json,
-                row.get::<_, Option<i64>>(6).map_err(read_sql)?.unwrap_or(0),
-                &row.get::<_, String>(2).map_err(read_sql)?,
-                doc,
-                lineage,
-                &update_digest,
-            )?;
-            if !chain.contains(&source.adoption_id) {
-                if !lineage_activation(conn, doc, lineage, &source.adoption_id)? {
+        let source = native
+            .map(|json| -> Result<OwnerOutboxNativeSource, ApplicationError> {
+                let source = native_source(
+                    &json,
+                    native_length.unwrap_or(0),
+                    &append_key,
+                    doc,
+                    lineage,
+                    &update_digest,
+                )?;
+                if !chain.contains(&source.adoption_id)
+                    && !lineage_activation(conn, doc, lineage, &source.adoption_id)?
+                {
                     return Err(ApplicationError::Conflict);
                 }
-                continue;
-            }
-        }
-        if listed.contains(&delivery_id) {
+                Ok(source)
+            })
+            .transpose();
+        let Some(source) = work.checked(&locator, source)? else {
+            continue;
+        };
+        if source
+            .as_ref()
+            .is_some_and(|source| !chain.contains(&source.adoption_id))
+            || listed.contains(&delivery_id)
+        {
             continue;
         }
-        if !pending {
-            if let Some(receipt) = &receipt {
+        let unproven = (|| -> Result<bool, ApplicationError> {
+            if pending {
+                // Nothing saved a receipt for it yet; any acceptance or
+                // application of its delivery is still its own.
+                if receipt.is_some() || terminal.is_some() {
+                    return Err(ApplicationError::Conflict);
+                }
+                match accepted_receipt(conn, namespace, doc, lineage, &delivery_id, &update_digest)? {
+                    Some(accepted) => {
+                        applied(conn, namespace, doc, lineage, &accepted)?;
+                    }
+                    None => unacknowledged_application(
+                        conn,
+                        namespace,
+                        doc,
+                        lineage,
+                        &delivery_id,
+                        &update_digest,
+                    )?,
+                }
+            } else if let Some(receipt) = &receipt {
                 let saved = saved_receipt(receipt)?;
                 saved.validate().map_err(|_| ApplicationError::Corrupt)?;
                 if saved.delivery_id != delivery_id || saved.update_digest != update_digest {
@@ -877,24 +968,147 @@ pub(crate) fn unproven_retained(
                     return Err(ApplicationError::Conflict);
                 }
                 if applied(conn, namespace, doc, lineage, &saved)? || accepted.is_some() {
-                    continue;
+                    return Ok(false);
                 }
             } else if terminal.is_some() {
                 if strictly_terminal(conn, namespace, doc, lineage, &chain, &outbox_id, sequence)? {
-                    continue;
+                    return Ok(false);
                 }
                 return Err(ApplicationError::Conflict);
             }
+            // What it keeps is what its provenance proves.
+            if let Some(source) = &source {
+                if !native_provenance(conn, namespace, doc, lineage, source)? {
+                    return Err(ApplicationError::Conflict);
+                }
+            }
+            Ok(true)
+        })();
+        if work.checked(&locator, unproven)? != Some(true) {
+            continue;
         }
-        unproven.push(RetainedContribution::Outbox {
-            outbox_id,
-            sequence,
-            delivery_id,
-            update_digest,
+        let authors = retained_authors(source.as_ref(), agent, automation, person);
+        work.authored(locator, authors)?;
+    }
+    let mut tail = work.tail;
+    tail.contributions.sort();
+    Ok(tail)
+}
+
+/// A tail's work as its validation finds it.
+struct Found<'a> {
+    namespace: &'a str,
+    tail: TailWork,
+}
+
+impl Found<'_> {
+    /// A contradiction of the work `locator` names, or of the tail when no
+    /// reader could locate that work.
+    fn contradiction(&mut self, reason: PreservationReason, locator: &ContributionLocator) {
+        self.tail.contradictions.push(PreservationFinding {
+            reason,
+            namespace: Some(self.namespace.to_owned()),
+            contribution: locator.readable().then(|| locator.clone()),
         });
     }
-    unproven.sort();
-    Ok(unproven)
+
+    /// What `result` reads as evidence of the work `locator` names: none,
+    /// with its contradiction recorded, when it does not read. A storage
+    /// failure stays an error.
+    fn checked<T>(
+        &mut self,
+        locator: &ContributionLocator,
+        result: Result<T, ApplicationError>,
+    ) -> Result<Option<T>, ApplicationError> {
+        let read = readable(result)?;
+        if read.is_none() {
+            self.contradiction(PreservationReason::ContradictoryEvidence, locator);
+        }
+        Ok(read)
+    }
+
+    /// Keep the work `locator` names, once its authors read. Malformed
+    /// authorship is a contradiction of its own: no contribution is made up
+    /// for it.
+    fn authored(
+        &mut self,
+        locator: ContributionLocator,
+        authors: Result<RetainedAuthors, ApplicationError>,
+    ) -> Result<(), ApplicationError> {
+        match readable(authors)? {
+            Some(authors) => self
+                .tail
+                .contributions
+                .push(RetainedContribution::at(locator, authors)),
+            None => self.contradiction(PreservationReason::MalformedAuthorship, &locator),
+        }
+        Ok(())
+    }
+}
+
+/// The authors an outbox entry's evidence credits, as
+/// [`crate::owner_outbox::entry_credit`] derives them for release too.
+fn retained_authors(
+    native: Option<&OwnerOutboxNativeSource>,
+    agent: Option<String>,
+    automation: Option<String>,
+    person: Option<i64>,
+) -> Result<RetainedAuthors, ApplicationError> {
+    let (actor, attribution) =
+        crate::owner_outbox::entry_credit(native, agent, automation, person).map_err(outbox_error)?;
+    RetainedAuthors::credited(actor.as_deref(), attribution.as_ref()).ok_or(ApplicationError::Corrupt)
+}
+
+/// The declarations the entry at `sequence` of `outbox_id` keeps.
+fn declarations(
+    conn: &Connection,
+    outbox_id: &str,
+    sequence: i64,
+) -> Result<(Option<String>, Option<String>, Option<i64>), ApplicationError> {
+    conn.prepare_cached(
+        "SELECT agent_declaration_json,automation_declaration_json,person_edit
+         FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND sequence=?2",
+    )
+    .map_err(read_sql)?
+    .query_row(params![outbox_id, sequence], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    })
+    .map_err(read_sql)
+}
+
+/// Refuse an application of `delivery` here that names another document,
+/// lineage or bytes. Without a receipt, its coordinate proves nothing.
+fn unacknowledged_application(
+    conn: &Connection,
+    namespace: &str,
+    doc: &DocKey,
+    lineage: &str,
+    delivery: &str,
+    update_digest: &str,
+) -> Result<(), ApplicationError> {
+    let row: Option<(String, String, String, String, String)> = conn
+        .prepare_cached(
+            "SELECT workspace_id,main_version_id,object_id,lineage_claim_id,update_digest
+             FROM live_device_update_applications WHERE relay_database_namespace=?1 AND delivery_id=?2",
+        )
+        .map_err(read_sql)?
+        .query_row(params![namespace, delivery], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+        })
+        .optional()
+        .map_err(read_sql)?;
+    match row {
+        Some((workspace, version, object, applied_lineage, digest))
+            if workspace != doc.workspace_id
+                || version != doc.version_id
+                || object != doc.object_id
+                || applied_lineage != lineage
+                || digest != update_digest =>
+        {
+            Err(ApplicationError::Conflict)
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Whether `activation_id` names an activation of the document's lineage in

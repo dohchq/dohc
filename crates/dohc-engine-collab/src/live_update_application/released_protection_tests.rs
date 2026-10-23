@@ -77,14 +77,20 @@ fn committed(unproven: Vec<RetainedContribution>) -> RetainedCoverage {
 /// The work `tail` retains without proof, as its validation reads it, which
 /// its binding names by commitment.
 fn unproven_of(f: &Fixture, tail: &ProtectedTail) -> Vec<RetainedContribution> {
-    let unproven = f
-        .store
+    let work = tail_work(f, tail);
+    assert!(work.contradictions.is_empty(), "{}: {:?}", tail.namespace, work.contradictions);
+    let unproven = work.contributions;
+    assert_eq!(tail.coverage, committed(unproven.clone()), "{}: the binding commits to all of it", tail.namespace);
+    unproven
+}
+
+/// What validating `tail` finds, contradictions included.
+fn tail_work(f: &Fixture, tail: &ProtectedTail) -> released_protection::TailWork {
+    f.store
         .read_with(|conn| {
             retirement::unproven_retained(conn, &tail.namespace, &f.key, &f.binding.lineage_claim_id, &tail.activation_id)
         })
-        .unwrap();
-    assert_eq!(tail.coverage, committed(unproven.clone()), "{}: the binding commits to all of it", tail.namespace);
-    unproven
+        .unwrap()
 }
 
 /// The unproven work of the one tail that protects the lineage.
@@ -100,13 +106,38 @@ fn owner_release() -> Option<TailRelease> {
     Some(TailRelease { path: "owner.md".into(), restore_generation: 0 })
 }
 
+/// A native update the fixture's agent made, Carried.
 fn carried(delivery: &CarriedDelivery) -> RetainedContribution {
+    carried_by(delivery, native_agent())
+}
+
+/// An acknowledged seed, Carried: it credits nobody.
+fn carried_seed(delivery: &CarriedDelivery) -> RetainedContribution {
+    carried_by(delivery, RetainedAuthors::credited(None, None).unwrap())
+}
+
+fn carried_by(delivery: &CarriedDelivery, authors: RetainedAuthors) -> RetainedContribution {
     let receipt = &delivery.receipt;
     RetainedContribution::Carried {
         delivery_id: receipt.delivery_id.clone(),
         update_digest: receipt.update_digest.clone(),
         journal_cursor: receipt.journal_cursor,
+        authors,
     }
+}
+
+/// Who `native_tail_edit` credits: its agent, for the owner, at depth 1.
+fn native_agent() -> RetainedAuthors {
+    RetainedAuthors::credited(
+        Some("native-agent"),
+        Some(&dohc_engine_domain::ChangeAttribution {
+            actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
+            on_behalf_of: Some("owner".into()),
+            depth: 1,
+            run: None,
+        }),
+    )
+    .unwrap()
 }
 
 /// Sol's 4b2i-1 ruling, the seam: a released tail protects its lineage while
@@ -157,7 +188,7 @@ fn a_released_tail_protects_its_lineage_while_its_retained_work_lacks_proof() {
     returned(&mut f);
     let unproven = only_unproven(&f);
     let seed = carried_delivery(&f, &seed);
-    assert!(unproven.contains(&carried(&seed)), "an acknowledged seed: {unproven:?}");
+    assert!(unproven.contains(&carried_seed(&seed)), "an acknowledged seed: {unproven:?}");
     assert!(unproven.contains(&carried(&carried_deliveries[1])), "{unproven:?}");
     assert!(!unproven.contains(&carried(&carried_deliveries[0])), "applied: {unproven:?}");
 
@@ -256,6 +287,115 @@ fn unproven_or_unreadable_retained_evidence_protects() {
         let coverage: Vec<RetainedCoverage> = listed(binding).into_iter().map(|tail| tail.coverage).collect();
         assert_eq!(coverage, [RetainedCoverage::Invalid], "{case}");
     }
+}
+
+/// What inspecting `binding` finds of `f`, which must still be current.
+fn inspected(f: &Fixture, binding: &ReleasedLineageBinding) -> Preservation {
+    match f.store.read_with(|conn| inspect_held(conn, binding)).unwrap() {
+        HeldInspection::Current(preservation) => preservation,
+        HeldInspection::Stale => panic!("the binding was just derived"),
+    }
+}
+
+/// Sol's r2c Ruling A: evidence is validated before work is committed to.
+/// A native update's journal row, its declarations, a draft's declarations,
+/// a pending entry's receipt and application, and a Carried delivery's
+/// journal row that contradict the rest each leave the whole tail invalid,
+/// never a commitment to the work that still reads, so destructive ingress
+/// stays held. Inspection names the work each concerns: malformed
+/// authorship by where the work is alone, and evidence that does not
+/// enumerate by its tail. A pending entry whose acknowledgement was lost
+/// stays work like any other.
+#[test]
+fn contradictory_provenance_invalidates_the_whole_tail_and_names_its_work() {
+    use PreservationReason::{ContradictoryEvidence, MalformedAuthorship};
+    let unapplied = || {
+        let mut f = released_without_carried();
+        write_unchecked(&mut f, "PRAGMA foreign_keys=OFF;
+            DELETE FROM live_device_update_applications; DELETE FROM live_accepted_updates");
+        f
+    };
+    let [entry]: [RetainedContribution; 1] = only_unproven(&unapplied()).try_into().unwrap();
+    assert_eq!(entry.authors(), &native_agent(), "the journal row's agent");
+    let RetainedContribution::Outbox { delivery_id, .. } = &entry else {
+        panic!("an outbox entry: {entry:?}")
+    };
+    let automation = r#"{"automationId":"sort","attribution":{"actorKind":"automation","depth":1}}"#;
+    let damages: [(&str, PreservationReason, bool, String); 7] = [
+        ("a journal row naming another author", ContradictoryEvidence, false,
+            "UPDATE ydoc_updates SET actor_origin_id='impostor' WHERE seq IN
+               (SELECT json_extract(native_source_json,'$.nativeSequence') FROM owner_ydoc_outbox_entries
+                WHERE delivery_id=?1)".into()),
+        ("a native entry declaring an automation", MalformedAuthorship, false,
+            format!("UPDATE owner_ydoc_outbox_entries SET automation_declaration_json='{automation}' WHERE delivery_id=?1")),
+        ("a native entry claiming a person's edit", MalformedAuthorship, false,
+            "UPDATE owner_ydoc_outbox_entries SET person_edit=1 WHERE delivery_id=?1".into()),
+        ("a draft declaring an agent and an automation", MalformedAuthorship, false,
+            format!("UPDATE owner_ydoc_outbox_entries SET native_source_json=NULL,
+               agent_declaration_json='{{\"agentId\":\"a\",\"onBehalfOf\":null,\"depth\":0}}',
+               automation_declaration_json='{automation}' WHERE delivery_id=?1")),
+        ("a draft whose declaration does not validate", MalformedAuthorship, false,
+            "UPDATE owner_ydoc_outbox_entries SET native_source_json=NULL,
+               agent_declaration_json='{\"agentId\":\"\",\"onBehalfOf\":null,\"depth\":0}' WHERE delivery_id=?1".into()),
+        ("a pending entry that saved a receipt", ContradictoryEvidence, false,
+            "UPDATE owner_ydoc_outbox_entries SET pending=1,update_blob_digest=update_digest WHERE delivery_id=?1".into()),
+        ("a pending entry applied here with other bytes", ContradictoryEvidence, true,
+            format!("UPDATE owner_ydoc_outbox_entries SET pending=1,update_blob_digest=update_digest,
+               accepted_receipt_json=NULL WHERE delivery_id=?1;
+             UPDATE live_device_update_applications SET update_digest='{}' WHERE delivery_id=?1", "0".repeat(64))),
+    ];
+    for (case, reason, applications_kept, damage) in damages {
+        let mut f = if applications_kept { released_without_carried() } else { unapplied() };
+        write_unchecked(&mut f, &format!("PRAGMA foreign_keys=OFF; {}", damage.replace("?1", &format!("'{delivery_id}'"))));
+        let binding = protected(&f).unwrap_or_else(|| panic!("{case}: still protected"));
+        assert_eq!(coverage_of(binding.clone()), [RetainedCoverage::Invalid], "{case}");
+        let expected = [PreservationFinding {
+            reason,
+            namespace: Some("namespace".into()),
+            contribution: Some(entry.locator()),
+        }];
+        let [tail] = <[ProtectedTail; 1]>::try_from(listed(binding.clone())).unwrap();
+        let work = tail_work(&f, &tail);
+        assert_eq!(work.contradictions, expected, "{case}");
+        assert!(work.contributions.iter().all(|kept| kept.locator() != entry.locator()), "{case}: none made up");
+        let preservation = inspected(&f, &binding);
+        assert_eq!(preservation.status, PreservationStatus::InvalidEvidence, "{case}");
+        assert_eq!(preservation.findings, expected, "{case}");
+        assert!(preservation.covered.is_empty() && preservation.preserved.is_none(), "{case}");
+    }
+
+    // An acknowledgement lost before the entry recorded it: the relay
+    // accepted it and the host applied it, and it is still work.
+    let mut f = released_without_carried();
+    write_unchecked(&mut f, &format!("PRAGMA foreign_keys=OFF;
+        UPDATE owner_ydoc_outbox_entries SET pending=1,update_blob_digest=update_digest,accepted_receipt_json=NULL
+        WHERE delivery_id='{delivery_id}'"));
+    assert_eq!(only_unproven(&f), [entry.clone()], "pending is no proof, and its acceptance no contradiction");
+
+    // One Carried delivery's journal row contradicts it; the other still
+    // reads, and the tail commits to neither.
+    let (mut f, _, c1, _) = released_at_b();
+    write_unchecked(&mut f, &format!("PRAGMA foreign_keys=OFF;
+        UPDATE ydoc_updates SET actor_origin_id='impostor' WHERE seq={}", c1.native_sequence));
+    let binding = protected(&f).expect("protected");
+    assert_eq!(coverage_of(binding.clone()), [RetainedCoverage::Invalid]);
+    assert_eq!(
+        inspected(&f, &binding).findings,
+        [PreservationFinding {
+            reason: ContradictoryEvidence,
+            namespace: Some("namespace".into()),
+            contribution: Some(carried(&c1).locator()),
+        }]
+    );
+
+    // A tail record that does not read names no work: its tail is the finding.
+    let mut f = released_without_carried();
+    write_unchecked(&mut f, "UPDATE live_owner_activations SET released_boundary_json='{}' WHERE activation_id='adoption'");
+    let binding = protected(&f).expect("protected");
+    assert_eq!(
+        inspected(&f, &binding).findings,
+        [PreservationFinding { reason: ContradictoryEvidence, namespace: Some("namespace".into()), contribution: None }]
+    );
 }
 
 /// Record, past the store's checks, that the host applied exactly `receipt`:

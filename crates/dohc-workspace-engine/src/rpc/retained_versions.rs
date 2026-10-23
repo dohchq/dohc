@@ -35,11 +35,24 @@ struct KeepRetainedVersionParams {
     projection_sha256: String,
     projection_byte_length: usize,
     preservation: String,
+    covered_contributions: Vec<CoveredParams>,
     merged_contribution_ids: Vec<Value>,
+}
+
+/// One tail's covered work, as inspection reported it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CoveredParams {
+    namespace: String,
+    contributions: Vec<Value>,
 }
 
 fn invalid(message: &'static str) -> WireError {
     WireError::new(ErrorCode::InvalidParams, message)
+}
+
+fn contributions(values: &[Value]) -> Option<Vec<RetainedContribution>> {
+    values.iter().map(RetainedContribution::from_json).collect()
 }
 
 /// The request's copy, checked against itself before anything opens.
@@ -52,15 +65,18 @@ fn keep_request(
     if params.preservation != "complete" {
         return Err(invalid("preservation is not complete"));
     }
-    let merged_contribution_ids = params
-        .merged_contribution_ids
-        .iter()
-        .map(RetainedContribution::from_json)
-        .collect::<Option<Vec<_>>>()
+    let merged_contribution_ids = contributions(&params.merged_contribution_ids)
         .ok_or_else(|| invalid("invalid merged contribution"))?;
     if !merged_contribution_ids.windows(2).all(|pair| pair[0] < pair[1]) {
         return Err(invalid("merged contributions are not in canonical order"));
     }
+    // The store checks them against the binding's commitments.
+    let covered_contributions = params
+        .covered_contributions
+        .iter()
+        .map(|covered| Some((covered.namespace.clone(), contributions(&covered.contributions)?)))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| invalid("invalid covered contribution"))?;
     if params.projection_byte_length > dohc_engine_domain::MAX_TEXT_BYTES
         || params.markdown_base64.len() > params.projection_byte_length.div_ceil(3) * 4
     {
@@ -81,6 +97,7 @@ fn keep_request(
             binding,
             markdown,
             projection_sha256: params.projection_sha256,
+            covered_contributions,
             merged_contribution_ids,
             now_ms: now_ms()?,
         },
@@ -143,6 +160,8 @@ fn kept_json(kept: &KeptRetainedVersion) -> Value {
             .iter()
             .map(RetainedContribution::to_json)
             .collect::<Vec<_>>(),
+        "authors": serde_json::from_str::<Value>(&kept.recovery_author_json)
+            .unwrap_or(Value::Null),
         "resolution": kept.resolution.map(|(outcome, at_ms)| json!({
             "outcome": outcome.as_str(),
             "atMs": at_ms,
@@ -157,7 +176,7 @@ mod tests {
 
     fn binding() -> Value {
         json!({
-            "version": 2, "workspaceId": "ws", "mainVersionId": "main", "objectId": "object",
+            "version": 3, "workspaceId": "ws", "mainVersionId": "main", "objectId": "object",
             "lineageClaimId": "a".repeat(64), "currentPath": "notes/plan.md", "restoreGeneration": 0,
             "incoming": {"relayNamespace": "relay", "replicationEpoch": "epoch", "streamIdentity": "stream",
                 "originId": "desktop", "originSeq": 1, "relaySeq": 3},
@@ -170,7 +189,8 @@ mod tests {
 
     fn outbox(sequence: i64) -> Value {
         json!({"kind": "outbox", "outboxId": "outbox", "sequence": sequence,
-            "deliveryId": format!("delivery-{sequence}"), "updateDigest": "d".repeat(64)})
+            "deliveryId": format!("delivery-{sequence}"), "updateDigest": "d".repeat(64),
+            "authors": [{"kind": "agent", "agentId": "trip-agent", "onBehalfOf": "owner", "depth": 1}]})
     }
 
     fn params(markdown: &[u8]) -> Value {
@@ -181,6 +201,7 @@ mod tests {
             "projectionSha256": dohc_engine_storage::hex_sha256(markdown),
             "projectionByteLength": markdown.len(),
             "preservation": "complete",
+            "coveredContributions": [{"namespace": "relay", "contributions": [outbox(1), outbox(2), outbox(3)]}],
             "mergedContributionIds": [outbox(1), outbox(2)],
         })
     }
@@ -208,6 +229,15 @@ mod tests {
             input.merged_contribution_ids.iter().map(RetainedContribution::to_json).collect::<Vec<_>>(),
             vec![outbox(1), outbox(2)]
         );
+        let [(namespace, covered)] = input.covered_contributions.as_slice() else {
+            panic!("one tail: {:?}", input.covered_contributions);
+        };
+        assert_eq!(namespace, "relay");
+        assert_eq!(
+            covered.iter().map(RetainedContribution::to_json).collect::<Vec<_>>(),
+            vec![outbox(1), outbox(2), outbox(3)],
+            "with their authors"
+        );
     }
 
     /// Each part of the request must agree with the rest before the store is
@@ -231,6 +261,26 @@ mod tests {
         assert_eq!(with(&|value| value["mergedContributionIds"] = json!([outbox(2), outbox(1)])), "merged contributions are not in canonical order");
         assert_eq!(with(&|value| value["mergedContributionIds"] = json!([outbox(1), outbox(1)])), "merged contributions are not in canonical order");
         assert_eq!(with(&|value| value["mergedContributionIds"] = json!([{"kind": "outbox"}])), "invalid merged contribution");
+        assert_eq!(
+            with(&|value| {
+                value["mergedContributionIds"][0].as_object_mut().unwrap().remove("authors");
+            }),
+            "invalid merged contribution"
+        );
+        assert_eq!(
+            with(&|value| value["coveredContributions"][0]["contributions"][0]["sequence"] = json!(0)),
+            "invalid covered contribution"
+        );
+        assert_eq!(
+            with(&|value| value["coveredContributions"][0]["contributions"][1]["authors"] = json!([])),
+            "invalid covered contribution"
+        );
+        assert_eq!(
+            with(&|value| {
+                value.as_object_mut().unwrap().remove("coveredContributions");
+            }),
+            "invalid parameters"
+        );
         assert_eq!(with(&|value| value["projectionByteLength"] = json!(dohc_engine_domain::MAX_TEXT_BYTES + 1)), "content-exceeds-capture-cap");
         assert_eq!(with(&|value| value["markdown"] = json!("# Plan\n")), "invalid parameters");
         let invalid_utf8 = [0xff_u8, 0xfe];

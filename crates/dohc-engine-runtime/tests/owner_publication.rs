@@ -7053,6 +7053,8 @@ async fn a_desktop_fold_never_destroys_what_a_released_chain_retains() {
                     delivery_id: w.retained_delivery.clone(),
                     update_digest: w.retained_digest.clone(),
                     journal_cursor: 2,
+                    // A seed, and an edit with no attribution, credit nobody.
+                    authors: RetainedAuthors::credited(None, None).unwrap(),
                 }])
                 .unwrap()
             ),
@@ -8127,6 +8129,8 @@ fn outbox_only(w: &mut RetainedWindow, text: &str, stored: Stored) -> RetainedCo
         sequence,
         delivery_id: "outbox-only".into(),
         update_digest: digest,
+        // The draft declares no one, as the unattributed edit it copies.
+        authors: RetainedAuthors::credited(None, None).unwrap(),
     }
 }
 
@@ -8251,7 +8255,7 @@ async fn missing_corrupt_or_contradictory_evidence_never_preserves() {
             .iter()
             .map(|found| (found.reason, found.contribution.clone()))
             .collect::<Vec<_>>(),
-        [(PreservationReason::SourceMissing, Some(contribution))]
+        [(PreservationReason::SourceMissing, Some(contribution.locator()))]
     );
     assert_eq!(preservation.preserved, None);
     desktop.close().await;
@@ -8291,6 +8295,51 @@ async fn missing_corrupt_or_contradictory_evidence_never_preserves() {
         [PreservationReason::ContradictoryEvidence]
     );
     assert_eq!(preservation.preserved, None);
+    desktop.close().await;
+    w.close().await;
+}
+
+/// Sol's r2c Ruling A: a hold derived before the retained delivery's journal
+/// row named another author names coverage validation no longer gives, so it
+/// inspects as stale. Derived again, it names invalid coverage, and
+/// inspecting it answers the contradiction and where its work is, with
+/// nothing to keep.
+#[tokio::test]
+async fn coverage_stronger_validation_refuses_inspects_as_stale_then_as_its_finding() {
+    let (mut w, desktop, _client) = held_for_a_queued_fold().await;
+    assert_eq!(inspected_window(&w.store).status, dohc_engine_sync::HeldBindingStatus::Current);
+    write_unchecked(
+        &w,
+        &format!(
+            "UPDATE ydoc_updates SET actor_origin_id='impostor' WHERE seq=
+               (SELECT json_extract(native_source_json,'$.nativeSequence') FROM owner_ydoc_outbox_entries
+                WHERE delivery_id='{}')",
+            w.retained_delivery
+        ),
+    );
+    let stale = inspected_window(&w.store);
+    assert_eq!(stale.status, dohc_engine_sync::HeldBindingStatus::Stale);
+    assert_eq!(stale.preservation, None);
+    rebound(&mut w);
+    let preservation = inspected_window(&w.store).preservation.unwrap();
+    assert_eq!(preservation.status, PreservationStatus::InvalidEvidence);
+    assert_eq!(
+        preservation
+            .findings
+            .iter()
+            .map(|found| (found.reason, found.namespace.clone(), found.contribution.clone()))
+            .collect::<Vec<_>>(),
+        [(
+            PreservationReason::ContradictoryEvidence,
+            Some("relay".to_owned()),
+            Some(ContributionLocator::Carried {
+                delivery_id: w.retained_delivery.clone(),
+                update_digest: w.retained_digest.clone(),
+                journal_cursor: 2,
+            })
+        )]
+    );
+    assert!(preservation.covered.is_empty() && preservation.preserved.is_none());
     desktop.close().await;
     w.close().await;
 }

@@ -4,7 +4,10 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import { ProtocolShapeError, mutableStruct } from "../wireSchema";
-import { decodeReleasedLineageBinding, releasedLineageBindingDigest, type ReleasedLineageBinding } from "./releasedLineageBinding";
+import {
+  canonicalRetainedContribution, decodeReleasedLineageBinding, decodeRetainedContribution, releasedLineageBindingDigest,
+  releasedTailContributionsCommitment, type ReleasedLineageBinding, type RetainedContribution,
+} from "./releasedLineageBinding";
 
 export { releasedLineageBindingDigest, type ReleasedLineageBinding } from "./releasedLineageBinding";
 
@@ -116,10 +119,16 @@ const Departed = Schema.mutable(Schema.Array(Text));
 const Digest = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
 // A journal cursor or outbox sequence: both count from one.
 const Coordinate = Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER));
-const RetainedContributionSchema = Schema.Union([
+// Where a finding's contribution is, without who made it.
+const ContributionLocatorSchema = Schema.Union([
   mutableStruct({ kind: Schema.Literal("carried"), deliveryId: Text, updateDigest: Digest, journalCursor: Coordinate }),
   mutableStruct({ kind: Schema.Literal("outbox"), outboxId: Text, sequence: Coordinate, deliveryId: Text, updateDigest: Digest }),
 ]);
+// A contribution with its authors, as a tail's commitment names it.
+const RetainedContributionSchema = Schema.declareConstructor<RetainedContribution>()([], () => (value) => Effect.try({
+  try: () => decodeRetainedContribution(value),
+  catch: (error) => new SchemaIssue.InvalidValue({ message: (error as TypeError).message }),
+}));
 // A document the hosted replica holds for retained work a released chain left.
 const HeldDocumentFields = {
   objectId: Text,
@@ -132,15 +141,20 @@ const HeldDocumentFields = {
 // Best to worst: a preservation's status is its worst reason's.
 const PRESERVATION_STATUSES = ["complete", "pending-dependencies", "missing-evidence", "invalid-evidence"] as const;
 const PreservationStatus = Schema.Literals(PRESERVATION_STATUSES);
-// Whether merged state keeps every retained contribution, why not, and what merging added.
+// Whether merged state keeps every retained contribution, why not, every
+// contribution with its authors each valid tail covers, and what merging added.
 const Preservation = mutableStruct({
   status: PreservationStatus,
   reasons: Schema.mutable(Schema.Array(mutableStruct({
     reason: Schema.Literals(["source-missing", "pending-head-dependencies", "pending-contribution-dependencies",
-      "digest-mismatch", "malformed-update", "contradictory-evidence", "missing-feed-identity"]),
+      "digest-mismatch", "malformed-update", "contradictory-evidence", "missing-feed-identity", "malformed-authorship"]),
     status: PreservationStatus,
     namespace: Schema.NullOr(Text),
-    contribution: Schema.NullOr(RetainedContributionSchema),
+    contribution: Schema.NullOr(ContributionLocatorSchema),
+  }))),
+  coveredContributions: Schema.mutable(Schema.Array(mutableStruct({
+    namespace: Text,
+    contributions: Schema.mutable(Schema.Array(RetainedContributionSchema)),
   }))),
   mergedContributionIds: Schema.mutable(Schema.Array(RetainedContributionSchema)),
   // Null above the in-band limit, when the engine streams it instead.
@@ -233,7 +247,26 @@ const REASON_STATUS: Record<HeldPreservation["reasons"][number]["reason"], HeldP
   "malformed-update": "invalid-evidence",
   "contradictory-evidence": "invalid-evidence",
   "missing-feed-identity": "invalid-evidence",
+  "malformed-authorship": "invalid-evidence",
 };
+
+// The covered work names exactly what each tail with valid coverage commits
+// to, in the binding's order, and every merged contribution is among it.
+function checkCovered(binding: ReleasedLineageBinding, preservation: HeldPreservation, invalid: () => Error): void {
+  const valid = (binding.tails ?? []).filter(tail => tail.unproven !== null);
+  const covered = preservation.coveredContributions;
+  if (covered.length !== valid.length) throw invalid();
+  const every = new Set<string>();
+  covered.forEach(({namespace, contributions}, index) => {
+    const tail = valid[index]!;
+    const committed = tail.unproven!;
+    const commitment = contributions.length === 0 ? null : releasedTailContributionsCommitment(contributions);
+    if (namespace !== tail.namespace || commitment === null || commitment.count !== committed.count ||
+      commitment.digest !== committed.digest) throw invalid();
+    for (const contribution of contributions) every.add(canonicalRetainedContribution(contribution));
+  });
+  if (preservation.mergedContributionIds.some(merged => !every.has(canonicalRetainedContribution(merged)))) throw invalid();
+}
 
 // Only a current binding may preserve, and a hold marked stale never is
 // current. Each reason has its own status, the preservation its worst
@@ -248,6 +281,7 @@ function checkHeldInspection(inspected: HeldDocumentInspection): void {
     throw invalid();
   }
   if (preservation === null) return;
+  checkCovered(inspected.binding, preservation, invalid);
   const worst = preservation.reasons.reduce((worst, found) => {
     if (found.status !== REASON_STATUS[found.reason]) throw invalid();
     return Math.max(worst, PRESERVATION_STATUSES.indexOf(found.status));

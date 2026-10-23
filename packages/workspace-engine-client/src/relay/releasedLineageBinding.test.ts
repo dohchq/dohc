@@ -4,6 +4,7 @@ import vectors from "./releasedLineageBindingVectors.json" with { type: "json" }
 import {
   canonicalReleasedLineageBinding,
   decodeReleasedLineageBinding,
+  decodeRetainedContribution,
   releasedLineageBindingDigest,
   releasedLineageBindingFromCanonical,
   releasedTailContributionsCommitment,
@@ -16,17 +17,52 @@ describe("released-lineage binding contract", () => {
     expect(releasedTailContributionsCommitment([...vector.contributions].reverse())).toEqual({count: vector.count, digest: vector.digest});
   });
 
-  it("commits to every contribution's identity, digest and position, and to each addition and removal", () => {
+  it("commits to every contribution's identity, digest, position and authors, and to each addition and removal", () => {
     const [carried, outbox] = vectors.commitments[0]!.contributions;
     const committed = releasedTailContributionsCommitment([carried, outbox]).digest;
+    const agent = carried!.authors[0]!;
     const changed = [
       [{...carried, deliveryId: "delivery-9"}, outbox], [{...carried, updateDigest: "e".repeat(64)}, outbox],
       [{...carried, journalCursor: 8}, outbox], [carried, {...outbox, outboxId: "outbox-9"}], [carried, {...outbox, sequence: 4}],
       [carried, outbox, {...outbox, sequence: 4}], [carried, outbox, carried], [carried],
+      // Only who made the work changes.
+      [{...carried, authors: [{...agent, agentId: "other-agent"}]}, outbox],
+      [{...carried, authors: [{...agent, onBehalfOf: "someone"}]}, outbox],
+      [{...carried, authors: [{...agent, depth: 2}]}, outbox],
+      [{...carried, authors: [{kind: "unattributed"}]}, outbox],
+      [carried, {...outbox, authors: [{kind: "human", humanId: "local-person"}]}],
     ];
     for (const contributions of changed) expect(releasedTailContributionsCommitment(contributions).digest).not.toBe(committed);
     expect(() => releasedTailContributionsCommitment([])).toThrow("unproven");
     expect(() => releasedTailContributionsCommitment([{...carried, journalCursor: 2 ** 53}])).toThrow("journalCursor");
+  });
+
+  it("refuses a contribution outside the engine's contract", () => {
+    const [carried, outbox] = vectors.commitments[0]!.contributions;
+    const {authors: _authors, ...unauthored} = carried!;
+    const refused: [string, unknown, string][] = [
+      ["no authors", unauthored, "authors"],
+      ["no author", {...carried, authors: []}, "authors"],
+      ["two authors", {...carried, authors: [...carried!.authors, ...outbox!.authors]}, "authors"],
+      ["a journal cursor of 0", {...carried, journalCursor: 0}, "journalCursor"],
+      ["a sequence of 0", {...outbox, sequence: 0}, "sequence"],
+      ["an uppercase digest", {...carried, updateDigest: "C".repeat(64)}, "updateDigest"],
+      ["a short digest", {...outbox, updateDigest: "d".repeat(63)}, "updateDigest"],
+      ["another key", {...carried, extra: 1}, "carried contribution"],
+      ["an unknown author kind", {...carried, authors: [{kind: "public"}]}, "author kind"],
+      ["an author with another key", {...carried, authors: [{kind: "unattributed", note: 1}]}, "author"],
+      ["an agent at an explicit depth of 0", {...carried, authors: [{kind: "agent", agentId: "a", depth: 0}]}, "author depth"],
+      ["a chain past its bound", {...carried, authors: [{kind: "agent", agentId: "a", depth: 65}]}, "author depth"],
+      ["an automation without its depth", {...carried, authors: [{kind: "automation", automationId: "sort"}]}, "author"],
+      ["a person at a depth", {...carried, authors: [{kind: "human", humanId: "p", depth: 1}]}, "author"],
+      ["an author with a control character", {...carried, authors: [{kind: "agent", agentId: "a\u0001"}]}, "author agentId"],
+      ["an author past the identifier bound", {...carried, authors: [{kind: "agent", agentId: "a".repeat(513)}]}, "author agentId"],
+      ["an empty principal", {...carried, authors: [{kind: "agent", agentId: "a", onBehalfOf: ""}]}, "author onBehalfOf"],
+    ];
+    for (const [name, contribution, field] of refused) {
+      expect(() => decodeRetainedContribution(contribution), name).toThrow(field);
+    }
+    expect(decodeRetainedContribution({...carried, authors: [{kind: "agent", agentId: "a".repeat(512)}]}).authors).toHaveLength(1);
   });
 
   it.each(vectors.valid)("encodes and digests $name as the engine does", vector => {

@@ -4,15 +4,32 @@
 
 use super::*;
 use dohc_engine_collab::live_update_application::{
-    ReleasedLineageBinding, ReleasedTails, RetainedContribution,
+    ReleasedLineageBinding, ReleasedTails, RetainedAuthors, RetainedContribution,
+    UnprovenCommitment,
 };
 
 const PATH: &str = "notes/plan.md";
 const MARKDOWN: &str = "# Plan\n\nKept from the stopped session.\n";
 
-fn binding() -> ReleasedLineageBinding {
+/// An agent that works for the owner.
+fn agent(id: &str) -> RetainedAuthors {
+    RetainedAuthors::credited(
+        Some(id),
+        Some(&dohc_engine_domain::ChangeAttribution {
+            actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
+            on_behalf_of: Some("owner".into()),
+            depth: 1,
+            run: None,
+        }),
+    )
+    .unwrap()
+}
+
+/// The binding a hold of `covered` names.
+fn binding_of(covered: Vec<RetainedContribution>) -> ReleasedLineageBinding {
+    let commitment = UnprovenCommitment::of(covered).expect("covered work");
     ReleasedLineageBinding::from_json(&json!({
-        "version": 2, "workspaceId": "ws", "mainVersionId": "main", "objectId": "held",
+        "version": 3, "workspaceId": "ws", "mainVersionId": "main", "objectId": "held",
         "lineageClaimId": "a".repeat(64), "currentPath": PATH, "restoreGeneration": 0,
         "incoming": {"relayNamespace": "relay", "replicationEpoch": "epoch-1",
             "streamIdentity": "stream-1", "originId": "service-host:host", "originSeq": 4,
@@ -20,9 +37,13 @@ fn binding() -> ReleasedLineageBinding {
         "headDigest": "b".repeat(64),
         "tails": [{"namespace": "relay", "activationId": "activation",
             "release": {"path": PATH, "restoreGeneration": 0},
-            "unproven": {"count": 2, "digest": "c".repeat(64)}}],
+            "unproven": {"count": commitment.count, "digest": commitment.digest}}],
     }))
     .expect("binding")
+}
+
+fn binding() -> ReleasedLineageBinding {
+    binding_of(covered())
 }
 
 fn merged() -> Vec<RetainedContribution> {
@@ -31,7 +52,26 @@ fn merged() -> Vec<RetainedContribution> {
         sequence: 1,
         delivery_id: "delivery-1".into(),
         update_digest: "d".repeat(64),
+        authors: agent("trip-agent"),
     }]
+}
+
+/// Work the held document already holds: covered, though merging adds
+/// nothing of it.
+fn contained() -> RetainedContribution {
+    RetainedContribution::Carried {
+        delivery_id: "delivery-0".into(),
+        update_digest: "e".repeat(64),
+        journal_cursor: 3,
+        authors: agent("earlier-agent"),
+    }
+}
+
+fn covered() -> Vec<RetainedContribution> {
+    let mut covered = merged();
+    covered.push(contained());
+    covered.sort();
+    covered
 }
 
 fn request(markdown: &str) -> KeepRetainedVersion {
@@ -39,9 +79,21 @@ fn request(markdown: &str) -> KeepRetainedVersion {
         binding: binding(),
         markdown: markdown.to_owned(),
         projection_sha256: dohc_engine_storage::hex_sha256(markdown.as_bytes()),
+        covered_contributions: vec![("relay".into(), covered())],
         merged_contribution_ids: merged(),
         now_ms: 3_000,
     }
+}
+
+/// The agents an author list names, in its order.
+fn agents(author_json: &str) -> Vec<String> {
+    let authors: serde_json::Value = serde_json::from_str(author_json).expect("authors");
+    authors
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|author| author["agentId"].as_str().expect("an agent").to_owned())
+        .collect()
 }
 
 /// An owner device of `ws` publishing as `origin` through its relay, which
@@ -220,17 +272,22 @@ fn a_copy_keeps_the_projection_without_touching_the_held_document() {
     );
     assert_eq!(copy.merged_contribution_ids, merged());
     assert_eq!(copy.resolution, None);
-    // The copy's creation names the binding and carries no authors.
-    let (correlation, authors): (Option<String>, Option<String>) = store
+    // The copy's creation names the binding and every covered author, as
+    // its decision does.
+    let (correlation, authors, decided): (Option<String>, Option<String>, String) = store
         .read_with(|conn| {
             conn.query_row(
-                "SELECT metadata_correlation_id,author_json FROM moments WHERE moment_id=?1",
+                "SELECT m.metadata_correlation_id,m.author_json,d.recovery_author_json FROM moments m
+                 JOIN released_hold_copy_decisions d ON d.recovery_moment_id=m.moment_id
+                 WHERE m.moment_id=?1",
                 [&copy.recovery_moment_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
         })
         .unwrap();
-    assert_eq!((correlation.as_deref(), authors), (Some(digest.as_str()), None));
+    assert_eq!(correlation.as_deref(), Some(digest.as_str()));
+    assert_eq!(decided, copy.recovery_author_json);
+    assert_eq!(agents(&authors.expect("authors")), agents(&decided));
     assert_eq!(
         count(
             &store,
@@ -776,7 +833,8 @@ fn a_different_creation_under_the_same_identity_is_not_equivalent() {
     assert_eq!(copy_text(&device_b, &on_b.recovery_object_id).as_deref(), Some(MARKDOWN));
 
     let digest = binding().digest();
-    let mut equivalent = |correlation: &str, has_authors: bool| {
+    let kept: serde_json::Value = serde_json::from_str(&on_b.recovery_author_json).unwrap();
+    let mut equivalent = |correlation: &str, authors: Option<&serde_json::Value>, unavailable: bool| {
         device_b
             .write_with(&NoFaults, |tx| {
                 crate::ydoc_recovery::equivalent_released_copy_in_tx(
@@ -792,15 +850,119 @@ fn a_different_creation_under_the_same_identity_is_not_equivalent() {
                         after_blob_sha256: &dohc_engine_storage::hex_sha256(MARKDOWN.as_bytes()),
                         after_byte_length: Some(MARKDOWN.len() as i64),
                         correlation_id: Some(correlation),
-                        has_authors,
+                        authors,
+                        attribution_unavailable: unavailable,
                     },
                 )
             })
             .unwrap()
     };
-    assert_eq!(equivalent(&digest, false), TxnOutcome::Committed(true));
-    assert_eq!(equivalent(&"e".repeat(64), false), TxnOutcome::Committed(false));
-    assert_eq!(equivalent(&digest, true), TxnOutcome::Committed(false));
+    assert_eq!(equivalent(&digest, Some(&kept), false), TxnOutcome::Committed(true));
+    assert_eq!(equivalent(&"e".repeat(64), Some(&kept), false), TxnOutcome::Committed(false));
+    // Sol's Ruling A: retained authorship is part of the copy. Authors left
+    // out, one dropped, another added or attribution withheld are another
+    // copy's.
+    let mut fewer = kept.clone();
+    fewer.as_array_mut().unwrap().pop();
+    let mut more = kept.clone();
+    more.as_array_mut().unwrap().push(json!({"kind": "agent", "agentId": "stranger"}));
+    for authors in [None, Some(&fewer), Some(&more)] {
+        assert_eq!(equivalent(&digest, authors, false), TxnOutcome::Committed(false), "{authors:?}");
+    }
+    assert_eq!(equivalent(&digest, Some(&kept), true), TxnOutcome::Committed(false));
+}
+
+/// Sol's Ruling A: the copy credits every author whose work the binding
+/// covers, in its creation and its decision: work the held document already
+/// held included, not only what merging added.
+#[test]
+fn the_copy_credits_already_contained_work_too() {
+    let (_scratch, mut store) = owner_device("local");
+    let copy = keep(&mut store, MARKDOWN);
+    assert!(!copy.merged_contribution_ids.contains(&contained()), "merging added nothing of it");
+    assert_eq!(agents(&copy.recovery_author_json), ["earlier-agent", "trip-agent"]);
+    let moment: Option<String> = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT author_json FROM moments WHERE moment_id=?1",
+                [&copy.recovery_moment_id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(agents(&moment.expect("authors")), ["earlier-agent", "trip-agent"]);
+}
+
+/// Sol's Ruling A: a copy credits only what the binding commits to. Covered
+/// lists that leave work out, credit it to someone else, or name another
+/// namespace, a merged contribution none of them covers, and a binding whose
+/// coverage does not read are refused before anything is written.
+#[test]
+fn covered_work_must_be_exactly_what_the_binding_commits_to() {
+    let (_scratch, mut store) = owner_device("local");
+    let credited_elsewhere = RetainedContribution::at(contained().locator(), agent("someone-else"));
+    let mut misattributed = merged();
+    misattributed.push(credited_elsewhere);
+    misattributed.sort();
+    let stranger = RetainedContribution::at(merged()[0].locator(), agent("stranger"));
+    let mut invalid_binding = binding();
+    invalid_binding.tails = std::sync::Arc::new(
+        dohc_engine_collab::live_update_application::ProtectedTails::Invalid,
+    );
+    let refused: [(&str, KeepRetainedVersion); 6] = [
+        ("work left out", KeepRetainedVersion { covered_contributions: vec![("relay".into(), merged())], ..request(MARKDOWN) }),
+        ("work credited to someone else", KeepRetainedVersion {
+            covered_contributions: vec![("relay".into(), misattributed)], ..request(MARKDOWN) }),
+        ("another namespace", KeepRetainedVersion { covered_contributions: vec![("other".into(), covered())], ..request(MARKDOWN) }),
+        ("no tail", KeepRetainedVersion { covered_contributions: Vec::new(), ..request(MARKDOWN) }),
+        ("a merged contribution nothing covers", KeepRetainedVersion {
+            merged_contribution_ids: vec![stranger], ..request(MARKDOWN) }),
+        ("coverage that does not read", KeepRetainedVersion { binding: invalid_binding, ..request(MARKDOWN) }),
+    ];
+    for (case, request) in refused {
+        assert!(
+            matches!(keep_retained_version(&mut store, "ws", &request, &NoFaults), Err(SyncError::InvalidInput { .. })),
+            "{case}"
+        );
+    }
+    assert_eq!(decisions(&store), 0);
+    assert_eq!(
+        count(&store, "SELECT COUNT(*) FROM moments WHERE moment_id GLOB ?1", "released-copy-*"),
+        0
+    );
+}
+
+/// Sol's decision-table note: a decision whose columns disagree with each
+/// other or with its key reads as corruption, never as the attempt that
+/// stands.
+#[test]
+fn a_decision_that_does_not_read_is_corruption() {
+    let damages = [
+        ("a binding of another digest",
+            "UPDATE released_hold_copy_decisions SET binding_json=replace(binding_json,'\"originSeq\":4','\"originSeq\":5')"),
+        ("a binding not in canonical form", "UPDATE released_hold_copy_decisions SET binding_json=' '||binding_json"),
+        ("a merged contribution without authors",
+            "UPDATE released_hold_copy_decisions SET merged_contribution_ids_json=json_remove(merged_contribution_ids_json,'$[0].authors')"),
+        ("a merged coordinate of 0",
+            "UPDATE released_hold_copy_decisions SET merged_contribution_ids_json=json_set(merged_contribution_ids_json,'$[0].sequence',0)"),
+        ("a repeated merged contribution",
+            "UPDATE released_hold_copy_decisions SET merged_contribution_ids_json=
+               json_insert(merged_contribution_ids_json,'$[#]',json_extract(merged_contribution_ids_json,'$[0]'))"),
+        ("no authors", "UPDATE released_hold_copy_decisions SET recovery_author_json='null'"),
+        ("authors that leave out a merged one",
+            "UPDATE released_hold_copy_decisions SET recovery_author_json='[{\"kind\":\"unattributed\"}]'"),
+        ("authors not in canonical form", "UPDATE released_hold_copy_decisions SET recovery_author_json=' '||recovery_author_json"),
+        ("another projection length", "UPDATE released_hold_copy_decisions SET projection_byte_length=projection_byte_length+1"),
+    ];
+    for (case, damage) in damages {
+        let (_scratch, mut store) = owner_device("local");
+        keep(&mut store, MARKDOWN);
+        store
+            .write_with(&NoFaults, |tx| tx.execute(damage, []).map_err(SyncError::persist))
+            .unwrap_or_else(|error| panic!("{case}: {error:?}"));
+        assert!(keep_retained_version(&mut store, "ws", &request(MARKDOWN), &NoFaults).is_err(), "{case}");
+        assert_eq!(decisions(&store), 1, "{case}: no other attempt");
+    }
 }
 
 /// A relay's redundant classification must name a copy's creation in the

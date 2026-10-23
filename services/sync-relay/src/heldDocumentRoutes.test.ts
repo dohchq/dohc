@@ -10,7 +10,7 @@ import {MAX_HELD_DOCUMENTS_PAGE, withStreamedMarkdown, type HeldDocumentHost, ty
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {for (const close of cleanups.splice(0).reverse()) await close();});
 
-const binding: ReleasedLineageBinding = {version: 2, workspaceId: scope.workspaceId, mainVersionId: "main", objectId: "object-1",
+const binding: ReleasedLineageBinding = {version: 3, workspaceId: scope.workspaceId, mainVersionId: "main", objectId: "object-1",
   lineageClaimId: "a".repeat(64), currentPath: "docs/a.md", restoreGeneration: 0,
   incoming: {relayNamespace: "relay", replicationEpoch: "epoch", streamIdentity: "stream", originId: "desktop", originSeq: 1, relaySeq: 3},
   headDigest: "b".repeat(64),
@@ -24,7 +24,7 @@ const sha256 = (bytes: string | Uint8Array) => createHash("sha256").update(bytes
 // Preserved text past the engine's in-band limit, as the session host answers it whole.
 const markdown = "# Plan\n\n" + "Kept paragraph with ünïcode.\n\n".repeat(4096);
 const preserved: HeldDocumentInspection = {...held, status: "current", resolution: null, preservation: {status: "complete",
-  reasons: [], mergedContributionIds: [], markdown, markdownSha256: sha256(markdown),
+  reasons: [], coveredContributions: [], mergedContributionIds: [], markdown, markdownSha256: sha256(markdown),
   markdownByteLength: Buffer.byteLength(markdown), inbandLimitBytes: 48 * 1024}};
 const markdownPath = `${scope.workspaceId}/held-documents/${held.objectId}/markdown` +
   `?bindingDigest=${held.bindingDigest}&sha256=${sha256(markdown)}`;

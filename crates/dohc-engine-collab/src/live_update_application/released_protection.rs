@@ -109,7 +109,7 @@ pub struct UnprovenCommitment {
     pub digest: String,
 }
 
-/// One piece of retained work no proof covers.
+/// One piece of retained work no proof covers, with who made it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RetainedContribution {
     /// A Carried delivery, a seed among them, that no host here applied.
@@ -117,6 +117,7 @@ pub enum RetainedContribution {
         delivery_id: String,
         update_digest: String,
         journal_cursor: i64,
+        authors: RetainedAuthors,
     },
     /// Any other outbox entry of the chain without such proof.
     Outbox {
@@ -124,7 +125,127 @@ pub enum RetainedContribution {
         sequence: i64,
         delivery_id: String,
         update_digest: String,
+        authors: RetainedAuthors,
     },
+}
+
+/// Who made one contribution, as a moment names its authors: the canonical
+/// JSON of a list of the one author its evidence credits, or of the
+/// unattributed marker when that evidence credits nobody. An adoption seed
+/// credits nobody, so a copy never credits it to whoever keeps the copy.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RetainedAuthors(String);
+
+impl RetainedAuthors {
+    /// The authors of a write `actor` made with `attribution`: unattributed
+    /// without either, as admission counts it. None when they do not
+    /// validate.
+    pub fn credited(
+        actor: Option<&str>,
+        attribution: Option<&dohc_engine_domain::ChangeAttribution>,
+    ) -> Option<Self> {
+        let list = match dohc_engine_domain::moment_author_json(actor, attribution) {
+            Some(json) => serde_json::from_str(&json).ok()?,
+            None => serde_json::json!([{"kind": "unattributed"}]),
+        };
+        Self::from_json(&list)
+    }
+
+    /// The canonical JSON of the list.
+    pub fn json(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Where a piece of retained work is, without who made it: what a finding
+/// names, even when the work's authorship does not read.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ContributionLocator {
+    Carried {
+        delivery_id: String,
+        update_digest: String,
+        journal_cursor: i64,
+    },
+    Outbox {
+        outbox_id: String,
+        sequence: i64,
+        delivery_id: String,
+        update_digest: String,
+    },
+}
+
+impl RetainedContribution {
+    /// Where the contribution is.
+    pub fn locator(&self) -> ContributionLocator {
+        match self {
+            Self::Carried {
+                delivery_id,
+                update_digest,
+                journal_cursor,
+                ..
+            } => ContributionLocator::Carried {
+                delivery_id: delivery_id.clone(),
+                update_digest: update_digest.clone(),
+                journal_cursor: *journal_cursor,
+            },
+            Self::Outbox {
+                outbox_id,
+                sequence,
+                delivery_id,
+                update_digest,
+                ..
+            } => ContributionLocator::Outbox {
+                outbox_id: outbox_id.clone(),
+                sequence: *sequence,
+                delivery_id: delivery_id.clone(),
+                update_digest: update_digest.clone(),
+            },
+        }
+    }
+
+    pub fn authors(&self) -> &RetainedAuthors {
+        match self {
+            Self::Carried { authors, .. } | Self::Outbox { authors, .. } => authors,
+        }
+    }
+
+    /// The contribution at `locator`, made by `authors`.
+    pub fn at(locator: ContributionLocator, authors: RetainedAuthors) -> Self {
+        match locator {
+            ContributionLocator::Carried {
+                delivery_id,
+                update_digest,
+                journal_cursor,
+            } => Self::Carried {
+                delivery_id,
+                update_digest,
+                journal_cursor,
+                authors,
+            },
+            ContributionLocator::Outbox {
+                outbox_id,
+                sequence,
+                delivery_id,
+                update_digest,
+            } => Self::Outbox {
+                outbox_id,
+                sequence,
+                delivery_id,
+                update_digest,
+                authors,
+            },
+        }
+    }
+}
+
+/// What one tail's validation found: the work it retains without proof, in
+/// canonical order, and each contradiction its evidence holds. A tail with
+/// any contradiction has invalid coverage; its work is never committed to in
+/// part.
+#[derive(Debug, Default)]
+pub(crate) struct TailWork {
+    pub contributions: Vec<RetainedContribution>,
+    pub contradictions: Vec<PreservationFinding>,
 }
 
 pub enum Protection {
@@ -171,7 +292,7 @@ impl ReleasedLineageBinding {
 
 /// The value `result` reads, or none when its evidence does not read.
 /// Storage failures stay errors.
-fn readable<T>(result: Result<T, ApplicationError>) -> Result<Option<T>, ApplicationError> {
+pub(super) fn readable<T>(result: Result<T, ApplicationError>) -> Result<Option<T>, ApplicationError> {
     match result {
         Ok(value) => Ok(Some(value)),
         Err(
@@ -1234,11 +1355,13 @@ fn protected_tails(
     }))
 }
 
-/// The protected tails of the released window, each with the retained work
-/// its commitment names.
+/// The protected tails of the released window, each with what its
+/// validation found.
 enum WindowWork {
-    /// In namespace order. A tail whose coverage is invalid names no work.
-    Listed(Vec<(ProtectedTail, Vec<RetainedContribution>)>),
+    /// In namespace order. A tail whose coverage is invalid names no work,
+    /// only the contradictions that made it so, none when its evidence does
+    /// not enumerate.
+    Listed(Vec<(ProtectedTail, TailWork)>),
     /// As [`ProtectedTails::Invalid`].
     Invalid,
 }
@@ -1277,11 +1400,20 @@ fn window_work(
         };
         // `unproven_retained` answers its work in canonical order.
         let (coverage, work) = match unproven {
-            Some(work) => match UnprovenCommitment::of_sorted(&work) {
-                Some(unproven) => (RetainedCoverage::Unproven(unproven), work),
-                None => continue,
-            },
-            None => (RetainedCoverage::Invalid, Vec::new()),
+            Some(work) if work.contradictions.is_empty() => {
+                match UnprovenCommitment::of_sorted(&work.contributions) {
+                    Some(unproven) => (RetainedCoverage::Unproven(unproven), work),
+                    None => continue,
+                }
+            }
+            Some(work) => (
+                RetainedCoverage::Invalid,
+                TailWork {
+                    contributions: Vec::new(),
+                    contradictions: work.contradictions,
+                },
+            ),
+            None => (RetainedCoverage::Invalid, TailWork::default()),
         };
         tails.push((
             ProtectedTail {

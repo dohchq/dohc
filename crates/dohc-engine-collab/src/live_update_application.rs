@@ -49,11 +49,12 @@ mod bootstrap;
 pub use adoption::{adopt_owner_committed, OwnerAdoptionAck, OwnerAdoptionCut};
 mod released_protection;
 pub use released_protection::{
-    inspect_held, lineage_protection, protection, HeldInspection, IncomingCoordinate,
-    LineageProtection, PendingValidation, Preservation, PreservationFinding, PreservationReason,
-    PreservationStatus, PreservedState, ProtectedTail, ProtectedTails, Protection, ProtectionKey,
-    ReleasedLineageBinding, ReleasedTails, RetainedContribution, RetainedCoverage, TailRelease,
-    UnprovenCommitment, Validation, ValidationError,
+    inspect_held, lineage_protection, protection, ContributionLocator, HeldInspection,
+    IncomingCoordinate, LineageProtection, PendingValidation, Preservation, PreservationFinding,
+    PreservationReason, PreservationStatus, PreservedState, ProtectedTail, ProtectedTails,
+    Protection, ProtectionKey, ReleasedLineageBinding, ReleasedTails, RetainedAuthors,
+    RetainedContribution, RetainedCoverage, TailRelease, UnprovenCommitment, Validation,
+    ValidationError,
 };
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]

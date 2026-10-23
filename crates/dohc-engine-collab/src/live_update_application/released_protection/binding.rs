@@ -9,14 +9,15 @@
 use super::*;
 use serde_json::{Map, Value};
 
-const VERSION: i64 = 2;
-const DIGEST_DOMAIN: &[u8] = b"dohc:released-lineage-binding:v2\0";
-const CONTRIBUTIONS_DOMAIN: &[u8] = b"dohc:released-tail-contributions:v1\0";
+const VERSION: i64 = 3;
+const DIGEST_DOMAIN: &[u8] = b"dohc:released-lineage-binding:v3\0";
+const CONTRIBUTIONS_DOMAIN: &[u8] = b"dohc:released-tail-contributions:v2\0";
 
 impl UnprovenCommitment {
     /// The commitment to `contributions`, none when there are none: their
-    /// count, and `SHA256(UTF8("dohc:released-tail-contributions:v1\0") ||
+    /// count, and `SHA256(UTF8("dohc:released-tail-contributions:v2\0") ||
     /// canonical JSON of all of them in canonical order)` in lowercase hex.
+    /// Each names its authors, so other provenance names other work.
     pub fn of(mut contributions: Vec<RetainedContribution>) -> Option<Self> {
         contributions.sort();
         Self::of_sorted(&contributions)
@@ -44,13 +45,55 @@ impl UnprovenCommitment {
 }
 
 impl RetainedContribution {
-    /// The contribution's identity as a commitment names it, for inspection.
+    /// The contribution as a commitment names it, authors included.
     pub fn to_json(&self) -> Value {
         contribution_value(self)
     }
 
     /// The contribution `value` names, or none unless it has exactly
-    /// [`Self::to_json`]'s keys with wire-range integers.
+    /// [`Self::to_json`]'s keys, a lowercase SHA-256 digest, coordinates
+    /// from 1 and authors in their canonical form.
+    pub fn from_json(value: &Value) -> Option<Self> {
+        let mut located = value.as_object()?.clone();
+        let authors = RetainedAuthors::from_json(&located.remove("authors")?)?;
+        Some(Self::at(
+            ContributionLocator::from_json(&Value::Object(located))?,
+            authors,
+        ))
+    }
+}
+
+impl ContributionLocator {
+    pub fn to_json(&self) -> Value {
+        match self {
+            Self::Carried {
+                delivery_id,
+                update_digest,
+                journal_cursor,
+            } => serde_json::json!({
+                "kind": "carried",
+                "deliveryId": delivery_id,
+                "updateDigest": update_digest,
+                "journalCursor": journal_cursor,
+            }),
+            Self::Outbox {
+                outbox_id,
+                sequence,
+                delivery_id,
+                update_digest,
+            } => serde_json::json!({
+                "kind": "outbox",
+                "outboxId": outbox_id,
+                "sequence": sequence,
+                "deliveryId": delivery_id,
+                "updateDigest": update_digest,
+            }),
+        }
+    }
+
+    /// The locator `value` names, or none unless it has exactly
+    /// [`Self::to_json`]'s keys, a lowercase SHA-256 digest and coordinates
+    /// from 1, as a journal cursor and an outbox sequence count.
     pub fn from_json(value: &Value) -> Option<Self> {
         match value.get("kind")?.as_str()? {
             "carried" => {
@@ -60,8 +103,8 @@ impl RetainedContribution {
                 )?;
                 Some(Self::Carried {
                     delivery_id: text(delivery_id)?,
-                    update_digest: text(update_digest)?,
-                    journal_cursor: integer(journal_cursor, 0)?,
+                    update_digest: sha256(update_digest)?,
+                    journal_cursor: integer(journal_cursor, 1)?,
                 })
             }
             "outbox" => {
@@ -71,14 +114,77 @@ impl RetainedContribution {
                 )?;
                 Some(Self::Outbox {
                     outbox_id: text(outbox_id)?,
-                    sequence: integer(sequence, 0)?,
+                    sequence: integer(sequence, 1)?,
                     delivery_id: text(delivery_id)?,
-                    update_digest: text(update_digest)?,
+                    update_digest: sha256(update_digest)?,
                 })
             }
             _ => None,
         }
     }
+
+    /// Whether every field is one [`Self::from_json`] reads: a finding names
+    /// only work its reader can locate.
+    pub fn readable(&self) -> bool {
+        Self::from_json(&self.to_json()).as_ref() == Some(self)
+    }
+}
+
+impl RetainedAuthors {
+    /// The authors `value` names, or none unless it is the list of exactly
+    /// one author a moment would record for the actor and attribution it
+    /// names, each field within its bounds, or of the unattributed marker.
+    pub fn from_json(value: &Value) -> Option<Self> {
+        let [author] = value.as_array()?.as_slice() else {
+            return None;
+        };
+        let (actor, attribution) = author_credit(author)?;
+        let expected: Value =
+            match dohc_engine_domain::moment_author_json(actor.as_deref(), attribution.as_ref()) {
+                Some(json) => serde_json::from_str(&json).ok()?,
+                None => serde_json::json!([{"kind": "unattributed"}]),
+            };
+        let mut canonical = String::new();
+        write_canonical(&expected, &mut canonical);
+        let mut given = String::new();
+        write_canonical(value, &mut given);
+        (canonical == given).then_some(Self(canonical))
+    }
+
+    pub fn to_json(&self) -> Value {
+        serde_json::from_str(&self.0).expect("canonical authors are JSON")
+    }
+}
+
+/// The actor and attribution one author entry names, if each validates as
+/// a local write's would; neither for the unattributed marker.
+fn author_credit(author: &Value) -> Option<crate::owner_outbox::EntryCredit> {
+    use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
+    let (field, actor_kind) = match author.get("kind")?.as_str()? {
+        "unattributed" => return Some((None, None)),
+        "agent" => ("agentId", ChangeActorKind::Agent),
+        "automation" => ("automationId", ChangeActorKind::Automation),
+        "human" => ("humanId", ChangeActorKind::Human),
+        _ => return None,
+    };
+    let actor = author.get(field)?.as_str()?.to_owned();
+    let on_behalf_of = match author.get("onBehalfOf") {
+        None => None,
+        Some(value) => Some(value.as_str()?.to_owned()),
+    };
+    let depth = match author.get("depth") {
+        None => 0,
+        Some(value) => u32::try_from(value.as_u64()?).ok()?,
+    };
+    let attribution = ChangeAttribution {
+        actor_kind,
+        on_behalf_of,
+        depth,
+        run: None,
+    };
+    crate::validate_actor_origin_id(&actor).ok()?;
+    attribution.validate().ok()?;
+    Some((Some(actor), Some(attribution)))
 }
 
 impl ReleasedLineageBinding {
@@ -89,7 +195,7 @@ impl ReleasedLineageBinding {
         out
     }
 
-    /// `SHA256(UTF8("dohc:released-lineage-binding:v2\0") || canonical bytes)`,
+    /// `SHA256(UTF8("dohc:released-lineage-binding:v3\0") || canonical bytes)`,
     /// in lowercase hex.
     pub fn digest(&self) -> String {
         let mut input = DIGEST_DOMAIN.to_vec();
@@ -235,15 +341,9 @@ fn tail_from(value: &Value) -> Option<ProtectedTail> {
     })?;
     let coverage = match nullable(unproven, |unproven| {
         let [count, digest] = fields(unproven, ["count", "digest"])?;
-        let digest = digest.as_str().filter(|digest| {
-            digest.len() == 64
-                && digest
-                    .bytes()
-                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-        })?;
         Some(UnprovenCommitment {
             count: integer(count, 1)?,
-            digest: digest.to_owned(),
+            digest: sha256(digest)?,
         })
     })? {
         Some(unproven) => RetainedCoverage::Unproven(unproven),
@@ -258,30 +358,22 @@ fn tail_from(value: &Value) -> Option<ProtectedTail> {
 }
 
 fn contribution_value(contribution: &RetainedContribution) -> Value {
-    match contribution {
-        RetainedContribution::Carried {
-            delivery_id,
-            update_digest,
-            journal_cursor,
-        } => serde_json::json!({
-            "kind": "carried",
-            "deliveryId": delivery_id,
-            "updateDigest": update_digest,
-            "journalCursor": journal_cursor,
-        }),
-        RetainedContribution::Outbox {
-            outbox_id,
-            sequence,
-            delivery_id,
-            update_digest,
-        } => serde_json::json!({
-            "kind": "outbox",
-            "outboxId": outbox_id,
-            "sequence": sequence,
-            "deliveryId": delivery_id,
-            "updateDigest": update_digest,
-        }),
-    }
+    let mut value = contribution.locator().to_json();
+    value["authors"] = contribution.authors().to_json();
+    value
+}
+
+/// A lowercase SHA-256 hex digest.
+fn sha256(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .filter(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        })
+        .map(str::to_owned)
 }
 
 /// The values of an object with exactly `keys`, in that order.
@@ -360,22 +452,24 @@ mod tests {
     }
 
     fn contribution(value: &Value) -> RetainedContribution {
-        let text = |key: &str| value[key].as_str().unwrap().to_owned();
-        let integer = |key: &str| value[key].as_i64().unwrap();
-        match value["kind"].as_str().unwrap() {
-            "carried" => RetainedContribution::Carried {
-                delivery_id: text("deliveryId"),
-                update_digest: text("updateDigest"),
-                journal_cursor: integer("journalCursor"),
-            },
-            "outbox" => RetainedContribution::Outbox {
-                outbox_id: text("outboxId"),
-                sequence: integer("sequence"),
-                delivery_id: text("deliveryId"),
-                update_digest: text("updateDigest"),
-            },
-            kind => panic!("{kind}"),
-        }
+        RetainedContribution::from_json(value).unwrap_or_else(|| panic!("{value}"))
+    }
+
+    fn agent(id: &str, on_behalf_of: Option<&str>, depth: u32) -> RetainedAuthors {
+        RetainedAuthors::credited(
+            Some(id),
+            Some(&dohc_engine_domain::ChangeAttribution {
+                actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
+                on_behalf_of: on_behalf_of.map(str::to_owned),
+                depth,
+                run: None,
+            }),
+        )
+        .unwrap()
+    }
+
+    fn unattributed() -> RetainedAuthors {
+        RetainedAuthors::credited(None, None).unwrap()
     }
 
     /// The first commitment vector's contributions, built here rather than
@@ -386,12 +480,14 @@ mod tests {
                 delivery_id: "delivery-1".into(),
                 update_digest: "c".repeat(64),
                 journal_cursor: 7,
+                authors: agent("trip-agent", Some("owner"), 1),
             },
             RetainedContribution::Outbox {
                 outbox_id: "outbox".into(),
                 sequence: 3,
                 delivery_id: "delivery-2".into(),
                 update_digest: "d".repeat(64),
+                authors: unattributed(),
             },
         ]
     }
@@ -440,8 +536,8 @@ mod tests {
     }
 
     /// A commitment names every field, kind and repetition of the work: a
-    /// changed identity, digest, sequence or cursor, an addition and a
-    /// removal each name other work. Its domain is its own.
+    /// changed identity, digest, sequence, cursor or author, an addition and
+    /// a removal each name other work. Its domain is its own.
     #[test]
     fn a_commitment_changes_with_any_contribution() {
         let [carried, outbox]: [RetainedContribution; 2] = carried_and_outbox().try_into().unwrap();
@@ -450,6 +546,7 @@ mod tests {
             delivery_id,
             update_digest,
             journal_cursor,
+            authors: carried_authors,
         } = carried.clone()
         else {
             unreachable!()
@@ -459,6 +556,7 @@ mod tests {
             sequence,
             delivery_id: outbox_delivery,
             update_digest: outbox_digest,
+            authors: outbox_authors,
         } = outbox.clone()
         else {
             unreachable!()
@@ -468,6 +566,7 @@ mod tests {
                 delivery_id: delivery_id.into(),
                 update_digest: update_digest.into(),
                 journal_cursor,
+                authors: carried_authors.clone(),
             }
         };
         let outbox_as = |outbox_id: &str, sequence: i64, delivery_id: &str, update_digest: &str| {
@@ -476,7 +575,11 @@ mod tests {
                 sequence,
                 delivery_id: delivery_id.into(),
                 update_digest: update_digest.into(),
+                authors: outbox_authors.clone(),
             }
+        };
+        let authored = |contribution: &RetainedContribution, authors: RetainedAuthors| {
+            RetainedContribution::at(contribution.locator(), authors)
         };
         let other = "e".repeat(64);
         let changed = [
@@ -527,6 +630,38 @@ mod tests {
                 vec![
                     carried.clone(),
                     outbox_as(&outbox_id, sequence, &outbox_delivery, &other),
+                ],
+            ),
+            (
+                "a Carried delivery's agent",
+                vec![
+                    authored(&carried, agent("other-agent", Some("owner"), 1)),
+                    outbox.clone(),
+                ],
+            ),
+            (
+                "a Carried delivery's principal",
+                vec![
+                    authored(&carried, agent("trip-agent", Some("someone"), 1)),
+                    outbox.clone(),
+                ],
+            ),
+            (
+                "a Carried delivery's chain depth",
+                vec![
+                    authored(&carried, agent("trip-agent", Some("owner"), 2)),
+                    outbox.clone(),
+                ],
+            ),
+            (
+                "a Carried delivery made unattributed",
+                vec![authored(&carried, unattributed()), outbox.clone()],
+            ),
+            (
+                "an outbox entry given an author",
+                vec![
+                    carried.clone(),
+                    authored(&outbox, agent("trip-agent", None, 0)),
                 ],
             ),
             (
@@ -646,14 +781,56 @@ mod tests {
         assert_eq!(ReleasedLineageBinding::from_json(&dropped), None);
         for contribution in carried_and_outbox() {
             let value = contribution.to_json();
-            assert_eq!(RetainedContribution::from_json(&value), Some(contribution));
-            let mut extra = value.clone();
-            extra["extra"] = Value::Bool(true);
-            assert_eq!(RetainedContribution::from_json(&extra), None);
-            let mut kind = value;
-            kind["kind"] = Value::String("other".into());
-            assert_eq!(RetainedContribution::from_json(&kind), None);
+            assert_eq!(RetainedContribution::from_json(&value), Some(contribution.clone()));
+            let coordinate = match contribution {
+                RetainedContribution::Carried { .. } => "journalCursor",
+                RetainedContribution::Outbox { .. } => "sequence",
+            };
+            let author = value["authors"][0].clone();
+            let refused: [(&str, &dyn Fn(&mut Value)); 13] = [
+                ("another key", &|value| value["extra"] = Value::Bool(true)),
+                ("another kind", &|value| value["kind"] = Value::String("other".into())),
+                ("no authors", &|value| {
+                    value.as_object_mut().unwrap().remove("authors");
+                }),
+                ("a coordinate of 0", &|value| value[coordinate] = Value::from(0)),
+                ("a fractional coordinate", &|value| value[coordinate] = Value::from(1.5)),
+                ("an uppercase digest", &|value| value["updateDigest"] = Value::String("C".repeat(64))),
+                ("a short digest", &|value| value["updateDigest"] = Value::String("c".repeat(63))),
+                ("no author", &|value| value["authors"] = serde_json::json!([])),
+                ("two authors", &|value| value["authors"] = Value::Array(vec![author.clone(), author.clone()])),
+                ("an author with another key", &|value| value["authors"][0]["note"] = Value::from(1)),
+                ("an unknown author kind", &|value| value["authors"] = serde_json::json!([{"kind": "public"}])),
+                ("an agent at an explicit depth of 0", &|value| {
+                    value["authors"] = serde_json::json!([{"kind": "agent", "agentId": "a", "depth": 0}])
+                }),
+                ("an author with a control character", &|value| {
+                    value["authors"] = serde_json::json!([{"kind": "agent", "agentId": "a\u{1}"}])
+                }),
+            ];
+            for (case, change) in refused {
+                let mut changed = value.clone();
+                change(&mut changed);
+                assert_eq!(RetainedContribution::from_json(&changed), None, "{case}");
+            }
         }
+        assert_eq!(
+            RetainedAuthors::from_json(&serde_json::json!([{"kind": "automation", "automationId": "sort"}])),
+            None,
+            "an automation names its depth"
+        );
+        assert_eq!(
+            RetainedAuthors::from_json(&serde_json::json!([{"kind": "human", "humanId": "local-person"}])),
+            RetainedAuthors::credited(
+                Some("local-person"),
+                Some(&dohc_engine_domain::ChangeAttribution {
+                    actor_kind: dohc_engine_domain::ChangeActorKind::Human,
+                    on_behalf_of: None,
+                    depth: 0,
+                    run: None,
+                })
+            ),
+        );
     }
 
     /// The digest names the domain as well as the bytes.

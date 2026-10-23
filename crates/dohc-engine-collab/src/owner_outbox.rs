@@ -1767,6 +1767,61 @@ pub(crate) fn stored_automation_declaration(
         .transpose()
 }
 
+/// The actor an outbox entry credits, and its attribution.
+pub(crate) type EntryCredit = (
+    Option<String>,
+    Option<dohc_engine_domain::ChangeAttribution>,
+);
+
+/// What an outbox entry's evidence credits: a native entry's journal row,
+/// whose declarations must be the ones its source derives, or what a draft
+/// declared. An automation outranks an agent, and either a person's edit.
+/// An adoption seed, and a draft that declared nothing, credit nobody; a
+/// caller treats that as unattributed, never as whoever reads the entry.
+pub(crate) fn entry_credit(
+    native: Option<&OwnerOutboxNativeSource>,
+    agent: Option<String>,
+    automation: Option<String>,
+    person: Option<i64>,
+) -> Result<EntryCredit, OwnerOutboxError> {
+    let person = match person {
+        None => false,
+        Some(1) => true,
+        Some(_) => return Err(OwnerOutboxError::Corrupt),
+    };
+    let agent = stored_declaration(agent)?;
+    let automation = stored_automation_declaration(automation)?;
+    if agent.is_some() && automation.is_some() {
+        return Err(OwnerOutboxError::Corrupt);
+    }
+    if let Some(source) = native {
+        if automation.is_some()
+            || agent != source.agent_declaration()?
+            || person != source.person_edit()?
+        {
+            return Err(OwnerOutboxError::Corrupt);
+        }
+        return Ok(source.native_author()?.unwrap_or((None, None)));
+    }
+    Ok(if let Some(declared) = automation {
+        (Some(declared.automation_id), Some(declared.attribution))
+    } else if let Some(declared) = agent {
+        (Some(declared.agent_id.clone()), Some(declared.attribution()))
+    } else if person {
+        (
+            Some("local-person".into()),
+            Some(dohc_engine_domain::ChangeAttribution {
+                actor_kind: dohc_engine_domain::ChangeActorKind::Human,
+                on_behalf_of: None,
+                depth: 0,
+                run: None,
+            }),
+        )
+    } else {
+        (None, None)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

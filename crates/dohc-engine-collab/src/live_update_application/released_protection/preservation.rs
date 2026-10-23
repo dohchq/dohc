@@ -54,6 +54,8 @@ pub enum PreservationReason {
     ContradictoryEvidence,
     /// The incoming feed names no relay namespace.
     MissingFeedIdentity,
+    /// A contribution's evidence names its authors in no form that reads.
+    MalformedAuthorship,
 }
 
 impl PreservationReason {
@@ -66,6 +68,7 @@ impl PreservationReason {
             Self::MalformedUpdate => "malformed-update",
             Self::ContradictoryEvidence => "contradictory-evidence",
             Self::MissingFeedIdentity => "missing-feed-identity",
+            Self::MalformedAuthorship => "malformed-authorship",
         }
     }
 
@@ -78,24 +81,29 @@ impl PreservationReason {
             Self::DigestMismatch
             | Self::MalformedUpdate
             | Self::ContradictoryEvidence
-            | Self::MissingFeedIdentity => PreservationStatus::InvalidEvidence,
+            | Self::MissingFeedIdentity
+            | Self::MalformedAuthorship => PreservationStatus::InvalidEvidence,
         }
     }
 }
 
-/// One reason, with the tail and the contribution it concerns when it
-/// concerns one.
+/// One reason, with the tail and where the contribution it concerns is,
+/// when it concerns one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreservationFinding {
     pub reason: PreservationReason,
     pub namespace: Option<String>,
-    pub contribution: Option<RetainedContribution>,
+    pub contribution: Option<ContributionLocator>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Preservation {
     pub status: PreservationStatus,
     pub findings: Vec<PreservationFinding>,
+    /// Every contribution each tail with valid coverage commits to, with its
+    /// authors, by namespace in namespace order and then in canonical order:
+    /// what a copy credits, whether or not merging added it.
+    pub covered: Vec<(String, Vec<RetainedContribution>)>,
     /// The contributions whose application added state to the merge, once
     /// each, in canonical order. Work the canonical state already held adds
     /// nothing; work an earlier contribution left waiting on a later one
@@ -186,7 +194,14 @@ pub fn inspect_held(
         (ProtectedTails::Listed(tails), Some(work)) => {
             for (tail, work) in tails.iter().zip(work) {
                 match tail.coverage {
-                    RetainedCoverage::Unproven(_) => readable.push((tail.namespace.clone(), work)),
+                    RetainedCoverage::Unproven(_) => {
+                        readable.push((tail.namespace.clone(), work.contributions))
+                    }
+                    // What made the tail invalid, or the tail itself when
+                    // its evidence does not enumerate.
+                    RetainedCoverage::Invalid if !work.contradictions.is_empty() => {
+                        findings.extend(work.contradictions)
+                    }
                     RetainedCoverage::Invalid => findings.push(finding(
                         PreservationReason::ContradictoryEvidence,
                         Some(&tail.namespace),
@@ -203,9 +218,14 @@ pub fn inspect_held(
     }
     let Some((canonical, kind)) = state else {
         findings.push(finding(PreservationReason::ContradictoryEvidence, None, None));
-        return Ok(HeldInspection::Current(concluded(findings, Vec::new(), None)));
+        return Ok(HeldInspection::Current(concluded(
+            findings,
+            readable,
+            Vec::new(),
+            None,
+        )));
     };
-    preserve(&canonical, kind, findings, &readable, |digest| {
+    preserve(&canonical, kind, findings, readable, |digest| {
         stored_source(conn, digest)
     })
     .map(HeldInspection::Current)
@@ -219,7 +239,7 @@ fn finding(
     PreservationFinding {
         reason,
         namespace: namespace.map(str::to_owned),
-        contribution: contribution.cloned(),
+        contribution: contribution.map(RetainedContribution::locator),
     }
 }
 
@@ -367,7 +387,7 @@ fn preserve(
     canonical: &Ydoc,
     kind: ContentKind,
     mut findings: Vec<PreservationFinding>,
-    work: &[(String, Vec<RetainedContribution>)],
+    work: Vec<(String, Vec<RetainedContribution>)>,
     mut load: impl FnMut(&str) -> Result<Source, ApplicationError>,
 ) -> Result<Preservation, ApplicationError> {
     // A full-state encoding drops what the canonical state holds pending.
@@ -377,7 +397,7 @@ fn preserve(
             None,
             None,
         ));
-        return Ok(concluded(findings, Vec::new(), None));
+        return Ok(concluded(findings, work, Vec::new(), None));
     }
     let scratch = Ydoc::wire();
     scratch.apply(&canonical.encode_full_state())?;
@@ -386,7 +406,7 @@ fn preserve(
     // each integrates: one counts as merged once the merge holds all of it,
     // whatever else stays pending.
     let mut waiting: Vec<(RetainedContribution, Integration)> = Vec::new();
-    for (namespace, contributions) in work {
+    for (namespace, contributions) in &work {
         for contribution in contributions {
             let held_back = |reason| finding(reason, Some(namespace.as_str()), Some(contribution));
             let bytes = match load(contribution.update_digest())? {
@@ -451,11 +471,12 @@ fn preserve(
     } else {
         None
     };
-    Ok(concluded(findings, merged, preserved))
+    Ok(concluded(findings, work, merged, preserved))
 }
 
 fn concluded(
     findings: Vec<PreservationFinding>,
+    covered: Vec<(String, Vec<RetainedContribution>)>,
     merged: Vec<RetainedContribution>,
     preserved: Option<PreservedState>,
 ) -> Preservation {
@@ -467,6 +488,7 @@ fn concluded(
     Preservation {
         status,
         findings,
+        covered,
         merged,
         preserved,
     }
@@ -483,6 +505,7 @@ mod tests {
             sequence,
             delivery_id: format!("delivery-{sequence}"),
             update_digest: hex_sha256(bytes),
+            authors: RetainedAuthors::credited(None, None).unwrap(),
         }
     }
 
@@ -510,7 +533,7 @@ mod tests {
             canonical,
             ContentKind::Richdoc,
             Vec::new(),
-            &[("namespace".to_owned(), work)],
+            vec![("namespace".to_owned(), work)],
             |digest| {
                 Ok(match stored.get(digest) {
                     Some(bytes) if hex_sha256(bytes) == digest => Source::Bytes(bytes.clone()),
@@ -547,6 +570,9 @@ mod tests {
         let contained = preserved(&integrated, vec![outbox(1, &third)], &stored(&[&third]));
         assert_eq!(contained.status, PreservationStatus::Complete);
         assert!(contained.merged.is_empty(), "already integrated: {:?}", contained.merged);
+        // Work the state already held is still covered, with its authors,
+        // for the copy to credit.
+        assert_eq!(contained.covered, [("namespace".to_owned(), vec![outbox(1, &third)])]);
         assert_eq!(integrated.encode_full_state(), before, "the canonical state is unchanged");
 
         let outbox_only = preserved(&integrated, vec![outbox(1, &third), outbox(2, &first)], &stored(&[&third, &first]));
@@ -606,6 +632,7 @@ mod tests {
             sequence: 1,
             delivery_id: "again".into(),
             update_digest: hex_sha256(&second),
+            authors: RetainedAuthors::credited(None, None).unwrap(),
         };
         let repeated = preserved(&canonical, vec![a.clone(), again.clone(), b.clone(), c], &all);
         assert_eq!(repeated.merged, {
@@ -663,7 +690,7 @@ mod tests {
             &canonical,
             ContentKind::Richdoc,
             vec![finding(PreservationReason::ContradictoryEvidence, Some("other"), None)],
-            &[("namespace".to_owned(), vec![outbox(1, &first)])],
+            vec![("namespace".to_owned(), vec![outbox(1, &first)])],
             |_| Ok(Source::Missing),
         )
         .unwrap();

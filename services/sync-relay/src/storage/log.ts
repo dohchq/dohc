@@ -51,7 +51,8 @@ export const RELEASED_COPY_MOMENT_PREFIX = "released-copy-moment-";
 /**
  * A copy of retained work's creation, by what identical creations on two
  * devices share: version, object, moment, bytes, length and correlation, a
- * new text object, and no authors. Recording time and path are left out.
+ * new text object, and exactly the same authors as each push left them.
+ * Recording time and path are left out.
  */
 function releasedCopyCreation(payloadJson: string): {objectId: string; momentId: string; key: string} | null {
   let payload: Record<string, unknown> | null;
@@ -65,10 +66,10 @@ function releasedCopyCreation(payloadJson: string): {objectId: string; momentId:
     typeof payload.objectId !== "string" || payload.operation !== "write" ||
     (payload.beforePresent !== "absent" && payload.beforePresent !== "null") ||
     (payload.payloadAfterContentKind != null && payload.payloadAfterContentKind !== "text") ||
-    typeof metadata?.correlationId !== "string" || !/^[0-9a-f]{64}$/.test(metadata.correlationId) ||
-    payload.authors != null) return null;
+    typeof metadata?.correlationId !== "string" || !/^[0-9a-f]{64}$/.test(metadata.correlationId)) return null;
   return {objectId: payload.objectId, momentId: payload.momentId, key: stableJsonStringify([payload.versionId, payload.objectId,
-    payload.momentId, payload.payloadAfterBlobSha256, payload.payloadAfterByteLength, metadata.correlationId])};
+    payload.momentId, payload.payloadAfterBlobSha256, payload.payloadAfterByteLength, metadata.correlationId,
+    payload.authors ?? null, payload.attributionUnavailable ?? null])};
 }
 
 export function appendLogBatch(storage: StorageContext, input: {

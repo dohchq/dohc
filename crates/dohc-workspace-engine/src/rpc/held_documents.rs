@@ -10,6 +10,7 @@ use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::parse;
 use crate::rpc::workspace::OpenWorkspace;
 use crate::rpc::workspace::validate_workspace_param;
+use dohc_engine_collab::live_update_application::ContributionLocator;
 use dohc_engine_collab::live_update_application::Preservation;
 use dohc_engine_collab::live_update_application::PreservationFinding;
 use dohc_engine_collab::live_update_application::RetainedContribution;
@@ -243,6 +244,17 @@ fn preservation_json(preservation: &Preservation, inband: bool) -> Value {
     json!({
         "status": preservation.status.as_str(),
         "reasons": preservation.findings.iter().map(finding_json).collect::<Vec<_>>(),
+        "coveredContributions": preservation
+            .covered
+            .iter()
+            .map(|(namespace, contributions)| json!({
+                "namespace": namespace,
+                "contributions": contributions
+                    .iter()
+                    .map(RetainedContribution::to_json)
+                    .collect::<Vec<_>>(),
+            }))
+            .collect::<Vec<_>>(),
         "mergedContributionIds": preservation
             .merged
             .iter()
@@ -261,7 +273,7 @@ fn finding_json(found: &PreservationFinding) -> Value {
         "reason": found.reason.as_str(),
         "status": found.reason.status().as_str(),
         "namespace": found.namespace,
-        "contribution": found.contribution.as_ref().map(RetainedContribution::to_json),
+        "contribution": found.contribution.as_ref().map(ContributionLocator::to_json),
     })
 }
 

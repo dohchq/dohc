@@ -703,7 +703,11 @@ fn apply_moment_append(
             after_blob_sha256: &payload.payload_after_blob_sha256,
             after_byte_length: payload.payload_after_byte_length,
             correlation_id: payload.metadata.correlation_id.as_deref(),
-            has_authors: payload.authors.is_some(),
+            authors: envelope
+                .payload
+                .get("authors")
+                .filter(|authors| !authors.is_null()),
+            attribution_unavailable: envelope.payload.get("attributionUnavailable").is_some(),
         };
         if crate::ydoc_recovery::equivalent_released_copy_in_tx(
             tx,

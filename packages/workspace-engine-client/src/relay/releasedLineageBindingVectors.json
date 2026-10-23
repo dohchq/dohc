@@ -7,186 +7,193 @@
           "kind": "carried",
           "deliveryId": "delivery-1",
           "updateDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-          "journalCursor": 7
+          "journalCursor": 7,
+          "authors": [{"kind": "agent", "agentId": "trip-agent", "onBehalfOf": "owner", "depth": 1}]
         },
         {
           "kind": "outbox",
           "outboxId": "outbox",
           "sequence": 3,
           "deliveryId": "delivery-2",
-          "updateDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          "updateDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "authors": [{"kind": "unattributed"}]
         }
       ],
       "count": 2,
-      "digest": "9a508a51c76a58a32aa385095e445d5e7b2a17d4766e854dab3eaeccfd3e721e"
+      "digest": "0d1966ad3707c6903ffa46a5ef448ff6e4e61732fdb87b7b62d12621aae69e0a"
     },
     {
-      "name": "Unicode, integer limits and a repeated delivery, out of order",
+      "name": "Unicode, integer limits, every author kind and a repeated delivery, out of order",
       "contributions": [
         {
           "kind": "outbox",
           "outboxId": "outbox-é☃",
           "sequence": 9007199254740991,
           "deliveryId": "délivery \"q\"\u0001",
-          "updateDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          "updateDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "authors": [{"kind": "automation", "automationId": "sort-☃", "depth": 64, "onBehalfOf": "owner"}]
         },
         {
           "kind": "carried",
           "deliveryId": "delivery-𝄞",
           "updateDigest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-          "journalCursor": 9007199254740991
+          "journalCursor": 9007199254740991,
+          "authors": [{"kind": "human", "humanId": "local-person"}]
         },
         {
           "kind": "carried",
           "deliveryId": "delivery-𝄞",
           "updateDigest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-          "journalCursor": 9007199254740991
+          "journalCursor": 9007199254740991,
+          "authors": [{"kind": "human", "humanId": "local-person"}]
         },
         {
           "kind": "carried",
           "deliveryId": "delivery-0",
           "updateDigest": "0000000000000000000000000000000000000000000000000000000000000000",
-          "journalCursor": 0
+          "journalCursor": 1,
+          "authors": [{"kind": "agent", "agentId": "agent-𝄞"}]
         }
       ],
       "count": 4,
-      "digest": "ae80aab537689ddde425f90f9986ce78cb385a1f8da201fde5f24c56129ac66b"
+      "digest": "26be10341b2e58cfbd2cc6ac164188750a4c7f7f88ce6e5f900cac3eb1619358"
     },
     {
-      "name": "one Carried delivery",
+      "name": "one Carried delivery nobody is credited for",
       "contributions": [
         {
           "kind": "carried",
           "deliveryId": "delivery-1",
           "updateDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-          "journalCursor": 7
+          "journalCursor": 7,
+          "authors": [{"kind": "unattributed"}]
         }
       ],
       "count": 1,
-      "digest": "9d3a3796f15835f1f0a50f0712f2c5dc43cfccb0dce629feec11f59e470693a7"
+      "digest": "07aebc54b8b3fe8496ab22750f5e99ae4bb4383aa9455951d828e490331da96e"
     }
   ],
   "valid": [
     {
       "name": "listed tails",
-      "canonical": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":2,\"digest\":\"9a508a51c76a58a32aa385095e445d5e7b2a17d4766e854dab3eaeccfd3e721e\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":2,\"workspaceId\":\"workspace\"}",
-      "digest": "0c3da13e766b58c3fa1565da7d41a2d2dc5944c2b18ef60b121258a7cc6b6695"
+      "canonical": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":2,\"digest\":\"0d1966ad3707c6903ffa46a5ef448ff6e4e61732fdb87b7b62d12621aae69e0a\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":3,\"workspaceId\":\"workspace\"}",
+      "digest": "ef051d630b3a31a6359b106c0a77cca8132a2f8dfb157b9d6b25f2a0eb47f216"
     },
     {
       "name": "invalid tails without a namespace or path, while a restore fences it",
-      "canonical": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":2,\"workspaceId\":\"workspace-2\"}",
-      "digest": "b3569f745904fb1418cc77f723c01980cf56d1a76b1a2855bbee83d2733637c7"
+      "canonical": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":3,\"workspaceId\":\"workspace-2\"}",
+      "digest": "cf33e909ef2da1c0c08ba1cd097a542819f94a17f09c597c6c38b2277caf036c"
     },
     {
       "name": "Unicode and integer limits",
-      "canonical": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":9007199254740991,\"tails\":[{\"activationId\":\"activation-𝄞\",\"namespace\":\"relay-☃\",\"release\":{\"path\":\"notes/é.md\",\"restoreGeneration\":9007199254740991},\"unproven\":{\"count\":4,\"digest\":\"ae80aab537689ddde425f90f9986ce78cb385a1f8da201fde5f24c56129ac66b\"}}],\"version\":2,\"workspaceId\":\"workspace\"}",
-      "digest": "ea32211c020a833c5f8eb0d89ad2455db4721cd8df9fec58f2cd894c5665bcd9"
+      "canonical": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":9007199254740991,\"tails\":[{\"activationId\":\"activation-𝄞\",\"namespace\":\"relay-☃\",\"release\":{\"path\":\"notes/é.md\",\"restoreGeneration\":9007199254740991},\"unproven\":{\"count\":4,\"digest\":\"26be10341b2e58cfbd2cc6ac164188750a4c7f7f88ce6e5f900cac3eb1619358\"}}],\"version\":3,\"workspaceId\":\"workspace\"}",
+      "digest": "a47609d7554feb8259c72d4b6612c8372482c74bc1428d6a31195a0684fabb49"
     }
   ],
   "invalid": [
     {
       "name": "a duplicate key",
-      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":2,\"workspaceId\":\"workspace-2\"}"
+      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":3,\"workspaceId\":\"workspace-2\"}"
     },
     {
       "name": "an integer past the wire range",
-      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":9007199254740992,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":2,\"workspaceId\":\"workspace-2\"}"
+      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":9007199254740992,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":3,\"workspaceId\":\"workspace-2\"}"
     },
     {
       "name": "a negative integer",
-      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":-1,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":2,\"workspaceId\":\"workspace-2\"}"
+      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":-1,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":3,\"workspaceId\":\"workspace-2\"}"
     },
     {
       "name": "a relay sequence of zero",
-      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":0,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":2,\"workspaceId\":\"workspace-2\"}"
+      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":0,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":3,\"workspaceId\":\"workspace-2\"}"
     },
     {
       "name": "a fractional integer",
-      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1.0,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":2,\"workspaceId\":\"workspace-2\"}"
+      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1.0,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":3,\"workspaceId\":\"workspace-2\"}"
     },
     {
       "name": "a dropped null",
-      "text": "{\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":2,\"workspaceId\":\"workspace-2\"}"
+      "text": "{\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":3,\"workspaceId\":\"workspace-2\"}"
     },
     {
       "name": "a dropped null namespace",
-      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":2,\"workspaceId\":\"workspace-2\"}"
+      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":3,\"workspaceId\":\"workspace-2\"}"
     },
     {
       "name": "an empty namespace for a null one",
-      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":\"\",\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":2,\"workspaceId\":\"workspace-2\"}"
+      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":\"\",\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":3,\"workspaceId\":\"workspace-2\"}"
     },
     {
       "name": "keys out of order",
-      "text": "{\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"currentPath\":null,\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":2,\"workspaceId\":\"workspace-2\"}"
+      "text": "{\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"currentPath\":null,\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":3,\"workspaceId\":\"workspace-2\"}"
     },
     {
       "name": "whitespace",
-      "text": "{ \"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":2,\"workspaceId\":\"workspace-2\"}"
+      "text": "{ \"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":3,\"workspaceId\":\"workspace-2\"}"
     },
     {
       "name": "an unknown key",
-      "text": "{\"currentPath\":null,\"extra\":1,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":2,\"workspaceId\":\"workspace-2\"}"
+      "text": "{\"currentPath\":null,\"extra\":1,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":3,\"workspaceId\":\"workspace-2\"}"
     },
     {
       "name": "another version",
-      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":3,\"workspaceId\":\"workspace-2\"}"
+      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":null,\"version\":4,\"workspaceId\":\"workspace-2\"}"
     },
     {
       "name": "a version 1 binding",
       "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":[{\"deliveryId\":\"delivery-1\",\"journalCursor\":7,\"kind\":\"carried\",\"updateDigest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},{\"deliveryId\":\"delivery-2\",\"kind\":\"outbox\",\"outboxId\":\"outbox\",\"sequence\":3,\"updateDigest\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}]},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":1,\"workspaceId\":\"workspace\"}"
     },
     {
-      "name": "the version 2 shape as version 1",
-      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":2,\"digest\":\"9a508a51c76a58a32aa385095e445d5e7b2a17d4766e854dab3eaeccfd3e721e\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":1,\"workspaceId\":\"workspace\"}"
+      "name": "the version 3 shape as version 2",
+      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":2,\"digest\":\"0d1966ad3707c6903ffa46a5ef448ff6e4e61732fdb87b7b62d12621aae69e0a\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":2,\"workspaceId\":\"workspace\"}"
     },
     {
       "name": "no tails listed",
-      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":[],\"version\":2,\"workspaceId\":\"workspace-2\"}"
+      "text": "{\"currentPath\":null,\"headDigest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"incoming\":{\"originId\":\"service-host:x\",\"originSeq\":5,\"relayNamespace\":null,\"relaySeq\":1,\"replicationEpoch\":\"epoch-2\",\"streamIdentity\":\"stream-2\"},\"lineageClaimId\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"mainVersionId\":\"main\",\"objectId\":\"object-2\",\"restoreGeneration\":null,\"tails\":[],\"version\":3,\"workspaceId\":\"workspace-2\"}"
     },
     {
       "name": "two tails of one namespace",
-      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":2,\"digest\":\"9a508a51c76a58a32aa385095e445d5e7b2a17d4766e854dab3eaeccfd3e721e\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-a\",\"release\":null,\"unproven\":null}],\"version\":2,\"workspaceId\":\"workspace\"}"
+      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":2,\"digest\":\"0d1966ad3707c6903ffa46a5ef448ff6e4e61732fdb87b7b62d12621aae69e0a\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-a\",\"release\":null,\"unproven\":null}],\"version\":3,\"workspaceId\":\"workspace\"}"
     },
     {
       "name": "a contribution list for a commitment",
-      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":[{\"deliveryId\":\"delivery-1\",\"journalCursor\":7,\"kind\":\"carried\",\"updateDigest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},{\"deliveryId\":\"delivery-2\",\"kind\":\"outbox\",\"outboxId\":\"outbox\",\"sequence\":3,\"updateDigest\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}]},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":2,\"workspaceId\":\"workspace\"}"
+      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":[{\"deliveryId\":\"delivery-1\",\"journalCursor\":7,\"kind\":\"carried\",\"updateDigest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},{\"deliveryId\":\"delivery-2\",\"kind\":\"outbox\",\"outboxId\":\"outbox\",\"sequence\":3,\"updateDigest\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}]},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":3,\"workspaceId\":\"workspace\"}"
     },
     {
       "name": "a commitment to nothing",
-      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":0,\"digest\":\"9a508a51c76a58a32aa385095e445d5e7b2a17d4766e854dab3eaeccfd3e721e\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":2,\"workspaceId\":\"workspace\"}"
+      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":0,\"digest\":\"0d1966ad3707c6903ffa46a5ef448ff6e4e61732fdb87b7b62d12621aae69e0a\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":3,\"workspaceId\":\"workspace\"}"
     },
     {
       "name": "a negative count",
-      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":-1,\"digest\":\"9a508a51c76a58a32aa385095e445d5e7b2a17d4766e854dab3eaeccfd3e721e\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":2,\"workspaceId\":\"workspace\"}"
+      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":-1,\"digest\":\"0d1966ad3707c6903ffa46a5ef448ff6e4e61732fdb87b7b62d12621aae69e0a\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":3,\"workspaceId\":\"workspace\"}"
     },
     {
       "name": "a count past the wire range",
-      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":9007199254740992,\"digest\":\"9a508a51c76a58a32aa385095e445d5e7b2a17d4766e854dab3eaeccfd3e721e\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":2,\"workspaceId\":\"workspace\"}"
+      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":9007199254740992,\"digest\":\"0d1966ad3707c6903ffa46a5ef448ff6e4e61732fdb87b7b62d12621aae69e0a\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":3,\"workspaceId\":\"workspace\"}"
     },
     {
       "name": "a fractional count",
-      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":2.0,\"digest\":\"9a508a51c76a58a32aa385095e445d5e7b2a17d4766e854dab3eaeccfd3e721e\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":2,\"workspaceId\":\"workspace\"}"
+      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":2.0,\"digest\":\"0d1966ad3707c6903ffa46a5ef448ff6e4e61732fdb87b7b62d12621aae69e0a\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":3,\"workspaceId\":\"workspace\"}"
     },
     {
       "name": "an uppercase commitment digest",
-      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":2,\"digest\":\"9A508A51C76A58A32AA385095E445D5E7B2A17D4766E854DAB3EAECCFD3E721E\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":2,\"workspaceId\":\"workspace\"}"
+      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":2,\"digest\":\"9A508A51C76A58A32AA385095E445D5E7B2A17D4766E854DAB3EAECCFD3E721E\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":3,\"workspaceId\":\"workspace\"}"
     },
     {
       "name": "a short commitment digest",
-      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":2,\"digest\":\"a508a51c76a58a32aa385095e445d5e7b2a17d4766e854dab3eaeccfd3e721e\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":2,\"workspaceId\":\"workspace\"}"
+      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":2,\"digest\":\"a508a51c76a58a32aa385095e445d5e7b2a17d4766e854dab3eaeccfd3e721e\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":3,\"workspaceId\":\"workspace\"}"
     },
     {
       "name": "a commitment digest that is not hex",
-      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":2,\"digest\":\"gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":2,\"workspaceId\":\"workspace\"}"
+      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":2,\"digest\":\"gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":3,\"workspaceId\":\"workspace\"}"
     },
     {
       "name": "a commitment without its count",
-      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"digest\":\"9a508a51c76a58a32aa385095e445d5e7b2a17d4766e854dab3eaeccfd3e721e\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":2,\"workspaceId\":\"workspace\"}"
+      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"digest\":\"0d1966ad3707c6903ffa46a5ef448ff6e4e61732fdb87b7b62d12621aae69e0a\"}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":3,\"workspaceId\":\"workspace\"}"
     },
     {
       "name": "a commitment with another key",
-      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":2,\"digest\":\"9a508a51c76a58a32aa385095e445d5e7b2a17d4766e854dab3eaeccfd3e721e\",\"extra\":1}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":2,\"workspaceId\":\"workspace\"}"
+      "text": "{\"currentPath\":\"notes/café \\\"q\\\"\\u0001.md\",\"headDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"incoming\":{\"originId\":\"desktop\",\"originSeq\":0,\"relayNamespace\":\"relay-a\",\"relaySeq\":9007199254740991,\"replicationEpoch\":\"epoch\",\"streamIdentity\":\"stream\"},\"lineageClaimId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"mainVersionId\":\"main\",\"objectId\":\"object\",\"restoreGeneration\":0,\"tails\":[{\"activationId\":\"activation-a\",\"namespace\":\"relay-a\",\"release\":{\"path\":\"notes/plan.md\",\"restoreGeneration\":2},\"unproven\":{\"count\":2,\"digest\":\"0d1966ad3707c6903ffa46a5ef448ff6e4e61732fdb87b7b62d12621aae69e0a\",\"extra\":1}},{\"activationId\":\"activation-b\",\"namespace\":\"relay-b\",\"release\":null,\"unproven\":null}],\"version\":3,\"workspaceId\":\"workspace\"}"
     }
   ]
 }

@@ -68,12 +68,36 @@ describe("a copy of retained work published by two owner devices", () => {
   it.each([
     ["other bytes", {payloadAfterBlobSha256: sha256("# Plan\n\nOther.\n"), payloadAfterByteLength: Buffer.byteLength("# Plan\n\nOther.\n")}],
     ["another correlation", {metadata: {origin: "sync", summary: null, correlationId: "e".repeat(64)}}],
-    ["authors", {authors: [{kind: "agent", agentId: "agent", agentName: "Agent"}]}],
+    ["authors the first left out", {authors: [{kind: "agent", agentId: "agent", agentName: "Agent"}]}],
+    ["attribution withheld", {attributionUnavailable: {settlementId: "unavailable", reason: "unproven-hosted-authors"}}],
     ["another moment kind", {momentId: "ordinary-moment"}],
   ])("never treats a creation with %s as redundant", async (_case, overrides) => {
     const f = await relay();
     await f.push("device-a", creation("notes/plan (recovered).md", 10));
     const other = await f.push("device-b", creation("notes/plan (recovered 2).md", 20, overrides));
     expect(other).not.toHaveProperty("redundantRecoveries");
+  });
+
+  // Sol's Ruling A: a copy credits the authors of the retained work it keeps,
+  // and only the same authorship names the same copy.
+  const authors = [{kind: "agent", agentId: "earlier-agent", onBehalfOf: "owner", depth: 1},
+    {kind: "agent", agentId: "trip-agent", onBehalfOf: "owner", depth: 1}];
+  it("treats a creation crediting the same authors as redundant, in any key order", async () => {
+    const f = await relay();
+    await f.push("device-a", creation("notes/plan (recovered).md", 10, {authors}));
+    const reordered = authors.map(author => Object.fromEntries(Object.entries(author).reverse()));
+    const second = await f.push("device-b", creation("notes/plan (recovered 2).md", 20, {authors: reordered}));
+    expect(second).toHaveProperty("redundantRecoveries");
+  });
+
+  it.each([
+    ["one author fewer", authors.slice(1)],
+    ["another author", [authors[0], {...authors[1], agentId: "stranger"}]],
+    ["no authors", null],
+  ])("never treats a creation crediting %s as redundant", async (_case, other) => {
+    const f = await relay();
+    await f.push("device-a", creation("notes/plan (recovered).md", 10, {authors}));
+    const second = await f.push("device-b", creation("notes/plan (recovered 2).md", 20, {authors: other}));
+    expect(second).not.toHaveProperty("redundantRecoveries");
   });
 });
