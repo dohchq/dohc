@@ -57,7 +57,7 @@ For docs, specs, plans, PR bodies, and code comments, follow the six rules from 
 
 > Before: We are pleased to confirm that the installation process has been successfully completed.
 >
-> After: That's it. dohc is installed.
+> After: dohc is installed.
 
 > Before: Note that the engine binary may need to be rebuilt in cases where changes have been made to any of the crates.
 >
