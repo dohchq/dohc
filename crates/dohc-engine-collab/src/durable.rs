@@ -2862,6 +2862,16 @@ pub(crate) fn validate_update_bytes(update: &[u8]) -> Result<(), CollabError> {
 /// Supply an existing transaction to read the marker, snapshot, and updates from
 /// one snapshot. Appends and lineage changes must use that same transaction.
 pub fn load_doc_in(conn: &Connection, key: &DocKey) -> Result<Ydoc, CollabError> {
+    load_doc_between::<CollabError>(conn, key, &mut || Ok(()))
+}
+
+/// [`load_doc_in`], calling `between` before each blob loads and hashes and
+/// before it applies; its error ends the load.
+pub(crate) fn load_doc_between<E: From<CollabError>>(
+    conn: &Connection,
+    key: &DocKey,
+    between: &mut dyn FnMut() -> Result<(), E>,
+) -> Result<Ydoc, E> {
     #[cfg(test)]
     passive_cache_tests::record_reconstruction();
     read_marker_in(conn, key)?.ok_or(CollabError::NoMarker)?;
@@ -2870,16 +2880,20 @@ pub fn load_doc_in(conn: &Connection, key: &DocKey) -> Result<Ydoc, CollabError>
     let tail = updates_after(conn, key, from_seq)?;
     let doc = Ydoc::wire();
     if let Some((_, sha)) = snapshot {
+        between()?;
         let bytes = binary_blob_for_gate(conn, &sha)?;
+        between()?;
         doc.apply(&bytes)?;
     }
     for (seq, sha) in tail {
+        between()?;
         let bytes = binary_blob_for_gate(conn, &sha).map_err(|error| match error {
             CollabError::Corrupt { .. } => CollabError::Corrupt {
                 reason: format!("update blob missing or invalid at seq {seq}"),
             },
             other => other,
         })?;
+        between()?;
         doc.apply(&bytes)?;
     }
     Ok(doc)

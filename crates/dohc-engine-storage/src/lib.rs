@@ -73,4 +73,5 @@ pub use materialize::{
     upsert_projection_job,
 };
 pub use remote_changes::{count_remote_change_in_tx, remote_changes_applied_in};
+pub use checkpoint::{HeldReader, WalPressure};
 pub use store::{EngineStore, TxnOutcome};

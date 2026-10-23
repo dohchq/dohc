@@ -15,6 +15,7 @@
 
 use crate::actor::{ActorHandle, WorkspaceActor};
 use crate::error::RuntimeError;
+use dohc_engine_collab::live_update_application::HeldProofLimit;
 use crate::identity::EngineDbIdentity;
 use std::collections::HashMap;
 use std::path::Path;
@@ -53,6 +54,9 @@ impl Slot {
 pub struct WorkspaceSupervisor {
     registry: Mutex<Registry>,
     ready: Condvar,
+    /// How many held proofs its actors run at once, and the memory they and
+    /// their results keep, shared by every actor it spawns.
+    held_proofs: HeldProofLimit,
 }
 
 /// Result of opening a workspace actor. `created_actor` is true only for the
@@ -117,6 +121,7 @@ impl WorkspaceSupervisor {
         WorkspaceSupervisor {
             registry: Mutex::new(HashMap::new()),
             ready: Condvar::new(),
+            held_proofs: HeldProofLimit::default(),
         }
     }
 
@@ -265,6 +270,7 @@ impl WorkspaceSupervisor {
         // Release the evicted actor's worker outside the lock.
         drop(dead);
 
+        let held_limit = self.held_proofs.clone();
         let spawned = match mode {
             ActorOpenMode::ReadWrite => {
                 if let Some(token) = root_token {
@@ -275,9 +281,17 @@ impl WorkspaceSupervisor {
                         now_ms,
                         token.to_owned(),
                         work,
+                        held_limit,
                     )
                 } else {
-                    WorkspaceActor::spawn(db_path.to_path_buf(), identity.clone(), 1, now_ms, work)
+                    WorkspaceActor::spawn(
+                        db_path.to_path_buf(),
+                        identity.clone(),
+                        1,
+                        now_ms,
+                        work,
+                        held_limit,
+                    )
                 }
             }
             ActorOpenMode::Passive => WorkspaceActor::spawn_passive(
@@ -287,10 +301,15 @@ impl WorkspaceSupervisor {
                 now_ms,
                 root_token.map(str::to_owned),
                 work,
+                held_limit,
             ),
-            ActorOpenMode::ReadOnly => {
-                WorkspaceActor::spawn_read_only(db_path.to_path_buf(), identity.clone(), 1, work)
-            }
+            ActorOpenMode::ReadOnly => WorkspaceActor::spawn_read_only(
+                db_path.to_path_buf(),
+                identity.clone(),
+                1,
+                work,
+                held_limit,
+            ),
         };
         let store_freshly_created = spawned
             .as_ref()
@@ -343,6 +362,7 @@ impl WorkspaceSupervisor {
             mode,
             None,
             None,
+            self.held_proofs.clone(),
         );
         self.finalize_reservation(identity, spawned)
     }

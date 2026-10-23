@@ -6,7 +6,7 @@
 
 use super::*;
 use dohc_engine_runtime::RuntimeError;
-use dohc_engine_sync::{HeldBindingStatus, HeldDocumentInspection};
+use dohc_engine_sync::{HeldAnswer, HeldBindingStatus};
 use rusqlite::trace::{TraceEvent, TraceEventCodes};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -30,7 +30,7 @@ impl Drop for Resume {
     }
 }
 
-type Answer = Result<Option<Arc<HeldDocumentInspection>>, RuntimeError>;
+type Answer = Result<Option<HeldAnswer>, RuntimeError>;
 
 /// A read of the window document through the actor, until `token`.
 fn inspection(w: &RetainedWindow, token: &CancellationToken) -> tokio::task::JoinHandle<Answer> {
@@ -57,7 +57,7 @@ async fn paused_inspection(w: &RetainedWindow) -> (Resume, tokio::task::JoinHand
 async fn released(
     resume: Resume,
     request: tokio::task::JoinHandle<Answer>,
-) -> Option<Arc<HeldDocumentInspection>> {
+) -> Option<HeldAnswer> {
     drop(resume);
     request.await.unwrap().unwrap()
 }
@@ -678,20 +678,27 @@ async fn identical_callers_share_one_proof_and_one_leaving_stops_only_its_wait()
 /// Ruling B, item 6: the last caller to leave stops the proof it waited for,
 /// wherever the proof is. Held at each stage in turn, the proof passes no
 /// further check once its caller leaves, and its reader closes before that
-/// caller answers; the workspace then takes the next proof.
+/// caller answers; the workspace then takes the next proof. Sol's r2c-3c-2
+/// finding 3: that holds inside replay once it applied the head's first
+/// blob, its fourth check, and inside the artifact's encoding, at the start
+/// of its first list, its second.
 #[tokio::test]
 async fn the_last_caller_leaving_stops_a_running_proof() {
     let (w, desktop, _client) = held_for_a_queued_fold().await;
     let proofs = w.actor.held_proofs();
     let resume = Resume(proofs.clone());
     let stages = [
-        ProofStage::Replay,
-        ProofStage::Validation,
-        ProofStage::Merge,
-        ProofStage::Encoding,
+        (ProofStage::Replay, 1),
+        (ProofStage::Replay, 4),
+        (ProofStage::Validation, 1),
+        (ProofStage::Merge, 1),
+        (ProofStage::Projection, 1),
+        (ProofStage::Encoding, 1),
+        (ProofStage::Encoding, 2),
     ];
-    for stage in stages {
-        proofs.pause_proofs_at(stage);
+    for (stage, nth) in stages {
+        let stage = (stage, nth);
+        proofs.pause_proofs_at_check(stage.0, nth);
         let token = CancellationToken::new();
         let request = inspection(&w, &token);
         reached(&format!("{stage:?}: the proof holds there"), proofs.paused_proof()).await;
@@ -774,6 +781,8 @@ async fn a_different_request_for_a_workspace_with_a_running_proof_is_busy() {
 /// proof stops it and returns only once its reader closed, so the store's
 /// files can be replaced, and the proof's caller answers that the workspace
 /// is gone. The stopped proof keeps its reader open until close waits for it.
+/// Opus's r2c-3c-2 finding 1: once close returns, `engine.db` and its WAL
+/// move.
 #[tokio::test]
 async fn closing_the_store_stops_a_running_proof_and_waits_for_its_reader() {
     let (w, desktop, _client) = held_for_a_queued_fold().await;
@@ -788,11 +797,118 @@ async fn closing_the_store_stops_a_running_proof_and_waits_for_its_reader() {
         releasing.wait_for_closing();
         releasing.resume_proofs();
     });
-    w.close().await;
+    let RetainedWindow {
+        owner,
+        supervisor,
+        store,
+        root,
+        ..
+    } = w;
+    // The test's own writer goes first, so only the proof holds the store.
+    drop(store);
+    owner.close().await.unwrap();
+    supervisor.close_all().expect("close returns once the reader closed");
     assert_eq!(proofs.running_proofs(), 0, "close returned after the reader closed");
     release.join().unwrap();
     let closed = answered(request).await;
     assert!(matches!(closed, Err(RuntimeError::ActorUnavailable)), "{closed:?}");
+    let db = engine_db_path(&root).unwrap();
+    for suffix in ["", "-wal"] {
+        let mut from = db.clone().into_os_string();
+        from.push(suffix);
+        let from = std::path::PathBuf::from(from);
+        if from.exists() {
+            let moved = root.path().join(format!("moved{suffix}"));
+            std::fs::rename(&from, &moved).unwrap_or_else(|error| panic!("{suffix}: {error}"));
+            std::fs::rename(&moved, &from).unwrap();
+        }
+    }
     drop(resume);
     desktop.close().await;
+}
+
+/// Sol's and Opus's r2c-3c-2 finding 1: a proof's reader still open past the
+/// close bound fails close, which still closes the writer, so nothing
+/// replaces the store's files under it. The caller answers that the
+/// workspace is gone, and the reader closes once the proof goes on.
+#[tokio::test]
+async fn closing_with_a_reader_past_the_bound_fails() {
+    let (w, desktop, _client) = held_for_a_queued_fold().await;
+    let proofs = w.actor.held_proofs();
+    let resume = Resume(proofs.clone());
+    proofs.pause_proofs_at(ProofStage::Validation);
+    proofs.linger_stopped_proofs();
+    let request = inspection(&w, &CancellationToken::new());
+    reached("the proof validates", proofs.paused_proof()).await;
+    let RetainedWindow {
+        owner, supervisor, ..
+    } = w;
+    owner.close().await.unwrap();
+    let closed = supervisor.close_all();
+    assert!(matches!(closed, Err(RuntimeError::StoreInUse)), "{closed:?}");
+    assert!(!proofs.drained(), "the reader is still open");
+    drop(resume);
+    let answered = answered(request).await;
+    assert!(matches!(answered, Err(RuntimeError::ActorUnavailable)), "{answered:?}");
+    proofs.wait_for_drained();
+    desktop.close().await;
+}
+
+/// Sol's r2c-3c-2 finding 4 and Opus's "old finding 2": a proof held at its
+/// merge while writes through the actor push the WAL past the mark where
+/// held readers give way. Every write succeeds; a new proof is busy while the
+/// WAL stays there; the held proof gives way at its next check and answers
+/// busy, not unavailable or corrupt; and writes go on succeeding past the
+/// length the store refuses writes at while a reader holds the WAL.
+#[tokio::test]
+async fn a_proof_gives_way_when_the_wal_presses_and_writes_keep_succeeding() {
+    const WRITE: &str = "INSERT INTO binary_blobs(sha256,byte_length,bytes)
+        SELECT lower(hex(randomblob(32))),65536,randomblob(65536)";
+    let (w, desktop, _client) = held_for_a_queued_fold().await;
+    let proofs = w.actor.held_proofs();
+    let resume = Resume(proofs.clone());
+    proofs.pause_proofs_at(ProofStage::Merge);
+    let request = inspection(&w, &CancellationToken::new());
+    reached("the proof merges", proofs.paused_proof()).await;
+    let mut writes = 0;
+    while !proofs.wal_pressed("workspace") {
+        assert!(writes < 1_000, "the WAL never pressed");
+        w.actor.write_for_test(WRITE).await.expect("every write succeeds");
+        writes += 1;
+    }
+    let refused = w
+        .actor
+        .held_document("elsewhere".into(), "object".into(), CancellationToken::new())
+        .await;
+    assert!(matches!(refused, Err(RuntimeError::HeldReadBusy)), "{refused:?}");
+    drop(resume);
+    let gave_way = answered(request).await;
+    assert!(matches!(gave_way, Err(RuntimeError::HeldReadBusy)), "{gave_way:?}");
+    assert_eq!(proofs.running_proofs(), 0, "its reader closed");
+    for _ in 0..2 * writes {
+        w.actor.write_for_test(WRITE).await.expect("writes go on succeeding");
+    }
+    desktop.close().await;
+    w.close().await;
+}
+
+/// Sol's r2c-3c-2 finding 4: a proof that outlasts its fixed deadline, here
+/// inside a statement it could never finish, gives way and answers busy;
+/// the next proof answers.
+#[tokio::test]
+async fn a_proof_past_its_deadline_answers_busy() {
+    let (w, desktop, _client) = held_for_a_queued_fold().await;
+    let proofs = w.actor.held_proofs();
+    proofs.set_proof_deadline(Duration::from_millis(500));
+    proofs.stall_next_proof();
+    let request = inspection(&w, &CancellationToken::new());
+    reached("the proof runs its statement", proofs.stalled_proof()).await;
+    let expired = answered(request).await;
+    assert!(matches!(expired, Err(RuntimeError::HeldReadBusy)), "{expired:?}");
+    assert_eq!(proofs.running_proofs(), 0, "its reader closed");
+    proofs.set_proof_deadline(dohc_engine_collab::live_update_application::HELD_PROOF_DEADLINE);
+    let next = answered(inspection(&w, &CancellationToken::new())).await;
+    assert_eq!(next.unwrap().expect("held").status, HeldBindingStatus::Current);
+    desktop.close().await;
+    w.close().await;
 }

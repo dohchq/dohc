@@ -49,14 +49,14 @@ mod bootstrap;
 pub use adoption::{adopt_owner_committed, OwnerAdoptionAck, OwnerAdoptionCut};
 mod released_protection;
 pub use released_protection::{
-    inspect_held, lineage_protection, protection, store_identity, ContributionArtifact,
+    inspect_held, lineage_protection, protection, store_identity, Charged, ContributionArtifact,
     ContributionLocator, HeldInspection, HeldProofAdmission, HeldProofError, HeldProofJob,
-    HeldProofRun, HeldProofStop, HeldProofWait, HeldProofs, IncomingCoordinate,
+    HeldProofLimit, HeldProofRun, HeldProofStop, HeldProofWait, HeldProofs, IncomingCoordinate,
     LineageCoordinates, LineageProtection, PendingValidation, Preservation, PreservationFinding,
-    PreservationReason, PreservationStatus, PreservedState, ProofStage, ProtectedTail,
-    ProtectedTails, Protection, ProtectionKey, ReleasedLineageBinding, ReleasedTails,
-    RetainedAuthors, RetainedContribution, RetainedCoverage, Stop, TailRelease,
-    UnprovenCommitment, Validation, ValidationError, MAX_PROOF_WAITERS,
+    PreservationReason, PreservationStatus, PreservedState, ProofReader, ProofStage, ProofStop,
+    ProtectedTail, ProtectedTails, Protection, ProtectionKey, ReleasedLineageBinding,
+    ReleasedTails, RetainedAuthors, RetainedContribution, RetainedCoverage, Stop, TailRelease,
+    UnprovenCommitment, Validation, ValidationError, HELD_PROOF_DEADLINE, MAX_PROOF_WAITERS,
 };
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]

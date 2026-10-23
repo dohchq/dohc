@@ -438,6 +438,7 @@ mod tests {
     use dohc_engine_collab::live_update_application::RetainedAuthors;
     use dohc_engine_collab::live_update_application::RetainedContribution;
     use dohc_engine_collab::live_update_application::RetainedCoverage;
+    use dohc_engine_collab::live_update_application::Stop;
     use dohc_engine_collab::live_update_application::UnprovenCommitment;
     use dohc_engine_protocol::transport::ConnectionOwner;
     use dohc_engine_sync::HeldBindingStatus;
@@ -838,7 +839,7 @@ mod tests {
         binding: &ReleasedLineageBinding,
         preservation: Preservation,
     ) -> HeldDocumentInspection {
-        let contributions = ContributionArtifact::of(binding, &preservation);
+        let contributions = ContributionArtifact::of(binding, &preservation, Stop::NEVER).unwrap();
         HeldDocumentInspection {
             document: held_by(binding),
             status: HeldBindingStatus::Current,

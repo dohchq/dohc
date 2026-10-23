@@ -973,12 +973,24 @@ impl EngineService {
                 // has to wait for it, or SQLite still holds the file.
                 drop(actor);
                 let removed = supervisor.begin_close(&db_path);
-                if let Ok(Some(closing)) = removed {
-                    let _ = tokio::task::spawn_blocking(move || closing.finish()).await;
-                }
+                let closed = match removed {
+                    Ok(Some(closing)) => {
+                        matches!(tokio::task::spawn_blocking(move || closing.finish()).await, Ok(Ok(())))
+                    }
+                    Ok(None) => true,
+                    Err(_) => false,
+                };
                 open_guard.disarm();
-                // A delete that fails leaves the store the next open refuses
-                // as a mismatch. The refusal stands; the path says why.
+                // A delete that fails, or a close that left the store open,
+                // leaves the store the next open refuses as a mismatch. The
+                // refusal stands; the path says why.
+                if !closed {
+                    eprintln!(
+                        "engine: kept the orphaned store {}: it did not close",
+                        db_path.display()
+                    );
+                    return Err(map_root_binding(error));
+                }
                 for suffix in ["", "-wal", "-shm"] {
                     let mut path = db_path.clone().into_os_string();
                     path.push(suffix);

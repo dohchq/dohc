@@ -120,6 +120,12 @@ pub enum RuntimeError {
     #[error("another held document read is running for this workspace")]
     HeldReadBusy,
 
+    /// The actor closed, but a held proof's reader still had the store open
+    /// past the close bound. Nothing may replace or delete the store's files
+    /// until it closes; the caller asks again later.
+    #[error("a held document read still has the workspace database open")]
+    StoreInUse,
+
     /// A fault-injected domain transaction crashed before acknowledgement.
     #[error("operation crashed before acknowledgement")]
     OperationCrashed,
@@ -187,6 +193,7 @@ impl RuntimeError {
             RuntimeError::WorkerPanicked => "worker-panicked",
             RuntimeError::Cancelled => "cancelled",
             RuntimeError::HeldReadBusy => "held-read-busy",
+            RuntimeError::StoreInUse => "store-in-use",
             RuntimeError::OperationCrashed => "operation-crashed",
             RuntimeError::DrainWaiting(_) => "retryable-state",
         }

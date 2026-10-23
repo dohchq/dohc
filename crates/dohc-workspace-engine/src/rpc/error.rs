@@ -266,6 +266,11 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::HeldReadBusy => {
             return WireError::new(ErrorCode::Overloaded, "held-read-busy");
         }
+        // The store closed with a held read's reader still open; its files
+        // stay as they are until it closes. Ask again.
+        RuntimeError::StoreInUse => {
+            return WireError::new(ErrorCode::Overloaded, "store-in-use");
+        }
         RuntimeError::Relay(relay @ RelayError::BlobTooLarge { .. }) => {
             return WireError::new(ErrorCode::PayloadTooLarge, relay.to_string());
         }
@@ -551,6 +556,7 @@ fn map_sync_code(error: SyncError) -> ErrorCode {
         | SyncError::ProjectionTooLarge { .. } => {
             ErrorCode::PayloadTooLarge
         }
+        SyncError::Cancelled => ErrorCode::Cancelled,
     }
 }
 

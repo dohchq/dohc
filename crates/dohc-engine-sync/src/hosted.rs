@@ -28,8 +28,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::{ReplicationEnvelope, SyncError};
 
 pub use held::{
-    HeldBindingStatus, HeldDocument, HeldDocumentInspection, HeldDocumentsPage, HeldFreshness,
-    HeldKey, HeldProof, HeldProofAdmission, HeldProofs, HeldRelease, MAX_HELD_DOCUMENTS_PAGE,
+    HeldAnswer, HeldBindingStatus, HeldDocument, HeldDocumentInspection, HeldDocumentsPage,
+    HeldFreshness, HeldKey, HeldProof, HeldProofAdmission, HeldProofs, HeldRelease,
+    MAX_HELD_DOCUMENTS_PAGE,
     ProvedHeld, admit_held_proof, check_held_freshness, inspect_held_document,
     list_held_documents, prove_held_document, release_held_proof, shared_proof_failure,
 };

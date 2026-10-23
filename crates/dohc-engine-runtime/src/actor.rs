@@ -76,7 +76,7 @@ use crate::identity::EngineDbIdentity;
 pub use crate::links::LinkDrainMetrics;
 use crate::links::{DrainWorker, SharedMetrics};
 use dohc_engine_collab::WriterDocCache;
-use dohc_engine_collab::live_update_application::ReleasedTails;
+use dohc_engine_collab::live_update_application::{HeldProofLimit, ReleasedTails};
 use dohc_engine_sync::HeldProofs;
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError};
 use std::path::PathBuf;
@@ -233,13 +233,15 @@ impl WorkspaceActor {
     ///
     /// `work`, when given, counts the store open's SQLite work and then each
     /// command the actor serves, so a caller can tell a long open from a
-    /// stuck one.
+    /// stuck one. `held_limit` is the daemon's, which the actor's held
+    /// proofs share with every other actor's.
     pub(crate) fn spawn(
         db_path: PathBuf,
         identity: EngineDbIdentity,
         generation: u64,
         now_ms: i64,
         work: Option<Arc<AtomicU64>>,
+        held_limit: HeldProofLimit,
     ) -> Result<Self, RuntimeError> {
         Self::spawn_with_mode(
             db_path,
@@ -249,6 +251,7 @@ impl WorkspaceActor {
             ActorOpenMode::ReadWrite,
             None,
             work,
+            held_limit,
         )
     }
 
@@ -259,6 +262,7 @@ impl WorkspaceActor {
         now_ms: i64,
         root_token: String,
         work: Option<Arc<AtomicU64>>,
+        held_limit: HeldProofLimit,
     ) -> Result<Self, RuntimeError> {
         Self::spawn_with_mode(
             db_path,
@@ -268,6 +272,7 @@ impl WorkspaceActor {
             ActorOpenMode::ReadWrite,
             Some(root_token),
             work,
+            held_limit,
         )
     }
 
@@ -278,6 +283,7 @@ impl WorkspaceActor {
         identity: EngineDbIdentity,
         generation: u64,
         work: Option<Arc<AtomicU64>>,
+        held_limit: HeldProofLimit,
     ) -> Result<Self, RuntimeError> {
         Self::spawn_with_mode(
             db_path,
@@ -287,6 +293,7 @@ impl WorkspaceActor {
             ActorOpenMode::ReadOnly,
             None,
             work,
+            held_limit,
         )
     }
 
@@ -297,6 +304,7 @@ impl WorkspaceActor {
         now_ms: i64,
         root_token: Option<String>,
         work: Option<Arc<AtomicU64>>,
+        held_limit: HeldProofLimit,
     ) -> Result<Self, RuntimeError> {
         Self::spawn_with_mode(
             db_path,
@@ -306,9 +314,11 @@ impl WorkspaceActor {
             ActorOpenMode::Passive,
             root_token,
             work,
+            held_limit,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn_with_mode(
         db_path: PathBuf,
         identity: EngineDbIdentity,
@@ -317,6 +327,7 @@ impl WorkspaceActor {
         mode: ActorOpenMode,
         root_token: Option<String>,
         work: Option<Arc<AtomicU64>>,
+        held_limit: HeldProofLimit,
     ) -> Result<Self, RuntimeError> {
         let writer_lock = if matches!(mode, ActorOpenMode::ReadOnly) {
             let file = std::fs::File::open(&db_path).map_err(|error| RuntimeError::Identity {
@@ -388,7 +399,7 @@ impl WorkspaceActor {
                     link_drain_holds,
                     current_views: Arc::default(),
                     released_tails,
-                    held_proofs: HeldProofs::default(),
+                    held_proofs: HeldProofs::new(held_limit),
                     pulls: relay::PullPermit::default(),
                 };
                 #[cfg(unix)]
@@ -468,9 +479,18 @@ impl WorkspaceActor {
     /// executor thread; a future `close_async` could yield instead (noted for a
     /// later shard). A worker wedged inside a fault gate must be released by the
     /// caller before close (same contract as the storage writer).
+    ///
+    /// A held proof's reader still open past the close bound, ten seconds,
+    /// fails close with [`RuntimeError::StoreInUse`] once the writer is gone,
+    /// and so does every later close until that reader closes: a caller
+    /// that replaces or deletes the store's files must not touch them first.
     pub fn close(&mut self) -> Result<(), RuntimeError> {
         let Some(worker) = self.worker.take() else {
-            return Ok(());
+            return if self.held_proofs.drained() {
+                Ok(())
+            } else {
+                Err(RuntimeError::StoreInUse)
+            };
         };
         #[cfg(unix)]
         if let Some(retention) = &mut self.retention {
@@ -482,10 +502,10 @@ impl WorkspaceActor {
         // before the store's files can be replaced. A request waiting on it
         // fails as unavailable.
         self.released_tails.close();
-        // So do held proofs. One left running past the bound closes its
-        // reader at its next check; a restore it meets meanwhile fails on
-        // the open file rather than waiting.
-        self.held_proofs.close(HELD_PROOF_CLOSE_BOUND);
+        // So do held proofs, and no reader opens once this begins. One left
+        // running past the bound closes its reader at its next check; the
+        // writer still closes, and close then fails.
+        let drained = self.held_proofs.close(HELD_PROOF_CLOSE_BOUND);
         match self.close_permit.take() {
             // Reserved slot: instant, fair, FIFO-respecting delivery.
             Some(permit) => {
@@ -498,7 +518,12 @@ impl WorkspaceActor {
                 let _ = self.tx.try_send(Command::Close);
             }
         }
-        match worker.join() {
+        let joined = worker.join();
+        if !drained {
+            eprintln!("engine: a held document read still has its workspace database open after close");
+            return Err(RuntimeError::StoreInUse);
+        }
+        match joined {
             Ok(()) => Ok(()),
             Err(_) => Err(RuntimeError::WorkerPanicked),
         }
@@ -572,6 +597,20 @@ impl ActorHandle {
                 hook(conn);
                 Ok(())
             })
+        })
+        .await
+    }
+
+    /// Run `sql` in a write of the actor's own, admitted as every write is,
+    /// for tests that grow the store's WAL.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn write_for_test(&self, sql: &'static str) -> Result<(), RuntimeError> {
+        self.run(move |store, _| {
+            store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                tx.execute_batch(sql).map_err(StorageError::persist_public)
+            })?;
+            Ok(())
         })
         .await
     }
@@ -1141,7 +1180,7 @@ mod saturation_tests {
             link_drain_holds: holds,
             current_views: Arc::default(),
             released_tails: ReleasedTails::default(),
-            held_proofs: HeldProofs::default(),
+            held_proofs: HeldProofs::new(HeldProofLimit::default()),
             pulls: relay::PullPermit::default(),
         };
         prepare(&actor.handle());
@@ -1400,7 +1439,7 @@ mod saturation_tests {
         std::fs::hard_link(&db, &alias).expect("hard link");
         let identity = EngineDbIdentity::of_existing(&alias).expect("identity");
         assert!(matches!(
-            WorkspaceActor::spawn_read_only(alias, identity, 1, None),
+            WorkspaceActor::spawn_read_only(alias, identity, 1, None, HeldProofLimit::default()),
             Err(RuntimeError::WorkspaceHardlinked)
         ));
     }
@@ -1410,7 +1449,8 @@ mod saturation_tests {
         let scratch = ScratchDir::new().expect("scratch");
         let db = engine_db_path(&scratch).expect("database path");
         let identity = EngineDbIdentity::resolve_or_create(&db).expect("identity");
-        let mut actor = WorkspaceActor::spawn(db, identity, 1, 1, None).expect("spawn");
+        let mut actor = WorkspaceActor::spawn(db, identity, 1, 1, None, HeldProofLimit::default())
+            .expect("spawn");
         assert!(actor.close_permit.is_some());
         let handle = actor.handle();
         let (entered, entered_rx) = oneshot::channel();

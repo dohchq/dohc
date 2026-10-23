@@ -125,6 +125,9 @@ pub enum SyncError {
     },
     #[error("injected crash")]
     FaultCrash,
+    /// A read stopped because nobody waits for it any more.
+    #[error("the read was cancelled")]
+    Cancelled,
 }
 
 /// What a share pull does with a refusal the boundary answered with.
@@ -173,7 +176,8 @@ impl SyncError {
             | SyncError::ValidationPending(_)
             | SyncError::BlobInvalid
             | SyncError::BlobTooLarge { .. }
-            | SyncError::FaultCrash => ShareDisposition::Abort,
+            | SyncError::FaultCrash
+            | SyncError::Cancelled => ShareDisposition::Abort,
         }
     }
 
@@ -206,6 +210,7 @@ impl SyncError {
             | SyncError::BlobInvalid
             | SyncError::BlobTooLarge { .. } => "invalid-input",
             SyncError::FaultCrash => "injected-crash",
+            SyncError::Cancelled => "cancelled",
         }
     }
 

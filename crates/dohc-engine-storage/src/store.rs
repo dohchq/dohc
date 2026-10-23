@@ -38,6 +38,7 @@ pub struct EngineStore {
     passive: bool,
     completed_batch: CompletionBatch,
     opening: u64,
+    wal_pressure: Arc<crate::checkpoint::WalPressure>,
 }
 
 /// The number of the next open of any store in this process.
@@ -114,6 +115,7 @@ impl EngineStore {
             passive: true,
             completed_batch: Arc::default(),
             opening: next_opening(),
+            wal_pressure: Arc::default(),
         })
     }
 
@@ -149,6 +151,7 @@ impl EngineStore {
             harness_commits: 0,
             completed_batch: Arc::default(),
             opening: next_opening(),
+            wal_pressure: Arc::default(),
         })
     }
 
@@ -172,6 +175,7 @@ impl EngineStore {
             passive: false,
             completed_batch: Arc::default(),
             opening: next_opening(),
+            wal_pressure: Arc::default(),
         })
     }
 
@@ -197,6 +201,7 @@ impl EngineStore {
             passive: false,
             completed_batch: Arc::default(),
             opening: next_opening(),
+            wal_pressure: Arc::default(),
         })
     }
 
@@ -225,6 +230,7 @@ impl EngineStore {
             passive,
             completed_batch: Arc::default(),
             opening: next_opening(),
+            wal_pressure: Arc::default(),
         })
     }
 
@@ -309,6 +315,11 @@ impl EngineStore {
             replacement.request();
             self.checkpoints.replace(replacement);
         }
+        if self.wal_pressure.held() {
+            self.wal_pressure
+                .measure(&self.conn)
+                .map_err(StorageError::persist)?;
+        }
         if let Some(checkpoints) = &self.checkpoints {
             checkpoints.prepare_for_write(&self.conn)?;
         }
@@ -348,6 +359,20 @@ impl EngineStore {
     /// the same file after a restore.
     pub fn opening(&self) -> u64 {
         self.opening
+    }
+
+    /// What this open's held readers stop for: the writer measures the WAL
+    /// before each write while one is counted, so writes keep their room.
+    pub fn wal_pressure(&self) -> Arc<crate::checkpoint::WalPressure> {
+        Arc::clone(&self.wal_pressure)
+    }
+
+    /// Measure the WAL now, for a held reader about to start; whether it
+    /// presses, which refuses the reader.
+    pub fn measure_wal_pressure(&self) -> Result<bool, StorageError> {
+        self.wal_pressure
+            .measure(&self.conn)
+            .map_err(StorageError::persist)
     }
 
     /// Bind a fresh store to its root's token, or verify an existing binding.

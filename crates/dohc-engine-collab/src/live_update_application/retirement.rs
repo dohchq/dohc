@@ -817,7 +817,8 @@ pub(crate) fn released_binding(
 /// whose evidence contradicts itself is a contradiction of the work it names,
 /// or of the tail when nothing names that work, and every other entry is
 /// still checked. Evidence that does not enumerate, or a storage failure, is
-/// an error, and so is `stop`, checked before each entry.
+/// an error, and so is `stop`, checked before the manifest decodes and
+/// before each entry.
 pub(crate) fn unproven_retained(
     conn: &Connection,
     namespace: &str,
@@ -832,6 +833,7 @@ pub(crate) fn unproven_retained(
     };
     let mut listed = BTreeSet::new();
     let chain = chain_activations(conn, namespace, tail)?;
+    stop.check(ProofStage::Validation)?;
     let (_, manifest) = released_tail(conn, namespace, tail)?;
     for carried in manifest {
         stop.check(ProofStage::Validation)?;

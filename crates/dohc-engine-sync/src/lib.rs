@@ -68,7 +68,8 @@ pub use enrolment::{originate_closing_ydoc_base_in_tx, originate_live_ydoc_base_
 use error::ShareDisposition;
 pub use error::{ObservedBytes, RelayError, SyncError};
 pub use hosted::{
-    DepartedDocument, DepartedHead, HOSTED_REPLICA_NOT_PRISTINE, HeldBindingStatus, HeldDocument,
+    DepartedDocument, DepartedHead, HOSTED_REPLICA_NOT_PRISTINE, HeldAnswer, HeldBindingStatus,
+    HeldDocument,
     HeldDocumentInspection, HeldDocumentsPage, HeldFreshness, HeldKey, HeldProof,
     HeldProofAdmission, HeldProofs, HeldRelease, HostedCommit, HostedCursor, HostedDocumentState,
     HostedDocumentStatus, HostedHold, HostedRead, HostedReplicaState, MAX_HELD_DOCUMENTS_PAGE,

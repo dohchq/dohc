@@ -13,6 +13,7 @@ fn actor(scratch: &ScratchDir) -> WorkspaceActor {
         1,
         0,
         None,
+        Default::default(),
     )
     .unwrap()
 }
@@ -263,6 +264,7 @@ fn passive_store_never_spawns_a_retention_worker_even_after_root_binding() {
         0,
         None,
         None,
+        Default::default(),
     )
     .unwrap();
     assert!(actor.retention.is_none());

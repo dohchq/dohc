@@ -16,8 +16,9 @@ mod held;
 mod preservation;
 pub use binding::ContributionArtifact;
 pub use held::{
-    store_identity, HeldProofAdmission, HeldProofError, HeldProofJob, HeldProofRun, HeldProofStop,
-    HeldProofWait, HeldProofs, LineageCoordinates, ProofStage, Stop, MAX_PROOF_WAITERS,
+    store_identity, Charged, HeldProofAdmission, HeldProofError, HeldProofJob, HeldProofLimit,
+    HeldProofRun, HeldProofStop, HeldProofWait, HeldProofs, LineageCoordinates, ProofReader,
+    ProofStage, ProofStop, Stop, HELD_PROOF_DEADLINE, MAX_PROOF_WAITERS,
 };
 pub use preservation::{
     inspect_held, HeldInspection, Preservation, PreservationFinding, PreservationReason,
@@ -1146,19 +1147,36 @@ fn open_reader(path: &std::path::Path) -> Result<Connection, ApplicationError> {
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-    .map_err(read_sql)?;
+    .map_err(open_failure)?;
     reader
         .set_db_config(
             rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
             true,
         )
-        .map_err(read_sql)?;
+        .map_err(open_failure)?;
     reader
         .busy_timeout(std::time::Duration::from_millis(u64::from(
             dohc_engine_storage::ENGINE_SQLITE_BUSY_TIMEOUT_MS,
         )))
-        .map_err(read_sql)?;
+        .map_err(open_failure)?;
     Ok(reader)
+}
+
+/// Why a reader could not open or fix its snapshot. A store that is busy,
+/// cannot open or fails I/O, a Windows sharing violation among them, is
+/// locked, which waiting may clear; anything else is the store's own state.
+fn open_failure(error: rusqlite::Error) -> ApplicationError {
+    use rusqlite::ErrorCode;
+    match error.sqlite_error_code() {
+        Some(
+            ErrorCode::CannotOpen
+            | ErrorCode::SystemIoFailure
+            | ErrorCode::DatabaseBusy
+            | ErrorCode::DatabaseLocked
+            | ErrorCode::PermissionDenied,
+        ) => StorageError::FileLocked.into(),
+        _ => read_sql(error),
+    }
 }
 
 /// The document's released tail generation, none before its first

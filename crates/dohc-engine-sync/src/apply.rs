@@ -483,7 +483,8 @@ pub(crate) fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
         | SyncError::ShareVersionUnusable { .. }
         | SyncError::BlobInvalid
         | SyncError::BlobTooLarge { .. }
-        | SyncError::FaultCrash => None,
+        | SyncError::FaultCrash
+        | SyncError::Cancelled => None,
     }
 }
 

@@ -3103,6 +3103,7 @@ pub(crate) fn protection_failure(
     match error {
         ApplicationError::Storage(error) => SyncError::Storage(error),
         ApplicationError::Collab(error) => map_collab_hard_error(error),
+        ApplicationError::Cancelled => SyncError::Cancelled,
         _ => local_corruption("released lineage evidence does not read"),
     }
 }

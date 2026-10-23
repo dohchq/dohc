@@ -268,7 +268,8 @@ fn corrupt(error: &CollabError) -> bool {
 /// The state `lineage` of the document keeps: the head's, loaded from its
 /// journal, or an archived one's, from the full state its archive keeps.
 /// None when the document holds no such lineage. `stop` is checked before
-/// the state loads, and again before and after it is hashed.
+/// the state loads, before each of its blobs loads and applies, and before
+/// and after it is hashed.
 fn lineage_state(
     conn: &Connection,
     doc: &DocKey,
@@ -278,10 +279,14 @@ fn lineage_state(
     stop.check(ProofStage::Replay)?;
     if let Some(marker) = durable::read_marker_in(conn, doc)? {
         if marker.lineage_claim_id.as_deref() == Some(lineage) {
-            let head = match durable::load_doc_in(conn, doc) {
+            let head = match durable::load_doc_between::<ApplicationError>(conn, doc, &mut || {
+                stop.check(ProofStage::Replay)
+            }) {
                 Ok(head) => head,
-                Err(error) if corrupt(&error) => return Ok(Some(LineageState::Corrupt(None))),
-                Err(error) => return Err(error.into()),
+                Err(ApplicationError::Collab(error)) if corrupt(&error) => {
+                    return Ok(Some(LineageState::Corrupt(None)))
+                }
+                Err(error) => return Err(error),
             };
             stop.check(ProofStage::Replay)?;
             let digest = hex_sha256(&head.encode_full_state());
@@ -393,8 +398,9 @@ impl Integration {
 /// other: each tail's work is validated alone, and both apply, so neither
 /// one's work is lost from the merge.
 ///
-/// `stop` is checked before each contribution loads and again before it
-/// applies, and before the merged state is projected and encoded.
+/// `stop` is checked around the scratch state's reconstruction, before each
+/// contribution loads and again before it applies, and around the merged
+/// state's projection and encoding.
 fn preserve(
     canonical: &Ydoc,
     kind: ContentKind,
@@ -412,8 +418,12 @@ fn preserve(
         ));
         return Ok(concluded(findings, work, Vec::new(), None));
     }
+    stop.check(ProofStage::Merge)?;
+    let base = canonical.encode_full_state();
+    stop.check(ProofStage::Merge)?;
     let scratch = Ydoc::wire();
-    scratch.apply(&canonical.encode_full_state())?;
+    scratch.apply(&base)?;
+    drop(base);
     let mut merged = Vec::new();
     // Contributions whose application left part of them parked, with what
     // each integrates: one counts as merged once the merge holds all of it,
@@ -481,9 +491,11 @@ fn preserve(
             ContentKind::Plaintext | ContentKind::Scene => projection,
         };
         stop.check(ProofStage::Projection)?;
+        let full_state = scratch.encode_full_state();
+        stop.check(ProofStage::Projection)?;
         Some(PreservedState {
             markdown,
-            full_state: scratch.encode_full_state(),
+            full_state,
         })
     } else {
         None

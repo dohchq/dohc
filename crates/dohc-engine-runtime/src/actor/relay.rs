@@ -1928,20 +1928,28 @@ impl ActorHandle {
     /// meanwhile is stale, with nothing preserved, and nothing proves again.
     ///
     /// A caller that asks what the workspace's running proof asks, of the
-    /// same state, shares it; any other is busy. `token`, the caller's own
-    /// cancellation or deadline, ends only its wait. The last caller to leave
-    /// stops the proof, and answers once its reader closed, or after twice
-    /// SQLite's busy timeout.
+    /// same state, shares it; any other is busy, and so is a new proof past
+    /// the daemon's limit or while the store's WAL presses on held readers.
+    /// A request busy whatever it asks is refused before the actor reads
+    /// anything. `token`, the caller's own cancellation or deadline, ends
+    /// only its wait. The last caller to leave stops the proof, and answers
+    /// once its reader closed, or after twice SQLite's busy timeout. A proof
+    /// that gave way to writes or reached its deadline answers busy. The
+    /// answer keeps the proof's result charged until the last caller drops
+    /// it.
     pub async fn held_document(
         &self,
         workspace_id: String,
         object_id: String,
         token: CancellationToken,
-    ) -> Result<Option<Arc<dohc_engine_sync::HeldDocumentInspection>>, RuntimeError> {
+    ) -> Result<Option<dohc_engine_sync::HeldAnswer>, RuntimeError> {
         use dohc_engine_collab::live_update_application::HeldProofError;
         use dohc_engine_sync::HeldProofAdmission;
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
+        }
+        if self.held_proofs.refuses(&workspace_id) {
+            return Err(RuntimeError::HeldReadBusy);
         }
         let proofs = self.held_proofs.clone();
         let (admitted_workspace, admitted_object) = (workspace_id.clone(), object_id.clone());
@@ -1962,8 +1970,13 @@ impl ActorHandle {
                 // and an unrun one ends as closed.
                 drop(tokio::task::spawn_blocking(move || {
                     run.prove(|job| {
-                        dohc_engine_sync::prove_held_document(job, &workspace_id, &object_id)
-                            .map_err(Arc::new)
+                        let proved =
+                            dohc_engine_sync::prove_held_document(job, &workspace_id, &object_id)
+                                .map_err(Arc::new);
+                        let retained = proved
+                            .as_ref()
+                            .map_or(0, dohc_engine_sync::HeldProof::retained_bytes);
+                        (proved, retained)
                     });
                 }));
                 wait
@@ -1983,9 +1996,10 @@ impl ActorHandle {
         };
         let proved = proved.map_err(|error| match error {
             HeldProofError::Closed => RuntimeError::ActorUnavailable,
+            HeldProofError::Busy => RuntimeError::HeldReadBusy,
             HeldProofError::Panicked => RuntimeError::WorkerPanicked,
         })?;
-        let proof = match &*proved {
+        let proof = match &**proved {
             Ok(proof) => proof,
             Err(failure) => return Err(dohc_engine_sync::shared_proof_failure(failure).into()),
         };
@@ -1997,7 +2011,8 @@ impl ActorHandle {
                 dohc_engine_sync::check_held_freshness(store, &freshness).map_err(RuntimeError::from)
             })
             .await?;
-        Ok(proof.released(release))
+        let released = proof.released(release);
+        Ok(released.map(|inspection| dohc_engine_sync::HeldAnswer::new(inspection, Arc::clone(&proved))))
     }
 
     pub async fn dismiss_sync_refusal(

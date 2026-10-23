@@ -42,10 +42,16 @@ impl UnprovenCommitment {
             &Value::Array(contributions.iter().map(contribution_value).collect()),
             &mut out,
         );
+        Self::committed(contributions.len(), &out)
+    }
+
+    /// The commitment to `count` contributions whose canonical array is
+    /// `listed`.
+    fn committed(count: usize, listed: &str) -> Self {
         let mut input = CONTRIBUTIONS_DOMAIN.to_vec();
-        input.extend_from_slice(out.as_bytes());
+        input.extend_from_slice(listed.as_bytes());
         Self {
-            count: contributions.len() as i64,
+            count: count as i64,
             digest: hex_sha256(&input),
         }
     }
@@ -53,6 +59,10 @@ impl UnprovenCommitment {
 
 /// The version of a [`ContributionArtifact`]'s encoding.
 const ARTIFACT_VERSION: i64 = 1;
+
+/// Contributions a [`ContributionArtifact`] encodes between its checks of
+/// whether to stop.
+const ARTIFACT_CHECK_EVERY: usize = 1024;
 
 /// Everything a current preservation names, as one canonical JSON document
 /// the owner downloads by its SHA-256: the format version, the binding, each
@@ -69,31 +79,65 @@ pub struct ContributionArtifact {
 }
 
 impl ContributionArtifact {
-    pub fn of(binding: &ReleasedLineageBinding, preservation: &Preservation) -> Self {
-        fn listed(contributions: &[RetainedContribution]) -> Value {
-            Value::Array(contributions.iter().map(contribution_value).collect())
+    /// The artifact of `preservation` under `binding`, written in canonical
+    /// order one contribution at a time; `stop` is checked before it starts,
+    /// every [`ARTIFACT_CHECK_EVERY`] contributions, and around each hash.
+    pub fn of(
+        binding: &ReleasedLineageBinding,
+        preservation: &Preservation,
+        stop: Stop<'_>,
+    ) -> Result<Self, ApplicationError> {
+        fn listed(
+            contributions: &[RetainedContribution],
+            out: &mut String,
+            stop: Stop<'_>,
+        ) -> Result<(), ApplicationError> {
+            out.push('[');
+            for (index, contribution) in contributions.iter().enumerate() {
+                if index % ARTIFACT_CHECK_EVERY == 0 {
+                    stop.check(ProofStage::Encoding)?;
+                }
+                if index > 0 {
+                    out.push(',');
+                }
+                write_canonical(&contribution_value(contribution), out);
+            }
+            out.push(']');
+            Ok(())
         }
-        let value = serde_json::json!({
-            "version": ARTIFACT_VERSION,
-            "binding": binding.to_json(),
-            "coveredContributions": preservation
-                .covered
-                .iter()
-                .map(|(namespace, contributions)| serde_json::json!({
-                    "namespace": namespace,
-                    "contributions": listed(contributions),
-                }))
-                .collect::<Vec<_>>(),
-            "mergedContributionIds": listed(&preservation.merged),
-        });
-        let mut text = String::new();
-        write_canonical(&value, &mut text);
-        let bytes = text.into_bytes();
-        Self {
-            sha256: hex_sha256(&bytes),
-            merged: UnprovenCommitment::of_listed(&preservation.merged),
-            bytes,
+        stop.check(ProofStage::Encoding)?;
+        // [`write_canonical`]'s form, its keys in order, written as it goes.
+        let mut text = String::from("{\"binding\":");
+        write_canonical(&binding.to_json(), &mut text);
+        text.push_str(",\"coveredContributions\":[");
+        for (index, (namespace, contributions)) in preservation.covered.iter().enumerate() {
+            if index > 0 {
+                text.push(',');
+            }
+            text.push_str("{\"contributions\":");
+            listed(contributions, &mut text, stop)?;
+            text.push_str(",\"namespace\":");
+            write_canonical(&Value::String(namespace.clone()), &mut text);
+            text.push('}');
         }
+        text.push_str("],\"mergedContributionIds\":");
+        let merged_from = text.len();
+        listed(&preservation.merged, &mut text, stop)?;
+        let merged_to = text.len();
+        text.push_str(",\"version\":");
+        write_canonical(&Value::from(ARTIFACT_VERSION), &mut text);
+        text.push('}');
+        stop.check(ProofStage::Encoding)?;
+        let merged =
+            UnprovenCommitment::committed(preservation.merged.len(), &text[merged_from..merged_to]);
+        stop.check(ProofStage::Encoding)?;
+        let sha256 = hex_sha256(text.as_bytes());
+        stop.check(ProofStage::Encoding)?;
+        Ok(Self {
+            bytes: text.into_bytes(),
+            sha256,
+            merged,
+        })
     }
 }
 
@@ -614,7 +658,7 @@ mod tests {
                 merged: listed(&parsed["mergedContributionIds"]),
                 preserved: None,
             };
-            let artifact = ContributionArtifact::of(&binding, &preservation);
+            let artifact = ContributionArtifact::of(&binding, &preservation, Stop::NEVER).unwrap();
             assert_eq!(std::str::from_utf8(&artifact.bytes).unwrap(), vector["canonical"], "{name}");
             assert_eq!(artifact.sha256, vector["sha256"], "{name}");
             assert_eq!(

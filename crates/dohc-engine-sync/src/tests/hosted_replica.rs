@@ -6352,7 +6352,7 @@ fn a_held_proofs_work_on_the_writer_stays_the_same_however_many_namespaces_it_ho
     };
     let (_scratch, _path, mut store) = hosted_store();
     host_document(&mut store, "doc");
-    let proofs = HeldProofs::default();
+    let proofs = HeldProofs::new(dohc_engine_collab::live_update_application::HeldProofLimit::default());
     let steps = |store: &EngineStore, run: &mut dyn FnMut()| {
         let counted = std::sync::Arc::new(AtomicUsize::new(0));
         let counter = std::sync::Arc::clone(&counted);
