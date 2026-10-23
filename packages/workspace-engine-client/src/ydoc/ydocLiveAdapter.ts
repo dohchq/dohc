@@ -1743,7 +1743,9 @@ export class YdocLiveAdapter {
       (raw) =>
         decodeVersionedResult(VERSIONED_METHOD.textReadBlob, raw)
           .bytesBase64 === null,
-      { workspace: input.workspace },
+      // The open holds its lease while this read runs, so it gets the open's
+      // own bound.
+      { workspace: input.workspace, deadlineMs: YDOC_OPEN_DEADLINE_MS },
     );
     const read = decodeVersionedResult(
       VERSIONED_METHOD.textReadBlob,
