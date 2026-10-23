@@ -21,7 +21,7 @@ import type { NativeOwnerActivation } from "@dohc/workspace-engine-client/daemon
 import { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { markdownToYDoc } from "../../../packages/ydoc-projection/src/import-export.js";
 import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
-import { releasedLineageBindingDigest, type ReleasedLineageBinding } from "@dohc/workspace-engine-client/relay-wire";
+import { hostedHeldWindowCovers, releasedLineageBindingDigest, type HostedHeldWindow, type ReleasedLineageBinding } from "@dohc/workspace-engine-client/relay-wire";
 import bindingVectors from "../../../packages/workspace-engine-client/src/relay/releasedLineageBindingVectors.json" with { type: "json" };
 
 const spawn = vi.hoisted(() => vi.fn());
@@ -181,7 +181,8 @@ it("registers only the discovered engine identity and releases its incarnation o
 
 // The engine's hosted replica replies, with fields a test can override.
 const hostedPass = (overrides: Record<string, unknown> = {}) => ({fetched: 0, applied: 0, refused: 0, skipped: 0, conflictsOpened: 0, hasMore: false,
-  pendingCursor: {kind: "hosted", token: "pending"}, changedPaths: [], refusals: [], sharingDeclined: [], held: [], departed: [], ...overrides});
+  pendingCursor: {kind: "hosted", token: "pending"}, changedPaths: [], refusals: [], sharingDeclined: [], held: [], heldThrough: null, departed: [],
+  ...overrides});
 const hostedCommit = (overrides: Record<string, unknown> = {}) => ({committed: true, hasMore: false, retirement: null, departed: [], sharingDeclined: [], ...overrides});
 const pushReply = {status: "complete", hasMore: false, pushed: 0, sharingDeclined: [], ownerAdmissionPending: []};
 
@@ -510,8 +511,10 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
 
   let parked: {method: string; entered: ReturnType<typeof deferred<void>>; release: ReturnType<typeof deferred<void>>} | undefined;
   // Queued unload replies, or errors that lose them. `replies` overrides every hosted pass, commit and push until a test changes it.
+  // With `heldPerPass`, a pass lists at most that many of its holds, as when the rest do not fit.
   const pushed = deferred<void>(), unloads: unknown[] = [];
-  const replies: {pass: Record<string, unknown>; commit: Record<string, unknown>; push: Record<string, unknown>; diverge?: boolean} = {pass: {}, commit: {}, push: {}};
+  const replies: {pass: Record<string, unknown>; commit: Record<string, unknown>; push: Record<string, unknown>; diverge?: boolean;
+    heldPerPass?: number} = {pass: {}, commit: {}, push: {}};
   // What the engine applied of each accepted row, by delivery ID. `lost` loses each application's
   // reply and every ACK read after it, as when the engine applied a row the relay never recorded.
   // While `pending` is set, the engine answers each application pending and applies nothing.
@@ -579,9 +582,14 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
         case "liveApplication.fenceRestore": return reply({status: "pending", reason: "native-fence-pending"});
         case "sync.createHostedReplica": return reply({hosted: true});
         case "sync.push": pushed.resolve(); return reply({...pushReply, ...replies.push});
-        case "sync.pullHosted":
+        case "sync.pullHosted": {
           if (replies.diverge) throw new EngineRequestError(request.id, {code: "INVALID_PARAMS", message: "relay-origin-diverged", retry: "no"} as never);
-          return reply(hostedPass(replies.pass));
+          // As the engine does, a pass lists the holds after where the pull asks, and says where a cut list stops.
+          const pass = hostedPass(replies.pass), after = request.params.heldAfter as string | undefined;
+          const held = (pass.held as {objectId: string}[]).filter(hold => after === undefined || hold.objectId > after);
+          const listed = held.slice(0, replies.heldPerPass ?? held.length);
+          return reply({...pass, held: listed, heldThrough: listed.length < held.length ? listed.at(-1)!.objectId : null});
+        }
         case "sync.materializePendingCursor": return reply({materialized: true});
         case "sync.commitCursor": return reply(hostedCommit(replies.commit));
       }
@@ -1964,20 +1972,20 @@ it("brings a dormant document back into passes when its restore capture loads it
   await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
 });
 
-// A hold of the sibling document for released retained work, bound as the
-// engine's first shared vector is, with `incoming` changed.
+// A hold of the sibling document for released retained work, as a pass names
+// it, bound as the engine's first shared vector is, with `incoming` changed.
 const releasedHold = (incoming: Partial<ReleasedLineageBinding["incoming"]> = {}) => {
   const binding = JSON.parse(bindingVectors.valid[0]!.canonical) as ReleasedLineageBinding;
-  return {objectId: "object", reason: "released-lineage-unsettled", binding: {...binding, incoming: {...binding.incoming, ...incoming}},
-    continuation: "frozen", bindingStale: false};
+  return {objectId: "object", reason: "released-lineage-unsettled", path: binding.currentPath!,
+    bindingDigest: releasedLineageBindingDigest({...binding, incoming: {...binding.incoming, ...incoming}}), continuation: "frozen", bindingStale: false};
 };
-const digest = (hold: ReturnType<typeof releasedHold>) => releasedLineageBindingDigest(hold.binding);
-// The driver a host activates through, once a pass held one of its documents.
-const heldDriver = () => {
+const digest = (hold: ReturnType<typeof releasedHold>) => hold.bindingDigest;
+// The driver a host activates through, once a pass held one of its documents. `heard` hears it after each pass.
+const heldDriver = (heard?: (driver: ServiceActivationDriver, window: HostedHeldWindow) => void) => {
   let driver: ServiceActivationDriver | undefined;
   const hold = ServiceActivationDriver.prototype.hold;
   vi.spyOn(ServiceActivationDriver.prototype, "hold").mockImplementation(function (this: ServiceActivationDriver, ...args) {
-    driver = this; return hold.apply(this, args);
+    driver = this; hold.apply(this, args); heard?.(this, args[2]);
   });
   return () => driver;
 };
@@ -2048,6 +2056,44 @@ it("frees a document once a pass no longer holds it for released retained work",
   o.replies.pass = {};
   o.refuseCapture(undefined);
   await vi.waitFor(() => expect(driver()!.releasedHold(o.sibling)).toBeUndefined());
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+});
+
+// Proves: a pass whose held list was cut says nothing past where it stops.
+// A list that names the document refreshes its hold; one that stops before
+// it, or starts after it, leaves the hold as it was, cut or not. Only a list
+// whose window reaches it frees it, once the engine no longer holds it.
+it("keeps a released-lineage hold a cut held list leaves out, until a list that reaches it", async () => {
+  const seen: {covers: boolean; digest: string | undefined}[] = [];
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  const driver = heldDriver((held, window) => seen.push({covers: hostedHeldWindowCovers(window, "object"), digest: held.releasedHold(o.sibling)}));
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCapture(unready());
+  const hold = releasedHold(), refreshed = releasedHold({originSeq: 1});
+  const waiting = (objectId: string) => ({objectId, reason: "hosted-backfill-work-waiting"});
+  o.replies.pass = {held: [hold]};
+  await vi.waitFor(() => expect(driver()?.releasedHold(o.sibling)).toBe(digest(hold)));
+  // Two holds a pass: the first lists "another" and the sibling, the next "zebra" alone.
+  o.replies.heldPerPass = 2;
+  o.replies.pass = {held: [waiting("another"), refreshed, waiting("zebra")]};
+  await vi.waitFor(() => expect(driver()!.releasedHold(o.sibling)).toBe(digest(refreshed)));
+  const refreshing = seen.length;
+  await o.nextPull(); await o.nextPull();
+  expect(seen.slice(refreshing).some(row => !row.covers)).toBe(true);
+  expect(seen.slice(refreshing).every(row => row.digest === digest(refreshed))).toBe(true);
+  // The engine holds the sibling no more. One hold a pass: lists stop before it until one reaches it.
+  const releasing = seen.length;
+  o.replies.heldPerPass = 1;
+  o.replies.pass = {held: [waiting("another"), waiting("apple")]};
+  await vi.waitFor(() => expect(driver()!.releasedHold(o.sibling)).toBeUndefined());
+  const freed = seen.findIndex((row, index) => index >= releasing && row.digest === undefined);
+  expect(seen.slice(releasing, freed).some(row => !row.covers)).toBe(true);
+  expect(seen.slice(releasing, freed).every(row => row.digest === digest(refreshed))).toBe(true);
+  expect(seen[freed]!.covers).toBe(true);
+  o.replies.pass = {};
+  o.refuseCapture(undefined);
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
 });
 

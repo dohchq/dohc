@@ -68,8 +68,9 @@ enum HeldStream {
 /// The longest object ID a request names.
 const MAX_OBJECT_ID_BYTES: usize = 512;
 
-/// The most a held-document answer's serialized control response holds,
-/// below the relay's 256 KiB metadata limit.
+/// The most a serialized control response that lists held documents holds:
+/// a held-document answer, below the relay's 256 KiB metadata limit, or a
+/// hosted pull.
 pub(super) const HELD_RESPONSE_BYTE_BUDGET: usize = 240 * 1024;
 
 /// The most findings an answer lists for one reason; its total counts all.
@@ -84,7 +85,7 @@ fn over_budget() -> WireError {
     WireError::new(ErrorCode::Internal, "state-corrupt")
 }
 
-fn object_id(value: &str) -> Result<(), WireError> {
+pub(super) fn object_id(value: &str) -> Result<(), WireError> {
     if value.is_empty() || value.len() > MAX_OBJECT_ID_BYTES {
         return Err(WireError::new(ErrorCode::InvalidParams, "invalid object ID"));
     }

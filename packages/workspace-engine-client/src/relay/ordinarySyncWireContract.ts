@@ -1,8 +1,6 @@
 import { createHash } from "node:crypto";
-import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
-import * as SchemaIssue from "effect/SchemaIssue";
 import { ProtocolShapeError, mutableStruct } from "../wireSchema";
 import {
   canonicalJson, canonicalRetainedContribution, decodeReleasedLineageBinding, decodeRetainedContribution,
@@ -94,37 +92,7 @@ export function decodeOrdinarySyncResult<M extends OrdinarySyncMethod>(
   return decoded.success as OrdinarySyncMethodResultMap[M];
 }
 
-const ReleasedLineageBindingSchema = Schema.declareConstructor<ReleasedLineageBinding>()([], () => (value) => Effect.try({
-  try: () => decodeReleasedLineageBinding(value),
-  catch: (error) => new SchemaIssue.InvalidValue({ message: (error as TypeError).message }),
-}));
-
-// What holds a hosted document from being ready, with the fields its reason names.
-const HostedHold = Schema.Union([
-  mutableStruct({ objectId: Text, reason: Schema.Literal("hosted-backfill-path-held"), path: Text, heldBy: Text }),
-  mutableStruct({ objectId: Text, reason: Schema.Literal("hosted-conflict-parent-withheld"), conflictId: Text }),
-  mutableStruct({ objectId: Text, reason: Schema.Literal("hosted-backfill-work-waiting") }),
-  mutableStruct({ objectId: Text, reason: Schema.Literal("hosted-scope-path-mismatch"), scopePath: Text, headPath: Schema.NullOr(Text) }),
-  // The host refused a live edit its session never admitted, so its copy is incomplete.
-  mutableStruct({ objectId: Text, reason: Schema.Literal("hosted-live-edit-unadmitted") }),
-  // An update that could destroy work a released activation retains, held with what it would change.
-  mutableStruct({ objectId: Text, reason: Schema.Literal("released-lineage-unsettled"), binding: ReleasedLineageBindingSchema,
-    continuation: Schema.Literals(["frozen", "dependency-drain"]), bindingStale: Schema.Boolean }),
-]);
-const RetirementError = mutableStruct({ code: Text, message: Text, retry: Text });
-
-// The documents that left the scope and are not gone from the replica: their
-// rows or their file remain.
-const Departed = Schema.mutable(Schema.Array(Text));
-
 const Digest = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
-// A journal cursor or outbox sequence: both count from one.
-const Coordinate = Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER));
-// Where a finding's contribution is, without who made it.
-const ContributionLocatorSchema = Schema.Union([
-  mutableStruct({ kind: Schema.Literal("carried"), deliveryId: Text, updateDigest: Digest, journalCursor: Coordinate }),
-  mutableStruct({ kind: Schema.Literal("outbox"), outboxId: Text, sequence: Coordinate, deliveryId: Text, updateDigest: Digest }),
-]);
 // A document the hosted replica holds for retained work a released chain
 // left, named by its binding's digest; the binding itself is in the
 // contribution artifact.
@@ -135,6 +103,32 @@ const HeldDocumentFields = {
   continuation: Schema.Literals(["frozen", "dependency-drain"]),
   bindingStale: Schema.Boolean,
 };
+
+// What holds a hosted document from being ready, with the fields its reason names.
+const HostedHold = Schema.Union([
+  mutableStruct({ objectId: Text, reason: Schema.Literal("hosted-backfill-path-held"), path: Text, heldBy: Text }),
+  mutableStruct({ objectId: Text, reason: Schema.Literal("hosted-conflict-parent-withheld"), conflictId: Text }),
+  mutableStruct({ objectId: Text, reason: Schema.Literal("hosted-backfill-work-waiting") }),
+  mutableStruct({ objectId: Text, reason: Schema.Literal("hosted-scope-path-mismatch"), scopePath: Text, headPath: Schema.NullOr(Text) }),
+  // The host refused a live edit its session never admitted, so its copy is incomplete.
+  mutableStruct({ objectId: Text, reason: Schema.Literal("hosted-live-edit-unadmitted") }),
+  // An update that could destroy work a released activation retains, held as discovery lists it. Its
+  // binding, whose tails are unbounded, never rides a pull.
+  mutableStruct({ reason: Schema.Literal("released-lineage-unsettled"), ...HeldDocumentFields, binding: Schema.optionalKey(Schema.Never) }),
+]);
+const RetirementError = mutableStruct({ code: Text, message: Text, retry: Text });
+
+// The documents that left the scope and are not gone from the replica: their
+// rows or their file remain.
+const Departed = Schema.mutable(Schema.Array(Text));
+
+// A journal cursor or outbox sequence: both count from one.
+const Coordinate = Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER));
+// Where a finding's contribution is, without who made it.
+const ContributionLocatorSchema = Schema.Union([
+  mutableStruct({ kind: Schema.Literal("carried"), deliveryId: Text, updateDigest: Digest, journalCursor: Coordinate }),
+  mutableStruct({ kind: Schema.Literal("outbox"), outboxId: Text, sequence: Coordinate, deliveryId: Text, updateDigest: Digest }),
+]);
 // Best to worst: a preservation's status is its worst reason's.
 const PRESERVATION_STATUSES = ["complete", "pending-dependencies", "missing-evidence", "invalid-evidence"] as const;
 const PreservationStatus = Schema.Literals(PRESERVATION_STATUSES);
@@ -171,7 +165,9 @@ const Preservation = mutableStruct({
 
 // A session host's hosted replica. A pass that adopted a new scope has no
 // cursor; a commit can stand while the retirement after it failed, and while
-// its departed documents could not be read (null).
+// its departed documents could not be read (null). A pass lists the documents
+// it holds after the pull's `heldAfter`, in object ID order, through its
+// `heldThrough`, the last listed, or to the last of them when that is null.
 const HostedSyncResultSchemas = {
   "sync.createHostedReplica": mutableStruct({ hosted: Schema.Literal(true) }),
   "sync.pullHosted": mutableStruct({
@@ -186,6 +182,7 @@ const HostedSyncResultSchemas = {
     refusals: Schema.mutable(Schema.Array(Refusal)),
     sharingDeclined: Schema.mutable(Schema.Array(SharingDeclined)),
     held: Schema.mutable(Schema.Array(HostedHold)),
+    heldThrough: Schema.NullOr(Text),
     departed: Departed,
   }),
   "sync.materializePendingCursor": OrdinarySyncResultSchemas["sync.materializePendingCursor"],
@@ -224,7 +221,14 @@ export function decodeHostedSyncResult<M extends HostedSyncMethod>(
     throw new ProtocolShapeError(`hosted ${method} result: ${decoded.failure.message}`);
   }
   const result = decoded.success as HostedSyncMethodResultMap[M];
-  if (method === "sync.heldDocuments") {
+  if (method === "sync.pullHosted") {
+    const pass = result as HostedSyncMethodResultMap["sync.pullHosted"];
+    // A list that stops early stops at the last document it lists.
+    if (pass.held.some((hold, index) => index > 0 && compareObjectIds(pass.held[index - 1]!.objectId, hold.objectId) >= 0) ||
+      (pass.heldThrough !== null && pass.heldThrough !== pass.held.at(-1)?.objectId)) {
+      throw new ProtocolShapeError(`hosted ${method} result: held documents do not match where their list stops`);
+    }
+  } else if (method === "sync.heldDocuments") {
     const page = result as HostedSyncMethodResultMap["sync.heldDocuments"];
     // The next page starts after the last document listed, so one that claims more lists one.
     if (page.hasMore && page.documents.length === 0) {
@@ -235,6 +239,18 @@ export function decodeHostedSyncResult<M extends HostedSyncMethod>(
     if (inspected !== null) checkHeldInspection(inspected);
   }
   return result;
+}
+
+// The engine orders object IDs by their UTF-8 bytes.
+const compareObjectIds = (a: string, b: string) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
+
+/** Where a pass's held list runs: after `after`, from the first when undefined, through `through`, or to the last when null. */
+export type HostedHeldWindow = { readonly after: string | undefined; readonly through: string | null };
+
+/** Whether a pass's held list speaks for the document: inside its window, a document it does not list is not held. */
+export function hostedHeldWindowCovers(window: HostedHeldWindow, objectId: string): boolean {
+  return (window.after === undefined || compareObjectIds(objectId, window.after) > 0) &&
+    (window.through === null || compareObjectIds(objectId, window.through) <= 0);
 }
 
 export type HeldDocumentInspection = NonNullable<HostedSyncMethodResultMap["sync.heldDocument"]>;

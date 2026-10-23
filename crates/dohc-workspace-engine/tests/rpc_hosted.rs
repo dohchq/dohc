@@ -1349,6 +1349,7 @@ async fn a_returning_document_is_held_off_another_documents_path_until_it_moves(
             "path": "a.md", "heldBy": "doc-a",
         }])
     );
+    assert_eq!(pass["heldThrough"], Value::Null, "the list is complete");
     assert!(host.commit(&pass["pendingCursor"]).await);
 
     relay.relay().rename(

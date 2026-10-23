@@ -425,7 +425,13 @@ impl EngineService {
                     .await?
             }
             "sync.pullHosted" => {
-                Box::pin(self.sync_pull_hosted(&ctx, request.workspace, request.params)).await?
+                Box::pin(self.sync_pull_hosted(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                    request.id,
+                ))
+                .await?
             }
             "sync.heldDocuments" => {
                 Box::pin(self.sync_held_documents(

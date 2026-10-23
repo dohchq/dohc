@@ -161,6 +161,8 @@ pub struct HostedPassOutcome {
     /// holds each. None of them can be edited live until a later pass
     /// settles it ready.
     pub held: BTreeMap<String, crate::HostedHold>,
+    /// The path its scope names each held document at, by object id.
+    pub held_paths: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2560,6 +2562,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             || reads
                 .values()
                 .any(|read| read.stopped.is_none() && !read.complete);
+        let held_paths = held
+            .keys()
+            .filter_map(|object_id| {
+                let document = replica.documents.get(object_id)?;
+                Some((object_id.clone(), document.path.clone()))
+            })
+            .collect();
         Ok(HostedPassOutcome {
             fetched,
             has_more: more,
@@ -2579,6 +2588,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             sharing_declined: pass.sharing_declined,
             record_facts: pass.record_facts,
             held,
+            held_paths,
         })
     }
 

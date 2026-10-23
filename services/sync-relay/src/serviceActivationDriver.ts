@@ -2,7 +2,7 @@ import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-bi
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
 import {isDeepStrictEqual} from "node:util";
 import {EngineRequestError,isHostedDocumentUnready,isLiveDocumentWithoutLineage,type EngineClient,type NativeOwnerActivation} from "@dohc/workspace-engine-client/daemon";
-import {releasedLineageBindingDigest} from "@dohc/workspace-engine-client/relay-wire";
+import {hostedHeldWindowCovers,type HostedHeldWindow} from "@dohc/workspace-engine-client/relay-wire";
 import {parseLiveDocumentKey,parseLiveUpdateIdentifier,type LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
 import {validateUserWritePath} from "@dohc/workspace-core";
 import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents";
@@ -124,18 +124,18 @@ export class ServiceActivationDriver {
    * already ended their sessions; each activates again once its capture
    * succeeds. Until then they do not hold back their workspace's pulls,
    * which bring what they wait for. `holds` is every document the pass left
-   * held, so one it no longer holds for released retained work is free of
-   * that hold.
+   * held within `window`, so one there it no longer holds for released
+   * retained work is free of that hold. Past the window nothing changes.
    */
-  hold(workspaceId:string,holds:readonly ServiceHostedHold[]){
+  hold(workspaceId:string,holds:readonly ServiceHostedHold[],window:HostedHeldWindow){
     for(const [key,objectId] of this.#objects){
-      if(JSON.parse(key)[0]!==workspaceId)continue;
+      if(JSON.parse(key)[0]!==workspaceId || !hostedHeldWindowCovers(window,objectId))continue;
       const hold=holds.find(row=>row.objectId===objectId);
       if(hold?.reason!=="released-lineage-unsettled" && this.#blocked.get(key)?.reason==="released-lineage-unsettled")this.#blocked.delete(key);
       if(!hold)continue;
       this.#completedTargets.delete(key);this.#dormant.delete(key);this.#held.set(key,hold.reason);
       // A fresh binding replaces the one held before; that resolves nothing.
-      if(hold.reason==="released-lineage-unsettled")this.#blocked.set(key,{reason:hold.reason,digest:releasedLineageBindingDigest(hold.binding)});
+      if(hold.reason==="released-lineage-unsettled")this.#blocked.set(key,{reason:hold.reason,digest:hold.bindingDigest});
       for(const [document,owner] of this.#owners)if(owner.target===key){owner.completed=false;this.#owners.delete(document);}
     }
   }

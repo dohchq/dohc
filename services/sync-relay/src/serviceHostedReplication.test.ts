@@ -10,7 +10,7 @@ let issued = 0;
 const pass = (patch: Partial<HostedSyncMethodResultMap["sync.pullHosted"]> = {}) => ({fetched: 1, applied: 1, refused: 0, skipped: 0,
   conflictsOpened: 0, hasMore: false, pendingCursor: {kind: "hosted" as const, token: `issued-${++issued}`},
   changedPaths: [{versionId: "main", path: "docs/a.md", operation: "write" as const, contentKind: "text" as const}],
-  refusals: [], sharingDeclined: [], held: [], departed: [], ...patch});
+  refusals: [], sharingDeclined: [], held: [], heldThrough: null, departed: [], ...patch});
 const commit = (patch: Partial<HostedSyncMethodResultMap["sync.commitCursor"]> = {}) =>
   ({committed: true, hasMore: false, retirement: null, departed: [], sharingDeclined: [], ...patch});
 const diverged = () => new EngineRequestError(1, {code: "INVALID_PARAMS", message: "relay-origin-diverged", retry: "no"});
@@ -66,6 +66,27 @@ it("pulls again after a pass that adopted a new scope, without materializing or 
   expect(await f.driver.pull(undefined, heard)).toMatchObject({hasMore: false, pages: [{committed: false, held: [held]}, {committed: true}]});
   expect(heard).toHaveBeenCalledTimes(2);
   expect(f.methods().slice(1)).toEqual(["sync.pullHosted", "sync.pullHosted", "sync.materializePendingCursor", "sync.commitCursor"]);
+});
+
+// Proves: however many documents are held, each pass asks after where the last
+// one's list stopped, so every hold is named within a few passes, and tells
+// its page where its list speaks. A list that reached the last starts the next
+// from the first, and one listing a document before where it was asked is refused.
+it("asks each pass for the held documents after where the last list stopped", async () => {
+  const f = fixture(), work = (objectId: string) => ({objectId, reason: "hosted-backfill-work-waiting" as const});
+  const passes = [pass({hasMore: true, held: [work("a"), work("b")], heldThrough: "b"}), pass({hasMore: true, held: [work("c")]}),
+    pass({held: [work("a")], heldThrough: "a"})];
+  f.answers["sync.pullHosted"] = () => passes.shift();
+  const result = await f.driver.pull();
+  expect(result.pages.map(page => page.heldWindow)).toEqual([{after: undefined, through: "b"}, {after: "b", through: null},
+    {after: undefined, through: "a"}]);
+  const asked = () => f.sendRequest.mock.calls.map(([request]) => request).filter(request => request.method === "sync.pullHosted")
+    .map(request => request.params);
+  expect(asked()).toEqual([{workspaceId: "workspace"}, {workspaceId: "workspace", heldAfter: "b"}, {workspaceId: "workspace"}]);
+  f.answers["sync.pullHosted"] = () => pass({held: [work("a")]});
+  await expect(f.driver.pull()).rejects.toThrow("hosted sync.pullHosted result");
+  expect(asked().at(-1)).toEqual({workspaceId: "workspace", heldAfter: "a"});
+  expect(f.methods().at(-1)).toBe("sync.pullHosted");
 });
 
 it("pulls again when the scope moved before the commit, and while the commit has more", async () => {
