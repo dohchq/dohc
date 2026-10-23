@@ -33,8 +33,8 @@ import {
   nextCharacter,
   nextLine,
   readingInlineText,
+  readsTable,
   searchBlockText,
-  searchFrom,
   searchInlineText,
   shortenLastParagraph,
   stepBlockText,
@@ -475,13 +475,15 @@ function textEnd(tokenizer: Tokenizer, src: string): number | undefined {
 // `a++a++…`, cost quadratic time. The importer finds where the run ends once
 // per text and tries the rule only where it can match.
 const MARKED_URL_RULE = String.raw`^((?:[hH][tT][tT][pP][sS]?|[fF][tT][pP]):\/\/|www\.)(?:[a-zA-Z0-9\-]+\.?)+[^\s<]*|^[A-Za-z0-9._+-]+(@)[a-zA-Z0-9-_]+(?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+(?![-_])`
-const URL_SCHEME = /^(?:(?:[hH][tT][tT][pP][sS]?|[fF][tT][pP]):\/\/|www\.)/
+// A link matches as soon as its scheme or `www.` has a domain character
+// after it, and fails at once without one.
+const URL_LINK = /^(?:(?:[hH][tT][tT][pP][sS]?|[fF][tT][pP]):\/\/|www\.)[a-zA-Z0-9-]/
 const NOT_LOCAL_PART = /[^A-Za-z0-9._+-]/g
 const URL_DOMAIN = /[a-zA-Z0-9-_]+(?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+(?![-_])/y
 
 function urlMayStart(tokenizer: Tokenizer, src: string): boolean {
   const read = readingInlineText(tokenizer.lexer)
-  if (tokenizer.rules.inline.url.source !== MARKED_URL_RULE || !read || read.step !== src.length || URL_SCHEME.test(src)) return true
+  if (tokenizer.rules.inline.url.source !== MARKED_URL_RULE || !read || read.step !== src.length || URL_LINK.test(src)) return true
   const from = read.text.length - src.length
   let found = read.localPart
   if (!found || found.from > from || (found.at >= 0 && found.at < from)) {
@@ -493,53 +495,284 @@ function urlMayStart(tokenizer: Tokenizer, src: string): boolean {
   return found.at > from && found.address
 }
 
-// marked's emphasis and strikethrough rules search the rest of the text for a
-// closing run each time a run of `*`, `_` or `~` opens, so a paragraph of
-// openers with no closer, such as `*a *a …`, cost quadratic time. Every run
-// the rules may close with follows a character that is neither white space
-// nor their delimiter, so with no such run after the opener they find none.
-const closingRun = (delimiter: string): RestSearch => (text, from) => {
-  for (let at = text.indexOf(delimiter, from); at >= 0; at = text.indexOf(delimiter, at + 1)) {
-    const before = text[at - 1]
-    if (before !== undefined && before !== delimiter && !/\s/u.test(before)) return at
-  }
-  return -1
+// marked's emphasis and strikethrough rules scan the rest of the masked text
+// for a closer each time a run of `*`, `_` or `~` opens. Each run their
+// right-delimiter rule finds counts: one that only opens adds its length, and
+// one that closes takes it away, until a closer takes the count to zero. A
+// run that may do both closes, unless it breaks emphasis's rule of three, and
+// strikethrough counts only runs as long as its opener. So a paragraph of
+// openers, or of openers before one closer, such as `*a *a … a*`, cost
+// quadratic time. The importer reads each masked text's runs once with the
+// same rule, and runs marked's only where the count can reach zero.
+//
+// marked's rule finds the same runs from any start but its first branch,
+// which matches only at the start and skips what it matches.
+type Rules = Tokenizer['rules']
+// A rule that finds nothing, at once. It is a RegExp like the rules it
+// replaces, so marked's code that reads them sees one kind of object.
+const NO_MATCH = /(?!)/y
+type DelimiterRule = {
+  opener: string
+  runs: RegExp
+  first: RegExp
+  // Whether marked's rule may go on to scan, from its opener rule's match.
+  // It also checks the character before the opener, which only stops it.
+  opens: (open: RegExpExecArray | null) => boolean
+  key: (opener: number) => number
+  // A run's count for openers of one key, which may close them if above zero.
+  count: (kinds: number, run: number, key: number) => number
 }
-const CLOSING_RUNS = new Map(['*', '_', '~'].map(delimiter => [delimiter, closingRun(delimiter)]))
+const OPENS = 1
+const CLOSES = 2
+const RUN_KINDS = [0, CLOSES, CLOSES, OPENS, OPENS, OPENS | CLOSES, OPENS | CLOSES]
+const EMPHASIS_RUNS = String.raw`(?!\*)(?!~)[\p{P}\p{S}](\*+)(?=[\s]|$)|(?:[^\s\p{P}\p{S}]|~)(\*+)(?!\*)(?=(?!~)[\s\p{P}\p{S}]|$)|(?!\*)(?!~)[\s\p{P}\p{S}](\*+)(?=(?:[^\s\p{P}\p{S}]|~))|[\s](\*+)(?!\*)(?=(?!~)[\p{P}\p{S}])|(?!\*)(?!~)[\p{P}\p{S}](\*+)(?!\*)(?=(?!~)[\p{P}\p{S}])|(?:[^\s\p{P}\p{S}]|~)(\*+)(?=(?:[^\s\p{P}\p{S}]|~))`
+const UNDERSCORE_RUNS = String.raw`(?!_)[\p{P}\p{S}](_+)(?=[\s]|$)|[^\s\p{P}\p{S}](_+)(?!_)(?=[\s\p{P}\p{S}]|$)|(?!_)[\s\p{P}\p{S}](_+)(?=[^\s\p{P}\p{S}])|[\s](_+)(?!_)(?=[\p{P}\p{S}])|(?!_)[\p{P}\p{S}](_+)(?!_)(?=[\p{P}\p{S}])`
+const STRIKE_RUNS = String.raw`(?!~)[\p{P}\p{S}](~~?)(?=[\s]|$)|[^\s\p{P}\p{S}](~~?)(?!~)(?=[\s\p{P}\p{S}]|$)|(?!~)[\s\p{P}\p{S}](~~?)(?=[^\s\p{P}\p{S}])|[\s](~~?)(?!~)(?=[\p{P}\p{S}])|(?!~)[\p{P}\p{S}](~~?)(?!~)(?=[\p{P}\p{S}])|[^\s\p{P}\p{S}](~~?)(?=[^\s\p{P}\p{S}])`
+const EMPHASIS_OPENER = String.raw`^(?:\*+(?:((?!\*)(?!~)[\p{P}\p{S}])|([^\s*]))?)|^_+(?:((?!_)(?!~)[\p{P}\p{S}])|([^\s_]))?`
+const emphasisCount = (kinds: number, run: number, key: number) =>
+  kinds === OPENS ? -run : kinds === (OPENS | CLOSES) && key && (key + run) % 3 === 0 ? 0 : run
+const strikeCount = (kinds: number, run: number, key: number) =>
+  run !== key ? 0 : kinds === OPENS ? -run : run
+const emphasisOpens: DelimiterRule['opens'] = open => !!open && !!(open[1] || open[2] || open[3] || open[4])
+const strikeOpens: DelimiterRule['opens'] = open => !!open
+const DELIMITER_RULES = new Map<string, DelimiterRule>([
+  [String.raw`^[^_*]*?__[^_*]*?\*[^_*]*?(?=__)|[^*]+(?=[^*])|${EMPHASIS_RUNS}`, {
+    opener: EMPHASIS_OPENER,
+    runs: new RegExp(String.raw`[^*]+(?=[^*])|${EMPHASIS_RUNS}`, 'gu'),
+    first: /[^_*]*?__[^_*]*?\*[^_*]*?(?=__)/uy,
+    opens: emphasisOpens,
+    key: opener => opener % 3,
+    count: emphasisCount,
+  }],
+  [String.raw`^[^_*]*?\*\*[^_*]*?_[^_*]*?(?=\*\*)|[^_]+(?=[^_])|${UNDERSCORE_RUNS}`, {
+    opener: EMPHASIS_OPENER,
+    runs: new RegExp(String.raw`[^_]+(?=[^_])|${UNDERSCORE_RUNS}`, 'gu'),
+    first: /[^_*]*?\*\*[^_*]*?_[^_*]*?(?=\*\*)/uy,
+    opens: emphasisOpens,
+    key: opener => opener % 3,
+    count: emphasisCount,
+  }],
+  [String.raw`^[^~]+(?=[^~])|${STRIKE_RUNS}`, {
+    opener: String.raw`^~~?(?:((?!~)[\p{P}\p{S}])|[^\s~])`,
+    runs: new RegExp(STRIKE_RUNS, 'gu'),
+    first: /[^~]+(?=[^~])/uy,
+    opens: strikeOpens,
+    key: opener => opener,
+    count: strikeCount,
+  }],
+])
 
-function mayClose(tokenizer: Tokenizer, src: string, masked: string): boolean {
-  const search = CLOSING_RUNS.get(src[0] ?? '')
-  const read = readingInlineText(tokenizer.lexer)
-  if (!search || !read) return true
-  if (read.masked?.text !== masked) read.masked = { text: masked, searched: new Map() }
-  // The rules search the end of the masked text as long as the rest, past
-  // the opener.
-  return searchFrom(masked, read.masked.searched, Math.max(0, masked.length - src.length) + 1, search) >= 0
+// Each run of a masked text, and for each key, the counts summed before
+// each run and the highest sum a closer from each run on reaches.
+type DelimiterRuns = {
+  starts: number[]
+  kinds: number[]
+  lengths: number[]
+  sums: Map<number, { before: Float64Array; best: Float64Array }>
+}
+const maskedRuns = new WeakMap<InlineText, Map<DelimiterRule, DelimiterRuns>>()
+
+function delimiterRuns(read: InlineText, masked: string, rule: DelimiterRule): DelimiterRuns {
+  let cached = maskedRuns.get(read)
+  if (!cached) maskedRuns.set(read, cached = new Map())
+  let found = cached.get(rule)
+  if (!found) {
+    found = { starts: [], kinds: [], lengths: [], sums: new Map() }
+    rule.runs.lastIndex = 0
+    for (let match = rule.runs.exec(masked); match; match = rule.runs.exec(masked)) {
+      let group = 1
+      while (group < RUN_KINDS.length && !match[group]) group += 1
+      const run = match[group]
+      if (!run) continue
+      found.starts.push(match.index + match[0].length - run.length)
+      found.kinds.push(RUN_KINDS[group]!)
+      found.lengths.push(run.length)
+    }
+    cached.set(rule, found)
+  }
+  return found
+}
+
+function delimiterSums(runs: DelimiterRuns, rule: DelimiterRule, key: number): { before: Float64Array; best: Float64Array } {
+  let sums = runs.sums.get(key)
+  if (!sums) {
+    const total = runs.starts.length
+    const before = new Float64Array(total + 1)
+    for (let at = 0; at < total; at += 1) before[at + 1] = before[at]! + rule.count(runs.kinds[at]!, runs.lengths[at]!, key)
+    const best = new Float64Array(total + 1)
+    best[total] = -Infinity
+    for (let at = total - 1; at >= 0; at -= 1) {
+      best[at] = rule.count(runs.kinds[at]!, runs.lengths[at]!, key) > 0 ? Math.max(best[at + 1]!, before[at + 1]!) : best[at + 1]!
+    }
+    runs.sums.set(key, sums = { before, best })
+  }
+  return sums
+}
+
+// marked's opener rule reads the whole run of delimiters at each place in
+// it, so a long run cost quadratic time too. Where the run ends is found once
+// per run, and for a run longer than three the importer reads three of its
+// delimiters and the character after them, which decide the rule the same
+// way.
+function runEnd(read: InlineText, at: number): number {
+  const { text, run } = read
+  if (run && run.start <= at && at < run.end && text[at] === text[run.start]) return run.end
+  let end = at
+  while (text[end] === text[at]) end += 1
+  if (run) {
+    run.start = at
+    run.end = end
+  } else read.run = { start: at, end }
+  return end
+}
+
+// The rule for marked's opener and closer rules, checked once for each pair.
+const delimiterRules = new WeakMap<RegExp, { opener: RegExp; rule: DelimiterRule | undefined }>()
+
+function delimiterRule(opener: RegExp, closer: RegExp): DelimiterRule | undefined {
+  let found = delimiterRules.get(closer)
+  if (found?.opener !== opener) {
+    const rule = DELIMITER_RULES.get(closer.source)
+    found = { opener, rule: rule && closer.flags === 'gu' && opener.source === rule.opener ? rule : undefined }
+    delimiterRules.set(closer, found)
+  }
+  return found.rule
+}
+
+// In an ordinary text each opener's closer follows soon, so marked's own
+// scans read less than reading every run first. The importer lets them run
+// until they have read as much as the text holds, and reads the runs then.
+type Closing = 'none' | 'closer' | 'scan'
+
+function mayClose(read: InlineText, rules: Rules, src: string): Closing {
+  const { masked } = read
+  const strike = src[0] === '~'
+  const opener = strike ? rules.inline.delLDelim : rules.inline.emStrongLDelim
+  const closer = strike ? rules.inline.delRDelim : src[0] === '_' ? rules.inline.emStrongRDelimUnd : rules.inline.emStrongRDelimAst
+  const rule = delimiterRule(opener, closer)
+  if (!rule || masked === undefined || read.step !== src.length) return 'closer'
+  const offset = read.text.length - src.length
+  const length = runEnd(read, offset) - offset
+  if (length > 3 && !rule.opens(opener.exec(src.slice(0, 3) + src.slice(length, length + 2)))) return 'none'
+  if ((read.scanned ?? 0) < read.text.length) return 'scan'
+  // The rule scans the end of the masked text as long as the rest, past the
+  // opener. Starting inside a character, it would read it differently.
+  const from = Math.max(0, masked.length - src.length + length)
+  const last = masked.charCodeAt(from - 1)
+  if (last >= 0xd800 && last <= 0xdbff) return 'closer'
+  rule.first.lastIndex = from
+  const first = rule.first.exec(masked)
+  const end = first ? from + first[0].length : from + 1
+  const runs = delimiterRuns(read, masked, rule)
+  let low = 0
+  let high = runs.starts.length
+  while (low < high) {
+    const middle = (low + high) >>> 1
+    if (runs.starts[middle]! < end) low = middle + 1
+    else high = middle
+  }
+  const { before, best } = delimiterSums(runs, rule, rule.key(length))
+  return best[low]! - before[low]! >= length ? 'closer' : 'none'
+}
+
+// The importer decides at each step, in the extension marked tries right
+// before its own rules, so marked calls its emphasis and strikethrough rules
+// itself and nested emphasis takes no more of the stack than in marked. For
+// a step whose opener can find no closer, their opener rules find nothing.
+// Only a run of `*`, `_` or `~` can open, so this lasts the one step.
+const DELIMITED = new Set(['em', 'strong', 'del'])
+const unopenedRules = new WeakMap<Rules, Rules>()
+let unopened: { tokenizer: Tokenizer; rules: Rules } | undefined
+
+function skipUnclosed(lexer: Lexer, src: string, tokens: Token[]): void {
+  reopen()
+  const read = readingInlineText(lexer)
+  if (!read) return
+  if (read.scanning !== undefined) {
+    // marked's scan read to the closer of the token it made, or the rest.
+    const token = tokens.at(-1)
+    read.scanned = (read.scanned ?? 0) + (token && DELIMITED.has(token.type) ? read.scanning - src.length : read.scanning)
+    read.scanning = undefined
+  }
+  const tokenizer = lexer.options.tokenizer
+  if ((src[0] !== '*' && src[0] !== '_' && src[0] !== '~') || !tokenizer) return
+  const { rules } = tokenizer
+  const closing = mayClose(read, rules, src)
+  if (closing === 'scan') read.scanning = src.length
+  if (closing !== 'none') return
+  let skipping = unopenedRules.get(rules)
+  if (!skipping) {
+    skipping = { ...rules, inline: { ...rules.inline, emStrongLDelim: NO_MATCH, delLDelim: NO_MATCH } }
+    unopenedRules.set(rules, skipping)
+  }
+  tokenizer.rules = skipping
+  unopened = { tokenizer, rules }
+}
+
+function reopen(): void {
+  if (!unopened) return
+  unopened.tokenizer.rules = unopened.rules
+  unopened = undefined
 }
 
 // marked's link rule reads a destination to the `)` that ends the link, and
-// its tag rule a comment to its `-->`. With none in the rest of the text,
-// each `[` or `<!--` read the rest for nothing.
+// its tag rule a comment, an instruction, a declaration or a CDATA section to
+// its end. With none in the rest of the text, each opener read the rest for
+// nothing.
 const nextParenthesis = nextCharacter(')')
-const nextCommentEnd: RestSearch = (text, from) => text.indexOf('-->', from)
+const nextText = (end: string): RestSearch => (text, from) => text.indexOf(end, from)
+const TAG_ENDS: Array<{ opener: RegExp; from: number; end: RestSearch }> = [
+  // `<!-->` and `<!--->` are whole comments.
+  { opener: /^<!--(?!-?>)/, from: 4, end: nextText('-->') },
+  { opener: /^<\?/, from: 2, end: nextText('?>') },
+  { opener: /^<!\[CDATA\[/, from: 9, end: nextText(']]>') },
+  { opener: /^<![a-zA-Z]/, from: 3, end: nextCharacter('>') },
+]
 
 function linkMayClose(read: InlineText | undefined, src: string): boolean {
   return !read || read.step !== src.length || !(src.startsWith('[') || src.startsWith('!['))
     || searchInlineText(read, src, 0, nextParenthesis) >= 0
 }
 
-function commentMayClose(read: InlineText | undefined, src: string): boolean {
-  // `<!-->` and `<!--->` are whole comments.
-  return !read || read.step !== src.length || !src.startsWith('<!--') || src[4] === '>' || src.startsWith('->', 4)
-    || searchInlineText(read, src, 4, nextCommentEnd) >= 0
+// marked's code span rule reads the rest of the text for a run of backticks
+// as long as its opener. With none left, each opener read the rest for
+// nothing.
+const closingTicks = new Map<number, RestSearch>()
+
+function codeMayClose(read: InlineText | undefined, src: string): boolean {
+  if (!read || read.step !== src.length || !src.startsWith('`')) return true
+  const offset = read.text.length - src.length
+  const opener = runEnd(read, offset) - offset
+  let search = closingTicks.get(opener)
+  if (!search) {
+    search = (text, from) => {
+      for (let at = text.indexOf('`', from); at >= 0;) {
+        let end = at
+        while (text[end] === '`') end += 1
+        if (end - at === opener && text[at - 1] !== '`') return at
+        at = text.indexOf('`', end)
+      }
+      return -1
+    }
+    closingTicks.set(opener, search)
+  }
+  // The span holds at least one character.
+  return searchInlineText(read, src, opener + 1, search) >= 0
+}
+
+function tagMayClose(read: InlineText | undefined, src: string): boolean {
+  if (!read || read.step !== src.length || !src.startsWith('<')) return true
+  const tag = TAG_ENDS.find(({ opener }) => opener.test(src))
+  return !tag || searchInlineText(read, src, tag.from, tag.end) >= 0
 }
 
 // marked's setext rule reads a paragraph's lines up to an underline, and
-// stops before a line that could interrupt the paragraph. Where the rest of
-// a block text holds no underline before such a line, it reads them at each
-// step for nothing. The importer finds both once per block text, with the
-// interrupting lines taken from marked's own rule.
-type SetextRule = { underline: RestSearch; interrupt: RestSearch }
+// stops before a line that could interrupt the paragraph, or at a character
+// its `.` does not match. Where the rest of a block text holds no underline
+// before either, it reads them at each step for nothing. The importer finds
+// all three once per block text, with the interrupting lines taken from
+// marked's own rule.
+type SetextRule = { underline: RestSearch; interrupt: RestSearch; blocker: RestSearch }
 const SETEXT_RULE = /^\^\(\?!(.+)\)\(\(\?:\.\|\\n\(\?!\\s\*\?\\n\|\1\)\)\+\?\)\\n \{0,3\}\(=\+\|-\+\) \*\(\?:\\n\+\|\$\)$/
 const setextRules = new WeakMap<RegExp, SetextRule | null>()
 const firstMatch = (pattern: RegExp): RestSearch => (text, from) => {
@@ -555,6 +788,7 @@ function setextRule(rule: RegExp): SetextRule | null {
       ? {
           underline: firstMatch(/\n {0,3}(?:=+|-+) *(?:\n|$)/g),
           interrupt: firstMatch(new RegExp(`\\n(?=\\s*?\\n|${interrupts})`, 'g')),
+          blocker: firstMatch(/[\r\p{Zl}\p{Zp}]/gu),
         }
       : null
     setextRules.set(rule, setext)
@@ -563,9 +797,40 @@ function setextRule(rule: RegExp): SetextRule | null {
 }
 
 // marked's table rule reads its header line to the newline before trying
-// the delimiter row, so a long line cut at each `$` read it at each cut.
+// the delimiter row, so a long line cut at each `$` read it at each cut. It
+// also reads every row before it checks the header against the delimiter
+// row, which decide alone whether it reads a table, so lines that each start
+// no table, such as `|` and `| - |` repeated, read the rest at each line.
+// Once it finds no table in a block text, it checks those two lines first.
 const TABLE_RULE_START = String.raw`^ *([^\n ].*)\n {0,3}((?:\| *)?:?-+`
 const TABLE_DELIMITER_START = / {0,3}(?:\| *)?:?-/y
+// Its own search, so its answers stay apart from the first line's.
+const nextDelimiterEnd = nextCharacter('\n')
+
+// marked's paragraph rule ends a paragraph before a line that starts a table,
+// and its look-ahead reads all of that table's rows first, so paragraphs
+// before rows that each could start a table, such as `|` and `| - |`
+// repeated, read the rest at each paragraph. The rows may be empty, so the
+// look-ahead matches exactly when the first two lines and the newline or end
+// after them do. The importer reads paragraphs with marked's rule without the
+// rows, which matches the same text.
+const TABLE_ROWS = String.raw`(?:\n((?:(?! *\n|`
+const paragraphRules = new WeakMap<RegExp, RegExp>()
+
+function paragraphRule(rules: Rules): RegExp {
+  const { paragraph, table } = rules.block
+  let found = paragraphRules.get(paragraph)
+  if (!found) {
+    const own = table.source.slice(1)
+    const rows = own.indexOf(TABLE_ROWS)
+    const at = paragraph.source.indexOf(own)
+    found = table.source.startsWith(TABLE_RULE_START) && rows > 0 && at >= 0 && at === paragraph.source.lastIndexOf(own)
+      ? new RegExp(paragraph.source.slice(0, at) + own.slice(0, rows) + String.raw`(?:\n|$)` + paragraph.source.slice(at + own.length), paragraph.flags)
+      : paragraph
+    paragraphRules.set(paragraph, found)
+  }
+  return found
+}
 
 const extensions: AnyExtension[] = [
   MarkdownHtml,
@@ -609,6 +874,7 @@ const markdownParser = new Marked({
       // runs at each step that reaches marked's rules, such as its text and
       // url rules.
       stepInlineText(tokens, src)
+      skipUnclosed(this.lexer, src, tokens)
       if (!src.startsWith('[](') || !linkMayClose(readingInlineText(this.lexer), src)) return undefined
       const link = literalProbe.link(src)
       return link?.type === 'link'
@@ -670,104 +936,153 @@ const markdownParser = new Marked({
   hooks: {
     emStrongMask: maskedText,
   },
-  tokenizer: {
-    table(src) {
-      const read = steppedBlockText(this.lexer, src)
-      if (read && this.rules.block.table.source.startsWith(TABLE_RULE_START)) {
-        const line = searchBlockText(read, src, 0, nextLine)
-        TABLE_DELIMITER_START.lastIndex = line + 1
-        if (line < 0 || !TABLE_DELIMITER_START.test(src)) return undefined
-      }
-      return Tokenizer.prototype.table.call(this, src)
-    },
-    lheading(src) {
-      const read = steppedBlockText(this.lexer, src)
-      const rule = read && setextRule(this.rules.block.lheading)
-      if (read && rule) {
-        const underline = searchBlockText(read, src, 1, rule.underline)
-        const interrupt = searchBlockText(read, src, 0, rule.interrupt)
-        if (underline < 0 || (interrupt >= 0 && interrupt < underline)) return undefined
-      }
-      return Tokenizer.prototype.lheading.call(this, src)
-    },
-    paragraph(src) {
-      shortenLastParagraph(this.lexer)
-      return Tokenizer.prototype.paragraph.call(this, src)
-    },
-    emStrong(src, masked, prevChar) {
-      return mayClose(this, src, masked) ? Tokenizer.prototype.emStrong.call(this, src, masked, prevChar) : undefined
-    },
-    del(src, masked, prevChar) {
-      return mayClose(this, src, masked) ? Tokenizer.prototype.del.call(this, src, masked, prevChar) : undefined
-    },
-    link(src) {
-      return linkMayClose(readingInlineText(this.lexer), src) ? Tokenizer.prototype.link.call(this, src) : undefined
-    },
-    tag(src) {
-      return commentMayClose(readingInlineText(this.lexer), src) ? Tokenizer.prototype.tag.call(this, src) : undefined
-    },
-    def(src) {
-      const escaped = escapedDefinition(src)
-      const token = escaped ?? Tokenizer.prototype.def.call(this, src)
-      if (!token || (!escaped && !Object.hasOwn(this.lexer.tokens.links, token.tag))) return token
-      const count = (repeatedDefinitions.get(this.lexer) ?? 0) + 1
-      repeatedDefinitions.set(this.lexer, count)
-      token.tag = `]${count}`
-      return token
-    },
-    url(src) {
-      return urlMayStart(this, src) ? Tokenizer.prototype.url.call(this, src) : undefined
-    },
-    inlineText(src) {
-      const end = textEnd(this, src)
-      const token = end === undefined
-        ? Tokenizer.prototype.inlineText.call(this, src)
-        : { type: 'text' as const, raw: src.slice(0, end), text: src.slice(0, end), escaped: this.lexer.state.inRawBlock }
-      if (token) token.text = fileAngles(token.text)
-      return token
-    },
-  },
 })
 
-// Before the emphasis rules read a text, marked masks each escape, then each
-// link, code span and tag, by copying the whole text around each one, so a
-// paragraph of `\[` cost quadratic time. The importer gives marked's masking
-// loops rules that find nothing, and masks the text once in the emphasis
-// hook marked calls right after them, with marked's own rules and
-// replacements.
-const NO_MASK = { exec: () => null } as unknown as RegExp
-let masking: { tokenizer: Tokenizer; rules: Tokenizer['rules'] } | undefined
+// marked wraps each tokenizer its options give it in a function that copies
+// its arguments, at every step that reaches the rule, so the importer's rules
+// go on its tokenizer itself.
+markdownParser.defaults.tokenizer = Object.assign(new Tokenizer(), {
+  table(this: Tokenizer, src: string) {
+    const read = steppedBlockText(this.lexer, src)
+    if (read && this.rules.block.table.source.startsWith(TABLE_RULE_START)) {
+      const line = searchBlockText(read, src, 0, nextLine)
+      TABLE_DELIMITER_START.lastIndex = line + 1
+      if (line < 0 || !TABLE_DELIMITER_START.test(src)) return undefined
+      if (read.tableRefused) {
+        const second = searchBlockText(read, src, line + 1, nextDelimiterEnd)
+        if (!readsTable(src.slice(0, second < 0 ? undefined : second), this.rules.block.table)) return undefined
+      }
+    }
+    const table = Tokenizer.prototype.table.call(this, src)
+    if (read && !table) read.tableRefused = true
+    return table
+  },
+  lheading(this: Tokenizer, src: string) {
+    const read = steppedBlockText(this.lexer, src)
+    const rule = read && setextRule(this.rules.block.lheading)
+    if (read && rule) {
+      const underline = searchBlockText(read, src, 1, rule.underline)
+      const interrupt = searchBlockText(read, src, 0, rule.interrupt)
+      const blocker = searchBlockText(read, src, 0, rule.blocker)
+      if (underline < 0 || (interrupt >= 0 && interrupt < underline) || (blocker >= 0 && blocker < underline)) return undefined
+    }
+    return Tokenizer.prototype.lheading.call(this, src)
+  },
+  // marked's own paragraph tokenizer, with the importer's paragraph rule.
+  paragraph(this: Tokenizer, src: string): Tokens.Paragraph | undefined {
+    shortenLastParagraph(this.lexer)
+    const cap = paragraphRule(this.rules).exec(src)
+    if (!cap) return undefined
+    const paragraph = cap[1]!
+    const text = paragraph.charAt(paragraph.length - 1) === '\n' ? paragraph.slice(0, -1) : paragraph
+    return { type: 'paragraph', raw: cap[0], text, tokens: this.lexer.inline(text) }
+  },
+  def(this: Tokenizer, src: string) {
+    const escaped = escapedDefinition(src)
+    const token = escaped ?? Tokenizer.prototype.def.call(this, src)
+    if (!token || (!escaped && !Object.hasOwn(this.lexer.tokens.links, token.tag))) return token
+    const count = (repeatedDefinitions.get(this.lexer) ?? 0) + 1
+    repeatedDefinitions.set(this.lexer, count)
+    token.tag = `]${count}`
+    return token
+  },
+  // Each inline rule's opener starts with one of its characters.
+  link(this: Tokenizer, src: string) {
+    if (src[0] !== '[' && src[0] !== '!') return undefined
+    return linkMayClose(readingInlineText(this.lexer), src) ? Tokenizer.prototype.link.call(this, src) : undefined
+  },
+  tag(this: Tokenizer, src: string) {
+    if (src[0] !== '<') return undefined
+    return tagMayClose(readingInlineText(this.lexer), src) ? Tokenizer.prototype.tag.call(this, src) : undefined
+  },
+  codespan(this: Tokenizer, src: string) {
+    if (src[0] !== '`') return undefined
+    return codeMayClose(readingInlineText(this.lexer), src) ? Tokenizer.prototype.codespan.call(this, src) : undefined
+  },
+  url(this: Tokenizer, src: string) {
+    return urlMayStart(this, src) ? Tokenizer.prototype.url.call(this, src) : undefined
+  },
+  inlineText(this: Tokenizer, src: string) {
+    const end = textEnd(this, src)
+    const token = end === undefined
+      ? Tokenizer.prototype.inlineText.call(this, src)
+      : { type: 'text' as const, raw: src.slice(0, end), text: src.slice(0, end), escaped: this.lexer.state.inRawBlock }
+    if (token) token.text = fileAngles(token.text)
+    return token
+  },
+} satisfies Partial<Tokenizer>)
+
+// Before the emphasis rules read a text, marked masks each reference to a
+// defined link, then each escape, then each link, code span and tag, by
+// copying the whole text around each one, so a paragraph of `\[` or `[x]`
+// cost quadratic time. The importer gives marked's masking loops rules that
+// find nothing, and masks the text once in the emphasis hook marked calls
+// right after them, with marked's own rules and replacements.
+const unmaskedRules = new WeakMap<Rules, Rules>()
+let masking: { links: object | undefined; read: InlineText | undefined; tokenizer: Tokenizer; rules: Rules } | undefined
+
+function unmasked(rules: Rules): Rules {
+  let found = unmaskedRules.get(rules)
+  if (!found) {
+    found = { ...rules, inline: { ...rules.inline, reflinkSearch: NO_MATCH, anyPunctuation: NO_MATCH, blockSkip: NO_MATCH } }
+    unmaskedRules.set(rules, found)
+  }
+  return found
+}
+
+// Each match of `pattern` in `text` replaced as `mask` gives, in one copy.
+function maskEach(text: string, pattern: RegExp, mask: (match: RegExpExecArray) => [number, string] | undefined): string {
+  const masked: string[] = []
+  let kept = 0
+  pattern.lastIndex = 0
+  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+    const replaced = mask(match)
+    if (!replaced) continue
+    masked.push(text.slice(kept, replaced[0]), replaced[1])
+    kept = match.index + match[0].length
+  }
+  if (!masked.length) return text
+  masked.push(text.slice(kept))
+  return masked.join('')
+}
 
 function maskedText(text: string): string {
   if (!masking) return text
-  const { tokenizer, rules } = masking
-  const { anyPunctuation, blockSkip } = rules.inline
-  tokenizer.rules = rules
-  masking = undefined
-  const escaped: string[] = []
-  let kept = 0
-  anyPunctuation.lastIndex = 0
-  for (let match = anyPunctuation.exec(text); match; match = anyPunctuation.exec(text)) {
-    escaped.push(text.slice(kept, match.index), '++')
-    kept = match.index + match[0].length
-    // marked searches on from where the escape ended in the text before it
-    // shortened it, so past an escaped astral character it skips one more.
-    anyPunctuation.lastIndex = kept + match[0].length - 2
+  const { links, read, rules } = masking
+  const { reflinkSearch, anyPunctuation, blockSkip } = rules.inline
+  unmask()
+  let source = text
+  // A reference's mask keeps the text's length, and marked's next search
+  // starts past it, so later matches read the same characters.
+  if (links && definesLink(links) && source.includes('[')) {
+    source = maskEach(source, reflinkSearch, match => Object.hasOwn(links, match[0].slice(match[0].lastIndexOf('[') + 1, -1))
+      ? [match.index, `[${'a'.repeat(match[0].length - 2)}]`]
+      : undefined)
   }
-  escaped.push(text.slice(kept))
-  // Each of these masks keeps the text's length, and none could start right
-  // after a code span, so later matches read the same characters.
-  const source = escaped.join('')
-  const masked: string[] = []
-  kept = 0
-  blockSkip.lastIndex = 0
-  for (let match = blockSkip.exec(source); match; match = blockSkip.exec(source)) {
-    const offset = match[2] ? match[2].length : 0
-    masked.push(source.slice(kept, match.index + offset), `[${'a'.repeat(match[0].length - offset - 2)}]`)
-    kept = blockSkip.lastIndex
+  if (source.includes('\\')) {
+    source = maskEach(source, anyPunctuation, match => {
+      // marked searches on from where the escape ended in the text before it
+      // shortened it, so past an escaped astral character it skips one more.
+      anyPunctuation.lastIndex += match[0].length - 2
+      return [match.index, '++']
+    })
   }
-  masked.push(source.slice(kept))
-  return masked.join('')
+  // These masks keep the length too, and none could start right after a code
+  // span.
+  if (/[[`<]/.test(source)) {
+    source = maskEach(source, blockSkip, match => {
+      const offset = match[2] ? match[2].length : 0
+      return [match.index + offset, `[${'a'.repeat(match[0].length - offset - 2)}]`]
+    })
+  }
+  // The emphasis and strikethrough rules scan this text.
+  if (read) read.masked = source
+  return source
+}
+
+function definesLink(links: object): boolean {
+  for (const _ in links) return true
+  return false
 }
 
 // Block lexing must protect content tabs from list indentation expansion, but
@@ -786,23 +1101,39 @@ class ContentTabLexer<ParserOutput = string, RendererOutput = string> extends Le
 
   inlineTokens(src: string, tokens: Token[] = []): Token[] {
     const text = parseTabs.size ? restoreParseSentinels(src, parseTabs) : src
-    enterInlineText(this, text, tokens)
-    const tokenizer = this.options.tokenizer
-    const rules = this.options.hooks === markdownParser.defaults.hooks ? tokenizer?.rules : undefined
-    if (tokenizer && rules) {
-      tokenizer.rules = { ...rules, inline: { ...rules.inline, anyPunctuation: NO_MASK, blockSkip: NO_MASK } }
-      masking = { tokenizer, rules }
-    }
+    enterText(this, text, tokens)
     try {
       return super.inlineTokens(text, tokens)
     } finally {
-      if (tokenizer && rules) {
-        tokenizer.rules = rules
-        masking = undefined
-      }
-      leaveInlineText(this, tokens)
+      leaveText(this, tokens)
     }
   }
+}
+
+// These sit outside the lexer's own frame, which nested emphasis repeats on
+// the stack at each level.
+function enterText<ParserOutput, RendererOutput>(lexer: Lexer<ParserOutput, RendererOutput>, text: string, tokens: Token[]): void {
+  enterInlineText(lexer, text, tokens)
+  reopen()
+  const tokenizer = lexer.options.tokenizer
+  const rules = lexer.options.hooks === markdownParser.defaults.hooks ? tokenizer?.rules : undefined
+  if (!tokenizer || !rules) return
+  tokenizer.rules = unmasked(rules)
+  masking = { links: lexer.tokens.links, read: readingInlineText(lexer), tokenizer, rules }
+}
+
+function leaveText<ParserOutput, RendererOutput>(lexer: Lexer<ParserOutput, RendererOutput>, tokens: Token[]): void {
+  unmask()
+  reopen()
+  leaveInlineText(lexer, tokens)
+}
+
+// The emphasis hook restores the rules once marked's masking loops end, so
+// this restores them only when they threw.
+function unmask(): void {
+  if (!masking) return
+  masking.tokenizer.rules = masking.rules
+  masking = undefined
 }
 markdownParser.Lexer = ContentTabLexer
 

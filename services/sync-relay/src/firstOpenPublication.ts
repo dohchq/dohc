@@ -132,12 +132,12 @@ export function createFirstOpenPublisher(options: {
   host(): FirstOpenCheckHost | undefined;
   /** The first-open worker, unless a test injects another. */
   build?: FirstOpenBuild;
-  /** The relay's clock, unless a test injects another. */
+  /** The relay's monotonic clock, unless a test injects another. */
   nowMs?: () => number;
   /** How many sources' waits the relay keeps, unless a test keeps fewer. */
   maxDeadlineWaits?: number;
 }) {
-  const {storage, namespace, nowMs = Date.now, maxDeadlineWaits = FIRST_OPEN_DEADLINE_WAITS} = options;
+  const {storage, namespace, nowMs = () => performance.now(), maxDeadlineWaits = FIRST_OPEN_DEADLINE_WAITS} = options;
   const build: FirstOpenBuild = options.build ?? ((policy, input, signal) => liveValidation.buildFirstOpenBase(policy, input, signal));
   // A build that passes its deadline would pass it again on the same bytes, holding the one first-open slot every time,
   // so the relay itself makes the same source wait, whatever its clients do. A restart forgets every wait.
@@ -218,18 +218,23 @@ export function createFirstOpenPublisher(options: {
       head.contentKind !== "text" || head.sourceByteLength === null) return answer({kind: "refused", reason: "stale-source"});
     // A live document holds no more Markdown than this, so nothing longer is built or sent to the engine.
     if (head.sourceByteLength > LIVE_MARKDOWN_MAX_BYTES) return answer({kind: "refused", reason: "too-large", code: "source-limit"});
+    const source: FirstOpenSource = Object.freeze({...named, sourceByteLength: head.sourceByteLength});
+    // A source whose build passed its deadline waits before it builds again; an edit is a new source. Its bytes passed the
+    // checks below before that build, so inside the wait the relay reads only its history, which can still answer first.
+    const waitKey = JSON.stringify([workspaceId, objectId, source.sourceDigest]), waiting = deadlineWaits.get(waitKey), at = nowMs();
+    if (waiting && at < waiting.untilMs) {
+      const preparation = await step("history-unavailable", () => storage.prepareFirstOpen(source, signal));
+      if (preparation.kind !== "prepared") return refusal(preparation);
+      return answer({kind: "unavailable", reason: "build-deadline", retryAfterMs: waiting.untilMs - at});
+    }
     const bytes = storage.getBlob(workspaceId, head.sourceDigest);
     if (!bytes || bytes.byteLength !== head.sourceByteLength || sha256(bytes) !== head.sourceDigest) return answer({kind: "integrity", reason: "source-evidence"});
     let markdown: string;
     try {markdown = new TextDecoder("utf-8", {fatal: true, ignoreBOM: true}).decode(bytes);}
     catch {return answer({kind: "refused", reason: "unsupported-source", cause: "not-utf8"});}
-    const source: FirstOpenSource = Object.freeze({...named, sourceByteLength: head.sourceByteLength});
 
     const preparation = await step("history-unavailable", () => storage.prepareFirstOpen(source, signal));
     if (preparation.kind !== "prepared") return refusal(preparation);
-    // A source whose build passed its deadline waits before it builds again; an edit is a new source.
-    const waitKey = JSON.stringify([workspaceId, objectId, source.sourceDigest]), waiting = deadlineWaits.get(waitKey), at = nowMs();
-    if (waiting && at < waiting.untilMs) return answer({kind: "unavailable", reason: "build-deadline", retryAfterMs: waiting.untilMs - at});
     let proof = preparation.proof;
     const built = await step("worker-failed", () => build(config.validation, {document: {workspaceId, mainVersionId: "main", objectId},
       currentPath: source.path, headMomentId: source.sourceMomentId, markdown, sourceDigest: source.sourceDigest,

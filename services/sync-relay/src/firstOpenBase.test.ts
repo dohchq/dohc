@@ -472,6 +472,29 @@ describe("first-open worker", () => {
     expect(outcomes.filter(({ built }) => built !== "built" && !bySize.includes(built))).toEqual([]);
   }, (slowShapes.length + 2) * FIRST_OPEN_BUILD_MS);
 
+  // Repeated units with what follows them once: one closer after many
+  // openers, an underline after a separator, a definition after its
+  // references, and the shapes the importer's growth sweep found.
+  const [lineSeparator, paragraphSeparator] = [0x2028, 0x2029].map(code => String.fromCharCode(code));
+  const closedShapes: [unit: string, end: string][] = [
+    ["*a ", "a*"], ["_a ", "a_"], ["~a ", "a~"], ["\\[ *a ", "a*"],
+    ["$$a\n", `x${lineSeparator}\n---`], ["a\n$$b\n", `x${lineSeparator}\n---`], ["$$", `${lineSeparator}\n===`],
+    ["$$a\n", `x${paragraphSeparator}\n---`], ["a\n$$b\n", `x${paragraphSeparator}\n---`], ["$$", `${paragraphSeparator}\n===`], ["$$", "\r\n==="],
+    ["[x] ", "\n\n[x]: /u\n"], [".<?", ""], [".<!a ", ""], [".<![CDATA[", ""], [".www.", ""], ["\\```", "@"], ["*", "&"],
+    ["*\n| - |\n", ""], ["|\n| - |\n", ""], ["<!a ]]>", "\n---"],
+  ];
+  it("builds a note of each shape that read slowly before one closer or terminator at the source limit, or refuses it by size, inside the deadline", async () => {
+    const { pool } = fixture();
+    const bySize = ["update-limit", "capture-budget", "read-budget", "validation-budget", "seed-worker-capacity"];
+    const outcomes = [];
+    for (const [unit, end] of closedShapes) {
+      expect((await pool.buildFirstOpenBase(policy, input("Body"))).kind).toBe("built");
+      const built = await pool.buildFirstOpenBase(policy, input(unit.repeat(Math.floor((LIVE_MARKDOWN_MAX_BYTES - Buffer.byteLength(end)) / unit.length)) + end));
+      outcomes.push({ unit, end, built: built.kind === "refused" ? built.reason : built.kind });
+    }
+    expect(outcomes.filter(({ built }) => built !== "built" && !bySize.includes(built))).toEqual([]);
+  }, (closedShapes.length + 2) * FIRST_OPEN_BUILD_MS);
+
   it("ends a build that passes its deadline and answers once its slot is free, while a caller's cancellation still rejects", async () => {
     // A deadline of 0 passes long before a new worker can start and answer.
     const { pool, journal, validate } = fixture({ firstOpenBuildMs: 0 });

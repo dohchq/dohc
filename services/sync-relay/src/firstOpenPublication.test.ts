@@ -773,6 +773,25 @@ it("answers a waiting source with the history it gained since, without building"
   expect(f.builds).toHaveBeenCalledTimes(1);
 });
 
+// Its bytes passed every check before the build that set the wait.
+it("reads a waiting source's history but not its bytes", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const f = await fixture(), blobs = vi.spyOn(f.storage, "getBlob");
+  const sourceReads = () => blobs.mock.calls.filter(([, digest]) => digest === f.source.sourceDigest).length;
+  f.buildWith(async () => ({kind: "deadline"}));
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "build-deadline"});
+  expect(sourceReads()).toBe(1);
+  const histories = f.reads;
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "build-deadline", retryAfterMs: FIRST_OPEN_DEADLINE_WAIT_MS});
+  expect(sourceReads()).toBe(1);
+  expect(f.reads).toBe(histories + 1);
+  // Once the wait passes, the source is read and built again.
+  f.advance(FIRST_OPEN_DEADLINE_WAIT_MS);
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "build-deadline"});
+  expect(sourceReads()).toBe(2);
+  expect(f.builds).toHaveBeenCalledTimes(2);
+});
+
 it("keeps at most its limit of waits, forgetting the one set longest ago", async () => {
   vi.spyOn(console, "error").mockImplementation(() => {});
   const f = await fixture({maxDeadlineWaits: 2});

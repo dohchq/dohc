@@ -22,27 +22,33 @@ function firstTokenMatch(src: string, pattern: RegExp): RegExpMatchArray | null 
 // text until the rest passes it.
 export type InlineText = {
   text: string
-  found: Map<InlineStart, { from: number; match: number; at: number }>
+  found?: Map<InlineStart, { from: number; match: number; at: number }>
   // The length of the rest at the lexer's current step, which the importer's
   // first tokenizer records.
   step: number
-  searched: Map<RestSearch, { from: number; at: number }>
+  searched?: Map<RestSearch, { from: number; at: number }>
   // The address the importer's text rule last found.
   email?: { from: number; at: number; start: number }
   // Where the run of characters an address's local part may hold, that the
   // importer's url rule last measured, ends, and whether an address's
   // domain follows.
   localPart?: { from: number; at: number; address: boolean }
-  // The text marked masks for its emphasis rules, and the importer's
-  // searches in it.
-  masked?: { text: string; searched: Map<RestSearch, { from: number; at: number }> }
+  // The run of one character the importer last measured for marked's
+  // emphasis, strikethrough or code span rule.
+  run?: { start: number; end: number }
+  // The text marked masks for its emphasis and strikethrough rules, how much
+  // of it their own scans have read, and the rest at the step whose scan the
+  // next step counts.
+  masked?: string
+  scanned?: number
+  scanning?: number
 }
 const inlineTexts = new WeakMap<object, InlineText[]>()
 // marked hands an extension's tokenizer the tokens of the text it reads.
 const tokenTexts = new WeakMap<object, InlineText>()
 
 export function enterInlineText(lexer: object, text: string, tokens: object): void {
-  const read = { text, found: new Map(), step: -1, searched: new Map() }
+  const read: InlineText = { text, step: -1 }
   const texts = inlineTexts.get(lexer)
   if (texts) texts.push(read)
   else inlineTexts.set(lexer, [read])
@@ -101,11 +107,12 @@ export function findInlineStart(lexer: object | undefined, src: string, start: I
   // search starts no earlier than that one and the match does not start
   // before it.
   const from = read.text.length - src.length + 1
-  let found = read.found.get(start)
+  let found = read.found?.get(start)
   if (!found || found.from > from || (found.match >= 0 && found.match < from)) {
     start.rest.lastIndex = from
     const match = start.rest.exec(read.text)
     found = { from, match: match?.index ?? -1, at: match ? at(match) : -1 }
+    read.found ??= new Map()
     read.found.set(start, found)
   }
   return found.match < 0 ? -1 : found.at - from + 1
@@ -119,7 +126,7 @@ export function findInlineStart(lexer: object | undefined, src: string, start: I
 export type RestSearch = (text: string, from: number) => number
 type Searched = Map<RestSearch, { from: number; at: number }>
 
-export function searchFrom(text: string, searched: Searched, from: number, search: RestSearch): number {
+function searchFrom(text: string, searched: Searched, from: number, search: RestSearch): number {
   let found = searched.get(search)
   if (!found || found.from > from || (found.at >= 0 && found.at < from)) {
     found = { from, at: search(text, from) }
@@ -131,7 +138,7 @@ export function searchFrom(text: string, searched: Searched, from: number, searc
 /** `search` from `from` in `src`, the rest of the text `read` holds. */
 export function searchInlineText(read: InlineText, src: string, from: number, search: RestSearch): number {
   const offset = read.text.length - src.length
-  const at = searchFrom(read.text, read.searched, offset + from, search)
+  const at = searchFrom(read.text, read.searched ??= new Map(), offset + from, search)
   return at < 0 ? -1 : at - offset
 }
 
@@ -152,15 +159,17 @@ const nextBrace = nextCharacter('}')
 export type BlockText = {
   text: string
   tokens: Token[]
-  searched: Searched
+  searched?: Searched
   rest?: string
-  heads: Map<Token, string[]>
+  heads?: Map<Token, string[]>
+  // Whether marked's table rule has found no table at a step of this text.
+  tableRefused?: boolean
 }
 const blockTexts = new WeakMap<object, BlockText[]>()
 const tokenBlockTexts = new WeakMap<object, BlockText>()
 
 export function enterBlockText(lexer: object, text: string, tokens: Token[]): void {
-  const read = { text, tokens, searched: new Map(), heads: new Map() }
+  const read: BlockText = { text, tokens }
   const texts = blockTexts.get(lexer)
   if (texts) texts.push(read)
   else blockTexts.set(lexer, [read])
@@ -181,9 +190,9 @@ export function shortenLastParagraph(lexer: object | undefined): void {
   const read = lexer ? blockTexts.get(lexer)?.at(-1) : undefined
   const last = read?.tokens.at(-1)
   if (!read || last?.type !== 'paragraph' || last.raw.length < 2) return
-  const head = read.heads.get(last)
+  const head = read.heads?.get(last)
   if (head) head.push(last.raw.slice(0, -1))
-  else read.heads.set(last, [last.raw.slice(0, -1)])
+  else (read.heads ??= new Map()).set(last, [last.raw.slice(0, -1)])
   last.raw = last.raw.slice(-1)
 }
 
@@ -202,7 +211,7 @@ export function steppedBlockText(lexer: object | undefined, src: string): BlockT
 /** `search` from `from` in `src`, the rest of the text `read` holds. */
 export function searchBlockText(read: BlockText, src: string, from: number, search: RestSearch): number {
   const offset = read.text.length - src.length
-  const at = searchFrom(read.text, read.searched, offset + from, search)
+  const at = searchFrom(read.text, read.searched ??= new Map(), offset + from, search)
   return at < 0 ? -1 : at - offset
 }
 
@@ -1466,6 +1475,32 @@ function tableStart(this: { lexer?: object }, src: string): number {
   return (tableTokenizer.start as (source: string) => number)(prefix)
 }
 
+// One tokenizer reads each table on its own. Its lexer gives it its GFM
+// rules, and holds the inline queue each table fills until the read ends.
+const tableReader = new Tokenizer()
+tableReader.lexer = new Lexer({ ...getDefaults(), tokenizer: tableReader })
+
+function readTable(text: string): Tokens.Table | undefined {
+  try {
+    return tableReader.table(text)
+  } finally {
+    tableReader.lexer.inlineQueue.length = 0
+  }
+}
+
+// The table marked's rule reads from `head`, the first two lines of a text,
+// as `leadingTable` would choose it. Whether it reads one depends only on
+// those lines, so a text whose first two lines are no table costs only them.
+function headTable(head: string): Tokens.Table | undefined {
+  const escaped = preprocessTablePipes(head)
+  return (escaped === head ? undefined : readTable(escaped)) ?? readTable(head)
+}
+
+/** Whether `rule`, when it is marked's own table rule, may read a table from `head`, the first two lines of a text. */
+export function readsTable(head: string, rule: RegExp): boolean {
+  return tableReader.rules.block.table !== rule || !!readTable(head)
+}
+
 // Finds the table at the start of `rest` with marked's table rule and nothing
 // else, and returns its lines as that rule read them. Lexing the rest of the
 // document would re-enter this tokenizer for every later table, and even a
@@ -1482,15 +1517,11 @@ function tableStart(this: { lexer?: object }, src: string): number {
 function leadingTable(
   rest: string,
 ): { table: Tokens.Table; lines: string[]; source: string[] } | undefined {
-  const tokenizer = new Tokenizer()
-  // The lexer gives the tokenizer its GFM rules and the inline queue the
-  // table rule fills.
-  tokenizer.lexer = new Lexer({ ...getDefaults(), tokenizer })
-  const own = tokenizer.rules.block.table.exec(rest)?.[0].replace(/\n+$/u, '')
+  const own = tableReader.rules.block.table.exec(rest)?.[0].replace(/\n+$/u, '')
   if (own === undefined) return undefined
   const escaped = preprocessTablePipes(own)
   for (const text of escaped === own ? [own] : [escaped, own]) {
-    const table = tokenizer.table(text)
+    const table = readTable(text)
     // The header, the delimiter, and each row take one line.
     const count = 2 + (table?.rows.length ?? 0)
     if (table) return { table, lines: text.split('\n', count), source: own.split('\n', count) }
@@ -1521,29 +1552,41 @@ function tableRowCells(row: string): string[] {
 // cells of a row past its header's count, so a row whose extra cells hold
 // text ends the table instead, and that text stays in the document.
 // Otherwise a file, or a preserved source, could hold text its document
-// lacks.
-function leadingTableText(rest: string): { text: string; cut: boolean } | undefined {
+// lacks. Without a cut, `cells` counts the most cells up to the last with
+// text in any row.
+function leadingTableText(rest: string): { text: string; cut: boolean; cells: number } | undefined {
   const read = leadingTable(rest)
   if (!read) return undefined
   const { table, lines, source: raw } = read
+  let cells = 0
   for (let row = 2; row < lines.length; row += 1) {
-    const extra = tableRowCells(lines[row]).slice(table.header.length)
-    if (extra.some(cell => cell.trim())) return { text: raw.slice(0, row).join('\n'), cut: true }
+    const texts = tableRowCells(lines[row]).map(cell => !!cell.trim())
+    if (texts.indexOf(true, table.header.length) >= 0) return { text: raw.slice(0, row).join('\n'), cut: true, cells }
+    cells = Math.max(cells, texts.lastIndexOf(true) + 1)
   }
-  return { text: raw.join('\n'), cut: false }
+  return { text: raw.join('\n'), cut: false, cells }
 }
+
+// Where the probe last read a table it did not cut and returned nothing, with
+// no pipe Tiptap's tokenizer would escape: from `start` to `end` of the block
+// text, with no row holding text past `cells` cells. A later probe whose first
+// two lines end inside it reads the rest of the same rows, so with no table in
+// those lines, or at least `cells` header cells, it returns nothing too.
+const tableProbes = new WeakMap<BlockText, { start: number; end: number; cells: number }>()
 
 // Only a line after the first that could be a delimiter row can start a
 // table, so ordinary blocks skip the table probe.
 const TABLE_DELIMITER_RE = /^[ \t|:]*-[ \t|:-]*$/u
-function secondLine(src: string, read: BlockText | undefined): string {
+// The second line of `src`, and where it ends.
+function secondLine(src: string, read: BlockText | undefined): { second: string; end: number } {
   const search = (from: number, rest: RestSearch) => (
     read && read.text.length >= src.length ? searchBlockText(read, src, from, rest) : rest(src, from)
   )
   const first = search(0, nextLine)
-  if (first < 0) return ''
+  if (first < 0) return { second: '', end: src.length }
   const second = search(first + 1, nextLineAfter)
-  return src.slice(first + 1, second < 0 ? undefined : second)
+  const end = second < 0 ? src.length : second
+  return { second: src.slice(first + 1, end), end }
 }
 
 export const DohcMarkdownTable = Table.extend({
@@ -1554,18 +1597,30 @@ export const DohcMarkdownTable = Table.extend({
       const annotation = TABLE_ROW_HEIGHTS_RE.exec(src)
       const prefix = annotation?.[0] ?? ''
       const rest = src.slice(prefix.length)
-      const second = secondLine(rest, annotation ? undefined : tokenBlockTexts.get(tokens))
-      const delimiter = TABLE_DELIMITER_RE.test(second)
-      const extent = annotation || delimiter ? leadingTableText(rest) : undefined
+      const read = annotation ? undefined : tokenBlockTexts.get(tokens)
+      const { second, end } = secondLine(rest, read)
+      const start = read ? read.text.length - rest.length : -1
+      // marked's table rule takes a delimiter row only with a pipe or colon,
+      // and its first two lines decide whether it reads a table.
+      const head = (annotation || TABLE_DELIMITER_RE.test(second)) && /[:|]/.test(second) ? headTable(rest.slice(0, end)) : undefined
+      const probed = read && tableProbes.get(read)
+      if (probed && probed.start <= start && start + end <= probed.end && (!head || head.header.length >= probed.cells)) return undefined
+      const extent = head ? leadingTableText(rest) : undefined
       if (!annotation && !extent?.cut) {
+        const none = () => {
+          if (read && extent && (!extent.text.includes('`') || preprocessTablePipes(extent.text) === extent.text)) {
+            tableProbes.set(read, { start, end: start + extent.text.length, cells: extent.cells })
+          }
+          return undefined
+        }
         // Tiptap's tokenizer reads a table only when its second line is a
         // delimiter row with a pipe, and here it reads only the table's own
         // lines. Given the text up to the next blank line, it would read every
         // line after the table too, and when a code span there holds a pipe,
         // count the line after the table as one of its own.
-        if (!extent || !second.includes('|')) return undefined
+        if (!extent || !second.includes('|')) return none()
         const table = tableTokenizer.tokenize(extent.text, tokens, helpers)
-        if (!table?.raw) return undefined
+        if (!table?.raw) return none()
         // The newline after the last row belongs to the table, as in marked.
         return { ...table, raw: table.raw + (rest[table.raw.length] === '\n' ? '\n' : '') }
       }

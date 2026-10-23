@@ -22,6 +22,7 @@ import {
   serializeRichdocBody,
 } from './import-export.js'
 import { getDohcYDocBodyFragment } from './body-fragment.js'
+import { parseWork } from './parse-work.fixture.js'
 import {
   FRONTMATTER_EDIT_REFUSED_MESSAGE,
   frontmatterEditsRefused,
@@ -97,93 +98,13 @@ it.each([
   }
 })
 
-// The characters `run` reads in searches: from where each starts to the end
-// of its match, or to the end of the text when it finds none, and the items
-// each `findIndex` reads. An anchored pattern reads only its match. One `exec`
-// hides what its pattern reads past where it stops, so these patterns count
-// that too: marked's text rule looks ahead through the email characters after
-// its match, its url rule reads the characters an address's local part may
-// hold, a wikilink start that repeats its label reads to the end of the line
-// from each `[[` it tries, marked's link rule reads a destination with no `)`
-// to the next white space, its tag rule reads the rest for a comment's end,
-// its setext rule the rest of the block text, and its table rule the first
-// line. Each other text marked's masks search is a copy of the text it
-// masked, and checking the end of a raw marked joined copies it.
-const MARKED_TEXT_RULE = Lexer.rules.inline.gfm.text
-const EMAIL_CHARACTERS = /[a-zA-Z0-9.!#$%&'*+/=?_`{|}~-]*/y
-const MARKED_URL_RULE = Lexer.rules.inline.gfm.url
-const LOCAL_PART = /[A-Za-z0-9._+-]*/y
-const MARKED_LINK_RULE = Lexer.rules.inline.gfm.link
-const LINK_DESTINATION = /!?\[[^\]]*\]\([^ \t\n\x00-\x1f]*/y
-const MARKED_TAG_RULE = Lexer.rules.inline.gfm.tag
-const MARKED_SETEXT_RULE = Lexer.rules.block.gfm.lheading
-const MARKED_TABLE_RULE = Lexer.rules.block.gfm.table
-const MARKED_MASKS = new Set([Lexer.rules.inline.gfm.anyPunctuation, Lexer.rules.inline.gfm.blockSkip])
+// The characters `run` reads, as `parseWork` counts them, with each string
+// `indexOf` searched for.
 function searchWork(run: () => void, searched = new Set<string>()): number {
-  const { endsWith, indexOf } = String.prototype
-  const { exec } = RegExp.prototype
-  const { findIndex } = Array.prototype
-  let work = 0, masked: string | undefined
-  const endsWithSpy = vi.spyOn(String.prototype, 'endsWith').mockImplementation(function (this: string, ...args) {
-    work += this.length
-    return Reflect.apply(endsWith, this, args) as boolean
-  })
-  const findIndexSpy = vi.spyOn(Array.prototype, 'findIndex').mockImplementation(function (this: unknown[], ...args) {
-    const at = Reflect.apply(findIndex, this, args) as number
-    work += at < 0 ? this.length : at + 1
-    return at
-  })
-  const indexOfSpy = vi.spyOn(String.prototype, 'indexOf').mockImplementation(function (this: string, search: string, from = 0) {
-    const at = Reflect.apply(indexOf, this, [search, from]) as number
-    searched.add(search)
-    work += (at < 0 ? this.length : at + search.length) - Math.max(from, 0)
-    return at
-  })
-  const execSpy = vi.spyOn(RegExp.prototype, 'exec').mockImplementation(function (this: RegExp, input: string) {
-    const from = this.global || this.sticky ? this.lastIndex : 0
-    const match = Reflect.apply(exec, this, [input]) as RegExpExecArray | null
-    if (this.sticky || (this.source.startsWith('^') && !this.multiline)) work += match?.[0].length ?? 0
-    else work += (match ? match.index + match[0].length : input.length) - from
-    if (this === MARKED_TEXT_RULE && match) {
-      EMAIL_CHARACTERS.lastIndex = match[0].length
-      work += (Reflect.apply(exec, EMAIL_CHARACTERS, [input]) as RegExpExecArray)[0].length
-    }
-    if (this === MARKED_URL_RULE && !match) {
-      LOCAL_PART.lastIndex = 0
-      work += (Reflect.apply(exec, LOCAL_PART, [input]) as RegExpExecArray)[0].length
-    }
-    if (this === MARKED_LINK_RULE && !match) {
-      LINK_DESTINATION.lastIndex = 0
-      work += (Reflect.apply(exec, LINK_DESTINATION, [input]) as RegExpExecArray | null)?.[0].length ?? 0
-    }
-    if (this === MARKED_TAG_RULE && !match && input.startsWith('<!--')) work += input.length
-    if (this === MARKED_SETEXT_RULE && !match) work += input.length
-    if (this === MARKED_TABLE_RULE && !match) {
-      const line = Reflect.apply(indexOf, input, ['\n']) as number
-      work += line < 0 ? input.length : line
-    }
-    if (MARKED_MASKS.has(this) && input !== masked) {
-      work += input.length
-      masked = input
-    }
-    if (this.source.includes('\\[\\[') && /[+*]/.test(this.source.replace(/\\./g, ''))) {
-      const end = this.sticky ? from + 1 : match ? match.index + 1 : input.length
-      for (let at = Reflect.apply(indexOf, input, ['[[', from]) as number; at >= 0 && at <= end; at = Reflect.apply(indexOf, input, ['[[', at + 1]) as number) {
-        const line = Reflect.apply(indexOf, input, ['\n', at]) as number
-        work += (line < 0 ? input.length : line) - at
-      }
-    }
-    return match
-  })
-  try {
-    run()
-    return work
-  } finally {
-    endsWithSpy.mockRestore()
-    findIndexSpy.mockRestore()
-    indexOfSpy.mockRestore()
-    execSpy.mockRestore()
-  }
+  const by = new Map<string, number>()
+  const work = parseWork(run, by)
+  for (const key of by.keys()) if (key.startsWith('indexOf ')) searched.add(JSON.parse(key.slice(8)) as string)
+  return work
 }
 
 // marked asks each inline extension where it may start before each run of
@@ -248,13 +169,16 @@ it.each([
 })
 
 // The atom pattern backtracked through the rest of the text at each
-// `{{atom:` without a `}}`, and each closing tag read every token before it.
+// `{{atom:` without a `}}`, each closing tag read every token before it, and
+// marked's emphasis opener rule read the rest of a run of delimiters at each
+// place in it.
 it.each([
   ['atom openers', '{{atom:', '', '}'],
   ['atom openers after letters', 'a{{atom:', '', '}'],
   ['atoms closed by one brace', '{{atom:a}', '', '}'],
   ['closing tags', '</b>', '', undefined],
   ['open tags before closing tags of another name', '<b>', '</i>', undefined],
+  ['a run of asterisks before as many closers', '*', ' a*', undefined],
 ])('searches a paragraph of %s in a linear amount of work', (_name, unit, then, search) => {
   const searched = new Set<string>()
   const measure = (repetitions: number) => searchWork(() => {
@@ -305,6 +229,75 @@ it.each([
   const small = measure(1_024)
   const large = measure(2_048)
   expect(large, `searched characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
+})
+
+// marked's emphasis and strikethrough rules counted every opener between an
+// opener and the one closer after them all, its opener rule read a whole run
+// of delimiters at each place in it, its code span and tag rules read the
+// rest for an end at each opener, and its url rule read the rest after each
+// `www.` with no domain.
+it.each([
+  ['emphasis openers before one closer', '*a ', 'a*'],
+  ['underscore openers before one closer', '_a ', 'a_'],
+  ['strikethrough openers before one closer', '~a ', 'a~'],
+  ['escaped brackets and emphasis openers before one closer', '\\[ *a ', 'a*'],
+  ['a run of asterisks', '*', '&'],
+  ['a run of underscores', '_', '~'],
+  ['code span openers no closer matches', '\\```', '@'],
+  ['instruction openers', '.<?', ''],
+  ['declaration openers', '.<!a ', ''],
+  ['CDATA openers', '.<![CDATA[', ''],
+  ['www. with no domain', '.www.', ''],
+])('searches a paragraph of %s in a linear amount of work', (_name, unit, end) => {
+  const measure = (repetitions: number) => searchWork(() => {
+    expect(parseRichdocMarkdown(`${unit.repeat(repetitions)}${end}\n`).content).toHaveLength(1)
+  })
+  const small = measure(1_024)
+  const large = measure(2_048)
+  expect(large, `searched characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
+})
+
+// marked's setext rule cannot cross a line or paragraph separator, so with one
+// before an underline it read the paragraph again at each cut, and its
+// masking copied the text for each reference to a defined link. marked's table
+// rule and the importer's table probe read every row of a table before they
+// found it was none, or nothing to return, at each line it could start, and
+// marked's paragraph rule read them all to end each paragraph before them.
+const LINE_SEPARATOR = String.fromCharCode(0x2028)
+const PARAGRAPH_SEPARATOR = String.fromCharCode(0x2029)
+it.each([
+  ['math block openers before a line separator', '$$a\n', `x${LINE_SEPARATOR}\n---`, ['paragraph', 'horizontalRule']],
+  ['math block openers between lines before a line separator', 'a\n$$b\n', `x${LINE_SEPARATOR}\n---`, ['paragraph', 'horizontalRule']],
+  ['dollar signs before a line separator', '$$', `${LINE_SEPARATOR}\n===`, ['paragraph']],
+  ['math block openers before a paragraph separator', '$$a\n', `x${PARAGRAPH_SEPARATOR}\n---`, ['paragraph', 'horizontalRule']],
+  ['math block openers between lines before a paragraph separator', 'a\n$$b\n', `x${PARAGRAPH_SEPARATOR}\n---`, ['paragraph', 'horizontalRule']],
+  ['dollar signs before a paragraph separator', '$$', `${PARAGRAPH_SEPARATOR}\n===`, ['paragraph']],
+  // marked reads `\r\n` as `\n`.
+  ['dollar signs before a carriage return', '$$', '\r\n===', ['heading']],
+  ['references to a defined link', '[x] ', '\n\n[x]: /u', ['paragraph']],
+  ['tables with no header cells', '|\n| - |\n', '', ['paragraph']],
+  ['empty items before table delimiters', '*\n| - |\n', '', ['bulletList', 'paragraph']],
+  ['declarations before an underline', '<!a ]]>', '\n---', ['paragraph']],
+])('cuts a paragraph of %s in a linear amount of work', (_name, unit, end, kinds) => {
+  const measure = (repetitions: number) => searchWork(() => {
+    const found = parseRichdocMarkdown(`${unit.repeat(repetitions)}${end}`).content?.map(block => block.type)
+    expect(found?.slice(0, kinds.length)).toEqual(kinds)
+  })
+  const small = measure(1_024)
+  const large = measure(2_048)
+  expect(large, `searched characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
+})
+
+// Each level of nested emphasis takes the stack deeper, and a note nested past
+// what it holds fails to open. In a fresh process the importer read 1,700
+// levels of either before it read delimiter runs itself, and still does.
+it.each([
+  ['emphasis', 1_600, '*', 'italic'],
+  ['strikethrough', 1_600, '~~', 'strike'],
+])('reads %s nested %i levels deep', (_name, depth, delimiter, mark) => {
+  const paragraph = parseRichdocMarkdown(`${`${delimiter}a `.repeat(depth)}b${` a${delimiter}`.repeat(depth)}`).content?.[0]
+  expect(paragraph?.content?.map(node => node.text).join('')).toBe(`${'a '.repeat(depth)}b${' a'.repeat(depth)}`)
+  expect(paragraph?.content?.every(node => node.marks?.some(({ type }) => type === mark))).toBe(true)
 })
 
 it.each([

@@ -39,6 +39,11 @@ const FRAGMENTS = [
   'a<!--', '<!--', '-->', '<!-->', '<!--->', '<!-- x -->', '<!--a-->', 'a<!--'.repeat(3), '<!---->', '<!--\n-->',
   '| $ |', '|-|', '===', '# h', '> [!a', 'a\n===', 'a\n---', '    x',
   '`a`*b*', '*a`*`b*', '[*a*](b)*c*', '<i>*</i>*', '\\**a*', '~~a~~b~~', '**a*', 'a\u2028b',
+  '*a *a a*', '_a _a a_', '~a ~a a~', '\\[ *a a*', '*a **b a*', '**a *b a**', '***a *b a*', 'a**b*c**', '*a**b*', '*a***b*',
+  '**a*b***', '***a**b*', '*__a *b__ c*', '_**a _b** c_', '__a*b__', '~~a ~b~~', '~a ~~b~', '~~~a~~~', '\\\ud83d\ude00*a *b*', '*****&',
+  '_____~', '[x] [x]', '[ref] [ref]', '<?', '<?x?>', '<!a ', '<!a >', '<![CDATA[', '<![CDATA[x]]>', '.www.', 'www.-a',
+  '\\```', '`a``', '``a`', '``a``b`', '*\n| - |', '|\n| - |', 'a\n:-', '<!a ]]>\n---',
+  ...[0x2028, 0x2029].flatMap(code => [`x${String.fromCharCode(code)}\n---`, `$$${String.fromCharCode(code)}\n===`]),
 ]
 const LINE_STARTS = [
   '# ', '## ', '> ', '> [!note] ', '- ', '* ', '1. ', '2) ', '- [ ] ', '- [x] ', '    ', '   ', '',
@@ -49,6 +54,8 @@ const BLOCKS = [
   '$$a\n$$b\n$$c', `${'$'.repeat(9)}\nx`, '$$x\n---', '$$a\n> [!note] t', '$$a\n# h\n---', 'a\n$$\nb', '$$$$$\n===',
   '*a *b *c\nd', '| a | b |\n|-|\n| $ |', '$$a\n| b | c |\n| - | - |', '$$a\n```\nb\n```', '$$a\n- b', '$$a\n  \n$$b',
   'a\n- b\n---', 'a\n> b\n===', 'a\n    b\n---', 'a\u2028b\n---', 'a\u2028| b |\n| - |', '> a\n$$b\n$$c', '- [ ] $$$\n$$a',
+  '*\n| - |\n*\n| - |', '|\n| - |\n|\n| - |', '| a | b |\n| - |\n| c | d | e |', 'a\n:-\nb', '[x]: /u\n\n[x] [x] *a *a a*',
+  ...[0x2028, 0x2029].flatMap(code => [`$$a\n$$b\nx${String.fromCharCode(code)}\n---`, `a\n$$b\nx${String.fromCharCode(code)}\n===`]),
 ]
 const SEPARATORS = ['', '', ' ', ' ', '\n', '\n\n']
 
@@ -116,5 +123,5 @@ it('reads 6,000 generated Markdown inputs exactly as before', () => {
   ]) {
     expect(counts.get(kind) ?? 0, kind).toBeGreaterThan(20)
   }
-  expect(hash.digest('hex')).toBe('d731b842fd8a56847363ee4a0cd40a957b5f8af25123dab68de290f7f1367ddb')
+  expect(hash.digest('hex')).toBe('9db571b29ce3cb43f90daf0d2bfc42efe860bd831e62bc3973ba28f70fbfbfdc')
 })
