@@ -134,6 +134,8 @@ export function createRealShareMountHarness(input: {
     relayShareDiscussionActivityPolls: createPresencePollRegistry(),
     ownerLiveStop: unexpected,
     listOwnerLiveStops: unexpected,
+    ownerLiveQuarantines: unexpected,
+    retryOwnerLiveQuarantine: unexpected,
     sharesChanged: unexpected,
     reconcileReceivedShares: unexpected,
   });

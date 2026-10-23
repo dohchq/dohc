@@ -6,6 +6,8 @@ import {
   OwnerLiveRefusalsResult,
   OwnerLiveDocument,
   OwnerLiveDocumentsResult,
+  type OwnerLiveQuarantine,
+  type StopOwnerLiveDocumentResult,
   CreateRelayShareResult,
   GetRelayReceivedShareResult,
   ListRelaySharesResult,
@@ -116,6 +118,9 @@ export function createRelaySharesIpcHandlers<
   >;
   ownerLiveStop(workspace: Workspace, action: "request" | "release" | "clear" | "retired", path: string, binding?: LiveObjectBinding | OwnerLiveStop["document"], acceptedCursor?: number): Promise<OwnerLiveStop | undefined>;
   listOwnerLiveStops(workspace: Workspace): Promise<OwnerLiveStop[]>;
+  // Documents whose edits the server refused for good, as this computer last read them.
+  ownerLiveQuarantines(workspace: Workspace): readonly OwnerLiveQuarantine[];
+  retryOwnerLiveQuarantine(workspace: Workspace, objectId: string, incident: string): Promise<void>;
   // A grant changed on the relay. Null when the change names no workspace.
   sharesChanged(workspaceId: string | null): void;
   // An authenticated account listing, applied to this machine's received
@@ -174,10 +179,13 @@ export function createRelaySharesIpcHandlers<
       }]));
       // A deferred Stop finishes through Resume, unless the server's copy diverged or misses an
       // edit made while live editing was off: then Resume cannot work.
+      const quarantines = dependencies.ownerLiveQuarantines(operation.workspace);
       for (const row of documents.values()) {
         const deferred = localStops.find(stop => stop.document.currentPath === row.path)?.deferred;
         if (deferred) Object.assign(row, {deferredStop: deferred,
           canResume: row.reason !== "session-host-diverged" && row.reason !== "live-edit-unadmitted"});
+        const quarantine = quarantines.find(candidate => candidate.path === row.path);
+        if (quarantine) Object.assign(row, {quarantine: quarantine.recovery});
       }
       return OwnerLiveDocumentsResult.parse({documents: [...documents.values()], nextCursor: stopped.nextCursor});
     }, assertOriginalWorkspace);
@@ -209,12 +217,16 @@ export function createRelaySharesIpcHandlers<
     }, assertOriginalWorkspace);
   };
 
-  const ownerLiveDocumentAction = (stop: boolean): Handlers["stopOwnerLiveDocument"] => async (input, { operation }) => {
+  // A Stop reports "recovered" only once the engine wrote the refused edits
+  // into the file. A release that kept them, or failed after the server
+  // stopped live editing, leaves them queued on this computer.
+  const ownerLiveDocumentAction = async (stop: boolean, input: {workspaceId: string; path: string}, operation: Operation): Promise<StopOwnerLiveDocumentResult> => {
     operation.assertCurrent();assertOriginalWorkspace(operation.workspace);
-    return withOwnerLiveStopTransition(input.workspaceId,input.path,async () => {
+    return withOwnerLiveStopTransition(input.workspaceId,input.path,async (): Promise<StopOwnerLiveDocumentResult> => {
       const local=stop ? await dependencies.ownerLiveStop(operation.workspace,"request",input.path) : undefined;
       operation.assertCurrent();
-      if (stop && local && !local.retirementOwed) return;
+      const quarantined=local!==undefined && dependencies.ownerLiveQuarantines(operation.workspace).some(row => row.objectId===local.document.objectId);
+      if (stop && local && !local.retirementOwed) return {keptEdits:quarantined ? "kept" : "none"};
       let result: unknown;
       try {
         const {credentials,credentialGeneration}=await remoteForWorkspace(operation.workspace);
@@ -231,9 +243,24 @@ export function createRelaySharesIpcHandlers<
       }
       const response=z.object({ok:z.literal(true),objectId:stop ? z.literal(local!.document.objectId) : z.string().optional(),path:stop ? z.string().min(1) : z.literal(input.path),status:stop ? z.literal("retired") : z.enum(["ready","preparing","unavailable"]),acceptedCursor:stop ? z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER) : z.number().optional()}).parse(result);
       if (response.status==="unavailable") throw new Error("This document could not resume live editing. Refresh the list and try again.");
-      if (stop) await dependencies.ownerLiveStop(operation.workspace,local!.binding ? "release" : "retired",input.path,local!.binding ?? local!.document,response.acceptedCursor);
-      else await dependencies.ownerLiveStop(operation.workspace,"clear",input.path);
+      if (!stop) {
+        await dependencies.ownerLiveStop(operation.workspace,"clear",input.path);
+        operation.assertCurrent();
+        return {keptEdits:"none"};
+      }
+      let released: OwnerLiveStop | undefined;
+      try {
+        released=await dependencies.ownerLiveStop(operation.workspace,local!.binding ? "release" : "retired",input.path,local!.binding ?? local!.document,response.acceptedCursor);
+      } catch (error) {
+        // The server already stopped live editing. The engine kept the refused
+        // queue, and Stop reconciliation tries the release again.
+        if (!quarantined) throw error;
+        operation.assertCurrent();
+        console.error("[desktop] owner live release kept the refused edits:",error);
+        return {keptEdits:"kept"};
+      }
       operation.assertCurrent();
+      return {keptEdits:!quarantined ? "none" : released?.deferred ? "kept" : "recovered"};
     });
   };
 
@@ -999,8 +1026,13 @@ export function createRelaySharesIpcHandlers<
     listOwnerLiveDocuments,
     listOwnerLiveRefusals,
     retryOwnerLiveShare,
-    stopOwnerLiveDocument: ownerLiveDocumentAction(true),
-    resumeOwnerLiveDocument: ownerLiveDocumentAction(false),
+    stopOwnerLiveDocument: (input, { operation }) => ownerLiveDocumentAction(true, input, operation),
+    resumeOwnerLiveDocument: async (input, { operation }) => { await ownerLiveDocumentAction(false, input, operation); },
+    retryOwnerLiveQuarantine: async (input, { operation }) => {
+      operation.assertCurrent(); assertOriginalWorkspace(operation.workspace);
+      await dependencies.retryOwnerLiveQuarantine(operation.workspace, input.objectId, input.incident);
+      operation.assertCurrent();
+    },
     createRelayShare,
     listRelayShares,
     getRelayReceivedShare,

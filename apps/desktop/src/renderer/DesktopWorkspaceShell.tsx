@@ -121,7 +121,7 @@ import { useRetainedCopiesNotice } from "./shell/useRetainedCopiesNotice";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
 import { useNetworkShareNotice } from "./shell/useNetworkShareNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
-import { errorDetails } from "./shell/copyDetails";
+import { errorDetails, type ErrorDetailField } from "./shell/copyDetails";
 import { shareCaptureNoticeState } from "../workspaces/shareCaptureNotice";
 import { CopyButton } from "./ui/CopyButton";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
@@ -173,7 +173,7 @@ import {
   useCollectionWritesBlockingAdmission,
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
-import { LiveDocumentsDialog } from "./LiveDocumentsDialog";
+import { LiveDocumentsDialog, type LiveDocumentStopResult } from "./LiveDocumentsDialog";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
@@ -637,6 +637,12 @@ export function DesktopWorkspaceShell(props: {
   const [liveDocumentsWorkspaceId, setLiveDocumentsWorkspaceId] = useState<
     string | null
   >(null);
+  // The document a notice opened the list for, so the list shows that row.
+  const [liveDocumentsReveal, setLiveDocumentsReveal] = useState<string | null>(null);
+  const openLiveDocuments = useCallback((id: string, reveal: string | null = null) => {
+    setLiveDocumentsReveal(reveal);
+    setLiveDocumentsWorkspaceId(id);
+  }, []);
   // Relay-share dialog target: paths, or a version.
   const [shareTarget, setShareTarget] = useState<RelayShareTarget | null>(null);
   // The Open a share surface: empty, or for a share a notice named.
@@ -929,8 +935,13 @@ export function DesktopWorkspaceShell(props: {
     [],
   );
   const stopLiveDocument = useCallback(
-    (id: string, path: string) =>
-      withClosedEngineDocSession(id, path, () => bridge().stopOwnerLiveDocument({ workspaceId: id, path })),
+    async (id: string, path: string) => {
+      let result: LiveDocumentStopResult = { keptEdits: "none" };
+      await withClosedEngineDocSession(id, path, async () => {
+        result = await bridge().stopOwnerLiveDocument({ workspaceId: id, path });
+      });
+      return result;
+    },
     [],
   );
   const resumeLiveDocument = useCallback(
@@ -964,10 +975,18 @@ export function DesktopWorkspaceShell(props: {
       reportShellError(message, error, () => {
         if (workspaceIdRef.current !== failedFor) return;
         if (retry()) return;
-        setLiveDocumentsWorkspaceId(failedFor);
+        openLiveDocuments(failedFor);
       });
     },
-    [reportShellError],
+    [reportShellError, openLiveDocuments],
+  );
+  // Refused edits a Stop wrote into the file. Edits it kept stay in their
+  // own notice, which the sync status carries.
+  const liveDocumentStopped = useCallback(
+    (path: string, keptEdits: "recovered" | "kept") => {
+      if (keptEdits === "recovered") showSuccessNotice(`Live editing stopped for ${path}. dohc wrote your kept edits into the file.`);
+    },
+    [showSuccessNotice],
   );
 
   const reportCloudStatusUnavailable = useCallback(
@@ -1782,12 +1801,49 @@ export function DesktopWorkspaceShell(props: {
       const identity=`owner-stop:${workspaceId}:${failure.path}`;
       if (shownStopFailures.current.get(identity)===failure.detail) continue;
       shownStopFailures.current.set(identity,failure.detail);
-      const retry=() => {void withClosedEngineDocSession(workspaceId,failure.path,()=>bridge().stopOwnerLiveDocument({workspaceId,path:failure.path})).catch(error => {
+      const retry=() => {void withClosedEngineDocSession(workspaceId,failure.path,async ()=>{await bridge().stopOwnerLiveDocument({workspaceId,path:failure.path});}).catch(error => {
         if (!workspaceAdmission.superseded) reportShellError("dohc could not stop live editing.",error,retry,undefined,identity);
       });};
       reportShellFailure({message:`dohc could not stop live editing for "${failure.path}".`,details:[["Reason",failure.detail]],retry,identity});
     }
   },[captureDecidedFor,syncStatus,workspaceId,workspaceAdmission,reportShellError,reportShellFailure,clearIdentity]);
+  // One notice per document whose edits the server refused, once per
+  // incident: a refusal after a Try again is a new incident. Dismissing the
+  // row hides it and leaves the edits queued. While a Try again waits for
+  // delivery, the document has no notice.
+  const shownQuarantines=useRef({workspaceId,shown:new Map<string,string>()});
+  useEffect(() => {
+    if (captureDecidedFor!==workspaceId || syncStatus===null) return;
+    if (shownQuarantines.current.workspaceId!==workspaceId) shownQuarantines.current={workspaceId,shown:new Map()};
+    const shown=shownQuarantines.current.shown;
+    const identityOf=(objectId:string) => `owner-live-quarantine:${workspaceId}:${objectId}`;
+    const waiting=(syncStatus.ownerLiveQuarantines ?? []).filter(row => row.recovery!=="retrying");
+    const listed=new Set(waiting.map(row => identityOf(row.objectId)));
+    for (const identity of [...shown.keys()]) {
+      if (!listed.has(identity)) {shown.delete(identity);clearIdentity(identity);}
+    }
+    for (const row of waiting) {
+      const identity=identityOf(row.objectId), incident=`${row.recovery}\n${row.incident}`;
+      if (shown.get(identity)===incident) continue;
+      shown.set(identity,incident);
+      const details:ReadonlyArray<ErrorDetailField>=[["File",row.path,row.path.length],["Kept on","This computer"],["Reason",row.reason],["Incident",row.incident]];
+      const open={label:"Open Live documents",run:() => openLiveDocuments(workspaceId,row.path)};
+      if (row.recovery==="stopped-kept") {
+        reportShellFailure({title:`Live editing stopped for ${row.path}`,message:"dohc kept your unsent edits, but could not write them to your file.",details,action:open,identity});
+        continue;
+      }
+      const retry=() => {
+        bridge().retryOwnerLiveQuarantine({workspaceId,objectId:row.objectId,incident:row.incident}).catch((error: unknown) => {
+          // A slow answer for a workspace this window left repaints nothing.
+          if (workspaceIdRef.current!==workspaceId || workspaceAdmission.superseded) return;
+          reportShellError(`dohc could not try again to send your edits to ${row.path}.`,error,retry,undefined,identity);
+        });
+      };
+      reportShellFailure({title:`Live editing paused for ${row.path}`,
+        message:"The server could not accept your edits. dohc kept them on this computer. Choose Stop live editing to recover them.",
+        details,retry,action:open,identity});
+    }
+  },[captureDecidedFor,syncStatus,workspaceId,workspaceAdmission,reportShellError,reportShellFailure,clearIdentity,openLiveDocuments]);
   const refreshShareViewRef = useRef<(trigger?: "manual" | "background" | "press-burst") => Promise<ShareViewRefresh>>(async () => "current");
   const shareRefreshFlight = useRef<{ admission: typeof workspaceAdmission; promise: Promise<ShareViewRefresh>; trigger: "manual" | "background" | "press-burst"; followUp?: Promise<ShareViewRefresh> } | null>(null);
   const checkShareAccess = useSharedViewAccess({
@@ -5408,7 +5464,7 @@ export function DesktopWorkspaceShell(props: {
               {...(shareView
                 ? {}
                 : {
-                    onOpenLiveDocuments: () => setLiveDocumentsWorkspaceId(workspaceId),
+                    onOpenLiveDocuments: () => openLiveDocuments(workspaceId),
                   })}
               {...crashReportNotice}
               automationHolds={automationHolds}
@@ -6469,7 +6525,7 @@ export function DesktopWorkspaceShell(props: {
               ? {
                   onOpenLiveDocuments: () => {
                     closeSettings();
-                    setLiveDocumentsWorkspaceId(workspaceId);
+                    openLiveDocuments(workspaceId);
                   },
                 }
               : {})}
@@ -6485,6 +6541,8 @@ export function DesktopWorkspaceShell(props: {
           loadRefusals={loadLiveRefusals}
           retryRefusal={retryLiveShare}
           onError={reportLiveDocumentsError}
+          onStopped={liveDocumentStopped}
+          {...(liveDocumentsReveal === null ? {} : { reveal: liveDocumentsReveal })}
           onClose={() => setLiveDocumentsWorkspaceId(null)}
         />
       ) : null}

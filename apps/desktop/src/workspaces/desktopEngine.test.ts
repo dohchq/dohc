@@ -1,7 +1,7 @@
 import {LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES} from "@dohc/live-session-contract/live-frame";
 import { resolve } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { Event, Request, Response } from "@dohc/workspace-engine-client";
 import {
   createRustEngineDaemon,
@@ -25,6 +25,9 @@ vi.mock("./desktopOwnerHost", () => ({ readDesktopOwnerHostConfig: ownerHostMock
 const ownerDeliveryMock = vi.hoisted(() => ({read: vi.fn(), start: vi.fn(), pass: vi.fn()}));
 vi.mock("./desktopOwnerDelivery", () => ({readDesktopOwnerDeliveryConfig: ownerDeliveryMock.read, startDesktopOwnerDelivery: ownerDeliveryMock.start}));
 vi.mock("./nativeOwnerDelivery", () => ({runNativeOwnerDeliveryPass: ownerDeliveryMock.pass}));
+// Stands in for the engine's durable owner queues, which outlive every desktop process.
+const quarantineMock = vi.hoisted(() => ({read: vi.fn(), retry: vi.fn()}));
+vi.mock("./ownerLiveQuarantine", () => ({readOwnerLiveQuarantines: quarantineMock.read, retryOwnerLiveQuarantine: quarantineMock.retry}));
 // Only Windows and Linux x64 install a reader, so these tests state Linux x64 on any host.
 vi.mock("./installedReaderConfig", async importOriginal => {
   const { installedReaderConfig } = await importOriginal<typeof import("./installedReaderConfig")>();
@@ -140,6 +143,10 @@ function fixture() {
   };
 }
 
+beforeEach(() => {
+  quarantineMock.read.mockReset().mockResolvedValue([]);
+  quarantineMock.retry.mockReset().mockResolvedValue(undefined);
+});
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("desktop engine construction", () => {
@@ -904,6 +911,79 @@ describe("server owner peer lifecycle", () => {
       expect(changed).toHaveBeenCalledTimes(3);
       credentials.abort(); expect(f.engine.ownerLiveDeliveryStatus("owner")).toBeUndefined();
     } finally {await f.close(); ownerDeliveryMock.pass.mockReset();}
+  });
+
+  // A document whose edits the server refused for good names itself, with
+  // where its edits are, instead of the workspace's moved-or-removed reason.
+  it("names a refused document in its own quarantine, keeps the workspace delivering, and counts each Try again as a new incident", async () => {
+    const f = fixture(), credentials = new AbortController();
+    Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+    const rootPath = await createTestScratch("dohc-server-owner-quarantine-");
+    f.rows.set("owner", {workspaceId: "owner", rootPath, kind: "personal", mode: "local-first"});
+    const binding = {workspaceId: "owner", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
+      currentPath: "notes/plan.md", selectorPaths: ["notes/plan.md"], restoreFenceGeneration: 1};
+    const document = {binding, relayDatabaseNamespace: "namespace", shareId: "share"};
+    const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
+      frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
+        maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
+      attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
+    f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
+      connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
+        retire: async () => 0, refusals: async () => {}, documents: async () => ({ok: true, documents: [{path: "notes/plan.md", status: "ready", document}]})})};
+    const refused = (recovery: "paused" | "retrying") => [{objectId: "object", path: "notes/plan.md", reason: "invalid-update",
+      outboxId: "outbox", binding, headDeliveryId: "delivery", recovery}];
+    quarantineMock.read.mockResolvedValue(refused("paused"));
+    ownerDeliveryMock.pass.mockResolvedValue("frozen");
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toEqual([{objectId: "object", path: "notes/plan.md",
+        reason: "invalid-update", storedOn: "this-computer", incident: "outbox:delivery:0", recovery: "paused"}]));
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("active"));
+      expect(f.engine.ownerLiveDeliveryReason("owner")).toBeUndefined();
+      expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith({workspaceId: "owner"});
+      // The workspace as a renderer operation names it.
+      const workspace = await f.authorities.withAuthority("owner", lease =>
+        ({workspaceId: "owner", rootPath: lease.binding.canonicalRootPath, attachmentId: lease.binding.attachmentId}));
+      // A Try again names the incident the owner saw; a stale one opens nothing.
+      await expect(f.engine.retryOwnerLiveQuarantine(workspace, "object", "outbox:delivery:9")).rejects.toThrow("This document changed.");
+      expect(quarantineMock.retry).not.toHaveBeenCalled();
+      quarantineMock.read.mockResolvedValueOnce(refused("paused")).mockResolvedValue(refused("retrying"));
+      await f.engine.retryOwnerLiveQuarantine(workspace, "object", "outbox:delivery:0");
+      expect(quarantineMock.retry).toHaveBeenCalledExactlyOnceWith(expect.any(EngineClient), "workspace-handle", refused("paused")[0]);
+      expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{incident: "outbox:delivery:1", recovery: "retrying"}]);
+      // The server refuses the attempt again: the same document, a new incident.
+      quarantineMock.read.mockResolvedValue(refused("paused"));
+      f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{incident: "outbox:delivery:1", recovery: "paused"}]));
+      await expect(f.engine.retryOwnerLiveQuarantine(workspace, "object", "outbox:delivery:0")).rejects.toThrow("This document changed.");
+      // Recovered: the queue is gone, and so is the quarantine.
+      quarantineMock.read.mockResolvedValue([]);
+      ownerDeliveryMock.pass.mockResolvedValue("acknowledged");
+      f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toEqual([]));
+    } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
+  });
+
+  // The desktop process keeps nothing: reopening the workspace reads the
+  // refused queue again from the engine, before any delivery pass runs.
+  it("shows an unresolved quarantine again after a restart, from the engine's durable queues", async () => {
+    const binding = {workspaceId: "owner", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
+      currentPath: "notes/plan.md", selectorPaths: ["notes/plan.md"], restoreFenceGeneration: 1};
+    quarantineMock.read.mockResolvedValue([{objectId: "object", path: "notes/plan.md", reason: "invalid-update",
+      outboxId: "outbox", binding, headDeliveryId: "delivery", recovery: "paused"}]);
+    const rootPath = await createTestScratch("dohc-quarantine-restart-");
+    for (let launch = 0; launch < 2; launch++) {
+      const f = fixture();
+      Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+      try {
+        await f.engine.start();
+        expect(f.engine.ownerLiveQuarantines("owner")).toEqual([]);
+        await f.engine.sessions!.run({workspaceId: "owner", rootPath}, async () => undefined);
+        await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toEqual([{objectId: "object", path: "notes/plan.md",
+          reason: "invalid-update", storedOn: "this-computer", incident: "outbox:delivery:0", recovery: "paused"}]));
+        expect(ownerDeliveryMock.pass).not.toHaveBeenCalled();
+      } finally {await f.close();}
+    }
   });
 
   // Proves: a document the server refused names the workspace's reason over

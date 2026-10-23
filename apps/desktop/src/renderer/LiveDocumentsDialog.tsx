@@ -12,7 +12,12 @@ export type LiveDocumentRow = {
   reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted";
   canResume: boolean;
   deferredStop?: {unsentEdits: number; editable: boolean};
+  /** The server refused this document's edits for good, and this computer keeps them. */
+  quarantine?: "paused" | "retrying" | "stopped-kept";
 };
+
+/** What a Stop did with edits the server refused. */
+export type LiveDocumentStopResult = { keptEdits: "none" | "recovered" | "kept" };
 
 /** One read: the latest active documents, then the next page of stopped ones. */
 export type LiveDocumentPage = {
@@ -38,8 +43,12 @@ export type LiveRefusalPage = {
 export type LiveDocumentsDialogProps = {
   workspaceId: string;
   load: (workspaceId: string, retiredAfter?: string) => Promise<LiveDocumentPage>;
-  stop: (workspaceId: string, path: string) => Promise<void>;
+  stop: (workspaceId: string, path: string) => Promise<LiveDocumentStopResult>;
   resume: (workspaceId: string, path: string) => Promise<void>;
+  /** Told when a Stop wrote refused edits into the file, or kept them on this computer. */
+  onStopped?: (path: string, keptEdits: "recovered" | "kept") => void;
+  /** The row a notice opened this dialog for. */
+  reveal?: string;
   /** One page of refused shares, from the share id the previous page ended on. */
   loadRefusals: (workspaceId: string, after?: string) => Promise<LiveRefusalPage>;
   /** Asks the engine to enrol one refused share again. */
@@ -136,6 +145,8 @@ function mergeRows(
 }
 
 function statusLabel(row: LiveDocumentRow): string {
+  if (row.quarantine === "paused") return "Paused";
+  if (row.quarantine === "retrying") return "Trying again";
   if (row.reason === "document-unavailable") return "File moved or removed";
   if (row.reason === "workspace-changed") return "Workspace changed";
   if (row.reason === "session-host-refused") return "Stopped by the server";
@@ -157,6 +168,7 @@ function statusLabel(row: LiveDocumentRow): string {
 }
 
 function statusTone(row: LiveDocumentRow): string {
+  if (row.quarantine === "paused" || row.quarantine === "stopped-kept") return "text-warning";
   if (row.status === "ready") return "text-success";
   if (row.status === "unavailable") return "text-warning";
   return "text-muted";
@@ -178,6 +190,20 @@ function deferredStopNote(row: LiveDocumentRow, stop: NonNullable<LiveDocumentRo
   const resume = row.reason === "session-host-diverged" || row.reason === "live-edit-unadmitted" ? ""
     : stop.unsentEdits === 0 ? "Resume live editing to finish syncing. " : `Resume live editing to try sending ${one ? "it" : "them"}. `;
   return `${row.status === "ready" ? "Live editing resumed. " : "Live editing stopped. "}${unsent}${resume}${stop.editable ? "You can keep editing." : "Editing is paused."}`;
+}
+
+// Edits the server refused: where they are, and what Stop does with them.
+// Stop writes them into the file only when the engine can; otherwise they stay queued.
+function quarantineNote(row: LiveDocumentRow): string | null {
+  if (row.quarantine === "paused") {
+    return "The server could not accept your edits. dohc kept them on this computer. Stop live editing writes them into your file.";
+  }
+  if (row.quarantine === "retrying") return "dohc is sending your kept edits to the server once more.";
+  if (row.quarantine === "stopped-kept") {
+    return `Live editing stopped. dohc kept your unsent edits, but could not write them to your file.${
+      row.canResume ? " Resume live editing, then try again." : ""}`;
+  }
+  return null;
 }
 
 function busyLabel(work: Work): string {
@@ -242,8 +268,13 @@ export function LiveDocumentsDialog({
   retryRefusal,
   onClose,
   onError,
+  onStopped,
+  reveal,
 }: LiveDocumentsDialogProps) {
   const [state, setState] = useState<ListState>({ kind: "loading" });
+  const listRef = useRef<HTMLUListElement | null>(null);
+  // The row a notice asked for, revealed once per opening.
+  const revealed = useRef<string | null>(null);
   const [busy, setBusy] = useState<Work | null>(null);
   const [shownWorkspaceId, setShownWorkspaceId] = useState(workspaceId);
   const request = useRequestSequence([workspaceId]);
@@ -306,8 +337,13 @@ export function LiveDocumentsDialog({
     void (async () => {
       let mutated = false;
       try {
-        if (isMutation(work)) {
-          await (work.kind === "stop" ? stop : resume)(workspaceId, work.path);
+        if (work.kind === "stop") {
+          const { keptEdits } = await stop(workspaceId, work.path);
+          if (!isCurrent()) return;
+          mutated = true;
+          if (keptEdits !== "none") onStopped?.(work.path, keptEdits);
+        } else if (work.kind === "resume") {
+          await resume(workspaceId, work.path);
           if (!isCurrent()) return;
           mutated = true;
         }
@@ -440,6 +476,18 @@ export function LiveDocumentsDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
 
+  // Brings the asked-for row into view and focuses its Stop live editing, or
+  // the row itself when it offers no Stop.
+  useEffect(() => {
+    if (state.kind !== "ready" || reveal === undefined || revealed.current === `${workspaceId}\n${reveal}`) return;
+    const row = [...(listRef.current?.querySelectorAll<HTMLElement>("[data-live-document-path]") ?? [])]
+      .find((element) => element.dataset.liveDocumentPath === reveal);
+    if (!row) return;
+    revealed.current = `${workspaceId}\n${reveal}`;
+    row.scrollIntoView?.({ block: "nearest" });
+    (row.querySelector<HTMLElement>("[data-live-document-stop]") ?? row).focus({ preventScroll: true });
+  }, [state, reveal, workspaceId]);
+
   function close(): void {
     scope.current.live = false;
     pendingRetry.current = null;
@@ -514,6 +562,7 @@ export function LiveDocumentsDialog({
       {state.kind === "ready" ? (
         state.rows.length ? (
           <ul
+            ref={listRef}
             aria-busy={listBusy}
             aria-label="Live documents"
             className="divide-y divide-line border-y border-line"
@@ -522,7 +571,11 @@ export function LiveDocumentsDialog({
               <li
                 key={row.path}
                 data-testid={`live-document-row-${row.path}`}
-                className="flex flex-wrap items-center gap-3 py-2"
+                data-live-document-path={row.path}
+                aria-current={row.path === reveal ? "true" : undefined}
+                tabIndex={-1}
+                className={`flex flex-wrap items-center gap-3 rounded-md py-2 focus-visible:-outline-offset-2 ${
+                  row.path === reveal ? "bg-selected px-2" : ""}`}
               >
                 <span
                   title={row.path}
@@ -549,6 +602,7 @@ export function LiveDocumentsDialog({
                     size="compact"
                     className="shrink-0"
                     disabled={listBusy}
+                    data-live-document-stop=""
                     aria-label={`Stop live editing for ${row.path}`}
                     onClick={() => perform({ kind: "stop", path: row.path })}
                   >
@@ -573,7 +627,9 @@ export function LiveDocumentsDialog({
                     The server's copy of this workspace no longer matches the synced one. Contact the server's operator.
                   </p>
                 ) : null}
-                {row.deferredStop ? (
+                {quarantineNote(row) !== null ? (
+                  <p className="m-0 basis-full text-[12px] text-muted">{quarantineNote(row)}</p>
+                ) : row.deferredStop ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
                     {deferredStopNote(row, row.deferredStop)}
                   </p>

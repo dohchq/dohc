@@ -254,6 +254,7 @@
     "desktop:retry-file-recovery",
     "desktop:retry-held-capture",
     "desktop:retry-owner-live-delivery",
+    "desktop:retry-owner-live-quarantine",
     "desktop:retry-owner-live-share",
     "desktop:retry-server-account-disconnect",
     "desktop:retry-share-handoff",
