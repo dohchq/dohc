@@ -228,7 +228,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_save_recovery_copy",
     {
       description:
-        "Save a live document's kept edits next to the document. Kept edits are edits the server refused, which dohc keeps on this computer; dohc_workspace_status lists them as `keptEdits`. dohc writes a recovery package with every kept edit, and a readable Markdown copy when it can read the edits as a document. `copyPath` is null when it cannot. The kept edits stay on this computer. Owner workspace only.",
+        "Save a live document's kept edits next to the document. Kept edits are edits the server refused, which dohc keeps on this computer; dohc_workspace_status lists them as `keptEdits`. dohc writes a recovery package with every kept edit, and a readable Markdown copy when it can read the edits as a document. `copyPath` is null when it cannot. dohc writes these files itself, not as the agent that asked. The kept edits stay on this computer. Accepts every `recovery` except `not-written`. A `not-written` document needs live editing stopped again; only dohc offers that for now, as Try again on its row in Notices. Owner workspace only.",
       inputSchema: { path: z.string().min(1).max(4096) },
     },
     async (args) => text(await saveRecoveryCopy(ctx, args)),
@@ -238,7 +238,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_retry_kept_edits",
     {
       description:
-        "Send a live document's kept edits to the server once more, as Try again does in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Only a document whose `recovery` is `paused` can try again. Then read dohc_workspace_status: `retrying` until the server answers, `paused` with a new `incident` if it refuses again. Owner workspace only.",
+        "Send a live document's kept edits to the server once more, as Try again does in dohc. Take `path` and `incident` from `keptEdits` in dohc_workspace_status. Accepts only a `recovery` of `paused`. Then read dohc_workspace_status: `retrying` until the server answers, `paused` with a new `incident` if it refuses again. A `not-written` or `stopping` document needs live editing stopped again; only dohc offers that for now, as Try again on its row in Notices. Owner workspace only.",
       inputSchema: { path: z.string().min(1).max(4096), incident: z.string().min(1).max(1024) },
     },
     async (args) => text(await retryKeptEdits(ctx, args)),

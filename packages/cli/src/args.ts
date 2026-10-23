@@ -341,14 +341,18 @@ const DOCUMENT_VERBS = {
     capabilityId: "share.live.document.recovery.save",
     summary: "Save a document's kept edits next to it. The edits stay kept on this computer.",
     operands: "<path>",
-    notes: ["dohc writes a recovery package with every kept edit, and a readable copy when it can read the edits as a document."],
+    notes: ["Accepts every recovery except not-written.",
+      "A not-written document needs live editing stopped again. Only dohc offers that for now, as Try again on its row in Notices.",
+      "dohc writes a recovery package with every kept edit, and a readable copy when it can read the edits as a document.",
+      "dohc writes these files itself, not as the agent that asked."],
     parse: input => ({ verb: "saveRecoveryCopy", path: parsePath(input, "document save-recovery-copy") }),
   },
   "retry-kept-edits": {
     capabilityId: "share.live.document.retry",
     summary: "Send a document's kept edits to the server once more.",
     operands: "<path> <incident>",
-    notes: ["Take the incident from kept-edits. Only a document whose recovery is paused can try again.",
+    notes: ["Take the incident from kept-edits. Accepts only a recovery of paused.",
+      "A not-written or stopping document needs live editing stopped again. Only dohc offers that for now, as Try again on its row in Notices.",
       "Run kept-edits again to follow it: retrying until the server answers, paused with a new incident if it refuses again."],
     parse: input => {
       const [path, incident, ...extra] = input.operands;

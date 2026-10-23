@@ -2236,6 +2236,8 @@ async function dispatch(
     }
     throw error;
   }
+  // A received share's folder resolves to its owner's workspace; the owner's kept edits stay the owner's.
+  if (paths.shared && (request.verb === "liveKeptEdits" || request.verb === "saveRecoveryCopy" || request.verb === "retryKeptEdits")) return keptEditsUnavailable();
   let rebased: CliRequest;
   try {
     validateRequestPathSpellings(request);

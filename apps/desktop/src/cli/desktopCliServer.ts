@@ -458,7 +458,7 @@ export function createDesktopCliServer<State>(
                   ownerLiveRecovery.keptEdits(current.workspaceId).map(({ path, reason, incident, recovery }) => ({ path, reason, incident, recovery }))),
                 saveRecoveryCopy: (path: string) => withOwnerLiveRecovery(current => ownerLiveRecovery.save(current, path)),
                 retry: (path: string, incident: string) => withOwnerLiveRecovery(async current => {
-                  const kept = ownerLiveRecovery.keptEdits(current.workspaceId).find(row => row.path === path);
+                  const kept = ownerLiveRecovery.keptEdits(current.workspaceId).find(row => row.path === path && row.incident === incident);
                   if (!kept) throw new Error(`dohc has no kept edits for ${path}. List kept edits again to check it.`);
                   await ownerLiveRecovery.retry(current, kept.objectId, incident);
                 }),
