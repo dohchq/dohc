@@ -19,7 +19,7 @@ Before reading a word, a person should see what a surface is, its state, and wha
 Use words only for the person's own content and for facts a picture cannot show, such as an error's cause.
 
 To test a surface, hide every word that is not the person's own content.
-If the purpose, the state, or the next click disappears, show it with an icon, a position, a shape, or a color.
+If the purpose, state, or next click disappears, show it with an icon, position, shape, or color.
 
 | Instead of | Show |
 | --- | --- |
@@ -55,17 +55,20 @@ Most strings do one of four jobs:
 Every error and empty state needs a Next. A toast usually reports a Change. A status bar shows a State.
 
 - Follow the instruction rules in `dohc-writing`: one instruction per sentence, 20 words or fewer.
-- Name who acted. Leave dohc out when the surface makes it obvious: `Saved`. Always name a failing actor: `dohc could not reach the relay`, not `The relay could not be reached`.
+- Use the active voice and name who acted. Leave dohc out when the surface makes it obvious: `Saved`.
+- Always name a failing actor: `dohc could not reach the relay`, not `The relay could not be reached`.
+- Attribution labels such as `Edited by agent` are fine as they are.
 - Call a thing what the surrounding UI calls it, every time. Never show an internal name. Check both the code and the shipping UI, because they often differ.
 - Keep the words literal. Leave out metaphors, jokes, irony, exclamation marks, and emoji.
 - Use sentence case: `New folder`.
 - Leave the period off labels, buttons, and fragments. Full sentences keep theirs.
 - Use numerals for counts a person scans or acts on: `Delete 12 files`. Inside a sentence, a word can read better: `A file changed on two machines`.
 - State the mechanism or say nothing. Cut promises such as `magically`, `just works`, `powered by AI`, `seamless`, `powerful`, and `smart`.
+- Keep sync clearly opt-in. Sync starts off, and signing in alone does not turn it on.
 
 ### Errors
 
-Write up to three parts, in this order, and leave out any part you do not know:
+Write up to three parts, in this order. Leave out any part you do not know.
 
 1. What happened, in the person's words for things.
 2. Why, if dohc knows. Never guess.
@@ -88,7 +91,7 @@ Check that the action exists on that surface before you name it.
 ### Agents
 
 - Finished work: past tense, with a count when the count means something. `Updated 3 files`. Never invent a count.
-- Work in progress: the concrete action. `Reading 40 files`, not `Working on it…`.
+- Work in progress: the concrete action, with the count when it is known. `Reading 40 files`, not `Working on it…`.
 - Waiting on the person: the reason. `Waiting for your review`.
 - Attribution: `Edited by agent`. No invented names or personalities. Use first person only when the agent itself is speaking.
 - Say what the agent did, not that it understood, decided, or thought.
@@ -96,9 +99,12 @@ Check that the action exists on that surface before you name it.
 ### Deletes and other actions that lose work
 
 - Name the exact thing and count: `Delete 12 files from Research?`
-- State the true recovery path, and check it in the code. In a workspace, a deleted file goes to the system trash, or to `.dohc/local/trash` when the system trash refuses it. If neither takes it, dohc refuses the delete. A shared copy has no trash, so say who still has the file and how to take the change back.
+- State the true recovery path. Check it in the code first.
+- In a workspace, a deleted file goes to the system trash, or to `.dohc/local/trash` when the system trash refuses it. Name both locations. If neither takes the file, dohc refuses the delete.
+- A shared copy has no trash. Say who still has the file and how to take the change back.
 - Write `This cannot be undone` only after you confirm it is true.
-- Label the confirm button with the verb, such as `Delete files`, never `OK`. Use `DangerButton`.
+- Label the confirm button with the verb, such as `Delete files`, never `OK`.
+- Use `DangerButton` for the confirm button.
 - Never ask only `Are you sure?`.
 
 ### Before and after
@@ -134,14 +140,15 @@ A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `rol
 - Let a repeat of the same message, or the same kind, replace its earlier row.
 - Closing a toast keeps its row. Dismissing the row removes it.
 - Restarting or closing the app asks once, in one dialog.
-- Report errors through the shell's `reportError` hook instead of rendering them yourself. For a list or section whose read failed, show `RetryRow`.
+- Report errors through the shell's `reportError` callback instead of rendering them yourself.
+- For a list or section whose read failed, show `RetryRow`.
 
 ## Controls
 
 The look in one line: warm paper, quiet graphite, mono metadata, serif for brand moments, and color only for meaning.
 
-Draw the dohc mark with `DohcMark`, `DohcWordmark`, or `DohcLockup` from `packages/brand/src/DohcLogo.tsx`.
-It is an SVG in `currentColor`, with no gradient, shadow, or badge.
+Use `DohcMark` for the mark, `DohcWordmark` for the name, and `DohcLockup` for both. They live in `packages/brand/src/DohcLogo.tsx`.
+The mark is an SVG in `currentColor`, with no gradient, shadow, or badge.
 
 Compose the controls in `apps/desktop/src/renderer/ui/controls.tsx` first: `PrimaryButton`, `SecondaryButton`, `DangerButton`, `IconButton`, `Pill`, `SectionLabel`, `EmptyState`, and `RetryRow`.
 To inline a control's classes, copy them from that file.
@@ -180,7 +187,7 @@ Never write hex or Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`
 | Brand moments, such as the first-run headline | `font-serif`, rarely |
 | Paths, counts, ids, keys | `font-mono` |
 
-Use only 10, 11, 12, and 13px. Never write a fractional size such as `text-[10.5px]`.
+Set small text at 10, 11, 12, or 13px. Never write a fractional size such as `text-[10.5px]`.
 
 ### Radius and elevation
 
@@ -192,9 +199,13 @@ Use only 10, 11, 12, and 13px. Never write a fractional size such as `text-[10.5
 | Popovers, dialogs, modals | `rounded-xl` (12px) |
 | Pills, dots, a person's avatar | `rounded-full` |
 
-Use the shadow classes in `styles.css` instead of writing shadows:
-`dohc-popover` for menus and floating chrome, `dohc-elevated` for dialogs and modal cards, and `dohc-pop-in` as the entrance for every floating surface.
-`dohc-paper-grid` is a faint grid for brand moments only.
+Use the classes in `styles.css` instead of writing shadows:
+
+- `dohc-popover` for menus and floating chrome.
+- `dohc-elevated` for dialogs and modal cards.
+- `dohc-pop-in` as the entrance for every floating surface.
+- `dohc-paper-grid` for a faint grid, in brand moments only.
+
 Flat panels get borders, not shadows.
 
 ### Recipes
@@ -206,7 +217,7 @@ List row (menus, trees, results): `flex h-7 w-full items-center gap-1.5 rounded-
 - At rest: `text-muted hover:bg-hover hover:text-ink`.
 - Active or selected: `bg-selected text-ink`. The active row adds `font-medium`.
 - Never fade a state fill, as in `bg-selected/85`. `tokens.test.ts` rejects it.
-- Keyboard focus keeps the global accent outline. An ink ring is under 3:1 on the selected fill, so never use one.
+- Keyboard focus keeps the global accent outline, never an ink ring. A 30% ink ring is under 3:1 on the selected fill.
 - Inside a scroller, draw the focus outline inset: `rounded-md focus-visible:-outline-offset-2`.
 - In a panel, give the parent `px-1`.
 
@@ -243,7 +254,7 @@ A running agent shows a 6px round `bg-agent` dot.
 - End-to-end tests pin every `data-testid`, `aria-*`, `role`, and accessible name. Rewording and restyling keep them. A surface can become something else, such as the right panel changing from Chats to About. Then change them in the same PR as the tests that read them.
 - Surface work adds no dependencies, no `any`, and no `styles.css` edits. Propose a new shared pattern instead of inlining it.
 - Use lucide-react icons only, at 12 to 18px, with `strokeWidth={1.9}` at rail size.
-- Keep the global `:focus-visible` ring. Do not add `outline-none`. Opt out only where a ring would clip and the frame shows focus another way, such as the command palette's `focus-within:border-ink`. Say why in a comment.
+- Keep the global `:focus-visible` ring. Do not add `outline-none`. Opt out only where a ring would clip and the frame shows focus another way. The command palette's `focus-within:border-ink` is one example. Say why in a comment.
 - Keep body text at 4.5:1 or more and decorative text at 3:1 or more against its surface.
 
 ## Before you finish
