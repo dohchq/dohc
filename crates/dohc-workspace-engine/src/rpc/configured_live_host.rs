@@ -484,11 +484,11 @@ impl EngineService {
         }
         if let Some(adoption) = &discovery.adoption {
             let opened = self.open(Some(handle))?;
-            let db_path = opened.actor.database_path().to_path_buf();
+            let held = opened.actor.location();
             let workspace_id = workspace.workspace_id.clone();
             let limits = adoption.owner_outbox.clone();
             let mismatch = tokio::task::spawn_blocking(move || {
-                let store = dohc_engine_storage::EngineStore::open_read_only(&db_path).map_err(|_|invalid("owner adoption budget read failed"))?;
+                let store = dohc_engine_storage::EngineStore::open_read_only(held.database_path()).map_err(|_|invalid("owner adoption budget read failed"))?;
                 store.read_with(|conn|conn.query_row(
                     "SELECT EXISTS(SELECT 1 FROM live_owner_adoptions a JOIN ydoc_docs d
                      ON d.workspace_id=a.workspace_id AND d.version_id=a.main_version_id AND d.object_id=a.object_id

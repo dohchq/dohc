@@ -1045,7 +1045,7 @@ impl EngineService {
             if actor_open.store_freshly_created {
                 // The guard's close finishes on a blocking task; the delete
                 // has to wait for it, or SQLite still holds the file.
-                let store_path = actor.database_path().to_path_buf();
+                let held = actor.location();
                 let removed = supervisor.begin_close_identity(actor.identity());
                 drop(actor);
                 if let Some(closing) = removed {
@@ -1055,7 +1055,7 @@ impl EngineService {
                 // A delete that fails leaves the store the next open refuses
                 // as a mismatch. The refusal stands; the path says why.
                 for suffix in ["", "-wal", "-shm"] {
-                    let mut path = store_path.clone().into_os_string();
+                    let mut path = held.database_path().to_path_buf().into_os_string();
                     path.push(suffix);
                     let path = std::path::PathBuf::from(path);
                     if let Err(error) = std::fs::remove_file(&path)
@@ -1107,7 +1107,7 @@ impl EngineService {
         let open_guard = if requested_mode == WorkspaceOpenMode::Full
             && let Some(config) = self.ordinary_live_host.get()
         {
-            let budget_db_path = actor.database_path().to_path_buf();
+            let budget_store = actor.location();
             let budget_workspace_id = params.workspace_id.clone();
             let owner_outbox = config.owner_outbox.clone();
             let budget_probe = self.capture_apply_probe.clone();
@@ -1118,8 +1118,10 @@ impl EngineService {
                     probe.pause_open_budget_if_armed();
                 }
                 let result = (|| {
-                    let store = dohc_engine_storage::EngineStore::open_read_only(&budget_db_path)
-                        .map_err(|error| {
+                    let store = dohc_engine_storage::EngineStore::open_read_only(
+                        budget_store.database_path(),
+                    )
+                    .map_err(|error| {
                         map_runtime(dohc_engine_runtime::RuntimeError::Storage(error))
                     })?;
                     let mismatch: bool = store.read_with(|conn| conn.query_row(
@@ -3305,6 +3307,11 @@ mod tests {
         {
             let open = service.open(Some(&handle)).expect("open workspace");
             assert!(open.actor.database_path().starts_with("/.vol"));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let open = service.open(Some(&handle)).expect("open workspace");
+            assert!(open.actor.database_path().starts_with("/proc/self/fd"));
         }
         let engine = scratch.path().join(".dohc/engine");
         let moved = scratch.path().join(".dohc/moved");

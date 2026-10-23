@@ -32,8 +32,9 @@ pub enum RootBindingError {
     #[error("this computer's folder in .dohc could not be prepared")]
     LocalStateUnwritable,
     /// `.dohc`, the engine's folder or `.dohc/local`, the second field, is a
-    /// link, is not a folder, or is another user's, the first. On a Mac and
-    /// on Windows, `NotPrivate` names it, with the same message.
+    /// link, is not a folder, or is another user's, or on Linux the engine
+    /// can't reach its folder through the descriptor it holds, the first. On
+    /// a Mac and on Windows, `NotPrivate` names it, with the same message.
     #[cfg(all(unix, not(target_os = "macos")))]
     #[error("engine-folder-not-private: {0} {1}")]
     NotPrivate(&'static str, &'static str),
@@ -192,10 +193,10 @@ pub fn write_root_binding(root: &Path, token: &str) -> Result<(), RootBindingErr
 }
 
 /// The engine's folder, ready for the root binding: the marker's path and,
-/// on a Mac, the folder that path goes through, open.
+/// on a Mac and Linux, the folder that path goes through, open.
 struct BindingDir {
     marker: PathBuf,
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     _folder: std::os::fd::OwnedFd,
 }
 
@@ -204,6 +205,7 @@ fn create_binding_dir(root: &Path) -> Result<BindingDir, RootBindingError> {
     let (Some(relative), Some(name)) = (marker.parent(), marker.file_name()) else {
         return Err(RootBindingError::Unwritable);
     };
+    #[cfg(not(target_os = "linux"))]
     let parent = root.join(relative);
     // A mode does not limit an ACL entry, so on a Mac each open makes the
     // folder 0700 with no entries, whoever created it, and refuses a link at
@@ -224,11 +226,28 @@ fn create_binding_dir(root: &Path) -> Result<BindingDir, RootBindingError> {
             _folder: folder,
         })
     }
+    // Linux holds the folder checked here and writes the marker through its
+    // descriptor, so a folder put at its name since then is not reached.
+    // Without that path the marker is refused.
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        create_engine_dir(root, rustix::process::geteuid().as_raw())?;
+        let folder = create_engine_dir(root, rustix::process::geteuid().as_raw())?;
+        let folder = std::os::fd::OwnedFd::from(folder);
+        #[cfg(target_os = "linux")]
+        let dir = {
+            use dohc_linux_files::held::{NotHeld, held_path, not_held};
+            held_path(std::os::fd::AsFd::as_fd(&folder), relative).map_err(|err| match not_held(
+                &err,
+            ) {
+                Some(_) => RootBindingError::NotPrivate(NotHeld::CODE, ".dohc/engine"),
+                None => RootBindingError::Unwritable,
+            })?
+        };
+        #[cfg(not(target_os = "linux"))]
+        let dir = parent;
         Ok(BindingDir {
-            marker: parent.join(name),
+            marker: dir.join(name),
+            _folder: folder,
         })
     }
     // Windows opens a file for anyone its own DACL admits, even in a folder
@@ -340,15 +359,17 @@ fn create_local_state_dir(root: &Path) -> Result<(), RootBindingError> {
     let refused = not_private(root, shown, RootBindingError::LocalStateUnwritable, owner);
     create_folder(root, shown, owner)
         .and_then(make_private)
+        .map(drop)
         .map_err(refused)
 }
 
 /// Create `.dohc` and the engine's folder in `root`, or take the ones there,
 /// and make the engine's folder private, as a Mac does. Both must belong to
 /// `owner`. A link, anything but a folder, or another user's folder at either
-/// is refused by name before anything changes.
+/// is refused by name before anything changes. Returns the engine's folder,
+/// open.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn create_engine_dir(root: &Path, owner: u32) -> Result<(), RootBindingError> {
+fn create_engine_dir(root: &Path, owner: u32) -> Result<std::fs::File, RootBindingError> {
     let refused = |shown| not_private(root, shown, RootBindingError::Unwritable, owner);
     create_folder(root, ".dohc", owner).map_err(refused(".dohc"))?;
     create_folder(root, ".dohc/engine", owner)
@@ -378,11 +399,16 @@ fn create_folder(root: &Path, shown: &str, owner: u32) -> std::io::Result<std::f
 }
 
 /// Give `folder` mode 0700 through its descriptor, whoever created it and
-/// however, as the Mac path does.
+/// however, as the Mac path does, and return it. A folder that is private
+/// already is left as it is, so a process that may not change modes, as a
+/// replica's sandbox forbids, still opens it.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn make_private(folder: std::fs::File) -> std::io::Result<()> {
+fn make_private(folder: std::fs::File) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::PermissionsExt;
-    folder.set_permissions(std::fs::Permissions::from_mode(0o700))
+    if folder.metadata()?.permissions().mode() & 0o777 != 0o700 {
+        folder.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(folder)
 }
 
 /// What kept the folder `shown` in `root` from being created, opened or made
@@ -739,7 +765,7 @@ mod tests {
     /// The engine's folder moves after the open checks it, and another takes
     /// its name. The marker still lands in the checked folder, and the other
     /// gets nothing (#2375).
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn the_marker_lands_in_the_folder_the_open_checked() {
         let scratch = ScratchDir::new().expect("scratch");
@@ -755,6 +781,39 @@ mod tests {
             std::fs::read_to_string(moved.join("ROOT_BINDING")).expect("marker"),
             token
         );
+    }
+
+    /// Where the engine can't reach its checked folder through the descriptor
+    /// it holds, as without `/proc`, minting and writing a binding are refused,
+    /// naming the folder, and no marker, lock or temporary file is written.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_binding_whose_folder_cannot_be_held_is_refused_before_anything_is_written() {
+        use dohc_linux_files::held::test_support::with_fds;
+        let scratch = ScratchDir::new().expect("scratch");
+        let no_fds = scratch.join("no-fds");
+        let minted = with_fds(&no_fds, || write_new_root_binding(scratch.path()));
+        let written = with_fds(&no_fds, || {
+            write_root_binding(scratch.path(), &"a".repeat(TOKEN_HEX_LEN))
+        });
+        for refused in [minted.map(drop), written] {
+            assert!(
+                matches!(
+                    refused,
+                    Err(RootBindingError::NotPrivate(
+                        "unchecked-system",
+                        ".dohc/engine"
+                    ))
+                ),
+                "{refused:?}"
+            );
+        }
+        let engine = scratch.join(".dohc").join("engine");
+        let left: Vec<_> = std::fs::read_dir(&engine)
+            .expect("engine folder")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
     }
 
     /// iCloud Drive must never sync the engine's folder, in a new workspace or
