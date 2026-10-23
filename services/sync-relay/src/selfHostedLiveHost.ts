@@ -316,7 +316,9 @@ export async function startSelfHostedLiveHost(options: {
     /** Why the running daemon cannot continue the document until its owner tries again, if it cannot. */
     blocked(document: {workspaceId: string; objectId: string}) {return current?.blocked(document);},
     /** The first-open refusal the owner sees for a document's current source, if the running daemon holds one. */
-    firstOpenRefusal(source: FirstOpenSourceIdentity) {return current?.firstOpenRefusal(source);},
+    firstOpenRefusal(document: {workspaceId: string; objectId: string}, source: () => FirstOpenSourceIdentity | undefined) {
+      return current?.firstOpenRefusal(document, source);
+    },
     /** Whether the enrolled document's hosted replica diverged from the relay. Nothing continues it. */
     diverged(row: Pick<ServiceHostEnrollment, "workspaceId" | "replicationEpoch" | "streamIdentity">) {return diverged.has(storeName(row));},
     /** Whether this host cannot continue the document: it is blocked, or its workspace's current hosted replica diverged. */

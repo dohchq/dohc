@@ -33,7 +33,10 @@ async function fixture() {
       return blocked.delete(document.objectId) || retried;
     }),
     diverged: vi.fn((_row: {workspaceId: string; replicationEpoch: string; streamIdentity: string}) => false),
-    firstOpenRefusal: (source: FirstOpenSourceIdentity) => answers.refusal(source, FIRST_OPEN_CONTEXT),
+    firstOpenRefusal: vi.fn((document: {workspaceId: string; objectId: string}, source: () => FirstOpenSourceIdentity | undefined) => {
+      const current = answers.has(document) ? source() : undefined;
+      return current && answers.refusal(current, FIRST_OPEN_CONTEXT);
+    }),
     firstOpenAnswered: (outcome: FirstOpenOutcome) => answers.record(outcome, FIRST_OPEN_CONTEXT),
     block(objectId: string, why: ServiceActivationBlock = "refused") {blocked.set(objectId, why);}};
   let actor = {workspaceId: scope.workspaceId, userId: "owner-1"};

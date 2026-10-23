@@ -998,6 +998,39 @@ describe("server owner peer lifecycle", () => {
     } finally {credentials.abort(); await f.close();}
   });
 
+  // Proves: a refused first open this build cannot read is logged and counts
+  // as an ordinary unavailable document. The pass still delivers the ready
+  // document and lists every other refusal.
+  it("drops and logs a refused first open it cannot read, and still delivers every other document", async () => {
+    const f = fixture(), credentials = new AbortController();
+    Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+    const rootPath = await createTestScratch("dohc-server-owner-first-open-invalid-");
+    f.rows.set("owner", {workspaceId: "owner", rootPath, kind: "personal", mode: "local-first"});
+    const document = {binding: {workspaceId: "owner", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
+      currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1}, relayDatabaseNamespace: "namespace", shareId: "share"};
+    const firstOpen = (path: string, code: string) => ({reason: "ordinary-activation-refused", code, recovery: "report",
+      source: {workspaceId: "owner", objectId: `object-${path}`, path, sourceMomentId: "moment", sourceDigest: "a".repeat(64)}});
+    const refused = (path: string, code: string) => ({path, status: "unavailable", reason: "live-first-open-refused", firstOpen: firstOpen(path, code)});
+    const rows = [{path: "a.md", status: "ready", document}, refused("bad.md", "Native_Disagreement"), refused("good.md", "native-disagreement")];
+    const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
+      frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
+        maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
+      attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
+    f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
+      connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
+        retire: async () => 0, refusals: async () => {}, documents: async () => ({ok: true, documents: rows})})};
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    ownerDeliveryMock.pass.mockResolvedValue("acknowledged");
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalledWith(expect.objectContaining({document})));
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying"));
+      expect(f.engine.ownerLiveFirstOpenRefusals("owner")).toEqual([firstOpen("good.md", "native-disagreement")]);
+      expect(log).toHaveBeenCalledWith("[desktop] owner live first-open refusal is invalid:", expect.anything());
+      expect(log).not.toHaveBeenCalledWith("[desktop] server owner delivery failed:", expect.anything());
+    } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset(); log.mockRestore();}
+  });
+
   it.each(["credentials", "daemon", "workspace"])("discovers ready documents and holds the session until %s cancellation settles", async mode => {
     const f = fixture(), credentials = new AbortController(), entered = deferred(), settled = deferred();
     Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));

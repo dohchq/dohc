@@ -53,6 +53,16 @@ describe("first-open reports", () => {
     expect([...FIRST_OPEN_REFUSAL_REASONS].sort()).toEqual(refusals.sort());
   });
 
+  // Proves: no refused activation carries a code the owner's IPC would reject,
+  // so one row can never fail its workspace's status.
+  it("refuses an activation code outside lowercase letters, digits and hyphens, up to 128 characters", () => {
+    for (const code of ["Native_Disagreement", "-leading", "", "a".repeat(129), "native disagreement"]) {
+      expect(() => firstOpenOutcome(source, { kind: "refused", reason: "ordinary-activation-refused", code })).toThrow();
+    }
+    expect(firstOpenReport(firstOpenOutcome(source, { kind: "refused", reason: "ordinary-activation-refused", code: "a".repeat(128) })))
+      .toMatchObject({ code: "a".repeat(128) });
+  });
+
   it("names only the source fields the request named", () => {
     const outcome = firstOpenOutcome({ ...source, sourceByteLength: 12 } as typeof source, { kind: "refused", reason: "deletion" });
     expect(outcome.source).toStrictEqual(source);

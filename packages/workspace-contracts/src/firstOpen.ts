@@ -49,6 +49,9 @@ export type FirstOpenUnsupportedCause = (typeof FIRST_OPEN_UNSUPPORTED_CAUSES)[n
 export const FIRST_OPEN_INTEGRITY_CODES = ["reserved-receipt", "source-evidence", "candidate", "check-evidence"] as const;
 export type FirstOpenIntegrityCode = (typeof FIRST_OPEN_INTEGRITY_CODES)[number];
 
+/** The shape of the code a service host gives an `ordinary-activation-refused` answer, at most 128 characters. */
+export const FIRST_OPEN_ACTIVATION_CODE = /^[a-z0-9][a-z0-9-]{0,127}$/;
+
 /** A step that failed for a reason a later request can outlast. */
 export type FirstOpenFailure = "history-unavailable" | "worker-failed" | "storage-failed";
 
@@ -127,7 +130,10 @@ export function firstOpenRecovery(answer: Answer): FirstOpenRecovery {
   }
 }
 
+/** Throws for an `ordinary-activation-refused` code outside `FIRST_OPEN_ACTIVATION_CODE`, so no reader meets one. */
 export function firstOpenOutcome(source: FirstOpenSourceIdentity, answer: Answer): FirstOpenOutcome {
+  if (answer.kind === "refused" && answer.reason === "ordinary-activation-refused" && answer.code !== undefined &&
+    !FIRST_OPEN_ACTIVATION_CODE.test(answer.code)) throw new Error("A refused activation code must be lowercase letters, digits and hyphens.");
   const {workspaceId, objectId, path, sourceMomentId, sourceDigest} = source;
   return Object.freeze({...answer, source: Object.freeze({workspaceId, objectId, path, sourceMomentId, sourceDigest}),
     recovery: firstOpenRecovery(answer)}) as FirstOpenOutcome;

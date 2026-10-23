@@ -3434,9 +3434,12 @@ describe("sync status IPC contract", () => {
     expect([...reported].sort()).toEqual([...FIRST_OPEN_REFUSAL_REASONS].sort());
     const unsupported = { reason: "unsupported-source", code: "settlement-mismatch", source, recovery: "none" };
     for (const invalid of [{ ...unsupported, code: "unknown-cause" }, { ...unsupported, reason: "too-large" }, { ...unsupported, message: "parse me" },
-      { ...unsupported, source: { ...source, sourceDigest: "not-a-digest" } }, { reason: "deletion", code: "source-limit", source, recovery: "none" }]) {
+      { ...unsupported, source: { ...source, sourceDigest: "not-a-digest" } }, { reason: "deletion", code: "source-limit", source, recovery: "none" },
+      { reason: "ordinary-activation-refused", code: "Native_Disagreement", source, recovery: "report" },
+      { reason: "ordinary-activation-refused", code: "a".repeat(129), source, recovery: "report" }]) {
       expect(OwnerLiveFirstOpen.safeParse(invalid).success).toBe(false);
     }
+    expect(OwnerLiveFirstOpen.safeParse({ reason: "ordinary-activation-refused", code: "a".repeat(128), source, recovery: "report" }).success).toBe(true);
   });
   it("refuses a status that cannot say why history is off", () => {
     const status = {

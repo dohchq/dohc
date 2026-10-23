@@ -29,6 +29,7 @@ import {
 import { z } from "zod";
 import { SharedReversalsSchema } from "@dohc/workspace-contracts/shared-file-settlement";
 import {
+  FIRST_OPEN_ACTIVATION_CODE,
   FIRST_OPEN_INTEGRITY_CODES,
   FIRST_OPEN_RECOVERIES,
   FIRST_OPEN_TOO_LARGE_CODES,
@@ -434,7 +435,7 @@ export const OwnerLiveFirstOpen = z.discriminatedUnion("reason", [
   OwnerLiveFirstOpenBase.extend({reason: z.literal("deletion")}).strict(),
   OwnerLiveFirstOpenBase.extend({reason: z.literal("unsupported-source"), code: z.enum(FIRST_OPEN_UNSUPPORTED_CAUSES)}).strict(),
   OwnerLiveFirstOpenBase.extend({reason: z.literal("too-large"), code: z.enum(FIRST_OPEN_TOO_LARGE_CODES)}).strict(),
-  OwnerLiveFirstOpenBase.extend({reason: z.literal("ordinary-activation-refused"), code: z.string().min(1).max(128).regex(/^[a-z0-9][a-z0-9-]*$/).optional()}).strict(),
+  OwnerLiveFirstOpenBase.extend({reason: z.literal("ordinary-activation-refused"), code: z.string().regex(FIRST_OPEN_ACTIVATION_CODE).optional()}).strict(),
   OwnerLiveFirstOpenBase.extend({reason: z.literal("integrity"), code: z.enum(FIRST_OPEN_INTEGRITY_CODES)}).strict(),
 ]);
 export type OwnerLiveFirstOpen = z.infer<typeof OwnerLiveFirstOpen>;

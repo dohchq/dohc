@@ -101,28 +101,38 @@ it.each(PASSING.map(answer => [JSON.stringify(answer), answer] as const))("never
   expect(refused.refusal(SOURCE, CONTEXT)).toMatchObject({reason: "unsupported-source"});
 });
 
-// Proves: Try again lets exactly one request through. The owner sees no
-// refusal while it waits for an answer, the same refusal stands again after
-// it, and a failure that can pass leaves the earlier refusal standing.
-it("lets one checked request through for each Try again", () => {
+// Proves: Try again asks the relay until an answer that holds arrives. The
+// owner sees no refusal while it waits, the refusal the relay checked again
+// stands after it, and no failure that can pass brings the old one back
+// unchecked.
+it.each(PASSING.map(answer => [JSON.stringify(answer), answer] as const))("keeps a Try again that meets %s until an answer that holds", (_, passing) => {
   const refusal: Answer = {kind: "refused", reason: "deletion"};
   const answers = answered(refusal);
   expect(answers.retry({workspaceId: SOURCE.workspaceId, objectId: SOURCE.objectId})).toBe(true);
   expect(answers.refusal(SOURCE, CONTEXT)).toBeUndefined();
   expect(answers.standing(SOURCE, CONTEXT)).toBeUndefined();
-  expect(answers.standing(SOURCE, CONTEXT)).toMatchObject(refusal);
-  expect(answers.refusal(SOURCE, CONTEXT)).toMatchObject({reason: "deletion"});
-  answers.retry(SOURCE);
+  answers.record(firstOpenOutcome(SOURCE, passing), CONTEXT);
   expect(answers.standing(SOURCE, CONTEXT)).toBeUndefined();
-  answers.record(firstOpenOutcome(SOURCE, {kind: "unavailable", reason: "busy"}), CONTEXT);
-  expect(answers.standing(SOURCE, CONTEXT)).toMatchObject(refusal);
-  answers.retry(SOURCE);
-  answers.standing(SOURCE, CONTEXT);
+  expect(answers.refusal(SOURCE, CONTEXT)).toBeUndefined();
   answers.record(firstOpenOutcome(SOURCE, refusal), CONTEXT);
   expect(answers.standing(SOURCE, CONTEXT)).toMatchObject(refusal);
+  expect(answers.refusal(SOURCE, CONTEXT)).toMatchObject({reason: "deletion"});
   // Nothing to try again for an answer that stops nothing.
   expect(answered({kind: "existing-history", reason: "prior-authority"}).retry(SOURCE)).toBe(false);
   expect(new FirstOpenAnswers().retry(SOURCE)).toBe(false);
+});
+
+// Proves: a document that went live or left the host keeps no answer, so its
+// owner never reads it as refused. Other documents keep theirs.
+it("forgets one document's answer", () => {
+  const answers = answered({kind: "refused", reason: "deletion"});
+  answered({kind: "refused", reason: "deletion"}, OTHER_DOCUMENT, CONTEXT, answers);
+  expect(answers.has(SOURCE)).toBe(true);
+  answers.forget({workspaceId: SOURCE.workspaceId, objectId: SOURCE.objectId});
+  expect(answers.has(SOURCE)).toBe(false);
+  expect(answers.refusal(SOURCE, CONTEXT)).toBeUndefined();
+  expect(answers.refusal(OTHER_DOCUMENT, CONTEXT)).toMatchObject({reason: "deletion"});
+  expect(answers.has(OTHER_WORKSPACE)).toBe(false);
 });
 
 // Proves: a full host forgets the answer it heard longest ago, which only costs one more request.

@@ -92,9 +92,11 @@ export function createServiceHostEnrollmentRoutes(options: {
     if (changed(row)) return {...base, status: "unavailable", reason: "workspace-changed"};
     if (storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) !== row.objectId) return {...base, status: "unavailable", reason: "document-unavailable"};
     // A refused first open names its reason, code and source for the owner and their agents, until the file or the host's checks change.
-    const head = storage.readFirstOpenMoment(row.workspaceId, row.objectId);
-    const firstOpen = head?.path && head.sourceDigest ? host.firstOpenRefusal({workspaceId: row.workspaceId, objectId: row.objectId,
-      path: head.path, sourceMomentId: head.sourceMomentId, sourceDigest: head.sourceDigest}) : undefined;
+    const firstOpen = host.firstOpenRefusal(row, () => {
+      const head = storage.readFirstOpenMoment(row.workspaceId, row.objectId);
+      return head?.path && head.sourceDigest ? {workspaceId: row.workspaceId, objectId: row.objectId,
+        path: head.path, sourceMomentId: head.sourceMomentId, sourceDigest: head.sourceDigest} : undefined;
+    });
     if (firstOpen) return {...base, status: "unavailable", reason: "live-first-open-refused", firstOpen};
     // Only the owner's Resume lets the host try a document it could not continue.
     // One with no live-editing history needs its owner to open it first, and a Resume

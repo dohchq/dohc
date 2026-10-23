@@ -29,7 +29,7 @@ const FIRST_OPEN_ANSWERS = 4_096;
 interface Held {
   readonly outcome: FirstOpenOutcome;
   readonly context: FirstOpenAnswerContext;
-  /** The owner's Try again: the next request goes through once. */
+  /** The owner's Try again: requests go through until an answer that holds arrives. */
   retry: boolean;
 }
 const documentKey = (document: {workspaceId: string; objectId: string}) => JSON.stringify([document.workspaceId, document.objectId]);
@@ -43,7 +43,7 @@ export class FirstOpenAnswers {
   readonly #held = new Map<string, Held>();
   constructor(readonly maxDocuments = FIRST_OPEN_ANSWERS) {}
 
-  /** Keeps an answer that holds. One that holds nothing leaves the earlier answer as it was. */
+  /** Keeps an answer that holds, which ends a Try again. One that holds nothing leaves the earlier answer, and a Try again, as they were. */
   record(outcome: FirstOpenOutcome, context: FirstOpenAnswerContext) {
     if (HOLDS[firstOpenReport(outcome).reason] === null) return;
     const key = documentKey(outcome.source);
@@ -52,21 +52,29 @@ export class FirstOpenAnswers {
     if (this.#held.size > this.maxDocuments) this.#held.delete(this.#held.keys().next().value!);
   }
 
-  /** The answer that still holds for the source, or undefined to ask the relay now. Call it only to ask: it spends a Try again. */
+  /** The answer that still holds for the source, or undefined to ask the relay now. */
   standing(source: FirstOpenSourceIdentity, context: FirstOpenAnswerContext): FirstOpenOutcome | undefined {
     const held = this.#holding(source, context);
-    if (!held) return undefined;
-    if (held.retry) {held.retry = false; return undefined;}
-    return held.outcome;
+    return held && !held.retry ? held.outcome : undefined;
   }
 
-  /** The refusal the owner sees for the document's current source, unless a Try again is still waiting for its answer. */
+  /** The refusal the owner sees for the document's current source, unless a Try again is still waiting for an answer that holds. */
   refusal(source: FirstOpenSourceIdentity, context: FirstOpenAnswerContext): FirstOpenRefusal | undefined {
     const held = this.#holding(source, context);
     return held && !held.retry ? firstOpenRefusal(held.outcome) : undefined;
   }
 
-  /** Lets the next request for a refused document through once, as its owner's Try again. Returns whether a refusal stood. */
+  /** Whether the document has an answer, so a caller reads its current source only then. */
+  has(document: {workspaceId: string; objectId: string}): boolean {return this.#held.has(documentKey(document));}
+
+  /** Forgets the document's answer, as once it went live or left this host. */
+  forget(document: {workspaceId: string; objectId: string}) {this.#held.delete(documentKey(document));}
+
+  /**
+   * Lets requests for a refused document through until an answer that holds
+   * arrives, as its owner's Try again, so a failure that can pass never
+   * brings the old refusal back unchecked. Returns whether a refusal stood.
+   */
   retry(document: {workspaceId: string; objectId: string}): boolean {
     const held = this.#held.get(documentKey(document));
     if (!held || !firstOpenRefusal(held.outcome)) return false;

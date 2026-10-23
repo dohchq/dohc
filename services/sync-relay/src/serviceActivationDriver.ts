@@ -119,7 +119,8 @@ export class ServiceActivationDriver {
   }
   /** Forgets a document the engine no longer holds, so a later pass activates it from its retained source. */
   removeTarget(target:ServiceActivationTarget){
-    const key=targetKey(target);
+    const key=targetKey(target),objectId=this.#objects.get(key);
+    if(objectId!==undefined)this.#firstOpen.forget({workspaceId:target.workspaceId,objectId});
     this.#targets=this.#targets.filter(row=>targetKey(row)!==key);
     this.#completedTargets.delete(key);this.#staleLeases.delete(key);this.#loaded.delete(key);this.#dormant.delete(key);this.#held.delete(key);this.#blocked.delete(key);this.#objects.delete(key);
     for(const [document,owner] of this.#owners)if(owner.target===key)this.#owners.delete(document);
@@ -140,7 +141,7 @@ export class ServiceActivationDriver {
   }
   /** Why the target failed the one capture it gets while it cannot progress, if it did. Activation skips it. */
   blocked(target:ServiceActivationTarget):ServiceActivationBlock|undefined{return this.#blocked.get(targetKey(target))?.reason;}
-  /** Allows a blocked target one more capture, and a refused first open one more request. Returns whether either stood. */
+  /** Allows a blocked target one more capture, and a refused first open requests until an answer that holds. Returns whether either stood. */
   unblock(target:ServiceActivationTarget){
     const key=targetKey(target),objectId=this.#objects.get(key);
     const retried=objectId!==undefined && this.#firstOpen.retry({workspaceId:target.workspaceId,objectId});
@@ -148,10 +149,14 @@ export class ServiceActivationDriver {
   }
   /** Keeps the relay's answer to a first-open request, which decides whether this host asks again and what the owner sees. */
   firstOpenAnswered(outcome:FirstOpenOutcome){this.#firstOpen.record(outcome,this.#firstOpenContext);}
-  /** The answer that still holds for a source, or undefined to ask the relay now. It spends the owner's Try again. */
+  /** The answer that still holds for a source, or undefined to ask the relay now. */
   firstOpenStanding(source:FirstOpenSourceIdentity){return this.#firstOpen.standing(source,this.#firstOpenContext);}
-  /** The first-open refusal the owner sees for a document's current source, if one stands. */
-  firstOpenRefusal(source:FirstOpenSourceIdentity){return this.#firstOpen.refusal(source,this.#firstOpenContext);}
+  /** The first-open refusal the owner sees for a document's current source, if one stands. Reads the source only when the document has an answer. */
+  firstOpenRefusal(document:{workspaceId:string;objectId:string},source:()=>FirstOpenSourceIdentity|undefined){
+    if(!this.#firstOpen.has(document))return undefined;
+    const current=source();
+    return current && this.#firstOpen.refusal(current,this.#firstOpenContext);
+  }
   // A document with no Y.Doc lineage has nothing to activate until one reaches the relay, a held
   // document whose live edit was never admitted cannot become ready, and a retained activation
   // the engine refuses as diverged cannot resume. Each blocks after its failed capture. A document
@@ -366,6 +371,7 @@ export class ServiceActivationDriver {
       catch(error){this.#refused(key,saved!==null,update,error);throw error;}
       check();
       this.#blocked.delete(key);this.#held.delete(key);this.#objects.set(key,capture.source.objectId);
+      this.#firstOpen.forget({workspaceId:target.workspaceId,objectId:capture.source.objectId});
       if(capture.source.workspaceId!==target.workspaceId || capture.source.relayDatabaseNamespace!==o.history.namespace ||
         (saved && (capture.activationId!==saved.activationId || !isDeepStrictEqual(capture.source,saved.source)))) {
         throw new Error("Native service activation source changed.");

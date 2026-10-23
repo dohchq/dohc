@@ -885,9 +885,9 @@ export async function startServiceLiveHost(options: {
         const key = hostedKey(document);
         return key !== undefined && activation!.unblock(hosted.get(key)!.target);
       },
-      /** The first-open refusal the owner sees for a hosted document's current source, if one stands. */
-      firstOpenRefusal(source: FirstOpenSourceIdentity): FirstOpenRefusal | undefined {
-        return hostedKey(source) === undefined ? undefined : activation!.firstOpenRefusal(source);
+      /** The first-open refusal the owner sees for a hosted document's current source, if one stands. Reads the source only when one might. */
+      firstOpenRefusal(document: {workspaceId: string; objectId: string}, source: () => FirstOpenSourceIdentity | undefined): FirstOpenRefusal | undefined {
+        return hostedKey(document) === undefined ? undefined : activation!.firstOpenRefusal(document, source);
       },
       /** Whether the document can be opened now. A dormant document reloads when it is opened. */
       isDocumentReady(document: LiveDocumentKey): boolean {

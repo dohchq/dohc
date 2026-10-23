@@ -209,11 +209,17 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               const {documents: rows, diverged} = response as {documents: {status: string; reason?: unknown; firstOpen?: unknown}[]; diverged?: unknown};
               const preparing = rows.some(row => row.status === "preparing");
               // Each refused first open is its own file's notice, so it does not make the workspace's delivery retry.
-              const firstOpen = rows.filter(row => row.status === "unavailable" && row.reason === "live-first-open-refused");
-              setOwnerFirstOpenRefusals(workspaceId, firstOpen.map(row => OwnerLiveFirstOpen.parse(row.firstOpen))
-                .filter(refusal => refusal.source.workspaceId === workspaceId));
+              // One this build cannot read is logged and counts as an ordinary unavailable document.
+              const firstOpen = new Map<typeof rows[number], OwnerLiveFirstOpen>();
+              for (const row of rows) {
+                if (row.status !== "unavailable" || row.reason !== "live-first-open-refused") continue;
+                const parsed = OwnerLiveFirstOpen.safeParse(row.firstOpen);
+                if (parsed.success) firstOpen.set(row, parsed.data);
+                else console.error("[desktop] owner live first-open refusal is invalid:", parsed.error);
+              }
+              setOwnerFirstOpenRefusals(workspaceId, [...firstOpen.values()].filter(refusal => refusal.source.workspaceId === workspaceId));
               // The server reports a diverged copy even after its owner stopped every document.
-              const unavailable = diverged === true || rows.some(row => row.status === "unavailable" && !firstOpen.includes(row));
+              const unavailable = diverged === true || rows.some(row => row.status === "unavailable" && !firstOpen.has(row));
               const unavailableFor = (reason: OwnerLiveDeliveryReason) => rows.some(row => row.status === "unavailable" && row.reason === reason);
               // A document the server refused stays stopped until its owner tries again, so no other reason hides it.
               // One it cannot start goes before it: the owner must open it before a Resume can help.

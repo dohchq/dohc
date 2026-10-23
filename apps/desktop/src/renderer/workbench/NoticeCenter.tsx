@@ -346,6 +346,9 @@ const LIVE_FIRST_OPEN_RETRY_FAILED = "dohc could not ask the server to try again
 const liveFirstOpenKey = (workspaceId: string, refusal: LiveFirstOpen): string =>
   JSON.stringify([workspaceId, refusal.source.objectId, refusal.reason, "code" in refusal ? refusal.code ?? null : null,
     refusal.source.path, refusal.source.sourceDigest]);
+// One file, whatever its refusal says.
+const liveFirstOpenDocument = (workspaceId: string, refusal: LiveFirstOpen): string =>
+  JSON.stringify([workspaceId, refusal.source.objectId]);
 function liveFirstOpenDetails(workspaceId: string, refusal: LiveFirstOpen, title: string, body: string): string {
   return errorDetails([
     ["Live editing", title],
@@ -912,62 +915,78 @@ export function NoticeCenter(props: {
   // new key, so it replaces the row and is announced again.
   const [closedFirstOpen, setClosedFirstOpen] = useState<ReadonlySet<string>>(new Set());
   const [dismissedFirstOpen, setDismissedFirstOpen] = useState<ReadonlySet<string>>(new Set());
+  const ownerLiveFirstOpen = useMemo(
+    () => (props.syncStatus?.ownerLiveFirstOpen ?? []).filter((refusal) => refusal.source.workspaceId === props.workspaceId),
+    [props.syncStatus?.ownerLiveFirstOpen, props.workspaceId],
+  );
   const liveFirstOpen = useMemo(
-    () => (props.syncStatus?.ownerLiveFirstOpen ?? []).filter(
-      (refusal) => !dismissedFirstOpen.has(liveFirstOpenKey(props.workspaceId, refusal)),
-    ),
-    [dismissedFirstOpen, props.syncStatus?.ownerLiveFirstOpen, props.workspaceId],
+    () => ownerLiveFirstOpen.filter((refusal) => !dismissedFirstOpen.has(liveFirstOpenKey(props.workspaceId, refusal))),
+    [dismissedFirstOpen, ownerLiveFirstOpen, props.workspaceId],
   );
   const firstOpenToast =
     liveFirstOpen.find((refusal) => !closedFirstOpen.has(liveFirstOpenKey(props.workspaceId, refusal))) ?? null;
-  // The Try again on its way, by file, and why it did not run once it did
-  // not. A new status or another workspace ends it.
-  const [firstOpenRetry, setFirstOpenRetry] = useState<{ path: string; note: string | null } | null>(null);
-  const firstOpenStatus = JSON.stringify(props.syncStatus?.ownerLiveFirstOpen ?? []);
-  useEffect(() => setFirstOpenRetry(null), [firstOpenStatus, props.workspaceId]);
-  const shownWorkspace = useRef(props.workspaceId);
-  useLayoutEffect(() => {
-    shownWorkspace.current = props.workspaceId;
-  }, [props.workspaceId]);
+  // Each file's Try again on its way, by document, with the refusal it
+  // answers and why it did not run once it did not. Only its own request's
+  // answer settles it; a changed refusal or another workspace ends it.
+  const [firstOpenRetries, setFirstOpenRetries] = useState<
+    ReadonlyMap<string, { token: number; refusal: string; note: string | null }>
+  >(new Map());
+  const firstOpenRequests = useRef(0);
+  useEffect(() => {
+    const current = new Set(ownerLiveFirstOpen.map((refusal) => liveFirstOpenKey(props.workspaceId, refusal)));
+    setFirstOpenRetries((retries) =>
+      [...retries.values()].every((retry) => current.has(retry.refusal))
+        ? retries
+        : new Map([...retries].filter(([, retry]) => current.has(retry.refusal))),
+    );
+  }, [ownerLiveFirstOpen, props.workspaceId]);
   const { onRetryLiveFirstOpen } = props;
   const retryFirstOpen = useCallback(
     async (refusal: LiveFirstOpen) => {
       if (!onRetryLiveFirstOpen) return;
-      const workspaceId = props.workspaceId, path = refusal.source.path;
+      const workspaceId = props.workspaceId, path = refusal.source.path, key = liveFirstOpenKey(workspaceId, refusal);
+      const document = liveFirstOpenDocument(workspaceId, refusal), token = ++firstOpenRequests.current;
       // Its answer is news, even if this refusal's toast was closed.
       setClosedFirstOpen((current) => {
         const next = new Set(current);
-        next.delete(liveFirstOpenKey(workspaceId, refusal));
+        next.delete(key);
         return next;
       });
-      setFirstOpenRetry({ path, note: null });
+      setFirstOpenRetries((current) => new Map(current).set(document, { token, refusal: key, note: null }));
       let note: string | null;
       try {
         note = await onRetryLiveFirstOpen(workspaceId, path);
       } catch {
         note = LIVE_FIRST_OPEN_RETRY_FAILED;
       }
-      // A late answer for a workspace this center no longer shows changes nothing here.
-      if (shownWorkspace.current !== workspaceId || note === null) return;
-      setFirstOpenRetry((current) => (current?.path === path && current.note === null ? { path, note } : current));
+      // A settled request frees its Try again; one that did not run says why.
+      setFirstOpenRetries((current) => {
+        const retry = current.get(document);
+        if (retry?.token !== token) return current;
+        const next = new Map(current);
+        if (note === null) next.delete(document);
+        else next.set(document, { ...retry, note });
+        return next;
+      });
     },
     [onRetryLiveFirstOpen, props.workspaceId],
   );
   // One view for the row and the toast, so they say and copy the same thing.
   const firstOpenView = useCallback(
     (refusal: LiveFirstOpen) => {
-      const copy = liveFirstOpenCopy(refusal);
-      const retry = firstOpenRetry?.path === refusal.source.path ? firstOpenRetry : null;
+      const copy = liveFirstOpenCopy(refusal), key = liveFirstOpenKey(props.workspaceId, refusal);
+      const attempt = firstOpenRetries.get(liveFirstOpenDocument(props.workspaceId, refusal));
+      const retry = attempt?.refusal === key ? attempt : null;
       const body = retry?.note ? `${copy.body} ${retry.note}` : copy.body;
       return {
-        key: liveFirstOpenKey(props.workspaceId, refusal),
+        key,
         title: copy.title,
         body,
         retrying: retry !== null && retry.note === null,
         details: liveFirstOpenDetails(props.workspaceId, refusal, copy.title, body),
       };
     },
-    [firstOpenRetry, props.workspaceId],
+    [firstOpenRetries, props.workspaceId],
   );
   const firstOpenToastView = firstOpenToast ? firstOpenView(firstOpenToast) : null;
 

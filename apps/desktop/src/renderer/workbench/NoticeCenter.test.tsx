@@ -1848,6 +1848,74 @@ describe("notice center", () => {
       await act(async () => second.resolve("dohc could not ask the server to try again."));
       expect(screen.getByTestId("owner-live-first-open-toast").textContent).toContain("could not ask");
     });
+
+    // The server can answer the checked attempt with the same refusal before
+    // the next status read ever shows the file preparing.
+    it("frees Try again once the request settles, even when the same refusal comes straight back", async () => {
+      const user = userEvent.setup(), asked = deferred<string | null>();
+      const onRetryLiveFirstOpen = vi.fn((_workspaceId: string, _path: string) => asked.promise);
+      const { rerender } = renderNotices({ syncStatus: firstOpenStatus(refusal()), onRetryLiveFirstOpen });
+      const retry = () => screen.getByTestId("owner-live-first-open-toast-retry") as HTMLButtonElement;
+      await user.click(retry());
+      expect(retry().disabled).toBe(true);
+      await act(async () => asked.resolve(null));
+      rerender(noticeElement({ syncStatus: firstOpenStatus(refusal()), onRetryLiveFirstOpen }));
+      expect(retry().disabled).toBe(false);
+      await user.click(retry());
+      expect(onRetryLiveFirstOpen).toHaveBeenCalledTimes(2);
+    });
+
+    // Each file waits for its own request: starting one never frees another,
+    // and each answer settles only its own file.
+    it("keeps each file's Try again apart while both are on their way", async () => {
+      const user = userEvent.setup(), first = deferred<string | null>(), second = deferred<string | null>();
+      const onRetryLiveFirstOpen = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+      const other = refusal({ source: { ...source, objectId: "object-2", path: "docs/other.md" } });
+      renderNotices({ syncStatus: firstOpenStatus(refusal(), other), onRetryLiveFirstOpen });
+      const row = async (objectId: string) => {
+        if (!screen.queryByTestId("notice-center")) await user.click(screen.getByTestId("notice-center-toggle"));
+        return screen.getByTestId(`notice-owner-live-first-open-${objectId}`);
+      };
+      const retry = async (objectId: string) => within(await row(objectId)).getByRole("button", { name: "Try again" }) as HTMLButtonElement;
+      const disabled = async () => [(await retry("object-1")).disabled, (await retry("object-2")).disabled];
+      await user.click(await retry("object-1"));
+      await user.click(await retry("object-2"));
+      expect(onRetryLiveFirstOpen.mock.calls).toEqual([["ws-status-test", "docs/notes.md"], ["ws-status-test", "docs/other.md"]]);
+      expect(await disabled()).toEqual([true, true]);
+      await act(async () => second.resolve("dohc could not ask the server to try again."));
+      expect(await disabled()).toEqual([true, false]);
+      expect((await row("object-2")).textContent).toContain("could not ask");
+      expect((await row("object-1")).textContent).not.toContain("could not ask");
+      await act(async () => first.resolve(null));
+      expect(await disabled()).toEqual([false, false]);
+    });
+
+    // Back in the first workspace, an answer to the request made before
+    // leaving it must not settle the request made since.
+    it("ignores an earlier request's answer after leaving the workspace and coming back", async () => {
+      const user = userEvent.setup(), first = deferred<string | null>(), second = deferred<string | null>();
+      const onRetryLiveFirstOpen = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+      const other = refusal({ source: { ...source, workspaceId: "ws-status-other" } });
+      const { rerender } = renderNotices({ syncStatus: firstOpenStatus(refusal()), onRetryLiveFirstOpen });
+      const retry = () => screen.getByTestId("owner-live-first-open-toast-retry") as HTMLButtonElement;
+      await user.click(retry());
+      rerender(noticeElement({ workspaceId: "ws-status-other", syncStatus: firstOpenStatus(other), onRetryLiveFirstOpen }));
+      rerender(noticeElement({ syncStatus: firstOpenStatus(refusal()), onRetryLiveFirstOpen }));
+      expect(retry().disabled).toBe(false);
+      await user.click(retry());
+      await act(async () => first.resolve("dohc could not ask the server to try again."));
+      expect(retry().disabled).toBe(true);
+      expect(screen.getByTestId("owner-live-first-open-toast").textContent).not.toContain("could not ask");
+      await act(async () => second.resolve("dohc could not ask the server to try again."));
+      expect(retry().disabled).toBe(false);
+      expect(screen.getByTestId("owner-live-first-open-toast").textContent).toContain("could not ask");
+    });
+
+    // A status row naming another workspace's file never reaches this one.
+    it("shows only refusals for the workspace it shows", () => {
+      renderNotices({ syncStatus: firstOpenStatus(refusal({ source: { ...source, workspaceId: "ws-status-other" } })) });
+      expect(screen.queryByTestId("owner-live-first-open-toast")).toBeNull();
+    });
   });
 
   // Where the bell is decides where the rest of this center may sit. The rail

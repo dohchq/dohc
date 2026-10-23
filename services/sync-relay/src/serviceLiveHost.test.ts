@@ -16,6 +16,7 @@ import {createNamedFrameChanges} from "./liveHostChanges.js";
 import {captureOwnerLiveFrameHost} from "./namedLiveFrameHost.js";
 import type {LiveHostConnectionCoordinate} from "./storage.js";
 import {ServiceActivationDriver} from "./serviceActivationDriver.js";
+import {createServiceHostEnrollmentRoutes} from "./serviceHostEnrollmentRoutes.js";
 import {liveEditors} from "./liveEditors.js";
 import { OwnerCommittedDelivery } from "./ownerCommittedDelivery.js";
 import type { NativeOwnerActivation } from "@dohc/workspace-engine-client/daemon";
@@ -1629,8 +1630,9 @@ it("activates a document without lineage once a Y.Doc update for it reaches the 
 
 // Proves: a hosted document's first-open refusal reads through the host while
 // it holds. A Y.Doc update for the document does not lift a deletion, as it
-// lifts a block for missing lineage, nor does a later source. Resume lets
-// exactly one request through.
+// lifts a block for missing lineage, nor does a later source. Resume asks
+// until an answer that holds arrives, and the document leaving the host
+// forgets its answer.
 it("holds a first-open refusal past later Y.Doc updates until its owner tries again", async () => {
   const o = await emptyServiceHost(), workspaces = [o.workspace], activations = vi.mocked(ServiceActivationDriver.prototype.activate).mock.contexts;
   await o.host.update({workspaces, documents: [o.sibling], ...stay});
@@ -1638,18 +1640,52 @@ it("holds a first-open refusal past later Y.Doc updates until its owner tries ag
   const driver = activations.at(-1) as ServiceActivationDriver;
   const source = {workspaceId: o.sibling.workspaceId, objectId: o.sibling.objectId, path: o.sibling.path, sourceMomentId: "moment-1", sourceDigest: "a".repeat(64)};
   const later = {...source, sourceMomentId: "moment-2", sourceDigest: "b".repeat(64)};
+  const refusal = (current: typeof source) => o.host.firstOpenRefusal(current, () => current);
   driver.firstOpenAnswered(firstOpenOutcome(source, {kind: "refused", reason: "deletion"}));
-  expect(o.host.firstOpenRefusal(source)).toMatchObject({reason: "deletion", recovery: "none"});
+  expect(refusal(source)).toMatchObject({reason: "deletion", recovery: "none"});
   appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
   await o.nextPull(); await o.nextPull();
-  expect(o.host.firstOpenRefusal(later)).toMatchObject({reason: "deletion", source});
+  expect(refusal(later)).toMatchObject({reason: "deletion", source});
   expect(driver.firstOpenStanding(later)).toMatchObject({reason: "deletion"});
-  expect(o.host.firstOpenRefusal({...source, objectId: "object-unhosted"})).toBeUndefined();
+  expect(refusal({...source, objectId: "object-unhosted"})).toBeUndefined();
   expect(o.host.unblock(o.sibling)).toBe(true);
-  expect(o.host.firstOpenRefusal(later)).toBeUndefined();
+  expect(refusal(later)).toBeUndefined();
   expect(driver.firstOpenStanding(later)).toBeUndefined();
+  driver.firstOpenAnswered(firstOpenOutcome(later, {kind: "unavailable", reason: "busy"}));
+  expect(driver.firstOpenStanding(later)).toBeUndefined();
+  driver.firstOpenAnswered(firstOpenOutcome(later, {kind: "refused", reason: "deletion"}));
   expect(driver.firstOpenStanding(later)).toMatchObject({reason: "deletion"});
   expect(o.host.unblock(o.other)).toBe(false);
+  driver.removeTarget(o.target);
+  expect(driver.firstOpenStanding(later)).toBeUndefined();
+  expect(driver.firstOpenRefusal(later, () => later)).toBeUndefined();
+});
+
+// Proves: owner status never reads a ready document as refused. A refusal the
+// relay gave before the document's capture is forgotten once that capture
+// succeeds, and status reads the document's head only while an answer stands.
+it("never reports a ready document's first open as refused", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace], activations = vi.mocked(ServiceActivationDriver.prototype.activate).mock.contexts;
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
+  o.refuseCapture(withoutLineage());
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.blocked(o.sibling)).toBe("without-lineage"));
+  const driver = activations.at(-1) as ServiceActivationDriver, head = o.f.storage.readFirstOpenMoment("workspace", "object")!;
+  driver.firstOpenAnswered(firstOpenOutcome({workspaceId: "workspace", objectId: "object", path: head.path!, sourceMomentId: head.sourceMomentId,
+    sourceDigest: head.sourceDigest!}, {kind: "refused", reason: "deletion"}));
+  const handle = createServiceHostEnrollmentRoutes({storage: o.f.storage, history: o.f.history, resolveActor: async () => ({workspaceId: "workspace", userId: "owner"}),
+    host: {ready: document => o.host.isDocumentReady(document), reconcile() {}, unavailable: false, blocked: document => o.host.blocked(document),
+      unblock: document => o.host.unblock(document), diverged: () => false, firstOpenRefusal: (document, source) => o.host.firstOpenRefusal(document, source)}});
+  const status = async () => (await (await handle(new Request("https://relay.test/sync/workspace/live-host",
+    {headers: {authorization: "Bearer owner-token"}}))).json()).documents;
+  expect(await status()).toEqual([{path: "docs/a.md", status: "unavailable", reason: "live-first-open-refused", firstOpen: expect.objectContaining({reason: "deletion"})}]);
+  o.refuseCapture(undefined);
+  appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const reads = vi.spyOn(o.f.storage, "readFirstOpenMoment");
+  expect(await status()).toEqual([expect.objectContaining({path: "docs/a.md", status: "ready"})]);
+  expect(reads).not.toHaveBeenCalled();
 });
 
 // Proves: a document still without lineage after the update that lifted its
