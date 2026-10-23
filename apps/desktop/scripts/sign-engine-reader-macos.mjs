@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, copyFile, readFile, rename, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +22,7 @@ async function signApp(options) {
 export default async function signEngineReaderMacOS(options, _packager, operations = { run, signApp }) {
   if (options.platform !== "darwin") throw new Error("Reader signing requires macOS.");
   const setMode = operations.chmod ?? chmod;
+  const move = operations.rename ?? rename;
   const resources = join(options.app, "Contents/Resources");
   const { generation } = JSON.parse(await readFile(join(resources, "engine-reader/selection.json"), "utf8"));
   if (typeof generation !== "string" || !/^[a-f0-9]{64}$/.test(generation)) throw new Error("Invalid reader generation.");
@@ -33,6 +34,10 @@ export default async function signEngineReaderMacOS(options, _packager, operatio
   const manifest = JSON.parse(await readFile(config.manifest, "utf8"));
   await setMode(base, 0o755);
   await setMode(oldRoot, 0o755);
+  // Detach any staging hard link before changing permissions or signing bytes.
+  const temporaryNode = join(oldRoot, `.node-signing-${process.pid}`);
+  await copyFile(config.node, temporaryNode);
+  await move(temporaryNode, config.node);
   await setMode(config.node, 0o755);
   const args = ["--force", "--sign", options.identity, "--options", "runtime",
     "--entitlements", entitlements, options.identity === "-" ? "--timestamp=none" : "--timestamp",
@@ -50,18 +55,20 @@ export default async function signEngineReaderMacOS(options, _packager, operatio
   manifest.runtime.sha256 = hash(await readFile(config.node));
   const { sources, buildSha256, ...built } = manifest;
   manifest.buildSha256 = hash(JSON.stringify(built));
-  await setMode(config.manifest, 0o644);
-  await writeFile(config.manifest, JSON.stringify(manifest, null, 2) + "\n");
+  const temporaryManifest = join(oldRoot, `.manifest-signing-${process.pid}.json`);
+  await writeFile(temporaryManifest, JSON.stringify(manifest, null, 2) + "\n", { mode: 0o444, flag: "wx" });
+  await move(temporaryManifest, config.manifest);
   await setMode(config.manifest, 0o444);
   await setMode(config.node, 0o555);
   const root = join(base, manifest.buildSha256);
-  if (root !== oldRoot) await rename(oldRoot, root);
+  if (root !== oldRoot) await move(oldRoot, root);
   const selection = join(base, "selection.json");
-  await setMode(selection, 0o644);
-  await writeFile(selection, JSON.stringify({ generation: manifest.buildSha256 }) + "\n");
+  const temporarySelection = join(base, `.selection-signing-${process.pid}.json`);
+  await writeFile(temporarySelection, JSON.stringify({ generation: manifest.buildSha256 }) + "\n", { mode: 0o444, flag: "wx" });
+  await move(temporarySelection, selection);
   await setMode(selection, 0o444);
-  await setMode(root, 0o555);
-  await setMode(base, 0o555);
+  await setMode(root, 0o755);
+  await setMode(base, 0o755);
 
   // Keep the pinned reader bytes through the outer signing pass.
   const readerNode = resolve(root, "node");

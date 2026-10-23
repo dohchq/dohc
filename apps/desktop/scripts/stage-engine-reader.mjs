@@ -93,7 +93,8 @@ export async function stageEngineReader(options = {}) {
   const resources = resolve(options.resources ?? join(desktop, "resources"));
   if (!supported(platform, arch)) return { supported: false };
   const base = join(resources, "engine-reader");
-  await mkdir(base, { recursive: true, mode: 0o700 });
+  await mkdir(base, { recursive: true, mode: 0o755 });
+  await chmod(base, 0o755);
   if (platform !== "win32") {
     const config = await requireEngineReader(resources, platform, arch, options.selfHost ? process.execPath : undefined).then(async config => {
       const manifest = JSON.parse(await regular(config.manifest));
@@ -103,6 +104,7 @@ export async function stageEngineReader(options = {}) {
       return config;
     }).catch(() => null);
     if (config) {
+      await chmod(dirname(config.bundle), 0o755);
       const generation = basename(dirname(config.bundle));
       if (options.selfHost) await writeFile(join(base, "startup.json"), JSON.stringify(config) + "\n", { mode: 0o444 });
       await prune(base, generation, options.selfHost);
@@ -128,8 +130,7 @@ export async function stageEngineReader(options = {}) {
     for (const file of platform === "win32" || options.selfHost ? ["reader.cjs", "manifest.json"] : ["node", "reader.cjs", "manifest.json"]) {
       await chmod(join(staging, file), file === "node" ? 0o555 : 0o444);
     }
-    // A read-only folder protects nothing on Windows and stops git clean removing it.
-    if (process.platform !== "win32") await chmod(staging, 0o555);
+    await chmod(staging, 0o755);
     const generation = manifest.buildSha256, destination = join(base, generation);
     const hostNode = options.selfHost ? process.execPath : undefined;
     const existing = await verifyGeneration(resources, platform, arch, generation, hostNode).catch(() => null);

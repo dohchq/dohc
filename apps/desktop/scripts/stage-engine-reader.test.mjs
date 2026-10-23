@@ -57,7 +57,7 @@ for (const [platform, arch] of [["win32", "x64"], ["linux", "x64"], ["darwin", "
   { timeout: 180000, skip: process.platform !== "win32" && platform === "win32" }, async t => {
   const root = await mkdtemp(join(tmpdir(), "dohc-reader-layout-"));
   t.after(async () => {
-    // Generations are read-only; only their trusted owner removes retired builds.
+    // Permit cleanup after a test injects a protected retired generation.
     for (const path of [join(root, "source/resources/engine-reader"), join(root, "packaged/engine-reader"), join(root, "dohc.app/Contents/Resources/engine-reader")]) {
       const { readdir } = await import("node:fs/promises");
       for (const entry of await readdir(path).catch(() => [])) await chmod(join(path, entry), 0o700).catch(() => {});
@@ -112,8 +112,9 @@ for (const [platform, arch] of [["win32", "x64"], ["linux", "x64"], ["darwin", "
   await copyFiles(getFileMatchers({ extraResources }, "extraResources", packaged, {
     defaultSrc: join(root, "source"), globalOutDir: packaged, customBuildOptions: {}, macroExpander: x => x,
   }));
-  await chmod(join(resources, "engine-reader", staged.generation), 0o700);
-  await rm(join(root, "source"), { recursive: true, force: true });
+  await t.test("plain rm deletes the staged layout without mode repair", async () => {
+    await rm(join(root, "source"), { recursive: true, force: true });
+  });
   const installed = await requireEngineReader(packaged, platform, arch);
   assert.deepEqual(JSON.parse(installedReaderConfig(packaged, platform, arch)), installed);
   assert.equal(installedReaderConfig(packaged, platform, "ia32"), undefined);
@@ -151,7 +152,7 @@ for (const [platform, arch] of [["win32", "x64"], ["linux", "x64"], ["darwin", "
     await rename(newRoot, oldRoot);
     await writeFile(installed.manifest, JSON.stringify(manifest));
     await chmod(installed.manifest, 0o444);
-    await chmod(oldRoot, 0o555);
+    await chmod(oldRoot, 0o755);
     await writeFile(join(packaged, "engine-reader/selection.json"), JSON.stringify({ generation: staged.generation }));
   }
   // Preserve an optional, task-owned layout for native engine integration.
@@ -159,6 +160,9 @@ for (const [platform, arch] of [["win32", "x64"], ["linux", "x64"], ["darwin", "
     const { cp } = await import("node:fs/promises");
     await cp(packaged, join(process.env.DOHC_READER_TEST_LAYOUT, platform === "darwin" ? `${platform}-${arch}` : platform), { recursive: true });
   }
+  await t.test("plain rm deletes the packaged layout without mode repair", async () => {
+    await rm(packaged, { recursive: true, force: true });
+  });
 });
 
 test("macOS signing uses the reader hook without enabling Electron Node mode", async () => {

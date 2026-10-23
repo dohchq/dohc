@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, cp, link, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -34,7 +34,7 @@ test("packaged macOS reader signing", { timeout: 180000 }, async t => {
   for (const name of stale.slice(0, 2)) {
     await mkdir(join(sourceBase, name));
     await writeFile(join(sourceBase, name, "node"), "unselected executable");
-    await chmod(join(sourceBase, name), 0o555);
+    await chmod(join(sourceBase, name), 0o755);
   }
   await writeFile(join(sourceBase, stale[2]), "unselected");
   await writeFile(join(sourceBase, "node-LICENSE.txt"), "synthetic license fixture");
@@ -48,10 +48,10 @@ test("packaged macOS reader signing", { timeout: 180000 }, async t => {
     const modes = new Map();
     const setMode = async (path, mode) => { modes.set(path, mode); await chmod(path, mode); };
     owner.after(async () => { await removeLayout(resources); await rm(app, { recursive: true, force: true }); });
-    async function prepare() {
+    async function prepare(arch = 3) {
       if (config.afterPack) {
         const hook = await resolveFunction("module", join(desktop, config.afterPack), "afterPack", desktop);
-        await hook(context, { chmod: setMode });
+        await hook({ ...context, arch }, { chmod: setMode });
       }
     }
     return { app, resources, original, modes, setMode, prepare };
@@ -63,18 +63,36 @@ test("packaged macOS reader signing", { timeout: 180000 }, async t => {
     assert.deepEqual((await readdir(sourceBase)).sort(), sourceEntries);
     for (const name of stale.slice(0, 2)) assert.equal(await readFile(join(sourceBase, name, "node"), "utf8"), "unselected executable");
   });
-  await t.test("makes reader assets readable by every account", async sub => {
+  await t.test("keeps packaged folders owner-writable and files read-only", async sub => {
     const f = await fixture(sub);
     await f.prepare();
     const base = join(f.resources, "engine-reader");
-    for (const [path, mode] of [[base, 0o555], [dirname(f.original.node), 0o555], [join(base, "selection.json"), 0o444], [f.original.manifest, 0o444]]) {
+    for (const [path, mode] of [[base, 0o755], [dirname(f.original.node), 0o755], [join(base, "selection.json"), 0o444], [f.original.manifest, 0o444]]) {
       assert.equal(f.modes.get(path), mode, `requested POSIX mode for ${path}`);
       if (process.platform !== "win32") assert.equal((await stat(path)).mode & 0o777, mode);
     }
+    await rm(f.app, { recursive: true, force: true });
   });
-  for (const scenario of ["compiler signing", "transient timestamp failures", "permanent signing failure", "verification failure", "ad hoc signing"]) {
+  await t.test("plain rm deletes an unsigned packaged layout without mode repair", async sub => {
+    const f = await fixture(sub);
+    await f.prepare();
+    await rm(f.app, { recursive: true, force: true });
+  });
+  await t.test("afterPack refuses an unsupported packaging architecture", async sub => {
+    const f = await fixture(sub);
+    for (const arch of [1, 0]) await assert.rejects(f.prepare(arch), /architecture/);
+  });
+  for (const scenario of ["compiler signing", "transient timestamp failures", "permanent signing failure", "verification failure", "ad hoc signing", "hard-linked source"]) {
     await t.test(`handles ${scenario}`, async sub => {
       const f = await fixture(sub);
+      const sourceManifest = await readFile(staged.manifest), sourceSelection = await readFile(join(sourceBase, "selection.json"));
+      const sourceNodeHash = createHash("sha256").update(await readFile(staged.node)).digest("hex");
+      if (scenario === "hard-linked source") {
+        for (const [sourcePath, target] of [[staged.node, f.original.node], [staged.manifest, f.original.manifest], [join(sourceBase, "selection.json"), join(f.resources, "engine-reader/selection.json")]]) {
+          await rm(target);
+          await link(sourcePath, target);
+        }
+      }
       await f.prepare();
       let attempts = 0, verifications = 0, sealed = false;
       const waits = [];
@@ -82,6 +100,11 @@ test("packaged macOS reader signing", { timeout: 180000 }, async t => {
         ignore: file => file.endsWith("already-ignored") };
       const operation = signReader(options, {}, {
         chmod: f.setMode,
+        rename: async (from, to) => {
+          // Model POSIX replacement: Windows cannot replace a read-only destination.
+          if (process.platform === "win32" && (await stat(to).catch(() => null))?.isFile()) await chmod(to, 0o644);
+          await rename(from, to);
+        },
         wait: async ms => { waits.push(ms); },
         run: async (command, args) => {
           assert.equal(command, "/usr/bin/codesign");
@@ -116,7 +139,12 @@ test("packaged macOS reader signing", { timeout: 180000 }, async t => {
           assert.ok(signedOptions.ignore("already-ignored"));
           assert.equal(signedOptions.ignore(join(f.resources, "workspace-engine/dohc-workspace-engine")), false);
           assert.equal(signedOptions.optionsForFile, options.optionsForFile);
-          for (const [path, mode] of [[join(f.resources, "engine-reader"), 0o555], [dirname(final.node), 0o555], [join(f.resources, "engine-reader/selection.json"), 0o444], [final.manifest, 0o444]]) {
+          if (scenario === "hard-linked source") {
+            assert.deepEqual(await readFile(staged.manifest), sourceManifest, "signing must not rewrite the staged manifest through a hard link");
+            assert.deepEqual(await readFile(join(sourceBase, "selection.json")), sourceSelection, "signing must not rewrite the staged selection through a hard link");
+            assert.equal(createHash("sha256").update(await readFile(staged.node)).digest("hex"), sourceNodeHash, "signing must not rewrite the staged Node through a hard link");
+          }
+          for (const [path, mode] of [[join(f.resources, "engine-reader"), 0o755], [dirname(final.node), 0o755], [join(f.resources, "engine-reader/selection.json"), 0o444], [final.manifest, 0o444]]) {
             assert.equal(f.modes.get(path === final.manifest ? f.original.manifest : path), mode);
             if (process.platform !== "win32") assert.equal((await stat(path)).mode & 0o777, mode);
           }
@@ -141,13 +169,18 @@ test("packaged macOS reader signing", { timeout: 180000 }, async t => {
         assert.deepEqual(waits, scenario === "transient timestamp failures" ? [5000, 10000] : []);
       }
       await requireEngineReader(source, "darwin", "arm64");
+      if (sealed) await rm(f.app, { recursive: true, force: true });
     });
   }
 });
 
+const developerIDRequirement = "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists";
+
 for (const [name, force, identity, signature, failure] of [
-  ["required signing rejects a missing identity", true, "bad-synthetic-identity", "missing", /unsigned app/],
+  ["required signing rejects a missing identity", true, "bad-synthetic-identity", "missing", /Required macOS signing/],
   ["required signing rejects an ad hoc authority", true, "bad-synthetic-identity", "adhoc", /Developer ID/],
+  ["required signing rejects Apple Development", true, "bad-synthetic-identity", "development", /Developer ID/],
+  ["required signing rejects a self-signed Developer ID name", true, "bad-synthetic-identity", "self-signed", /Developer ID/],
   ["required signing accepts a verified Developer ID", true, "bad-synthetic-identity", "developer", undefined],
   ["unsigned development skips signature checks", false, "bad-synthetic-identity", "missing", undefined],
   ["explicit null identity permits unsigned development", false, null, "missing", undefined],
@@ -179,12 +212,15 @@ for (const [name, force, identity, signature, failure] of [
         assert.equal(command, "/usr/bin/codesign");
         assert.equal(args.at(-1), join(root, "dohc.app"));
         if (args.includes("--verify")) {
-          assert.deepEqual(args, ["--verify", "--strict", join(root, "dohc.app")]);
           if (signature === "missing") throw Error("unsigned app");
+          // Only Apple's anchored Developer ID certificate chain satisfies -R.
+          if (args.includes(`-R=${developerIDRequirement}`) && signature !== "developer") throw Error("code failed requirement");
           return { stdout: "", stderr: "" };
         }
         assert.deepEqual(args, ["--display", "--verbose=2", join(root, "dohc.app")]);
-        return { stdout: "", stderr: signature === "developer" ? "Authority=Developer ID Application: Synthetic (SYNTHETIC1)\nTeamIdentifier=SYNTHETIC1\n" : "Signature=adhoc\nTeamIdentifier=not set\n" };
+        const authority = signature === "development" ? "Authority=Apple Development: Synthetic (SYNTHETIC1)\n" :
+          ["developer", "self-signed"].includes(signature) ? "Authority=Developer ID Application: Synthetic (SYNTHETIC1)\n" : "Signature=adhoc\n";
+        return { stdout: "", stderr: authority };
       } });
     } },
   };
@@ -193,5 +229,5 @@ for (const [name, force, identity, signature, failure] of [
   if (failure) await assert.rejects(operation, failure); else await operation;
   if (identity !== null) assert.equal(afterSign, 1, "the real signApp return emits afterSign even without an identity");
   if (!force) assert.equal(checks, 0, "development needs no signature tools or accounts");
-  else if (identity !== null) assert.equal(checks, signature === "missing" ? 1 : 2);
+  else if (identity !== null) assert.equal(checks, 1, "one designated-requirement verification, without display-name matching");
 });
