@@ -23,6 +23,9 @@ description = "Durable Y.Doc layer for the workspace engine: update log, snapsho
 # Production builds must not enable this feature.
 # Poison tests require debug assertions.
 test-support = []
+# Installs dhat as the unit tests' global allocator, for the held-proof
+# memory measurement in `src/live_update_application/held_proof_memory_tests.rs`.
+held-proof-memory = []
 
 [dependencies]
 # The durable store (single writer, migration ledger with the R11a ydoc tables,
@@ -67,8 +70,9 @@ rusqlite = { version = "0.40", features = ["limits"] }
 dohc-engine-collab = { path = ".", features = ["test-support"] }
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
 dohc-test-scratch = { path = "../dohc-test-scratch" }
-# The heap profiler `tests/held_proof_memory.rs` installs as its global
-# allocator, to measure a held proof's peak beside what it reserved.
+# The heap profiler the `held-proof-memory` feature installs as the unit
+# tests' global allocator, to measure a held proof's peak beside what it
+# reserved.
 dhat = "0.3"
 
 # Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).

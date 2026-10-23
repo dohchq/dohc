@@ -25,9 +25,8 @@ pub use preservation::{
     inspect_held, HeldInspection, Preservation, PreservationFinding, PreservationReason,
     PreservationStatus, PreservedState,
 };
-#[cfg(any(test, feature = "test-support"))]
-#[doc(hidden)]
-pub use preservation::preserve_lineage;
+#[cfg(all(test, feature = "held-proof-memory"))]
+pub(super) use preservation::preserve_lineage;
 
 /// The synced update protection is decided for: the feed it arrived on and
 /// its coordinate there.
@@ -1418,11 +1417,12 @@ pub(super) enum WindowWork {
 /// What it reads is reserved before it reads it, from stored lengths: the
 /// window's lists, and the lineage's current activation, in `working`,
 /// which also keeps each tail and its work once validated; and each tail's
-/// activation and validation in a reservation of their own, given back once
-/// that tail's work is kept. So it reserves at most the window, every
-/// tail's kept work and the largest tail's validation, never every tail's
-/// validation at once. The lineage's outbox evidence, which every tail's
-/// validation reads, is measured once.
+/// activation and validation, with each contradiction it finds as it finds
+/// it, in a reservation of their own, given back once that tail's work is
+/// kept. So it reserves at most the window, every tail's kept work and the
+/// largest tail's validation, never every tail's validation at once. The
+/// lineage's outbox evidence, which every tail's validation reads, is
+/// measured once.
 pub(super) fn window_work(
     conn: &Connection,
     doc: &DocKey,
@@ -1468,6 +1468,7 @@ pub(super) fn window_work(
                     lineage,
                     &activation_id,
                     stop,
+                    &mut validating,
                 ))?
             }
             None => None,
@@ -1495,9 +1496,9 @@ pub(super) fn window_work(
             release,
             coverage,
         };
-        let kept = tail_kept_bytes(&tail, &work);
+        // Kept before the validation that made it is given back.
+        working.grow(tail_kept_bytes(&tail, &work))?;
         drop(validating);
-        working.grow(kept)?;
         tails.push((tail, work));
     }
     Ok((!tails.is_empty()).then_some(WindowWork::Listed(tails)))

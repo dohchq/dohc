@@ -45,6 +45,13 @@ mod tests {
     include!("rename_tests.rs");
     include!("retired_outbox_tests.rs");
 
+    /// What a held proof's memory peaks at, beside what it reserved.
+    #[cfg(feature = "held-proof-memory")]
+    mod held_proof_memory {
+        use super::*;
+        include!("held_proof_memory_tests.rs");
+    }
+
     struct Fixture {
         store: EngineStore,
         _owner: ApplicationOwner,

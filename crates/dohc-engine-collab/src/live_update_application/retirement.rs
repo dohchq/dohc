@@ -7,7 +7,7 @@ use super::owner_activations::{
 };
 use super::released_protection::{
     readable, ContributionLocator, PreservationFinding, PreservationReason, ProofStage,
-    RetainedAuthors, RetainedContribution, Stop, TailWork,
+    RetainedAuthors, RetainedContribution, Stop, TailWork, Work,
 };
 use super::*;
 use crate::owner_outbox::{
@@ -816,9 +816,10 @@ pub(crate) fn released_binding(
 /// Missing or conflicting evidence never reads as nothing retained. An entry
 /// whose evidence contradicts itself is a contradiction of the work it names,
 /// or of the tail when nothing names that work, and every other entry is
-/// still checked. Evidence that does not enumerate, or a storage failure, is
-/// an error, and so is `stop`, checked before the manifest decodes and
-/// before each entry.
+/// still checked. Each contradiction is reserved in `working` before it is
+/// kept. Evidence that does not enumerate, or a storage failure, is an
+/// error, and so is `stop`, checked before the manifest decodes and before
+/// each entry.
 pub(crate) fn unproven_retained(
     conn: &Connection,
     namespace: &str,
@@ -826,10 +827,12 @@ pub(crate) fn unproven_retained(
     lineage: &str,
     tail: &str,
     stop: Stop<'_>,
+    working: &mut Work<'_>,
 ) -> Result<TailWork, ApplicationError> {
     let mut work = Found {
         namespace,
         tail: TailWork::default(),
+        working,
     };
     let mut listed = BTreeSet::new();
     let chain = chain_activations(conn, namespace, tail)?;
@@ -844,7 +847,7 @@ pub(crate) fn unproven_retained(
             journal_cursor: receipt.journal_cursor,
         };
         if !listed.insert(receipt.delivery_id.clone()) {
-            work.contradiction(PreservationReason::ContradictoryEvidence, &locator);
+            work.contradiction(PreservationReason::ContradictoryEvidence, &locator)?;
             continue;
         }
         let unapplied = (|| -> Result<Option<RetainedEntry>, ApplicationError> {
@@ -1000,21 +1003,35 @@ pub(crate) fn unproven_retained(
     Ok(tail)
 }
 
-/// A tail's work as its validation finds it.
-struct Found<'a> {
+/// A tail's work as its validation finds it, and the reservation its
+/// contradictions are kept in.
+struct Found<'a, 'w> {
     namespace: &'a str,
     tail: TailWork,
+    working: &'a mut Work<'w>,
 }
 
-impl Found<'_> {
+impl Found<'_, '_> {
     /// A contradiction of the work `locator` names, or of the tail when no
-    /// reader could locate that work.
-    fn contradiction(&mut self, reason: PreservationReason, locator: &ContributionLocator) {
+    /// reader could locate that work: its namespace, the work it names, and
+    /// its place with room for the contradictions to double, reserved before
+    /// it is made.
+    fn contradiction(
+        &mut self,
+        reason: PreservationReason,
+        locator: &ContributionLocator,
+    ) -> Result<(), ApplicationError> {
+        let contribution = locator.readable().then_some(locator);
+        let bytes = self.namespace.len()
+            + contribution.map_or(0, ContributionLocator::text_bytes)
+            + 2 * std::mem::size_of::<PreservationFinding>();
+        self.working.grow(u64::try_from(bytes).unwrap_or(u64::MAX))?;
         self.tail.contradictions.push(PreservationFinding {
             reason,
             namespace: Some(self.namespace.to_owned()),
-            contribution: locator.readable().then(|| locator.clone()),
+            contribution: contribution.cloned(),
         });
+        Ok(())
     }
 
     /// What `result` reads as evidence of the work `locator` names: none,
@@ -1027,7 +1044,7 @@ impl Found<'_> {
     ) -> Result<Option<T>, ApplicationError> {
         let read = readable(result)?;
         if read.is_none() {
-            self.contradiction(PreservationReason::ContradictoryEvidence, locator);
+            self.contradiction(PreservationReason::ContradictoryEvidence, locator)?;
         }
         Ok(read)
     }
@@ -1045,7 +1062,7 @@ impl Found<'_> {
                 .tail
                 .contributions
                 .push(RetainedContribution::at(locator, authors)),
-            None => self.contradiction(PreservationReason::MalformedAuthorship, &locator),
+            None => self.contradiction(PreservationReason::MalformedAuthorship, &locator)?,
         }
         Ok(())
     }

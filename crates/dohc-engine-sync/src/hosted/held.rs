@@ -315,13 +315,12 @@ impl HeldProof {
 /// transaction, then the contribution artifact once the reader closed, each
 /// checking between its units whether `job` stopped. What each works with
 /// is reserved of `job`'s memory before it is allocated, decoding the
-/// binding from its stored length first. What the preservation keeps is
-/// reserved before the artifact grows, and the artifact reserves its own as
-/// it grows; one past its cap leaves the inspection with none but its
-/// merged list's commitment, and the rest still answers. The reader closes
-/// before this returns, however it
-/// returns. A reader that cannot open is a locked store, never corrupt
-/// evidence.
+/// binding from its stored length first. The inspection reserves what its
+/// preservation keeps before it gives back the work that made it, and the
+/// artifact reserves its own as it grows; one past its cap leaves the
+/// inspection with none but its merged list's commitment, and the rest still
+/// answers. The reader closes before this returns, however it returns. A
+/// reader that cannot open is a locked store, never corrupt evidence.
 pub fn prove_held_document(
     job: &HeldProofJob,
     workspace_id: &str,
@@ -365,21 +364,17 @@ pub fn prove_held_document(
     tx.rollback().map_err(SyncError::corrupt)?;
     drop(reader);
     let contributions = match (&binding, &preservation) {
-        (Some(binding), Some(preservation)) => {
-            stop.reserve(preservation.retained_bytes())
-                .map_err(protection_failure)?;
-            Some(
-                match ContributionArtifact::of(binding, preservation, stop)
-                    .map_err(protection_failure)?
-                {
-                    Some(artifact) => HeldContributions::Artifact(artifact),
-                    None => HeldContributions::TooLarge {
-                        merged: UnprovenCommitment::of_merged(&preservation.merged, stop)
-                            .map_err(protection_failure)?,
-                    },
+        (Some(binding), Some(preservation)) => Some(
+            match ContributionArtifact::of(binding, preservation, stop)
+                .map_err(protection_failure)?
+            {
+                Some(artifact) => HeldContributions::Artifact(artifact),
+                None => HeldContributions::TooLarge {
+                    merged: UnprovenCommitment::of_merged(&preservation.merged, stop)
+                        .map_err(protection_failure)?,
                 },
-            )
-        }
+            },
+        ),
         _ => None,
     };
     let inspection = key.hold.clone().map(|document| {

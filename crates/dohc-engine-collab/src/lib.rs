@@ -20,6 +20,11 @@
 
 #![forbid(unsafe_code)]
 
+/// The heap profiler the held-proof memory measurement reads.
+#[cfg(all(test, feature = "held-proof-memory"))]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 pub mod author_coverage;
 pub mod canonical_json;
 mod doc_cache;

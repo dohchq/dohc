@@ -5,6 +5,7 @@
 //! names, the head's or an archived one, loaded for it alone.
 use super::*;
 use crate::ContentKind;
+use std::collections::{BTreeMap, HashMap};
 use std::mem::size_of;
 
 /// The most memory a Y.Doc holds for each byte of the encoded state and
@@ -15,7 +16,8 @@ const YDOC_BYTES_PER_ENCODED_BYTE: u64 = 24;
 
 /// What loading a lineage holds for each stored byte beside the state it
 /// builds: the blob it applies, and the full-state encoding its digest
-/// hashes.
+/// hashes. SQLite's own copy of the blob it reads, which no heap profile
+/// sees, adds the largest blob once.
 const LOADING_BYTES_PER_STORED_BYTE: u64 = 2;
 
 /// What one journal row a lineage's load lists holds: its sequence and
@@ -23,13 +25,18 @@ const LOADING_BYTES_PER_STORED_BYTE: u64 = 2;
 const LOADED_ROW_BYTES: u64 = 128;
 
 /// What applying a contribution holds for each of its bytes beside what it
-/// adds to the state: its bytes as they load, and the update they decode to
-/// when it waits on another.
-const APPLYING_BYTES_PER_UPDATE_BYTE: u64 = 4;
+/// adds to the state: SQLite's own copy of its row, which no heap profile
+/// sees, its bytes as they load, and the update applying decodes them to.
+const APPLYING_BYTES_PER_UPDATE_BYTE: u64 = 5;
 
-/// What a contribution waiting on another keeps of its update for each of
-/// its bytes: where each client's insertions end, and what it deletes.
+/// What a contribution's update integrates, for each of its bytes: where
+/// each client's insertions end, and what it deletes. Held while it
+/// applies, and kept while it waits on another.
 const INTEGRATION_BYTES_PER_UPDATE_BYTE: u64 = 8;
+
+/// What the merge keeps of one range of clocks it was asked to delete: its
+/// place in its client's ranges.
+const DELETED_RANGE_BYTES: u64 = 64;
 
 /// What projecting the merged state holds for each encoded byte: the
 /// document checking its Markdown source rebuilds, the projection, that
@@ -187,7 +194,7 @@ impl Preservation {
 
 impl ContributionLocator {
     /// The bytes its text keeps.
-    pub(super) fn text_bytes(&self) -> usize {
+    pub(crate) fn text_bytes(&self) -> usize {
         match self {
             Self::Carried {
                 delivery_id,
@@ -284,13 +291,14 @@ impl RetainedContribution {
 /// allocated, from the stored sizes of what it reads, and what it only
 /// works with is given back once it is done, so a proof holds the most one
 /// moment needs, not the sum of its stages. With S the stored bytes of the
-/// lineage's state in R rows, B its full state, b each contribution's
-/// bytes, M = B + Σb, the window's lists W and each tail's kept work K, it
-/// keeps 24·(S + Σb) for the state, W + ΣK, and each merged or waiting
-/// contribution's text and place, and reserves beside that at most the
-/// largest of: loading the state, 2·S + 128·R; validating one tail, as
-/// `window_work` reserves it; applying one contribution, 4·b + 2·M; and
-/// projecting, 28·M.
+/// lineage's state in R rows, the largest L, B its full state, b each
+/// contribution's bytes, M = B + Σb, the window's lists W and each tail's
+/// kept work K, it keeps 24·(S + Σb) for the state, W + ΣK, each merged or
+/// waiting contribution's text and place, and the ranges the merge was asked
+/// to delete, and reserves beside that at most the largest of: loading the
+/// state, 2·S + L + 128·R; validating one tail, as `window_work` reserves it;
+/// applying one contribution, 13·b + 2·M; and projecting, 28·M, with what
+/// the preservation keeps, which stays reserved as its result's.
 pub fn inspect_held(
     conn: &Connection,
     binding: &ReleasedLineageBinding,
@@ -369,12 +377,8 @@ pub fn inspect_held(
     }
     let Some(state) = state else {
         findings.push(finding(PreservationReason::ContradictoryEvidence, None, None));
-        return Ok(HeldInspection::Current(concluded(
-            findings,
-            readable,
-            Vec::new(),
-            None,
-        )));
+        return kept(concluded(findings, readable, Vec::new(), None), stop)
+            .map(HeldInspection::Current);
     };
     preserve(
         state,
@@ -387,17 +391,17 @@ pub fn inspect_held(
     .map(HeldInspection::Current)
 }
 
-/// The state `doc`'s `lineage` keeps merged with `work`, as [`inspect_held`]
-/// merges it and with its memory reserved alike, with no window read or
-/// validated: for measuring what a proof holds. None when the document holds
-/// no such lineage or its state does not load.
-#[cfg(any(test, feature = "test-support"))]
-#[doc(hidden)]
-pub fn preserve_lineage(
+/// The state `doc`'s `lineage` keeps merged with the work of `tails`, as
+/// [`inspect_held`] merges it and with its memory reserved alike, each
+/// tail's work reserved as `window_work` keeps it, with no window read or
+/// validated: for measuring what the merge holds. None when the document
+/// holds no such lineage or its state does not load.
+#[cfg(test)]
+pub(crate) fn preserve_lineage(
     conn: &Connection,
     doc: &DocKey,
     lineage: &str,
-    work: Vec<(String, Vec<RetainedContribution>)>,
+    tails: Vec<(ProtectedTail, TailWork)>,
     stop: Stop<'_>,
 ) -> Result<Option<Preservation>, ApplicationError> {
     let mut working = stop.working();
@@ -405,6 +409,11 @@ pub fn preserve_lineage(
     else {
         return Ok(None);
     };
+    let mut work = Vec::new();
+    for (tail, kept) in tails {
+        working.grow(tail_kept_bytes(&tail, &kept))?;
+        work.push((tail.namespace, kept.contributions));
+    }
     preserve(
         state,
         Vec::new(),
@@ -428,27 +437,28 @@ fn load_lineage(
 ) -> Result<Option<LineageState>, ApplicationError> {
     let mut loading = stop.working();
     if working.limited() {
-        let (rows, bytes) = lineage_workload(conn, doc, lineage)?;
+        let (rows, bytes, largest) = lineage_workload(conn, doc, lineage)?;
         working.grow(bytes.saturating_mul(YDOC_BYTES_PER_ENCODED_BYTE))?;
         loading.grow(
             rows.saturating_mul(LOADED_ROW_BYTES)
-                .saturating_add(bytes.saturating_mul(LOADING_BYTES_PER_STORED_BYTE)),
+                .saturating_add(bytes.saturating_mul(LOADING_BYTES_PER_STORED_BYTE))
+                .saturating_add(largest),
         )?;
     }
     lineage_state(conn, doc, lineage, stop)
 }
 
-/// How many blobs loading `lineage`'s state reads and their stored length,
-/// read before any loads: the head's latest snapshot and the journal rows
-/// after it, or the full state an archive keeps.
+/// How many blobs loading `lineage`'s state reads, their stored length and
+/// the largest one's, read before any loads: the head's latest snapshot and
+/// the journal rows after it, or the full state an archive keeps.
 fn lineage_workload(
     conn: &Connection,
     doc: &DocKey,
     lineage: &str,
-) -> Result<(u64, u64), ApplicationError> {
+) -> Result<(u64, u64, u64), ApplicationError> {
     let head = durable::read_marker_in(conn, doc)?
         .is_some_and(|marker| marker.lineage_claim_id.as_deref() == Some(lineage));
-    let (rows, bytes): (i64, Option<i64>) = if head {
+    let (rows, bytes, largest): (i64, Option<i64>, Option<i64>) = if head {
         conn.prepare_cached(
             "WITH snapshot AS (SELECT up_to_seq,snapshot_blob_sha256 AS sha256 FROM ydoc_snapshots
                WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
@@ -457,18 +467,18 @@ fn lineage_workload(
                UNION ALL SELECT update_blob_sha256 FROM ydoc_updates
                WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
                AND seq>coalesce((SELECT up_to_seq FROM snapshot),0))
-             SELECT count(*),sum(length(b.bytes)) FROM loaded l
+             SELECT count(*),sum(length(b.bytes)),max(length(b.bytes)) FROM loaded l
              LEFT JOIN binary_blobs b ON b.sha256=l.sha256",
         )
         .map_err(read_sql)?
         .query_row(
             params![doc.workspace_id, doc.version_id, doc.object_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(read_sql)?
     } else {
         conn.prepare_cached(
-            "SELECT count(*),sum(length(b.bytes)) FROM ydoc_inactive_lineages l
+            "SELECT count(*),sum(length(b.bytes)),max(length(b.bytes)) FROM ydoc_inactive_lineages l
              LEFT JOIN binary_blobs b ON b.sha256=l.full_state_blob_sha256
              WHERE l.workspace_id=?1 AND l.version_id=?2 AND l.object_id=?3
              AND l.lineage_claim_id=?4",
@@ -476,11 +486,15 @@ fn lineage_workload(
         .map_err(read_sql)?
         .query_row(
             params![doc.workspace_id, doc.version_id, doc.object_id, lineage],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(read_sql)?
     };
-    Ok((unsigned(rows), unsigned(bytes.unwrap_or(0))))
+    Ok((
+        unsigned(rows),
+        unsigned(bytes.unwrap_or(0)),
+        unsigned(largest.unwrap_or(0)),
+    ))
 }
 
 /// The length of the bytes stored under `digest`, without loading them; 0
@@ -629,11 +643,6 @@ fn stored_source(conn: &Connection, digest: &str) -> Result<Source, ApplicationE
     })
 }
 
-/// The state vector and delete set: what a doc has integrated.
-fn integrated(doc: &Ydoc) -> (Vec<u8>, Vec<u8>) {
-    (doc.encode_state_vector(), doc.encode_delete_set())
-}
-
 /// What an update integrates: where each client's insertions end, and what
 /// it deletes.
 struct Integration {
@@ -642,9 +651,11 @@ struct Integration {
 }
 
 impl Integration {
-    fn of(bytes: &[u8]) -> Result<Self, ApplicationError> {
+    /// None when `bytes` are no update.
+    fn of(bytes: &[u8]) -> Option<Self> {
         use yrs::updates::decoder::Decode;
-        let update = yrs::Update::decode_v1(bytes).map_err(|_| ApplicationError::Corrupt)?;
+        crate::replay_parity::prevalidate_update_bytes(bytes).ok()?;
+        let update = yrs::Update::decode_v1(bytes).ok()?;
         let ends = update
             .insertions(true)
             .iter()
@@ -652,22 +663,112 @@ impl Integration {
                 ranges.iter().map(|range| range.end).max().map(|end| (*client, end))
             })
             .collect();
-        Ok(Self {
+        Some(Self {
             ends,
             deletes: update.delete_set().clone(),
         })
     }
 
-    /// Whether a doc with this state vector and delete set holds all of it.
-    /// A doc's insertions run from clock zero, so its vector covers every
-    /// insertion that ends at or before it.
-    fn within(&self, vector: &yrs::StateVector, deleted: &yrs::IdSet) -> bool {
-        let empty = Default::default();
+    /// How many ranges of clocks it deletes.
+    fn deleted_ranges(&self) -> u64 {
+        self.deletes
+            .iter()
+            .map(|(_, ranges)| ranges.iter().count() as u64)
+            .sum()
+    }
+
+    /// Whether a doc with this state vector holds all of it, when `asked`
+    /// holds every range the doc was asked to delete and `pending` those it
+    /// could not yet, whose items have not arrived. A doc's insertions run
+    /// from clock zero, so its vector covers every insertion that ends at or
+    /// before it.
+    fn within(&self, vector: &yrs::StateVector, asked: &Deletes, pending: &Deletes) -> bool {
         self.ends.iter().all(|(client, end)| *end <= vector.get(client))
-            && self
-                .deletes
-                .iter()
-                .all(|(client, ranges)| ranges.subset_of(deleted.get(client).unwrap_or(&empty)))
+            && self.deletes.iter().all(|(client, ranges)| {
+                ranges.iter().all(|range| {
+                    asked.covers(*client, range.start, range.end)
+                        && !pending.overlaps(*client, range.start, range.end)
+                })
+            })
+    }
+}
+
+/// Each client's ranges of clocks, sorted by where each starts, none
+/// overlapping or touching another.
+#[derive(Default)]
+struct Deletes(HashMap<yrs::ClientID, BTreeMap<u32, u32>>);
+
+impl Deletes {
+    /// Every range `state` was asked to delete: those it deleted, and those
+    /// it keeps pending until their items arrive.
+    fn asked(state: &Ydoc) -> Self {
+        let mut asked = Self::default();
+        asked.extend(&state.delete_set());
+        if let Some(pending) = state.pending_delete_set() {
+            asked.extend(&pending);
+        }
+        asked
+    }
+
+    /// The ranges `state` keeps pending until their items arrive.
+    fn pending(state: &Ydoc) -> Self {
+        let mut pending = Self::default();
+        if let Some(set) = state.pending_delete_set() {
+            pending.extend(&set);
+        }
+        pending
+    }
+
+    fn ranges(&self) -> u64 {
+        self.0.values().map(|ranges| ranges.len() as u64).sum()
+    }
+
+    fn extend(&mut self, set: &yrs::IdSet) {
+        for (client, ranges) in set.iter() {
+            for range in ranges.iter() {
+                self.insert(*client, range.start, range.end);
+            }
+        }
+    }
+
+    fn insert(&mut self, client: yrs::ClientID, mut start: u32, mut end: u32) {
+        if start >= end {
+            return;
+        }
+        let ranges = self.0.entry(client).or_default();
+        // Every range it overlaps or touches joins it.
+        loop {
+            let Some((&from, &to)) = ranges.range(..=end).next_back() else {
+                break;
+            };
+            if to < start {
+                break;
+            }
+            start = start.min(from);
+            end = end.max(to);
+            ranges.remove(&from);
+        }
+        ranges.insert(start, end);
+    }
+
+    fn covers(&self, client: yrs::ClientID, start: u32, end: u32) -> bool {
+        start >= end
+            || self.0.get(&client).is_some_and(|ranges| {
+                ranges
+                    .range(..=start)
+                    .next_back()
+                    .is_some_and(|(_, to)| *to >= end)
+            })
+    }
+
+    fn overlaps(&self, client: yrs::ClientID, start: u32, end: u32) -> bool {
+        start < end
+            && self.0.get(&client).is_some_and(|ranges| {
+                ranges
+                    .range(..end)
+                    .next_back()
+                    .is_some_and(|(_, to)| *to > start)
+            })
     }
 }
 
@@ -686,6 +787,12 @@ impl Integration {
 /// other: each tail's work is validated alone, and both apply, so neither
 /// one's work is lost from the merge.
 ///
+/// Whether a contribution added anything is read from its own update, what
+/// it inserts and deletes, against the state's vector and the ranges the
+/// merge was asked to delete, never from the whole state, so each one costs
+/// its own size. One that integrates only in part waits, and counts once
+/// the merge holds all of it.
+///
 /// `stop` is checked before the merge starts, before each contribution
 /// loads and again before it applies, and around the merged state's
 /// projection and encoding. What the merge works with is reserved of its
@@ -693,7 +800,8 @@ impl Integration {
 /// once done: what each contribution adds to the state, from the `length`
 /// of its bytes before they `load`, and its place in the merged or waiting
 /// list before it takes it, stay reserved; what applying it holds besides,
-/// and the projection, are given back.
+/// and the projection, are given back once what the preservation keeps is
+/// reserved as its result's.
 fn preserve(
     loaded: Loaded,
     mut findings: Vec<PreservationFinding>,
@@ -714,7 +822,7 @@ fn preserve(
             None,
             None,
         ));
-        return Ok(concluded(findings, work, Vec::new(), None));
+        return kept(concluded(findings, work, Vec::new(), None), stop);
     }
     stop.check(ProofStage::Merge)?;
     // The encoded bytes the merged state holds: the lineage's full state,
@@ -728,19 +836,28 @@ fn preserve(
     // each integrates: one counts as merged once the merge holds all of it,
     // whatever else stays pending.
     let mut waiting: Vec<(RetainedContribution, Integration)> = Vec::new();
+    // Every range the merge was asked to delete, read of the state the first
+    // time a contribution deletes and kept since: the state's deletions are
+    // these, less those it keeps pending.
+    let mut asked: Option<Deletes> = None;
+    let none = Deletes::default();
     for (namespace, contributions) in &work {
         for contribution in contributions {
             stop.check(ProofStage::Merge)?;
             let stored = length(contribution.update_digest())?;
             working.grow(stored.saturating_mul(YDOC_BYTES_PER_ENCODED_BYTE))?;
             merging = merging.saturating_add(stored);
-            // Its bytes as they load and decode, and the state vector and
-            // delete set read of the state before and after it applies, each
-            // no larger than the state's encoding: given back once it merged.
+            // Its bytes as they load and apply, and what it integrates; the
+            // state's vector and pending deletions read before and after it
+            // applies and, the first time a contribution deletes, the
+            // state's deletions, each no larger than the state's encoding:
+            // given back once it merged.
             let mut applying = stop.working();
             applying.grow(
                 stored
-                    .saturating_mul(APPLYING_BYTES_PER_UPDATE_BYTE)
+                    .saturating_mul(
+                        APPLYING_BYTES_PER_UPDATE_BYTE + INTEGRATION_BYTES_PER_UPDATE_BYTE,
+                    )
                     .saturating_add(merging.saturating_mul(2)),
             )?;
             let held_back = |reason| finding(reason, Some(namespace.as_str()), Some(contribution));
@@ -759,40 +876,62 @@ fn preserve(
                 }
             };
             stop.check(ProofStage::Merge)?;
-            let before = integrated(&state);
+            let Some(integration) = Integration::of(&bytes) else {
+                working.grow(found)?;
+                findings.push(held_back(PreservationReason::MalformedUpdate));
+                continue;
+            };
+            let deletes = integration.deleted_ranges();
+            if deletes > 0 && asked.is_none() {
+                let read = Deletes::asked(&state);
+                working.grow(read.ranges().saturating_mul(DELETED_RANGE_BYTES))?;
+                asked = Some(read);
+            }
+            // Work the merge already holds adds nothing.
+            let held = integration.within(
+                &state.state_vector(),
+                asked.as_ref().unwrap_or(&none),
+                &Deletes::pending(&state),
+            );
             if state.apply(&bytes).is_err() {
                 working.grow(found)?;
                 findings.push(held_back(PreservationReason::MalformedUpdate));
                 continue;
             }
-            if integrated(&state) != before {
+            if held {
+                continue;
+            }
+            if let Some(asked) = &mut asked {
+                working.grow(deletes.saturating_mul(DELETED_RANGE_BYTES))?;
+                asked.extend(&integration.deletes);
+            }
+            let (vector, pending) = (state.state_vector(), Deletes::pending(&state));
+            let asked = asked.as_ref().unwrap_or(&none);
+            if integration.within(&vector, asked, &pending) {
                 working.grow(contribution.kept_bytes())?;
                 merged.push(contribution.clone());
                 // What this one added may be what an earlier one waited on;
                 // each waiting one reserved its place in the merged list.
                 if !waiting.is_empty() {
-                    let (vector, deleted) = (state.state_vector(), state.delete_set());
-                    let (held, still): (Vec<_>, Vec<_>) = waiting
+                    let (whole, still): (Vec<_>, Vec<_>) = waiting
                         .drain(..)
-                        .partition(|(_, integration)| integration.within(&vector, &deleted));
-                    merged.extend(held.into_iter().map(|(contribution, _)| contribution));
+                        .partition(|(_, integration)| {
+                            integration.within(&vector, asked, &pending)
+                        });
+                    merged.extend(whole.into_iter().map(|(contribution, _)| contribution));
                     waiting = still;
                 }
-            } else if state.has_pending_dependencies() {
-                // It added nothing: either the merge held it already, or it
-                // is parked, alone or beside an identical earlier one.
-                let integration = Integration::of(&bytes)?;
-                if !integration.within(&state.state_vector(), &state.delete_set()) {
-                    // Its places in the waiting list, and the lists that
-                    // list splits into, and in the merged list.
-                    working.grow(
-                        contribution
-                            .kept_bytes()
-                            .saturating_add(4 * size_of::<(RetainedContribution, Integration)>() as u64)
-                            .saturating_add(stored.saturating_mul(INTEGRATION_BYTES_PER_UPDATE_BYTE)),
-                    )?;
-                    waiting.push((contribution.clone(), integration));
-                }
+            } else {
+                // Part of it is parked, alone or beside an identical earlier
+                // one: its places in the waiting list, the lists that list
+                // splits into and the merged list, and what it integrates.
+                working.grow(
+                    contribution
+                        .kept_bytes()
+                        .saturating_add(4 * size_of::<(RetainedContribution, Integration)>() as u64)
+                        .saturating_add(stored.saturating_mul(INTEGRATION_BYTES_PER_UPDATE_BYTE)),
+                )?;
+                waiting.push((contribution.clone(), integration));
             }
         }
     }
@@ -803,13 +942,13 @@ fn preserve(
             None,
         ));
     }
-    merged.sort();
+    merged.sort_unstable();
     merged.dedup();
     let complete = findings.is_empty();
+    // Given back once what the preservation keeps is reserved as its
+    // result's.
+    let mut projecting = stop.working();
     let preserved = if complete {
-        // Given back once the preservation keeps what it made, which its
-        // proof reserves as what its result keeps.
-        let mut projecting = stop.working();
         projecting.grow(merging.saturating_mul(PROJECTION_BYTES_PER_ENCODED_BYTE))?;
         stop.check(ProofStage::Projection)?;
         let projection = state.project(kind)?.content;
@@ -829,7 +968,14 @@ fn preserve(
     } else {
         None
     };
-    Ok(concluded(findings, work, merged, preserved))
+    kept(concluded(findings, work, merged, preserved), stop)
+}
+
+/// `preservation`, with what it keeps reserved of `stop`'s memory as what
+/// its proof's result keeps, before the work that made it is given back.
+fn kept(preservation: Preservation, stop: Stop<'_>) -> Result<Preservation, ApplicationError> {
+    stop.reserve(preservation.retained_bytes())?;
+    Ok(preservation)
 }
 
 fn concluded(
@@ -1022,6 +1168,47 @@ mod tests {
         });
     }
 
+    /// Opus's r2c-3c-10 finding 2: whether a contribution added anything is
+    /// read from its own update, deletions included. A deletion the state
+    /// already holds adds nothing; a new one merges; one whose items a later
+    /// contribution brings waits, and counts once that one arrives.
+    #[test]
+    fn a_deletion_counts_once_the_merge_holds_it() {
+        let canonical = Ydoc::wire();
+        let _ = canonical.richdoc_append_paragraph("Kept");
+        let _ = canonical.richdoc_append_paragraph("Removed");
+        let writer = Ydoc::wire();
+        writer.apply(&canonical.encode_full_state()).unwrap();
+        let removal = writer.richdoc_remove_block(1);
+        let added = writer.richdoc_append_paragraph("Added");
+        // Deletes what `added` inserts, with `removal`'s deletion again.
+        let retracted = writer.richdoc_remove_block(1);
+        let all = stored(&[&removal, &added, &retracted]);
+
+        let removed = Ydoc::wire();
+        removed.apply(&canonical.encode_full_state()).unwrap();
+        removed.apply(&removal).unwrap();
+        let held = preserved_from(loaded(removed), vec![outbox(1, &removal)], &all);
+        assert_eq!(held.status, PreservationStatus::Complete, "{:?}", held.findings);
+        assert!(held.merged.is_empty(), "already deleted: {:?}", held.merged);
+
+        let new = preserved(&canonical, vec![outbox(1, &removal)], &all);
+        assert_eq!(new.status, PreservationStatus::Complete, "{:?}", new.findings);
+        assert_eq!(new.merged, [outbox(1, &removal)]);
+        let markdown = new.preserved.unwrap().markdown;
+        assert!(markdown.contains("Kept") && !markdown.contains("Removed"), "{markdown}");
+
+        let later = preserved(&canonical, vec![outbox(1, &retracted), outbox(2, &added)], &all);
+        assert_eq!(later.status, PreservationStatus::Complete, "{:?}", later.findings);
+        assert_eq!(later.merged, [outbox(1, &retracted), outbox(2, &added)]);
+        let markdown = later.preserved.unwrap().markdown;
+        assert!(markdown.contains("Kept") && !markdown.contains("Added"), "{markdown}");
+
+        let unresolved = preserved(&canonical, vec![outbox(1, &retracted)], &all);
+        assert_eq!(reasons(&unresolved), [PreservationReason::PendingContributionDependencies]);
+        assert!(unresolved.merged.is_empty(), "its items never arrived: {:?}", unresolved.merged);
+    }
+
     /// Plan r3: canonical pending state has a reason of its own, distinct
     /// from a merge left pending, and never preserves.
     #[test]
@@ -1094,14 +1281,17 @@ mod tests {
     /// real proof's memory before it allocates it. Opus's r2c-3c-8 findings 2
     /// and 3: what applying a contribution holds is given back before the
     /// projection reserves its own, and the merged list's copy is reserved
-    /// before it is made. With room for all of it, it preserves, and the most
-    /// it reserved is exactly what the state gained, the copy and the
-    /// projection: never applying and projecting at once. With room for less,
-    /// it refuses, too large, before it loads the contribution when the
-    /// state's growth or its application does not fit, and before it
-    /// projects when the projection does not. These counts and the exact
-    /// peak are the evidence; a peak at or under the room never fails, as
-    /// the budget refuses past it.
+    /// before it is made. Opus's r2c-3c-10 finding 4: what the preservation
+    /// keeps is reserved before the projection is given back, so no gap
+    /// opens between the merge and its caller. With room for all of it, it
+    /// preserves, and the most it reserved is exactly what the state gained,
+    /// the copy, the projection and what the preservation keeps: never
+    /// applying and projecting at once. With room for less, it refuses, too
+    /// large, before it loads the contribution when the state's growth or
+    /// its application does not fit, before it projects when the projection
+    /// does not, and once it projected when what it keeps does not. These
+    /// counts and the exact peak are the evidence; a peak at or under the
+    /// room never fails, as the budget refuses past it.
     #[test]
     fn a_merge_reserves_what_it_works_with_before_it_allocates_it() {
         let canonical = Ydoc::wire();
@@ -1117,7 +1307,14 @@ mod tests {
         let stored = stored(&[&added]);
         let (full, bytes) = (copied(&canonical).full_state, added.len() as u64);
         let growth = bytes * YDOC_BYTES_PER_ENCODED_BYTE;
-        let applying = bytes * APPLYING_BYTES_PER_UPDATE_BYTE + 2 * (full + bytes);
+        // What the merge keeps of the ranges it was asked to delete, when the
+        // update carries deletions.
+        let deleting = match Integration::of(&added).expect("an update").deleted_ranges() {
+            0 => 0,
+            deleted => (Deletes::asked(&copied(&canonical).state).ranges() + deleted) * DELETED_RANGE_BYTES,
+        };
+        let applying =
+            bytes * (APPLYING_BYTES_PER_UPDATE_BYTE + INTEGRATION_BYTES_PER_UPDATE_BYTE) + 2 * (full + bytes);
         let copy = outbox(1, &added).kept_bytes();
         let projection = (full + bytes) * PROJECTION_BYTES_PER_ENCODED_BYTE;
         assert!(projection > applying);
@@ -1152,17 +1349,25 @@ mod tests {
             (preserved, stopped, loads, proofs.checks_passed(), limit.peak_reserved_bytes())
         };
 
-        let (preserved, stopped, loads, _, peak) = merged(1 << 30);
+        let (preserved, stopped, loads, checks, peak) = merged(1 << 30);
         let preserved = preserved.expect("room for all of it");
-        assert_eq!((preserved.status, stopped, loads), (PreservationStatus::Complete, None, 1));
+        assert_eq!((preserved.status, stopped, loads, checks), (PreservationStatus::Complete, None, 1, 6));
         assert_eq!(preserved.merged, [outbox(1, &added)]);
-        assert_eq!(peak, growth + copy + projection, "the projection, not beside the application");
+        let retained = preserved.retained_bytes() as u64;
+        // What the merge holds until it ends.
+        let held = growth + deleting + copy;
+        assert_eq!(
+            peak,
+            held + projection + retained,
+            "the projection beside what the preservation keeps, not beside the application"
+        );
 
         for (room, what, (loaded, passed)) in [
             (growth - 1, "the state's growth", (0, 2)),
             (growth + applying - 1, "its application", (0, 2)),
-            (growth + applying + copy - 1, "the merged list's copy", (1, 3)),
-            (growth + copy + projection - 1, "the projection", (1, 3)),
+            (held + applying - 1, "the merged list's copy", (1, 3)),
+            (held + projection - 1, "the projection", (1, 3)),
+            (held + projection + retained - 1, "what the preservation keeps", (1, 6)),
         ] {
             let (preserved, stopped, loads, checks, _) = merged(room);
             assert!(matches!(preserved, Err(ApplicationError::Cancelled)), "{what}: {preserved:?}");
@@ -1171,11 +1376,15 @@ mod tests {
         }
     }
 
-    /// Opus's r2c-3c-8 check 1: under the default limit, a lineage merged
-    /// with 50,000 small contributions proves alone. Every one merges, the
-    /// preservation is complete with its Markdown, and its artifact, naming
-    /// every one, encodes within its cap. What the window and validation of
-    /// such a hold reserve is pinned where they run.
+    /// Opus's r2c-3c-8 check 1: under the default limit and deadline, a
+    /// lineage merged with 50,000 small contributions proves alone. Every
+    /// one merges, the preservation is complete with its Markdown, and its
+    /// artifact, naming every one, encodes within its cap. The tail's work
+    /// is reserved as the window keeps it. Opus's r2c-3c-10 finding 2: each
+    /// contribution's merge costs its own size, so the whole merge ends
+    /// within the deadline; its wall time is printed. A real released hold
+    /// of 50,000 stored entries, its window and validation included, is
+    /// pinned in `released_protection_tests`.
     #[test]
     fn fifty_thousand_contributions_prove_alone_under_the_default_limit() {
         use dohc_engine_domain::VersionedTextStore;
@@ -1219,6 +1428,20 @@ mod tests {
             .enumerate()
             .map(|(index, update)| outbox(index as i64 + 1, update))
             .collect();
+        let tail = ProtectedTail {
+            namespace: "namespace".into(),
+            activation_id: "activation".into(),
+            release: None,
+            coverage: RetainedCoverage::Unproven(UnprovenCommitment::of(covered.clone()).unwrap()),
+        };
+        // Built before the proof, as validation would have built it.
+        let tails = vec![(
+            tail.clone(),
+            TailWork {
+                contributions: covered.clone(),
+                contradictions: Vec::new(),
+            },
+        )];
         let binding = ReleasedLineageBinding {
             workspace_id: "workspace".into(),
             main_version_id: "main".into(),
@@ -1235,35 +1458,30 @@ mod tests {
                 relay_seq: 1,
             },
             head_digest: hex_sha256(&canonical.encode_full_state()),
-            tails: Arc::new(ProtectedTails::Listed(vec![ProtectedTail {
-                namespace: "namespace".into(),
-                activation_id: "activation".into(),
-                release: None,
-                coverage: RetainedCoverage::Unproven(UnprovenCommitment::of(covered.clone()).unwrap()),
-            }])),
+            tails: Arc::new(ProtectedTails::Listed(vec![tail])),
         };
         let proofs: HeldProofs<(), ()> = HeldProofs::new(HeldProofLimit::default());
-        proofs.set_proof_deadline(std::time::Duration::from_secs(3_600));
         let HeldProofAdmission::Started(run, _wait) = proofs.admit(&store, "workspace", ()).unwrap() else {
             panic!("a free workspace starts its proof")
         };
         let mut answer = None;
+        let started = std::time::Instant::now();
         run.prove(|job| {
             let stop = job.stop();
             let preserved = store
-                .read_with(|conn| {
-                    preserve_lineage(conn, &key, &lineage, vec![("namespace".into(), covered.clone())], stop)
-                })
+                .read_with(|conn| preserve_lineage(conn, &key, &lineage, tails, stop))
                 .map(|preservation| preservation.expect("the lineage loads"));
-            let artifact = preserved.as_ref().ok().map(|preservation| {
-                stop.reserve(preservation.retained_bytes())
-                    .and_then(|()| ContributionArtifact::of(&binding, preservation, stop))
-            });
+            let artifact = preserved
+                .as_ref()
+                .ok()
+                .map(|preservation| ContributionArtifact::of(&binding, preservation, stop));
             answer = Some((preserved, artifact, job.stopped()));
             ((), 0)
         });
+        let elapsed = started.elapsed();
+        println!("FIFTY_THOUSAND_MERGE_WALL_MS {}", elapsed.as_millis());
         let (preserved, artifact, stopped) = answer.expect("the proof ran");
-        assert_eq!(stopped, None, "it fits alone");
+        assert_eq!(stopped, None, "it fits alone within {HELD_PROOF_DEADLINE:?}: it took {elapsed:?}");
         let preserved = preserved.unwrap();
         assert_eq!(preserved.status, PreservationStatus::Complete, "{:?}", preserved.findings);
         assert_eq!(preserved.merged, covered, "every one merged");

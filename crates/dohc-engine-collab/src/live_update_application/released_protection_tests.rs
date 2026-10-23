@@ -88,7 +88,15 @@ fn unproven_of(f: &Fixture, tail: &ProtectedTail) -> Vec<RetainedContribution> {
 fn tail_work(f: &Fixture, tail: &ProtectedTail) -> released_protection::TailWork {
     f.store
         .read_with(|conn| {
-            retirement::unproven_retained(conn, &tail.namespace, &f.key, &f.binding.lineage_claim_id, &tail.activation_id, Stop::NEVER)
+            retirement::unproven_retained(
+                conn,
+                &tail.namespace,
+                &f.key,
+                &f.binding.lineage_claim_id,
+                &tail.activation_id,
+                Stop::NEVER,
+                &mut Stop::NEVER.working(),
+            )
         })
         .unwrap()
 }
@@ -1150,7 +1158,9 @@ fn window_of(conn: &rusqlite::Connection, f: &Fixture, stop: Stop<'_>) -> Result
 /// alone, no activation; with room for the window and the tail's
 /// activation, that activation and nothing its validation reads, an
 /// activation of its chain among them, and it passes no validation check.
-/// Each refusal is too large. These counts are the evidence.
+/// Each refusal is too large. These counts are the evidence. Opus's
+/// r2c-3c-10 finding 4: the tail's work is kept before its validation is
+/// given back, so room for all of it holds both at once.
 #[test]
 fn a_held_proof_reserves_the_window_and_each_activation_before_it_reads_them() {
     let (f, _, _, _) = released_at_b();
@@ -1166,7 +1176,14 @@ fn a_held_proof_reserves_the_window_and_each_activation_before_it_reads_them() {
         assert_eq!(within.stopped, Some(ProofStop::TooLarge), "{what}");
         assert_eq!((within.windows, within.activations, within.checks), read, "{what}: refused before it read");
     }
-    let within = within_memory(&f, window + activation + validation, |conn, stop| window_of(conn, &f, stop));
+    let Ok(Some(released_protection::WindowWork::Listed(listed))) =
+        within_memory(&f, 1 << 40, |conn, stop| window_of(conn, &f, stop)).answer
+    else {
+        panic!("one tail validates")
+    };
+    let [(tail, work)] = &listed[..] else { panic!("one tail: {}", listed.len()) };
+    let kept = released_protection::tail_kept_bytes(tail, work);
+    let within = within_memory(&f, window + activation + validation + kept, |conn, stop| window_of(conn, &f, stop));
     assert!(matches!(within.answer, Ok(Some(released_protection::WindowWork::Listed(_)))), "room for all of it");
     assert_eq!(within.stopped, None);
     assert!(within.activations > 1, "its validation read its chain's activations: {}", within.activations);
@@ -1175,7 +1192,9 @@ fn a_held_proof_reserves_the_window_and_each_activation_before_it_reads_them() {
 /// Opus's r2c-3c-8 finding 2: what reading and validating a tail holds is
 /// given back once its work is kept, so a window of three tails reserves at
 /// its peak the window, what the earlier tails kept and one tail's
-/// validation, never every tail's validation at once.
+/// validation, never every tail's validation at once. Opus's r2c-3c-10
+/// finding 4: a tail's work is kept before its validation is given back,
+/// so the peak holds that tail's kept work beside its validation.
 #[test]
 fn a_window_of_many_tails_reserves_its_largest_tail_not_their_sum() {
     let (mut f, _, _, _) = released_at_b();
@@ -1196,17 +1215,17 @@ fn a_window_of_many_tails_reserves_its_largest_tail_not_their_sum() {
     let kept: Vec<u64> = listed.iter().map(|(tail, work)| released_protection::tail_kept_bytes(tail, work)).collect();
     let validations: Vec<u64> = tails.iter().map(|(activation, validation)| activation + validation).collect();
     let peak = (0..namespaces.len())
-        .map(|nth| window + kept[..nth].iter().sum::<u64>() + validations[nth])
-        .chain([window + kept.iter().sum::<u64>()])
+        .map(|nth| window + kept[..=nth].iter().sum::<u64>() + validations[nth])
         .max()
         .unwrap();
     assert_eq!(within.peak, peak, "the largest tail's validation, beside what the others kept");
     assert!(within.peak < window + validations.iter().sum::<u64>(), "never their sum");
 }
 
-/// Opus's r2c-3c-8 check 1: under the default limit, a held document of
-/// more than 5 MiB of full state proves alone: current, its preservation
-/// complete with its Markdown, and its contribution artifact within its cap.
+/// Opus's r2c-3c-8 check 1: under the default limit and deadline, a held
+/// document of more than 5 MiB of full state proves alone: current, its
+/// preservation complete with its Markdown, and its contribution artifact
+/// within its cap. Its wall time is printed.
 #[test]
 fn a_held_document_of_five_mebibytes_proves_alone_under_the_default_limit() {
     let (mut f, _, _, _) = released_at_b();
@@ -1230,27 +1249,8 @@ fn a_held_document_of_five_mebibytes_proves_alone_under_the_default_limit() {
         })
         .unwrap();
     let binding = protected(&f).expect("protected");
-    let proofs: HeldProofs<(), ()> = HeldProofs::new(HeldProofLimit::default());
-    proofs.set_proof_deadline(std::time::Duration::from_secs(3_600));
-    let HeldProofAdmission::Started(run, _wait) = proofs.admit(&f.store, "workspace", ()).unwrap() else {
-        panic!("a free workspace starts its proof")
-    };
-    let mut answer = None;
-    run.prove(|job| {
-        let stop = job.stop();
-        let inspected = f.store.read_with(|conn| inspect_held(conn, &binding, stop));
-        let artifact = match &inspected {
-            Ok(HeldInspection::Current(preservation)) => Some(
-                stop.reserve(preservation.retained_bytes())
-                    .and_then(|()| ContributionArtifact::of(&binding, preservation, stop)),
-            ),
-            _ => None,
-        };
-        answer = Some((inspected, artifact, job.stopped()));
-        ((), 0)
-    });
-    let (inspected, artifact, stopped) = answer.expect("the proof ran");
-    assert_eq!(stopped, None, "it fits alone");
+    let (inspected, artifact, stopped) = held_proof(&f, &binding, "FIVE_MEBIBYTE_PROOF_WALL_MS");
+    assert_eq!(stopped, None, "it fits alone within {HELD_PROOF_DEADLINE:?}");
     let HeldInspection::Current(preservation) = inspected.unwrap() else {
         panic!("the binding was just derived")
     };
@@ -1259,4 +1259,163 @@ fn a_held_document_of_five_mebibytes_proves_alone_under_the_default_limit() {
     assert!(preserved.markdown.contains("The last paragraph."));
     assert!(preserved.full_state.len() >= 5 << 20);
     assert!(matches!(artifact, Some(Ok(Some(_)))), "its artifact is within its cap");
+}
+
+/// What one held proof of `binding` answers under the default limit and
+/// deadline: its inspection, its artifact once it is current, and why it
+/// stopped. Its wall time is printed under `label`.
+#[allow(clippy::type_complexity)]
+fn held_proof(
+    f: &Fixture,
+    binding: &ReleasedLineageBinding,
+    label: &str,
+) -> (
+    Result<HeldInspection, ApplicationError>,
+    Option<Result<Option<ContributionArtifact>, ApplicationError>>,
+    Option<ProofStop>,
+) {
+    let proofs: HeldProofs<(), ()> = HeldProofs::new(HeldProofLimit::default());
+    let HeldProofAdmission::Started(run, _wait) = proofs.admit(&f.store, "workspace", ()).unwrap() else {
+        panic!("a free workspace starts its proof")
+    };
+    let mut answer = None;
+    let started = std::time::Instant::now();
+    run.prove(|job| {
+        let stop = job.stop();
+        let inspected = f.store.read_with(|conn| inspect_held(conn, binding, stop));
+        let artifact = match &inspected {
+            Ok(HeldInspection::Current(preservation)) => Some(ContributionArtifact::of(binding, preservation, stop)),
+            _ => None,
+        };
+        answer = Some((inspected, artifact, job.stopped()));
+        ((), 0)
+    });
+    println!("{label} {}", started.elapsed().as_millis());
+    answer.expect("the proof ran")
+}
+
+/// The fixture released with nothing Carried, then `count` drafts of its
+/// lineage queued and never sent, each one paragraph appended to its head,
+/// written in one transaction with their bytes: retained work no proof
+/// covers. With the binding that protects it and the work its tail commits
+/// to, in canonical order.
+fn released_with_drafts(count: usize) -> (Fixture, ReleasedLineageBinding, Vec<RetainedContribution>) {
+    let mut f = released_without_carried();
+    let writer = Ydoc::wire();
+    writer.apply(&local_doc(&f).encode_full_state()).unwrap();
+    let updates: Vec<Vec<u8>> = (0..count)
+        .map(|index| writer.richdoc_append_paragraph(&format!("Draft {index}")))
+        .collect();
+    let (outbox_id, sequence): (String, i64) = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT e.outbox_id,max(e.sequence) FROM owner_ydoc_outbox_entries e
+                 JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE o.lineage_claim_id=?1",
+                [&f.binding.lineage_claim_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            let mut entry = tx
+                .prepare(
+                    "INSERT INTO owner_ydoc_outbox_entries(outbox_id,sequence,append_key,delivery_id,update_digest,
+                       update_blob_digest,byte_length,created_at_ms,pending,result_pending_bytes,
+                       result_oldest_entry_at_ms,result_state)
+                     VALUES (?1,?2,?3,?3,?4,?4,?5,20,1,?5,20,'active')",
+                )
+                .map_err(write_sql)?;
+            for (index, update) in updates.iter().enumerate() {
+                let sha = hex_sha256(update);
+                dohc_engine_storage::put_binary_blob_with_sha(tx, update, &sha)?;
+                entry
+                    .execute(rusqlite::params![
+                        outbox_id,
+                        sequence + 1 + index as i64,
+                        format!("draft-{index:06}"),
+                        sha,
+                        update.len() as i64,
+                    ])
+                    .map_err(write_sql)?;
+            }
+            Ok::<_, ApplicationError>(())
+        })
+        .unwrap();
+    let drafts: Vec<RetainedContribution> = updates
+        .iter()
+        .enumerate()
+        .map(|(index, update)| RetainedContribution::Outbox {
+            outbox_id: outbox_id.clone(),
+            sequence: sequence + 1 + index as i64,
+            delivery_id: format!("draft-{index:06}"),
+            update_digest: hex_sha256(update),
+            authors: RetainedAuthors::credited(None, None).unwrap(),
+        })
+        .collect();
+    let binding = protected(&f).expect("its drafts protect it");
+    assert_eq!(coverage_of(binding.clone()), [committed(drafts.clone())], "the tail commits to every draft");
+    (f, binding, drafts)
+}
+
+/// Sol's r2c-3c-10 finding 2: under the default limit and deadline, a real
+/// released hold of 50,000 stored entries proves alone through the whole
+/// inspection: the window, each activation, validating every entry, the
+/// tail's commitment, the merge, the projection and the artifact, each
+/// reserved as it runs. Every draft merges, the preservation is complete
+/// with its Markdown, and its artifact, naming every one, is within its
+/// cap. Its wall time is printed.
+#[test]
+fn a_released_hold_of_fifty_thousand_entries_proves_alone_under_the_default_limit() {
+    let (f, binding, drafts) = released_with_drafts(50_000);
+    let (inspected, artifact, stopped) = held_proof(&f, &binding, "FIFTY_THOUSAND_ENTRY_PROOF_WALL_MS");
+    assert_eq!(stopped, None, "it fits alone within {HELD_PROOF_DEADLINE:?}");
+    let HeldInspection::Current(preservation) = inspected.unwrap() else {
+        panic!("the binding was just derived")
+    };
+    assert_eq!(preservation.status, PreservationStatus::Complete, "{:?}", preservation.findings);
+    assert_eq!(preservation.merged, drafts, "every draft merged");
+    let markdown = &preservation.preserved.as_ref().expect("its Markdown").markdown;
+    assert!(markdown.contains("Draft 0") && markdown.contains("Draft 49999"));
+    let artifact = artifact.expect("encoded").unwrap().expect("within its cap");
+    assert_eq!(artifact.merged, UnprovenCommitment::of_listed(&drafts));
+}
+
+/// Sol's r2c-3c-10 finding 1: each contradiction validation keeps, its
+/// namespace among it, is reserved before it is made. A tail in a namespace
+/// of 1,000 bytes, whose 1,000 drafts each declare an agent that does not
+/// validate, reserves at its peak, beside the window, the other tail's
+/// kept work and its own activation and validation, every contradiction's
+/// namespace once as validation makes it and again in the work it keeps.
+#[test]
+fn a_tail_reserves_each_contradiction_before_it_keeps_it() {
+    let long = "n".repeat(1_000);
+    let (mut f, _, _) = released_with_drafts(1_000);
+    write_unchecked(&mut f, &format!("PRAGMA foreign_keys=OFF;
+        UPDATE owner_ydoc_outbox_entries SET agent_declaration_json='{{\"agentId\":\"\",\"onBehalfOf\":null,\"depth\":0}}'
+        WHERE delivery_id LIKE 'draft-%';
+        CREATE TEMP TABLE copied AS SELECT * FROM live_owner_activations WHERE activation_id='adoption';
+        UPDATE copied SET relay_database_namespace='{long}';
+        INSERT INTO live_owner_activations SELECT * FROM copied"));
+    let (window, tails) = window_workloads(&f, &["namespace", long.as_str()]);
+    let within = within_memory(&f, 1 << 40, |conn, stop| window_of(conn, &f, stop));
+    let Ok(Some(released_protection::WindowWork::Listed(listed))) = within.answer else {
+        panic!("two tails validate")
+    };
+    let named: Vec<&str> = listed.iter().map(|(tail, _)| tail.namespace.as_str()).collect();
+    assert_eq!(named, ["namespace", long.as_str()]);
+    let (tail, work) = &listed[1];
+    assert_eq!(tail.coverage, RetainedCoverage::Invalid);
+    let found = work.contradictions.len() as u64;
+    assert!(found >= 1_000, "every draft contradicts its tail: {found}");
+    assert!(work.contradictions.iter().all(|contradiction| contradiction.namespace.as_deref() == Some(long.as_str())));
+    let kept: Vec<u64> = listed.iter().map(|(tail, work)| released_protection::tail_kept_bytes(tail, work)).collect();
+    let (activation, validation) = tails[1];
+    assert!(
+        within.peak >= window + kept[0] + activation + validation + found * long.len() as u64 + kept[1],
+        "{} reserved, its contradictions' namespaces {} bytes",
+        within.peak,
+        found * long.len() as u64
+    );
 }
