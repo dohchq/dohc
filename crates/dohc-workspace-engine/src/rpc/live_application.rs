@@ -237,7 +237,8 @@ impl OutputGuard for HostOutputGuard {
         if !self.read || !self.host.connection.is_current() {
             return None;
         }
-        if !self.host.current(&self.host.connection) {
+        // `retire` cancels `retired` before it retires the owner, so check both.
+        if self.host.retired.is_cancelled() || !self.host.current(&self.host.connection) {
             return Some(WireError::new(
                 ErrorCode::WorkspaceUnavailable,
                 "held document answer retired",
@@ -2148,6 +2149,29 @@ mod tests {
         drop(owner);
         assert!(read.withheld_error().is_none());
         assert!(acknowledgement.withheld_error().is_none());
+    }
+
+    /// `Host::retire` cancels `retired` before it retires the owner. A held
+    /// read the writer withholds in that gap is still answered.
+    #[tokio::test]
+    async fn held_read_answers_once_its_host_starts_retiring() {
+        let (_scratch, service, owner, workspace, _registration, _) = fixture().await;
+        let workspace = WorkspaceHandle(workspace);
+        let read = service
+            .live_host_read_guard(&RequestContext::unbounded(), &workspace)
+            .unwrap();
+        let host = lock(&service.live_applications)
+            .hosts
+            .get(&workspace)
+            .unwrap()
+            .clone();
+        host.retired.cancel();
+        assert!(owner.handle().is_current());
+        assert!(host.current(&host.connection));
+        assert_eq!(
+            read.withheld_error().map(|error| error.code),
+            Some(ErrorCode::WorkspaceUnavailable)
+        );
     }
 
     async fn settle_queued_interruption(deadline: bool) {
