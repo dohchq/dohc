@@ -816,7 +816,7 @@ describe("share-web sessions", () => {
     expect(readCalls).toBe(2);
   });
 
-  it("refuses when a held read completes under a replaced capability", async () => {
+  it("answers a held read that completes under a renewed capability as retryable", async () => {
     let now = 1_000;
     let resolveHeldRead: ((response: Response) => void) | undefined;
     let markHeldReadStarted: (() => void) | undefined;
@@ -890,8 +890,8 @@ describe("share-web sessions", () => {
     }), { status: 401 }));
     const stale = await held;
     expect({ status: stale.status, body: await stale.text() }).toEqual({
-      status: 404,
-      body: shareWebRefusalBody,
+      status: 503,
+      body: JSON.stringify(linkRefusalBody("link_unavailable")),
     });
     expect(staleBodyCancelled).toBe(true);
 
@@ -1668,6 +1668,61 @@ describe("share-web relay call", () => {
     );
     expect(answer.headers.has("set-cookie")).toBe(false);
     await answer.body?.cancel();
+  });
+
+  it("answers a follow or post its session's renewal superseded as retryable, and a revoked link's as ended", async () => {
+    let now = 1_000, capabilityByte = 1, revoked = false, gated = true;
+    const held: Array<() => void> = [];
+    const calls: string[] = [];
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      publicHosts: new Set([HOST]),
+      nowMs: () => now,
+      newProfileSecret: () => PROFILE_ALPHA,
+      fetchRelay: async (relayRequest) => {
+        const pathname = new URL(relayRequest.url).pathname;
+        if (pathname === "/sync/link-exchange" || pathname === "/sync/link-refresh") {
+          if (revoked) return new Response(null, { status: 404 });
+          return Response.json({ ok: true, grantId: "grant-renewal",
+            capabilityToken: Buffer.alloc(32, capabilityByte++).toString("base64url"), capabilityExpiresAtMs: now + 900_000 });
+        }
+        if (pathname === "/sync/link/share") return Response.json({ ok: true, access: "edit" });
+        calls.push(`${relayRequest.method} ${relayRequest.headers.get("authorization")}`);
+        if (gated) await new Promise<void>((resolve) => held.push(resolve));
+        return Response.json(relayRequest.method === "POST" ? { ok: true, message: { messageId: "link-message:1" } } : { ok: true, messages: [], nextCursor: 0 });
+      },
+    });
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const { session } = (await exchanged.json()) as { session: string };
+    const headers = { cookie: cookieHeader(cookiePair(exchanged), profileCookiePair(exchanged)), "x-dohc-link-session": session };
+    const follow = () => handler(request("/api/view/chat/messages?channelWireId=wire&since=0&hold=30000", { headers }));
+    const post = () => handler(request("/api/view/chat/messages", { method: "POST",
+      headers: { ...headers, origin: `https://${HOST}`, "sec-fetch-site": "same-origin", "content-type": "application/json" },
+      body: JSON.stringify({ channelWireId: "wire", body: "Hi", idempotencyKey: "post-1" }) }));
+    // Another call inside the refresh window renews the capability while both are held.
+    const renewWhileHeld = async (...pending: Promise<Response>[]) => {
+      await vi.waitFor(() => expect(held).toHaveLength(pending.length));
+      now += 600_001;
+      await (await handler(request("/api/view/meta", { headers }))).body?.cancel();
+      for (const release of held.splice(0)) release();
+      return await Promise.all(pending);
+    };
+    const first = Buffer.alloc(32, 1).toString("base64url"), renewed = Buffer.alloc(32, 2).toString("base64url");
+
+    for (const answer of await renewWhileHeld(follow(), post())) {
+      expect(answer.status).toBe(503);
+      expect(await answer.json()).toEqual(linkRefusalBody("link_unavailable"));
+      expect(answer.headers.has("set-cookie")).toBe(false);
+    }
+    gated = false;
+    expect([(await follow()).status, (await post()).status]).toEqual([200, 200]);
+    expect(calls.slice(-2)).toEqual([`GET LinkCapability ${renewed}`, `POST LinkCapability ${renewed}`]);
+    expect(calls.slice(0, 2).sort()).toEqual([`GET LinkCapability ${first}`, `POST LinkCapability ${first}`]);
+
+    // A link revoked during the hold has no session left to try again with.
+    gated = true;
+    revoked = true;
+    expect((await renewWhileHeld(follow())).map((answer) => answer.status)).toEqual([404]);
   });
 });
 
@@ -3846,11 +3901,13 @@ describe("share-web protected discussion proxy", () => {
     expect(new Set(publicLimitBytes)).toEqual(new Set([
       '413:{"ok":false,"state":"limit-reached"}',
     ]));
-    for (const response of responses.slice(1)) {
-      expect({ status: response.status, body: await response.text() }).toEqual({
-        status: 404,
-        body: shareWebRefusalBody,
-      });
+    // A refusal body that can't be read says nothing about the link.
+    const malformed = relayResponses.length - 2;
+    for (const [index, response] of responses.entries()) {
+      if (index === 0) continue;
+      expect({ status: response.status, body: await response.text() }).toEqual(index === malformed
+        ? { status: 503, body: JSON.stringify(linkRefusalBody("link_unavailable")) }
+        : { status: 404, body: shareWebRefusalBody });
     }
     for (const response of responses) {
       expectSecurityHeaders(response);

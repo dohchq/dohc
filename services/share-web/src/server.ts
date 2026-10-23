@@ -1216,8 +1216,14 @@ export function createShareWebApplication({
       }
       return result;
     };
-    const superseded = (): Response | null =>
-      call.ifSessionChanged && !current() ? refused() : null;
+    // A renewal replaces the capability without ending the grant, so a
+    // retryable call it superseded tries again instead of ending the link.
+    const superseded = (): Response | null => {
+      if (!call.ifSessionChanged || current()) return null;
+      const renewed = call.retryable &&
+        sessions.get(browser.discriminator, browser.token, nowMs())?.grantId === browser.session.grantId;
+      return renewed ? jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}) : refused();
+    };
     const release = call.limiter
       ? call.limiter.acquire(sessionKey(browser.discriminator, browser.token), browser.session.grantId)
       : () => {};
@@ -1269,7 +1275,11 @@ export function createShareWebApplication({
         return answer(await (call.ok ?? relayJson)(relayResponse, holdSlot, bounded.request.signal));
       }
       if ([400, 403, 409, 413, 429].includes(relayResponse.status) && relayResponse.headers.get("content-type")?.split(";", 1)[0] === "application/json") {
-        const value = await readBoundedJson(relayResponse, 4096, bounded.request.signal).catch(() => null);
+        // An unreadable refusal says nothing about the link when the call is retryable.
+        const value = await readBoundedJson(relayResponse, 4096, bounded.request.signal).catch((error: unknown) => {
+          if (call.retryable) throw error;
+          return null;
+        });
         const detail = parseLinkRefusal(value, relayResponse.status);
         if (detail) return answer(jsonResponse(linkRefusalBody(detail), {status: relayResponse.status}));
         const translated = await call.refusal?.(Response.json(value, {status: relayResponse.status}));

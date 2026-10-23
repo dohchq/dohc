@@ -52,8 +52,8 @@ async function stack(options: Parameters<typeof testStorage>[0] = {}) {
   const shareId = String(((await shared.json()) as { shareId: string }).shareId);
   const relayPaths: string[] = [];
   // "METHOD /path" of relay calls whose next answer is lost after the relay made it:
-  // before its response arrives, or with its body broken.
-  const lost = new Map<string, "connection" | "body">();
+  // before its response arrives, with its body broken, or replaced by a JSON 429 whose body breaks.
+  const lost = new Map<string, "connection" | "body" | "refusal">();
   const app = createShareWebApplication({
     relayUrl: "http://relay.test", publicRelayUrl: "https://relay.test", relayExchangeKey: RELAY_EXCHANGE_KEY,
     publicHosts: new Set([HOST]), publicEditRelease: { version: 1 }, linkLive: { publicOrigin: ORIGIN, ...liveLimits },
@@ -65,8 +65,9 @@ async function stack(options: Parameters<typeof testStorage>[0] = {}) {
       if (!loss) return answered;
       await answered.body?.cancel();
       if (loss === "connection") throw new TypeError("connection reset");
-      return new Response(new ReadableStream({ start: (controller) => controller.error(new TypeError("connection reset")) }),
-        { status: answered.status, headers: answered.headers });
+      const broken = new ReadableStream({ start: (controller) => controller.error(new TypeError("connection reset")) });
+      return loss === "body" ? new Response(broken, { status: answered.status, headers: answered.headers })
+        : new Response(broken, { status: 429, headers: { "content-type": "application/json" } });
     },
   });
   const send = (path: string, init: RequestInit = {}) => {
@@ -262,16 +263,23 @@ it("answers a lost share answer as retryable, so neither a browser nor an agent 
   const s = await stack();
   const link = await s.link("read-write");
   const b = await browser(s, link.secret);
-  s.lost.set("GET /sync/link/share", "connection");
-  const lost = await b.meta();
-  expect(lost.status).toBe(503);
-  expect(await lost.json()).toMatchObject({ ok: false, code: "link_unavailable" });
-  expect(await (await b.meta()).json()).toMatchObject({ channel: { channelWireId: CHANNEL, access: "read-write" } });
+  for (const loss of ["connection", "refusal"] as const) {
+    s.lost.set("GET /sync/link/share", loss);
+    const lost = await b.meta();
+    expect(lost.status, loss).toBe(503);
+    expect(await lost.json()).toMatchObject({ ok: false, code: "link_unavailable" });
+    expect(await (await b.meta()).json()).toMatchObject({ channel: { channelWireId: CHANNEL, access: "read-write" } });
+  }
+  // A successful answer still streams, so its status arrives before its body breaks.
+  s.lost.set("GET /sync/link/share", "body");
+  const streamed = await b.meta();
+  expect(streamed.status).toBe(200);
+  await expect(streamed.text()).rejects.toThrow();
 
   // An agent's request fails as a whole instead of listing tools without the channel's,
-  // whether the answer is lost before it arrives or partway through.
+  // whether the answer is lost before it arrives, partway through, or in a refusal's body.
   const mcp = await agent(s, link.secret);
-  for (const loss of ["connection", "body"] as const) {
+  for (const loss of ["connection", "body", "refusal"] as const) {
     s.lost.set("GET /sync/link/share", loss);
     await expect(mcp.listTools(), loss).rejects.toThrow(/"code":"link_unavailable"/u);
     expect((await mcp.listTools()).tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(["dohc_read_channel", "dohc_post_channel"]));
