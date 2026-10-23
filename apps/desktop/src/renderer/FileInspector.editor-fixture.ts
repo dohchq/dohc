@@ -3,6 +3,7 @@ import { act, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import { AUTOSAVE_DEBOUNCE_MS } from "./useAutosavedTextDraft";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLimits";
 
 // A text view's test id appears one commit before CodeMirror exists: the view
 // creates its EditorView — and with it `.cm-content` — in a passive effect. A
@@ -135,8 +136,9 @@ export function useAutoAdvancingFakeTimers(): void {
   vi.useFakeTimers({ shouldAdvanceTime: true });
 }
 
+// Past the WYSIWYG limit, so the note opens as the read preview.
 export const LARGE_READ_MODE_FILLER = Array.from(
-  { length: 96 },
+  { length: Math.ceil(WYSIWYG_MARKDOWN_THRESHOLD_BYTES / 800) },
   (_, index) => `Paragraph ${index + 1}. ${"body ".repeat(160)}`,
 ).join("\n\n");
 

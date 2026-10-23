@@ -62,6 +62,14 @@ vi.mock("./editor/artifactSource", () => ({
 }));
 import {forgedSources} from '../../../../packages/ydoc-projection/src/artifact-witness.fixture.ts';
 import { rememberLossyNoteVerdictForTests } from "./editor/lossyNote";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLimits";
+
+// These tests need a note past the WYSIWYG limit, not the limit itself. A
+// small limit keeps their notes small, so opening one stays fast on a busy host.
+vi.mock("../workspaces/workspaceTextLimits", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../workspaces/workspaceTextLimits")>()),
+  WYSIWYG_MARKDOWN_THRESHOLD_BYTES: 64 * 1024,
+}));
 setupFileInspectorTests();
 
 // "View markdown as source" on the ENGINE path: the toggle shows a READ-ONLY
@@ -1877,7 +1885,7 @@ describe("engine markdown source view", () => {
       "",
       LARGE_READ_MODE_FILLER,
     ].join("\n");
-    expect(bigBody.length).toBeGreaterThan(64 * 1024);
+    expect(bigBody.length).toBeGreaterThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
     const { bridgeMock } = makeEngineBridge(bigBody);
     bridgeMock.openEngineYDocSession.mockResolvedValue({
       available: false,
@@ -1944,7 +1952,7 @@ describe("engine markdown source view", () => {
       "",
       filler,
     ].join("\n");
-    expect(firstBody.length).toBeGreaterThan(64 * 1024);
+    expect(firstBody.length).toBeGreaterThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
     const { bridgeMock } = makeEngineBridge(firstBody);
     let reads = 0;
     bridgeMock.readWorkspaceText.mockImplementation(async () => {
@@ -2003,8 +2011,9 @@ describe("engine markdown source view", () => {
 
   it("retires a read-mode heading observer when a newer switch arm replaces it", async () => {
     const scrollIntoView = stubScrollSpy("scrollIntoView");
+    // Past the WYSIWYG limit, so the first version opens as the read preview.
     const firstBody = Array.from(
-      { length: 201 },
+      { length: Math.max(201, Math.ceil(WYSIWYG_MARKDOWN_THRESHOLD_BYTES / 450)) },
       (_, index) =>
         `# First ${index + 1}\n\n${"first document padding ".repeat(20)}\n\n`,
     ).join("");
@@ -3123,10 +3132,10 @@ describe("engine markdown source view", () => {
   });
 
   it("resyncs an editable mode entered while the switch reread is pending", async () => {
-    const firstBody = `# Old version\n\n${"x".repeat(64 * 1024)}`;
+    const firstBody = `# Old version\n\n${"x".repeat(WYSIWYG_MARKDOWN_THRESHOLD_BYTES)}`;
     const secondBody = "# New version\n\nReplacement paragraph.\n";
     const typedBody = `${firstBody}\nTyped while the reread was pending.`;
-    expect(firstBody.length).toBeGreaterThan(64 * 1024);
+    expect(firstBody.length).toBeGreaterThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
     const { bridgeMock } = makeEngineBridge(firstBody);
     let releaseSecondRead!: () => void;
     let reads = 0;

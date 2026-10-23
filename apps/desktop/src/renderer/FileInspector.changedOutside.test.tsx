@@ -7,6 +7,7 @@ import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { saveProblem } from "@dohc/workspace-contracts/save-state";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLimits";
 import type { EngineDocInput } from "./collab/engineDocLease";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
@@ -31,6 +32,13 @@ const engine = vi.hoisted(() => ({
   sharedLease: false,
 }));
 const retryKeys = engine.retryKeys;
+// The large lossy note needs a note past the WYSIWYG limit, not the limit
+// itself. A small limit keeps it small, so opening it stays fast on a busy host.
+vi.mock("../workspaces/workspaceTextLimits", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../workspaces/workspaceTextLimits")>()),
+  WYSIWYG_MARKDOWN_THRESHOLD_BYTES: 64 * 1024,
+}));
+
 vi.mock("./collab/useEngineDoc", async () => {
   const { useSyncExternalStore } = await import("react");
   const subscribe = (listener: () => void) => {
@@ -291,6 +299,7 @@ describe("FileInspector when an open note changed outside dohc", () => {
     const filler = "A paragraph that makes this note larger than read mode's limit.\n\n".repeat(1_100);
     const versionA = `# Readme\n\n<details>\n\nVersion A.\n</details>\n\n${filler}`;
     const versionB = `# Readme\n\n<details>\n\nVersion B, from another app.\n</details>\n\n${filler}`;
+    expect(versionA.length).toBeGreaterThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
     let disk = { text: versionA, contentHash: "a".repeat(64) };
     const bridge = makeBridge();
     vi.mocked(bridge.readWorkspaceText).mockImplementation(async () => ({ ...disk, truncated: false }));

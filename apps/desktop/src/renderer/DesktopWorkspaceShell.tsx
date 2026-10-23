@@ -4059,9 +4059,13 @@ export function DesktopWorkspaceShell(props: {
     function onKeyDown(event: KeyboardEvent) {
       // A stopped workspace answers no workspace shortcut.
       if (storeUpdateRequiredRef.current) return;
-      const blockingModal = hasBlockingModal();
       const platform = bridge().platform;
-      const command = blockingModal ? matchShellShortcutChord(event, platform) : matchShellShortcut(event, platform);
+      // Typing matches no chord, so a keystroke never pays for the page-wide
+      // modal query, which grows with a long note's elements.
+      const chord = matchShellShortcutChord(event, platform);
+      if (!chord) return;
+      const blockingModal = hasBlockingModal();
+      const command = blockingModal ? chord : matchShellShortcut(event, platform);
       if (!command) return;
       // A modal owns the keyboard while it is visible. Native/main-owned
       // shortcuts such as Close Window and zoom never reach this listener,
