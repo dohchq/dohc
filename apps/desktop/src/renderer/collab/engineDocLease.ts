@@ -153,6 +153,9 @@ type EngineDocOpenOutcome =
     }
   | { kind: "unavailable" }
   | { kind: "capture-held" }
+  // A close released the file, but capture has not recorded the version
+  // changed outside dohc yet.
+  | { kind: "outside-write-waiting" }
   // Their own kinds, not flags on "unavailable": only the unqualified outcome
   // means "fall back to the plain editor". Collapsing these outcomes would put
   // distinct user states and retry rules behind one flag.
@@ -327,6 +330,9 @@ export type EngineDocLeaseSnapshot = {
     retry?: () => void;
   } | null;
   permanentFailure: { token: number } | null;
+  // The file changed outside dohc while this session held it, and whether
+  // the document then had edits no save carried.
+  changedOutside: { token: number; unsaved: boolean } | null;
   // The drafts holding edits a history replacement set aside, once the new
   // history shows.
   replacedDraftIds: readonly number[];
@@ -340,6 +346,8 @@ export type EngineDocLeaseSnapshot = {
 type EngineDocSession = {
   subscribe: (listener: () => void) => () => void;
   getSnapshot: () => EngineDocLeaseSnapshot;
+  // Edits this editor made that main has not confirmed, asked at the moment.
+  unsavedEditsPending: () => boolean;
   start: () => void;
   dispose: () => Promise<void>;
   whenClosed: () => Promise<void>;
@@ -369,6 +377,7 @@ function emptyLeaseSnapshot(requestKey: string): EngineDocLeaseSnapshot {
     deletion: null,
     readOnlyTransition: null,
     permanentFailure: null,
+    changedOutside: null,
     replacedDraftIds: [],
     sceneRecoveryAssets: null,
   };
@@ -543,10 +552,24 @@ function createEngineDocSession(
     publish((current) => ({ ...current, saveState: state, saveError: error, authorCapacity }));
   };
 
+  // A change to the document from any origin, an agent's edit through main
+  // included, after main said nothing was unsaved.
+  let changedSinceCleanSignal = false;
+  const unsavedEditsPending = (): boolean =>
+    deliveryPending || localSeq.current > confirmedLocalSeq || changedSinceCleanSignal;
+  // The file changed outside dohc. Edits main has not confirmed are unsaved
+  // whatever main counted, so the document must not reload over them.
+  const noteChangedOutside = (unsaved: boolean): void => {
+    const current = snapshot.changedOutside;
+    if (current?.token === token && (current.unsaved || !unsaved)) return;
+    publish((latest) => ({ ...latest, changedOutside: { token, unsaved } }));
+  };
+
   const onDeliveryPendingChange = (pending: boolean): void => {
     deliveryPending = pending;
     if (pending) {
       pendingSavedSeq = null;
+      if (snapshot.changedOutside?.token === token) noteChangedOutside(true);
       return;
     }
     if (
@@ -1035,6 +1058,7 @@ function createEngineDocSession(
       captureDeletion(doc, cause);
       return;
     }
+    if (event.changedOutside) noteChangedOutside(event.changedOutside.unsaved || unsavedEditsPending());
     // Deletion is terminal for this session. A settle/update already in
     // flight can report after main's deletion notice, but it no longer
     // describes a path that exists and must not repaint this state.
@@ -1095,6 +1119,10 @@ function createEngineDocSession(
     detachSaveObserver?.();
     const onUpdate = () => {
       if (disposed) return;
+      if (snapshot.changedOutside?.token === token && !snapshot.changedOutside.unsaved) {
+        changedSinceCleanSignal = true;
+        noteChangedOutside(true);
+      }
       if (writesRefused.current) {
         if (recovery.snapshotBytes === null && deletionPending) {
           // A replacement installed a fresh recovery slot while the path
@@ -1308,6 +1336,7 @@ function createEngineDocSession(
     getSnapshot() {
       return snapshot;
     },
+    unsavedEditsPending,
     start() {
       if (started) return;
       started = true;
@@ -1355,6 +1384,8 @@ function createEngineDocSession(
             // autosave would race the session it still binds.
             if (bound.captureHeld) {
               setOutcome({ kind: "capture-held" });
+            } else if (bound.outsideWriteWaiting) {
+              setOutcome({ kind: "outside-write-waiting" });
             } else if (bound.notInVersion) {
               setOutcome({ kind: "not-in-version" });
             } else if (bound.sharedWaiting) {
@@ -1601,6 +1632,9 @@ function createEngineDocLease(
     },
     getSnapshot() {
       return snapshot;
+    },
+    unsavedEditsPending() {
+      return activeSession?.unsavedEditsPending() ?? false;
     },
     startAfter(barrier) {
       if (started) return;

@@ -6797,6 +6797,9 @@ export const engineYDocSaveOperations = {
 export const OpenEngineYDocSessionResult = z.object({
   available: z.boolean(),
   captureHeld: z.boolean().optional(),
+  // A close released the file, but capture has not recorded the version
+  // changed outside dohc yet. Opening again waits for it.
+  outsideWriteWaiting: z.boolean().optional(),
   initialUpdate: ENGINE_YDOC_INITIAL_UPDATE.optional(),
   objectId: z.string().min(1).optional(),
   versionId: z.string().min(1).optional(),
@@ -6972,6 +6975,9 @@ export const EngineYDocSaveStateEvent = z.object({
   path: z.string(),
   state: SaveStateSchema,
   access: z.enum(["read-only", "deleted", "object-changed"]).optional(),
+  // The file changed outside dohc while this session held it. `unsaved` is
+  // whether the document had edits no save carried.
+  changedOutside: z.object({ unsaved: z.boolean() }).strict().optional(),
   // A settle failed to write the file, and why when a check can tell. Absent
   // for an edit refusal, an author-capacity refusal, and an error no settle
   // reported.

@@ -116,6 +116,14 @@ export type UseEngineDoc = {
   // A local update exceeded the permanent transport limit, or main refused a
   // delivery outright. The rejected document is retained for recovery only.
   permanentFailureWhileEditing: boolean;
+  // The file changed outside dohc while this session held it: "saved" when
+  // the document had no unsaved edits then, "unsaved" when it had.
+  changedOutside: "saved" | "unsaved" | null;
+  // A close released the file, but capture has not recorded the version
+  // changed outside dohc yet, so the document did not open again.
+  outsideWriteWaiting: boolean;
+  // Asked right before a reload: edits main has not confirmed yet.
+  unsavedEditsPending: () => boolean;
   // The live session became read-only after it opened. Unconfirmed local
   // edits are retained for recovery; a clean access stop creates no draft.
   readOnlyWhileEditing: boolean;
@@ -309,6 +317,11 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   const permanentFailureWhileEditing =
     outcome?.kind === "bound" &&
     settled?.permanentFailure?.token === outcome.token;
+  const outsideWriteWaiting = outcome?.kind === "outside-write-waiting";
+  const changedOutside =
+    outcome?.kind === "bound" && settled?.changedOutside?.token === outcome.token
+      ? settled.changedOutside.unsaved ? "unsaved" : "saved"
+      : null;
   const recoveryAssets =
     settled?.sceneRecoveryAssets != null &&
     outcome?.kind === "bound" &&
@@ -340,6 +353,9 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     deletedDraftId,
     recoveryAssets,
     permanentFailureWhileEditing,
+    changedOutside,
+    outsideWriteWaiting,
+    unsavedEditsPending: () => committedRequestRef.current?.lease?.unsavedEditsPending() ?? false,
     readOnlyWhileEditing,
     readOnlyDraftId,
     readOnlyCause,
