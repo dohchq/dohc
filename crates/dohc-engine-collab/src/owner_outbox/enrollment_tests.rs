@@ -818,6 +818,66 @@ fn enrolled_with_unsent_draft() -> (
 }
 
 #[test]
+fn a_refused_queue_reads_its_accepted_checkpoint_as_its_own_part() {
+    use super::super::{
+        read_pending_page, OwnerOutboxPageResult, OwnerOutboxReadCursor, OwnerOutboxReadPart,
+    };
+    let (_dir, mut store, _observed, _checkpoint, _unsent, _host) = enrolled_with_unsent_draft();
+    let outbox_id: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outbox_id FROM owner_ydoc_outbox_entries WHERE append_key='unsent'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    super::super::quarantine(
+        &mut store,
+        "workspace",
+        OwnerOutboxQuarantineInput {
+            outbox_id: outbox_id.clone(),
+            reason: "invalid-update".into(),
+            observed_binding: None,
+        },
+        20,
+    )
+    .unwrap();
+    let (digest, accepted): (String, Vec<u8>) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.checkpoint_digest,blob.bytes FROM ydoc_owner_bindings b JOIN binary_blobs blob ON blob.sha256=b.checkpoint_digest",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap();
+    let read = |cursor: Option<OwnerOutboxReadCursor>, budget: usize| {
+        match read_pending_page(&store, "workspace", &outbox_id, cursor, budget).unwrap() {
+            OwnerOutboxPageResult::Page(page) => page,
+            OwnerOutboxPageResult::ReadChanged => panic!("unchanged snapshot"),
+        }
+    };
+    let header = read(None, 4096);
+    let raw: serde_json::Value = serde_json::from_slice(&header.bytes).unwrap();
+    assert_eq!(raw["checkpointDigest"], serde_json::json!(digest));
+    let mut cursor = Some(OwnerOutboxReadCursor {
+        snapshot: header.cursor.snapshot.clone(),
+        part: OwnerOutboxReadPart::Checkpoint,
+        sequence: 0,
+        offset: 0,
+    });
+    let mut bytes = Vec::new();
+    while let Some(next) = cursor {
+        let page = read(Some(next), 7);
+        assert_eq!(page.digest, digest);
+        bytes.extend(page.bytes);
+        cursor = page.next_cursor;
+    }
+    assert_eq!(bytes, accepted);
+}
+
+#[test]
 fn explicit_recovery_keeps_old_writes_refused_and_installs_only_the_host_checkpoint() {
     use super::super::draft::{append_draft_in_tx, write_states_in, OwnerDraftWrite};
     let (dir, mut store, observed, checkpoint, unsent, host) = enrolled_with_unsent_draft();

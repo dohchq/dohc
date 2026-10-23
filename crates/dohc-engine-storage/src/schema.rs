@@ -161,6 +161,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "ydoc_recovery_decisions",
     "owner_ydoc_outboxes",
     "owner_ydoc_outbox_entries",
+    "owner_ydoc_outbox_refusals",
     "owner_live_stops",
     "share_view_file_lane",
     "replication_pending_conflict_bundles",
@@ -794,6 +795,7 @@ mod tests {
         for table in [
             "owner_ydoc_outboxes",
             "owner_ydoc_outbox_entries",
+            "owner_ydoc_outbox_refusals",
             "ydoc_owner_base_sources",
             "ydoc_owner_activation_sources",
         ] {

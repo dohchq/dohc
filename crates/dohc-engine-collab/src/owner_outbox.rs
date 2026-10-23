@@ -290,6 +290,8 @@ pub enum OwnerOutboxReadPart {
     Base,
     EntryHeader,
     Update,
+    /// The lineage's accepted checkpoint. Only a recovery copy asks for it.
+    Checkpoint,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1075,8 +1077,8 @@ pub fn read_pending_page(
             sequence: 0,
             offset: 0,
         });
-        use OwnerOutboxReadPart::{Base, EntryHeader, Header, Update};
-        if matches!(cursor.part, Header | Base) != (cursor.sequence == 0)
+        use OwnerOutboxReadPart::{Base, Checkpoint, EntryHeader, Header, Update};
+        if matches!(cursor.part, Header | Base | Checkpoint) != (cursor.sequence == 0)
             || cursor.sequence >= parent.next_sequence
         {
             return Err(OwnerOutboxError::InvalidInput("invalid read part sequence"));
@@ -1103,6 +1105,10 @@ pub fn read_pending_page(
                 header["pendingEntryCount"] = count.into();
                 header["firstEntryCursor"] = serde_json::to_value(next_entry(0)?)
                     .map_err(|_| OwnerOutboxError::Corrupt)?;
+                // Outside the snapshot: acceptances advance it while the queue waits.
+                header["checkpointDigest"] = accepted_checkpoint_in(&tx, &parent.binding)?
+                    .map(|(digest, _)| digest)
+                    .into();
                 let bytes = page_json(&header)?;
                 let (total, digest, bytes) = slice_header(bytes, cursor.offset, max_bytes)?;
                 (total, digest, bytes, following_part(Base))
@@ -1111,19 +1117,25 @@ pub fn read_pending_page(
                 let bytes = slice_blob(&tx, &parent.base_blob_digest, base_length, cursor.offset, max_bytes)?;
                 (base_length, parent.base_update_digest, bytes, next_entry(0)?)
             }
+            Checkpoint => {
+                let (digest, length) = accepted_checkpoint_in(&tx, &parent.binding)?
+                    .ok_or(OwnerOutboxError::InvalidInput("no accepted checkpoint"))?;
+                let bytes = slice_blob(&tx, &digest, length, cursor.offset, max_bytes)?;
+                (length, digest, bytes, None)
+            }
             EntryHeader | Update => {
                 let entry = tx.query_row(
-                    "SELECT append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,agent_declaration_json,automation_declaration_json,person_edit \
+                    "SELECT append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,agent_declaration_json,automation_declaration_json,person_edit,native_source_json \
                      FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND sequence=?2 AND pending=1",
                     params![outbox_id, cursor.sequence], |row| Ok((
                         row.get::<_, String>(0)?, row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?, row.get::<_, String>(3)?,
                         row.get::<_, i64>(4)?, row.get::<_, i64>(5)?,
                         row.get::<_, Option<String>>(6)?, row.get::<_, Option<String>>(7)?,
-                        row.get::<_, Option<bool>>(8)?,
+                        row.get::<_, Option<bool>>(8)?, row.get::<_, Option<String>>(9)?,
                     )),
                 ).optional().map_err(read_sql)?.ok_or(OwnerOutboxError::InvalidInput("invalid read entry"))?;
-                let (append_key, delivery_id, digest, blob_digest, byte_length, created_at_ms, declaration_json, automation_json, person_edit) = entry;
+                let (append_key, delivery_id, digest, blob_digest, byte_length, created_at_ms, declaration_json, automation_json, person_edit, native_json) = entry;
                 if digest != blob_digest || byte_length <= 0 {
                     return Err(OwnerOutboxError::Corrupt);
                 }
@@ -1141,6 +1153,14 @@ pub fn read_pending_page(
                     }
                     if let Some(declaration) = stored_automation_declaration(automation_json)? {
                         header["automationDeclaration"] = serde_json::to_value(declaration).map_err(|_| OwnerOutboxError::Corrupt)?;
+                    }
+                    // Who this computer recorded as the native update's author. Never authority.
+                    let native = native_json
+                        .map(|json| serde_json::from_str::<OwnerOutboxSource>(&json))
+                        .transpose()
+                        .map_err(|_| OwnerOutboxError::Corrupt)?;
+                    if let Some(source) = native.as_ref().and_then(OwnerOutboxSource::native) {
+                        header["nativeSource"] = serde_json::to_value(source).map_err(|_| OwnerOutboxError::Corrupt)?;
                     }
                     let bytes = page_json(&header)?;
                     let (total, digest, bytes) = slice_header(bytes, cursor.offset, max_bytes)?;
@@ -1198,6 +1218,35 @@ fn slice_header(
         hex_sha256(&bytes),
         bytes[start..end].to_vec(),
     ))
+}
+
+/// The digest and length of the accepted state this lineage's pending entries
+/// build on, while this computer still holds its binding.
+fn accepted_checkpoint_in(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+) -> Result<Option<(String, i64)>, OwnerOutboxError> {
+    let digest: Option<String> = conn
+        .query_row(
+            "SELECT checkpoint_digest FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+            params![binding.workspace_id, binding.main_version_id, binding.object_id, binding.lineage_claim_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(read_sql)?;
+    let Some(digest) = digest else {
+        return Ok(None);
+    };
+    let length: i64 = conn
+        .query_row(
+            "SELECT byte_length FROM binary_blobs WHERE sha256=?1",
+            [&digest],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(read_sql)?
+        .ok_or(OwnerOutboxError::Corrupt)?;
+    Ok(Some((digest, length)))
 }
 
 fn slice_blob(
@@ -1992,6 +2041,56 @@ mod tests {
     }
 
     #[test]
+    fn entry_headers_carry_the_recorded_native_source_and_an_unbound_queue_has_no_checkpoint() {
+        let (_dir, mut store) = store("owner-native-source-read");
+        let appended = append(&mut store, "workspace-1", input("native", b"a", 1)).expect("append");
+        let source = OwnerOutboxNativeSource {
+            binding: binding(),
+            adoption_id: "adoption-1".to_owned(),
+            native_sequence: 3,
+            update_digest: appended.update_digest.clone(),
+            origin: OwnerOutboxNativeOrigin::NativeUpdate {
+                actor_origin_id: Some("automation-1".to_owned()),
+                actor_kind: Some("automation".to_owned()),
+                on_behalf_of: Some("person-1".to_owned()),
+                chain_depth: Some(1),
+                recorded_at_ms: 5,
+            },
+        };
+        let json = serde_json::to_string(&source).expect("source");
+        committed(
+            store
+                .write_with(&NoFaults, |tx| -> Result<usize, OwnerOutboxError> {
+                    tx.execute(
+                        "UPDATE owner_ydoc_outbox_entries SET native_source_json=?2 WHERE outbox_id=?1",
+                        params![appended.outbox_id, json],
+                    )
+                    .map_err(write_sql)
+                })
+                .expect("recorded source"),
+        )
+        .expect("recorded source committed");
+        let header = page(&store, &appended.outbox_id, None, 4096);
+        let raw: serde_json::Value = serde_json::from_slice(&header.bytes).expect("header");
+        assert!(raw["checkpointDigest"].is_null());
+        let first: OwnerOutboxReadCursor =
+            serde_json::from_value(raw["firstEntryCursor"].clone()).expect("first entry");
+        let entry = page(&store, &appended.outbox_id, Some(first), 4096);
+        let entry: serde_json::Value = serde_json::from_slice(&entry.bytes).expect("entry header");
+        assert_eq!(entry["nativeSource"], serde_json::to_value(&source).expect("source json"));
+        let checkpoint = OwnerOutboxReadCursor {
+            snapshot: header.cursor.snapshot.clone(),
+            part: OwnerOutboxReadPart::Checkpoint,
+            sequence: 0,
+            offset: 0,
+        };
+        assert!(matches!(
+            read_pending_page(&store, "workspace-1", &appended.outbox_id, Some(checkpoint), 4096),
+            Err(OwnerOutboxError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
     fn changed_append_acknowledgment_or_quarantine_invalidates_a_partial_read() {
         for mutation in ["append", "acknowledge", "ack-append", "quarantine"] {
             let (_dir, mut store) = store("owner-page-changed");
@@ -2760,6 +2859,53 @@ mod tests {
         assert_eq!(recorded_refusals(&store, &outbox), 2);
         acknowledge(&mut store, "workspace-1", &outbox, &[receipt(&pending.entries[0])])
             .expect("accepted");
+        assert_eq!(recorded_refusals(&store, &outbox), 0);
+    }
+
+    #[test]
+    fn a_moved_head_and_a_released_queue_keep_no_earlier_refusal() {
+        let (_dir, mut store, outbox, pending) = refused_queue("owner-outbox-refusal-cleanup");
+        let [first, second] = [0, 1].map(|index| pending.entries[index].delivery_id.clone());
+        retry(&mut store, "workspace-1", try_again(&outbox)).expect("try again");
+        acknowledge(&mut store, "workspace-1", &outbox, &[receipt(&pending.entries[0])])
+            .expect("first head accepted");
+        // A refusal still kept for the earlier head.
+        committed(
+            store
+                .write_with(&NoFaults, |tx| -> Result<usize, OwnerOutboxError> {
+                    tx.execute(
+                        "INSERT INTO owner_ydoc_outbox_refusals(outbox_id,delivery_id,refusal_key) VALUES(?1,?2,'refusal-first')",
+                        params![outbox, first],
+                    )
+                    .map_err(write_sql)
+                })
+                .expect("earlier refusal"),
+        )
+        .expect("earlier refusal committed");
+        record(&mut store, &outbox, &second, "refusal-second");
+        let kept: Vec<String> = store
+            .read_with(|conn| {
+                let mut statement = conn.prepare(
+                    "SELECT delivery_id FROM owner_ydoc_outbox_refusals WHERE outbox_id=?1",
+                )?;
+                let rows = statement.query_map([&outbox], |row| row.get(0))?;
+                rows.collect::<Result<Vec<_>, rusqlite::Error>>()
+            })
+            .expect("kept refusals");
+        assert_eq!(kept, vec![second]);
+        // Release deletes the queue's rows; the refusals go with them.
+        committed(
+            store
+                .write_with(&NoFaults, |tx| -> Result<(), OwnerOutboxError> {
+                    tx.execute("DELETE FROM owner_ydoc_outbox_entries WHERE outbox_id=?1", [&outbox])
+                        .map_err(write_sql)?;
+                    tx.execute("DELETE FROM owner_ydoc_outboxes WHERE outbox_id=?1", [&outbox])
+                        .map_err(write_sql)?;
+                    Ok(())
+                })
+                .expect("released"),
+        )
+        .expect("release committed");
         assert_eq!(recorded_refusals(&store, &outbox), 0);
     }
 

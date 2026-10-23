@@ -90,6 +90,7 @@ function harness() {
   const ownerLiveQuarantines = vi.fn<Dependencies["ownerLiveQuarantines"]>(() => []);
   const retryOwnerLiveQuarantine = vi.fn<Dependencies["retryOwnerLiveQuarantine"]>(async () => undefined);
   const saveOwnerLiveRecoveryCopy = vi.fn<Dependencies["saveOwnerLiveRecoveryCopy"]>(async () => ({copyPath: "notes/a (recovered).md", packagePath: "notes/a (recovered).dohc-recovery.json"}));
+  const retryOwnerLiveRelease = vi.fn<Dependencies["retryOwnerLiveRelease"]>(async () => undefined);
   const ownerLiveStop=vi.fn<Dependencies["ownerLiveStop"]>(async (_workspace,action,path) => action==="clear" || action==="retired" ? undefined : ({state:action==="release" || !enrolled ? "released" : "requested",relayDatabaseNamespace:enrolled ? "relay" : "",retirementOwed:action!=="release",document:{mainVersionId:"main",objectId:"object",currentPath:path},binding:enrolled ? {workspaceId,mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),currentPath:path,selectorPaths:[path],restoreFenceGeneration:0} : null,
     ...(action==="release" ? {materialized:true} : {})}));
   const ownerHandlers = createRelaySharesIpcHandlers<Sender, Event, Workspace, Operation>({
@@ -105,6 +106,7 @@ function harness() {
     listOwnerLiveStops: localStops,
     ownerLiveQuarantines,
     retryOwnerLiveQuarantine,
+    retryOwnerLiveRelease,
     saveOwnerLiveRecoveryCopy,
     sharesChanged,
     reconcileReceivedShares,
@@ -133,6 +135,7 @@ function harness() {
     ownerLiveStop,
     ownerLiveQuarantines,
     retryOwnerLiveQuarantine,
+    retryOwnerLiveRelease,
     saveOwnerLiveRecoveryCopy,
     retireRenderer: () => { rendererCurrent = false; },
     retirePhysical: () => { physicalCurrent = false; },
@@ -359,15 +362,21 @@ describe("owner live document enrollment", () => {
       await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "kept"});
     });
 
-    // A Stop that finished but could not write the file: Stop again writes it, without asking the server.
-    it("writes the file again when the owner stops a document whose edits were not written", async () => {
-      const h = harness(); h.ownerLiveQuarantines.mockReturnValue([{...quarantine, incident: "release:a:0", recovery: "not-written"}]);
-      h.ownerLiveStop.mockImplementation(released(undefined, true, "released"));
-      await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "recovered"});
-      expect(h.ownerLiveStop.mock.calls.map(call => call[1])).toEqual(["request", "release"]);
+    // A Stop that finished but could not write the file: Try again settles
+    // that release again by the record's document, for the path the record
+    // names even after a rename. It never asks for a new Stop or the server.
+    it("writes the file again from the unwritten release alone, and never starts a new Stop", async () => {
+      const h = harness(); h.ownerLiveQuarantines.mockReturnValue([{...quarantine, path: "old name.md", incident: "release:a:0", recovery: "not-written"}]);
+      const settled = await released(undefined, true)(h.workspace, "release", "live.md");
+      h.retryOwnerLiveRelease.mockResolvedValueOnce(settled).mockResolvedValueOnce({...settled!, materialized: false}).mockResolvedValueOnce(undefined);
+      const tryAgain = () => h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "old name.md"});
+      await expect(tryAgain()).resolves.toEqual({keptEdits: "recovered"});
+      await expect(tryAgain()).resolves.toEqual({keptEdits: "kept"});
+      // The engine holds no such release any more: nothing is left to write.
+      await expect(tryAgain()).resolves.toEqual({keptEdits: "none"});
+      expect(h.retryOwnerLiveRelease.mock.calls).toEqual([[h.workspace, "object"], [h.workspace, "object"], [h.workspace, "object"]]);
+      expect(h.ownerLiveStop).not.toHaveBeenCalled();
       expect(h.request).not.toHaveBeenCalled();
-      h.ownerLiveStop.mockImplementation(released(undefined, false, "released"));
-      await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).resolves.toEqual({keptEdits: "kept"});
     });
 
     it("saves a recovery copy for the workspace's own path, and only there", async () => {

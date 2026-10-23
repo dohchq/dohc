@@ -169,13 +169,15 @@ export async function atomicCreateFile(
     rm: remove = rm,
     allowDirectWrite = false,
     platform = process.platform,
+    temporary = `${destination}.tmp-${process.pid}-${randomUUID()}`,
   }: Pick<DurableFileOperations, "open" | "platform"> & {
     link?: (source: string, destination: string) => Promise<void>;
     rm?: typeof rm;
     allowDirectWrite?: boolean;
+    /** A sibling of `destination` that nothing else uses. */
+    temporary?: string;
   } = {},
 ): Promise<boolean> {
-  const temporary = `${destination}.tmp-${process.pid}-${randomUUID()}`;
   const writeAndFlush = async (handle: SyncHandle & { writeFile(data: string): Promise<void> }) => {
     try {
       await handle.writeFile(data);

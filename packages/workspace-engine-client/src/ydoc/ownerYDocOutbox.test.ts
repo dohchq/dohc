@@ -415,6 +415,86 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     await expect(read(result)).rejects.toThrow(TypeError);
   });
 
+  function nativeSourceOf(result: ReturnType<typeof pendingResult>, origin: Record<string, unknown>) {
+    return {binding: result.binding, adoptionId: "adoption-1", nativeSequence: 4, updateDigest: result.entries[0]!.updateDigest, origin};
+  }
+
+  it.each([["human", "local-person"], ["agent", "trip-agent"], ["automation", "automation-1"]])(
+    "reads the %s a native entry's journal recorded", async (actorKind, actorOriginId) => {
+      const result = pendingResult();
+      const nativeSource = nativeSourceOf(result, {kind: "nativeUpdate", actorOriginId, actorKind,
+        onBehalfOf: actorKind === "human" ? null : "local-person", chainDepth: actorKind === "human" ? 0 : 1, recordedAtMs: 7});
+      Object.assign(result.entries[0]!, {nativeSource});
+      expect((await read(result)).entries[0]?.nativeSource).toEqual(nativeSource);
+    });
+
+  it("reads an adoption seed's source and leaves an entry without one absent", async () => {
+    const result = pendingResult();
+    result.entries.push({...result.entries[0]!, sequence: 3, deliveryId: "delivery-3", appendKey: "append-3"});
+    result.pendingBytes = 6;
+    const nativeSource = nativeSourceOf(result, {kind: "adoptionSeed"});
+    Object.assign(result.entries[0]!, {nativeSource});
+    const pending = await read(result);
+    expect(pending.entries[0]?.nativeSource).toEqual(nativeSource);
+    expect(pending.entries[1]).not.toHaveProperty("nativeSource");
+  });
+
+  it.each([
+    {kind: "nativeUpdate"},
+    {kind: "foreign"},
+    {kind: "adoptionSeed", note: 1},
+    {kind: "nativeUpdate", actorOriginId: "", actorKind: null, onBehalfOf: null, chainDepth: null, recordedAtMs: 1},
+  ])("refuses a malformed native origin %j", async origin => {
+    const result = pendingResult();
+    Object.assign(result.entries[0]!, {nativeSource: nativeSourceOf(result, origin)});
+    await expect(read(result)).rejects.toThrow(TypeError);
+  });
+
+  it("refuses a native source recorded for other bytes", async () => {
+    const result = pendingResult();
+    Object.assign(result.entries[0]!, {nativeSource: {...nativeSourceOf(result, {kind: "adoptionSeed"}), updateDigest: "f".repeat(64)}});
+    await expect(read(result)).rejects.toThrow("Invalid native source.");
+  });
+
+  function checkpointPages(checkpoint: Buffer) {
+    const snapshot = "a".repeat(64);
+    const offsets = [0, 4].filter(offset => offset < checkpoint.length);
+    return offsets.map((offset, index) => ({kind: "page", snapshot, part: "checkpoint", sequence: 0, offset, totalBytes: checkpoint.length,
+      digest: sha(checkpoint), bytesBase64: checkpoint.subarray(offset, offset + 4).toString("base64"),
+      nextCursor: offsets[index + 1] === undefined ? null : {snapshot, part: "checkpoint", sequence: 0, offset: offsets[index + 1]!}}));
+  }
+
+  function cursorReader(responses: ReturnType<typeof pages>) {
+    const parts: string[] = [];
+    const client = outbox({async sendRequest(request) {
+      const cursor = (request.params as {cursor?: {part: string; sequence: number; offset: number}}).cursor;
+      const page = cursor === undefined ? responses[0] : responses.find(page => page.part === cursor.part && page.sequence === cursor.sequence && page.offset === cursor.offset);
+      if (!page) throw new Error("Cursor is outside the fixture.");
+      parts.push(page.part);
+      return {id: request.id, result: page};
+    }});
+    return {client, parts};
+  }
+
+  it("reads a recovery's checkpoint after the whole queue, and none for a queue without a binding", async () => {
+    const checkpoint = Buffer.from([9, 8, 7, 6, 5, 4]);
+    const bound = {...pendingResult(), state: "quarantined", quarantineReason: "invalid-update", checkpointDigest: sha(checkpoint)};
+    const recovering = cursorReader([...pages(bound, 5), ...checkpointPages(checkpoint)]);
+    const recovery = await recovering.client.readRecovery("outbox-1");
+    expect(recovery.checkpoint).toEqual(new Uint8Array(checkpoint));
+    expect(recovery.entries[0]?.update).toEqual(new Uint8Array([2, 3, 4]));
+    expect(recovering.parts.slice(-2)).toEqual(["checkpoint", "checkpoint"]);
+    expect(recovering.parts.indexOf("checkpoint")).toBeGreaterThan(recovering.parts.lastIndexOf("update"));
+    const withoutBinding = {...pendingResult(), checkpointDigest: null};
+    const unbound = cursorReader(pages(withoutBinding, 5));
+    expect((await unbound.client.readRecovery("outbox-1")).checkpoint).toBeNull();
+    expect(unbound.parts).not.toContain("checkpoint");
+    // Delivery never reads it.
+    const delivering = cursorReader([...pages(bound, 5), ...checkpointPages(checkpoint)]);
+    expect(await delivering.client.readPending("outbox-1")).not.toHaveProperty("checkpoint");
+    expect(delivering.parts).not.toContain("checkpoint");
+  });
+
   it("discards a changed snapshot and does not automatically retry", async () => {
     const responses = pages(pendingResult());
     const last = responses.length - 1;

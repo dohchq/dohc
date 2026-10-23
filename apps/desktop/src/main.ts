@@ -4917,6 +4917,8 @@ const serverAccountDeletion = createServerAccountDeletion({
   },
 });
 
+const documentProjection = createDocumentProjectionWorker();
+
 const { startDesktopCliServer } = createDesktopCliServer({
   shareCopy: shareCopyReader,
   access: workspaceId => accessCliQueries(accessOwner, work => withPhysicalWorkspaceOperation(workspaceId, work)),
@@ -5019,7 +5021,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   },
   trashItem: (path) => shell.trashItem(path),
   markDeletedUnderPath: (attachmentId, path) => engineYDocSessionIpc.fileMutationPort().markDeletedUnderPath(attachmentId, path),
-  documentProjection: createDocumentProjectionWorker(),
+  documentProjection,
   chatWrites,
   startCliServer,
   stateDir,
@@ -5193,6 +5195,7 @@ const desktopEngine = createDesktopEngine({
   },
   onRefusalsChanged: notifyNoticesChanged,
   ownerLiveReleases: createUnwrittenReleases(() => join(stateDir(), "owner-live-releases.json")),
+  documentProjection,
   serverOwnerDelivery: createServerOwnerConnection({stateDir, workspaces: listWorkspaces,
     onRefusalsChanged: workspaceId => notifyRenderer({workspaceId}),
     credentials: () => cachedCredentials ? {value: cachedCredentials, signal: ownerDeliveryCredentialLifetime.signal} : null,
@@ -6555,11 +6558,10 @@ function registerIpcHandlers(): void {
           const request={id:0,workspace:session.workspace,deadlineMs:30_000};
           if (action==="request") return client.ownerYDocStopRequest(request,path);
           if (action==="retired") {await client.ownerYDocStopRetired(request,binding!);return undefined;}
-          if (action==="clear") {await client.ownerYDocStopClear(request,path);return undefined;}
           return undefined;
         });
         if (action==="release" && binding && "lineageClaimId" in binding) result=await desktopEngine.releaseOwnerLiveStop(workspace,binding,acceptedCursor!);
-        if (action==="clear") await desktopEngine.forgetOwnerLiveRelease(workspace.workspaceId,path);
+        if (action==="clear") await desktopEngine.clearOwnerLiveStop(workspace,path);
       } finally {
         // Each step of a Stop, failed or not, and a Resume change which refused
         // queues remain and how: a requested Stop shows as waiting at once.
@@ -6574,6 +6576,7 @@ function registerIpcHandlers(): void {
     },
     ownerLiveQuarantines: workspace => desktopEngine.ownerLiveQuarantines(workspace.workspaceId),
     retryOwnerLiveQuarantine: (workspace,objectId,incident) => desktopEngine.retryOwnerLiveQuarantine(workspace,objectId,incident),
+    retryOwnerLiveRelease: (workspace,objectId) => desktopEngine.retryOwnerLiveRelease(workspace,objectId),
     saveOwnerLiveRecoveryCopy: (workspace,path) => desktopEngine.saveOwnerLiveRecoveryCopy(workspace,path),
     sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); invalidateHistoryLabels(workspaceId); shareRosters.sharesChanged(workspaceId); },
     reconcileReceivedShares,

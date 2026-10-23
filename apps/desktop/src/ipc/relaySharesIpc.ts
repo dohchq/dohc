@@ -122,6 +122,8 @@ export function createRelaySharesIpcHandlers<
   // Documents whose edits the server refused for good, as this computer last read them.
   ownerLiveQuarantines(workspace: Workspace): readonly OwnerLiveQuarantine[];
   retryOwnerLiveQuarantine(workspace: Workspace, objectId: string, incident: string): Promise<void>;
+  // Settles again a release that took refused edits but could not write the file. Undefined when no release remains.
+  retryOwnerLiveRelease(workspace: Workspace, objectId: string): Promise<OwnerLiveStop | undefined>;
   saveOwnerLiveRecoveryCopy(workspace: Workspace, path: string): Promise<SaveOwnerLiveRecoveryCopyResult>;
   // A grant changed on the relay. Null when the change names no workspace.
   sharesChanged(workspaceId: string | null): void;
@@ -227,17 +229,17 @@ export function createRelaySharesIpcHandlers<
   const ownerLiveDocumentAction = async (stop: boolean, input: {workspaceId: string; path: string}, operation: Operation): Promise<StopOwnerLiveDocumentResult> => {
     operation.assertCurrent();assertOriginalWorkspace(operation.workspace);
     return withOwnerLiveStopTransition(input.workspaceId,input.path,async (): Promise<StopOwnerLiveDocumentResult> => {
+      // Stop again writes the file a finished release could not, from that release alone.
+      const unwritten=stop && dependencies.ownerLiveQuarantines(operation.workspace).find(row => row.path===input.path && row.recovery==="not-written");
+      if (unwritten) {
+        const released=await dependencies.retryOwnerLiveRelease(operation.workspace,unwritten.objectId);
+        operation.assertCurrent();
+        return {keptEdits:released ? keptEditsOf(released) : "none"};
+      }
       const local=stop ? await dependencies.ownerLiveStop(operation.workspace,"request",input.path) : undefined;
       operation.assertCurrent();
-      const quarantine=local && dependencies.ownerLiveQuarantines(operation.workspace).find(row => row.objectId===local.document.objectId);
-      const quarantined=quarantine!==undefined;
-      if (stop && local && !local.retirementOwed) {
-        // Stop again writes the file a finished release could not.
-        if (quarantine?.recovery!=="not-written" || !local.binding) return {keptEdits:quarantined ? "kept" : "none"};
-        const released=await dependencies.ownerLiveStop(operation.workspace,"release",input.path,local.binding,0);
-        operation.assertCurrent();
-        return {keptEdits:keptEditsOf(released)};
-      }
+      const quarantined=local!==undefined && dependencies.ownerLiveQuarantines(operation.workspace).some(row => row.objectId===local.document.objectId);
+      if (stop && local && !local.retirementOwed) return {keptEdits:quarantined ? "kept" : "none"};
       let result: unknown;
       try {
         const {credentials,credentialGeneration}=await remoteForWorkspace(operation.workspace);

@@ -49,8 +49,8 @@ export type LiveDocumentsDialogProps = {
   onStopped?: (path: string, keptEdits: "recovered" | "kept") => void;
   /** The row a notice opened this dialog for. */
   reveal?: string;
-  /** Writes a row's kept edits next to its file. The shell reports the result. */
-  saveRecoveryCopy?: (workspaceId: string, path: string) => void;
+  /** Writes a row's kept edits next to its file, settling when the save ends. The shell reports the result. */
+  saveRecoveryCopy?: (workspaceId: string, path: string) => Promise<void>;
   /** One page of refused shares, from the share id the previous page ended on. */
   loadRefusals: (workspaceId: string, after?: string) => Promise<LiveRefusalPage>;
   /** Asks the engine to enrol one refused share again. */
@@ -208,15 +208,10 @@ function quarantineNote(row: LiveDocumentRow): string | null {
     case "stopped-kept":
       return "Live editing stopped. dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.";
     case "not-written":
-      return "Live editing stopped. dohc kept your unsent edits, but could not write them to your file.";
+      return "Live editing stopped. dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.";
     default:
       return null;
   }
-}
-
-// Every state that still holds the queue can save it.
-function canSaveRecoveryCopy(row: LiveDocumentRow): boolean {
-  return row.quarantine !== undefined && row.quarantine !== "not-written";
 }
 
 function busyLabel(work: Work): string {
@@ -291,6 +286,8 @@ export function LiveDocumentsDialog({
   const revealed = useRef<string | null>(null);
   const revealPage = useRef<string | null>(null);
   const [busy, setBusy] = useState<Work | null>(null);
+  // Rows whose Save recovery copy is running, keyed by workspace and path.
+  const [savingCopies, setSavingCopies] = useState<ReadonlySet<string>>(() => new Set());
   const [shownWorkspaceId, setShownWorkspaceId] = useState(workspaceId);
   const request = useRequestSequence([workspaceId]);
   const running = useRef(false);
@@ -647,12 +644,21 @@ export function LiveDocumentsDialog({
                     Try again
                   </SecondaryButton>
                 ) : null}
-                {canSaveRecoveryCopy(row) && saveRecoveryCopy ? (
+                {row.quarantine !== undefined && saveRecoveryCopy ? (
                   <SecondaryButton
                     size="compact"
                     className="shrink-0"
+                    disabled={savingCopies.has(`${workspaceId}\n${row.path}`)}
                     aria-label={`Save recovery copy of ${row.path}`}
-                    onClick={() => saveRecoveryCopy(workspaceId, row.path)}
+                    onClick={() => {
+                      const key = `${workspaceId}\n${row.path}`;
+                      setSavingCopies(saving => new Set(saving).add(key));
+                      void saveRecoveryCopy(workspaceId, row.path).finally(() => setSavingCopies(saving => {
+                        const next = new Set(saving);
+                        next.delete(key);
+                        return next;
+                      }));
+                    }}
                   >
                     Save recovery copy
                   </SecondaryButton>

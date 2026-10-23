@@ -94,11 +94,11 @@ export async function retryOwnerLiveQuarantine(client: EngineClient, workspace: 
   finally {outbox.dispose();}
 }
 
-/** Every pending update of a refused queue, with its base, for a recovery copy. The queue stays. */
+/** Every pending update of a refused queue, with its base and accepted checkpoint, for a recovery copy. The queue stays. */
 export async function readOwnerLiveQueue(client: EngineClient, workspace: string, record: OwnerLiveQuarantineRecord & {outboxId: string}) {
   const outbox = new OwnerYDocOutbox({sendRequest: request => client.sendRequest(request)}, workspace);
   try {
-    const pending = await outbox.readPending(record.outboxId);
+    const pending = await outbox.readRecovery(record.outboxId);
     if (pending.state !== "quarantined" || !sameGeneration(pending.binding, record.binding)) {
       throw new Error("This document changed. Open Live documents to check it.");
     }

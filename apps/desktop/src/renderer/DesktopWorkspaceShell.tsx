@@ -990,7 +990,7 @@ export function DesktopWorkspaceShell(props: {
   );
   // Save recovery copy, from a notice or the Live documents dialog. Set once
   // the shell can open the copy it wrote.
-  const saveLiveRecoveryCopyRef = useRef<(id: string, path: string) => void>(() => undefined);
+  const saveLiveRecoveryCopyRef = useRef<(id: string, path: string) => Promise<void>>(async () => undefined);
   const saveLiveRecoveryCopyFromDialog = useCallback((id: string, path: string) => saveLiveRecoveryCopyRef.current(id, path), []);
 
   const reportCloudStatusUnavailable = useCallback(
@@ -1815,7 +1815,7 @@ export function DesktopWorkspaceShell(props: {
   // incident and recovery step: a refusal after a Try again is a new
   // incident. Dismissing the row hides it and leaves the edits kept. While a
   // Try again or a Stop waits, the row stays quiet. Save recovery copy is on
-  // every row whose edits are still queued.
+  // every row, including one whose Stop took the edits but could not write them.
   const shownQuarantines=useRef({workspaceId,shown:new Map<string,string>()});
   useEffect(() => {
     if (captureDecidedFor!==workspaceId || syncStatus===null) return;
@@ -1833,7 +1833,7 @@ export function DesktopWorkspaceShell(props: {
       shown.set(identity,incident);
       const details:ReadonlyArray<ErrorDetailField>=[["File",row.path,row.path.length],["Kept on","This computer"],["Reason",row.reason],["Incident",row.incident]];
       const open={label:"Open Live documents",run:() => openLiveDocuments(workspaceId,row.path)};
-      const save={label:"Save recovery copy",run:() => saveLiveRecoveryCopyRef.current(workspaceId,row.path),additional:[open]};
+      const save={label:"Save recovery copy",run:() => {void saveLiveRecoveryCopyRef.current(workspaceId,row.path);},additional:[open]};
       // A Stop runs again: it finishes a waiting Stop, or writes the file a finished one could not.
       const stopAgain=() => {
         let result:LiveDocumentStopResult={keptEdits:"none"};
@@ -1845,7 +1845,8 @@ export function DesktopWorkspaceShell(props: {
             });
       };
       if (row.recovery==="not-written") {
-        reportShellFailure({title:`Live editing stopped for ${row.path}`,message:"dohc kept your unsent edits, but could not write them to your file.",details,retry:stopAgain,action:open,identity});
+        reportShellFailure({title:`Live editing stopped for ${row.path}`,
+          message:"dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.",details,retry:stopAgain,action:save,identity});
         continue;
       }
       if (row.recovery==="stopped-kept") {
@@ -2446,23 +2447,28 @@ export function DesktopWorkspaceShell(props: {
     ],
   );
   // Main writes the copy next to the file and keeps the queue; a slow answer
-  // for a workspace this window left paints nothing.
+  // for a workspace this window left paints nothing. One save per file runs
+  // at a time, and asking again while it runs waits for it.
+  const recoverySaves = useRef(new Map<string, Promise<void>>());
   useEffect(() => {
     saveLiveRecoveryCopyRef.current = (id, path) => {
-      const save = () => {
-        void bridge().saveOwnerLiveRecoveryCopy({ workspaceId: id, path }).then((saved) => {
-          if (workspaceIdRef.current !== id) return;
-          const opened = saved.copyPath ?? saved.packagePath;
-          showSuccessNotice(saved.copyPath
-            ? `Saved a recovery copy of ${path}. Your kept edits stay on this computer.`
-            : `Saved your kept edits for ${path} as a recovery package. dohc could not make a readable copy.`,
-          undefined, undefined, { label: "Open", run: () => { if (workspaceIdRef.current === id) openFile(opened); } });
-        }, (error: unknown) => {
-          if (workspaceIdRef.current !== id) return;
-          reportShellError(`dohc could not save a recovery copy of ${path}.`, error, save);
-        });
-      };
-      save();
+      const key = `${id}\n${path}`, running = recoverySaves.current.get(key);
+      if (running) return running;
+      const saving = bridge().saveOwnerLiveRecoveryCopy({ workspaceId: id, path }).then((saved) => {
+        if (workspaceIdRef.current !== id) return;
+        const opened = saved.copyPath ?? saved.packagePath;
+        const slash = saved.packagePath.lastIndexOf("/");
+        const folder = slash < 0 ? "the workspace folder" : saved.packagePath.slice(0, slash);
+        showSuccessNotice(saved.copyPath
+          ? `Saved a recovery copy of ${path} in ${folder}. Your kept edits stay on this computer.`
+          : `Saved your kept edits for ${path} as a recovery package in ${folder}. dohc could not make a readable copy.`,
+        undefined, undefined, { label: "Open", run: () => { if (workspaceIdRef.current === id) openFile(opened); } });
+      }, (error: unknown) => {
+        if (workspaceIdRef.current !== id) return;
+        reportShellError(`dohc could not save a recovery copy of ${path}.`, error, () => { void saveLiveRecoveryCopyRef.current(id, path); });
+      }).finally(() => recoverySaves.current.delete(key));
+      recoverySaves.current.set(key, saving);
+      return saving;
     };
   }, [openFile, showSuccessNotice, reportShellError]);
   const reportKeptCopyFailure = useCallback(

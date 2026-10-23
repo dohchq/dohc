@@ -10,7 +10,7 @@ vi.mock("@dohc/workspace-engine-client", async original => ({
     // A delivery head never transfers the base.
     readDeliveryHead(outboxId: string) {outboxes.reads.push(`delivery:${outboxId}`); return Promise.resolve(outboxes.heads.get(outboxId));}
     readHead(outboxId: string) {outboxes.reads.push(`head:${outboxId}`); return Promise.resolve(outboxes.heads.get(outboxId));}
-    readPending(outboxId: string) {return Promise.resolve(outboxes.pending.get(outboxId));}
+    readRecovery(outboxId: string) {return Promise.resolve(outboxes.pending.get(outboxId));}
     retry(input: unknown) {outboxes.retried.push(input); return Promise.resolve({retryDeliveryId: "delivery-a"});}
     dispose() {}
   },

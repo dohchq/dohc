@@ -1,9 +1,11 @@
 import { Worker } from "node:worker_threads";
+import * as Y from "yjs";
 import {
   documentCreateUpdate,
   documentEditUpdate,
   documentMarkdown,
   settledDocumentMarkdown,
+  yDocToMarkdown,
   type DocumentEdit,
 } from "@dohc/ydoc-projection";
 
@@ -15,10 +17,25 @@ export type DocumentProjectionRequest =
   | { kind: "read"; state: Uint8Array }
   | { kind: "read-settled"; markdown: string }
   | { kind: "edit"; state: Uint8Array; edit: DocumentEdit; keepBlocks: boolean }
-  | { kind: "create"; state: Uint8Array; markdown: string; keepBlocks: boolean };
+  | { kind: "create"; state: Uint8Array; markdown: string; keepBlocks: boolean }
+  | { kind: "recover"; updates: readonly Uint8Array[] };
 
 type DocumentProjectionResult<Request extends DocumentProjectionRequest> =
-  Request extends { kind: "edit" | "create" } ? Uint8Array | null : string;
+  Request extends { kind: "recover" } ? string | null
+    : Request extends { kind: "edit" | "create" } ? Uint8Array | null : string;
+
+/** The document a recovery package's updates rebuild, or null when one still waits on what it depends on. */
+export function recoveredDocumentMarkdown(updates: readonly Uint8Array[]): string | null {
+  const doc = new Y.Doc();
+  try {
+    for (const update of updates) Y.applyUpdate(doc, update);
+    // An update missing what it depends on would leave its edit out of the copy.
+    if (doc.store.pendingStructs !== null || doc.store.pendingDs !== null) return null;
+    return yDocToMarkdown(doc);
+  } finally {
+    doc.destroy();
+  }
+}
 
 export interface DocumentProjection {
   run<Request extends DocumentProjectionRequest>(
@@ -58,6 +75,8 @@ export function runDocumentProjection(
       return documentCreateUpdate(request.state, request.markdown, {
         keepBlocks: request.keepBlocks,
       });
+    case "recover":
+      return recoveredDocumentMarkdown(request.updates);
   }
 }
 

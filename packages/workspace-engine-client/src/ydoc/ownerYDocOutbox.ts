@@ -51,6 +51,31 @@ export interface OwnerYDocOutboxEntry {
   /** The agent the queued edit declared; absent when it declared none. Never authority. */
   readonly agentDeclaration?: AgentDeclaration;
   readonly automationDeclaration?: AutomationDeclaration;
+  /** The local journal update this entry queued, with the author this engine recorded on it. Never authority. */
+  readonly nativeSource?: OwnerYDocNativeSource;
+}
+
+export interface OwnerYDocNativeSource {
+  readonly binding: LiveObjectBinding;
+  readonly adoptionId: string;
+  readonly nativeSequence: number;
+  readonly updateDigest: string;
+  readonly origin:
+    | {
+        readonly kind: "nativeUpdate";
+        readonly actorOriginId: string | null;
+        readonly actorKind: string | null;
+        readonly onBehalfOf: string | null;
+        readonly chainDepth: number | null;
+        readonly recordedAtMs: number;
+      }
+    | { readonly kind: "adoptionSeed" };
+}
+
+/** A refused queue with the accepted state its entries build on, for a recovery copy. */
+export interface OwnerYDocOutboxRecovery extends OwnerYDocOutboxPending {
+  /** The lineage's accepted checkpoint; null once this computer holds no binding for it. */
+  readonly checkpoint: Uint8Array | null;
 }
 
 export interface OwnerYDocOutboxPending {
@@ -81,7 +106,7 @@ export class OwnerYDocOutboxReadChangedError extends Error {
   }
 }
 
-type ReadPart = "header" | "base" | "entryHeader" | "update";
+type ReadPart = "header" | "base" | "entryHeader" | "update" | "checkpoint";
 interface ReadCursor {
   snapshot: string;
   part: ReadPart;
@@ -98,7 +123,7 @@ function digestField(value: Record<string, unknown>, name: string): string {
 function readCursor(value: unknown): ReadCursor {
   const raw = record(value, "owner outbox read cursor");
   const part = raw.part;
-  if (part !== "header" && part !== "base" && part !== "entryHeader" && part !== "update") {
+  if (part !== "header" && part !== "base" && part !== "entryHeader" && part !== "update" && part !== "checkpoint") {
     throw new TypeError("Unknown owner outbox read part.");
   }
   return {
@@ -107,6 +132,30 @@ function readCursor(value: unknown): ReadCursor {
     sequence: wireInteger(raw, "sequence"),
     offset: wireInteger(raw, "offset"),
   };
+}
+
+const nullableField = <T>(value: Record<string, unknown>, name: string, check: (field: unknown) => field is T): T | null => {
+  const field = value[name];
+  if (field !== null && !check(field)) throw new TypeError(`${name} is invalid.`);
+  return field as T | null;
+};
+const isText = (field: unknown): field is string => typeof field === "string" && field.length > 0;
+const isWireInteger = (field: unknown): field is number => Number.isSafeInteger(field) && (field as number) >= 0;
+
+function nativeSource(value: unknown, updateDigest: string): OwnerYDocNativeSource {
+  const raw = record(value, "native source");
+  const origin = record(raw.origin, "native source origin");
+  if (Object.keys(raw).sort().join() !== "adoptionId,binding,nativeSequence,origin,updateDigest"
+    || digestField(raw, "updateDigest") !== updateDigest) throw new TypeError("Invalid native source.");
+  const source = {binding: parseLiveObjectBinding(raw.binding), adoptionId: stringField(raw, "adoptionId"),
+    nativeSequence: wireInteger(raw, "nativeSequence"), updateDigest};
+  if (origin.kind === "adoptionSeed" && Object.keys(origin).length === 1) return {...source, origin: {kind: "adoptionSeed"}};
+  if (origin.kind !== "nativeUpdate" || Object.keys(origin).sort().join() !== "actorKind,actorOriginId,chainDepth,kind,onBehalfOf,recordedAtMs") {
+    throw new TypeError("Invalid native source origin.");
+  }
+  return {...source, origin: {kind: "nativeUpdate", actorOriginId: nullableField(origin, "actorOriginId", isText),
+    actorKind: nullableField(origin, "actorKind", isText), onBehalfOf: nullableField(origin, "onBehalfOf", isText),
+    chainDepth: nullableField(origin, "chainDepth", isWireInteger), recordedAtMs: wireInteger(origin, "recordedAtMs")}};
 }
 
 function headerRecord(bytes: Uint8Array): Record<string, unknown> {
@@ -249,6 +298,12 @@ export class OwnerYDocOutbox {
     return this.readSnapshot(outboxId, false);
   }
 
+  /** Reads the whole queue, then the accepted checkpoint it builds on, which may have advanced since. */
+  async readRecovery(outboxId: string): Promise<OwnerYDocOutboxRecovery> {
+    const {checkpoint, ...pending} = await this.readSnapshot(outboxId, false, undefined, true);
+    return {...pending, checkpoint: checkpoint ?? null};
+  }
+
   /** Reads the complete base and first pending update, with queue-wide admission metadata. */
   async readHead(outboxId: string): Promise<OwnerYDocOutboxHead> {
     const { entries, ...pending } = await this.readSnapshot(outboxId, true);
@@ -262,8 +317,9 @@ export class OwnerYDocOutbox {
   }
 
   private readSnapshot(outboxId: string, headOnly: boolean): Promise<OwnerYDocOutboxPending>;
+  private readSnapshot(outboxId: string, headOnly: false, deliveryBinding: undefined, withCheckpoint: true): Promise<OwnerYDocOutboxPending & {checkpoint?: Uint8Array}>;
   private readSnapshot(outboxId: string, headOnly: boolean, deliveryBinding: LiveObjectBinding): Promise<Omit<OwnerYDocOutboxPending, "baseUpdate">>;
-  private async readSnapshot(outboxId: string, headOnly: boolean, deliveryBinding?: LiveObjectBinding): Promise<Omit<OwnerYDocOutboxPending, "baseUpdate"> & {baseUpdate?: Uint8Array}> {
+  private async readSnapshot(outboxId: string, headOnly: boolean, deliveryBinding?: LiveObjectBinding, withCheckpoint = false): Promise<Omit<OwnerYDocOutboxPending, "baseUpdate"> & {baseUpdate?: Uint8Array; checkpoint?: Uint8Array}> {
     this.assertLive();
     let next: ReadCursor | null | undefined;
     let snapshot: string | undefined;
@@ -385,6 +441,7 @@ export class OwnerYDocOutbox {
         ...(Object.hasOwn(entry, "agentDeclaration")
           ? { agentDeclaration: parseAgentDeclaration(entry.agentDeclaration) }
           : {}),
+        ...(Object.hasOwn(entry, "nativeSource") ? {nativeSource: nativeSource(entry.nativeSource, updateDigest)} : {}),
       });
       remaining -= byteLength;
       lastSequence = sequence;
@@ -399,8 +456,15 @@ export class OwnerYDocOutbox {
         throw new TypeError("Owner outbox suffix does not match its header.");
       }
     }
+    // Read after the entries, so it covers every entry accepted before them.
+    let checkpoint: Uint8Array | undefined;
+    if (withCheckpoint && nullableField(raw, "checkpointDigest", isText) !== null) {
+      next = {snapshot: snapshot!, part: "checkpoint", sequence: 0, offset: 0};
+      checkpoint = await readPart("checkpoint", 0);
+    }
     const observed = raw.observedBinding;
     return {
+      ...(checkpoint === undefined ? {} : {checkpoint}),
       outboxId: stringField(raw, "outboxId"),
       binding,
       baseUpdateDigest,

@@ -47,7 +47,7 @@ function harness() {
     retryRefusal: vi.fn((workspaceId: string, shareId: string) => Promise.resolve()),
     onClose: vi.fn(),
     onError: vi.fn((message: string, error: unknown, retry: () => boolean) => {}),
-    saveRecoveryCopy: vi.fn((workspaceId: string, path: string) => {}),
+    saveRecoveryCopy: vi.fn(async (workspaceId: string, path: string) => {}),
   };
 }
 
@@ -1080,17 +1080,31 @@ describe("LiveDocumentsDialog", () => {
       expect(actions("docs/a.md")).toEqual(["Stop live editing", "Save recovery copy"]);
     });
 
-    it("offers Try again for edits a Stop took but could not write, and no recovery copy", async () => {
+    it("offers Try again and a recovery copy for edits a Stop took but could not write", async () => {
       const h = harness();
       h.load.mockResolvedValue(page([row("docs/a.md", { status: "retired", quarantine: "not-written" })]));
       h.stop.mockResolvedValueOnce({ keptEdits: "recovered" });
       render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
       const kept = await screen.findByTestId("live-document-row-docs/a.md");
-      expect(kept.textContent).toContain("Live editing stopped. dohc kept your unsent edits, but could not write them to your file.");
-      expect(actions("docs/a.md")).toEqual(["Try again"]);
+      expect(kept.textContent).toContain("Live editing stopped. dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.");
+      expect(actions("docs/a.md")).toEqual(["Try again", "Save recovery copy"]);
       await userEvent.setup().click(within(kept).getByRole("button", { name: "Try again to write your kept edits to docs/a.md" }));
       await vi.waitFor(() => expect(h.onStopped).toHaveBeenCalledExactlyOnceWith("docs/a.md", "recovered"));
       expect(h.stop).toHaveBeenCalledExactlyOnceWith("ws", "docs/a.md");
+    });
+
+    it("disables a row's Save recovery copy while its save runs", async () => {
+      const h = harness();
+      h.load.mockResolvedValue(page([row("docs/a.md", { status: "retired", quarantine: "not-written" })]));
+      const saving = deferred();
+      h.saveRecoveryCopy.mockReturnValueOnce(saving.promise);
+      render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+      const save = await screen.findByRole("button", { name: "Save recovery copy of docs/a.md" });
+      await userEvent.setup().click(save);
+      expect(h.saveRecoveryCopy).toHaveBeenCalledExactlyOnceWith("ws", "docs/a.md");
+      expect(save).toHaveProperty("disabled", true);
+      await act(async () => { saving.resolve(); await saving.promise; });
+      expect(save).toHaveProperty("disabled", false);
     });
 
     it.each(["recovered", "kept"] as const)("reports a Stop that %s the refused edits only after it answers", async (keptEdits) => {

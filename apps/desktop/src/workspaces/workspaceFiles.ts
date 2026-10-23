@@ -37,6 +37,7 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, parse, relative, sep } from "node:path";
+import { atomicCreateFile } from "../atomicReplaceFile";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS } from "../ipc/channels";
 import { isInside } from "../security/pathContainment";
 import type { LocalStateWorkspace } from "./workspaceLocalState";
@@ -358,26 +359,34 @@ export async function createFile(
 /**
  * Creates a new workspace file of any size and syncs it to disk before
  * returning. It never replaces a file: an existing path refuses with EEXIST.
+ * The bytes reach the final name only complete, through a link from an
+ * ignored temporary sibling, so a crash never leaves a cut-off file there.
  */
-export async function createDurableFile(rootPath: string, relativePath: string, text: string): Promise<string> {
+export async function createDurableFile(rootPath: string, relativePath: string, text: string,
+  operations: Pick<NonNullable<Parameters<typeof atomicCreateFile>[3]>, "open" | "link"> = {}): Promise<string> {
   const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
   if (!validated.ok) {
     throw new Error(`Invalid file path (${validated.reason}): ${relativePath}`);
   }
-  const target = await newFileTarget(rootPath, relativePath, validated.normalized);
-  const handle = await open(target, "wx");
-  try {
-    try { await handle.writeFile(text); await handle.sync(); }
-    finally { await handle.close(); }
-  } catch (error) {
-    // A partial file would read as a complete one.
-    await unlink(target).catch(() => undefined);
-    throw error;
+  const created: { directory?: string } = {};
+  const target = await newFileTarget(rootPath, relativePath, validated.normalized, created);
+  const temporary = join(dirname(target), `.dohc-write-${process.pid}-${randomUUID()}.tmp`);
+  // A drive without hard links gets a direct write, as other workspace creates do.
+  if (!await atomicCreateFile(target, text, 0o666, { ...operations, temporary, allowDirectWrite: true })) {
+    throw Object.assign(new Error(`EEXIST: file already exists, ${relativePath}`), { code: "EEXIST" });
+  }
+  // The file's own folder is synced; each folder this create made needs its entry synced in its parent.
+  if (created.directory && process.platform !== "win32") {
+    const top = dirname(created.directory);
+    for (let folder = dirname(target); folder !== top && dirname(folder) !== folder; folder = dirname(folder)) {
+      const handle = await open(dirname(folder), "r");
+      try { await handle.sync(); } finally { await handle.close(); }
+    }
   }
   return validated.normalized;
 }
 
-async function newFileTarget(rootPath: string, relativePath: string, normalized: string): Promise<string> {
+async function newFileTarget(rootPath: string, relativePath: string, normalized: string, created?: { directory?: string }): Promise<string> {
   const absolute = join(rootPath, normalized);
   // Lexical validation can't see symlinks, and it read the path as SPELLED.
   // Both questions get asked of the real path before mkdir, so a symlinked
@@ -394,7 +403,8 @@ async function newFileTarget(rootPath: string, relativePath: string, normalized:
   if (!isInside(realRoot, await existingAncestor(dirname(target)))) {
     throw new Error(`Invalid file path (escapes workspace): ${relativePath}`);
   }
-  await mkdir(dirname(target), { recursive: true });
+  const directory = await mkdir(dirname(target), { recursive: true });
+  if (created && directory) created.directory = directory;
   // Re-check after mkdir (the resolved parent now exists) as belt-and-braces;
   // wx + O_EXCL additionally prevents a final-segment symlink from escaping.
   if (!isInside(realRoot, await realpath(dirname(target)))) {

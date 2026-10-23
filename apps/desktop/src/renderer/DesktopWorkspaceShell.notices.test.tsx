@@ -199,7 +199,7 @@ describe("edits the server refused", () => {
     await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", {name: "Save recovery copy"}));
     expect(bridge.saveOwnerLiveRecoveryCopy).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId, path: "notes/plan.md"});
     await act(async () => { saving.resolve({copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json"}); await saving.promise; });
-    expect(await screen.findByText("Saved a recovery copy of notes/plan.md. Your kept edits stay on this computer.")).toBeTruthy();
+    expect(await screen.findByText("Saved a recovery copy of notes/plan.md in notes. Your kept edits stay on this computer.")).toBeTruthy();
     expect(screen.getByRole("button", {name: "Open"})).toBeTruthy();
     // The edits stay queued, so the notice that holds them stays too.
     await user.click(screen.getByTestId("notice-center-toggle"));
@@ -218,8 +218,23 @@ describe("edits the server refused", () => {
     await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", {name: "Save recovery copy"}));
     const failed = await screen.findByText(/^dohc could not save a recovery copy of notes\/plan\.md\. dohc could not find a free name/);
     await user.click(within(failed.closest<HTMLElement>("[data-testid='workspace-shell-error']")!).getByRole("button", {name: "Try again"}));
-    expect(await screen.findByText("Saved your kept edits for notes/plan.md as a recovery package. dohc could not make a readable copy.")).toBeTruthy();
+    expect(await screen.findByText("Saved your kept edits for notes/plan.md as a recovery package in notes. dohc could not make a readable copy.")).toBeTruthy();
     expect(bridge.saveOwnerLiveRecoveryCopy).toHaveBeenCalledTimes(2);
+  });
+
+  it("runs one save per file at a time, and names the workspace folder for a file at its top", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(async () => quarantined({...quarantine, path: "plan.md"}));
+    const saving = deferred<{copyPath: string | null; packagePath: string}>();
+    bridge.saveOwnerLiveRecoveryCopy = vi.fn(() => saving.promise);
+    renderShell(bridge);
+    const user = userEvent.setup();
+    const save = within(await screen.findByTestId("workspace-shell-error")).getByRole("button", {name: "Save recovery copy"});
+    await user.click(save);
+    await user.click(save);
+    expect(bridge.saveOwnerLiveRecoveryCopy).toHaveBeenCalledOnce();
+    await act(async () => { saving.resolve({copyPath: "plan (recovered).md", packagePath: "plan (recovered).dohc-recovery.json"}); await saving.promise; });
+    expect(await screen.findByText("Saved a recovery copy of plan.md in the workspace folder. Your kept edits stay on this computer.")).toBeTruthy();
   });
 
   // The release committed, then settlement could not write the file.
@@ -231,8 +246,8 @@ describe("edits the server refused", () => {
     renderShell(bridge);
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(within(toast).getByText("Live editing stopped for notes/plan.md")).toBeTruthy();
-    expect(within(toast).getByText("dohc kept your unsent edits, but could not write them to your file.")).toBeTruthy();
-    expect(within(toast).queryByRole("button", {name: "Save recovery copy"})).toBeNull();
+    expect(within(toast).getByText("dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.")).toBeTruthy();
+    expect(within(toast).getByRole("button", {name: "Save recovery copy"})).toBeTruthy();
     expect(screen.queryByText(RECOVERED)).toBeNull();
     // The same incident read again adds nothing.
     const reads = bridge.getSyncStatus.mock.calls.length;
