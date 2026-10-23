@@ -221,11 +221,16 @@ export function createFirstOpenPublisher(options: {
     const source: FirstOpenSource = Object.freeze({...named, sourceByteLength: head.sourceByteLength});
     // A source whose build passed its deadline waits before it builds again; an edit is a new source. Its bytes passed the
     // checks below before that build, so inside the wait the relay reads only its history, which can still answer first.
-    const waitKey = JSON.stringify([workspaceId, objectId, source.sourceDigest]), waiting = deadlineWaits.get(waitKey), at = nowMs();
-    if (waiting && at < waiting.untilMs) {
-      const preparation = await step("history-unavailable", () => storage.prepareFirstOpen(source, signal));
-      if (preparation.kind !== "prepared") return refusal(preparation);
-      return answer({kind: "unavailable", reason: "build-deadline", retryAfterMs: waiting.untilMs - at});
+    // A blob lost or corrupted inside the wait answers build-deadline, not integrity, until the wait ends.
+    const waitKey = JSON.stringify([workspaceId, objectId, source.sourceDigest]);
+    const waitLeft = () => (deadlineWaits.get(waitKey)?.untilMs ?? -Infinity) - nowMs();
+    let prepared: FirstOpenPreparation | undefined;
+    if (waitLeft() > 0) {
+      prepared = await step("history-unavailable", () => storage.prepareFirstOpen(source, signal));
+      if (prepared.kind !== "prepared") return refusal(prepared);
+      // The history read can outlast the wait, and then the source builds now.
+      const retryAfterMs = waitLeft();
+      if (retryAfterMs > 0) return answer({kind: "unavailable", reason: "build-deadline", retryAfterMs});
     }
     const bytes = storage.getBlob(workspaceId, head.sourceDigest);
     if (!bytes || bytes.byteLength !== head.sourceByteLength || sha256(bytes) !== head.sourceDigest) return answer({kind: "integrity", reason: "source-evidence"});
@@ -233,7 +238,7 @@ export function createFirstOpenPublisher(options: {
     try {markdown = new TextDecoder("utf-8", {fatal: true, ignoreBOM: true}).decode(bytes);}
     catch {return answer({kind: "refused", reason: "unsupported-source", cause: "not-utf8"});}
 
-    const preparation = await step("history-unavailable", () => storage.prepareFirstOpen(source, signal));
+    const preparation = prepared ?? await step("history-unavailable", () => storage.prepareFirstOpen(source, signal));
     if (preparation.kind !== "prepared") return refusal(preparation);
     let proof = preparation.proof;
     const built = await step("worker-failed", () => build(config.validation, {document: {workspaceId, mainVersionId: "main", objectId},

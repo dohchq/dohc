@@ -36,6 +36,8 @@ export type InlineText = {
   // The run of one character the importer last measured for marked's
   // emphasis, strikethrough or code span rule.
   run?: { start: number; end: number }
+  // Where the white space that ends the text starts.
+  blankEnd?: number
   // The text marked masks for its emphasis and strikethrough rules, how much
   // of it their own scans have read, and the rest at the step whose scan the
   // next step counts.

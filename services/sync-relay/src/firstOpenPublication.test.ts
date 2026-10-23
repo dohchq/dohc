@@ -792,6 +792,31 @@ it("reads a waiting source's history but not its bytes", async () => {
   expect(f.builds).toHaveBeenCalledTimes(2);
 });
 
+// The wait is measured when the history read returns, which can take part of it or outlast it.
+it("answers what is left of a wait once its history read returns", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const f = await fixture();
+  f.buildWith(async () => ({kind: "deadline"}));
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "build-deadline", retryAfterMs: FIRST_OPEN_DEADLINE_WAIT_MS});
+  f.afterRead(() => f.advance(FIRST_OPEN_DEADLINE_WAIT_MS / 4));
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "build-deadline", retryAfterMs: FIRST_OPEN_DEADLINE_WAIT_MS * 3 / 4});
+  expect(f.builds).toHaveBeenCalledTimes(1);
+});
+
+it("builds a waiting source whose history read outlasts the wait, with that read", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const f = await fixture();
+  f.buildWith(async () => ({kind: "deadline"}));
+  expect(await f.open()).toMatchObject({kind: "unavailable", reason: "build-deadline", retryAfterMs: FIRST_OPEN_DEADLINE_WAIT_MS});
+  f.advance(FIRST_OPEN_DEADLINE_WAIT_MS - 1);
+  f.afterRead(() => f.advance(1));
+  f.buildWith(inThread);
+  const reads = f.reads;
+  expect((await f.open()).kind).toBe("published");
+  expect(f.builds).toHaveBeenCalledTimes(2);
+  expect(f.reads).toBe(reads + 1);
+});
+
 it("keeps at most its limit of waits, forgetting the one set longest ago", async () => {
   vi.spyOn(console, "error").mockImplementation(() => {});
   const f = await fixture({maxDeadlineWaits: 2});

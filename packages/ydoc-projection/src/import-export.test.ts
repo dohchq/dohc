@@ -124,6 +124,18 @@ it.each([
   expect(large, `searched characters: ${small} -> ${large}`).toBeLessThan(small * 2.2)
 })
 
+// The importer finds the end of a text's white space once, where marked's
+// hard-break rule looked ahead to it at each break.
+it.each([
+  'a  \nb', 'a  \n', 'a  \n  ', 'a\\\n \t', 'a  \n \n', `a  \n${String.fromCharCode(0xa0)}`, `a  \n${String.fromCharCode(0xa0)}b`,
+  `${`${String.fromCharCode(0xa0)}  \n`.repeat(3)}b`, `a  \n${String.fromCharCode(0x2028)}`, 'a  \nb  \n',
+])('reads hard breaks where marked does in %j', (markdown) => {
+  const breaks = (node: JSONContent): number => (node.type === 'hardBreak' ? 1 : 0) + (node.content ?? []).reduce((sum, child) => sum + breaks(child), 0)
+  const markedBreaks = (tokens: Array<{ type: string; tokens?: unknown }>): number =>
+    tokens.reduce((sum, token) => sum + (token.type === 'br' ? 1 : 0) + markedBreaks((token.tokens ?? []) as typeof tokens), 0)
+  expect(breaks(parseRichdocMarkdown(markdown))).toBe(markedBreaks(new Lexer(getDefaults()).lex(markdown)))
+})
+
 // marked's text rule stopped before an email address by reading the email
 // characters after each run, and its url rule read the characters an
 // address's local part may hold at each step. A spaceless paragraph is one

@@ -116,7 +116,7 @@ const MarkdownDefinition = Extension.create({
 })
 
 function definitionText(raw: string): string {
-  return raw.replace(/\s+$/u, '').split('\n').map(line => line.trimStart()).join('\n')
+  return raw.trimEnd().split('\n').map(line => line.trimStart()).join('\n')
 }
 
 // The serializer writes a definition the document holds as text as one tag
@@ -317,9 +317,10 @@ function writtenLink(
   }
 }
 
-// Tiptap trims a literal fragment's trailing whitespace.
+// Tiptap trims a literal fragment's trailing whitespace. A pattern anchored
+// at the end would read each white space run inside the text to its end.
 function rawHtmlText(source: string): string {
-  return sourceText(source.replace(/\s+$/u, ''))
+  return sourceText(source.trimEnd())
 }
 
 // Source the document keeps as the text the file holds, with each reference
@@ -493,6 +494,25 @@ function urlMayStart(tokenizer: Tokenizer, src: string): boolean {
     found = read.localPart = { from, at, address: read.text[at] === '@' && URL_DOMAIN.test(read.text) }
   }
   return found.at > from && found.address
+}
+
+// marked's hard-break rule looks ahead through the white space after the
+// break for the end of the text, so breaks between white space, such as a
+// no-break space and `  \n` repeated, cost quadratic time. The text ends in
+// white space from the same place at every break, found once per text.
+const MARKED_BREAK_RULE = String.raw`^( {2,}|\\)\n(?!\s*$)`
+const BREAK = /( {2,}|\\)\n/y
+
+function hardBreak(tokenizer: Tokenizer, src: string): Tokens.Br | undefined {
+  if (tokenizer.rules.inline.br.source !== MARKED_BREAK_RULE) return Tokenizer.prototype.br.call(tokenizer, src)
+  // Only a space or a backslash starts a break.
+  if (src[0] !== ' ' && src[0] !== '\\') return undefined
+  const read = readingInlineText(tokenizer.lexer)
+  if (!read || read.step !== src.length) return Tokenizer.prototype.br.call(tokenizer, src)
+  BREAK.lastIndex = 0
+  const raw = BREAK.exec(src)?.[0]
+  read.blankEnd ??= read.text.trimEnd().length
+  return raw && read.text.length - src.length + raw.length < read.blankEnd ? { type: 'br', raw } : undefined
 }
 
 // marked's emphasis and strikethrough rules scan the rest of the masked text
@@ -1001,6 +1021,9 @@ markdownParser.defaults.tokenizer = Object.assign(new Tokenizer(), {
   },
   url(this: Tokenizer, src: string) {
     return urlMayStart(this, src) ? Tokenizer.prototype.url.call(this, src) : undefined
+  },
+  br(this: Tokenizer, src: string) {
+    return hardBreak(this, src)
   },
   inlineText(this: Tokenizer, src: string) {
     const end = textEnd(this, src)
