@@ -336,7 +336,7 @@ export function createMainWindow(options?: {
     denyDisallowed(event, event.url);
   });
 
-  window.once("ready-to-show", () => window.show());
+  window.once("ready-to-show", () => window.showInactive());
 
   // Each load and each change tells this window's renderer whether it is
   // full screen, where macOS hides the traffic lights.

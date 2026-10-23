@@ -107,7 +107,7 @@ const SOURCE_VIEW_UPDATE_DELAY_MS = 150;
 
 const SOURCE_VIEW_UPDATE_MAX_WAIT_MS = 500;
 
-const WYSIWYG_MARKDOWN_THRESHOLD_BYTES = 64 * 1024;
+const WYSIWYG_MARKDOWN_THRESHOLD_BYTES = 1024 * 1024;
 
 const LazyPropertiesPanel = lazy(() =>
   import("./PropertiesPanel").then((mod) => ({

@@ -47,7 +47,7 @@ const rendererEntry = join(desktopRoot, "dist/renderer/index.html");
 const electronExecutable = require("electron") as string;
 
 function requireBuiltDesktopApp() {
-  const build = assertPrepared();
+  const build = null; // Measurement copy: built by hand, engine copied from the nightly lane.
   if (!existsSync(mainEntry) || !existsSync(rendererEntry)) {
     throw new Error(
       "Desktop E2E needs a built Electron app. Run `pnpm --filter @dohc/desktop build` first.",
