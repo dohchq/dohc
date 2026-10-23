@@ -2,7 +2,7 @@ import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-bi
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
 import {isDeepStrictEqual} from "node:util";
 import {EngineRequestError,isHostedDocumentUnready,isLiveDocumentWithoutLineage,type EngineClient,type NativeOwnerActivation} from "@dohc/workspace-engine-client/daemon";
-import {hostedHeldWindowCovers,type HostedHeldWindow} from "@dohc/workspace-engine-client/relay-wire";
+import {hostedWindowCovers,type HostedWindow} from "@dohc/workspace-engine-client/relay-wire";
 import {parseLiveDocumentKey,parseLiveUpdateIdentifier,type LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
 import {validateUserWritePath} from "@dohc/workspace-core";
 import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents";
@@ -20,7 +20,7 @@ import type {SyncRelayStorage,LiveHostConnectionCoordinate} from "./storage";
 import type {LiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import type {LiveRestorePreparation} from "./liveRestorePreparation";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
-import type {ServiceHostedHold} from "./serviceHostedReplication";
+import type {ServiceHostedHold,ServiceHostedPullPage} from "./serviceHostedReplication";
 
 const positive=(value:unknown)=>{
   if(typeof value!=="number" || !Number.isSafeInteger(value) || value<1 || value>2_147_483_647)throw new Error("Invalid service activation budget.");
@@ -127,20 +127,29 @@ export class ServiceActivationDriver {
    * held within `window`, so one there it no longer holds for released
    * retained work is free of that hold. Past the window, only the documents
    * in `newlyHeld`, which the pass moved from ready to held, become held at
-   * once; that list frees nothing.
+   * once; that list frees nothing. While it may leave some out, every other
+   * owner past the window is dropped too, and activates again on a later
+   * pass, where the engine refuses it if it is held.
    */
-  hold(workspaceId:string,holds:readonly ServiceHostedHold[],window:HostedHeldWindow,newlyHeld:readonly ServiceHostedHold[]){
+  hold(workspaceId:string,holds:readonly ServiceHostedHold[],window:HostedWindow,newlyHeld:ServiceHostedPullPage["newlyHeld"]){
     for(const [key,objectId] of this.#objects){
       if(JSON.parse(key)[0]!==workspaceId)continue;
-      const covered=hostedHeldWindowCovers(window,objectId);
-      const hold=(covered?holds:newlyHeld).find(row=>row.objectId===objectId);
+      const covered=hostedWindowCovers(window,objectId);
+      const hold=covered?holds.find(row=>row.objectId===objectId):newlyHeld.listed.find(row=>row.objectId===objectId);
       if(covered && hold?.reason!=="released-lineage-unsettled" && this.#blocked.get(key)?.reason==="released-lineage-unsettled")this.#blocked.delete(key);
-      if(!hold)continue;
-      this.#completedTargets.delete(key);this.#dormant.delete(key);this.#held.set(key,hold.reason);
+      if(!hold){
+        if(!covered && !newlyHeld.complete)this.#drop(key);
+        continue;
+      }
+      this.#drop(key);this.#dormant.delete(key);this.#held.set(key,hold.reason);
       // A fresh binding replaces the one held before; that resolves nothing.
       if(hold.reason==="released-lineage-unsettled")this.#blocked.set(key,{reason:hold.reason,digest:hold.bindingDigest});
-      for(const [document,owner] of this.#owners)if(owner.target===key){owner.completed=false;this.#owners.delete(document);}
     }
+  }
+  // Ends the target's readiness and its owner, if it has one.
+  #drop(key:string){
+    this.#completedTargets.delete(key);
+    for(const [document,owner] of this.#owners)if(owner.target===key){owner.completed=false;this.#owners.delete(document);}
   }
   /** Why the target failed the one capture it gets while it cannot progress, if it did. Activation skips it. */
   blocked(target:ServiceActivationTarget):ServiceActivationBlock|undefined{

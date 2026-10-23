@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ProtocolShapeError } from "../wireSchema";
-import { decodeHeldContributions, decodeHostedSyncResult, decodeOrdinarySyncResult, hostedDeparted, hostedHeldWindowCovers } from "./ordinarySyncWireContract";
+import { decodeHeldContributions, decodeHostedSyncResult, decodeOrdinarySyncResult, hostedWindowCovers } from "./ordinarySyncWireContract";
 import { canonicalJson } from "./releasedLineageBinding";
 import vectors from "./releasedLineageBindingVectors.json" with { type: "json" };
 
@@ -96,8 +96,11 @@ const holds = [
 ];
 const hosted = { fetched: 2, applied: 1, refused: 1, skipped: 0, conflictsOpened: 0, hasMore: true,
   pendingCursor: { kind: "hosted", token: "opaque-issued-token" }, changedPaths: [change], changedPathsOmitted: 0, refusals: [refusal],
-  refusalsOmitted: 0, sharingDeclined: [], sharingDeclinedOmitted: 0, held: holds, heldThrough: null, newlyHeld: [], departed: ["gone"],
-  departedOmitted: 0 };
+  refusalsOmitted: 0, sharingDeclined: [], sharingDeclinedOmitted: 0, held: holds, heldThrough: null, newlyHeld: [], newlyHeldOmitted: 0,
+  departed: ["gone"], departedThrough: null };
+// What `newlyHeld` names of a hold: only what holding it needs.
+const newly = (hold: (typeof holds)[number]) => ({ objectId: hold.objectId, reason: hold.reason,
+  ...("bindingDigest" in hold ? { bindingDigest: hold.bindingDigest } : {}) });
 
 describe("hosted native sync contract", () => {
   it("keeps the issued hosted cursor, every hold with its fields, departed documents, and a pass that adopted a scope", () => {
@@ -122,52 +125,49 @@ describe("hosted native sync contract", () => {
     expect(() => decodeHostedSyncResult("sync.pullHosted", { ...hosted, ...patch })).toThrow("hosted sync.pullHosted result");
   });
 
-  it("speaks for a document only inside its held list's window", () => {
+  it("speaks for a document only inside its list's window", () => {
     const window = { after: "b", through: "d" };
-    expect(["a", "b", "c", "d", "e"].filter(objectId => hostedHeldWindowCovers(window, objectId))).toEqual(["c", "d"]);
-    expect(hostedHeldWindowCovers({ after: undefined, through: null }, "any")).toBe(true);
-    expect(hostedHeldWindowCovers({ after: "￿", through: null }, "\u{10000}")).toBe(true);
+    expect(["a", "b", "c", "d", "e"].filter(objectId => hostedWindowCovers(window, objectId))).toEqual(["c", "d"]);
+    expect(hostedWindowCovers({ after: undefined, through: null }, "any")).toBe(true);
+    expect(hostedWindowCovers({ after: "￿", through: null }, "\u{10000}")).toBe(true);
+    expect(hostedWindowCovers({ after: undefined, through: "￿" }, "\u{10000}")).toBe(false);
   });
 
   it("keeps a commit that stands beside the retirement error after it, and unread departed documents", () => {
     const retirement = { code: "INTERNAL", message: "hosted file unexpected: docs/a.md", retry: "no" };
-    const commit = { committed: true, hasMore: false, retirement, departed: ["gone"], departedOmitted: 0, sharingDeclined: [] };
+    const commit = { committed: true, hasMore: false, retirement, departed: ["gone"], departedThrough: null, sharingDeclined: [] };
     expect(decodeHostedSyncResult("sync.commitCursor", commit)).toEqual(commit);
     expect(decodeHostedSyncResult("sync.commitCursor", { ...commit, retirement: null, departed: null }).departed).toBeNull();
     expect(decodeHostedSyncResult("sync.commitCursor", { ...commit, committed: false, retirement: null }).committed).toBe(false);
-    const cut = { ...commit, departed: ["a", "b"], departedOmitted: 4 };
+    const cut = { ...commit, departed: ["a", "b"], departedThrough: "b" };
     expect(decodeHostedSyncResult("sync.commitCursor", cut)).toEqual(cut);
   });
 
   it.each([
-    { departed: null, departedOmitted: 1 }, { departed: ["b", "a"] }, { departed: ["a", "a"] }, { departedOmitted: -1 },
-    { departedOmitted: undefined },
-  ])("rejects a commit whose departed documents contradict what they leave out: %j", patch => {
-    const commit = { committed: true, hasMore: false, retirement: null, departed: ["gone"], departedOmitted: 0, sharingDeclined: [], ...patch };
+    { departed: null, departedThrough: "a" }, { departed: ["b", "a"] }, { departed: ["a", "a"] }, { departed: ["a", "b"], departedThrough: "a" },
+    { departed: [], departedThrough: "a" }, { departedThrough: undefined },
+  ])("rejects a commit whose departed documents contradict where they stop: %j", patch => {
+    const commit = { committed: true, hasMore: false, retirement: null, departed: ["gone"], departedThrough: null, sharingDeclined: [], ...patch };
     expect(() => decodeHostedSyncResult("sync.commitCursor", commit)).toThrow("hosted sync.commitCursor result");
   });
 
-  it("keeps each cut list with how many it leaves out, and the documents a pass moved from ready to held", () => {
-    const cut = { ...hosted, changedPathsOmitted: 7, refusalsOmitted: 8, sharingDeclinedOmitted: 9, newlyHeld: [holds[2], holds[5]],
-      departed: ["a", "b"], departedOmitted: 3 };
+  it("keeps each cut list with how many it leaves out or where it stops, and what a pass moved from ready to held", () => {
+    const cut = { ...hosted, changedPathsOmitted: 7, refusalsOmitted: 8, sharingDeclinedOmitted: 9, newlyHeld: [newly(holds[2]!), newly(holds[5]!)],
+      newlyHeldOmitted: 3, departed: ["a", "b"], departedThrough: "b" };
     expect(decodeHostedSyncResult("sync.pullHosted", cut)).toEqual(cut);
+    // Only what holding a document needs reaches the relay.
+    expect(decodeHostedSyncResult("sync.pullHosted", { ...hosted, newlyHeld: [holds[0], holds[5]] }).newlyHeld)
+      .toEqual([newly(holds[0]!), newly(holds[5]!)]);
   });
 
   it.each([
-    { newlyHeld: [holds[5], holds[2]] }, { newlyHeld: [holds[2], holds[2]] }, { newlyHeld: [{ objectId: "a", reason: "unknown" }] },
-    { newlyHeld: undefined }, { departed: ["b", "a"] }, { departed: ["a", "a"] }, { departedOmitted: undefined },
-    { changedPathsOmitted: -1 }, { refusalsOmitted: 0.5 }, { sharingDeclinedOmitted: null },
+    { newlyHeld: [newly(holds[5]!), newly(holds[2]!)] }, { newlyHeld: [newly(holds[2]!), newly(holds[2]!)] },
+    { newlyHeld: [{ objectId: "a", reason: "unknown" }] }, { newlyHeld: [{ objectId: "g", reason: "released-lineage-unsettled" }] },
+    { newlyHeld: undefined }, { newlyHeldOmitted: undefined }, { newlyHeldOmitted: -1 },
+    { departed: ["b", "a"] }, { departed: ["a", "a"] }, { departed: ["a", "b"], departedThrough: "a" }, { departed: [], departedThrough: "a" },
+    { departedThrough: undefined }, { changedPathsOmitted: -1 }, { refusalsOmitted: 0.5 }, { sharingDeclinedOmitted: null },
   ])("rejects a pass whose cut lists are unusable: %j", patch => {
     expect(() => decodeHostedSyncResult("sync.pullHosted", { ...hosted, ...patch })).toThrow("hosted sync.pullHosted result");
-  });
-
-  it("reads a document past where a cut departed list stops as unknown, never as gone", () => {
-    const cut = { listed: ["b", "d"], omitted: 2 };
-    expect(["a", "b", "c", "d", "e"].map(objectId => hostedDeparted(cut, objectId))).toEqual([false, true, false, true, undefined]);
-    expect(hostedDeparted({ listed: [], omitted: 1 }, "a")).toBeUndefined();
-    expect(["a", "b", "e"].map(objectId => hostedDeparted({ listed: ["b"], omitted: 0 }, objectId))).toEqual([false, true, false]);
-    // The engine's UTF-8 order, not UTF-16's.
-    expect(hostedDeparted({ listed: ["￿"], omitted: 1 }, "\u{10000}")).toBeUndefined();
   });
 
   it("names a released-lineage hold by the summary discovery lists, its binding only by its digest", () => {
