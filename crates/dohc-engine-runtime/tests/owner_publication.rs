@@ -11769,8 +11769,10 @@ fn committed_counts(binding: &ReleasedLineageBinding) -> Vec<i64> {
 /// Sol's binding-cost ruling: a protected tail's binding names its unproven
 /// work by count and digest, so a hold over 50,000 retained entries is the
 /// size of a hold over one. The worker commits to the work once, as it
-/// validates. Warm passes and their cursor commits scan nothing and commit to
-/// nothing again, and the hold stores the binding's own canonical bytes.
+/// validates, and once more after the hold is first stored, which moves its
+/// document's generation. Warm passes and their cursor commits then scan
+/// nothing and commit to nothing again, and the hold stores the binding's own
+/// canonical bytes.
 #[tokio::test]
 async fn a_hold_names_retained_work_by_one_commitment_at_any_size() {
     let (mut w, desktop, client, pass) = held_pass().await;
@@ -11787,13 +11789,19 @@ async fn a_hold_names_retained_work_by_one_commitment_at_any_size() {
         "only the count's digits differ in size"
     );
     assert_eq!(tails.validations(), 1);
-    let (scans, commitments) = (
-        released_tail_scans_on_this_thread(),
-        released_tail_commitments_on_this_thread(),
-    );
-    for _ in 0..3 {
+    let mut warm = None;
+    for round in 0..4 {
         let pass = hosted_pass(&mut w.store, &client, &mut cache);
         assert_eq!(held_object(&pass), many);
+        // The first commit stores the hold, which moves its document's
+        // generation, so the pass after it validates once more.
+        if round == 1 {
+            assert_eq!(tails.validations(), 2);
+            warm = Some((
+                released_tail_scans_on_this_thread(),
+                released_tail_commitments_on_this_thread(),
+            ));
+        }
         let commit = client
             .commit_hosted_cursor(
                 &mut w.store,
@@ -11808,13 +11816,14 @@ async fn a_hold_names_retained_work_by_one_commitment_at_any_size() {
             "{commit:?}"
         );
     }
+    let (scans, commitments) = warm.expect("a warm round");
     assert_eq!(
         (
             released_tail_scans_on_this_thread(),
             released_tail_commitments_on_this_thread(),
             tails.validations(),
         ),
-        (scans, commitments, 1),
+        (scans, commitments, 2),
         "warm passes and commits scan and commit to nothing"
     );
     let stored: String = w

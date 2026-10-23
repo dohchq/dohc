@@ -681,6 +681,10 @@ async fn a_binding_changed_under_its_digest_is_refused() {
     assert_eq!(proved.status, HeldBindingStatus::Current);
     let (resume, request) = paused_inspection(&w).await;
     let raw = rusqlite::Connection::open(engine_db_path(&w.root).unwrap()).unwrap();
+    raw.busy_timeout(Duration::from_millis(u64::from(
+        dohc_engine_storage::ENGINE_SQLITE_BUSY_TIMEOUT_MS,
+    )))
+    .unwrap();
     raw.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON")
         .unwrap();
     let refused = raw
@@ -698,6 +702,72 @@ async fn a_binding_changed_under_its_digest_is_refused() {
     assert_eq!(*answer, proved);
     desktop.close().await;
     w.close().await;
+}
+
+/// Sol's and Opus's r2c-3c-5 finding 1: writes that change the hold's
+/// binding with its digest can leave the digest the proof read beside a
+/// binding it never read: two rewrites, or the hold removed and restored
+/// with another binding. Each moves the document's released tail
+/// generation, so while the proof holds at its snapshot the answer turns
+/// stale and keeps nothing.
+#[tokio::test]
+async fn a_binding_changed_back_to_its_digest_is_stale() {
+    for case in ["rewritten twice", "removed and restored"] {
+        let (w, desktop, _client) = held_for_a_queued_fold().await;
+        assert_eq!(inspected_window(&w.store).status, HeldBindingStatus::Current, "{case}");
+        let (resume, request) = paused_inspection(&w).await;
+        let proved: String = w
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT released_hold_binding_digest FROM hosted_documents WHERE object_id='object'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        let mut before = generation(&w);
+        if case == "rewritten twice" {
+            for (json, digest) in [
+                ("{\"rebound\":2}", "e".repeat(64)),
+                ("{\"rebound\":3}", proved.clone()),
+            ] {
+                let rebound = changed(
+                    &w,
+                    &format!(
+                        "UPDATE hosted_documents SET released_hold_binding_json='{json}',
+                           released_hold_binding_digest='{digest}' WHERE object_id='object'"
+                    ),
+                );
+                assert_eq!(rebound, 1, "{json}");
+                assert!(generation(&w) > before, "{json} moves the generation");
+                before = generation(&w);
+            }
+        } else {
+            let raw = rusqlite::Connection::open(engine_db_path(&w.root).unwrap()).unwrap();
+            raw.busy_timeout(Duration::from_millis(u64::from(
+                dohc_engine_storage::ENGINE_SQLITE_BUSY_TIMEOUT_MS,
+            )))
+            .unwrap();
+            raw.execute_batch(
+                "PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON;
+                 CREATE TEMP TABLE kept AS SELECT * FROM hosted_documents WHERE object_id='object';
+                 DELETE FROM hosted_documents WHERE object_id='object';
+                 UPDATE temp.kept SET released_hold_binding_json='{\"rebound\":4}';
+                 INSERT INTO hosted_documents SELECT * FROM temp.kept;",
+            )
+            .unwrap();
+            drop(raw);
+            assert!(generation(&w) > before, "{case} moves the generation");
+        }
+        let answer = released(resume, request).await.expect("held");
+        assert_eq!(answer.document.binding_digest, proved, "{case}");
+        assert_eq!(answer.status, HeldBindingStatus::Stale, "{case}");
+        assert_eq!(answer.preservation, None, "{case}: no preservation");
+        assert_eq!(answer.contributions, None, "{case}: no artifact");
+        desktop.close().await;
+        w.close().await;
+    }
 }
 
 /// Every statement the store's connection ran while a proof was released.

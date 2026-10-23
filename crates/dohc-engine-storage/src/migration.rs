@@ -3367,10 +3367,17 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
 /// holds against with its digest, how its work continues, and whether that
 /// binding went stale; no other hold carries them. The binding changes only
 /// with its digest, so a reader that never reads the binding still knows
-/// when it changed. The binding comes last in the row, so reading the rest
-/// never reaches it. Rebuilding the table keeps every row, its parked heads
-/// and aliases among them. A deferred Y.Doc
-/// update records which ingress deferred it, and a hosted one the feed it
+/// when it changed. Any change to the binding, a hold carrying one arriving
+/// or going, or such a hold moving to another document, also moves the
+/// released tail generation of its document in its workspace's main version,
+/// so two writes cannot change the binding and restore its digest unseen.
+/// Writers never `REPLACE` rows of `hosted_documents`, `ydoc_snapshots` or
+/// `ydoc_inactive_lineages`: without recursive triggers its implicit delete
+/// fires no trigger, and it passes the binding's guard. The binding comes
+/// last in the row, so reading the rest never reaches it. Rebuilding the
+/// table keeps every row, its parked heads and aliases among them. A
+/// deferred Y.Doc update records which ingress deferred it, and a hosted one
+/// the feed it
 /// arrived on: its namespace, epoch, stream and relay sequence. A row
 /// deferred earlier is local in a workspace that is no hosted replica, and
 /// its feed is unknown in one that is.
@@ -3843,6 +3850,30 @@ WHEN OLD.released_hold_binding_json IS NOT NEW.released_hold_binding_json
   AND OLD.released_hold_binding_digest IS NEW.released_hold_binding_digest BEGIN
     SELECT RAISE(ABORT,'a released hold binding changes with its digest');
 END;
+CREATE TRIGGER released_tail_hold_insert AFTER INSERT ON hosted_documents
+WHEN NEW.released_hold_binding_json IS NOT NULL BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND object_id=NEW.object_id AND version_id=
+          (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=NEW.workspace_id);
+END;
+CREATE TRIGGER released_tail_hold_update
+AFTER UPDATE OF workspace_id,object_id,released_hold_binding_json ON hosted_documents
+WHEN OLD.released_hold_binding_json IS NOT NEW.released_hold_binding_json
+  OR (OLD.released_hold_binding_json IS NOT NULL
+    AND (OLD.workspace_id IS NOT NEW.workspace_id OR OLD.object_id IS NOT NEW.object_id)) BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND object_id=OLD.object_id AND version_id=
+          (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=OLD.workspace_id);
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=NEW.workspace_id AND object_id=NEW.object_id AND version_id=
+          (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=NEW.workspace_id);
+END;
+CREATE TRIGGER released_tail_hold_delete AFTER DELETE ON hosted_documents
+WHEN OLD.released_hold_binding_json IS NOT NULL BEGIN
+    UPDATE released_tail_generations SET generation=generation+1
+        WHERE workspace_id=OLD.workspace_id AND object_id=OLD.object_id AND version_id=
+          (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=OLD.workspace_id);
+END;
 CREATE TABLE hosted_parked_snapshots (
     workspace_id TEXT NOT NULL,
     version_id TEXT NOT NULL,
@@ -4017,6 +4048,9 @@ pub(crate) const RELEASED_TAIL_TRIGGERS: &[&str] = &[
     "released_tail_archive_update",
     "released_tail_archive_delete",
     "released_hold_binding_digest_moves",
+    "released_tail_hold_insert",
+    "released_tail_hold_update",
+    "released_tail_hold_delete",
 ];
 
 /// A hosted document that left the scope parks instead of losing its state.
@@ -5034,7 +5068,7 @@ mod tests {
             ),
             (
                 "v2-live-owner-activations",
-                "df2daeddd417e81818a09ed34ca018cfefe276cbf5e8ee1c69b1caacc0d487d6",
+                "fb240511233eccb0ef864141a9f30c3a5ae635f3310f91b3a87f30783efdaf98",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -8708,7 +8742,8 @@ mod tests {
     /// inspection loads that its coordinates do not name (Sol's r2c-3c-1
     /// finding 1), including a latest snapshot removed after it folded rows,
     /// an archive rebound, and a missing blob restored (Sol's r2c-3c-3
-    /// findings 1 and 2, Opus's finding 1). A blob nothing names, a folded
+    /// findings 1 and 2, Opus's finding 1), and a hold's binding (their
+    /// r2c-3c-5 finding 1). A blob nothing names, a folded
     /// journal row no entry names, an append, a superseded snapshot pruned,
     /// and a document column neither reads move nothing. The generation
     /// outlives its document.
@@ -8985,6 +9020,55 @@ mod tests {
         step("INSERT INTO binary_blobs VALUES ('merged',1,X'00')", &["b"]);
         step("UPDATE binary_blobs SET bytes=X'01' WHERE sha256='merged'", &["b"]);
         step("DELETE FROM binary_blobs WHERE sha256='merged'", &["b"]);
+        // Sol's and Opus's r2c-3c-5 finding 1: a hold's binding moves its
+        // document in its workspace's main version as it is set, changes,
+        // moves to another document and back, goes and comes back, so two
+        // writes cannot change it and restore its digest unseen. Its digest
+        // alone, the binding rewritten as it was, the hold's other columns,
+        // and a document with no binding arriving or going move nothing.
+        step("INSERT INTO versioned_workspaces VALUES ('ws','main')", &[]);
+        step(
+            "INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation)
+             VALUES ('ws','a','a.md','ready',0)",
+            &[],
+        );
+        let digest = |n: u8| char::from(b'0' + n).to_string().repeat(64);
+        let bind = |json: &str, digest: &str| {
+            format!(
+                "UPDATE hosted_documents SET state='held',held_reason='released-lineage-unsettled',
+                   released_hold_continuation='frozen',released_hold_binding_json='{json}',
+                   released_hold_binding_digest='{digest}' WHERE object_id='a'"
+            )
+        };
+        step(&bind("[1]", &digest(1)), &["a"]);
+        step(&bind("[2]", &digest(2)), &["a"]);
+        step(&bind("[3]", &digest(1)), &["a"]);
+        step(&bind("[3]", &digest(2)), &[]);
+        step(
+            "UPDATE hosted_documents SET released_hold_binding_json=released_hold_binding_json,
+               released_hold_binding_stale=1,path='moved.md',scope_generation=1 WHERE object_id='a'",
+            &[],
+        );
+        step("UPDATE hosted_documents SET object_id='b' WHERE object_id='a'", &["a", "b"]);
+        step("UPDATE hosted_documents SET object_id='a' WHERE object_id='b'", &["a", "b"]);
+        conn.execute_batch(
+            "CREATE TEMP TABLE kept_hold AS SELECT * FROM hosted_documents WHERE object_id='a'",
+        )
+        .unwrap();
+        step("DELETE FROM hosted_documents WHERE object_id='a'", &["a"]);
+        step("INSERT INTO hosted_documents SELECT * FROM temp.kept_hold", &["a"]);
+        step(
+            "UPDATE hosted_documents SET state='ready',held_reason=NULL,released_hold_continuation=NULL,
+               released_hold_binding_stale=0,released_hold_binding_json=NULL,released_hold_binding_digest=NULL
+             WHERE object_id='a'",
+            &["a"],
+        );
+        step(
+            "INSERT INTO hosted_documents(workspace_id,object_id,path,state,scope_generation)
+             VALUES ('ws','b','b.md','ready',0)",
+            &[],
+        );
+        step("DELETE FROM hosted_documents", &[]);
     }
 
     /// A generation at its bound fails the mutation that would move it, even
@@ -9142,7 +9226,8 @@ mod tests {
     /// row going, coming back and changing its digest, a missing blob it
     /// names arriving, a snapshot changing its digest, the latest snapshot
     /// going, and an archive changing its digest and going. Every statement
-    /// those triggers run searches by index, never scans.
+    /// those triggers run, and the one a hold's binding moves its document
+    /// by, searches by index, never scans.
     #[test]
     fn released_tail_triggers_that_match_move_by_key() {
         let dir = tempdir();
@@ -9243,6 +9328,10 @@ mod tests {
                  UNION SELECT workspace_id,version_id,object_id FROM ydoc_inactive_lineages
                    WHERE full_state_blob_sha256=?1)"
             ),
+            "UPDATE released_tail_generations SET generation=generation+1
+             WHERE workspace_id=?1 AND object_id=?2 AND version_id=
+               (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1)"
+                .to_owned(),
         ] {
             let plan = query_plan(&conn, &sql);
             assert!(

@@ -1,7 +1,7 @@
 import { DRAIN_TIMEOUT_HEADER } from "@dohc/service-http";
 import type { HeldDocumentInspection, HostedSyncMethodResultMap } from "@dohc/workspace-engine-client/relay-wire";
 import { badRequest, notFound, relayError } from "./errors";
-import { HeldReadBusyError } from "./liveHostRequests";
+import { HeldReadBusyError, HeldReadTooLargeError } from "./liveHostRequests";
 import type { SyncRelayStorage } from "./storage";
 import { MAX_BLOB_BYTES, MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 
@@ -227,6 +227,7 @@ export function createHeldDocumentRoutes(options: {storage: SyncRelayStorage; ho
       // A former owner, or a caller of a replaced host, learns nothing from how the read ended.
       if (!standing()) throw notFound();
       if (error instanceof HeldReadBusyError) throw relayError("held_read_busy");
+      if (error instanceof HeldReadTooLargeError) throw relayError("payload_too_large", "Held document exceeds what a held read can answer.");
       throw error;
     }
     signal.throwIfAborted();

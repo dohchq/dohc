@@ -3,8 +3,8 @@
 //! before its answer is handed over. What it read beyond the evidence the
 //! document's released tail generation covers, its caller names by bounded
 //! coordinates and compares again on the actor before releasing the answer.
-//! A workspace has one proof reading at a time, shared by the callers that
-//! ask the same of the same state, and stopped once none of them waits, its
+//! A workspace has one proof at a time until it ends, shared by the callers
+//! that ask the same of the same state, and stopped once none of them waits, its
 //! store closes, its store's WAL needs its reader gone, or its deadline
 //! passes. A daemon runs a few proofs at once, within a memory budget its
 //! proofs and their results share: a proof takes more of it before it grows
@@ -48,18 +48,17 @@ const PROOF_RESERVATION_BYTES: u64 = 128 << 20;
 const PROOF_MEMORY_BYTES: u64 = 2 * PROOF_RESERVATION_BYTES;
 
 /// The held-document proofs of one store's actor. A workspace has at most
-/// one reading, from admission until its reader closes. A caller whose
-/// request `K` is the workspace's proof joins it, up to [`MAX_PROOF_WAITERS`]
-/// callers, and shares its result `T`; any other request for the workspace
-/// is busy while that reader is open, never queued, and so is a new proof
-/// beyond its daemon's [`HeldProofLimit`] or while the store's WAL presses
-/// on held readers. Each caller leaves on its own, and the last to leave
-/// stops the proof, queued or running: its reader at its next statement,
-/// within [`READER_STEP_OPS`] steps of the one running, and the proof itself
-/// at its next [`Stop::check`]. Once its reader closed, the workspace takes
-/// the next proof while this one encodes and hands over its answer.
-/// [`Self::close`] stops every proof and waits, bounded, for their readers
-/// to close, those still opening included.
+/// one, from admission until it ends, its encoding after its reader closed
+/// included. A caller whose request `K` is the workspace's proof joins it,
+/// up to [`MAX_PROOF_WAITERS`] callers, and shares its result `T`; any other
+/// request for the workspace is busy until that proof ends, never queued,
+/// and so is a new proof beyond its daemon's [`HeldProofLimit`] or while the
+/// store's WAL presses on held readers. Each caller leaves on its own, and
+/// the last to leave stops the proof, queued or running: its reader at its
+/// next statement, within [`READER_STEP_OPS`] steps of the one running, and
+/// the proof itself at its next [`Stop::check`]. [`Self::close`] stops every
+/// proof and waits, bounded, for their readers to close, those still opening
+/// included, but not for a proof that only encodes.
 pub struct HeldProofs<K, T>(Arc<Proofs<K, T>>);
 
 /// What the proofs' handles and their blocking threads share. The lock is
@@ -84,11 +83,8 @@ struct OpenReaders {
 }
 
 struct ProofState<K, T> {
-    /// Each workspace's proof, by workspace ID, until it ends or, once its
-    /// reader closed, the workspace's next proof takes its place.
+    /// Each workspace's proof, by workspace ID, until it ends.
     running: HashMap<String, Arc<Proof<K, T>>>,
-    /// Proofs whose place the next one took, until they end.
-    ending: Vec<Arc<Proof<K, T>>>,
     closed: bool,
     /// How long a proof admitted now may run.
     deadline: Duration,
@@ -447,7 +443,6 @@ impl<K, T> HeldProofs<K, T> {
         Self(Arc::new(Proofs {
             state: Mutex::new(ProofState {
                 running: HashMap::new(),
-                ending: Vec::new(),
                 closed: false,
                 deadline: HELD_PROOF_DEADLINE,
                 close_bound: HELD_PROOF_CLOSE_BOUND,
@@ -463,8 +458,7 @@ impl<K, T> HeldProofs<K, T> {
 
     /// Whether a request for `workspace_id` is busy whatever it asks, which
     /// reads nothing: its proof is stopping or answers as many callers as it
-    /// can, and either still reads or the daemon runs as many proofs as it
-    /// may; or with none the daemon runs as many proofs as it may.
+    /// can; or with none the daemon runs as many proofs as it may.
     pub fn refuses(&self, workspace_id: &str) -> bool {
         let state = lock(&self.0.state);
         if state.closed {
@@ -472,9 +466,8 @@ impl<K, T> HeldProofs<K, T> {
         }
         match state.running.get(workspace_id) {
             Some(proof) => {
-                (proof.job.halt.stopped().is_some()
-                    || lock(&proof.outcome).waiters.len() >= MAX_PROOF_WAITERS)
-                    && (!proof.job.halt.read() || self.0.limit.refuses())
+                proof.job.halt.stopped().is_some()
+                    || lock(&proof.outcome).waiters.len() >= MAX_PROOF_WAITERS
             }
             None => self.0.limit.refuses(),
         }
@@ -498,12 +491,10 @@ impl<K: PartialEq, T> HeldProofs<K, T> {
             return Ok(HeldProofAdmission::Closed);
         }
         if let Some(proof) = state.running.get(workspace_id) {
-            if let Some(wait) = proof.join(&key) {
-                return Ok(HeldProofAdmission::Joined(wait));
-            }
-            if !proof.job.halt.read() {
-                return Ok(HeldProofAdmission::Busy);
-            }
+            return Ok(match proof.join(&key) {
+                Some(wait) => HeldProofAdmission::Joined(wait),
+                None => HeldProofAdmission::Busy,
+            });
         }
         if store.measure_wal_pressure()? {
             return Ok(HeldProofAdmission::Busy);
@@ -534,12 +525,9 @@ impl<K: PartialEq, T> HeldProofs<K, T> {
                 stopping: Vec::new(),
             }),
         });
-        if let Some(previous) = state
+        state
             .running
-            .insert(workspace_id.to_owned(), Arc::clone(&proof))
-        {
-            state.ending.push(previous);
-        }
+            .insert(workspace_id.to_owned(), Arc::clone(&proof));
         #[cfg(any(test, feature = "test-support"))]
         {
             state.admitted += 1;
@@ -568,7 +556,7 @@ impl<K, T> HeldProofs<K, T> {
         let mut state = lock(&self.0.state);
         let deadline = Instant::now() + state.close_bound;
         state.closed = true;
-        let proofs: Vec<_> = state.running.values().chain(&state.ending).cloned().collect();
+        let proofs: Vec<_> = state.running.values().cloned().collect();
         drop(state);
         // Each stops before close takes the readers' lock below, so a reader
         // not yet counted finds its proof stopped.
@@ -701,7 +689,7 @@ impl<K, T> HeldProofRun<K, T> {
     /// bytes do not fit the daemon's proof memory answers busy, or too large
     /// when they never would. `prove` opens at most one reader and closes it
     /// before it returns, a panic's unwinding included; the workspace takes
-    /// another proof once it closed. A proof stopped meanwhile answers
+    /// another proof once this one ends. A proof stopped meanwhile answers
     /// nobody, whatever `prove` returned: an interrupted reader is a stop,
     /// never a storage failure. One preempted, past its deadline or short of
     /// memory answers busy.
@@ -719,8 +707,8 @@ impl<K, T> HeldProofRun<K, T> {
         self.end(&proof, result);
     }
 
-    /// Free the proof's place in its workspace, unless the next proof took
-    /// it, answer its callers, then free its place in the daemon's limit.
+    /// Free the proof's place in its workspace, answer its callers, then
+    /// free its place in the daemon's limit.
     fn end(
         &mut self,
         proof: &Arc<Proof<K, T>>,
@@ -734,8 +722,6 @@ impl<K, T> HeldProofRun<K, T> {
                 .is_some_and(|running| Arc::ptr_eq(running, proof))
             {
                 state.running.remove(&proof.workspace_id);
-            } else {
-                state.ending.retain(|ending| !Arc::ptr_eq(ending, proof));
             }
         }
         // A stopped proof has nobody to answer, unless close answered them,
@@ -1882,12 +1868,14 @@ mod tests {
         assert_eq!(proofs.readers_opened(), 0, "no reader opened after close began");
     }
 
-    /// Opus's r2c-3c-3 finding 3: once a proof's reader closed, while it
-    /// still encodes its answer, its workspace takes the next proof, which
-    /// another request starts, and close waits for nothing; the first proof
-    /// opens no other reader and still answers its callers.
+    /// Sol's r2c-3c-5 finding 2: a workspace runs one distinct proof until
+    /// it ends. Once its reader closed, while it still encodes its answer, a
+    /// different request for its workspace is busy and an identical one
+    /// joins it; the workspace frees only once it ends. It opens no other
+    /// reader and answers every caller, and close waits for no encoding
+    /// (Opus's r2c-3c-3 finding 3).
     #[test]
-    fn a_proofs_workspace_frees_once_its_reader_closes() {
+    fn a_proof_keeps_its_workspace_until_it_ends() {
         let (_scratch, store) = store();
         let proofs = proofs();
         proofs.pause_proofs_at(ProofStage::Encoding);
@@ -1902,16 +1890,15 @@ mod tests {
         });
         proofs.wait_for_paused_proof();
         assert_eq!(proofs.open_readers(), 0, "its reader closed");
-        assert!(!proofs.refuses("workspace"));
-        let (next, second) = match admit(&proofs, &store, "workspace", "other") {
-            HeldProofAdmission::Started(run, wait) => (run, wait),
-            _ => panic!("the workspace takes the next proof"),
-        };
-        assert!(matches!(admit(&proofs, &store, "workspace", "key"), HeldProofAdmission::Busy), "the next proof reads");
-        drop((next, second));
+        assert!(!proofs.refuses("workspace"), "an identical request may join");
+        assert!(matches!(admit(&proofs, &store, "workspace", "other"), HeldProofAdmission::Busy), "a different request");
+        let second = joined(&proofs, &store, "key");
         proofs.resume_proofs();
         worker.join().unwrap();
-        assert_eq!(answer(first), Ok(1), "the first proof still answers");
+        assert_eq!(answer(first), Ok(1), "the proof still answers");
+        assert_eq!(answer(second), Ok(1), "and so does its joiner");
+        assert_eq!(proofs.proofs_admitted(), 1, "one distinct proof");
+        assert!(matches!(admit(&proofs, &store, "workspace", "other"), HeldProofAdmission::Started(..)), "an ended proof frees its workspace");
 
         let (run, wait) = started(&proofs, &store, "key");
         proofs.pause_proofs_at(ProofStage::Encoding);

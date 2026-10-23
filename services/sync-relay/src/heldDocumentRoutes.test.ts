@@ -9,7 +9,7 @@ import {createSyncRelayHandler} from "./server";
 import {releasedLineageBindingDigest, type ReleasedLineageBinding} from "@dohc/workspace-engine-client/relay-wire";
 import {heldBodySendDeadlineMs, MAX_HELD_BODY_BYTES, MAX_HELD_DOCUMENTS_PAGE, withStreamedContributions, withStreamedMarkdown, type HeldContributionsRead,
   type HeldDocumentHost, type HeldDocumentInspection, type HeldDocumentsPage, type StreamedBlob} from "./heldDocumentRoutes";
-import {HeldReadBusyError} from "./liveHostRequests";
+import {HeldReadBusyError, HeldReadTooLargeError} from "./liveHostRequests";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {for (const close of cleanups.splice(0).reverse()) await close();});
@@ -483,6 +483,18 @@ describe("held document read admission", () => {
     const refused = await f.get(details);
     expect(refused.status).toBe(429);
     expect(await refused.json()).toMatchObject({code: "held_read_busy"});
+  });
+
+  it("answer the host refusing an answer too large to keep as 413 while ownership stands, and as a missing document once it does not", async () => {
+    let lose = () => {};
+    const f = await relay(fakeHost({heldDocument: async () => {lose(); throw new HeldReadTooLargeError();}}));
+    const refused = await f.get(details);
+    expect(refused.status).toBe(413);
+    expect(await refused.json()).toMatchObject({code: "payload_too_large"});
+    lose = () => {f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='owner-2' WHERE workspace_id=?").run(scope.workspaceId);};
+    const lost = await f.get(details);
+    expect(lost.status).toBe(404);
+    expect(await lost.json()).toMatchObject({code: "not_found"});
   });
 
   it("hold the slot until the answer's body is read or cancelled", async () => {

@@ -11,7 +11,7 @@ import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots, type Servi
 import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
 import {hasRelayWriteObservers, notifyRelayWrite, observeRelayWrites} from "./relayWriteChanges.js";
 import {createNamedFrameChanges} from "./liveHostChanges.js";
-import {HeldReadBusyError} from "./liveHostRequests.js";
+import {HeldReadBusyError, HeldReadTooLargeError} from "./liveHostRequests.js";
 import {captureOwnerLiveFrameHost} from "./namedLiveFrameHost.js";
 import type {LiveHostConnectionCoordinate} from "./storage.js";
 import {ServiceActivationDriver} from "./serviceActivationDriver.js";
@@ -958,6 +958,35 @@ it("frees a cancelled held read's slot on the engine's answer, and answers the e
   await expect(read()).rejects.toMatchObject({code: "held_read_busy"});
   const asked = deferred<void>(), release = deferred<void>();
   engine = async () => {asked.resolve(); await release.promise; throw busy();};
+  const lost = read();
+  await asked.promise;
+  o.raw.exec("UPDATE sync_relay_workspaces SET owner_user_id='owner-2' WHERE workspace_id='workspace'");
+  release.resolve();
+  await expect(lost).rejects.toMatchObject({code: "not_found"});
+});
+
+// Proves: the engine refusing a held answer larger than it keeps for one
+// reaches the owner as 413, a refusal asking again cannot change, never as a
+// generic engine failure; a caller who lost ownership meanwhile learns nothing.
+it("answers the engine's too-large refusal of a held read 413 to the owner alone", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const send = o.client().sendRequest, through = send.getMockImplementation()! as (...args: unknown[]) => ReturnType<typeof send>;
+  const tooLarge = () => new EngineRequestError(0, {code: "PAYLOAD_TOO_LARGE", message: "held-read-too-large", retry: "no"});
+  let engine: () => Promise<unknown> = async () => {throw tooLarge();};
+  send.mockImplementation(async (...args: unknown[]) => {
+    const request = args[0] as {id: number; method: string};
+    return request.method === "sync.heldDocument" ? {id: request.id, result: await engine()} as never : through(...args);
+  });
+
+  await expect(o.host.heldDocument("workspace", "object", {markdown: false})).rejects.toBeInstanceOf(HeldReadTooLargeError);
+  const routes = createHeldDocumentRoutes({storage: o.f.storage, host: () => o.host});
+  const read = () => routes(new Request("http://relay.test/sync/workspace/held-documents/object"),
+    {route: "held-documents", workspaceId: "workspace", objectId: "object"}, "owner");
+  await expect(read()).rejects.toMatchObject({code: "payload_too_large", statusCode: 413});
+  const asked = deferred<void>(), release = deferred<void>();
+  engine = async () => {asked.resolve(); await release.promise; throw tooLarge();};
   const lost = read();
   await asked.promise;
   o.raw.exec("UPDATE sync_relay_workspaces SET owner_user_id='owner-2' WHERE workspace_id='workspace'");

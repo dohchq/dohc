@@ -117,6 +117,11 @@ export class HeldReadBusyError extends Error {
   constructor() {super("Another held read is running for this workspace.");}
 }
 
+/** A held read whose answer is larger than the engine keeps for one; asking again answers the same. */
+export class HeldReadTooLargeError extends Error {
+  constructor() {super("The held document is larger than a held read can answer.");}
+}
+
 type HeldWaiter = {settle(outcome: {value: unknown} | {error: unknown}): void};
 type HeldJob = {key: string; waiters: Set<HeldWaiter>; controller: AbortController; start(): void};
 

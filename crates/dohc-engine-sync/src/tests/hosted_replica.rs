@@ -6318,6 +6318,66 @@ fn a_released_hold_nothing_still_justifies_frees_on_the_next_pass() {
     assert!(ready(&store, "doc-a"));
 }
 
+/// Sol's and Opus's r2c-3c-5 finding 1, through the production writers: a
+/// released hold stored, its binding replaced, and the hold freed by the
+/// next pass each move the document's released tail generation, so a held
+/// proof never reads a binding that changed as current. Storing the hold
+/// again as it was moves nothing.
+#[test]
+fn storing_replacing_and_freeing_a_released_hold_moves_its_generation() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let feed = HostedFeed::new();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-a", "a.md", "first");
+    feed.share("doc-a", "a.md");
+    let client = RelaySyncClient::new(feed);
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-a"));
+    let recorded = store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO released_tail_generations \
+                 SELECT workspace_id,main_version_id,'doc-a',1 FROM versioned_workspaces \
+                 WHERE workspace_id='ws'",
+                [],
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+    assert_eq!(recorded, TxnOutcome::Committed(1));
+    let generation = |store: &EngineStore| {
+        count(
+            store,
+            "SELECT generation FROM released_tail_generations WHERE workspace_id='ws' \
+             AND object_id='doc-a' AND version_id= \
+               (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id='ws')",
+        )
+    };
+    let mut before = generation(&store);
+    for (what, relay_seq, moves) in [
+        ("stored", 8, true),
+        ("as it was", 8, false),
+        ("replaced", 9, true),
+    ] {
+        let held = store
+            .write_with(&NoFaults, |tx| {
+                crate::hosted::hold_released_in_tx(
+                    tx,
+                    &released_binding("doc-a", "a.md", relay_seq),
+                    crate::ReleasedHoldContinuation::Frozen,
+                    false,
+                )
+            })
+            .unwrap();
+        assert_eq!(held, TxnOutcome::Committed(true), "{what}");
+        assert_eq!(generation(&store) > before, moves, "{what}");
+        before = generation(&store);
+    }
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-a"));
+    assert!(generation(&store) > before, "freed");
+}
+
 /// A binding names a relay position from 1. One at 0 would not read back,
 /// so no hold stores it: the transaction fails before it counts a commit,
 /// and the document stays as it was.
