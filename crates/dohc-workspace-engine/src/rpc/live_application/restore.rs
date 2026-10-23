@@ -44,7 +44,7 @@ impl RestoreOperation {
 }
 
 struct RestoreOutputGuard {
-    fence: RestoreFenceOutputGuard,
+    fence: HostOutputGuard,
     _reservation: Arc<dyn Send + Sync>,
 }
 impl RestoreOutputGuard {
@@ -209,7 +209,7 @@ impl EngineService {
             return Err(workspace_unavailable());
         }
         let guard = Arc::new(RestoreOutputGuard {
-            fence: RestoreFenceOutputGuard {
+            fence: HostOutputGuard {
                 host: host.clone(),
                 cancel: ctx.cancel.clone(),
                 deadline: ctx.deadline,

@@ -210,4 +210,43 @@ describe("held document inspection contract", () => {
   ])("rejects %s", (_case, patch) => {
     expect(() => decodeHostedSyncResult("sync.heldDocument", { ...inspected, ...patch })).toThrow(ProtocolShapeError);
   });
+
+  const found = (reason: string, status: string) => ({ reason, status, namespace: null, contribution: null });
+  const incomplete = (status: string, ...reasons: unknown[]) => ({ status, reasons, mergedContributionIds: [],
+    markdown: null, markdownSha256: null, markdownByteLength: null, inbandLimitBytes: 49152 });
+  const pending = found("pending-contribution-dependencies", "pending-dependencies");
+  const missing = found("source-missing", "missing-evidence");
+  const contradictory = found("contradictory-evidence", "invalid-evidence");
+
+  it("keeps mixed reasons under the worst one's status, and coordinates from one", () => {
+    for (const [status, reasons] of [
+      ["missing-evidence", [pending, missing]],
+      ["invalid-evidence", [missing, contradictory, pending]],
+    ] as const) {
+      const preservation = incomplete(status, ...reasons);
+      expect(decodeHostedSyncResult("sync.heldDocument", { ...inspected, preservation })?.preservation).toEqual(preservation);
+    }
+    const first = [{ ...carried, journalCursor: 1 }, { ...outbox, sequence: Number.MAX_SAFE_INTEGER }];
+    const preservation = { ...complete, mergedContributionIds: first };
+    expect(decodeHostedSyncResult("sync.heldDocument", { ...inspected, preservation })?.preservation).toEqual(preservation);
+  });
+
+  it.each([
+    ["a stale-marked hold that claims to be current", { bindingStale: true }],
+    ["a reason under another reason's status", { preservation: incomplete("invalid-evidence", found("source-missing", "invalid-evidence")) }],
+    ["a pending reason claiming invalid evidence", { preservation: incomplete("invalid-evidence", found("pending-head-dependencies", "invalid-evidence")) }],
+    ["a status better than its worst reason", { preservation: incomplete("pending-dependencies", pending, missing) }],
+    ["a status worse than its worst reason", { preservation: incomplete("invalid-evidence", missing) }],
+    ["no reasons but an incomplete status", { preservation: incomplete("missing-evidence") }],
+    ["an update digest that is no SHA-256", { preservation: { ...complete, mergedContributionIds: [{ ...outbox, updateDigest: "d" }] } }],
+    ["an uppercase update digest", { preservation: { ...complete, mergedContributionIds: [{ ...carried, updateDigest: "C".repeat(64) }] } }],
+    ["a reason's contribution with no SHA-256", { preservation: incomplete("missing-evidence",
+      { ...missing, contribution: { ...outbox, updateDigest: "not-a-digest" } }) }],
+    ["journal cursor zero", { preservation: { ...complete, mergedContributionIds: [{ ...carried, journalCursor: 0 }] } }],
+    ["outbox sequence zero", { preservation: { ...complete, mergedContributionIds: [{ ...outbox, sequence: 0 }] } }],
+    ["an unsafe journal cursor", { preservation: { ...complete, mergedContributionIds: [{ ...carried, journalCursor: Number.MAX_SAFE_INTEGER + 1 }] } }],
+    ["a fractional sequence", { preservation: { ...complete, mergedContributionIds: [{ ...outbox, sequence: 1.5 }] } }],
+  ])("rejects %s", (_case, patch) => {
+    expect(() => decodeHostedSyncResult("sync.heldDocument", { ...inspected, ...patch })).toThrow(ProtocolShapeError);
+  });
 });

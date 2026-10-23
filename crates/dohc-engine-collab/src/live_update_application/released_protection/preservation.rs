@@ -146,8 +146,14 @@ pub fn inspect_held(
         object_id: binding.object_id.clone(),
     };
     let lineage = binding.lineage_claim_id.as_str();
-    let Some((canonical, kind, digest)) = lineage_state(conn, &doc, lineage)? else {
-        return Ok(HeldInspection::Stale);
+    let (state, digest) = match lineage_state(conn, &doc, lineage)? {
+        None => return Ok(HeldInspection::Stale),
+        Some(LineageState::Read(canonical, kind, digest)) => (Some((canonical, kind)), digest),
+        // A head whose journal does not load has no digest to compare; the
+        // rest of the binding must still stand for the finding to be its own.
+        Some(LineageState::Corrupt(digest)) => {
+            (None, digest.unwrap_or_else(|| binding.head_digest.clone()))
+        }
     };
     if digest != binding.head_digest {
         return Ok(HeldInspection::Stale);
@@ -195,6 +201,10 @@ pub fn inspect_held(
             None,
         )),
     }
+    let Some((canonical, kind)) = state else {
+        findings.push(finding(PreservationReason::ContradictoryEvidence, None, None));
+        return Ok(HeldInspection::Current(concluded(findings, Vec::new(), None)));
+    };
     preserve(&canonical, kind, findings, &readable, |digest| {
         stored_source(conn, digest)
     })
@@ -213,20 +223,43 @@ fn finding(
     }
 }
 
-/// The state `lineage` of the document keeps, its content kind, and the
-/// digest a binding names it by: the head's, loaded from its journal, or an
-/// archived one's, from the full state its archive keeps. None when the
-/// document holds no such lineage.
+/// What [`lineage_state`] found of a lineage.
+enum LineageState {
+    /// Its state, content kind, and the digest a binding names it by.
+    Read(Ydoc, ContentKind, String),
+    /// Its stored state does not load: the head's journal, or an archive's
+    /// bytes, are missing, mismatched or malformed. An archive still names
+    /// its digest.
+    Corrupt(Option<String>),
+}
+
+/// Whether `error` says stored state is corrupt, rather than unreadable.
+fn corrupt(error: &CollabError) -> bool {
+    matches!(
+        error,
+        CollabError::Corrupt { .. }
+            | CollabError::MalformedUpdate { .. }
+            | CollabError::ReplayParityViolation { .. }
+    )
+}
+
+/// The state `lineage` of the document keeps: the head's, loaded from its
+/// journal, or an archived one's, from the full state its archive keeps.
+/// None when the document holds no such lineage.
 fn lineage_state(
     conn: &Connection,
     doc: &DocKey,
     lineage: &str,
-) -> Result<Option<(Ydoc, ContentKind, String)>, ApplicationError> {
+) -> Result<Option<LineageState>, ApplicationError> {
     if let Some(marker) = durable::read_marker_in(conn, doc)? {
         if marker.lineage_claim_id.as_deref() == Some(lineage) {
-            let head = durable::load_doc_in(conn, doc)?;
+            let head = match durable::load_doc_in(conn, doc) {
+                Ok(head) => head,
+                Err(error) if corrupt(&error) => return Ok(Some(LineageState::Corrupt(None))),
+                Err(error) => return Err(error.into()),
+            };
             let digest = hex_sha256(&head.encode_full_state());
-            return Ok(Some((head, marker.content_kind, digest)));
+            return Ok(Some(LineageState::Read(head, marker.content_kind, digest)));
         }
     }
     let archived: Option<(String, String)> = conn
@@ -242,11 +275,15 @@ fn lineage_state(
         return Ok(None);
     };
     let Source::Bytes(bytes) = stored_source(conn, &digest)? else {
-        return Err(ApplicationError::Corrupt);
+        return Ok(Some(LineageState::Corrupt(Some(digest))));
     };
     let state = Ydoc::wire();
-    state.apply(&bytes)?;
-    Ok(Some((state, ContentKind::parse(&kind)?, digest)))
+    match state.apply(&bytes) {
+        Ok(()) => {}
+        Err(error) if corrupt(&error) => return Ok(Some(LineageState::Corrupt(Some(digest)))),
+        Err(error) => return Err(error.into()),
+    }
+    Ok(Some(LineageState::Read(state, ContentKind::parse(&kind)?, digest)))
 }
 
 /// The bytes stored under `digest`, which must hash to it.
@@ -274,6 +311,43 @@ fn integrated(doc: &Ydoc) -> (Vec<u8>, Vec<u8>) {
     (doc.encode_state_vector(), doc.encode_delete_set())
 }
 
+/// What an update integrates: where each client's insertions end, and what
+/// it deletes.
+struct Integration {
+    ends: Vec<(yrs::ClientID, u32)>,
+    deletes: yrs::IdSet,
+}
+
+impl Integration {
+    fn of(bytes: &[u8]) -> Result<Self, ApplicationError> {
+        use yrs::updates::decoder::Decode;
+        let update = yrs::Update::decode_v1(bytes).map_err(|_| ApplicationError::Corrupt)?;
+        let ends = update
+            .insertions(true)
+            .iter()
+            .filter_map(|(client, ranges)| {
+                ranges.iter().map(|range| range.end).max().map(|end| (*client, end))
+            })
+            .collect();
+        Ok(Self {
+            ends,
+            deletes: update.delete_set().clone(),
+        })
+    }
+
+    /// Whether a doc with this state vector and delete set holds all of it.
+    /// A doc's insertions run from clock zero, so its vector covers every
+    /// insertion that ends at or before it.
+    fn within(&self, vector: &yrs::StateVector, deleted: &yrs::IdSet) -> bool {
+        let empty = Default::default();
+        self.ends.iter().all(|(client, end)| *end <= vector.get(client))
+            && self
+                .deletes
+                .iter()
+                .all(|(client, ranges)| ranges.subset_of(deleted.get(client).unwrap_or(&empty)))
+    }
+}
+
 /// Merge every contribution of `work`, each tail's in its canonical order,
 /// into scratch state loaded from `canonical`, loading each one's bytes by
 /// its digest as it comes. Every contribution is loaded and checked, however
@@ -281,6 +355,14 @@ fn integrated(doc: &Ydoc) -> (Vec<u8>, Vec<u8>) {
 /// only when nothing in `findings` or found here holds it back and the
 /// canonical and the final merged state hold nothing pending; an
 /// intermediate application may wait on a later one.
+///
+/// Two contradictions stay out of reach. A contribution that reuses a
+/// client and clock the merged state already holds, with other content,
+/// counts as already integrated: Yjs keeps the first struct at an ID and
+/// never compares a later one, so nothing records the difference. Two tails
+/// naming one delivery under different digests are not compared with each
+/// other: each tail's work is validated alone, and both apply, so neither
+/// one's work is lost from the merge.
 fn preserve(
     canonical: &Ydoc,
     kind: ContentKind,
@@ -300,7 +382,10 @@ fn preserve(
     let scratch = Ydoc::wire();
     scratch.apply(&canonical.encode_full_state())?;
     let mut merged = Vec::new();
-    let mut waiting = Vec::new();
+    // Contributions whose application left part of them parked, with what
+    // each integrates: one counts as merged once the merge holds all of it,
+    // whatever else stays pending.
+    let mut waiting: Vec<(RetainedContribution, Integration)> = Vec::new();
     for (namespace, contributions) in work {
         for contribution in contributions {
             let held_back = |reason| finding(reason, Some(namespace.as_str()), Some(contribution));
@@ -315,15 +400,29 @@ fn preserve(
                     continue;
                 }
             };
-            let before = (integrated(&scratch), scratch.pending_state());
+            let before = integrated(&scratch);
             if scratch.apply(&bytes).is_err() {
                 findings.push(held_back(PreservationReason::MalformedUpdate));
                 continue;
             }
-            if integrated(&scratch) != before.0 {
+            if integrated(&scratch) != before {
                 merged.push(contribution.clone());
-            } else if scratch.pending_state() != before.1 {
-                waiting.push(contribution.clone());
+                // What this one added may be what an earlier one waited on.
+                if !waiting.is_empty() {
+                    let (vector, deleted) = (scratch.state_vector(), scratch.delete_set());
+                    let (held, still): (Vec<_>, Vec<_>) = waiting
+                        .drain(..)
+                        .partition(|(_, integration)| integration.within(&vector, &deleted));
+                    merged.extend(held.into_iter().map(|(contribution, _)| contribution));
+                    waiting = still;
+                }
+            } else if scratch.has_pending_dependencies() {
+                // It added nothing: either the merge held it already, or it
+                // is parked, alone or beside an identical earlier one.
+                let integration = Integration::of(&bytes)?;
+                if !integration.within(&scratch.state_vector(), &scratch.delete_set()) {
+                    waiting.push((contribution.clone(), integration));
+                }
             }
         }
     }
@@ -333,8 +432,6 @@ fn preserve(
             None,
             None,
         ));
-    } else {
-        merged.append(&mut waiting);
     }
     merged.sort();
     merged.dedup();
@@ -483,6 +580,39 @@ mod tests {
         assert_eq!(reasons(&unresolved), [PreservationReason::PendingContributionDependencies]);
         assert_eq!(unresolved.preserved, None);
         assert!(unresolved.merged.is_empty(), "nothing integrated: {:?}", unresolved.merged);
+    }
+
+    /// Sol's r2a finding 2: A waits for B, and B integrates both, while C
+    /// stays pending on a dependency nothing supplies. A and B count as
+    /// merged, however long C keeps the merge pending, and C has its reason.
+    /// The same holds for a second identity naming A's bytes.
+    #[test]
+    fn work_a_later_contribution_integrates_counts_while_other_work_stays_pending() {
+        let (canonical, first, second, _) = edits();
+        let other = Ydoc::wire();
+        other.apply(&canonical.encode_full_state()).unwrap();
+        let _ = other.richdoc_append_paragraph("Never sent");
+        let orphan = other.richdoc_append_paragraph("Orphan");
+        let all = stored(&[&first, &second, &orphan]);
+        let (a, b, c) = (outbox(1, &second), outbox(2, &first), outbox(3, &orphan));
+        let accounted = preserved(&canonical, vec![a.clone(), b.clone(), c.clone()], &all);
+        assert_eq!(accounted.status, PreservationStatus::PendingDependencies);
+        assert_eq!(reasons(&accounted), [PreservationReason::PendingContributionDependencies]);
+        assert_eq!(accounted.merged, vec![a.clone(), b.clone()], "C stays unmerged");
+        assert_eq!(accounted.preserved, None);
+
+        let again = RetainedContribution::Outbox {
+            outbox_id: "other".into(),
+            sequence: 1,
+            delivery_id: "again".into(),
+            update_digest: hex_sha256(&second),
+        };
+        let repeated = preserved(&canonical, vec![a.clone(), again.clone(), b.clone(), c], &all);
+        assert_eq!(repeated.merged, {
+            let mut merged = vec![a, again, b];
+            merged.sort();
+            merged
+        });
     }
 
     /// Plan r3: canonical pending state has a reason of its own, distinct

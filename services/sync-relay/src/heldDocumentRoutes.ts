@@ -7,15 +7,24 @@ import { MAX_BLOB_BYTES, MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 export type HeldDocumentsPage = HostedSyncMethodResultMap["sync.heldDocuments"];
 export type { HeldDocumentInspection };
 
+/**
+ * The host's registration, or the attachment it read through, ended while it read, so what it read
+ * answers no one. Not a failure: the host that read is no longer the one to ask.
+ */
+export type HeldReadInvalidated = {readonly invalidated: "registration" | "attachment"};
+
 /** The session host's read-only view of the documents its hosted replica holds for released retained work. */
 export type HeldDocumentHost = {
   /** Null when the workspace has no hosted replica on this host. */
-  heldDocuments(workspaceId: string, page: {afterObjectId?: string; limit: number}, signal?: AbortSignal): Promise<HeldDocumentsPage | null>;
+  heldDocuments(workspaceId: string, page: {afterObjectId?: string; limit: number}, signal?: AbortSignal):
+    Promise<HeldDocumentsPage | HeldReadInvalidated | null>;
   /**
    * Null when the document is not held for released retained work, or its workspace is not hosted here.
-   * A complete preservation carries its whole Markdown, however long.
+   * With `markdown`, a complete preservation carries its whole Markdown, however long; without it, only
+   * text within the in-band limit.
    */
-  heldDocument(workspaceId: string, objectId: string, signal?: AbortSignal): Promise<HeldDocumentInspection | null>;
+  heldDocument(workspaceId: string, objectId: string, read: {markdown: boolean}, signal?: AbortSignal):
+    Promise<HeldDocumentInspection | HeldReadInvalidated | null>;
 };
 export type HeldDocumentRoute = {route: "held-documents"; workspaceId: string; objectId?: string; markdown?: true};
 
@@ -62,25 +71,19 @@ export function withStreamedMarkdown(inspected: HeldDocumentInspection, streamed
   return {...inspected, preservation: {...preservation, markdown}};
 }
 
-/** The inspection as the JSON route answers it: Markdown above the in-band limit is read from its own route. */
-function inband(inspected: HeldDocumentInspection): HeldDocumentInspection {
-  const preservation = inspected.preservation;
-  if (preservation?.markdown == null || preservation.markdownByteLength! <= preservation.inbandLimitBytes) return inspected;
-  return {...inspected, preservation: {...preservation, markdown: null}};
-}
-
 /**
  * `GET /sync/:workspaceId/held-documents`, `.../held-documents/:objectId` and
  * `.../held-documents/:objectId/markdown`: the workspace's owner, or an agent
  * acting with the owner's credential, reads what the session host holds for
  * retained work and what it preserves. Authority comes from the
  * authenticated owner alone. The host's read yields, so ownership and the
- * answering host must still hold before anything is returned; anything else
- * answers as if nothing were there.
+ * answering host must still hold before anything is returned, or a failure
+ * is reported; anything else, and a read its host's registration or
+ * attachment overtook, answers as if nothing were there.
  *
- * The Markdown route answers the whole text of a current, complete
- * preservation, only while the binding and digest the caller inspected
- * still name it.
+ * The details leave Markdown above the in-band limit out. The Markdown route
+ * answers the whole text of a current, complete preservation, only while the
+ * binding and digest the caller inspected still name it.
  */
 export function createHeldDocumentRoutes(options: {storage: SyncRelayStorage; host(): HeldDocumentHost | undefined}) {
   return async (request: Request, route: HeldDocumentRoute, ownerUserId: string) => {
@@ -95,11 +98,19 @@ export function createHeldDocumentRoutes(options: {storage: SyncRelayStorage; ho
     const host = options.host();
     if (!host) throw notFound();
     const signal = AbortSignal.any([request.signal, storage.unavailable]);
-    const answered = objectId !== undefined
-      ? await host.heldDocument(route.workspaceId, objectId, signal)
-      : await host.heldDocuments(route.workspaceId, query ?? page(url), signal);
+    const standing = () => storage.workspaceIsOwnedBy(route.workspaceId, ownerUserId) && options.host() === host;
+    let answered: HeldDocumentsPage | HeldDocumentInspection | HeldReadInvalidated | null;
+    try {
+      answered = objectId !== undefined
+        ? await host.heldDocument(route.workspaceId, objectId, {markdown: wanted !== null}, signal)
+        : await host.heldDocuments(route.workspaceId, query ?? page(url), signal);
+    } catch (error) {
+      // A former owner, or a caller of a replaced host, learns nothing from how the read ended.
+      if (!standing()) throw notFound();
+      throw error;
+    }
     signal.throwIfAborted();
-    if (!storage.workspaceIsOwnedBy(route.workspaceId, ownerUserId) || options.host() !== host || answered === null) throw notFound();
+    if (!standing() || answered === null || "invalidated" in answered) throw notFound();
     const headers = {"cache-control": "private, no-store"};
     if (wanted) {
       const inspected = answered as HeldDocumentInspection, preservation = inspected.preservation;
@@ -109,7 +120,7 @@ export function createHeldDocumentRoutes(options: {storage: SyncRelayStorage; ho
       if (bytes.length > MAX_BLOB_BYTES) throw relayError("payload_too_large", "Held document Markdown exceeds the blob limit.");
       return new Response(bytes, {status: 200, headers: {...headers, "content-type": "text/markdown; charset=utf-8"}});
     }
-    const body = JSON.stringify(objectId !== undefined ? inband(answered as HeldDocumentInspection) : answered);
+    const body = JSON.stringify(answered);
     if (Buffer.byteLength(body) > MAX_PAYLOAD_JSON_BYTES) throw relayError("payload_too_large", "Held document details exceed the metadata limit.");
     return new Response(body, {status: 200, headers: {...headers, "content-type": "application/json"}});
   };

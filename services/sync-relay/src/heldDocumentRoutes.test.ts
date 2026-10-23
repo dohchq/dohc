@@ -55,7 +55,17 @@ function fakeHost(overrides: Partial<HeldDocumentHost> = {}): HeldDocumentHost &
   const calls: unknown[][] = [];
   return {calls,
     heldDocuments: overrides.heldDocuments ?? (async (...args) => {calls.push(["list", ...args.slice(0, 2)]); return page;}),
-    heldDocument: overrides.heldDocument ?? (async (...args) => {calls.push(["one", ...args.slice(0, 2)]); return inspection;})};
+    heldDocument: overrides.heldDocument ?? (async (...args) => {calls.push(["one", ...args.slice(0, 3)]); return inspection;})};
+}
+
+/** A host answering `inspected` as the session host does: text above the in-band limit only when asked for. */
+function answering(inspected: HeldDocumentInspection, asked: boolean[] = []): HeldDocumentHost["heldDocument"] {
+  return async (_workspaceId, _objectId, read) => {
+    asked.push(read.markdown);
+    const preservation = inspected.preservation;
+    if (read.markdown || preservation?.markdown == null || preservation.markdownByteLength! <= preservation.inbandLimitBytes) return inspected;
+    return {...inspected, preservation: {...preservation, markdown: null}};
+  };
 }
 
 describe("held document routes", () => {
@@ -71,7 +81,7 @@ describe("held document routes", () => {
     expect(await (await f.get(`${scope.workspaceId}/held-documents`)).json()).toEqual(page);
     expect(host.calls).toEqual([
       ["list", scope.workspaceId, {afterObjectId: "a", limit: 2}],
-      ["one", scope.workspaceId, held.objectId],
+      ["one", scope.workspaceId, held.objectId, {markdown: false}],
       ["list", scope.workspaceId, {limit: 50}],
     ]);
   });
@@ -137,6 +147,47 @@ describe("held document routes", () => {
     expect((await g.get(`${scope.workspaceId}/held-documents`)).status, "no session host").toBe(404);
   });
 
+  it.each(["registration", "attachment"] as const)("answer a read its host's %s overtook as a missing document", async ended => {
+    const f = await relay(fakeHost({heldDocument: async () => ({invalidated: ended}), heldDocuments: async () => ({invalidated: ended})}));
+    for (const path of [`${scope.workspaceId}/held-documents`, `${scope.workspaceId}/held-documents/${held.objectId}`, markdownPath]) {
+      const refused = await f.get(path);
+      expect(refused.status, path).toBe(404);
+      expect(await refused.json()).toMatchObject({code: "not_found"});
+    }
+  });
+
+  it("answer a host that failed as a failure while ownership and the host stand, and as nothing once either moved", async () => {
+    const failing = () => {
+      let release!: () => void, began!: () => void;
+      const answered = new Promise<void>(resolve => {release = resolve;});
+      const asked = new Promise<void>(resolve => {began = resolve;});
+      const fail = async (): Promise<never> => {began(); await answered; throw new Error("engine transport failed");};
+      return {host: fakeHost({heldDocument: fail, heldDocuments: fail}), asked, release};
+    };
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const standing = failing(), f = await relay(standing.host);
+      standing.release();
+      expect((await f.get(`${scope.workspaceId}/held-documents/${held.objectId}`)).status).toBe(500);
+
+      const transferred = failing(), g = await relay(transferred.host);
+      const read = g.get(`${scope.workspaceId}/held-documents/${held.objectId}`);
+      await transferred.asked;
+      g.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='owner-2' WHERE workspace_id=?").run(scope.workspaceId);
+      transferred.release();
+      const refused = await read;
+      expect(refused.status).toBe(404);
+      expect(JSON.stringify(await refused.json())).not.toContain("engine transport failed");
+
+      const replaced = failing(), h = await relay(replaced.host);
+      const listed = h.get(`${scope.workspaceId}/held-documents`);
+      await replaced.asked;
+      h.replaceHost(fakeHost());
+      replaced.release();
+      expect((await listed).status).toBe(404);
+    } finally {log.mockRestore();}
+  });
+
   it.each([
     "limit=0", `limit=${MAX_HELD_DOCUMENTS_PAGE + 1}`, "limit=1.5", "limit=01", "limit=two",
     "after=", "limit=1&limit=2", "other=1",
@@ -154,8 +205,9 @@ describe("held document routes", () => {
     expect(host.calls).toEqual([]);
   });
 
-  it("answer preserved text past the in-band limit whole from its own route, and leave it out of the details", async () => {
-    const host = fakeHost({heldDocument: async () => preserved}), f = await relay(host);
+  it("answer preserved text past the in-band limit whole from its own route, and ask for it only there", async () => {
+    const asked: boolean[] = [];
+    const host = fakeHost({heldDocument: answering(preserved, asked)}), f = await relay(host);
     const details = await f.get(`${scope.workspaceId}/held-documents/${held.objectId}`);
     expect(details.status).toBe(200);
     const body = await details.json() as HeldDocumentInspection;
@@ -168,13 +220,14 @@ describe("held document routes", () => {
     const bytes = new Uint8Array(await text.arrayBuffer());
     expect(sha256(bytes)).toBe(sha256(markdown));
     expect(new TextDecoder().decode(bytes)).toBe(markdown);
+    expect(asked).toEqual([false, true]);
   });
 
   it("keep preserved text within the in-band limit in the details", async () => {
     const short = "# Plan\n\nKept.\n";
     const inband: HeldDocumentInspection = {...preserved, preservation: {...preserved.preservation!, markdown: short,
       markdownSha256: sha256(short), markdownByteLength: Buffer.byteLength(short)}};
-    const f = await relay(fakeHost({heldDocument: async () => inband}));
+    const f = await relay(fakeHost({heldDocument: answering(inband)}));
     expect(((await (await f.get(`${scope.workspaceId}/held-documents/${held.objectId}`)).json()) as HeldDocumentInspection)
       .preservation?.markdown).toBe(short);
   });
@@ -183,7 +236,7 @@ describe("held document routes", () => {
     ["another binding", {bindingDigest: "e".repeat(64)}],
     ["other text", {sha256: "e".repeat(64)}],
   ])("answer no text inspected under %s, as a missing document", async (_case, query) => {
-    const f = await relay(fakeHost({heldDocument: async () => preserved}));
+    const f = await relay(fakeHost({heldDocument: answering(preserved)}));
     const params = new URLSearchParams({bindingDigest: held.bindingDigest, sha256: sha256(markdown), ...query});
     const refused = await f.get(`${scope.workspaceId}/held-documents/${held.objectId}/markdown?${params}`);
     expect(refused.status).toBe(404);

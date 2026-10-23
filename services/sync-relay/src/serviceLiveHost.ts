@@ -29,8 +29,8 @@ import {snapshotStopRestoreLookup} from "./liveRestoreDelivery.js";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation.js";
 import {parseLiveRestoreConfig, LiveRestorePreparation, type LiveRestoreConfig} from "./liveRestorePreparation.js";
 import {parseServiceHostedReplicationConfig, ServiceHostedReplication} from "./serviceHostedReplication.js";
-import {decodeHostedSyncResult} from "@dohc/workspace-engine-client/relay-wire";
-import {withStreamedMarkdown} from "./heldDocumentRoutes";
+import {decodeHostedSyncResult, type HostedSyncMethodResultMap} from "@dohc/workspace-engine-client/relay-wire";
+import {withStreamedMarkdown, type HeldReadInvalidated} from "./heldDocumentRoutes";
 import type {ServiceActivationReplica} from "./serviceActivationDriver";
 interface ServiceLiveHostConfig {
   readonly version: 1;
@@ -235,13 +235,19 @@ export async function startServiceLiveHost(options: {
     if (requestId === Number.MAX_SAFE_INTEGER) throw new Error("Service host request IDs exhausted.");
     return ++requestId;
   };
-  const check = () => {
+  const available = () => {
     standing();
     if (signal.aborted || !history.reconciled) throw new Error("Service host is unavailable.");
+  };
+  const registrationStands = () => {
     const current = storage.getLiveHostControl();
-    if (!current || current.transition || current.configuredMode !== "service" || current.configuredHostId !== coordinate.hostId ||
-      current.hostEpoch !== coordinate.hostEpoch || current.registeredInstanceId !== coordinate.instanceId ||
-      current.registeredConnectionId !== coordinate.connectionId || current.admissionState !== "open") throw new Error("Service host registration was retired.");
+    return !!current && !current.transition && current.configuredMode === "service" && current.configuredHostId === coordinate.hostId &&
+      current.hostEpoch === coordinate.hostEpoch && current.registeredInstanceId === coordinate.instanceId &&
+      current.registeredConnectionId === coordinate.connectionId && current.admissionState === "open";
+  };
+  const check = () => {
+    available();
+    if (!registrationStands()) throw new Error("Service host registration was retired.");
   };
   const checkPreparing = () => {
     if(registered){check();return;}
@@ -606,23 +612,34 @@ export async function startServiceLiveHost(options: {
     };
     // A held-document read asks the engine for a workspace this daemon replicates,
     // and answers only while this registration and that attachment still stand.
+    // One that ended during the read invalidates it, however the read ended.
     // It writes nothing, so it takes no turn and no pass waits on it. `streamed`
     // takes the blob the engine sends before its answer.
     const heldRead = async <M extends "sync.heldDocuments" | "sync.heldDocument">(workspaceId: string, method: M,
-      params: Record<string, JsonValue>, callerSignal?: AbortSignal, streamed?: (bytes: Uint8Array) => void) => {
-      check();
+      params: Record<string, JsonValue>, callerSignal?: AbortSignal,
+      streamed?: (bytes: Uint8Array) => void): Promise<HostedSyncMethodResultMap[M] | HeldReadInvalidated | null> => {
+      available();
+      if (!registrationStands()) return {invalidated: "registration"};
       const attached = attachments.get(workspaceId);
       if (!attached) return null;
+      const ended = (): HeldReadInvalidated | undefined => !registrationStands() ? {invalidated: "registration"}
+        : attachments.get(workspaceId) !== attached ? {invalidated: "attachment"} : undefined;
       return withLiveHostSignal(signal, callerSignal, async joined => {
         const id = nextRequestId();
         const stop = streamed ? client.onBlob(blob => {if (blob.requestId === id) streamed(blob.bytes);}) : () => {};
         try {
-          const response = await client.sendRequest({id, method, workspace: attached.handle,
-            params: {workspaceId, ...params}, deadlineMs: config.client.requestDeadlineMs}, joined);
-          joined.throwIfAborted();
-          check();
-          if (attachments.get(workspaceId) !== attached) throw new Error("Hosted replica changed while it was read.");
-          return decodeHostedSyncResult(method, response.result);
+          let response;
+          try {
+            response = await client.sendRequest({id, method, workspace: attached.handle,
+              params: {workspaceId, ...params}, deadlineMs: config.client.requestDeadlineMs}, joined);
+            joined.throwIfAborted();
+            available();
+          } catch (error) {
+            const invalidated = ended();
+            if (invalidated) return invalidated;
+            throw error;
+          }
+          return ended() ?? decodeHostedSyncResult(method, response.result);
         } finally {
           stop();
         }
@@ -929,13 +946,14 @@ export async function startServiceLiveHost(options: {
           {...(page.afterObjectId === undefined ? {} : {afterObjectId: page.afterObjectId}), limit: page.limit}, callerSignal);
       },
       /**
-       * One held document, whether its binding stands, and what that binding preserves, with
-       * its whole Markdown however long. Null when nothing is held there.
+       * One held document, whether its binding stands, and what that binding preserves; with
+       * `markdown`, its whole Markdown however long. Null when nothing is held there.
        */
-      async heldDocument(workspaceId: string, objectId: string, callerSignal?: AbortSignal) {
+      async heldDocument(workspaceId: string, objectId: string, read: {markdown: boolean}, callerSignal?: AbortSignal) {
         let streamed: Uint8Array | undefined;
-        const inspected = await heldRead(workspaceId, "sync.heldDocument", {objectId}, callerSignal, bytes => {streamed = bytes;});
-        return inspected && withStreamedMarkdown(inspected, streamed);
+        const inspected = await heldRead(workspaceId, "sync.heldDocument", {objectId, streamMarkdown: read.markdown}, callerSignal,
+          read.markdown ? bytes => {streamed = bytes;} : undefined);
+        return inspected === null || "invalidated" in inspected || !read.markdown ? inspected : withStreamedMarkdown(inspected, streamed);
       },
       get restoreConfigured() { return restore !== undefined; },
       async prepareRestore(value: StopRestoreLookup, callerSignal?: AbortSignal) {

@@ -123,32 +123,44 @@ pub fn inspect_held_document(
     object_id: &str,
 ) -> Result<Option<HeldDocumentInspection>, SyncError> {
     store.read_with(|conn| {
-        let tx = conn.unchecked_transaction().map_err(SyncError::corrupt)?;
-        let Some(document) = held_in(&tx, workspace_id, object_id)? else {
-            return Ok(None);
-        };
-        let preservation = if document.binding_stale || !feed_matches(&tx, &document.binding)? {
-            None
-        } else {
-            match inspect_held(&tx, &document.binding)
-                .map_err(crate::ydoc_apply::protection_failure)?
-            {
-                HeldInspection::Current(preservation) => Some(preservation),
-                HeldInspection::Stale => None,
-            }
-        };
-        tx.commit().map_err(SyncError::corrupt)?;
-        let status = if preservation.is_some() {
-            HeldBindingStatus::Current
-        } else {
-            HeldBindingStatus::Stale
-        };
-        Ok(Some(HeldDocumentInspection {
-            document,
-            status,
-            preservation,
-        }))
+        read_only(conn, |tx| {
+            let Some(document) = held_in(tx, workspace_id, object_id)? else {
+                return Ok(None);
+            };
+            let preservation = if document.binding_stale || !feed_matches(tx, &document.binding)? {
+                None
+            } else {
+                match inspect_held(tx, &document.binding)
+                    .map_err(crate::ydoc_apply::protection_failure)?
+                {
+                    HeldInspection::Current(preservation) => Some(preservation),
+                    HeldInspection::Stale => None,
+                }
+            };
+            let status = if preservation.is_some() {
+                HeldBindingStatus::Current
+            } else {
+                HeldBindingStatus::Stale
+            };
+            Ok(Some(HeldDocumentInspection {
+                document,
+                status,
+                preservation,
+            }))
+        })
     })
+}
+
+/// `read` in one transaction that always rolls back, so whatever it or
+/// anything it calls writes is undone and every read agrees.
+fn read_only<T>(
+    conn: &Connection,
+    read: impl FnOnce(&Connection) -> Result<T, SyncError>,
+) -> Result<T, SyncError> {
+    let tx = conn.unchecked_transaction().map_err(SyncError::corrupt)?;
+    let answer = read(&tx)?;
+    tx.rollback().map_err(SyncError::corrupt)?;
+    Ok(answer)
 }
 
 fn replica_exists(conn: &Connection, workspace_id: &str) -> Result<bool, SyncError> {
@@ -227,4 +239,30 @@ fn feed_matches(conn: &Connection, binding: &ReleasedLineageBinding) -> Result<b
             incoming.replication_epoch.as_str(),
             incoming.stream_identity.as_str(),
         )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Opus's r2a F4: inspection's transaction rolls back, so a write made
+    /// inside it, by inspection or anything it calls, never lands.
+    #[test]
+    fn inspection_rolls_its_transaction_back() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE probe (value INTEGER)").unwrap();
+        let count = |conn: &Connection| {
+            conn.query_row("SELECT count(*) FROM probe", [], |row| row.get::<_, i64>(0))
+                .map_err(SyncError::corrupt)
+        };
+        let inside = read_only(&conn, |tx| {
+            tx.execute("INSERT INTO probe VALUES (1)", [])
+                .map_err(SyncError::corrupt)?;
+            count(tx)
+        })
+        .unwrap();
+        assert_eq!(inside, 1, "the transaction reads its own write");
+        assert_eq!(count(&conn).unwrap(), 0, "which never lands");
+        assert!(conn.is_autocommit(), "the transaction ended");
+    }
 }

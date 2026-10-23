@@ -15,6 +15,7 @@ import {captureOwnerLiveFrameHost} from "./namedLiveFrameHost.js";
 import type {LiveHostConnectionCoordinate} from "./storage.js";
 import {ServiceActivationDriver} from "./serviceActivationDriver.js";
 import {liveEditors} from "./liveEditors.js";
+import {createHeldDocumentRoutes} from "./heldDocumentRoutes.js";
 import { OwnerCommittedDelivery } from "./ownerCommittedDelivery.js";
 import type { NativeOwnerActivation } from "@dohc/workspace-engine-client/daemon";
 import { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
@@ -810,6 +811,54 @@ it("detaches a workspace that is no longer wanted at once and attaches it again 
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
   expect(o.membership).toEqual([o.attach, o.detach, o.attach]);
   expect(o.spawned()).toBe(1); expect(o.client().close).not.toHaveBeenCalled();
+});
+
+// Proves: a held-document read the engine is still answering when its
+// workspace detaches, or this host's registration retires, comes back as that
+// invalidation, never as a failure, and the owner route answers it as a missing
+// document. A read the engine fails while both stand stays a failure.
+it("answers a held-document read its detach or retired registration overtook as nothing there", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const send = o.client().sendRequest, through = send.getMockImplementation()! as (...args: unknown[]) => ReturnType<typeof send>;
+  let engine: () => Promise<unknown> = async () => null;
+  send.mockImplementation(async (...args: unknown[]) => {
+    const request = args[0] as {id: number; method: string};
+    return request.method === "sync.heldDocument" ? {id: request.id, result: await engine()} as never : through(...args);
+  });
+  // The engine's next held-document answers wait for `release`, once one is asked, then `answer`.
+  const holding = (answer: () => unknown) => {
+    const asked = deferred<void>(), release = deferred<void>();
+    engine = async () => {asked.resolve(); await release.promise; return answer();};
+    return {asked: asked.promise, release: () => release.resolve()};
+  };
+  const routes = createHeldDocumentRoutes({storage: o.f.storage, host: () => o.host});
+  const read = () => routes(new Request("http://relay.test/sync/workspace/held-documents/object"),
+    {route: "held-documents", workspaceId: "workspace", objectId: "object"}, "owner");
+
+  engine = async () => {throw new Error("engine connection closed");};
+  await expect(o.host.heldDocument("workspace", "object", {markdown: false})).rejects.toThrow("engine connection closed");
+  await expect(read()).rejects.toThrow("engine connection closed");
+
+  // The engine's connection to the workspace ends with it: the read fails, and the recheck finds why.
+  const detaching = holding(() => {throw new Error("engine connection closed");}), detached = read();
+  await detaching.asked;
+  await o.host.update({workspaces: [], documents: [], ...stay});
+  detaching.release();
+  await expect(detached).rejects.toMatchObject({code: "not_found"});
+
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  cleanup.push(async () => log.mockRestore());
+  // The engine answers, but the host that asked no longer stands.
+  const retiring = holding(() => null), retired = o.host.heldDocument("workspace", "object", {markdown: false});
+  await retiring.asked;
+  o.raw.exec("UPDATE sync_relay_session_host_control SET admission_state='closed', registered_connection_id=NULL");
+  retiring.release();
+  await expect(retired).resolves.toEqual({invalidated: "registration"});
+  await expect(read()).rejects.toMatchObject({code: "not_found"});
 });
 
 // Proves: a workspace whose last document left stays attached until the

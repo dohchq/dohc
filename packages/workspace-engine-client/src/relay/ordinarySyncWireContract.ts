@@ -114,9 +114,11 @@ const RetirementError = mutableStruct({ code: Text, message: Text, retry: Text }
 const Departed = Schema.mutable(Schema.Array(Text));
 
 const Digest = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
+// A journal cursor or outbox sequence: both count from one.
+const Coordinate = Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER));
 const RetainedContributionSchema = Schema.Union([
-  mutableStruct({ kind: Schema.Literal("carried"), deliveryId: Text, updateDigest: Text, journalCursor: Count }),
-  mutableStruct({ kind: Schema.Literal("outbox"), outboxId: Text, sequence: Count, deliveryId: Text, updateDigest: Text }),
+  mutableStruct({ kind: Schema.Literal("carried"), deliveryId: Text, updateDigest: Digest, journalCursor: Coordinate }),
+  mutableStruct({ kind: Schema.Literal("outbox"), outboxId: Text, sequence: Coordinate, deliveryId: Text, updateDigest: Digest }),
 ]);
 // A document the hosted replica holds for retained work a released chain left.
 const HeldDocumentFields = {
@@ -127,7 +129,9 @@ const HeldDocumentFields = {
   continuation: Schema.Literals(["frozen", "dependency-drain"]),
   bindingStale: Schema.Boolean,
 };
-const PreservationStatus = Schema.Literals(["complete", "pending-dependencies", "missing-evidence", "invalid-evidence"]);
+// Best to worst: a preservation's status is its worst reason's.
+const PRESERVATION_STATUSES = ["complete", "pending-dependencies", "missing-evidence", "invalid-evidence"] as const;
+const PreservationStatus = Schema.Literals(PRESERVATION_STATUSES);
 // Whether merged state keeps every retained contribution, why not, and what merging added.
 const Preservation = mutableStruct({
   status: PreservationStatus,
@@ -219,17 +223,37 @@ function checkHeldDocument(method: HostedSyncMethod, held: HeldDocument): void {
   }
 }
 
-// Only a current binding may preserve, and only complete preservation carries
-// text, whose digest and length must name it.
+type HeldPreservation = NonNullable<HeldDocumentInspection["preservation"]>;
+// The status each reason holds preservation at.
+const REASON_STATUS: Record<HeldPreservation["reasons"][number]["reason"], HeldPreservation["status"]> = {
+  "source-missing": "missing-evidence",
+  "pending-head-dependencies": "pending-dependencies",
+  "pending-contribution-dependencies": "pending-dependencies",
+  "digest-mismatch": "invalid-evidence",
+  "malformed-update": "invalid-evidence",
+  "contradictory-evidence": "invalid-evidence",
+  "missing-feed-identity": "invalid-evidence",
+};
+
+// Only a current binding may preserve, and a hold marked stale never is
+// current. Each reason has its own status, the preservation its worst
+// reason's, and only complete preservation carries text, whose digest and
+// length must name it.
 function checkHeldInspection(inspected: HeldDocumentInspection): void {
   const method = "sync.heldDocument";
   checkHeldDocument(method, inspected);
   const preservation = inspected.preservation;
   const invalid = () => new ProtocolShapeError(`hosted ${method} result: preservation does not match its status`);
-  if ((inspected.status === "current") !== (preservation !== null)) throw invalid();
+  if ((inspected.status === "current") !== (preservation !== null) || (inspected.bindingStale && inspected.status !== "stale")) {
+    throw invalid();
+  }
   if (preservation === null) return;
+  const worst = preservation.reasons.reduce((worst, found) => {
+    if (found.status !== REASON_STATUS[found.reason]) throw invalid();
+    return Math.max(worst, PRESERVATION_STATUSES.indexOf(found.status));
+  }, 0);
   const complete = preservation.status === "complete";
-  if (complete !== (preservation.reasons.length === 0) || complete !== (preservation.markdownSha256 !== null) ||
+  if (preservation.status !== PRESERVATION_STATUSES[worst] || complete !== (preservation.markdownSha256 !== null) ||
     (preservation.markdownSha256 === null) !== (preservation.markdownByteLength === null) ||
     (!complete && preservation.markdown !== null)) throw invalid();
   if (preservation.markdown !== null) {

@@ -8353,6 +8353,40 @@ async fn an_archived_hold_is_inspected_against_its_archive() {
     w.close().await;
 }
 
+/// Opus's r2a F7: an archive whose full state is gone, or is not the bytes
+/// its digest names, answers a machine-readable finding about the lineage
+/// rather than an error, so its owner tells corrupt state from a failed
+/// read. Nothing merges or preserves.
+#[tokio::test]
+async fn a_corrupt_archive_answers_a_finding_not_an_error() {
+    for (case, damage) in [
+        ("missing", "DELETE FROM binary_blobs WHERE sha256='{archive}'"),
+        ("mismatched", "UPDATE binary_blobs SET bytes=X'00',byte_length=1 WHERE sha256='{archive}'"),
+    ] {
+        let (mut w, desktop, client, queued, archive) = archived_window(2).await;
+        let first = committed_pass(&mut w.store, &client);
+        assert!(holds_archived(first.held.get("object"), &w.lineage, &archive, &queued[0]), "{case}: {first:?}");
+        write_unchecked(&w, &damage.replace("{archive}", &archive));
+        let inspection = inspected_window(&w.store);
+        assert_eq!(inspection.status, dohc_engine_sync::HeldBindingStatus::Current, "{case}");
+        let preservation = inspection.preservation.expect("a current binding is inspected");
+        assert_eq!(preservation.status, PreservationStatus::InvalidEvidence, "{case}");
+        assert_eq!(
+            preservation
+                .findings
+                .iter()
+                .map(|found| (found.reason, found.namespace.clone(), found.contribution.clone()))
+                .collect::<Vec<_>>(),
+            [(PreservationReason::ContradictoryEvidence, None, None)],
+            "{case}"
+        );
+        assert!(preservation.merged.is_empty(), "{case}");
+        assert_eq!(preservation.preserved, None, "{case}");
+        desktop.close().await;
+        w.close().await;
+    }
+}
+
 /// The commit stored `object` waiting, and it still is after a restart. The
 /// next pass's drain holds it again for the fold.
 fn waits_then_holds_again(

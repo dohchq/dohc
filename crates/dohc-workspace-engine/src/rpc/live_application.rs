@@ -187,14 +187,16 @@ impl Drop for RetireOnCancellation {
     }
 }
 
+/// Output a workspace's live host answers, withheld once the host retires:
+/// its connection ends or its workspace detaches.
 #[derive(Debug)]
-struct RestoreFenceOutputGuard {
+struct HostOutputGuard {
     host: Arc<Host>,
     cancel: CancelSignal,
     deadline: Option<Instant>,
 }
 
-impl OutputGuard for RestoreFenceOutputGuard {
+impl OutputGuard for HostOutputGuard {
     fn cancel_signal(&self) -> CancelSignal {
         self.cancel.clone()
     }
@@ -303,6 +305,28 @@ fn read_owner_outbox(
 }
 
 impl EngineService {
+    /// A guard for output `workspace`'s live host answers on `ctx`'s behalf.
+    pub(super) fn live_host_output_guard(
+        &self,
+        ctx: &RequestContext,
+        workspace: &WorkspaceHandle,
+    ) -> Result<Arc<dyn OutputGuard>, WireError> {
+        let host = lock(&self.live_applications)
+            .hosts
+            .get(workspace)
+            .cloned()
+            .ok_or_else(workspace_unavailable)?;
+        let guard = HostOutputGuard {
+            host,
+            cancel: ctx.cancel.clone(),
+            deadline: ctx.deadline,
+        };
+        if !guard.is_current() {
+            return Err(workspace_unavailable());
+        }
+        Ok(Arc::new(guard))
+    }
+
     pub(super) async fn live_application_ack(
         &self,
         ctx: RequestContext,
@@ -712,7 +736,7 @@ impl EngineService {
         let old_binding = params.operation.old_binding.clone();
         let retired_binding = old_binding.clone();
         let sessions = Arc::clone(&self.sessions);
-        let guard = Arc::new(RestoreFenceOutputGuard {
+        let guard = Arc::new(HostOutputGuard {
             host: host.clone(),
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
@@ -2034,7 +2058,7 @@ mod tests {
             .get(&workspace)
             .unwrap()
             .clone();
-        let guard = RestoreFenceOutputGuard {
+        let guard = HostOutputGuard {
             host: host.clone(),
             cancel: RequestContext::unbounded().cancel,
             deadline: None,

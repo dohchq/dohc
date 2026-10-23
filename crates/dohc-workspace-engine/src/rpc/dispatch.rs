@@ -256,18 +256,13 @@ impl EngineService {
             });
         }
         if request.method == "sync.heldDocument" {
-            let (result, blob_egress) = Box::pin(self.sync_held_document(
+            return Box::pin(self.sync_held_document(
                 &ctx,
                 request.workspace,
                 request.params,
                 id,
             ))
-            .await?;
-            return Ok(ServiceResponse {
-                output_guard: None,
-                response: Response { id, result },
-                blob_egress,
-            });
+            .await;
         }
         if request.method == "versionedText.readBlob" {
             let (result, blob_egress) = self
