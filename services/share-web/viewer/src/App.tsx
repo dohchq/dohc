@@ -18,6 +18,7 @@ import { parsePublicExcalidrawScene } from "./excalidraw";
 import { useImageRetryHandlers } from "./imageRetry";
 import { MarkdownContent } from "./MarkdownContent";
 import { CommentsPanel } from "./CommentsPanel";
+import { LinkChannelPanel } from "./LinkChannelPanel";
 import { LinkDocumentEditor } from "./LinkDocumentEditor";
 import { CollectionFileEditor, isCollectionOwnFile } from "./CollectionFileEditor";
 import { LinkEntry } from "./LinkEntry";
@@ -1395,10 +1396,14 @@ export function App() {
             <p>No files in this share yet.</p>
           )}
         </main>
-        <CommentsPanel
-          access={state.meta.access}
+        {/* A Group share's conversation is its channel; any other share's is its discussion. */}
+        <LinkChannelPanel
           session={state.session}
-          onAccessChange={applyDiscussionAccess}
+          fallback={<CommentsPanel
+            access={state.meta.access}
+            session={state.session}
+            onAccessChange={applyDiscussionAccess}
+          />}
         />
       </div>
     </div>

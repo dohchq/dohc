@@ -4337,6 +4337,8 @@ describe("App", () => {
         return new Response("# Commented file\n\nFile bytes stay read-only.");
       }
       if (path === "/api/view/meta") return jsonResponse(commentMeta);
+      // Not a Group share's link, so it has no channel.
+      if (path === "/api/view/chat/channels") return jsonResponse({ ok: false, error: "not found" }, 404);
       unexpectedRequests += 1;
       throw new Error(`Unexpected request: ${path} ${String(init?.method)}`);
     });
@@ -4361,6 +4363,42 @@ describe("App", () => {
 
     expect(activitySignal).toBeInstanceOf(AbortSignal);
     expect(activitySignal?.aborted).toBe(true);
+  });
+
+  it("shows a Group link's channel in place of the share discussion", async () => {
+    const file: SharedFile = { path: "team/plan.md", blobSha256: "6".repeat(64), contentKind: "text" };
+    const viewMeta: ViewMeta = { ...DEFAULT_META, access: "view", effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "view" } };
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/current") return currentPage([file], 1, 0, viewMeta);
+      if (path === "/api/view/log?since=1&limit=500&current=true") return logOpsPage([], 1);
+      if (path === "/api/view/meta") return jsonResponse(viewMeta);
+      if (path === `/api/view/blob/${file.blobSha256}`) return new Response("# Plan");
+      if (path === "/api/view/chat/channels") {
+        return jsonResponse({ shareId: "share", channels: [{ channelWireId: "wire", name: "Team", access: "read-only" }] });
+      }
+      if (path.startsWith("/api/view/chat/messages?") && !path.includes("since=")) {
+        return jsonResponse({ shareId: "share", channelWireId: "wire", nextCursor: 3, olderCursor: null, messages: [{
+          relaySeq: 2, messageId: "m2", threadId: "t", authorDisplayName: "Sam", authorKind: "link",
+          authorOwnerDisplayName: null, createdAtMs: 1, body: "Count me in", bodyTooLarge: false,
+        }] });
+      }
+      if (path.startsWith("/api/view/discussion")) return new Promise<Response>(() => undefined);
+      if (path.startsWith("/api/view/chat/messages?")) {
+        return await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+        });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+
+    await renderApp();
+    await settle(() => container.textContent?.includes("Count me in") === true);
+    expect(container.querySelector(".link-channel h2")?.textContent).toBe("Team");
+    expect(container.querySelector('.link-channel [role="img"]')?.getAttribute("aria-label")).toBe("Link holder");
+    expect(container.querySelector('.link-channel textarea[name="body"]')).toBeNull();
+    expect(container.querySelector(".link-channel")?.textContent).toContain("You can read this channel but not post.");
+    expect(container.querySelector(".comments-panel:not(.link-channel)")).toBeNull();
   });
 
   it("applies narrowed View access from activity and ignores stale Comment metadata", async () => {
@@ -4492,6 +4530,7 @@ describe("App", () => {
       }
       if (path === `/api/view/blob/${file.blobSha256}`) return new Response("Readable file bytes");
       if (path === "/api/view/meta") return jsonResponse(commentMeta);
+      if (path === "/api/view/chat/channels") return jsonResponse({ ok: false, error: "not found" }, 404);
       unexpectedRequests += 1;
       throw new Error(`Unexpected request: ${path}`);
     }));

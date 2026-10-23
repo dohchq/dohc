@@ -85,6 +85,8 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
       }
       if (path === "/sync/link/discussion") return Response.json({ok: true, ...(request.method === "POST" ? {body: await request.json()} : {limit: new URL(request.url).searchParams.get("limit")}), profile: request.headers.get("x-dohc-link-profile-secret")});
       if (path === "/sync/live/link-document") return new Response(null, {status: 404});
+      // Not a Group share's link, so it has no channel.
+      if (path === "/sync/link/chat/channels") return new Response(null, {status: 404});
       throw new Error(`Unexpected route: ${path}`);
     }});
   const send = (path: string, init: RequestInit = {}) => app.handle(new Request(origin + path, {...init, headers: {host: "share.example.test", ...init.headers}}));
@@ -339,7 +341,7 @@ it.each([
     expect(summary).toContain("You can change a Collection's collection.yaml and automations.yaml here.");
   }
   expect(result.content).toContainEqual({type: "text", text: JSON.stringify(result.structuredContent)});
-  expect(f.calls.every(call => ["/sync/link-exchange", "/sync/link/share"].includes(new URL(call.url).pathname))).toBe(true);
+  expect(f.calls.every(call => ["/sync/link-exchange", "/sync/link/share", "/sync/link/chat/channels"].includes(new URL(call.url).pathname))).toBe(true);
 });
 
 it("describes an unfiltered link without claiming access to private workspace data", async () => {

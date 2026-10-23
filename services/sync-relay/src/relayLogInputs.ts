@@ -30,6 +30,11 @@ export function linkChatOrigin(principalId: string): string {
   return `${LINK_CHAT_ORIGIN_PREFIX}${principalId}`;
 }
 
+// The IDs of a link post's message and new thread. Only the relay mints them,
+// so no client can take one first and drop the link post on every desktop.
+export const LINK_CHAT_MESSAGE_ID_PREFIX = "link-message:";
+export const LINK_CHAT_THREAD_ID_PREFIX = "link-thread:";
+
 // Clients can publish their agent and automation authors, or an exact
 // unattributed coverage marker. The marker claims no identity. The relay
 // alone mints human, public, named, and link attribution.
@@ -262,6 +267,12 @@ export function assertChatAuthorship(
     if (!opKind.startsWith("chat.")) continue;
     const policy = CHAT_OP_POLICY[opKind];
     if (!policy) throw relayError("unknown_chat_op"); // fail-closed: an unrecognized chat op.
+    // Only the relay names a link post's message and new thread.
+    const reserved = op.payload && typeof op.payload === "object" ? op.payload as Record<string, unknown> : {};
+    if ((opKind === "chat.message.append" && String(reserved.messageId).startsWith(LINK_CHAT_MESSAGE_ID_PREFIX)) ||
+        (opKind === "chat.thread.create" && String(reserved.threadId).startsWith(LINK_CHAT_THREAD_ID_PREFIX))) {
+      throw relayError("authorship_mismatch");
+    }
     if (policy.kind === "structural") continue;
     const payload = op.payload;
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {

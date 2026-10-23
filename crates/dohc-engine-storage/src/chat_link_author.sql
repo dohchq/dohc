@@ -5,8 +5,10 @@
 --
 -- While chat_messages is gone, the conversation-links view and the triggers
 -- that read it name a missing table, so the rename runs in legacy mode, which
--- leaves them alone. DROP TABLE takes the message triggers with it and
--- cascades into the dispatch discovery rows; both are put back unchanged.
+-- leaves them alone. DROP TABLE takes the message triggers with it, and with
+-- foreign keys on it cascades into the dispatch discovery rows. Those rows are
+-- set aside and cleared first, so the migration runs the same either way, and
+-- both are put back unchanged.
 PRAGMA legacy_alter_table=ON;
 CREATE TABLE chat_messages_next (
     workspace_id              TEXT    NOT NULL,
@@ -52,6 +54,7 @@ CREATE TABLE chat_dispatch_local_discovery_kept (
 ) STRICT;
 INSERT INTO chat_dispatch_local_discovery_kept (workspace_id, message_id)
 SELECT workspace_id, message_id FROM chat_dispatch_local_discovery;
+DELETE FROM chat_dispatch_local_discovery;
 DROP TABLE chat_messages;
 ALTER TABLE chat_messages_next RENAME TO chat_messages;
 INSERT INTO chat_dispatch_local_discovery (workspace_id, message_id)

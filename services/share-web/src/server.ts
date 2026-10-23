@@ -34,6 +34,9 @@ const REFUSAL_VALUE = { ok: false, error: "not found" };
 const REFUSAL_BODY = JSON.stringify(REFUSAL_VALUE);
 const MAX_EXCHANGE_BODY_BYTES = 8 * 1024;
 const MAX_DISCUSSION_ENVELOPE_BYTES = 16 * 1024;
+// The relay's own bound on a link post: an 8,000-byte body, escaped, and its fields.
+const MAX_LINK_CHAT_POST_BYTES = 64 * 1024;
+const LINK_CHAT_POST_FIELDS = new Set(["channelWireId", "threadId", "body", "claimedName", "idempotencyKey"]);
 const MAX_RELAY_RESPONSE_BYTES = 2 * 1024 * 1024;
 export const EXCHANGE_BUCKET_CAPACITY = 12;
 const EXCHANGE_REFILL_PER_SECOND = 0.2;
@@ -553,6 +556,62 @@ async function discussionRefusal(relayResponse: Response): Promise<Response | nu
     { ok: false, ...state },
     { status: state.state === "limit-reached" ? 413 : 403 },
   );
+}
+
+// A Group's channel read through its link: the channel, a page of messages
+// newest first with `before`, or new ones with `since` and an optional hold.
+function linkChatReadPath(request: Request, channels: boolean): { path: string; holdMs: number } | null {
+  const params = new URL(request.url).searchParams;
+  const allowed = channels ? ["session"] : ["session", "channelWireId", "before", "since", "hold", "limit"];
+  if ([...params.keys()].some((key) => !allowed.includes(key) || params.getAll(key).length !== 1)) return null;
+  if (channels) return { path: "/sync/link/chat/channels", holdMs: 0 };
+  const channelWireId = params.get("channelWireId");
+  const cursor = (key: string) => params.get(key) === null || /^(?:0|[1-9][0-9]{0,15})$/u.test(params.get(key)!);
+  const hold = params.get("hold") ?? "0";
+  if (!channelWireId || channelWireId.length > 256 || !cursor("before") || !cursor("since") ||
+      !DISCUSSION_HOLD.test(hold) || Number(hold) > MAX_DISCUSSION_ACTIVITY_HOLD_MS ||
+      (params.has("limit") && (!DISCUSSION_LIMIT.test(params.get("limit")!) || Number(params.get("limit")) > 100))) return null;
+  const relaySearch = new URLSearchParams({ channelWireId });
+  for (const key of ["before", "since", "hold", "limit"]) {
+    const value = params.get(key);
+    if (value !== null) relaySearch.set(key, value);
+  }
+  return { path: `/sync/link/chat/messages?${relaySearch}`, holdMs: Number(hold) };
+}
+
+// Only what a post is: its channel, an optional thread, the body, a retry
+// key and the link holder's optional name.
+async function linkChatPostInput(request: Request): Promise<string | null> {
+  try {
+    const value = asRecord(await readBoundedJson(request, MAX_LINK_CHAT_POST_BYTES, request.signal));
+    if (
+      !value || Object.keys(value).some((key) => !LINK_CHAT_POST_FIELDS.has(key)) ||
+      typeof value.channelWireId !== "string" || typeof value.body !== "string" || typeof value.idempotencyKey !== "string" ||
+      (Object.hasOwn(value, "threadId") && typeof value.threadId !== "string") ||
+      (Object.hasOwn(value, "claimedName") && typeof value.claimedName !== "string")
+    ) {
+      return null;
+    }
+    return JSON.stringify(value);
+  } catch {
+    return null;
+  }
+}
+
+// A link post's refusals that the viewer and agents act on. Only the relay's
+// code passes, never its words.
+const LINK_CHAT_REFUSALS: Readonly<Record<number, readonly string[]>> = {
+  400: ["bad_request"],
+  403: ["link_discussion_blocked", "link_discussion_paused"],
+  409: ["conflict"],
+  413: ["discussion_limit_reached", "quota_exceeded", "payload_too_large"],
+};
+
+async function linkChatRefusal(relayResponse: Response): Promise<Response | null> {
+  const code = asRecord(await relayResponse.json().catch(() => null))?.code;
+  return typeof code === "string" && LINK_CHAT_REFUSALS[relayResponse.status]?.includes(code)
+    ? jsonResponse({ ok: false, code }, { status: relayResponse.status })
+    : null;
 }
 
 // A Collection write's answers, as `parseCollectionWriteOutcome` reads them.
@@ -1537,6 +1596,51 @@ export function createShareWebApplication({
       } finally {
         release();
       }
+    }
+
+    if (pathname === "/api/view/chat/channels" || pathname === "/api/view/chat/messages") {
+      const authenticated = readSession(request);
+      if (!authenticated) return refused();
+      if (request.method === "GET") {
+        const read = linkChatReadPath(request, pathname === "/api/view/chat/channels");
+        if (!read) return refused();
+        return await callRelay(request, authenticated, {
+          path: read.path, holdMs: read.holdMs, buffered: true, ifSessionChanged: true,
+          ...(read.holdMs > 0 ? { limiter: activityHoldLimiter } : {}),
+        });
+      }
+      // Only the viewer page, or this server's own MCP tools, which send the
+      // viewer's headers, as for Collection writes.
+      const fetchSite = request.headers.get("sec-fetch-site");
+      if (
+        request.method !== "POST" || pathname !== "/api/view/chat/messages" || search ||
+        request.headers.get("origin") !== agentOrigin || (fetchSite !== null && fetchSite !== "same-origin") ||
+        !request.headers.has(LINK_SESSION_HEADER) ||
+        request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json"
+      ) {
+        return refused();
+      }
+      const profileSecret = parseCookies(request.headers.get("cookie")).get(profileCookieName(authenticated.discriminator));
+      const agentProfile = authenticated.session.agentProfileSecret;
+      if (
+        !profileSecret || !LINK_SECRET_PATTERN.test(profileSecret) ||
+        (agentProfile !== undefined && !sameSecret(profileSecret, agentProfile))
+      ) {
+        return refused();
+      }
+      const body = await linkChatPostInput(request);
+      if (body === null) return refused();
+      // Who posts comes from the capability and the profile alone; the relay
+      // checks the link's access again inside its write.
+      return await callRelay(request, authenticated, {
+        path: "/sync/link/chat/messages",
+        method: "POST",
+        headers: { "x-dohc-link-profile-secret": profileSecret, "content-type": "application/json" },
+        body,
+        buffered: true,
+        ifSessionChanged: true,
+        refusal: linkChatRefusal,
+      });
     }
 
     if (

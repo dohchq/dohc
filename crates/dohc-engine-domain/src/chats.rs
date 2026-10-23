@@ -82,6 +82,9 @@ pub const LINKED_CHAT_PROJECTION_KIND: &str = "thread";
 pub const MAX_MESSAGE_BODY_BYTES: usize = 64 * 1024;
 /// A link message's body byte cap, below the general one.
 pub const MAX_LINK_MESSAGE_BODY_BYTES: usize = 8_000;
+/// The relay names every link message with this prefix; no other message may
+/// use it, so no device can take a link post's id first.
+pub const LINK_MESSAGE_ID_PREFIX: &str = "link-message:";
 /// Thread title char cap (`normalizeThreadTitle`).
 const MAX_THREAD_TITLE_CHARS: usize = 200;
 /// Channel name char cap (`normalizeChannelName`).
@@ -1263,13 +1266,15 @@ fn opening_message_body_snippet(body: &str) -> String {
 }
 
 /// Indexed message text (`chatIndexText`): author, the author's kind for an
-/// agent or automation, body. `author_kind` is the stored kind.
+/// agent, automation or link holder, body. `author_kind` is the stored kind.
 pub fn chat_message_search_text(display_name: &str, author_kind: &str, body: &str) -> String {
     let mut parts: Vec<String> = Vec::with_capacity(3);
     if !display_name.is_empty() {
         parts.push(display_name.to_owned());
-        if matches!(author_kind, "agent" | "automation") {
-            parts.push(format!("{display_name} ({author_kind})"));
+        match author_kind {
+            "agent" | "automation" => parts.push(format!("{display_name} ({author_kind})")),
+            "link" => parts.push(format!("{display_name} (link holder)")),
+            _ => {}
         }
     }
     if !body.is_empty() {
@@ -1647,9 +1652,10 @@ pub fn normalize_author_user_id(value: Option<&str>) -> Result<Option<String>, D
 
 /// A replicated message's link provenance. A link message names its grant and
 /// link principal, carries no account, owner, origin or chain depth, and stays
-/// within the link body cap; no other message names a link. Ids must already
-/// be in their stored form.
+/// within the link body cap; no other message names a link or uses the link
+/// message id prefix. Ids must already be in their stored form.
 pub fn validate_replicated_link_author(
+    message_id: &str,
     author_kind: &str,
     grant_id: Option<&str>,
     principal_id: Option<&str>,
@@ -1666,7 +1672,7 @@ pub fn validate_replicated_link_author(
             && !has_projection_control_char(value)
     };
     match (author_kind == ChatActorKind::Link.as_str(), grant_id, principal_id) {
-        (false, None, None) => Ok(None),
+        (false, None, None) if !message_id.starts_with(LINK_MESSAGE_ID_PREFIX) => Ok(None),
         (true, Some(grant_id), Some(principal_id))
             if id(grant_id)
                 && id(principal_id)

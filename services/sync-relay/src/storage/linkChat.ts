@@ -1,6 +1,6 @@
 import { normalizeShareDiscussionDisplayName } from "@dohc/security-contract/share-discussion";
 import { sha256Hex } from "@dohc/workspace-core/hash";
-import { linkChatOrigin, LINK_CHAT_ORIGIN_PREFIX } from "../relayLogInputs";
+import { linkChatOrigin, LINK_CHAT_MESSAGE_ID_PREFIX, LINK_CHAT_ORIGIN_PREFIX, LINK_CHAT_THREAD_ID_PREFIX } from "../relayLogInputs";
 import { authorizeLinkChatAction } from "../shareAuthorization";
 import type { StorageContext } from "./context";
 import { validLinkDiscussionIdempotencyKey } from "./discussion";
@@ -84,7 +84,8 @@ export function appendLinkChatPost(storage: StorageContext, input: {
     const { principal } = enrollment;
     const ids = (principalId: string) => {
       const key = sha256Hex(JSON.stringify([principalId, input.idempotencyKey]));
-      return { originId: linkChatOrigin(principalId), messageId: `link-message:${key}`, threadId: input.threadId ?? `link-thread:${key}` };
+      return { originId: linkChatOrigin(principalId), messageId: `${LINK_CHAT_MESSAGE_ID_PREFIX}${key}`,
+        threadId: input.threadId ?? `${LINK_CHAT_THREAD_ID_PREFIX}${key}` };
     };
     if (principal) {
       const { originId, messageId, threadId } = ids(principal.principalId);

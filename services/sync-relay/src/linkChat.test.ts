@@ -4,7 +4,7 @@ import { MAX_LINK_CHAT_FOLLOWS_PER_GRANT } from "./linkChatRoutes";
 import { MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE } from "./namedRecipientChat";
 import { authorizeLinkChatAction, authorizeLinkShareAction } from "./shareAuthorization";
 import { hashLinkProfileSecret } from "./linkSecurity";
-import { LINK_CHAT_ORIGIN_PREFIX } from "./relayLogInputs";
+import { LINK_CHAT_MESSAGE_ID_PREFIX, LINK_CHAT_ORIGIN_PREFIX, LINK_CHAT_THREAD_ID_PREFIX } from "./relayLogInputs";
 import type { OpenSyncRelayStorageOptions, SyncRelayStorage } from "./storage";
 import {
   LINK_KEY,
@@ -678,5 +678,25 @@ describe("client pushes of a link post", () => {
       await expectRefused(await f.h(request(OWNER, `/sync/${workspaceId}/log`, jsonBody({ originId, ops }))), 400);
     }
     expect(linkOps(await ownerLog(f))).toEqual([]);
+  });
+
+  it("reserves link post message and thread IDs for the relay, and keeps replies in a link thread", async () => {
+    const f = await fixture();
+    const before = (await ownerLog(f)).length;
+    for (const ops of [
+      [chatMessageAppend(`${LINK_CHAT_MESSAGE_ID_PREFIX}taken`, "thread-team", "first", { authorUserId: OWNER })],
+      [chatThreadCreate(`${LINK_CHAT_THREAD_ID_PREFIX}taken`, channelWireId)],
+    ]) {
+      await expectRefused(await f.h(request(OWNER, `/sync/${workspaceId}/log`, jsonBody({ originId: "owner-device", ops: sequenced(ops) }))),
+        403, "authorship_mismatch");
+    }
+    expect(await ownerLog(f)).toHaveLength(before);
+
+    const link = await readWriteLink(f);
+    const { message } = await json(await postChat(f, link.capability)) as { message: { messageId: string; threadId: string } };
+    expect(message.messageId.startsWith(LINK_CHAT_MESSAGE_ID_PREFIX)).toBe(true);
+    expect(message.threadId.startsWith(LINK_CHAT_THREAD_ID_PREFIX)).toBe(true);
+    const reply = sequenced([chatMessageAppend("owner-reply", message.threadId, "welcome", { authorUserId: OWNER })]);
+    expect((await f.h(request(OWNER, `/sync/${workspaceId}/log`, jsonBody({ originId: "owner-device", ops: reply })))).status).toBe(200);
   });
 });

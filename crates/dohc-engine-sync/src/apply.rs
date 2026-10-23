@@ -1570,6 +1570,7 @@ fn apply_message(
     let body = normalize_body(&payload.body)
         .map_err(|error| map_chat_rule(error, "chat message body is invalid"))?;
     let link_author = validate_replicated_link_author(
+        &payload.message_id,
         &payload.author_kind,
         payload.link_grant_id.as_deref(),
         payload.link_principal_id.as_deref(),

@@ -1576,6 +1576,45 @@ fn a_link_message_with_an_account_or_without_its_link_is_refused() {
     );
 }
 
+/// Only the relay names a message with the link message prefix. A device's
+/// message that takes such an id first is refused, so the link post that
+/// later arrives with it still applies.
+#[test]
+fn a_message_that_takes_a_link_message_id_is_refused() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let id = format!("{}taken", dohc_engine_domain::chats::LINK_MESSAGE_ID_PREFIX);
+    let mut taken = link_message_payload(&id, "First");
+    taken["authorKind"] = json!("human");
+    let fields = taken.as_object_mut().expect("payload");
+    fields.remove("linkGrantId");
+    fields.remove("linkPrincipalId");
+    let op = envelope("peer", 3, "chat.message.append", taken);
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
+
+    let post = envelope(
+        "relay-link",
+        0,
+        "chat.message.append",
+        link_message_payload(&id, "Hi"),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &post, &NoFaults).expect("link post"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    let stored: (String, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT author_kind, body FROM chat_messages WHERE message_id = ?1",
+                [&id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("link post");
+    assert_eq!(stored, ("link".to_owned(), "Hi".to_owned()));
+}
+
 /// A desktop that predates an author kind refuses its messages for good, the
 /// way this build refuses a kind newer than itself: the refusal is recorded
 /// and acked, nothing is stored, and the workspace's next op applies.

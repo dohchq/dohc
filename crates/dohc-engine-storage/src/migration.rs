@@ -4456,7 +4456,7 @@ mod tests {
             ),
             (
                 "v2-chat-link-author",
-                "df66305d38c45f82758264505b913da8c3aa3e08ec72d03b1b9e54f73ded5c56",
+                "5b21c35c5a98bc7621b3cc004e422a53b03bb0e74355e28344a24db6c4100f4b",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -6318,7 +6318,7 @@ mod tests {
                 .iter()
                 .any(|(name, _)| name == "conversation_file_link_message_insert")
         );
-        // DROP TABLE cascades only with foreign keys on, as every store opens.
+        // Every store opens with foreign keys on, so DROP TABLE cascades.
         conn.pragma_update(None, "foreign_keys", true).unwrap();
         assert_eq!(
             run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
@@ -6410,6 +6410,41 @@ mod tests {
             [],
         )
         .expect("a link mention");
+    }
+
+    /// With foreign keys off, as on a bare connection, dropping the message
+    /// table cascades nothing. The link-author migration still applies once
+    /// and keeps each pending dispatch discovery row once.
+    #[test]
+    fn chat_link_author_migration_keeps_dispatch_discovery_without_foreign_keys() {
+        let dir = tempdir();
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let before = migration_index("v2-chat-link-author");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO chat_threads (workspace_id, thread_id, title, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', 'thread-1', '', 1, 1); \
+             INSERT INTO chat_messages \
+                 (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, \
+                  author_user_id, body, created_at_ms) \
+                 VALUES ('ws', 'thread-1', 0, 'message-1', 'human', 'Ice', 'user-ice', 'Hi', 2); \
+             INSERT INTO chat_dispatch_local_discovery (workspace_id, message_id) VALUES ('ws', 'message-1');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let kept: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chat_dispatch_local_discovery WHERE workspace_id = 'ws' AND message_id = 'message-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 1);
     }
 
     /// Plugin subscriptions and claims written before the automation facts

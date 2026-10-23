@@ -211,12 +211,10 @@ export function createNamedRecipientChat(options: {
           recheck();
           return json({shareId, channelWireId, message: messageFromOp({relaySeq: row.relaySeq, opKind: row.opKind, payload: JSON.parse(row.payloadJson)})});
         }
-        // share-web's browser view cannot mark a link holder's self-chosen
-        // name yet, so it gets no link posts. The recipient's desktop does.
         return json(await readSharedChannelPage({storage, resolver: options.reads.chatResolverFor(share.workspaceId),
           selector: authority.effectiveSelector, workspaceId: share.workspaceId, shareId, channelWireId, query: url.searchParams,
           recheck, activity: options.activity, waiter: `named:${actor.userId}`, signal: controller.signal,
-          maxResponseBytes: limits.maxResponseBytes, busyCode: "share_access_rate_limited", linkPosts: false, project: message => message}));
+          maxResponseBytes: limits.maxResponseBytes, busyCode: "share_access_rate_limited", project: message => message}));
       } catch (error) {return controller.signal.aborted ? cancelledResponse(request) : errorResponse(error);}
       finally {
         if (following) pendingFollows--; else pending--;
@@ -255,7 +253,6 @@ export async function readSharedChannelPage<Message extends {relaySeq: number}>(
   signal: AbortSignal;
   maxResponseBytes: number;
   busyCode: Extract<RelayErrorCode, "share_access_rate_limited" | "link_read_rate_limited">;
-  linkPosts: boolean;
   project(message: NamedChatMessage): Message;
 }) {
   const {query, recheck, project} = input;
@@ -276,7 +273,7 @@ export async function readSharedChannelPage<Message extends {relaySeq: number}>(
       if (row.settlementAdmission?.status === "refused") continue;
       const decision = filterOpForShare(input.selector, row.opKind, row.payloadJson, input.resolver, "chat");
       const message = decision.allowed ? messageFromOp({relaySeq: row.relaySeq, opKind: row.opKind, payload: decision.payload}) : null;
-      if (message && (input.linkPosts || message.authorKind !== "link")) messages.push(message);
+      if (message) messages.push(message);
     }
     return {messages, nextCursor: following ? result.nextCursor : result.latestCursor,
       ...(following ? {hasMore: result.hasMore} : {olderCursor: result.hasMore ? result.nextCursor : null})};

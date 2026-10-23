@@ -194,7 +194,7 @@ export function createLinkChatRoutes(options: {
         },
         activity: options.activity, waiter: `link:${capability.session.capabilityHash}`, signal: request.signal,
         maxResponseBytes: options.maxResponseBytes ?? LINK_CHAT_MAX_RESPONSE_BYTES, busyCode: "link_read_rate_limited",
-        linkPosts: true, project: linkChatMessage,
+        project: linkChatMessage,
       }));
     } finally {
       if (following) {

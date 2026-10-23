@@ -94,14 +94,22 @@ describe("named browser chat authorization and replication", () => {
     expect(followed.messages).toContainEqual(message);
   });
 
-  it("leaves link posts to the recipient's desktop, which gets them with their link", async () => {
+  it("serves link posts as link posts to the browser and with their link to the recipient's desktop", async () => {
     const f = await fixture();
     const payload = {messageId: "link-message:1", threadId: "thread-team", body: "from a link", authorKind: "link",
       authorDisplayName: "Owner", linkGrantId: "grant-link", linkPrincipalId: "principal", createdAtMs: 5};
     f.storage.appendLogBatch({workspaceId, originId: "relay:share-link:principal",
       ops: [{originSeq: 0, opKind: "chat.message.append", payloadJson: JSON.stringify(payload), recordedAtMs: 5}]});
     const page = await json(await f.call(history));
-    expect(page.messages).toEqual([expect.objectContaining({messageId: "owner-second"}), expect.objectContaining({messageId: "owner-first"})]);
+    // A link holder who chose the owner's name still reads as a link holder, with no account.
+    expect(page.messages).toEqual([
+      expect.objectContaining({messageId: "link-message:1", authorKind: "link", authorDisplayName: "Owner", authorUserId: null,
+        authorOwnerDisplayName: null, body: "from a link"}),
+      expect.objectContaining({messageId: "owner-second"}), expect.objectContaining({messageId: "owner-first"}),
+    ]);
+    const [served] = page.messages as Array<Record<string, unknown>>;
+    expect(served).not.toHaveProperty("linkGrantId");
+    expect(served).not.toHaveProperty("linkPrincipalId");
     const log = await json(await f.handler(request("alice", `/sync/shares/${shareId}/log?since=0&limit=100&channelWireId=${channelWireId}`)));
     expect((log.ops as Array<{payload: Record<string, unknown>}>).filter(op => op.payload.messageId === payload.messageId)
       .map(op => op.payload)).toEqual([payload]);
