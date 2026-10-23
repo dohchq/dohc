@@ -1343,6 +1343,9 @@ pub fn acknowledge(
             params![outbox_id, pending_bytes, oldest_entry_at_ms],
         )
         .map_err(write_sql)?;
+        // Every refusal recorded here was of a head this acknowledgement passed.
+        tx.execute("DELETE FROM owner_ydoc_outbox_refusals WHERE outbox_id=?1", [outbox_id])
+            .map_err(write_sql)?;
         if observed { accepted::prune_in(tx, &parent.binding)?; }
         Ok(OwnerOutboxAcknowledgeResult {
             acknowledged: i64::try_from(receipts.len())
@@ -1423,9 +1426,9 @@ pub(crate) fn quarantine_in_tx(
 }
 
 /// Records a terminal refusal of the head: the reason and the end of its Try
-/// again commit together. Writing the same refusal again, or one whose head
-/// was accepted or whose Try again already ended, changes nothing, so a late
-/// write cannot use up a later Try again.
+/// again commit together. Writing any refusal of the head again, or one whose
+/// head was accepted or whose Try again already ended, changes nothing, so a
+/// late write cannot use up a later Try again.
 pub fn record_refusal(
     store: &mut EngineStore,
     workspace_id: &str,
@@ -1451,17 +1454,17 @@ pub(crate) fn record_refusal_in_tx(
     validate_identifier(&refusal.key, "refusal key must be non-empty and bounded")?;
     let parent = read_parent(tx, &input.outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
     require_workspace(workspace_id, &parent.binding.workspace_id)?;
-    let (recorded, head): (Option<String>, Option<String>) = tx
+    let (recorded, head): (bool, Option<String>) = tx
         .query_row(
-            "SELECT refusal_key,(SELECT delivery_id FROM owner_ydoc_outbox_entries \
-             WHERE outbox_id=?1 AND pending=1 ORDER BY sequence LIMIT 1) \
-             FROM owner_ydoc_outboxes WHERE outbox_id=?1",
-            [&input.outbox_id],
+            "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outbox_refusals \
+             WHERE outbox_id=?1 AND refusal_key=?2),(SELECT delivery_id FROM owner_ydoc_outbox_entries \
+             WHERE outbox_id=?1 AND pending=1 ORDER BY sequence LIMIT 1)",
+            params![input.outbox_id, refusal.key],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(read_sql)?;
     let refused = Some(refusal.delivery_id.as_str());
-    if recorded.as_deref() == Some(refusal.key.as_str())
+    if recorded
         || head.as_deref() != refused
         || (parent.state == OwnerOutboxState::Quarantined
             && parent.retry_delivery_id.as_deref() != refused)
@@ -1469,9 +1472,15 @@ pub(crate) fn record_refusal_in_tx(
         return Ok(());
     }
     quarantine_in_tx(tx, workspace_id, input, now_ms)?;
+    // Only the pending head's refusals can still arrive.
     tx.execute(
-        "UPDATE owner_ydoc_outboxes SET refusal_key=?2 WHERE outbox_id=?1",
-        params![input.outbox_id, refusal.key],
+        "DELETE FROM owner_ydoc_outbox_refusals WHERE outbox_id=?1 AND delivery_id<>?2",
+        params![input.outbox_id, refusal.delivery_id],
+    )
+    .map_err(write_sql)?;
+    tx.execute(
+        "INSERT INTO owner_ydoc_outbox_refusals(outbox_id,delivery_id,refusal_key) VALUES(?1,?2,?3)",
+        params![input.outbox_id, refusal.delivery_id, refusal.key],
     )
     .map_err(write_sql)?;
     Ok(())
@@ -2708,6 +2717,50 @@ mod tests {
             40,
         )
         .expect("record refusal");
+    }
+
+    fn recorded_refusals(store: &EngineStore, outbox: &str) -> i64 {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM owner_ydoc_outbox_refusals WHERE outbox_id=?1",
+                    [outbox],
+                    |row| row.get(0),
+                )
+            })
+            .expect("recorded refusals")
+    }
+
+    #[test]
+    fn no_earlier_refusal_ends_a_newer_try_again() {
+        let (dir, mut store, outbox, pending) = refused_queue("owner-outbox-earlier-refusal");
+        let head = pending.entries[0].delivery_id.clone();
+        for key in ["refusal-a", "refusal-b"] {
+            retry(&mut store, "workspace-1", try_again(&outbox)).expect("try again");
+            record(&mut store, &outbox, &head, key);
+            let refused = read_pending(&store, "workspace-1", &outbox).expect("refused");
+            assert_eq!(refused.retry_delivery_id, None);
+        }
+        retry(&mut store, "workspace-1", try_again(&outbox)).expect("newest try again");
+        let still_granted = |store: &EngineStore| {
+            let granted = read_pending(store, "workspace-1", &outbox).expect("granted");
+            assert_eq!(granted.state, OwnerOutboxState::Quarantined);
+            assert_eq!(granted.retry_delivery_id.as_deref(), Some(head.as_str()));
+            assert_eq!(granted.entries, pending.entries);
+        };
+        // A write of the first refusal whose completion was delayed.
+        record(&mut store, &outbox, &head, "refusal-a");
+        still_granted(&store);
+        drop(store);
+        let mut store = EngineStore::open(&dir.join("engine.db"), 50).expect("reopen");
+        for key in ["refusal-a", "refusal-b", "refusal-a"] {
+            record(&mut store, &outbox, &head, key);
+            still_granted(&store);
+        }
+        assert_eq!(recorded_refusals(&store, &outbox), 2);
+        acknowledge(&mut store, "workspace-1", &outbox, &[receipt(&pending.entries[0])])
+            .expect("accepted");
+        assert_eq!(recorded_refusals(&store, &outbox), 0);
     }
 
     #[test]

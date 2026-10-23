@@ -13,6 +13,8 @@ export class AutomationRecordBindingChanged extends Error {
   }
 }
 
+type EntryRetirement = {outboxId: string; deliveryId: string; updateDigest: string; reason: string};
+
 /** The server uses desktop's durable queue and receipt rules with an in-process host. */
 export function automationRecordDelivery(options: {
   replica: Pick<AutomationReplica, "client" | "workspace" | "workspaceId" | "nextRequestId">;
@@ -24,6 +26,15 @@ export function automationRecordDelivery(options: {
   const request = () => ({id: replica.nextRequestId(), workspace: replica.workspace, deadlineMs: 30_000});
   const target = (binding: LiveObjectBinding) => ({binding, relayDatabaseNamespace: options.namespace});
   const refusals = new OwnerKnownRefusals();
+  // Entries refused for good but not yet retired. A later run retires them instead of submitting again.
+  const retirements = new Map<string, EntryRetirement>();
+
+  async function retire(retirement: EntryRetirement, signal: AbortSignal) {
+    retirements.set(retirement.outboxId, retirement);
+    await replica.client.ownerYDocRefuseEntry(request(), retirement, signal);
+    retirements.delete(retirement.outboxId);
+    return {kind: "not-accepted"} as const;
+  }
 
   async function open(binding: LiveObjectBinding, host: NamedFrameHostSession, signal: AbortSignal, recovery = false) {
     const preparation = await replica.client.ownerYDocPrepareEnrollment(request(), {...target(binding), recovery}, signal);
@@ -82,6 +93,9 @@ export function automationRecordDelivery(options: {
         }
       },
       async deliver(_authority, entry) {
+        const retirement = retirements.get(entry.outboxId);
+        if (retirement?.deliveryId === entry.deliveryId) return retire(retirement, signal);
+        retirements.delete(entry.outboxId);
         const declared = entry.agentDeclaration;
         let recipientAuthority;
         try {
@@ -89,9 +103,8 @@ export function automationRecordDelivery(options: {
             : await automationRecordPresser(replica, entry.automationDeclaration, signal);
         } catch (error) {
           if (!(error instanceof AutomationRecordPresserChanged)) throw error;
-          await replica.client.ownerYDocRefuseEntry(request(), {outboxId: entry.outboxId, deliveryId: entry.deliveryId,
-            updateDigest: entry.updateDigest, reason: "authority-refused"}, signal);
-          return {kind: "not-accepted"};
+          return retire({outboxId: entry.outboxId, deliveryId: entry.deliveryId, updateDigest: entry.updateDigest,
+            reason: "authority-refused"}, signal);
         }
         const result = await host!.submit({deliveryId: entry.deliveryId, updateDigest: entry.updateDigest, updateBytes: entry.update,
           ...(recipientAuthority ? "hostPressId" in recipientAuthority ? {trustedAutomationPress: recipientAuthority}
@@ -105,10 +118,9 @@ export function automationRecordDelivery(options: {
         if (result.result === "refused") {
           if (["stale-binding", "restore-fenced", "binding-changed"].includes(result.reason)) return {kind: "quarantine", reason: result.reason};
           if (result.reason === "stale-session") return {kind: "retry"};
-          await replica.client.ownerYDocRefuseEntry(request(), {outboxId: entry.outboxId, deliveryId: entry.deliveryId,
-            updateDigest: entry.updateDigest, reason: result.reason === "capacity-refused"
+          return retire({outboxId: entry.outboxId, deliveryId: entry.deliveryId, updateDigest: entry.updateDigest,
+            reason: result.reason === "capacity-refused"
               ? "This update exceeds the shared file's limits. Reduce the change, then try again." : result.reason}, signal);
-          return {kind: "not-accepted"};
         }
         // Install incremental accepted frames before acknowledging this exact receipt.
         let state = await replica.client.ownerYDocReadState(request(), target(binding), signal);

@@ -101,7 +101,8 @@ function fixture(edit: (doc: Y.Doc) => void = doc => doc.getMap("frontmatter").s
     live.storage = reopened; live.close = () => reopened.close();
     return reopened;
   };
-  return {relay,document,host,binding,update,entry,pending,receipts,quarantines,native,faults,engine,applyThrough,validate,commit,run,restart,crash};
+  const known = () => refusals.get(JSON.stringify([host.mode,host.hostId,"outbox"]));
+  return {relay,document,host,binding,update,entry,pending,receipts,quarantines,native,faults,engine,applyThrough,validate,commit,run,restart,crash,known};
 }
 
 it("retries the retained owner head when a named submission advances its validated journal cut", async () => {
@@ -333,6 +334,20 @@ it("keeps a refusal through repeated quarantine failures across passes and recon
   expect(f.validate).toHaveBeenCalledTimes(1); expect(f.commit).toHaveBeenCalledTimes(1);
   expect(f.quarantines).toEqual(["invalid-update"]);
   expect(journalRows(f)).toEqual([]); expect(f.pending).toEqual([f.entry]);
+});
+
+it("forgets a refusal whose lost write already quarantined the queue, without writing it again", async () => {
+  const f = fixture(doc => doc.getMap("meta").set("schemaVersion", 2));
+  f.faults.quarantine.push("lost");
+  await expect(f.run()).rejects.toThrow("Engine response lost.");
+  expect(f.native).toEqual({state: "quarantined",quarantineReason: "invalid-update",retryDeliveryId: null});
+  expect(f.known()).toBeDefined();
+  // Another write would take this fault.
+  f.faults.quarantine.push("failed");
+  expect(await f.run()).toEqual({admittedEntries: 0,hasMore: false});
+  expect(f.known()).toBeUndefined();
+  expect(f.faults.quarantine).toEqual(["failed"]);
+  expect(f.validate).toHaveBeenCalledTimes(1); expect(f.quarantines).toEqual(["invalid-update"]);
 });
 
 it("a quarantine write repeated after its lost response cannot use up the owner's newer Try again", async () => {

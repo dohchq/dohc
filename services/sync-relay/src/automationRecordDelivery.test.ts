@@ -195,6 +195,41 @@ it.each(["authority-refused", "invalid-update", "capacity-refused"] as const)("t
   expect(f.acknowledge).not.toHaveBeenCalled();
 });
 
+it("retires a received refusal on a later run instead of submitting its head again", async () => {
+  const f = fixture();
+  vi.mocked(f.host.submit).mockResolvedValueOnce({result: "refused", reason: "invalid-update"});
+  f.client.ownerYDocRefuseEntry.mockRejectedValueOnce(new Error("engine unavailable")).mockRejectedValueOnce(new Error("engine unavailable"));
+  const runs: string[] = [];
+  for (let run = 0; run < 3; run++) {
+    runs.push(await f.delivery.drain(binding, new AbortController().signal).then(() => "retired", (error: Error) => error.message));
+  }
+  expect(f.host.submit).toHaveBeenCalledTimes(1);
+  expect(runs).toEqual(["engine unavailable", "engine unavailable", "retired"]);
+  expect(f.client.ownerYDocRefuseEntry).toHaveBeenCalledTimes(3);
+  expect(f.client.ownerYDocRefuseEntry).toHaveBeenLastCalledWith(expect.anything(), {outboxId: "outbox", deliveryId: "delivery-0",
+    updateDigest: "b".repeat(64), reason: "invalid-update"}, expect.anything());
+  expect(f.acknowledge).not.toHaveBeenCalled();
+  expect(f.quarantine).not.toHaveBeenCalled();
+});
+
+it("retires a recipient chain whose authority changed on a later run even once its presser resolves", async () => {
+  const declaration: AutomationDeclaration = {automationId: "collection:Tasks#chained", attribution: {actorKind: "automation", onBehalfOf: "reader", depth: 2,
+    run: {claimId: "chained", automationName: "Chain"}}};
+  const f = fixture(1, declaration);
+  f.client.ownerYDocRefuseEntry.mockRejectedValueOnce(new Error("engine unavailable")).mockRejectedValueOnce(new Error("engine unavailable"));
+  await expect(f.delivery.drain(binding, new AbortController().signal)).rejects.toThrow("engine unavailable");
+  await expect(f.delivery.drain(binding, new AbortController().signal)).rejects.toThrow("engine unavailable");
+  const claim: AutomationClaimSummary = {claimId: "chained", automationId: declaration.automationId, trigger: {historyId: 1}, recordId: "record", collectionPath: "Tasks",
+    depth: 2, state: "done", attempts: 1, run: 1, createdAtMs: 1, updatedAtMs: 1, change: {kind: "message", actorKind: "automation", onBehalfOf: "reader", authorOriginId: null,
+      sharedAuthor: {kind: "named", userId: "reader", grantId: "original", grantGeneration: 4}, liveCursor: null}};
+  f.client.sendRequest.mockResolvedValue({id: 1, result: {claim}});
+  await f.delivery.drain(binding, new AbortController().signal);
+  expect(f.host.submit).not.toHaveBeenCalled();
+  expect(f.client.ownerYDocRefuseEntry).toHaveBeenCalledTimes(3);
+  expect(f.client.ownerYDocRefuseEntry).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({deliveryId: "delivery-0",
+    reason: "authority-refused"}), expect.anything());
+});
+
 it("delivers an independent sibling in the same pass after a terminal refusal", async () => {
   const f = fixture(2);
   vi.mocked(f.host.submit).mockResolvedValueOnce({result: "refused", reason: "capacity-refused"});

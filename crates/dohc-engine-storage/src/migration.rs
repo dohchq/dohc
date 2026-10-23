@@ -3374,15 +3374,18 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sets_user_version: None,
     },
     // The delivery a quarantined outbox's owner asked to try once more.
-    // Acceptance or another refusal clears it. The refusal key names the
-    // last refusal recorded, so writing it again changes nothing.
+    // Acceptance or another refusal clears it. Every refusal recorded for the
+    // pending head keeps its key, so writing any of them again changes nothing.
     Migration {
         ordinal: 68,
         id: "v2-owner-outbox-retry",
         sql: "ALTER TABLE owner_ydoc_outboxes ADD COLUMN retry_delivery_id TEXT \
               CHECK (retry_delivery_id IS NULL OR (state = 'quarantined' AND length(retry_delivery_id) > 0)); \
-              ALTER TABLE owner_ydoc_outboxes ADD COLUMN refusal_key TEXT \
-              CHECK (refusal_key IS NULL OR length(refusal_key) > 0);",
+              CREATE TABLE owner_ydoc_outbox_refusals ( \
+              outbox_id TEXT NOT NULL REFERENCES owner_ydoc_outboxes(outbox_id) ON DELETE CASCADE, \
+              delivery_id TEXT NOT NULL CHECK (length(delivery_id) > 0), \
+              refusal_key TEXT NOT NULL CHECK (length(refusal_key) > 0), \
+              PRIMARY KEY (outbox_id, refusal_key)) STRICT;",
         sets_user_version: None,
     },
 ];
@@ -4462,7 +4465,7 @@ mod tests {
             ),
             (
                 "v2-owner-outbox-retry",
-                "c74c63be023a44f934aedbd9179e19b6109577e48bdeed5d103e7a2af93f97b3",
+                "57ea5685a38a07ff6ddf30bcf22fe8a867166d1687c8475a6c43f408052de363",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

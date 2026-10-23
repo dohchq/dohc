@@ -80,12 +80,15 @@ export async function drainOwnerOutbox(options: {
     return {outboxId: status.outboxId, pendingBytes: status.pendingBytes};
   };
   const status = await readStatus(), outboxId = status.outboxId;
-  if (status.quarantined) {adoption.applied(); return {admittedEntries: 0, hasMore: false};}
+  const refusals = admission.refusals, held = JSON.stringify([host.mode,host.hostId,outboxId]);
+  if (status.quarantined) {
+    // With no Try again outstanding, no known refusal is left to record.
+    const known = refusals.get(held);
+    if (known) refusals.recorded(held, known);
+    adoption.applied(); return {admittedEntries: 0, hasMore: false};
+  }
   if (status.pendingBytes === 0) {adoption.applied(); return {admittedEntries: 0, hasMore: false};}
   if (typeof outboxId !== "string") throw new Error("Invalid owner outbox identity.");
-  // One attempt per outbox at a time, across passes and connections.
-  const refusals = admission.refusals, held = JSON.stringify([host.mode,host.hostId,outboxId]);
-  if (!refusals.hold(held)) return {admittedEntries: 0, hasMore: true};
   const quarantine = async (known: OwnerKnownRefusal) => {
     await client.sendRequest({...request(), method: "liveApplication.quarantineOwnerOutbox",
       params: {registrationId, reason: known.reason, deliveryId: known.deliveryId, refusalKey: known.key}}, signal);
@@ -110,6 +113,8 @@ export async function drainOwnerOutbox(options: {
     }
     return {...response,id: original.id};
   }},options.workspace);
+  // One attempt per outbox at a time, across passes and connections.
+  if (!refusals.hold(held)) return {admittedEntries: 0, hasMore: true};
   try {
     for (let index = 0; index < admission.maxEntriesPerDrain; index++) {
       check();
