@@ -3374,12 +3374,15 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sets_user_version: None,
     },
     // The delivery a quarantined outbox's owner asked to try once more.
-    // Acceptance or another refusal clears it.
+    // Acceptance or another refusal clears it. The refusal key names the
+    // last refusal recorded, so writing it again changes nothing.
     Migration {
         ordinal: 68,
         id: "v2-owner-outbox-retry",
         sql: "ALTER TABLE owner_ydoc_outboxes ADD COLUMN retry_delivery_id TEXT \
-              CHECK (retry_delivery_id IS NULL OR (state = 'quarantined' AND length(retry_delivery_id) > 0));",
+              CHECK (retry_delivery_id IS NULL OR (state = 'quarantined' AND length(retry_delivery_id) > 0)); \
+              ALTER TABLE owner_ydoc_outboxes ADD COLUMN refusal_key TEXT \
+              CHECK (refusal_key IS NULL OR length(refusal_key) > 0);",
         sets_user_version: None,
     },
 ];

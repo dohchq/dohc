@@ -27,7 +27,7 @@ import { createSyncRelayHandler } from "../../sync-relay/src/server.js";
 import { createNamedLiveRoutes, createOwnerLiveRoutes } from "../../sync-relay/src/namedLiveRoutes.js";
 import { captureOwnerLiveFrameHost } from "../../sync-relay/src/namedLiveFrameHost.js";
 import type { LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
-import {runNativeOwnerDeliveryPass} from "../../../apps/desktop/src/workspaces/nativeOwnerDelivery.js";
+import {OwnerKnownRefusals, runNativeOwnerDeliveryPass} from "../../../apps/desktop/src/workspaces/nativeOwnerDelivery.js";
 import {readyOwnerDeliveryDocuments} from "../../../apps/desktop/src/workspaces/serverOwnerDelivery.js";
 import { createLiveTickets } from "../../sync-relay/src/liveTickets.js";
 import { createLinkLiveHttp } from "../../sync-relay/src/linkLiveHttp.js";
@@ -363,8 +363,9 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     expect(discovered.status).toBe(200);
     const ownerTarget = readyOwnerDeliveryDocuments(await discovered.json(), "workspace")[0]!;
     expect(ownerTarget).toBeDefined();
+    const refusals = new OwnerKnownRefusals();
     const runOwnerPass = () => runNativeOwnerDeliveryPass({client: owner!, workspaceHandle: handle, document: ownerTarget,
-      config: {...profile.owner, nativeConfigPath: ownerConfigPath, relayUrl, documents: [ownerTarget]},
+      config: {...profile.owner, nativeConfigPath: ownerConfigPath, relayUrl, documents: [ownerTarget]}, refusals,
       signal: AbortSignal.timeout(30_000), bearer, accountId: ownerUser.id, assertCurrent() {expect(owner).toBeDefined();}});
     expect(["empty", "acknowledged"]).toContain(await runOwnerPass());
     const nativeRequest = () => ({id: 0, workspace: handle, deadlineMs: 30_000});

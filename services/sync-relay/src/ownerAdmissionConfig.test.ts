@@ -2,6 +2,7 @@ import {mkdtempSync,rmSync,writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {afterEach,expect,it,vi} from "vitest";
+import {OwnerKnownRefusals} from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import {readOwnerAdmissionConfig,startOwnerAdmission} from "./ownerAdmissionConfig.js";
 
 const fixtureRoots: string[] = [];
@@ -35,7 +36,7 @@ it("resumes a bounded workspace scan and aborts the active pass on close",async 
     return objectId ? {workspaceId,mainVersionId: "main",objectId,lineageClaimId: "a".repeat(64)} : undefined;
   }})};
   let held: AbortSignal | undefined;
-  const config = {admission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([["a","share-a"],["b","share-b"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 1000,validate: vi.fn()},
+  const config = {admission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([["a","share-a"],["b","share-b"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 1000,refusals: new OwnerKnownRefusals(),validate: vi.fn()},
     maxDocumentsPerPass: 2,pollIntervalMs: 100,passDeadlineMs: 30_000};
   const runner = startOwnerAdmission({config,storage: storage as never,history: {} as never,onError: vi.fn(),control: {settle: async (doc,signal) => {
     calls.push(doc.objectId);
@@ -59,7 +60,7 @@ it("reports a recurring failure again after a successful pass",async () => {
     return {workspaceId: "a",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64)};
   }})};
   const runner = startOwnerAdmission({storage: storage as never,history: {} as never,onError,
-    config: {admission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([["a","share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 1000,validate: vi.fn()},maxDocumentsPerPass: 1,pollIntervalMs: 100,passDeadlineMs: 30_000},
+    config: {admission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([["a","share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 1000,refusals: new OwnerKnownRefusals(),validate: vi.fn()},maxDocumentsPerPass: 1,pollIntervalMs: 100,passDeadlineMs: 30_000},
     control: {settle: async () => {if (fails) throw new Error("offline"); return {} as never;}},
   });
   try {
@@ -80,7 +81,7 @@ function admissionFixture(settle: Settle,onError = vi.fn()) {
   const runner = startOwnerAdmission({
     storage: {unavailable: unavailable.signal,createLiveCommittedDeliveryStore: () => ({nextOwnerDocument})} as never,
     history: {} as never,onError,control: {settle},
-    config: {admission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([["a","share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 1000,validate: vi.fn()},
+    config: {admission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([["a","share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 1000,refusals: new OwnerKnownRefusals(),validate: vi.fn()},
       maxDocumentsPerPass: 2,pollIntervalMs: 100,passDeadlineMs: 30_000},
   });
   return {runner,unavailable,nextOwnerDocument};

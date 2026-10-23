@@ -95,6 +95,20 @@ describe("OwnerYDocOutbox Try again", () => {
     expect(requests).toEqual([]);
     await expect(outbox(client).retry({ outboxId: "outbox", binding })).rejects.toThrow("retryDeliveryId");
   });
+
+  it("records a refusal with the head it refused and its key, and other quarantines without one", async () => {
+    const requests: Request[] = [];
+    const client: DaemonRequesterClient = { async sendRequest(request) {
+      requests.push(request);
+      return { id: request.id, result: { quarantined: true } };
+    } };
+    await outbox(client).quarantine({ outboxId: "outbox", reason: "invalid-update", refusal: { deliveryId: "delivery-1", key: "refusal-1" } });
+    await outbox(client).quarantine({ outboxId: "outbox", reason: "binding-changed", observedBinding: binding });
+    expect(requests.map(request => request.params)).toEqual([
+      { outboxId: "outbox", reason: "invalid-update", refusal: { deliveryId: "delivery-1", key: "refusal-1" } },
+      { outboxId: "outbox", reason: "binding-changed", observedBinding: binding },
+    ]);
+  });
 });
 
 describe("OwnerYDocOutbox receipt boundary", () => {

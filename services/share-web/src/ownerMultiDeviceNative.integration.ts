@@ -33,7 +33,7 @@ const routeLimits = { maxConnections: 4, maxConnectionsPerWorkspace: 96, reserve
 const exchangeKey = "native-network-exchange-".repeat(2);
 import {openEngineYdocProviderSession} from "../../../packages/workspace-engine-client/src/ydoc/ydocProviderSession.js";
 import {YdocOwnerDraftPendingError} from "../../../packages/workspace-engine-client/src/ydoc/ydocLiveAdapter.js";
-import {runNativeOwnerDeliveryPass} from "../../../apps/desktop/src/workspaces/nativeOwnerDelivery.js";
+import {OwnerKnownRefusals, runNativeOwnerDeliveryPass} from "../../../apps/desktop/src/workspaces/nativeOwnerDelivery.js";
 import {startDesktopOwnerDelivery} from "../../../apps/desktop/src/workspaces/desktopOwnerDelivery.js";
 import type {OwnerYDocDrainResult} from "../../../apps/desktop/src/workspaces/ownerYDocOutbox.js";
 import {OwnerYDocOutbox} from "../../../packages/workspace-engine-client/src/ydoc/ownerYDocOutbox.js";
@@ -199,7 +199,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
         if (result.status !== "observed") throw new Error("Expected durable enrolled owner state.");
         return result.draft;
       }
-      const outbox = new OwnerYDocOutbox(client, workspaceHandle);
+      const outbox = new OwnerYDocOutbox(client, workspaceHandle), refusals = new OwnerKnownRefusals();
       async function pass(): Promise<OwnerYDocDrainResult> {
         const lifetime = AbortSignal.timeout(deliveryConfig.attemptTimeoutMs);
         let completed!: (result: OwnerYDocDrainResult) => void, failed!: (error: unknown) => void;
@@ -208,7 +208,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
         lifetime.addEventListener("abort", aborted, {once: true});
         const delivery = startDesktopOwnerDelivery({config: deliveryConfig,
           async runPass(document, signal) {
-            const result = await runNativeOwnerDeliveryPass({client, workspaceHandle, document, config: deliveryConfig,
+            const result = await runNativeOwnerDeliveryPass({client, workspaceHandle, document, config: deliveryConfig, refusals,
               signal: AbortSignal.any([lifetime, signal]), bearer, accountId: signedIn.user.id, assertCurrent() {expect(storage.unavailable.aborted).toBe(false);}});
             if (result !== "retry") completed(result);
             return result;
@@ -288,7 +288,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     results.stage = "refuse foreign owner account";
     const wrongAccount = await auth.api.signInEmail({body: {email: users[0]!.email, password}});
     const refused = await runNativeOwnerDeliveryPass({client: first.client, workspaceHandle: first.workspaceHandle,
-      document: selected, config: deliveryConfig, signal: AbortSignal.timeout(30000), bearer: wrongAccount.token, accountId: wrongAccount.user.id, assertCurrent() {}});
+      document: selected, config: deliveryConfig, refusals: new OwnerKnownRefusals(), signal: AbortSignal.timeout(30000), bearer: wrongAccount.token, accountId: wrongAccount.user.id, assertCurrent() {}});
     expect(refused).toBe("retry");
     expect(await first.client.ownerYDocPrepareEnrollment(first.request(), target)).toEqual(firstDraft);
     // Hold the second authenticated capture: enrollment committed, submission has not started.

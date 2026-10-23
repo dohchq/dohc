@@ -6,6 +6,7 @@ import { limitLiveDeclaredAgents, liveAuthorCheckpointAnticipated } from "./stor
 import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
 import { OwnerYDocOutbox } from "@dohc/workspace-engine-client";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
+import { refusalOutstanding, type OwnerKnownRefusal, type OwnerKnownRefusals } from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { parseLiveUpdateHostApplicationAck, type LiveDocumentKey, type LiveUpdateHostApplicationAck, type LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
 import type { SyncRelayStorage, LiveHostConnectionCoordinate } from "./storage.js";
@@ -24,6 +25,8 @@ export interface OwnerOutboxAdmission {
   readonly shares: ReadonlyMap<string,string>;
   readonly maxEntriesPerDrain: number;
   readonly maxBytesPerDrain: number;
+  /** Outlives every pass and connection, so a refusal received once is recorded, not admitted again. */
+  readonly refusals: OwnerKnownRefusals;
   validate(input: {document: LiveDocumentKey; currentPath: string; checkpoint: Uint8Array; suffix: readonly Uint8Array[]; candidate: Uint8Array;
     retainStateUpdate?: boolean}, signal?: AbortSignal): LiveAdmissionValidation | Promise<LiveAdmissionValidation>;
 }
@@ -80,6 +83,15 @@ export async function drainOwnerOutbox(options: {
   if (status.quarantined) {adoption.applied(); return {admittedEntries: 0, hasMore: false};}
   if (status.pendingBytes === 0) {adoption.applied(); return {admittedEntries: 0, hasMore: false};}
   if (typeof outboxId !== "string") throw new Error("Invalid owner outbox identity.");
+  // One attempt per outbox at a time, across passes and connections.
+  const refusals = admission.refusals, held = JSON.stringify([host.mode,host.hostId,outboxId]);
+  if (!refusals.hold(held)) return {admittedEntries: 0, hasMore: true};
+  const quarantine = async (known: OwnerKnownRefusal) => {
+    await client.sendRequest({...request(), method: "liveApplication.quarantineOwnerOutbox",
+      params: {registrationId, reason: known.reason, deliveryId: known.deliveryId, refusalKey: known.key}}, signal);
+    refusals.recorded(held, known);
+    check();
+  };
   let receivedBytes = 0, admittedEntries = 0;
   const byteBudget = new Error("Owner drain byte budget exceeded.");
   const outbox = new OwnerYDocOutbox({sendRequest: async original => {
@@ -103,6 +115,16 @@ export async function drainOwnerOutbox(options: {
       check();
       const pending = await outbox.readDeliveryHead(outboxId,binding); check();
       if (!isDeepStrictEqual(pending.binding,binding) || pending.baseUpdateDigest !== binding.lineageClaimId) throw new Error("Owner outbox binding changed.");
+      const known = refusals.get(held);
+      if (known) {
+        // A refusal already received completes; it never reaches admission again.
+        if (refusalOutstanding(pending, known)) {
+          await quarantine(known);
+          adoption.applied();
+          return {admittedEntries, hasMore: true, retryReady: true};
+        }
+        refusals.recorded(held, known);
+      }
       if (pending.state === "quarantined" && (!pending.entry || pending.entry.deliveryId !== pending.retryDeliveryId)) {adoption.applied(); return {admittedEntries, hasMore: false};}
       if (!pending.entry) {adoption.applied(); return {admittedEntries, hasMore: false};}
       const entry = pending.entry;
@@ -146,9 +168,7 @@ export async function drainOwnerOutbox(options: {
         // Final refusals of this candidate freeze its whole queue. Contention returned retry above;
         // validator integration and admitted-cut failures threw in storage.
         if (["provenance-refused", "delivery-conflict", "capacity-refused", "invalid-update"].includes(committed.result.reason)) {
-          await client.sendRequest({...request(), method: "liveApplication.quarantineOwnerOutbox",
-            params: {registrationId, reason: committed.result.reason}}, signal);
-          check();
+          await quarantine(refusals.receive(held, {deliveryId: entry.deliveryId, reason: committed.result.reason}));
           adoption.applied();
           return {admittedEntries, hasMore: false};
         }
@@ -176,5 +196,5 @@ export async function drainOwnerOutbox(options: {
       return {admittedEntries, hasMore: remaining.pendingBytes > 0};
     }
     throw error;
-  } finally { outbox.dispose(); }
+  } finally { outbox.dispose(); refusals.release(held); }
 }

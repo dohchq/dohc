@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import type { EngineClient } from "../../workspace-engine-client/src/daemon/index.js";
+import { OwnerKnownRefusals } from "../../workspace-engine-client/src/ydoc/ownerYDocOutboxDrainer.js";
 import { OwnerCommittedDelivery } from "../../../services/sync-relay/src/ownerCommittedDelivery.js";
 import { createLiveMarkdownJournalValidator } from "./liveDocumentValidation.js";
 import { policy } from "./liveCommittedDeliveryTestSupport.js";
@@ -27,7 +28,7 @@ it("retries an unmaterialized owner settlement and caches only its completed res
     };
     const delivery = new OwnerCommittedDelivery(f.storage,createLiveJournalHistoryAuthority({namespace: "owner-history",reconciled: true}),{
       client: client as unknown as EngineClient,workspace: "workspace-handle",host,deadlineMs: 30_000,nextRequestId: () => ++sequence,bounds: {maxBytes: 1_000_000,maxEvents: 10},
-      ownerAdmission: {trustedAccount: accountId => ({accountId, name: "Owner"}), shares: new Map([["workspace","share"]]),maxEntriesPerDrain: 10,maxBytesPerDrain: 1_000_000,
+      ownerAdmission: {trustedAccount: accountId => ({accountId, name: "Owner"}), shares: new Map([["workspace","share"]]),maxEntriesPerDrain: 10,maxBytesPerDrain: 1_000_000,refusals: new OwnerKnownRefusals(),
         validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input)},
     });
     expect((await delivery.settle(f.input.evidence.document)).materialized).toBe(false);

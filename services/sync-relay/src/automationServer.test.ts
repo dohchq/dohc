@@ -12,6 +12,7 @@ import type { ReachHandover } from "@dohc/automation-executor/reach-verdicts";
 import { DaemonRefusalError, OwnerYDocOutbox, VersionedLiveAdapter, type AutomationClaim, type AutomationGroupHandover, type MomentRecord } from "@dohc/workspace-engine-client";
 import { AUTOMATION_SWITCHED_OFF_BODY, AUTOMATION_SWITCHED_OFF_VIEW_BODY } from "@dohc/automation-executor/automation-failed-notice";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
+import { OwnerYDocOutboxDrainer } from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import * as daemon from "@dohc/workspace-engine-client/daemon";
 import { startAutomationReplicas, type AutomationReplica } from "./automationReplicas";
 import type { LiveClaimLedger } from "./automationLiveClaims";
@@ -799,6 +800,31 @@ describe("a server that pushes its copy of a workspace", () => {
     expect(readHead).toHaveBeenCalledWith("outbox");
     expect(capture).toHaveBeenCalled();
     readHead.mockRestore(); currentBinding.mockRestore();
+  });
+  it("never captures a quarantined draft its owner has not asked to try again", async () => {
+    clock = at(8);
+    const {storage, h} = await relay();
+    const binding = {workspaceId: WORKSPACE, mainVersionId: "main", objectId: "record", lineageClaimId: "a".repeat(64),
+      currentPath: "Tasks/one.md", selectorPaths: ["Tasks"], restoreFenceGeneration: 0};
+    const draft = {binding, pendingBytes: 10, state: "quarantined", outboxId: "outbox"};
+    const capture = vi.fn(async () => {throw new Error("Device delivery is unavailable.");});
+    const client = {ownerYDocListDrafts: vi.fn(async () => ({drafts: [draft], next: null}))};
+    vi.spyOn(storage, "automationRecordBinding").mockReturnValue({binding, shareId: "share"});
+    const readHead = vi.spyOn(OwnerYDocOutbox.prototype, "readHead").mockResolvedValue({outboxId: "outbox", binding,
+      baseUpdate: Uint8Array.of(0, 0), baseUpdateDigest: binding.lineageClaimId, state: "quarantined", pendingBytes: 10,
+      oldestEntryAtMs: 1, quarantineReason: "invalid-update", observedBinding: null, retryDeliveryId: null,
+      entry: {appendKey: "key", sequence: 1, deliveryId: "delivery", updateDigest: "b".repeat(64), update: Uint8Array.of(0, 0), byteLength: 2, createdAtMs: 1}});
+    const drained = vi.spyOn(OwnerYDocOutboxDrainer.prototype, "drainOnce");
+    const currentBinding = vi.mocked(storage.automationRecordBinding);
+    const s = await server(storage, h, {client: client as unknown as EngineClient,
+      recordDelivery: {namespace: "relay", capture}});
+    await s.openReplica();
+    await vi.waitFor(() => expect(drained).toHaveBeenCalled());
+    expect(await drained.mock.results[0]!.value).toBe("frozen");
+    expect(readHead).toHaveBeenCalledWith("outbox");
+    expect(capture).not.toHaveBeenCalled();
+    expect(s.errors.filter(([context]) => context.startsWith("deliver automation record"))).toEqual([]);
+    drained.mockRestore(); readHead.mockRestore(); currentBinding.mockRestore();
   });
   it("tries a sync the engine refused again, and reports only one that keeps failing", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });

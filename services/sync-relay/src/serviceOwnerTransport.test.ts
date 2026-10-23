@@ -36,25 +36,32 @@ it("uses the captured native session and translates owner outbox calls to its na
   expect(f.sendRequest).toHaveBeenLastCalledWith(expect.objectContaining({method:"ydoc.ownerOutbox.readPending",params:{outboxId:"actual-outbox",cursor:"chunk"}}),undefined);
   await f.transport.client.sendRequest({...f.request,id:6,method:"liveApplication.acknowledgeOwnerOutbox",params:{registrationId:7,receipts:[]}});
   expect(f.sendRequest).toHaveBeenLastCalledWith(expect.objectContaining({method:"ydoc.ownerOutbox.acknowledge",params:{outboxId:"actual-outbox",receipts:[]}}),undefined);
-  await f.transport.client.sendRequest({...f.request,id:7,method:"liveApplication.quarantineOwnerOutbox",params:{registrationId:7,reason:"provenance-refused"}});
-  expect(f.sendRequest).toHaveBeenLastCalledWith(expect.objectContaining({method:"ydoc.ownerOutbox.quarantine",params:{outboxId:"actual-outbox",reason:"provenance-refused"}}),undefined);
+  // A refusal carries the head it refused and its key, so native records it once.
+  const refused={deliveryId:"delivery-1",refusalKey:"refusal-1"},refusal={deliveryId:"delivery-1",key:"refusal-1"};
+  await f.transport.client.sendRequest({...f.request,id:7,method:"liveApplication.quarantineOwnerOutbox",params:{registrationId:7,reason:"provenance-refused",...refused}});
+  expect(f.sendRequest).toHaveBeenLastCalledWith(expect.objectContaining({method:"ydoc.ownerOutbox.quarantine",params:{outboxId:"actual-outbox",reason:"provenance-refused",refusal}}),undefined);
   for(const reason of ["capacity-refused","invalid-update"]) {
-    await f.transport.client.sendRequest({...f.request,id:9,method:"liveApplication.quarantineOwnerOutbox",params:{registrationId:7,reason}});
-    expect(f.sendRequest).toHaveBeenLastCalledWith(expect.objectContaining({method:"ydoc.ownerOutbox.quarantine",params:{outboxId:"actual-outbox",reason}}),undefined);
+    await f.transport.client.sendRequest({...f.request,id:9,method:"liveApplication.quarantineOwnerOutbox",params:{registrationId:7,reason,...refused}});
+    expect(f.sendRequest).toHaveBeenLastCalledWith(expect.objectContaining({method:"ydoc.ownerOutbox.quarantine",params:{outboxId:"actual-outbox",reason,refusal}}),undefined);
   }
   const quarantines=f.sendRequest.mock.calls.length;
-  await expect(f.transport.client.sendRequest({...f.request,id:8,method:"liveApplication.quarantineOwnerOutbox",params:{registrationId:7,reason:"arbitrary"}})).rejects.toThrow();
-  await expect(f.transport.client.sendRequest({...f.request,id:10,method:"liveApplication.quarantineOwnerOutbox",params:{registrationId:8,reason:"invalid-update"}})).rejects.toThrow("registration changed");
-  await expect(f.transport.client.sendRequest({...f.request,id:11,workspace:"other-workspace",method:"liveApplication.quarantineOwnerOutbox",params:{registrationId:7,reason:"invalid-update"}})).rejects.toThrow("workspace changed");
+  await expect(f.transport.client.sendRequest({...f.request,id:8,method:"liveApplication.quarantineOwnerOutbox",params:{registrationId:7,reason:"arbitrary",...refused}})).rejects.toThrow();
+  for(const params of [{registrationId:7,reason:"invalid-update"},{registrationId:7,reason:"invalid-update",deliveryId:"",refusalKey:"refusal-1"},
+    {registrationId:7,reason:"invalid-update",deliveryId:"delivery-1",refusalKey:""}]) {
+    await expect(f.transport.client.sendRequest({...f.request,id:13,method:"liveApplication.quarantineOwnerOutbox",params})).rejects.toThrow();
+  }
+  await expect(f.transport.client.sendRequest({...f.request,id:10,method:"liveApplication.quarantineOwnerOutbox",params:{registrationId:8,reason:"invalid-update",...refused}})).rejects.toThrow("registration changed");
+  await expect(f.transport.client.sendRequest({...f.request,id:11,workspace:"other-workspace",method:"liveApplication.quarantineOwnerOutbox",params:{registrationId:7,reason:"invalid-update",...refused}})).rejects.toThrow("workspace changed");
   f.retire();
-  await expect(f.transport.client.sendRequest({...f.request,id:12,method:"liveApplication.quarantineOwnerOutbox",params:{registrationId:7,reason:"invalid-update"}})).rejects.toThrow("retired");
+  await expect(f.transport.client.sendRequest({...f.request,id:12,method:"liveApplication.quarantineOwnerOutbox",params:{registrationId:7,reason:"invalid-update",...refused}})).rejects.toThrow("retired");
   expect(f.sendRequest.mock.calls.length).toBe(quarantines);
 });
 it("refuses an invalid-update quarantine before the service owner adopted its outbox",async()=>{
   const f=fixture();
   await f.transport.client.sendRequest({...f.request,method:"liveApplication.register",params:{binding:f.binding}});
   const calls=f.sendRequest.mock.calls.length;
-  await expect(f.transport.client.sendRequest({...f.request,id:2,method:"liveApplication.quarantineOwnerOutbox",params:{registrationId:7,reason:"invalid-update"}})).rejects.toThrow("outbox is unavailable");
+  await expect(f.transport.client.sendRequest({...f.request,id:2,method:"liveApplication.quarantineOwnerOutbox",
+    params:{registrationId:7,reason:"invalid-update",deliveryId:"delivery-1",refusalKey:"refusal-1"}})).rejects.toThrow("outbox is unavailable");
   expect(f.sendRequest.mock.calls.length).toBe(calls);
 });
 it("refuses foreign bindings, sessions, and retirement without invoking native adoption",async()=>{

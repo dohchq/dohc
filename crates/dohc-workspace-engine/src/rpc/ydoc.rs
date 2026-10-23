@@ -244,6 +244,9 @@ struct OwnerYDocOutboxQuarantineParams {
     reason: String,
     #[serde(default)]
     observed_binding: Option<dohc_engine_collab::LiveObjectBinding>,
+    /// Present when delivery received a terminal refusal of the head.
+    #[serde(default)]
+    refusal: Option<dohc_engine_collab::OwnerOutboxRefusal>,
 }
 
 #[derive(Deserialize)]
@@ -942,18 +945,36 @@ impl EngineService {
             .mutation_session_guard(&open, &cancellation, "ydoc.ownerOutbox.quarantine (queued)")
             .await?;
         let open = self.open(Some(&handle))?;
-        open.actor
-            .owner_ydoc_outbox_quarantine(
-                open.workspace_id.clone(),
-                dohc_engine_collab::OwnerOutboxQuarantineInput {
-                    outbox_id: params.outbox_id,
-                    reason: params.reason,
-                    observed_binding: params.observed_binding,
-                },
-                now_ms()?,
-                cancellation.token(),
-            )
-            .await
+        let input = dohc_engine_collab::OwnerOutboxQuarantineInput {
+            outbox_id: params.outbox_id,
+            reason: params.reason,
+            observed_binding: params.observed_binding,
+        };
+        let workspace_id = open.workspace_id.clone();
+        let outcome = match params.refusal {
+            Some(refusal) => {
+                open.actor
+                    .owner_ydoc_outbox_record_refusal(
+                        workspace_id,
+                        input,
+                        refusal,
+                        now_ms()?,
+                        cancellation.token(),
+                    )
+                    .await
+            }
+            None => {
+                open.actor
+                    .owner_ydoc_outbox_quarantine(
+                        workspace_id,
+                        input,
+                        now_ms()?,
+                        cancellation.token(),
+                    )
+                    .await
+            }
+        };
+        outcome
             .map_err(|error| match error {
                 RuntimeError::Cancelled => cancellation.interruption("ydoc.ownerOutbox.quarantine"),
                 error => map_runtime(error),

@@ -11,10 +11,11 @@ use crate::search::upsert_file_search_index;
 use dohc_engine_collab::{
     AppendOutcome, CacheStats, CloseOutcome, CollabError, ContentKind, DocKey, LineageClaimStatus,
     OwnerDeliveryReceipt, OwnerOutboxAcknowledgeResult, OwnerOutboxAppendInput,
-    OwnerOutboxAppendResult, OwnerOutboxError, OwnerOutboxQuarantineInput, OwnerOutboxRetryInput,
-    Projection, Regime, SceneAsset, WriterDocCache, Ydoc, acknowledge_owner_outbox,
-    append_owner_outbox, encode_scene_asset_record, encode_scene_asset_records,
-    import_portable_scene, quarantine_owner_outbox, retry_owner_outbox,
+    OwnerOutboxAppendResult, OwnerOutboxError, OwnerOutboxQuarantineInput, OwnerOutboxRefusal,
+    OwnerOutboxRetryInput, Projection, Regime, SceneAsset, WriterDocCache, Ydoc,
+    acknowledge_owner_outbox, append_owner_outbox, encode_scene_asset_record,
+    encode_scene_asset_records, import_portable_scene, quarantine_owner_outbox,
+    record_owner_outbox_refusal, retry_owner_outbox,
 };
 use dohc_engine_domain::{
     ChangeAttribution, DomainError, ProjectedWriteText, VersionedTextStore,
@@ -672,6 +673,24 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 Ok(quarantine_owner_outbox(store, &workspace_id, input, now_ms))
+            }
+        })
+        .await
+    }
+
+    pub async fn owner_ydoc_outbox_record_refusal(
+        &self,
+        workspace_id: String,
+        input: OwnerOutboxQuarantineInput,
+        refusal: OwnerOutboxRefusal,
+        now_ms: i64,
+        token: CancellationToken,
+    ) -> Result<Result<(), OwnerOutboxError>, RuntimeError> {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                Ok(record_owner_outbox_refusal(store, &workspace_id, input, refusal, now_ms))
             }
         })
         .await

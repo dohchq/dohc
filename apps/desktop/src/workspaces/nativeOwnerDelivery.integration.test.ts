@@ -3,6 +3,7 @@ import {resolve} from "node:path";
 import {afterEach, expect, it, vi} from "vitest";
 import {OwnerYDocOutbox} from "@dohc/workspace-engine-client";
 import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
+import {OwnerKnownRefusals} from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import type {connectOwnerLiveTransport} from "@dohc/sync-relay/owner-live-transport";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import {createNamedLiveFrameSession, type NamedFrameHostSession} from "../../../../services/sync-relay/src/namedLiveFrameSession";
@@ -53,7 +54,7 @@ async function deliver(accountId: string, declared: typeof agentDeclaration | nu
     ownerYDocReadState: vi.fn(async () => ({revision: 1, acceptedCursor: 0, nativeHeadSequence: 1, stateVector: Uint8Array.of(0)})),
     ownerYDocApplyInitialSync: vi.fn(async () => ({revision: 2, acceptedCursor: 0, nativeHeadSequence: 2})),
     ownerYDocIsReceiptApplied: vi.fn(async () => true)};
-  const options = {client: client as unknown as EngineClient, workspaceHandle: "handle", config, document: config.documents[0]!,
+  const options = {client: client as unknown as EngineClient, workspaceHandle: "handle", config, refusals: new OwnerKnownRefusals(), document: config.documents[0]!,
     signal: lifetime.signal, bearer: "session-bearer", accountId, assertCurrent() {lifetime.signal.throwIfAborted();}};
   expect(await runNativeOwnerDeliveryPass(options)).toBe("acknowledged");
   expect(acknowledge).toHaveBeenCalledWith("outbox", [receipt]);

@@ -339,6 +339,15 @@ pub struct OwnerOutboxQuarantineInput {
     pub observed_binding: Option<LiveObjectBinding>,
 }
 
+/// A terminal refusal delivery received for the head. The deliverer mints the
+/// key once per refusal and sends it with every write of that refusal.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OwnerOutboxRefusal {
+    pub delivery_id: String,
+    pub key: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct OwnerOutboxRetryInput {
     pub outbox_id: String,
@@ -396,6 +405,8 @@ pub fn refuse_entry_in_tx(
         None => native_refusal_checkpoint_in_tx(tx, &parent.binding, input)?,
     };
     tx.execute("UPDATE owner_ydoc_outbox_entries SET pending=0,terminal_blob_digest=update_blob_digest,update_blob_digest=NULL,terminal_reason=?3 WHERE outbox_id=?1 AND delivery_id=?2 AND pending=1", params![input.outbox_id,input.delivery_id,input.reason]).map_err(write_sql)?;
+    // Retiring the granted head ends its Try again.
+    tx.execute("UPDATE owner_ydoc_outboxes SET retry_delivery_id=NULL WHERE outbox_id=?1 AND retry_delivery_id=?2", params![input.outbox_id,input.delivery_id]).map_err(write_sql)?;
     let visible = draft::refuse_dependent_entries_in_tx(tx, &input.outbox_id, &checkpoint_digest)?;
     refresh_pending_in_tx(tx, &input.outbox_id)?;
     if observed.is_some() && parent.state != OwnerOutboxState::Quarantined {
@@ -1411,6 +1422,61 @@ pub(crate) fn quarantine_in_tx(
     Ok(())
 }
 
+/// Records a terminal refusal of the head: the reason and the end of its Try
+/// again commit together. Writing the same refusal again, or one whose head
+/// was accepted or whose Try again already ended, changes nothing, so a late
+/// write cannot use up a later Try again.
+pub fn record_refusal(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    input: OwnerOutboxQuarantineInput,
+    refusal: OwnerOutboxRefusal,
+    now_ms: i64,
+) -> Result<(), OwnerOutboxError> {
+    let outcome = store.write_with(&NoFaults, |tx| {
+        record_refusal_in_tx(tx, workspace_id, &input, &refusal, now_ms)
+    })?;
+    committed(outcome)
+}
+
+pub(crate) fn record_refusal_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    input: &OwnerOutboxQuarantineInput,
+    refusal: &OwnerOutboxRefusal,
+    now_ms: i64,
+) -> Result<(), OwnerOutboxError> {
+    validate_identifier(&input.outbox_id, "outbox id must be non-empty and bounded")?;
+    validate_identifier(&refusal.delivery_id, "delivery id must be non-empty and bounded")?;
+    validate_identifier(&refusal.key, "refusal key must be non-empty and bounded")?;
+    let parent = read_parent(tx, &input.outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
+    require_workspace(workspace_id, &parent.binding.workspace_id)?;
+    let (recorded, head): (Option<String>, Option<String>) = tx
+        .query_row(
+            "SELECT refusal_key,(SELECT delivery_id FROM owner_ydoc_outbox_entries \
+             WHERE outbox_id=?1 AND pending=1 ORDER BY sequence LIMIT 1) \
+             FROM owner_ydoc_outboxes WHERE outbox_id=?1",
+            [&input.outbox_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(read_sql)?;
+    let refused = Some(refusal.delivery_id.as_str());
+    if recorded.as_deref() == Some(refusal.key.as_str())
+        || head.as_deref() != refused
+        || (parent.state == OwnerOutboxState::Quarantined
+            && parent.retry_delivery_id.as_deref() != refused)
+    {
+        return Ok(());
+    }
+    quarantine_in_tx(tx, workspace_id, input, now_ms)?;
+    tx.execute(
+        "UPDATE owner_ydoc_outboxes SET refusal_key=?2 WHERE outbox_id=?1",
+        params![input.outbox_id, refusal.key],
+    )
+    .map_err(write_sql)?;
+    Ok(())
+}
+
 /// The owner's Try again: one more delivery attempt of the quarantined head at
 /// the binding generation the owner saw. The attempt keeps its delivery
 /// identity and goes through ordinary admission. Accepting it resumes
@@ -1464,7 +1530,7 @@ pub(crate) fn retry_in_tx(
         return Err(OwnerOutboxError::ParentMismatch);
     }
     // The observed generation, if any, must still be this one.
-    draft::read_observed_in(tx, &binding)?;
+    let observed = draft::read_observed_in(tx, &binding)?;
     let adopted: Option<String> = tx
         .query_row(
             "SELECT binding_json FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
@@ -1500,6 +1566,7 @@ pub(crate) fn retry_in_tx(
         .map_err(read_sql)?;
     // The document must still be live at the binding the owner saw.
     if newer
+        || (observed.is_some() && marker.is_none())
         || marker.is_some_and(|marker| {
             marker.regime != crate::Regime::Replicated
                 || marker.lineage_claim_id.as_deref() != Some(binding.lineage_claim_id.as_str())
@@ -1507,6 +1574,10 @@ pub(crate) fn retry_in_tx(
         })
     {
         return Err(OwnerOutboxError::ParentMismatch);
+    }
+    // A repeated request keeps the outstanding grant.
+    if let Some(granted) = parent.retry_delivery_id {
+        return Ok(granted);
     }
     let head: String = tx
         .query_row(
@@ -2618,6 +2689,102 @@ mod tests {
         assert!(matches!(
             append(&mut store, "workspace-1", input("key-4", b"four", 13)),
             Err(OwnerOutboxError::Frozen)
+        ));
+    }
+
+    fn record(store: &mut EngineStore, outbox: &str, delivery_id: &str, key: &str) {
+        record_refusal(
+            store,
+            "workspace-1",
+            OwnerOutboxQuarantineInput {
+                outbox_id: outbox.to_owned(),
+                reason: "provenance-refused".to_owned(),
+                observed_binding: None,
+            },
+            OwnerOutboxRefusal {
+                delivery_id: delivery_id.to_owned(),
+                key: key.to_owned(),
+            },
+            40,
+        )
+        .expect("record refusal");
+    }
+
+    #[test]
+    fn a_repeated_try_again_keeps_the_outstanding_grant() {
+        let (_dir, mut store, outbox, pending) = refused_queue("owner-outbox-try-again-twice");
+        let first = retry(&mut store, "workspace-1", try_again(&outbox)).expect("try again");
+        let second = retry(&mut store, "workspace-1", try_again(&outbox)).expect("again");
+        assert_eq!(first, pending.entries[0].delivery_id);
+        assert_eq!(second, first);
+    }
+
+    #[test]
+    fn a_recorded_refusal_ends_its_try_again_once_and_never_a_later_one() {
+        let (dir, mut store, outbox, pending) = refused_queue("owner-outbox-known-refusal");
+        let head = pending.entries[0].delivery_id.clone();
+        retry(&mut store, "workspace-1", try_again(&outbox)).expect("try again");
+        record(&mut store, &outbox, &head, "refusal-1");
+        let frozen = read_pending(&store, "workspace-1", &outbox).expect("refused");
+        assert_eq!(frozen.state, OwnerOutboxState::Quarantined);
+        assert_eq!(frozen.quarantine_reason.as_deref(), Some("provenance-refused"));
+        assert_eq!(frozen.retry_delivery_id, None);
+        assert_eq!(frozen.entries, pending.entries);
+        assert_eq!(frozen.base_update, pending.base_update);
+        // The owner asks again before a lost response's write is repeated.
+        retry(&mut store, "workspace-1", try_again(&outbox)).expect("try again later");
+        drop(store);
+        let mut store = EngineStore::open(&dir.join("engine.db"), 50).expect("reopen");
+        record(&mut store, &outbox, &head, "refusal-1");
+        let granted = read_pending(&store, "workspace-1", &outbox).expect("granted");
+        assert_eq!(granted.retry_delivery_id.as_deref(), Some(head.as_str()));
+        assert_eq!(granted.quarantine_reason.as_deref(), Some("provenance-refused"));
+        // A refusal of another entry than the granted head changes nothing.
+        record(&mut store, &outbox, &pending.entries[1].delivery_id, "refusal-2");
+        assert_eq!(
+            read_pending(&store, "workspace-1", &outbox)
+                .expect("still granted")
+                .retry_delivery_id
+                .as_deref(),
+            Some(head.as_str())
+        );
+        acknowledge(&mut store, "workspace-1", &outbox, &[receipt(&pending.entries[0])])
+            .expect("accepted");
+        // A refusal written after its head was accepted cannot freeze the suffix.
+        record(&mut store, &outbox, &head, "refusal-3");
+        let resumed = read_pending(&store, "workspace-1", &outbox).expect("resumed");
+        assert_eq!(resumed.state, OwnerOutboxState::Active);
+        assert_eq!(resumed.quarantine_reason, None);
+        assert_eq!(resumed.entries.len(), 2);
+    }
+
+    #[test]
+    fn a_refusal_of_an_active_head_quarantines_the_queue_and_keeps_its_bytes() {
+        let (_dir, mut store) = store("owner-outbox-known-refusal-active");
+        let first = append(&mut store, "workspace-1", input("key-1", b"one", 10)).expect("first");
+        append(&mut store, "workspace-1", input("key-2", b"two", 11)).expect("second");
+        let before = read_pending(&store, "workspace-1", &first.outbox_id).expect("active");
+        record(&mut store, &first.outbox_id, &first.delivery_id, "refusal-1");
+        let frozen = read_pending(&store, "workspace-1", &first.outbox_id).expect("frozen");
+        assert_eq!(frozen.state, OwnerOutboxState::Quarantined);
+        assert_eq!(frozen.quarantine_reason.as_deref(), Some("provenance-refused"));
+        assert_eq!(frozen.entries, before.entries);
+        assert!(matches!(
+            record_refusal(
+                &mut store,
+                "workspace-2",
+                OwnerOutboxQuarantineInput {
+                    outbox_id: first.outbox_id.clone(),
+                    reason: "provenance-refused".to_owned(),
+                    observed_binding: None,
+                },
+                OwnerOutboxRefusal {
+                    delivery_id: first.delivery_id.clone(),
+                    key: "refusal-2".to_owned(),
+                },
+                40,
+            ),
+            Err(OwnerOutboxError::WorkspaceMismatch)
         ));
     }
 

@@ -117,6 +117,11 @@ export interface OwnerYDocOutboxQuarantineInput {
   readonly outboxId: string;
   readonly reason: string;
   readonly observedBinding?: LiveObjectBinding;
+  /**
+   * The terminal refusal of the head this records. The engine records it at
+   * most once, and only while it is that head's own attempt.
+   */
+  readonly refusal?: { readonly deliveryId: string; readonly key: string };
 }
 
 export interface OwnerYDocOutboxRetryInput {
@@ -458,6 +463,9 @@ export class OwnerYDocOutbox {
                 input.observedBinding,
               ),
             }),
+        ...(input.refusal === undefined
+          ? {}
+          : { refusal: { deliveryId: input.refusal.deliveryId, key: input.refusal.key } }),
       } as unknown as JsonValue,
       { workspace: this.workspace },
     );

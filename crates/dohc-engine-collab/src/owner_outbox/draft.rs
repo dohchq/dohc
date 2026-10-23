@@ -2243,6 +2243,74 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn try_again_refuses_an_observed_binding_whose_document_is_gone() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let owner = Ydoc::wire();
+        owner.apply(&checkpoint).unwrap();
+        let head = pending(
+            &mut store,
+            &observed,
+            owner.richdoc_append_paragraph("refused"),
+        );
+        refuse_for_good(&mut store, &head.outbox_id);
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute("DELETE FROM ydoc_docs", []).unwrap();
+                Ok::<_, OwnerOutboxError>(())
+            })
+            .unwrap();
+        assert!(store
+            .read_with(|c| read_observed_in(c, &observed.binding))
+            .unwrap()
+            .is_some());
+        assert!(matches!(
+            try_again(&mut store, &observed, &head.outbox_id),
+            Err(OwnerOutboxError::ParentMismatch)
+        ));
+        assert_eq!(
+            super::super::read_pending(&store, "workspace", &head.outbox_id)
+                .unwrap()
+                .retry_delivery_id,
+            None
+        );
+    }
+    #[test]
+    fn retiring_the_granted_head_ends_its_try_again() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let owner = Ydoc::wire();
+        owner.apply(&checkpoint).unwrap();
+        let head = pending(
+            &mut store,
+            &observed,
+            owner.richdoc_append_paragraph("refused twice"),
+        );
+        refuse_for_good(&mut store, &head.outbox_id);
+        assert_eq!(
+            try_again(&mut store, &observed, &head.outbox_id).unwrap(),
+            head.delivery_id
+        );
+        let refusal = OwnerOutboxRefuseInput {
+            outbox_id: head.outbox_id.clone(),
+            delivery_id: head.delivery_id.clone(),
+            update_digest: head.update_digest.clone(),
+            reason: "The presser no longer has edit access.".into(),
+        };
+        committed(
+            store
+                .write_with(&NoFaults, |tx| {
+                    refuse_entry_in_tx(tx, "workspace", &refusal, 12)
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let retired = super::super::read_pending(&store, "workspace", &head.outbox_id).unwrap();
+        assert_eq!(retired.state, super::super::OwnerOutboxState::Quarantined);
+        assert_eq!(retired.retry_delivery_id, None);
+        assert!(retired.entries.is_empty());
+    }
     fn feed(
         store: &mut EngineStore,
         observed: &ObservedOwnerBinding,

@@ -215,16 +215,22 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     singleton.sendRequest.mockResolvedValueOnce({result: {entries: []}});
     await peer!.sendRequest({id: 21,method: "liveApplication.readOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 9}});
     expect(singleton.sendRequest.mock.lastCall?.[0]).toMatchObject({method: "ydoc.ownerOutbox.readPending",params: {outboxId: "outbox"}});
+    // A refusal carries the head it refused and its key, so native records it once.
+    const refused = {deliveryId: "delivery-1",refusalKey: "refusal-1"}, refusal = {deliveryId: "delivery-1",key: "refusal-1"};
     singleton.sendRequest.mockResolvedValueOnce({result: {state: "quarantined"}});
-    await peer!.sendRequest({id: 31,method: "liveApplication.quarantineOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 9,reason: "provenance-refused"}});
-    expect(singleton.sendRequest.mock.lastCall?.[0]).toMatchObject({method: "ydoc.ownerOutbox.quarantine",params: {outboxId: "outbox",reason: "provenance-refused"}});
+    await peer!.sendRequest({id: 31,method: "liveApplication.quarantineOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 9,reason: "provenance-refused",...refused}});
+    expect(singleton.sendRequest.mock.lastCall?.[0]).toMatchObject({method: "ydoc.ownerOutbox.quarantine",params: {outboxId: "outbox",reason: "provenance-refused",refusal}});
     for (const reason of ["capacity-refused", "invalid-update"]) {
       singleton.sendRequest.mockResolvedValueOnce({result: {state: "quarantined"}});
-      await peer!.sendRequest({id: 32,method: "liveApplication.quarantineOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 9,reason}});
-      expect(singleton.sendRequest.mock.lastCall?.[0]).toMatchObject({method: "ydoc.ownerOutbox.quarantine",params: {outboxId: "outbox",reason}});
+      await peer!.sendRequest({id: 32,method: "liveApplication.quarantineOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 9,reason,...refused}});
+      expect(singleton.sendRequest.mock.lastCall?.[0]).toMatchObject({method: "ydoc.ownerOutbox.quarantine",params: {outboxId: "outbox",reason,refusal}});
     }
     const quarantines = singleton.sendRequest.mock.calls.length;
-    await expect(peer!.sendRequest({id: 33,method: "liveApplication.quarantineOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 9,reason: "arbitrary"}})).rejects.toThrow();
+    await expect(peer!.sendRequest({id: 33,method: "liveApplication.quarantineOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 9,reason: "arbitrary",...refused}})).rejects.toThrow();
+    for (const params of [{registrationId: 9,reason: "invalid-update"},{registrationId: 9,reason: "invalid-update",deliveryId: "",refusalKey: "refusal-1"},
+      {registrationId: 9,reason: "invalid-update",deliveryId: "delivery-1",refusalKey: ""}]) {
+      await expect(peer!.sendRequest({id: 35,method: "liveApplication.quarantineOwnerOutbox",workspace: "ws-ordinary",params})).rejects.toThrow();
+    }
     expect(singleton.sendRequest.mock.calls.length).toBe(quarantines);
     await peer!.sendRequest({id: 22,method: "liveApplication.ownerState",workspace: "ws-ordinary",params: {registrationId: 9}});
     const beforeFence = owner.finishHandoff.mock.calls.length;
@@ -242,7 +248,7 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     expect(singleton.close).not.toHaveBeenCalled();
     // An unknown registration closes the transport without quarantining anything.
     const native = singleton.sendRequest.mock.calls.length;
-    await expect(peer!.sendRequest({id: 34,method: "liveApplication.quarantineOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 99,reason: "invalid-update"}})).rejects.toThrow();
+    await expect(peer!.sendRequest({id: 34,method: "liveApplication.quarantineOwnerOutbox",workspace: "ws-ordinary",params: {registrationId: 99,reason: "invalid-update",deliveryId: "delivery-1",refusalKey: "refusal-1"}})).rejects.toThrow();
     expect(singleton.sendRequest.mock.calls.length).toBe(native);
   } finally { await transport.close(); peer?.close(); }
 });

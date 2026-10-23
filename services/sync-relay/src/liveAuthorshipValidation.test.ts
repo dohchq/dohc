@@ -4,6 +4,7 @@ import type {LiveAuthorContext} from '@dohc/live-session-contract'
 import type {LiveUpdateJournalCommitInput} from './storage.js'
 import type {LiveJournalValidation} from './storage/types.js'
 import type {EngineClient} from '@dohc/workspace-engine-client/daemon'
+import {OwnerKnownRefusals} from '@dohc/workspace-engine-client/owner-ydoc-drainer'
 import {registered, cleanupLiveDeliveryFixtures, policy, hash} from '../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js'
 import type {StorageContext} from './storage/context.js'
 import {appendValidatedLiveJournal} from './storage/liveUpdateJournal.js'
@@ -262,7 +263,7 @@ it('cuts a complete checkpoint when the owner outbox introduces the 960th identi
     }}
     const retained: Array<boolean | undefined> = [], validations: LiveJournalValidation[] = []
     const admission: OwnerOutboxAdmission = {shares: new Map([[document.workspaceId, 'share']]), maxEntriesPerDrain: 1,
-      maxBytesPerDrain: 10_000, trustedAccount: accountId => ({accountId, name: 'Alice'}),
+      maxBytesPerDrain: 10_000, refusals: new OwnerKnownRefusals(), trustedAccount: accountId => ({accountId, name: 'Alice'}),
       validate: async (input, signal) => {
         retained.push(input.retainStateUpdate)
         const result = await validate(input, signal)

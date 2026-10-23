@@ -33,6 +33,7 @@ import { createLiveValidationExecutor } from '../../../../services/sync-relay/sr
 import { PresenceHub } from '../../../../services/sync-relay/src/presence.ts';
 import { createDeviceHostCredential } from '../../../../services/sync-relay/src/deviceHostCredential.ts';
 import { parseHostEpoch } from '../../../../packages/live-session-contract/src/hostControl.ts';
+import { OwnerKnownRefusals } from '../../../../packages/workspace-engine-client/src/ydoc/ownerYDocOutboxDrainer.ts';
 // No product object-topic builder exists yet. PR 5 must move and import this
 // definition for its Markdown caret binding; do not introduce a second format.
 export const makePresenceObjectTopic = (value: {workspaceId: string; versionId: string; objectId: string}) => 'doc:' + JSON.stringify([value.workspaceId, value.versionId, value.objectId]);
@@ -130,7 +131,7 @@ export async function createPresenceFixture(options: { workspace: Workspace; pro
     storage.createShare({ share: { shareId: ownerShareId, workspaceId: workspace.workspaceId, granterUserId: owner, selectorJson: JSON.stringify({ paths: documents.map(doc => doc.path), versionId: null }), createdAtMs: Date.now() },
       grant: { grantId: randomUUID(), shareId: ownerShareId, principalKind: 'user', principalUserId: 'presence-seed-peer', principalEmail: null, access: 'edit', generation: 1, status: 'active', createdAtMs: Date.now(), revokedAtMs: null, parentGrantId: null } });
     const control = createDeviceControl({ storage, hosts: new Set([internalHost]), relayExchangeKey: exchangeKey, limits: controlLimits,
-      delivery: { history, frameChanges: changes, ownerAdmission: { trustedAccount: async accountId => ({accountId, name: accountId}), shares: new Map([[workspace.workspaceId, ownerShareId]]), maxEntriesPerDrain: 128, maxBytesPerDrain: 4 * 1024 * 1024, validate: validate }, config: parseRelayDeviceDeliveryConfig({ version: 1, workspaceIds: [workspace.workspaceId], maxQueuedBytes: 8_000_000, maxActiveDrains: 2,
+      delivery: { history, frameChanges: changes, ownerAdmission: { trustedAccount: async accountId => ({accountId, name: accountId}), shares: new Map([[workspace.workspaceId, ownerShareId]]), maxEntriesPerDrain: 128, maxBytesPerDrain: 4 * 1024 * 1024, refusals: new OwnerKnownRefusals(), validate: validate }, config: parseRelayDeviceDeliveryConfig({ version: 1, workspaceIds: [workspace.workspaceId], maxQueuedBytes: 8_000_000, maxActiveDrains: 2,
         client: { aggregateBytes: profile.nativeClient.aggregateBytes, maxUploads: 4, connectTimeoutMs: 30_000, requestDeadlineMs: 30_000, maxFrameBytes: 1_048_576 } }, controlLimits) } });
     closes.push(() => control.close()); internal.on('upgrade', control.handleUpgrade);
     const tls = await ensureLocalhostTls(), ca = readFileSync(tls.certificate);

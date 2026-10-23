@@ -33,6 +33,7 @@ import { createCollectionRecord, setCollectionRecordFields } from "@dohc/automat
 import { derivedRecordId } from "@dohc/automation-executor/record-ids";
 import { requireEngineBinaryOrSkip } from "../../../apps/desktop/src/testing/engineBinary";
 import { ChatsLiveAdapter, VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { OwnerKnownRefusals } from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import {SHARED_BUTTON_HELD} from "@dohc/automation-executor/button-presser";
 import {registerStopAndRestoreIpc} from "../../../apps/desktop/src/ipc/stopAndRestoreIpc";
 import {CHANNELS} from "../../../apps/desktop/src/ipc/channels";
@@ -331,7 +332,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   } satisfies Pick<EngineClient, "sendRequest" | "sendLiveOwnerAdoption" | "sendLiveApplication" | "readLiveApplicationAck" | "openLiveAppliedSync" | "readNextLiveApplied">;
   const consumer = new OwnerCommittedDelivery(storage, history, {client: native as EngineClient, workspace: owner.workspace, host, deadlineMs: DEADLINE_MS, nextRequestId: owner.nextRequestId,
     bounds: {maxBytes: profile.nativeIngress.maxAdoptionBytes, maxEvents: profile.nativeIngress.maxAdoptionEvents},
-    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[WORKSPACE, "native-share"]]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, validate}});
+    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[WORKSPACE, "native-share"]]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, refusals: new OwnerKnownRefusals(), validate}});
   await consumer.drain(document);
   const row = storage.joinAutomationWorkspace({workspaceId: WORKSPACE, nowMs: Date.now()})!;
   const copy = await computer({root: join(root, "server"), relayUrl, bearerToken: deriveAutomationReplicaBearer(row, {key, namespace}), identity: {kind: "join", replicationEpoch: row.replicationEpoch, streamIdentity: row.streamIdentity}});
@@ -872,7 +873,7 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
   } satisfies Pick<EngineClient, "sendRequest" | "sendLiveOwnerAdoption" | "sendLiveApplication" | "readLiveApplicationAck" | "openLiveAppliedSync" | "readNextLiveApplied">;
   const consumer = new OwnerCommittedDelivery(storage, history, {client: native as EngineClient, workspace: owner.workspace, host, deadlineMs: DEADLINE_MS, nextRequestId: owner.nextRequestId,
     bounds: {maxBytes: profile.nativeIngress.maxAdoptionBytes, maxEvents: profile.nativeIngress.maxAdoptionEvents},
-    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[WORKSPACE, "native-share"]]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, validate}});
+    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[WORKSPACE, "native-share"]]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, refusals: new OwnerKnownRefusals(), validate}});
   await consumer.drain(document);
   const nativeRegistration = consumer.captureRegistration(binding);
   const common = {storage, bounds: profile.namedLive.host, validate,

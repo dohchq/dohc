@@ -1,6 +1,7 @@
 import {afterEach, expect, it, vi} from "vitest";
 import * as Y from "yjs";
 import {OwnerYDocOutbox} from "@dohc/workspace-engine-client";
+import {OwnerKnownRefusals} from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
 import type {LiveUpdateHostApplicationAck, LiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
 import {createLiveMarkdownJournalValidator} from "@dohc/ydoc-projection/live-journal-validation";
@@ -37,21 +38,31 @@ function fixture(edit: (doc: Y.Doc) => void = doc => doc.getMap("frontmatter").s
   // The native outbox's durable record, which outlives every client and relay process.
   const pending = [entry], receipts: LiveUpdateReceipt[] = [], quarantines: string[] = [];
   const native = {state: "active", quarantineReason: null as string | null, retryDeliveryId: null as string | null};
+  // A fault fails a native write, or commits it and loses the response.
+  const faults = {quarantine: [] as Array<"failed" | "lost">, acknowledge: [] as Array<"failed" | "lost">};
+  let recordedRefusal: unknown;
   const cursor = (part: string) => ({snapshot: "a".repeat(64),part,sequence: part === "header" || part === "base" ? 0 : 1,offset: 0});
   const engine = () => ({sendRequest: vi.fn<EngineClient["sendRequest"]>(async request => {
     if (request.method === "liveApplication.ownerOutbox") return {id: request.id,result: {outboxId: "outbox",pendingBytes: pending.length * update.byteLength,state: native.state,retryDeliveryId: native.retryDeliveryId}};
     if (request.method === "liveApplication.quarantineOwnerOutbox") {
-      const {reason} = request.params as {reason: string};
-      native.state = "quarantined"; native.quarantineReason = reason; native.retryDeliveryId = null; quarantines.push(reason);
+      const fault = faults.quarantine.shift(), {reason, deliveryId, refusalKey} = request.params as {reason: string; deliveryId: string; refusalKey: string};
+      if (fault === "failed") throw new Error("Engine unavailable.");
+      // Like native, a refusal records once, and only while it is its head's own attempt.
+      if (refusalKey !== recordedRefusal && pending[0]?.deliveryId === deliveryId && (native.state !== "quarantined" || native.retryDeliveryId === deliveryId)) {
+        native.state = "quarantined"; native.quarantineReason = reason; native.retryDeliveryId = null; quarantines.push(reason); recordedRefusal = refusalKey;
+      }
+      if (fault === "lost") throw new Error("Engine response lost.");
       return {id: request.id,result: {state: "quarantined"}};
     }
     if (request.method === "liveApplication.acknowledgeOwnerOutbox") {
-      const receipt = (request.params as unknown as {receipts: LiveUpdateReceipt[]}).receipts[0]!;
+      const fault = faults.acknowledge.shift(), receipt = (request.params as unknown as {receipts: LiveUpdateReceipt[]}).receipts[0]!;
+      if (fault === "failed") throw new Error("Engine unavailable.");
       // Only the head its owner asked to try again leaves quarantine, and its acceptance resumes the queue.
       if (native.state === "quarantined" && native.retryDeliveryId !== receipt.deliveryId) throw new Error("A quarantined owner outbox refuses acknowledgement.");
       Object.assign(native, {state: "active", quarantineReason: null, retryDeliveryId: null});
       expect(receipt).toMatchObject({deliveryId: entry.deliveryId,updateDigest: entry.updateDigest});
       receipts.push(receipt); pending.shift();
+      if (fault === "lost") throw new Error("Engine response lost.");
       return {id: request.id,result: {acknowledged: 1,pendingBytes: 0,oldestEntryAtMs: null}};
     }
     // The relay reads through its registration; a native reader reads the outbox directly.
@@ -76,9 +87,12 @@ function fixture(edit: (doc: Y.Doc) => void = doc => doc.getMap("frontmatter").s
   const validate = vi.fn<OwnerOutboxAdmission["validate"]>(input => validateJournal(input));
   const commit = vi.spyOn(relay.storage, "commitLiveUpdateJournal");
   let requestId = 0;
-  // Each drain builds its delivery objects afresh, as a new relay pass does.
+  // The relay process's delivery state, which a pass or reconnect keeps and a crash loses.
+  let refusals = new OwnerKnownRefusals();
+  const crash = () => {refusals = new OwnerKnownRefusals();};
+  // Each drain builds its delivery objects and engine connection afresh, as a new relay pass does.
   const run = (admit = validate) => drainOwnerOutbox({storage: live.storage,client: engine() as unknown as EngineClient,
-    admission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[document.workspaceId,"share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 10_000,validate: admit},
+    admission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[document.workspaceId,"share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 10_000,refusals,validate: admit},
     workspace: "handle",host,registrationId: 1,binding,adoption: {adoptionId: "adoption",sequence: 1,applied() {}},nextRequestId: () => ++requestId,deadlineMs: 1_000,
     assertCurrent() {},applyThrough});
   const restart = () => {
@@ -87,7 +101,7 @@ function fixture(edit: (doc: Y.Doc) => void = doc => doc.getMap("frontmatter").s
     live.storage = reopened; live.close = () => reopened.close();
     return reopened;
   };
-  return {relay,document,host,binding,update,entry,pending,receipts,quarantines,native,engine,applyThrough,validate,commit,run,restart};
+  return {relay,document,host,binding,update,entry,pending,receipts,quarantines,native,faults,engine,applyThrough,validate,commit,run,restart,crash};
 }
 
 it("retries the retained owner head when a named submission advances its validated journal cut", async () => {
@@ -258,4 +272,96 @@ it("admits a Try again granted before a relay restart once, under its original d
   expect(f.pending).toEqual([]); expect(f.applyThrough).toHaveBeenCalledTimes(1);
   expect(await f.run()).toEqual({admittedEntries: 0,hasMore: false});
   expect(commit).toHaveBeenCalledTimes(1); expect(journal()).toHaveLength(1);
+});
+
+const olderValidator = () => vi.fn<OwnerOutboxAdmission["validate"]>(() => ({kind: "refused",reason: "invalid-schema",source: "final"}));
+const journalRows = (f: ReturnType<typeof fixture>) => {
+  const raw = new DatabaseSync(f.relay.path, {readOnly: true}); cleanup.push(() => raw.close());
+  return raw.prepare("SELECT delivery_id,principal_kind FROM sync_relay_live_update_journal").all();
+};
+
+it("admits an outstanding Try again once, under its original delivery, after a crash lost its refusal", async () => {
+  const f = fixture(), older = olderValidator();
+  expect(await f.run(older)).toEqual({admittedEntries: 0,hasMore: false});
+  f.native.retryDeliveryId = f.entry.deliveryId;
+  f.faults.quarantine.push("failed");
+  await expect(f.run(older)).rejects.toThrow("Engine unavailable.");
+  expect(f.native).toEqual({state: "quarantined",quarantineReason: "invalid-update",retryDeliveryId: f.entry.deliveryId});
+  // The relay crashes with the refusal it received; the owner's request is still open.
+  f.crash();
+  const storage = f.restart(), commit = vi.spyOn(storage, "commitLiveUpdateJournal");
+  expect(await f.run()).toEqual({admittedEntries: 1,hasMore: false});
+  expect(older).toHaveBeenCalledTimes(2); expect(f.validate).toHaveBeenCalledTimes(1);
+  expect(commit.mock.calls.map(([input]) => input.metadata)).toEqual([f.commit.mock.calls[0]![0].metadata]);
+  expect(journalRows(f)).toEqual([{delivery_id: f.entry.deliveryId,principal_kind: "owner"}]);
+  expect(f.native).toEqual({state: "active",quarantineReason: null,retryDeliveryId: null});
+  expect(f.receipts).toHaveLength(1); expect(f.pending).toEqual([]);
+  expect(await f.run()).toEqual({admittedEntries: 0,hasMore: false});
+  expect(commit).toHaveBeenCalledTimes(1);
+});
+
+it("records a Try again refused again after a crash lost its refusal, and never validates it after that", async () => {
+  const f = fixture(doc => doc.getMap("meta").set("schemaVersion", 2));
+  expect(await f.run()).toEqual({admittedEntries: 0,hasMore: false});
+  f.native.retryDeliveryId = f.entry.deliveryId;
+  f.faults.quarantine.push("failed");
+  await expect(f.run()).rejects.toThrow("Engine unavailable.");
+  f.crash(); f.restart();
+  expect(await f.run()).toEqual({admittedEntries: 0,hasMore: false});
+  expect(f.validate).toHaveBeenCalledTimes(3);
+  expect(f.native).toEqual({state: "quarantined",quarantineReason: "invalid-update",retryDeliveryId: null});
+  // Background passes, reconnects, a restart and an upgraded validator never reopen it.
+  for (let pass = 0; pass < 2; pass++) expect(await f.run()).toEqual({admittedEntries: 0,hasMore: false});
+  f.crash();
+  const storage = f.restart(), commit = vi.spyOn(storage, "commitLiveUpdateJournal");
+  const upgraded = vi.fn<OwnerOutboxAdmission["validate"]>(input => validateJournal(input));
+  for (let pass = 0; pass < 2; pass++) expect(await f.run(upgraded)).toEqual({admittedEntries: 0,hasMore: false});
+  expect(upgraded).not.toHaveBeenCalled(); expect(commit).not.toHaveBeenCalled(); expect(f.validate).toHaveBeenCalledTimes(3);
+  expect(f.quarantines).toEqual(["invalid-update","invalid-update"]);
+  expect(journalRows(f)).toEqual([]); expect(f.pending).toEqual([f.entry]); expect(f.receipts).toEqual([]);
+});
+
+it("keeps a refusal through repeated quarantine failures across passes and reconnects, and never validates it again", async () => {
+  const f = fixture(doc => doc.getMap("meta").set("schemaVersion", 2));
+  f.faults.quarantine.push("failed","failed","failed");
+  for (let pass = 0; pass < 3; pass++) await expect(f.run()).rejects.toThrow("Engine unavailable.");
+  expect(f.validate).toHaveBeenCalledTimes(1); expect(f.commit).toHaveBeenCalledTimes(1);
+  expect(f.native.state).toBe("active");
+  expect(await f.run()).toEqual({admittedEntries: 0,hasMore: true,retryReady: true});
+  expect(f.native).toEqual({state: "quarantined",quarantineReason: "invalid-update",retryDeliveryId: null});
+  for (let pass = 0; pass < 3; pass++) expect(await f.run()).toEqual({admittedEntries: 0,hasMore: false});
+  expect(f.validate).toHaveBeenCalledTimes(1); expect(f.commit).toHaveBeenCalledTimes(1);
+  expect(f.quarantines).toEqual(["invalid-update"]);
+  expect(journalRows(f)).toEqual([]); expect(f.pending).toEqual([f.entry]);
+});
+
+it("a quarantine write repeated after its lost response cannot use up the owner's newer Try again", async () => {
+  const f = fixture(), older = olderValidator();
+  expect(await f.run(older)).toEqual({admittedEntries: 0,hasMore: false});
+  f.native.retryDeliveryId = f.entry.deliveryId;
+  f.faults.quarantine.push("lost");
+  await expect(f.run(older)).rejects.toThrow("Engine response lost.");
+  expect(f.native.retryDeliveryId).toBeNull();
+  // The owner asks again before the relay writes the refusal again.
+  f.native.retryDeliveryId = f.entry.deliveryId;
+  expect(await f.run(older)).toEqual({admittedEntries: 0,hasMore: true,retryReady: true});
+  expect(older).toHaveBeenCalledTimes(2);
+  expect(f.native).toEqual({state: "quarantined",quarantineReason: "invalid-update",retryDeliveryId: f.entry.deliveryId});
+  expect(await f.run()).toEqual({admittedEntries: 1,hasMore: false});
+  expect(f.validate).toHaveBeenCalledTimes(1);
+  expect(f.quarantines).toEqual(["invalid-update","invalid-update"]);
+  expect(f.native).toEqual({state: "active",quarantineReason: null,retryDeliveryId: null});
+});
+
+it.each(["failed","lost"] as const)("recovers an accepted Try again whose acknowledgement %s under its original delivery, without a duplicate", async fault => {
+  const f = fixture();
+  expect(await f.run(olderValidator())).toEqual({admittedEntries: 0,hasMore: false});
+  f.native.retryDeliveryId = f.entry.deliveryId;
+  f.faults.acknowledge.push(fault);
+  await expect(f.run()).rejects.toThrow();
+  expect(await f.run()).toEqual({admittedEntries: fault === "failed" ? 1 : 0,hasMore: false});
+  expect(new Set(f.commit.mock.calls.map(([input]) => input.metadata.deliveryId))).toEqual(new Set([f.entry.deliveryId]));
+  expect(journalRows(f)).toEqual([{delivery_id: f.entry.deliveryId,principal_kind: "owner"}]);
+  expect(f.receipts).toHaveLength(1); expect(f.pending).toEqual([]);
+  expect(f.native).toEqual({state: "active",quarantineReason: null,retryDeliveryId: null});
 });

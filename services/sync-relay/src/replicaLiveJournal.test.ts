@@ -6,6 +6,7 @@ import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
 import {createServiceHostReplication} from "./serviceHostReplication";
 import {createSyncRelayHandler} from "./server";
 import {drainOwnerOutbox} from "./ownerOutboxDelivery";
+import {OwnerKnownRefusals} from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import {initializeSyncRelaySchema} from "./storage/schema";
 import {canonicalVersionedAcceptedMetadata} from "./liveAcceptedHistory";
 import * as journal from "./storage/liveUpdateJournal";
@@ -150,7 +151,7 @@ it("reads the committed owner update while applyThrough is pending", async () =>
     const drain = drainOwnerOutbox({storage: f.storage, client: client as never, workspace: "handle", host: input.host,
       registrationId: 1, binding, adoption: {adoptionId: "adoption", sequence: 1, applied() {}},
       admission: {trustedAccount: accountId => ({accountId, name: "Owner name"}),
-        shares: new Map([["workspace", "share"]]), maxEntriesPerDrain: 1, maxBytesPerDrain: 10_000,
+        shares: new Map([["workspace", "share"]]), maxEntriesPerDrain: 1, maxBytesPerDrain: 10_000, refusals: new OwnerKnownRefusals(),
         validate: () => input.validation}, nextRequestId: () => ++requestId, deadlineMs: 30_000, assertCurrent() {},
       applyThrough: async value => {receipt = value; entered(); return pending;}});
     await Promise.race([applying, drain.then(() => {throw new Error("Drain returned before host application");})]);

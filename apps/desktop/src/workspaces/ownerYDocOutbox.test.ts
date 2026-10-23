@@ -1,7 +1,7 @@
 import {expect, it, vi} from "vitest";
 import {OwnerYDocOutbox} from "@dohc/workspace-engine-client";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
-import {OwnerYDocOutboxDrainer, type OwnerYDocDelivery} from "./ownerYDocOutbox";
+import {OwnerKnownRefusals, OwnerYDocOutboxDrainer, type OwnerYDocDelivery} from "./ownerYDocOutbox";
 
 function fixture(state: "active" | "sealed" | "quarantined", retryDeliveryId: string | null = null) {
   const pending: Awaited<ReturnType<OwnerYDocOutbox["readHead"]>> = {
@@ -22,7 +22,7 @@ function fixture(state: "active" | "sealed" | "quarantined", retryDeliveryId: st
     freshOwnerAuthority: vi.fn<OwnerYDocDelivery["freshOwnerAuthority"]>(async () => ({kind: "authority",authority: {value: {},hostEpoch: parseHostEpoch(2)}})),
     deliver: vi.fn<OwnerYDocDelivery["deliver"]>(async () => ({kind: "receipt",receipt})),
   };
-  const drainer = new OwnerYDocOutboxDrainer(outbox,"outbox",delivery);
+  const drainer = new OwnerYDocOutboxDrainer(outbox,"outbox",delivery,new OwnerKnownRefusals());
   return {pending,receipt,outbox,delivery,drainer,close: () => {drainer.dispose(); outbox.dispose();}};
 }
 
@@ -76,7 +76,8 @@ it("re-quarantines a Try again the session host refuses again, with its reason",
   try {
     f.delivery.deliver.mockResolvedValueOnce({kind: "quarantine", reason: "invalid-update"});
     expect(await f.drainer.drainOnce()).toBe("frozen");
-    expect(f.outbox.quarantine).toHaveBeenCalledWith({outboxId: "outbox", reason: "invalid-update"});
+    expect(f.outbox.quarantine).toHaveBeenCalledWith({outboxId: "outbox", reason: "invalid-update",
+      refusal: {deliveryId: "delivery", key: expect.any(String)}});
     expect(f.outbox.acknowledge).not.toHaveBeenCalled();
   } finally {f.close();}
 });

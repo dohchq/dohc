@@ -17,6 +17,7 @@ import { parseFrontmatter } from "@dohc/ydoc-projection/frontmatter";
 import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
+import { OwnerKnownRefusals } from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import { DaemonRefusalError, OwnerYDocOutbox, openEngineYdocProviderSession, YdocAdapterError, YdocOwnerDraftPendingError, VersionedLiveAdapter, WorkspaceDaemonRequester, YdocLiveAdapter, type AutomationClaim } from "@dohc/workspace-engine-client";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { collectionRecordWrites } from "@dohc/automation-executor/collection-record-edits";
@@ -709,8 +710,9 @@ it.skipIf(engine.missing).each([
     catch (error) { throw new Error(JSON.stringify({ discoveryPayload, diagnostics: relayServer.diagnostics() }), { cause: error }); }
     const document = (await discovery())[0]!;
     const config = {...profile.owner, nativeConfigPath, nativeClient: profile.nativeClient, relayUrl: proxy.origin, documents: [document]};
+    const refusals = new OwnerKnownRefusals();
     const pass = (signal: AbortSignal) => source.sessions.run(source.workspace, async ({client, workspace}) =>
-      runNativeOwnerDeliveryPass({client: source.nativeClient(), workspaceHandle: workspace, document, config, signal, bearer: relayConnection.token, accountId: workspaceId, assertCurrent() {}}));
+      runNativeOwnerDeliveryPass({client: source.nativeClient(), workspaceHandle: workspace, document, config, refusals, signal, bearer: relayConnection.token, accountId: workspaceId, assertCurrent() {}}));
     expect(["empty", "acknowledged"]).toContain(await pass(AbortSignal.timeout(60_000)));
     let saveState: string | undefined;
     const session = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined,

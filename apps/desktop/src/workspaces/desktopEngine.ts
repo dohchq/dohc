@@ -30,6 +30,7 @@ import type {ExistingOwnerDeviceConfig} from "@dohc/sync-relay/device-host";
 import type {readDesktopOwnerHostConfig,startDesktopOwnerHost} from "./desktopOwnerHost";
 
 import type {DesktopOwnerDeliveryConfig, startDesktopOwnerDelivery} from "./desktopOwnerDelivery";
+import type {OwnerKnownRefusals} from "./ownerYDocOutbox";
 import {relayUrlsMatch} from "./syncCode";
 import {readyOwnerDeliveryDocuments, startServerOwnerDelivery} from "./serverOwnerDelivery";
 
@@ -135,6 +136,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   let ownerDeliveryConfig: DesktopOwnerDeliveryConfig | undefined;
   let ownerDeliveryModule: typeof import("./desktopOwnerDelivery") | undefined;
   let nativeOwnerDeliveryModule: typeof import("./nativeOwnerDelivery") | undefined;
+  // Outlives every owner delivery pass and connection.
+  let ownerRefusals: OwnerKnownRefusals | undefined;
   let ownerDeliverySettled = Promise.resolve();
   let ownerDeliveryGeneration = 0;
   let serverOwnerConfig: Awaited<ReturnType<ServerOwnerDelivery["prepare"]>> | undefined;
@@ -244,7 +247,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                 };
                 assertCurrent();
                 return native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
-                  document, config: {...profile, relayUrl: session.relayUrl, documents},
+                  document, config: {...profile, relayUrl: session.relayUrl, documents}, refusals: ownerRefusals ??= new native.OwnerKnownRefusals(),
                   signal, bearer: session.bearer, accountId: session.accountId, assertCurrent});
               });
               check();
@@ -289,7 +292,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               };
               assertCurrent();
               const result = await native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
-                document, config, signal, bearer: credentials.bearer, accountId: credentials.accountId, assertCurrent});
+                document, config, refusals: ownerRefusals ??= new native.OwnerKnownRefusals(),
+                signal, bearer: credentials.bearer, accountId: credentials.accountId, assertCurrent});
               assertCurrent();
               if (result === "acknowledged" || result === "frozen") notifyRenderer({workspaceId: document.binding.workspaceId});
               return result;

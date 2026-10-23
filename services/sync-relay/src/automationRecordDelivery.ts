@@ -1,7 +1,7 @@
 import {isDeepStrictEqual} from "node:util";
 import {AutomationRunWait} from "@dohc/automation-executor/button-presser";
 import {OwnerYDocOutbox, isTransientEngineRefusal} from "@dohc/workspace-engine-client";
-import {OwnerYDocOutboxDrainer, type OwnerYDocDelivery} from "@dohc/workspace-engine-client/owner-ydoc-drainer";
+import {OwnerKnownRefusals, OwnerYDocOutboxDrainer, type OwnerYDocDelivery} from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import type {NamedFrameHostSession, NamedFrameSync} from "./namedLiveFrameSession";
 import type {AutomationReplica} from "./automationReplicas";
@@ -23,6 +23,7 @@ export function automationRecordDelivery(options: {
   const {replica} = options;
   const request = () => ({id: replica.nextRequestId(), workspace: replica.workspace, deadlineMs: 30_000});
   const target = (binding: LiveObjectBinding) => ({binding, relayDatabaseNamespace: options.namespace});
+  const refusals = new OwnerKnownRefusals();
 
   async function open(binding: LiveObjectBinding, host: NamedFrameHostSession, signal: AbortSignal, recovery = false) {
     const preparation = await replica.client.ownerYDocPrepareEnrollment(request(), {...target(binding), recovery}, signal);
@@ -126,7 +127,7 @@ export function automationRecordDelivery(options: {
         return {kind: "receipt", receipt};
       },
     };
-    const drainer = new OwnerYDocOutboxDrainer(outbox, outboxId, delivery);
+    const drainer = new OwnerYDocOutboxDrainer(outbox, outboxId, delivery, refusals);
     try {
       for (let count = 0; count < 128; count++) {
         const result = await drainer.drainOnce();

@@ -1,5 +1,6 @@
 import {afterEach, expect, it, vi} from "vitest";
 import type {EngineClient} from "../../workspace-engine-client/src/daemon/engineClient.js";
+import {OwnerKnownRefusals} from "../../workspace-engine-client/src/ydoc/ownerYDocOutboxDrainer.js";
 import type {LiveUpdateHostApplicationAck, LiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
 import type {OwnerOutboxAdmission} from "../../../services/sync-relay/src/ownerOutboxDelivery.js";
 import {OwnerCommittedDelivery} from "../../../services/sync-relay/src/ownerCommittedDelivery.js";
@@ -67,7 +68,7 @@ it("replays a real journal admission and retains the owner entry until native ap
     };
     const consumer = new OwnerCommittedDelivery(f.storage,history,{client: client as unknown as EngineClient,
       workspace: "handle",host,deadlineMs: 1_000,nextRequestId: () => ++requestId,bounds,
-      ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[document.workspaceId,"share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 100_000,validate}});
+      ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[document.workspaceId,"share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 100_000,refusals: new OwnerKnownRefusals(),validate}});
     client.sendLiveApplication.mockResolvedValueOnce({id: 1,result: {status: "pending",reason: "native busy"}});
     expect(await consumer.drain(document)).toMatchObject({kind: "pending",continueDrain: false});
     expect(pending).toBe(true); expect(removed).toEqual([]); expect(nativeAck).toBeNull();
