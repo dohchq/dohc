@@ -520,6 +520,17 @@ describe("OutlinePanel active heading", () => {
     expect(harness.activeText()).toBe("Review");
   });
 
+  it("walks back past every heading of a cell the line has not reached", () => {
+    // Plan and Review sit low in a row's first cell; the hit lands in the
+    // second cell, after both in document order.
+    const harness = renderActiveHeadingHarness([0, 300, 400]);
+    harness.setHitHeading(2);
+
+    harness.scrollTo(100);
+
+    expect(harness.activeText()).toBe("Intro");
+  });
+
   it("passes over a folded heading between headings of a row", () => {
     // Plan and Done share a row; Review, between them, is folded away.
     const harness = renderActiveHeadingHarness([0, 200, 0, 200]);

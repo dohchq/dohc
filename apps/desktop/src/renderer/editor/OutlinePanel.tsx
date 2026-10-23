@@ -137,9 +137,10 @@ function headingIndexAtReadingLine(
     return element instanceof HTMLElement ? element.getBoundingClientRect() : null;
   };
   let index = resolveActiveHeadingIndex(headings, pos);
-  // A hit in the margin above a heading can resolve to its start; the
-  // heading is reached only once its top crosses the line.
-  if (index > 0 && (headingBox(headings[index]!)?.top ?? 0) > line) return index - 1;
+  // A hit in the margin above a heading can resolve to its start, and a hit
+  // in a table cell can follow headings lower in an earlier cell. A heading
+  // is reached only once its top crosses the line.
+  while (index > 0 && (headingBox(headings[index]!)?.top ?? 0) > line) index -= 1;
   // Headings side by side, as in a table row, follow the hit in document
   // order on the same line: the last drawn one the line has reached is
   // active. A heading in folded content draws no box and is passed over.
