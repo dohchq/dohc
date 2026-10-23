@@ -7,6 +7,10 @@ rust-version.workspace = true
 publish.workspace = true
 description = "dhat as the global allocator of a test binary that links it, for heap measurements."
 
+[lib]
+test = false
+doctest = false
+
 [dependencies]
 dhat = "0.3"
 

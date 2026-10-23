@@ -277,7 +277,7 @@ enum Source {
 }
 
 impl RetainedContribution {
-    fn update_digest(&self) -> &str {
+    pub(crate) fn update_digest(&self) -> &str {
         match self {
             Self::Carried { update_digest, .. } | Self::Outbox { update_digest, .. } => {
                 update_digest
@@ -794,6 +794,54 @@ impl Deletes {
     }
 }
 
+/// What the index of the ranges `state` deleted holds once built, read as
+/// `heap`'s current bytes before and after, beside what [`Deletes::growth`]
+/// reserves for it: for measuring the index.
+#[cfg(all(test, feature = "held-proof-memory"))]
+pub(crate) fn deletion_index_bytes(state: &Ydoc, heap: impl Fn() -> u64) -> (u64, u64) {
+    let set = state.delete_set();
+    let mut index = Deletes::default();
+    let reserved = index.growth(&set);
+    let before = heap();
+    index.extend(&set);
+    (heap().saturating_sub(before), reserved)
+}
+
+/// What [`preserve`] keeps between its applications beside what it reserves
+/// as kept: whether a contribution deleted yet, and the state's vector and
+/// pending deletions read once the last one applied. For measuring what
+/// applying one contribution holds.
+#[cfg(all(test, feature = "held-proof-memory"))]
+#[derive(Default)]
+pub(crate) struct Applications {
+    deleting: bool,
+    seen: Option<(yrs::StateVector, Deletes)>,
+}
+
+#[cfg(all(test, feature = "held-proof-memory"))]
+impl Applications {
+    /// Apply `update` to `state` as [`preserve`] applies a contribution: its
+    /// bytes as they load, what it integrates, the state's deletions the
+    /// first time one deletes, and the state's vector and pending deletions
+    /// read before and once it applied. The index of what the state deleted
+    /// is measured on its own, by [`deletion_index_bytes`].
+    pub(crate) fn apply(&mut self, state: &Ydoc, update: &[u8]) {
+        let bytes = update.to_vec();
+        let integration = Integration::of(&bytes).expect("an update");
+        if integration.deleted_ranges() > 0 && !self.deleting {
+            self.deleting = true;
+            drop(state.delete_set());
+        }
+        if self.seen.is_none() {
+            self.seen = Some((state.state_vector(), Deletes::pending(state)));
+        }
+        state
+            .apply_seeing_deletions(&bytes, |_| {})
+            .expect("each contribution applies");
+        self.seen = Some((state.state_vector(), Deletes::pending(state)));
+    }
+}
+
 /// Merge every contribution of `work`, each tail's in its canonical order,
 /// into the lineage's `loaded` state, loading each one's bytes by its digest
 /// as it comes. Every contribution is loaded and checked, however many share
@@ -813,17 +861,20 @@ impl Deletes {
 /// it inserts and deletes, against the state's vector and the ranges the
 /// merged state deleted, never from the whole state, so each one costs its
 /// own size and the state's vector, read once per application. One that
-/// integrates only in part waits, and counts once the merge holds all of it;
-/// work still waiting when the merge ends leaves it pending.
+/// integrates only in part waits, and counts once the merge holds all of it:
+/// waiting work is reconsidered once every contribution applied, against the
+/// final state, and work still waiting then leaves the merge pending.
 ///
 /// `stop` is checked before the merge starts, before each contribution
-/// loads and again before it applies, and around the merged state's
-/// projection and encoding. What the merge works with is reserved of its
-/// memory before it is allocated, and what it only works with is given back
-/// once done: what each contribution adds to the state, from the `length`
-/// of its bytes before they `load`, and its place in the merged or waiting
-/// list before it takes it, stay reserved; what applying it holds besides,
-/// and the projection, are given back once what the preservation keeps is
+/// loads and again before it applies, before each waiting contribution is
+/// reconsidered, and around the merged state's projection and encoding.
+/// What the merge works with is reserved of its memory before it is
+/// allocated, and what it only works with is given back once done: what
+/// each contribution adds to the state, from the `length` of its bytes
+/// before they `load`, and its place in the merged or waiting list before
+/// it takes it, stay reserved; what applying it holds besides, and the
+/// final state's vector waiting work is reconsidered against, are given
+/// back once done, and the projection once what the preservation keeps is
 /// reserved as its result's.
 fn preserve(
     loaded: Loaded,
@@ -865,9 +916,10 @@ fn preserve(
     // deletes, items it integrated into an already deleted parent included.
     let mut deleted: Option<Deletes> = None;
     let none = Deletes::default();
-    // The state's vector and the deletions it keeps pending, read before the
-    // merge and again once each application changed them.
-    let (mut vector, mut pending) = (state.state_vector(), Deletes::pending(&state));
+    // The state's vector and the deletions it keeps pending, read once the
+    // first application is reserved and again once each application changed
+    // them.
+    let mut seen: Option<(yrs::StateVector, Deletes)> = None;
     for (namespace, contributions) in &work {
         for contribution in contributions {
             stop.check(ProofStage::Merge)?;
@@ -911,9 +963,11 @@ fn preserve(
             if integration.deleted_ranges() > 0 && deleted.is_none() {
                 deleted = Some(Deletes::of(&state, &mut working)?);
             }
+            let (vector, pending) =
+                seen.get_or_insert_with(|| (state.state_vector(), Deletes::pending(&state)));
             // Work the merge already holds adds nothing, and applying it
             // changes nothing.
-            let held = integration.within(&vector, deleted.as_ref().unwrap_or(&none), &pending);
+            let held = integration.within(vector, deleted.as_ref().unwrap_or(&none), pending);
             let mut kept_deletions = Ok(());
             let applied = state.apply_seeing_deletions(&bytes, |actual| {
                 if let Some(deleted) = &mut deleted {
@@ -923,7 +977,7 @@ fn preserve(
             kept_deletions?;
             if applied.is_err() {
                 // It may have changed the state before it failed.
-                (vector, pending) = (state.state_vector(), Deletes::pending(&state));
+                seen = Some((state.state_vector(), Deletes::pending(&state)));
                 working.grow(found)?;
                 findings.push(held_back(PreservationReason::MalformedUpdate));
                 continue;
@@ -931,20 +985,8 @@ fn preserve(
             if held {
                 continue;
             }
-            (vector, pending) = (state.state_vector(), Deletes::pending(&state));
-            let deleted = deleted.as_ref().unwrap_or(&none);
-            let whole = integration.within(&vector, deleted, &pending);
-            // What this one integrated may be what an earlier one waited on,
-            // whether or not all of this one is held; each waiting one
-            // reserved its place in the merged list.
-            let mut index = 0;
-            while index < waiting.len() {
-                if waiting[index].1.within(&vector, deleted, &pending) {
-                    merged.push(waiting.swap_remove(index).0);
-                } else {
-                    index += 1;
-                }
-            }
+            let (vector, pending) = seen.insert((state.state_vector(), Deletes::pending(&state)));
+            let whole = integration.within(vector, deleted.as_ref().unwrap_or(&none), pending);
             if whole {
                 working.grow(contribution.kept_bytes())?;
                 merged.push(contribution.clone());
@@ -959,6 +1001,28 @@ fn preserve(
                         .saturating_add(stored.saturating_mul(INTEGRATION_BYTES_PER_UPDATE_BYTE)),
                 )?;
                 waiting.push((contribution.clone(), integration));
+            }
+        }
+    }
+    // Read again below, once reserved.
+    drop(seen);
+    // What an application integrated, whether or not it applied whole, may
+    // be what an earlier one waited on. Each waiting one reserved its place
+    // in the merged list.
+    if !waiting.is_empty() {
+        // The final state's vector and pending deletions, no larger together
+        // than its encoding, as applying reserves them.
+        let mut reading = stop.working();
+        reading.grow(merging)?;
+        let (vector, pending) = (state.state_vector(), Deletes::pending(&state));
+        let deleted = deleted.as_ref().unwrap_or(&none);
+        let mut index = 0;
+        while index < waiting.len() {
+            stop.check(ProofStage::Merge)?;
+            if waiting[index].1.within(&vector, deleted, &pending) {
+                merged.push(waiting.swap_remove(index).0);
+            } else {
+                index += 1;
             }
         }
     }
@@ -1203,6 +1267,46 @@ mod tests {
             merged.sort();
             merged
         });
+    }
+
+    /// Opus's r2c-3c-12 finding 3: an application can integrate what earlier
+    /// work waits on and still fail. A parked update names as its parent the
+    /// first edit's text, which is no type: applying the first edit
+    /// integrates it, then the second edit parked on it, then fails on the
+    /// parked update. The first edit applies last, so the second counts as
+    /// merged only because waiting work is reconsidered after a failed
+    /// application too.
+    #[test]
+    fn a_failed_last_application_still_credits_the_waiting_work_it_completed() {
+        let canonical = Ydoc::with_client_id(500);
+        let _ = canonical.plaintext_insert(0, "Kept");
+        let writer = Ydoc::with_client_id(1_000);
+        writer.apply(&canonical.encode_full_state()).unwrap();
+        let first = writer.plaintext_insert(0, "First");
+        let second = writer.plaintext_insert(5, "Second");
+        let misparented: Vec<u8> = vec![
+            0x01, // clients_len
+            0x01, // blocks_len
+            0x01, // client 1
+            0x00, // clock
+            0x04, // info: string content, no origins
+            0x00, // parent_info: the parent item's id follows
+            0xe8, 0x07, // its client, 1,000: the first edit's
+            0x00, // its clock: the first edit's text
+            0x01, b'z', // string content "z"
+            0x00, // empty delete set
+        ];
+        let all = stored(&[&second, &misparented, &first]);
+        let work = vec![outbox(1, &second), outbox(2, &misparented), outbox(3, &first)];
+        let failed = preserved(&canonical, work, &all);
+        assert_eq!(
+            failed.findings,
+            [
+                finding(PreservationReason::MalformedUpdate, Some("namespace"), Some(&outbox(3, &first))),
+                finding(PreservationReason::PendingContributionDependencies, None, None),
+            ]
+        );
+        assert_eq!(failed.merged, [outbox(1, &second)], "the first edit completed the second before it failed");
     }
 
     /// Opus's r2c-3c-10 finding 2: whether a contribution added anything is
@@ -1589,6 +1693,58 @@ mod tests {
         assert!(markdown.contains("Item 0") && markdown.contains("Item 49999"));
         let artifact = artifact.expect("encoded").unwrap().expect("within its cap");
         assert_eq!(artifact.merged, UnprovenCommitment::of_listed(&covered));
+    }
+
+    /// Sol's r2c-3c-12 finding 1 and Opus's finding 4: waiting work is
+    /// reconsidered once, after every contribution applied, not after each.
+    /// 50,000 delivery identities name one update whose dependency never
+    /// arrives, so each waits, and under the default limit and deadline the
+    /// merge still ends pending, well inside the deadline; its wall time is
+    /// printed. Reconsidering after each application would check about 1.25
+    /// billion times. It runs in release, where its deadline is the
+    /// production one.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "release deadline pin")]
+    fn fifty_thousand_identities_of_one_orphan_wait_well_inside_the_deadline() {
+        let (canonical, _, second, _) = edits();
+        let stored = stored(&[&second]);
+        let work: Vec<_> = (0..50_000)
+            .map(|index| RetainedContribution::Outbox {
+                outbox_id: "outbox".into(),
+                sequence: index + 1,
+                delivery_id: format!("orphan-{index:06}"),
+                update_digest: hex_sha256(&second),
+                authors: RetainedAuthors::credited(None, None).unwrap(),
+            })
+            .collect();
+        let directory = dohc_test_scratch::ScratchDir::new().unwrap();
+        let store = dohc_engine_storage::EngineStore::open(&directory.path().join("engine.db"), 1).unwrap();
+        let proofs: HeldProofs<(), ()> = HeldProofs::new(HeldProofLimit::default());
+        let HeldProofAdmission::Started(run, _wait) = proofs.admit(&store, "workspace", ()).unwrap() else {
+            panic!("a free workspace starts its proof")
+        };
+        let mut answer = None;
+        let started = std::time::Instant::now();
+        run.prove(|job| {
+            let preserved = preserve(
+                copied(&canonical),
+                Vec::new(),
+                vec![("namespace".to_owned(), work)],
+                job.stop(),
+                |digest| Ok(stored.get(digest).map_or(0, |bytes| bytes.len() as u64)),
+                |digest| Ok(stored.get(digest).map_or(Source::Missing, |bytes| Source::Bytes(bytes.clone()))),
+            );
+            answer = Some((preserved, job.stopped()));
+            ((), 0)
+        });
+        let elapsed = started.elapsed();
+        println!("ORPHAN_IDENTITIES_MERGE_WALL_MS {}", elapsed.as_millis());
+        let (preserved, stopped) = answer.expect("the proof ran");
+        assert_eq!(stopped, None, "it fits alone within {HELD_PROOF_DEADLINE:?}: it took {elapsed:?}");
+        let preserved = preserved.unwrap();
+        assert_eq!(reasons(&preserved), [PreservationReason::PendingContributionDependencies]);
+        assert!(preserved.merged.is_empty(), "nothing integrated: {:?}", preserved.merged.len());
+        assert!(elapsed * 4 < HELD_PROOF_DEADLINE, "well inside {HELD_PROOF_DEADLINE:?}: it took {elapsed:?}");
     }
 
     /// Findings the caller brings, such as a tail whose evidence does not

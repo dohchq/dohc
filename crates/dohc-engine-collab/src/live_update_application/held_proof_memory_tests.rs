@@ -18,6 +18,16 @@
 // projection's. A measurement counts only once its preservation is complete,
 // with the Markdown the case expects and every contribution merged.
 //
+// Two stages the projection's peak hides are measured on their own as well.
+// The index of the ranges the merged state deleted is built on that state,
+// and what it holds is reported against what `Deletes::growth` reserves:
+// the deleting cases, the 2,000-client one above all, calibrate the 256 B
+// per client and 64 B per range. And the lineage is loaded again and each
+// contribution applied as the merge applies it: the most the heap held
+// over the loaded state is reported against what the merge reserves beside
+// it then, and the largest rise of one application over the heap before it
+// against its 13·b + 2·M.
+//
 // Calibrate against the measured peak, not the reserved one: at the
 // projection's peak the proof reserves the state it kept, 28·M for the
 // projection and `retained_bytes()` for the preservation, and the
@@ -290,27 +300,68 @@ enum Expected<'a> {
     Exactly(&'a str),
 }
 
-/// What the merged state keeps, kept as a proof keeps it: `key`'s lineage
-/// loaded from `store` as a proof loads it, then every one of `updates`
-/// applied. The stored bytes loading reads, and the heap still held once
-/// the lineage loaded and once every update applied; what loading and
-/// applying only read is not counted.
+/// What the merged state keeps, kept as a proof keeps it: `key`'s lineage,
+/// the head's, which must be `claim`, loaded from `store` as a proof loads
+/// it, then every one of `updates` applied. The stored bytes loading reads,
+/// and the heap still held once the lineage loaded and once every update
+/// applied; what loading and applying only read is not counted. Then, on
+/// that merged state, what the index of the ranges it deleted holds once
+/// built. Then, loaded again before the profiler starts, what applying each
+/// update as the merge applies it holds: the most the heap held once it
+/// applied, over what it held before.
 fn kept_state(store: &EngineStore, key: &DocKey, claim: &str, updates: &[Vec<u8>]) -> Kept {
+    let head = store
+        .read_with(|conn| durable::read_marker_in(conn, key))
+        .expect("the marker reads")
+        .and_then(|marker| marker.lineage_claim_id);
+    assert_eq!(head.as_deref(), Some(claim), "the proof loads the head's lineage");
     let (_, stored, _) = store
         .read_with(|conn| released_protection::lineage_workload(conn, key, claim))
         .expect("the lineage's stored length");
+    let load = || {
+        store
+            .read_with(|conn| durable::load_doc_between::<CollabError>(conn, key, &mut || Ok(())))
+            .expect("the lineage loads")
+    };
+    let heap = || dhat::HeapStats::get().curr_bytes as u64;
     let profiler = dhat::Profiler::builder().testing().build();
-    let state = store
-        .read_with(|conn| durable::load_doc_between::<CollabError>(conn, key, &mut || Ok(())))
-        .expect("the lineage loads");
-    let loaded = dhat::HeapStats::get().curr_bytes as u64;
+    let state = load();
+    let loaded = heap();
     for update in updates {
         state.apply(update).expect("each contribution applies");
     }
-    let merged = dhat::HeapStats::get().curr_bytes as u64;
+    let merged = heap();
+    let (index, index_reserved) = released_protection::deletion_index_bytes(&state, heap);
     drop(state);
     drop(profiler);
-    Kept { stored, loaded, merged }
+
+    let state = load();
+    // M, the encoded bytes the merge holds: the full state, then each
+    // update's as it applies.
+    let mut merging = state.encode_full_state().len() as u64;
+    let (mut growing, mut reserved) = (0u64, 0u64);
+    let mut worst = Applying { rise: 0, allowance: 1 };
+    let mut applications = released_protection::Applications::default();
+    let profiler = dhat::Profiler::builder().testing().build();
+    for update in updates {
+        let bytes = update.len() as u64;
+        merging += bytes;
+        growing += 24 * bytes;
+        // 13·b + 2·M, as `preservation.rs` reserves applying.
+        let allowance = 13 * bytes + 2 * merging;
+        reserved = reserved.max(growing + allowance);
+        let before = heap();
+        applications.apply(&state, update);
+        let rise = (dhat::HeapStats::get().max_bytes as u64).saturating_sub(before);
+        if u128::from(rise) * u128::from(worst.allowance) > u128::from(worst.rise) * u128::from(allowance) {
+            worst = Applying { rise, allowance };
+        }
+    }
+    let applying_peak = dhat::HeapStats::get().max_bytes as u64;
+    drop(applications);
+    drop(state);
+    drop(profiler);
+    Kept { stored, loaded, merged, index, index_reserved, applying_peak, applying_reserved: reserved, worst }
 }
 
 /// What [`kept_state`] measured.
@@ -319,6 +370,27 @@ struct Kept {
     stored: u64,
     loaded: u64,
     merged: u64,
+    /// What the index of the ranges the merged state deleted holds, and
+    /// what the merge reserves for it.
+    index: u64,
+    index_reserved: u64,
+    /// The most the heap held over the loaded state while the updates
+    /// applied, and the most the merge reserves beside that state while
+    /// they do: 24·b for each so far, and 13·b + 2·M for the one applying.
+    applying_peak: u64,
+    applying_reserved: u64,
+    /// The application whose rise is largest against what it reserves.
+    worst: Applying,
+}
+
+/// What applying one update held: the most the heap held once it applied
+/// over what it held before, which counts what it adds to the state and
+/// any earlier application's higher peak, so it never reads low, against
+/// 13·b + 2·M.
+#[derive(Clone, Copy)]
+struct Applying {
+    rise: u64,
+    allowance: u64,
 }
 
 /// Refuse a measurement whose preservation is not the complete one its case
@@ -350,7 +422,8 @@ struct Measured<'a> {
 
 fn report(measured: &Measured<'_>) {
     let ratio = |bytes: u64, of: u64| bytes as f64 / of.max(1) as f64;
-    let Kept { stored, loaded, merged: kept } = measured.kept;
+    let Kept { stored, loaded, merged: kept, index, index_reserved, applying_peak, applying_reserved, worst } =
+        measured.kept;
     let contributed = measured.merged as u64;
     let growth = kept.saturating_sub(loaded);
     let projection = measured.peak.saturating_sub(kept);
@@ -369,6 +442,15 @@ fn report(measured: &Measured<'_>) {
             "keptPerStoredByte": ratio(kept, stored + contributed),
             "contributionGrowthBytes": growth,
             "contributionGrowthPerContributionByte": ratio(growth, contributed),
+            "applyingPeakBytes": applying_peak,
+            "applyingReservedBytes": applying_reserved,
+            "applyingPeakPerReserved": ratio(applying_peak, applying_reserved),
+            "applyingRiseBytes": worst.rise,
+            "applyingAllowanceBytes": worst.allowance,
+            "applyingRisePerAllowance": ratio(worst.rise, worst.allowance),
+            "deletionIndexBytes": index,
+            "deletionIndexReservedBytes": index_reserved,
+            "deletionIndexPerReserved": ratio(index, index_reserved),
             "measuredPeakBytes": measured.peak,
             "projectionBytes": projection,
             "projectionPerMergedByte": ratio(projection, measured.full_state as u64 + contributed),
@@ -451,9 +533,7 @@ fn measure_released_hold(count: usize) {
             entries
                 .iter()
                 .map(|entry| {
-                    let (RetainedContribution::Outbox { update_digest, .. }
-                    | RetainedContribution::Carried { update_digest, .. }) = entry;
-                    conn.query_row("SELECT bytes FROM binary_blobs WHERE sha256=?1", [update_digest], |row| {
+                    conn.query_row("SELECT bytes FROM binary_blobs WHERE sha256=?1", [entry.update_digest()], |row| {
                         row.get::<_, Vec<u8>>(0)
                     })
                 })
