@@ -301,15 +301,16 @@ it.each([
 })
 
 // Each level of nested emphasis lexes its text again, so the importer reads
-// 120 levels and refuses a note nested past the lexer's depth (see
-// nestedMarkdownContract.test.ts).
+// 15 levels and refuses 16 (see nestedMarkdownContract.test.ts).
 it.each([
-  ['emphasis', 120, '*', 'italic'],
-  ['strikethrough', 120, '~~', 'strike'],
-])('reads %s nested %i levels deep', (_name, depth, delimiter, mark) => {
-  const paragraph = parseRichdocMarkdown(`${`${delimiter}a `.repeat(depth)}b${` a${delimiter}`.repeat(depth)}`).content?.[0]
-  expect(paragraph?.content?.map(node => node.text).join('')).toBe(`${'a '.repeat(depth)}b${' a'.repeat(depth)}`)
+  ['emphasis', '*', 'italic'],
+  ['strikethrough', '~~', 'strike'],
+])('reads %s nested 15 levels deep and refuses 16', (_name, delimiter, mark) => {
+  const nested = (depth: number) => `${`${delimiter}a `.repeat(depth)}b${` a${delimiter}`.repeat(depth)}`
+  const paragraph = parseRichdocMarkdown(nested(15)).content?.[0]
+  expect(paragraph?.content?.map(node => node.text).join('')).toBe(`${'a '.repeat(15)}b${' a'.repeat(15)}`)
   expect(paragraph?.content?.every(node => node.marks?.some(({ type }) => type === mark))).toBe(true)
+  expect(() => parseRichdocMarkdown(nested(16))).toThrow(/not representable/)
 })
 
 it.each([

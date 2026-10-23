@@ -348,14 +348,22 @@ it.each([
   } finally { doc.destroy() }
 })
 
-// A region's last line leaves no paragraph for the next line to continue.
+// A region's last line, a heading, a thematic break, indented code or an item
+// with no text leaves no paragraph for the next line to continue.
 it.each([
   ['a closed fence', '```\n```\n<? x\n'],
   ['an HTML block a blank line ends', '<x-y>\n\n<? x\n'],
   ['an HTML block closed on its line', '<?a?>\n<? x\n'],
-])('keeps quotes after %s as code', (_name, head) => {
-  expect(nestingRefusal(head + CODE)).toEqual({ lexed: true })
-  expect(JSON.stringify(parseRichdocMarkdown(head + CODE))).toContain(CODE)
+  ['a heading', '#\n<![CDATA[\n'],
+  ['a thematic break', '---\n<![CDATA[\n'],
+  ['indented code', '    b\n<![CDATA[\n'],
+  ['an item with no text', '-\n<![CDATA[\n'],
+  ['an item holding a heading', '- # h\n<![CDATA[\n'],
+])('keeps quotes after %s as code in both readings', (_name, head) => {
+  for (const reading of ['source', 'projection'] as const) {
+    expect(nestingRefusal(head + CODE, reading)).toEqual({ lexed: true })
+    expect(JSON.stringify(parseRichdocMarkdown(head + CODE, reading))).toContain(CODE)
+  }
 })
 
 // Each level of emphasis or strikethrough lexes its text again.
@@ -380,12 +388,22 @@ it('reads link brackets nested 2,048 deep, which marked nests only a few levels'
   }
 })
 
-it('reads strong emphasis 120 deep through 64 KB', () => {
-  const source = Array.from({ length: Math.ceil(65_536 / STRONG(120).length) }, () => STRONG(120)).join('\n\n')
+it('reads strong emphasis 15 deep through 64 KB', () => {
+  const source = Array.from({ length: Math.ceil(65_536 / STRONG(15).length) }, () => STRONG(15)).join('\n\n')
   for (const reading of ['source', 'projection'] as const) {
     expect(nestingRefusal(source, reading)).toEqual({ lexed: true })
   }
 })
+
+// Each level lexes its text again, so the inline limit bounds a whole note's
+// time, not only a paragraph's.
+it('reads 2 MiB of emphasis 15 deep, one paragraph to a run', () => {
+  const run = nested(15, () => '*x ', () => ' x*')
+  const source = Array.from({ length: Math.ceil(2 * 2 ** 20 / (run.length + 2)) }, () => run).join('\n\n')
+  const started = performance.now()
+  expect(nestingRefusal(source)).toEqual({ lexed: true })
+  console.log(`2 MiB of emphasis 15 deep: ${Math.round(performance.now() - started)} ms`)
+}, 120_000)
 
 // An earlier line's item holds these quotes, which the preflight does not
 // read; marked's lexing still stops at the limit.

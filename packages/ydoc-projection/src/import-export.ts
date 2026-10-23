@@ -1154,7 +1154,7 @@ class ContentTabLexer<ParserOutput = string, RendererOutput = string> extends Le
 
   // Emphasis, strikethrough and links lex their text through here again.
   inlineTokens(src: string, tokens: Token[] = []): Token[] {
-    if (lexing.inline === MAX_LEXING_DEPTH) throw new MarkdownNestingRefusal('depth')
+    if (lexing.inline === MAX_INLINE_DEPTH) throw new MarkdownNestingRefusal('depth')
     lexing.inline += 1
     const text = parseTabs.size ? restoreParseSentinels(src, parseTabs) : src
     enterText(this, text, tokens)
@@ -1320,9 +1320,13 @@ const LEXING_FLOOR = 256 * 1024
 // Block lexing nested this deep reads text inside a node deeper than the
 // limit: the top level and a table's own text each add a level no node does.
 // The preflight refuses such notes first; this keeps any it misses off the
-// end of the stack. Inline lexing stops at the same depth: marks do not nest
-// as nodes, so the serializer never writes emphasis that deep.
+// end of the stack.
 const MAX_LEXING_DEPTH = MAX_STRUCTURE_DEPTH + 2
+// Inline lexing nests at most this deep: a block's text and 15 levels of
+// emphasis or strikethrough inside it. Each level lexes its text again, so
+// this bounds the time a note full of them takes. The serializer's output
+// nests at most 7 deep.
+const MAX_INLINE_DEPTH = 16
 
 /**
  * A note the live document contract does not read as rich text, because its
@@ -1405,6 +1409,7 @@ function lineContainers(line: string, continues: boolean, containers?: number[])
     listed = true
     if (blank || content - end > 4) {
       containers?.push(end + 1 - at)
+      if (blank) at = content
       break
     }
     containers?.push(content - at)
@@ -1440,6 +1445,23 @@ function thematicBreak(text: string, start: number): boolean {
 function blankFrom(text: string, at: number): boolean {
   for (let index = at; index < text.length; index += 1) if (text[index] !== ' ' && text[index] !== '\t') return false
   return true
+}
+
+// Whether a line's text from `at` leaves no paragraph for the next line to
+// continue: it is blank, a heading or a thematic break, or indented code after
+// a line that `continues` none.
+function endsParagraph(text: string, at: number, continues: boolean): boolean {
+  if (blankFrom(text, at)) return true
+  if (text.startsWith('    ', at)) return !continues
+  let start = at
+  while (start - at < 3 && text[start] === ' ') start += 1
+  const first = text[start]
+  if (first === '#') {
+    let end = start
+    while (end - start < 7 && text[end] === '#') end += 1
+    return end - start < 7 && (end === text.length || text[end] === ' ' || text[end] === '\t')
+  }
+  return (first === '-' || first === '*' || first === '_') && start >= uniformEnd(text) && thematicBreak(text, start)
 }
 
 // Whether a line that starts with `first` may open a container or a literal
@@ -1646,8 +1668,13 @@ function assertNestingWithinLimits(markdown: string, lines: string[]): void {
   // The containers earlier lines opened that may hold this line, as
   // `lineContainers` lists them.
   let held: number[] = []
+  // Whether the last line opened the item `held` ends with and left no
+  // paragraph in it.
+  let ended = false
   for (let at = 0; at < lines.length; at += 1) {
     const line = lines[at]
+    const after = ended
+    ended = false
     if (literal) {
       const text = within(line, literal.containers)
       if (text !== undefined) {
@@ -1661,12 +1688,13 @@ function assertNestingWithinLimits(markdown: string, lines: string[]): void {
     const blank = blankFrom(line, 0)
     const first = line[0]
     if (!held.length && !mayOpen(first)) {
-      continues = !blank
+      continues = !endsParagraph(line, 0, continues)
       continue
     }
     // The line's text within the containers that hold it. An item the line
-    // leaves ends after a blank line, or where the line opens a block;
-    // otherwise it may hold the line lazily, and still holds the next.
+    // leaves ends after a blank line or a first line that left no paragraph,
+    // or where the line opens a block; otherwise it may hold the line lazily,
+    // and still holds the next.
     let kept = 0
     let rest = line
     for (; kept < held.length; kept += 1) {
@@ -1675,19 +1703,20 @@ function assertNestingWithinLimits(markdown: string, lines: string[]): void {
       rest = text
     }
     const item = kept < held.length && held[kept] >= 0
-    const fresh = item && blankFrom(within(lines[at - 1], held, kept) ?? '.', 0)
+    const fresh = item && ((after && kept === held.length - 1) || blankFrom(within(lines[at - 1], held, kept) ?? '.', 0))
     // Those containers, then the ones the line opens.
     const containers = held.slice(0, kept)
     let region: LiteralRegion | number | undefined
     if (mayOpen(first)) {
       const opened = lineContainers(line, continues, held.length ? undefined : containers)
       if (opened.quotes > MAX_QUOTE_DEPTH || opened.depth > MAX_STRUCTURE_DEPTH) throw new MarkdownNestingRefusal('depth')
-      const inner = held.length ? lineContainers(rest, continues && !item, containers) : opened
+      const inner: LineContainers = held.length ? lineContainers(rest, continues && !item, containers) : opened
       const follows: Follows = item ? fresh || containers.length > kept ? 'block' : 'lazy'
         : continues && inner.depth === inner.quotes ? 'paragraph' : 'block'
       region = literalRegion(lines, at, rest, inner, containers, follows)
-      continues = !blankFrom(opened.text, opened.at)
-    } else continues = !blank
+      continues = !endsParagraph(inner.text, inner.at, continues)
+      ended = !continues && containers.length > kept && containers[containers.length - 1] >= 0
+    } else continues = !endsParagraph(line, 0, continues)
     const opens = containers.length > kept
     if (kept < held.length ? blank || fresh || opens || region !== undefined : opens) {
       held = containers.length > MAX_LEXING_DEPTH ? containers.slice(0, MAX_LEXING_DEPTH) : containers
