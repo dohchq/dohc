@@ -16,6 +16,7 @@ pub(super) mod reads;
 pub(super) mod relay;
 pub(crate) mod replica;
 pub(super) mod request;
+pub(super) mod retained_copies;
 pub(super) mod search;
 pub(super) mod secrets;
 pub(super) mod versioned;

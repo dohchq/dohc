@@ -3359,6 +3359,20 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
               WHERE status = 'pending' AND operation = 'delete';",
         sets_user_version: None,
     },
+    // Why the sweep can never release a retained original. A volume that
+    // cannot refuse to unlink an open file keeps each one until a person or
+    // an agent deletes it. Rows from before this read as unblocked until the
+    // sweep checks their volume.
+    Migration {
+        ordinal: 67,
+        id: "v2-retained-release-blocked",
+        sql: "ALTER TABLE materialization_retained ADD COLUMN release_blocked TEXT \
+              CHECK (release_blocked IS NULL OR release_blocked = 'busy-check-unsupported'); \
+              CREATE INDEX materialization_retained_blocked \
+              ON materialization_retained(workspace_id, release_blocked, size) \
+              WHERE release_blocked IS NOT NULL;",
+        sets_user_version: None,
+    },
 ];
 
 /// Documents whose file a `ydoc.open` found on disk while the version had no
@@ -4019,10 +4033,12 @@ mod tests {
         let ctx = MigrationContext::current(1);
         let before = migration_index("v2-retained-materialization-displacements");
         assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 54);
+        // Migration 67 changes the table 54 creates, so a store without 54
+        // predates 67 too.
         let without_retention: Vec<_> = BASELINE_MIGRATIONS
             .iter()
             .copied()
-            .filter(|migration| migration.ordinal != 54)
+            .filter(|migration| !matches!(migration.ordinal, 54 | 67))
             .collect();
         run_migrations(&mut conn, &without_retention, &ctx, &NoFaults).unwrap();
         let sha = crate::blob::put_binary_blob(&conn, b"before").unwrap();
@@ -4043,11 +4059,11 @@ mod tests {
         tx.commit().unwrap();
         assert_eq!(
             run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
-            MigrationOutcome::Applied { newly_applied: 1 }
+            MigrationOutcome::Applied { newly_applied: 2 }
         );
         let jobs:i64=conn.query_row("SELECT COUNT(*) FROM materialization_jobs WHERE job_id='pending' AND status='pending'",[],|r|r.get(0)).unwrap();
         assert_eq!(jobs, 1);
-        for ordinal in [54, 55, 56] {
+        for ordinal in [54, 55, 56, 67] {
             let applied: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM engine_migrations WHERE ordinal=?1 AND completed_at IS NOT NULL",
@@ -4428,6 +4444,10 @@ mod tests {
                 "v2-pending-delete-preimage-index",
                 "a6ead02cfa43cab0395717b10b07be6e314baa0b453c09ebb63c56df2267d08b",
             ),
+            (
+                "v2-retained-release-blocked",
+                "16b4bee68d7fde08b97ade0bd28c4969c185b73bb65bf54ceb6006bfeaee40ff",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -4622,6 +4642,75 @@ mod tests {
                 |_| Ok(()),
             )
             .is_ok()
+        );
+    }
+
+    /// Rows retained before migration 67 keep their fields and read as
+    /// unblocked until the sweep checks their volume. The summary reads only
+    /// the blocked rows' index.
+    #[test]
+    fn retained_release_blocked_upgrades_rows_from_main_66() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-retained-release-blocked");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 66);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 67);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute(
+            "INSERT INTO materialization_retained(job_id,workspace_id,target_path,source_path,device,inode,digest,size,mtime,ctime,changed_at_ms) \
+             VALUES('job','ws','notes.md','.dohc/engine/displaced/job.0','1','2','abc',10,'0:0','0:0',5)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let rows = crate::materialize::retained_rows(&conn, 0).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (
+                rows[0].size,
+                rows[0].changed_at_ms,
+                rows[0].busy_check_unsupported
+            ),
+            (10, 5, false)
+        );
+        assert_eq!(
+            crate::materialize::retained_summary(&conn, "ws").unwrap(),
+            crate::RetainedSummary::default()
+        );
+        crate::materialize::record_retained_busy_check(&conn, &rows[0], true).unwrap();
+        assert_eq!(
+            crate::materialize::retained_summary(&conn, "ws").unwrap(),
+            crate::RetainedSummary {
+                count: 1,
+                bytes: 10
+            }
+        );
+        assert!(
+            conn.execute(
+                "UPDATE materialization_retained SET release_blocked='busy'",
+                []
+            )
+            .is_err(),
+            "only known reasons are recorded"
+        );
+        let plan: Vec<String> = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT COUNT(*), COALESCE(SUM(size), 0) FROM materialization_retained \
+                 WHERE workspace_id=?1 AND release_blocked IS NOT NULL",
+            )
+            .unwrap()
+            .query_map(["ws"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("COVERING INDEX materialization_retained_blocked")),
+            "{plan:?}"
         );
     }
 

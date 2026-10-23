@@ -2022,7 +2022,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         ))}
       </Section>
 
-      <Section part="capture-recovery" title="Typing kept in History">
+      <Section part="capture-recovery" title="Text kept in History">
         <Specimen label="toast">
           <div className={SHADOW_ROOM}>
             <WorkspaceErrorToast error={RECOVERY_TOAST} onAction={noop} onHide={noop} />

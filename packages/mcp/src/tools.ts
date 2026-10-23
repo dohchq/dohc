@@ -72,6 +72,8 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_list_changes: ["history.list"],
   dohc_list_kept_copies: ["file.kept.list"],
   dohc_save_kept_copy: ["file.kept.save"],
+  dohc_list_retained_copies: ["file.retained.list"],
+  dohc_delete_retained_copies: ["file.retained.delete"],
   dohc_chat_file_mentions: ["chat.read"],
   dohc_chat_links: ["chat.read"],
   dohc_links_edges: ["links.edges"],
@@ -2209,6 +2211,23 @@ export async function listKeptCopies(ctx: ToolContext) {
 
 export async function saveKeptCopy(ctx: ToolContext, args: { id: number }) {
   return requestCli(ctx, "saveKeptCopy", { id: args.id });
+}
+
+// Old file copies kept on a drive that cannot tell dohc whether a program
+// still has one open. The desktop shows their count and size as one Notices
+// row and deletes them after the same warning an agent accepts here.
+export async function listRetainedCopies(ctx: ToolContext) {
+  return requestCli(ctx, "retainedCopies", {});
+}
+
+export async function deleteRetainedCopies(
+  ctx: ToolContext,
+  args: { copies: { id: number; revision: number }[]; acceptLateWriteRisk: true },
+) {
+  return requestCli(ctx, "deleteRetainedCopies", {
+    copies: args.copies,
+    acceptLateWriteRisk: args.acceptLateWriteRisk,
+  });
 }
 
 // An automation's runs, and Try again, through the desktop's Automations

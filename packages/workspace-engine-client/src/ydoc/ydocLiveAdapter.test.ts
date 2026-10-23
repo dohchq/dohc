@@ -692,6 +692,7 @@ it("forwards committed owner deltas without resync or journaling, while daemon g
   const provider = await openEngineYdocProviderSession({
     transport: {...forwardYdocBlobEgress(engine),sendRequest: request => engine.sendRequest(request),onEvent: handler => engine.onEvent(event => {if (forward) handler(event);})},
     workspace: WORKSPACE,versionId: VERSION,path: PATH,contentKind: "plaintext",
+    largeSeed: {workspaceId: "workspace-1", maxBytes: original.length},
     onRemoteUpdate: remote,onResyncNeeded: gaps,scheduleSettle: () => () => undefined,
   });
   const owner = provider.nativeOwner!;
@@ -817,6 +818,68 @@ describe("seeding an absent lineage", () => {
     ).rejects.toThrow("without a valid seed client id");
     expect(recordedUpdates(engine, true)).toEqual([]);
     adapter.dispose();
+  });
+
+  describe("a seed past the in-band cap", () => {
+    const longPath = "notes/long.md";
+    const content = "# Long\n\n" + "A paragraph of a long note, written outside dohc.\n\n".repeat(1_100);
+    const largeSeed = { workspaceId: "workspace-1", maxBytes: 64 * 1024 };
+    const seedLongNote = () => {
+      const engine = new YdocLoopbackEngine();
+      engine.seedFile({ workspace: WORKSPACE, versionId: VERSION, path: longPath, content, contentKind: "richdoc" });
+      return engine;
+    };
+    const openLong = (adapter: YdocLiveAdapter, withLargeSeed: boolean) =>
+      adapter.openSession({
+        workspace: WORKSPACE,
+        versionId: VERSION,
+        path: longPath,
+        contentKind: "richdoc",
+        ...(withLargeSeed ? { largeSeed } : {}),
+      });
+
+    it("reads it as a blob within the open's limit and seeds the same document", async () => {
+      expect(Buffer.byteLength(content)).toBeGreaterThan(48 * 1024);
+      const engine = seedLongNote();
+      const adapter = new YdocLiveAdapter(engine);
+      await expect(openLong(adapter, false)).rejects.toThrow("ydoc-seed-too-large");
+
+      const session = await openLong(adapter, true);
+      expect(engine.requests.filter((request) => request.method === "versionedText.readBlob")).toHaveLength(1);
+      expect(recordedUpdates(engine, true)).toHaveLength(1);
+      const opened = new Y.Doc();
+      Y.applyUpdate(opened, session.initialUpdate);
+      expect(ydocProjection.yDocToMarkdown(opened)).toBe(
+        ydocProjection.yDocToMarkdown(ydocProjection.markdownToYDoc(content)),
+      );
+      await session.close({ settle: false });
+      adapter.dispose();
+    });
+
+    it("refuses a blob that does not match the digest the open named", async () => {
+      const engine = seedLongNote();
+      const blobReads = new Set<number>();
+      const transport: EngineTransport = {
+        helloAck: engine.helloAck,
+        onEvent: (handler) => engine.onEvent(handler),
+        onBlob: (handler) =>
+          engine.onBlob((blob) => {
+            if (!blobReads.has(blob.requestId)) return handler(blob);
+            const bytes = new Uint8Array(blob.bytes);
+            bytes[0] = bytes[0]! ^ 1;
+            handler({ ...blob, bytes });
+          }),
+        async sendRequest(request) {
+          if (request.method === "versionedText.readBlob") blobReads.add(request.id);
+          return engine.sendRequest(request);
+        },
+      };
+      const adapter = new YdocLiveAdapter(transport);
+      await expect(openLong(adapter, true)).rejects.toThrow("does not match the digest");
+      expect(recordedUpdates(engine, true)).toEqual([]);
+      expect(engine.activeSessionIds()).toEqual([]);
+      adapter.dispose();
+    });
   });
 });
 

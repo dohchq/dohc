@@ -424,7 +424,7 @@ describe("createCaptureLiveStores", () => {
               degraded: false,
               terminal: false,
               phase: "ready",
-              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [],
+              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 },
             }
           : { deferredWrites: [], settled: false, running: true, degraded: true, heldFiles: [] },
       };
@@ -464,7 +464,7 @@ describe("createCaptureLiveStores", () => {
         }
         return { id: request.id, result: request.method === WORKSPACE_METHOD.watcherStatus
           ? { deferredWrites: [], running: true, degraded: false, terminal: false, phase: "ready",
-              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [] }
+              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 } }
           : { deferredWrites: [], settled: false, running: true, degraded: false, heldFiles: [] } };
       });
       const { store } = createCaptureLiveStores(
@@ -557,7 +557,7 @@ describe("createCaptureLiveStores", () => {
         return { id: request.id, result: { deferredWrites: [], settled: false, running: true, degraded: false, heldFiles: [] } };
       }
       return { id: request.id, result: { deferredWrites: [], running: true, degraded: false, terminal: false, phase: "ready",
-        noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [] } };
+        noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 } } };
     });
     const { store } = createCaptureLiveStores(
       { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
@@ -592,7 +592,7 @@ describe("createCaptureLiveStores", () => {
       now += durations[requests.length - 1]!;
       return { id: request.id, result: request.method === WORKSPACE_METHOD.watcherStatus
         ? { deferredWrites: [], running: true, degraded: false, terminal: false, phase: "ready",
-            noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [] }
+            noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 } }
         : { deferredWrites: [], settled: requests.length === 4, running: true, degraded: false, heldFiles: [] } };
     });
     const { store } = createCaptureLiveStores(
@@ -727,7 +727,7 @@ describe("createCaptureLiveStores", () => {
       requests.push(request);
       if (request.method === WORKSPACE_METHOD.watcherStatus) {
         return { id: request.id, result: { deferredWrites: [], running: true, degraded: false, terminal: false, phase: "ready",
-          noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [] } };
+          noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 } } };
       }
       await new Promise<void>(resolve => setTimeout(resolve, 6_000));
       return { id: request.id, result: { deferredWrites: [], settled: false, running: true, degraded: false, heldFiles: [] } };
@@ -790,7 +790,7 @@ describe("createCaptureLiveStores", () => {
         controller.abort();
         return { id: request.id, result: { deferredWrites: [],
           running: true, degraded: false, terminal: false, phase: "ready",
-          noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [],
+          noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 },
         } };
       }
       return { id: request.id, result: { deferredWrites: [], settled: false, running: true, degraded: false, heldFiles: [] } };
@@ -829,7 +829,7 @@ describe("createCaptureLiveStores", () => {
         result: request.method === WORKSPACE_METHOD.watcherStatus
           ? { deferredWrites: [],
               running: true, degraded: false, terminal: false, phase: "ready",
-              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [],
+              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 },
             }
           : { deferredWrites: [], settled: false, running: true, degraded: false, heldFiles: [] },
       };
@@ -864,7 +864,7 @@ describe("createCaptureLiveStores", () => {
                 degraded: false,
                 terminal: false,
                 phase: "importing",
-                noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [],
+                noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 },
               }
             : { deferredWrites: [], settled: false, running: true, degraded: false, heldFiles: [] },
       };

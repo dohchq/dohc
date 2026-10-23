@@ -579,6 +579,11 @@ impl EngineService {
                 self.kept_copies_save(request.workspace, request.params)
                     .await?
             }
+            "retainedCopies.list" => self.retained_copies_list(request.workspace).await?,
+            "retainedCopies.delete" => {
+                self.retained_copies_delete(request.workspace, request.params)
+                    .await?
+            }
             "capture.flush" => self.capture_flush(&ctx, request.workspace).await?,
             "capture.reconcile" => self.capture_reconcile(&ctx, request.workspace).await?,
             "capture.retryHeld" => {
@@ -1556,6 +1561,8 @@ mod tests {
             "history.page",
             "keptCopies.list",
             "keptCopies.save",
+            "retainedCopies.delete",
+            "retainedCopies.list",
             "keys.download",
             "keys.upload",
             "moments.get",

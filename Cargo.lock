@@ -562,6 +562,7 @@ dependencies = [
 name = "dohc-windows-files"
 version = "0.1.0"
 dependencies = [
+ "dohc-test-scratch",
  "windows-sys 0.61.2",
 ]
 
@@ -581,6 +582,7 @@ dependencies = [
  "dohc-engine-sync",
  "dohc-engine-testkit",
  "dohc-macos-files",
+ "dohc-windows-files",
  "dohc-workspace-engine",
  "file-id",
  "fs4",

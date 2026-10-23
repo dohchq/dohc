@@ -26,7 +26,7 @@ test("Docker cold repair and private deployment archive", { skip: !process.env.D
     "--mount", `type=volume,source=${volumes[0]},target=/data`,
     "--mount", `type=volume,source=${volumes[1]},target=/continuity`,
     "--mount", `type=bind,source=${scratch},target=/backup`,
-    "--mount", `type=bind,source=${resolve("services/sync-relay/dist/relay-deployment.js")},target=${commandPath},readonly`,
+    "--mount", `type=bind,source=${resolve("services/sync-relay/dist")},target=/app/services/sync-relay/dist,readonly`,
     "--entrypoint", "node", image];
   const command = (...args) => docker([...common, commandPath, ...args]);
   function returnScratchOwnership() {

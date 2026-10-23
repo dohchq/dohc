@@ -48,6 +48,10 @@ rustix = { version = "1", features = ["process"] }
 # Keeps the engine's folder out of iCloud Drive.
 dohc-macos-files = { path = "../dohc-macos-files" }
 
+[target.'cfg(windows)'.dependencies]
+# Keeps the engine's folder private.
+dohc-windows-files = { path = "../dohc-windows-files" }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4.7"
 seccompiler = "0.5.0"

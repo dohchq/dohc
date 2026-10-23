@@ -1,7 +1,8 @@
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
 import type { RecordHistoryTarget } from "./collections/useRecordHistory";
-import { filenameStem, MarkdownView, WYSIWYG_MARKDOWN_THRESHOLD_BYTES, type HeadingTarget, type ScrollTarget } from "./MarkdownView";
+import { filenameStem, MarkdownView, type HeadingTarget, type ScrollTarget } from "./MarkdownView";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES, exceedsUtf8Bytes } from "../workspaces/workspaceTextLimits";
 import { DrawingView } from "./DrawingView";
 import {
   DocumentControls,
@@ -478,7 +479,7 @@ export const FileInspector = memo(function FileInspector(
   // A note past read mode's size with no engine record gets no session and
   // edits as source, which writes what is typed. So its open goes first, and
   // only a session that binds waits for the check.
-  const large = (text?.length ?? 0) > WYSIWYG_MARKDOWN_THRESHOLD_BYTES;
+  const large = text !== null && exceedsUtf8Bytes(text, WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
   const [bound, setBound] = useState(false);
   const checked = useLossyNote({
     open: lossyOpen,

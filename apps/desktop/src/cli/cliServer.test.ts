@@ -2223,6 +2223,48 @@ describe("CLI socket server", () => {
     });
   });
 
+  it("lists and deletes old file copies for an agent only with the late-write risk accepted", async () => {
+    let copies = [{ id: 3, revision: 10 }, { id: 4, revision: 11 }];
+    const deleted: { id: number; revision: number }[][] = [];
+    context.retainedCopies = {
+      async list() {
+        return { copies, more: false, total: { count: copies.length, bytes: copies.length * 1024 } };
+      },
+      async delete(requested) {
+        deleted.push([...requested]);
+        copies = copies.filter(copy => !requested.some(gone => gone.id === copy.id));
+        return { deleted: requested.length, skipped: 0, failed: 0, remaining: { count: copies.length, bytes: copies.length * 1024 } };
+      },
+    };
+
+    await expect(invoke("retainedCopies", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual({
+      ok: true,
+      copies: [{ id: 3, revision: 10 }, { id: 4, revision: 11 }],
+      more: false,
+      total: { count: 2, bytes: 2048 },
+    });
+    for (const args of [
+      { cwd: workspaceRoot, actor: "agent", copies: [{ id: 3, revision: 10 }] },
+      { cwd: workspaceRoot, actor: "agent", copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: false },
+      { cwd: workspaceRoot, actor: "agent", copies: Array.from({ length: 101 }, (_, id) => ({ id, revision: 0 })), acceptLateWriteRisk: true },
+    ]) {
+      const response = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "deleteRetainedCopies", args });
+      expect(response.ok, JSON.stringify(args).slice(0, 80)).toBe(false);
+    }
+    expect(deleted).toEqual([]);
+    await expect(invoke("deleteRetainedCopies", {
+      cwd: workspaceRoot, actor: "agent", copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: true,
+    })).resolves.toEqual({ ok: true, deleted: 1, skipped: 0, failed: 0, remaining: { count: 1, bytes: 1024 } });
+    expect(deleted).toEqual([[{ id: 3, revision: 10 }]]);
+
+    delete context.retainedCopies;
+    const unavailable = { ok: false, reason: "Old file copies are kept only in the owning workspace. Open it to continue." };
+    await expect(invoke("retainedCopies", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual(unavailable);
+    await expect(invoke("deleteRetainedCopies", {
+      cwd: workspaceRoot, actor: "agent", copies: [{ id: 4, revision: 11 }], acceptLateWriteRisk: true,
+    })).resolves.toEqual(unavailable);
+  });
+
   it("answers whether Collection updates wait with the engine's own answer", async () => {
     const answers = [true, false];
     context.daemonReads.collectionsWaiting = async () => {

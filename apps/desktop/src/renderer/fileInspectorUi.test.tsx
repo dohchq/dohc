@@ -123,7 +123,7 @@ describe("ViewActions", () => {
   it.each([
     ["file-locked", "File in use"],
     ["error", "Couldn't save"],
-    ["changed-on-disk", "Changed on disk"],
+    ["changed-on-disk", "Changed outside dohc"],
   ] as const)("shows a %s state in words beside Share", (saveState, words) => {
     render(<Group id="left" groupNumber={1} path="trip/plan.md" onShare={noop} saveState={saveState} />);
     const mark = screen.getByTestId("status-left");

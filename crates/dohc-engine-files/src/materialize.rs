@@ -3178,6 +3178,23 @@ fn is_staged_name(name: &str) -> bool {
     staged_name_key(name).is_some()
 }
 
+/// Whether `source_path`, the name a retained row stores, names a staged
+/// original of `job_id`: a name that job's replace makes, in the folder it
+/// stages into.
+pub fn is_staged_original(
+    store: &EngineStore,
+    job_id: &str,
+    source_path: &str,
+) -> Result<bool, MaterializeError> {
+    let Some((folder, name)) = source_path.rsplit_once('/') else {
+        return Ok(false);
+    };
+    let staging = store
+        .staging_location(job_id)?
+        .unwrap_or_else(|| STAGING_DIR.to_owned());
+    Ok(folder == staging && staged_name_key(name) == Some(staged_key(job_id).as_str()))
+}
+
 /// The job a staged name spells, and its id, when the store still has it. A
 /// hashed key also matches completed jobs whose staged cleanup was interrupted.
 fn staged_job(
