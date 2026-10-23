@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { afterEach, expect, it } from "vitest";
-import { markdownToYDoc } from "@dohc/ydoc-projection";
+import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
 import { createLiveValidationExecutor } from "./liveValidation.js";
 
@@ -37,8 +38,10 @@ it.each([4093, 4094])("returns state bytes only when %s retained updates reach t
   const result = await validate(call);
   expect(expected.kind).toBe("accepted");
   if (expected.kind !== "accepted") throw Error("Expected accepted validation");
-  if (suffixCount === 4094) expect(result).toEqual(expected);
-  else {
+  if (suffixCount === 4094) {
+    expect(result).toEqual(expected);
+    if (result.kind === "accepted") expect(Object.getPrototypeOf(result.evidence.stateUpdate)).toBe(Uint8Array.prototype);
+  } else {
     const {stateUpdate: _stateUpdate, ...evidence} = expected.evidence;
     expect(result).toEqual({kind: "accepted", evidence});
   }
@@ -81,6 +84,8 @@ it("bounds concurrent work, cancels active jobs, and closes without dangling req
   cancelled.abort(new Error("stop waiting")); await cancelWait;
   expect(ready).toBe(false);
   abort.abort(new Error("cancelled")); await rejected;
+  // The cancelled child holds its slot until it has exited.
+  expect(validate.hasCapacity?.()).toBe(false);
   await available;
   expect(validate.hasCapacity?.()).toBe(true);
   expect((await second).kind).toBe("accepted");
@@ -88,6 +93,55 @@ it("bounds concurrent work, cancels active jobs, and closes without dangling req
   await pool.close(); await closing;
   await expect(validate(input)).rejects.toThrow("closed");
 });
+
+const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+/** A note whose source witness nests emphasis `depth` levels; it reads as one flat emphasis run. */
+function nestedEmphasis(depth: number) {
+  const source = "*".repeat(depth) + "b" + " a*".repeat(depth);
+  const doc = markdownToYDoc(`*b${" a".repeat(depth)}*`), meta = doc.getMap("meta");
+  meta.set("dohcMarkdownSource", source);
+  meta.set("dohcMarkdownSourceSha256", sha256(source));
+  meta.set("dohcMarkdownSourceProjectionSha256", sha256(yDocToMarkdown(doc)));
+  const checkpoint = encodeStateAsUpdate(doc); doc.destroy();
+  return {source, checkpoint};
+}
+it("keeps a worker thread's stack for deeply nested emphasis", async () => {
+  const {pool, input} = fixture(), {source, checkpoint} = nestedEmphasis(2400);
+  // A child's default stack refuses this witness as unreadable instead of verifying it.
+  expect(await pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint}))
+    .toMatchObject({kind: "accepted", evidence: {projectedMarkdownSha256: sha256(source)}});
+}, 120_000);
+
+it.each(["journal", "settlement"] as const)("refuses %s work whose child runs out of heap, and replaces the child", async kind => {
+  const {input} = fixture(), pool = createLiveValidationExecutor(128); pools.push(pool);
+  const validate = pool.validator(policy);
+  const doc = markdownToYDoc("a\n\n".repeat(80_000)), checkpoint = encodeStateAsUpdate(doc); doc.destroy();
+  const result = kind === "journal" ? await validate({...input, checkpoint})
+    : await pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint});
+  expect(result).toEqual({kind: "refused", reason: "capacity-refused", source: kind === "journal" ? "final" : "registration-input"});
+  expect(validate.hasCapacity?.()).toBe(true);
+  expect((await validate(input)).kind).toBe("accepted");
+}, 60_000);
+
+it("fails a job whose child exits abnormally, and replaces the child", async () => {
+  const {input, validate} = fixture();
+  // The child cannot read a missing input and exits with an uncaught error.
+  await expect(validate(null as never)).rejects.toThrow("exited");
+  expect(validate.hasCapacity?.()).toBe(true);
+  expect((await validate(input)).kind).toBe("accepted");
+});
+
+it("kills a child at its deadline and keeps its slot until the child exits", async () => {
+  const {pool, input, validate} = fixture(), {checkpoint} = nestedEmphasis(3000);
+  const work = {document: input.document, currentPath: input.currentPath, checkpoint};
+  const held = new AbortController(), other = Promise.resolve(pool.normalizeSettlement(work, held.signal)).catch((error: unknown) => error);
+  await expect(pool.normalizeSettlement(work, AbortSignal.timeout(2_000))).rejects.toThrow("timeout");
+  expect(validate.hasCapacity?.()).toBe(false);
+  // The other job runs far longer than the test, so only the killed child's exit frees a slot.
+  await validate.waitForCapacity!();
+  expect((await validate(input)).kind).toBe("accepted");
+  held.abort(new Error("released")); expect(await other).toMatchObject({message: "released"});
+}, 60_000);
 
 it.each([false, true])('commits and recovers worker evidence with checkpoint due=%s', async checkpointDue => {
   const f = registered({deployment: true}), pool = createLiveValidationExecutor();
