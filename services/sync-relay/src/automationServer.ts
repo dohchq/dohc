@@ -129,7 +129,7 @@ export type ServerExecutor = Pick<
   | "open" | "dispose" | "notifyClaimed" | "handlePulledPaths" | "relayAnswered" | "groupMessagesArrived" | "hostChanged"
   | "releaseGroupSubscriptions" | "reachHandover" | "relayedClaim" | "pressRelayed" | "automationName"
   | "schedules" | "scheduleMarks" | "claimSchedule" | "failuresChanged" | "datasetsChanged" | "pressDataset" | "holds"
-  | "runs" | "listedRun" | "retry" | "undo" | "undoRunsOf" | "removePendingRestore" | "confirmReach"
+  | "runs" | "listedRun" | "hasRun" | "retry" | "undo" | "undoRunsOf" | "removePendingRestore" | "confirmReach"
   | "inspectRelayedBatch"
 >;
 
@@ -639,18 +639,21 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       };
       let draining: Promise<boolean> | undefined;
       ws.flushRecordDelivery = () => draining ??= (async () => {
-        let after = null, drained = true;
+        let after = null, undelivered: string | null = null;
         const failures: unknown[] = [];
         do {
           const page = await replica.client.ownerYDocListDrafts({id: replica.nextRequestId(), workspace: replica.workspace, deadlineMs: 30_000}, {after, limit: 64, pendingOnly: true}, replica.signal);
           for (const draft of page.drafts) if (draft.pendingBytes > 0 && draft.state !== "quarantined") {
-            try {if (!await serializeRecords(() => delivery.drain(draft.binding, replica.signal, draft.outboxId ?? undefined))) drained = false;}
+            try {if (!await serializeRecords(() => delivery.drain(draft.binding, replica.signal, draft.outboxId ?? undefined))) undelivered ??= draft.binding.currentPath;}
             catch (error) {failures.push(error); options.onError(`deliver automation record "${draft.binding.currentPath}" in workspace "${workspaceId}"`, error);}
           }
           after = page.next;
         } while (after !== null);
+        // Until it is delivered, no sync confirms that a run's changes were sent.
+        if (undelivered !== null) options.onError(`deliver automation record "${undelivered}" in workspace "${workspaceId}"`,
+          new Error("The record has updates waiting but no outbox to deliver them from, so the server confirms no run's changes as sent."));
         if (failures.length) throw failures[0];
-        return drained;
+        return undelivered === null;
       })().finally(() => {draining = undefined;});
     } else {
       recordEngine.prepareSharedRecord = async path => {
@@ -1214,14 +1217,20 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     return ownedCopy(scope);
   }
 
-  /** One page of the runs a lost copy of this workspace may not have sent, newest first. */
-  function lostRunsPage(scope: OwnerScope, automationId: string, after?: LostAutomationServerRunCursor) {
+  /**
+   * One page of the runs a lost copy of this workspace may not have sent,
+   * newest first. A run this copy still lists, as a dataset claim the relay
+   * keeps, shows on the copy's own pages instead.
+   */
+  async function lostRunsPage(ws: Hosted, scope: OwnerScope, automationId: string, after?: LostAutomationServerRunCursor) {
     const lost = storage.lostAutomationServerRuns({
       workspaceId: scope.workspaceId, automationId, nowMs: nowMs(), limit: LOST_RUNS_PAGE + 1, ...(after === undefined ? {} : { after }),
     });
     const shown = lost.slice(0, LOST_RUNS_PAGE);
     const last = shown.at(-1);
-    return { runs: shown.map(lostRunRow), next: lost.length > LOST_RUNS_PAGE && last ? `lost:${last.startedAtMs}:${last.incarnation}:${last.claimId}` : null };
+    const runs: CollectionAutomationRun[] = [];
+    for (const run of shown) if (!await ws.executor.hasRun(automationId, run.claimId)) runs.push(lostRunRow(run));
+    return { runs, next: lost.length > LOST_RUNS_PAGE && last ? `lost:${last.startedAtMs}:${last.incarnation}:${last.claimId}` : null };
   }
   const lostRun = (scope: OwnerScope, automationId: string, claimId: string) =>
     storage.lostAutomationServerRuns({ workspaceId: scope.workspaceId, automationId, claimId, nowMs: nowMs(), limit: 1 })[0];
@@ -1230,17 +1239,18 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     // They are older than any run of this copy, so they follow its last page.
     list: (scope, automationId, before) => withCopy(scope, async (ws) => {
       const lostAfter = before === undefined ? null : LOST_RUNS_CURSOR.exec(before);
-      if (lostAfter) return lostRunsPage(scope, automationId, { startedAtMs: Number(lostAfter[1]), incarnation: Number(lostAfter[2]), claimId: lostAfter[3]! });
+      if (lostAfter) return await lostRunsPage(ws, scope, automationId, { startedAtMs: Number(lostAfter[1]), incarnation: Number(lostAfter[2]), claimId: lostAfter[3]! });
       const page = await ws.executor.runs(automationId, before);
-      if (page.next !== null) return page;
-      const listed = new Set(page.runs.map((run) => run.claimId));
-      const lost = lostRunsPage(scope, automationId);
-      return { runs: [...page.runs, ...lost.runs.filter((run) => !listed.has(run.claimId))], next: lost.next };
+      const listed = page.runs.map((run) => withLoss(run, lostRun(scope, automationId, run.claimId)));
+      if (page.next !== null) return { runs: listed, next: page.next };
+      const lost = await lostRunsPage(ws, scope, automationId);
+      return { runs: [...listed, ...lost.runs], next: lost.next };
     }),
     get: (scope, automationId, claimId) => withCopy(scope, async (ws) => {
       const run = await ws.executor.listedRun(automationId, claimId);
-      const lost = run === null ? lostRun(scope, automationId, claimId) : undefined;
-      return run ?? (lost === undefined ? null : lostRunRow(lost));
+      const lost = lostRun(scope, automationId, claimId);
+      if (run !== null) return withLoss(run, lost);
+      return lost === undefined ? null : lostRunRow(lost);
     }),
     retry: (scope, input) => withCopy(scope, async (ws) => {
       // A copy kept after the workspace left runs nothing, so a run queued in it would never run.
@@ -1332,11 +1342,17 @@ function collectionPathOf(run: StoredRun): string | null {
 
 /** A run a lost copy may not have sent, as run history lists it: failed, with nothing left to run or undo. */
 function lostRunRow(lost: LostAutomationServerRun): CollectionAutomationRun {
-  return {
-    claimId: lost.claimId, state: "failed", error: LOST_CHANGES_ERROR, createdAtMs: lost.startedAtMs, updatedAtMs: lost.unsentSinceMs,
+  return withLoss({
+    claimId: lost.claimId, state: "failed", error: null, createdAtMs: lost.startedAtMs, updatedAtMs: lost.unsentSinceMs,
     trigger: { kind: null, recordId: null, by: null, sharedAuthor: null, depth: 0 }, writes: [],
-    definitionChanged: false, neverStarted: false, chainStopped: false, undone: false, undoUnfinished: false, unsentChangesLost: true,
-  };
+    definitionChanged: false, neverStarted: false, chainStopped: false, undone: false, undoUnfinished: false,
+  }, lost);
+}
+
+/** A run as run history lists it, failed if a lost copy may not have sent its changes. */
+function withLoss<Run extends CollectionAutomationRun>(run: Run, lost: LostAutomationServerRun | undefined): Run {
+  return lost === undefined ? run
+    : { ...run, state: "failed", error: LOST_CHANGES_ERROR, updatedAtMs: lost.unsentSinceMs, unsentChangesLost: true };
 }
 
 /** Whether an earlier copy of the workspace was given the release at this generation, so took it. */

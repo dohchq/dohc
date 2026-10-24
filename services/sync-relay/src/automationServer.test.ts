@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
-import type { ScheduledAutomation, CollectionAutomationsOptions, DatasetAutomationHost, CollectionAutomationHold } from "@dohc/automation-executor/collection-automations";
+import type { ScheduledAutomation, CollectionAutomationRun, CollectionAutomationsOptions, DatasetAutomationHost, CollectionAutomationHold } from "@dohc/automation-executor/collection-automations";
 import type { AutomationRunStore, StoredRun, StoredStep } from "@dohc/automation-executor/automation-run-store";
 import { runSteps, type StepBackend } from "@dohc/automation-executor/automation-step-run";
 import { newRun } from "@dohc/automation-executor/collection-automation-run";
@@ -125,6 +125,7 @@ function fakeExecutor(
       asked.push(["get", automationId, claimId]);
       return null;
     },
+    hasRun: async (_automationId, claimId) => claimId === "claim-1",
     retry: async (input) => {
       asked.push(["retry", input, await options.mayRetryPress("ana")]);
       return { status: "queued", press: false };
@@ -855,8 +856,11 @@ describe("a server that pushes its copy of a workspace", () => {
     options.beforeEffect!(sent, setStatus(0));
     options.onRunEnded!(sent);
     await vi.waitFor(() => expect(ended()).toEqual([]));
-    // A record's update waits, and the flush finds no outbox to deliver it from.
-    drafts = [{binding, pendingBytes: 10, state: "active", outboxId: null}];
+    expect(s.errors).toEqual([]);
+    // Two records' updates wait, and the flush finds no outbox to deliver them from.
+    drafts = [{binding, pendingBytes: 10, state: "active", outboxId: null},
+      {binding: {...binding, objectId: "record-two", currentPath: "Tasks/two.md"}, pendingBytes: 10, state: "active", outboxId: null}];
+    const flushes = client.ownerYDocListDrafts.mock.calls.length;
     const held = payRunRecord("claim-held");
     options.beforeEffect!(held, setStatus(0));
     const syncs = s.sync.mock.calls.length;
@@ -866,6 +870,11 @@ describe("a server that pushes its copy of a workspace", () => {
     await s.run.close();
     expect(client.ownerYDocPrepareEnrollment).toHaveBeenCalled();
     expect(ended()).toEqual([expect.objectContaining({claimId: "claim-held"})]);
+    // The operator hears once for each such flush, of the first record it left.
+    const left = client.ownerYDocListDrafts.mock.calls.length - flushes;
+    expect(left).toBeGreaterThan(0);
+    expect(s.errors).toEqual(Array.from({length: left}, () => [`deliver automation record "Tasks/one.md" in workspace "${WORKSPACE}"`,
+      expect.objectContaining({message: "The record has updates waiting but no outbox to deliver them from, so the server confirms no run's changes as sent."})]));
   });
   it("tries a sync the engine refused again, and reports only one that keeps failing", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
@@ -1390,18 +1399,18 @@ describe("the owner's routes to the server's runs", () => {
 
     it("lists every run the lost copy may not have sent, and tells the owner of them all in one Notice", async () => {
       const { storage, call, start } = await copies();
-      const changing = (claimId: string, startedAtMs: number) => storage.recordAutomationServerRunChanging({ workspaceId: WORKSPACE, incarnation: 1,
-        automationId: PRESSED, claimId, automationName: "Pay", collectionPath: "Tasks", startedAtMs, nowMs: startedAtMs });
-      // The first copy changed 260 runs it never sent, and one run waited
-      // longer than run history keeps a run.
-      changing("claim-waited", at(8) - 31 * 24 * HOUR);
+      const changing = (claimId: string, startedAtMs: number, nowMs = startedAtMs) => storage.recordAutomationServerRunChanging({ workspaceId: WORKSPACE,
+        incarnation: 1, automationId: PRESSED, claimId, automationName: "Pay", collectionPath: "Tasks", startedAtMs, nowMs });
+      // The first copy changed 260 runs it never sent, and one run that
+      // started longer ago than run history keeps a run changed it today.
+      changing("claim-waited", at(8) - 31 * 24 * HOUR, at(8));
       const lost = Array.from({ length: 260 }, (_, n) => `claim-${String(n).padStart(3, "0")}`);
       lost.forEach((claimId, n) => changing(claimId, at(8) + n));
       clock = at(9);
       await start(2);
       await vi.waitFor(() => expect(notices(storage, OWNER)).toEqual([expect.objectContaining({
         title: 'Automation "Pay" may have lost changes',
-        body: "Your server lost its copy of this workspace and may not have sent the latest changes of 260 runs. Check the records they changed.",
+        body: "Your server lost its copy of this workspace and may not have sent the latest changes of 261 runs. Check the records they changed.",
         target: { automation: PRESSED, run: "claim-259", path: "Tasks/automations.yaml" },
       })]));
       const listed: string[] = [];
@@ -1413,7 +1422,50 @@ describe("the owner's routes to the server's runs", () => {
         listed.push(...body.runs.map((run) => run.claimId));
         before = body.next;
       } while (before !== null);
-      expect(listed).toEqual(["claim-1", ...[...lost].reverse()]);
+      expect(listed).toEqual(["claim-1", ...[...lost].reverse(), "claim-waited"]);
+    });
+
+    it.each([
+      ["on the page where the copy's runs meet the lost ones", false],
+      ["on an earlier page of the copy's runs", true],
+    ])("lists a dataset claim the relay keeps once, as lost, %s", async (_where, earlier) => {
+      const { storage, call, start } = await copies();
+      const changing = (claimId: string) => storage.recordAutomationServerRunChanging({ workspaceId: WORKSPACE, incarnation: 1,
+        automationId: PRESSED, claimId, automationName: "Pay", collectionPath: "Tasks", startedAtMs: at(8), nowMs: at(8, 5) });
+      // The first copy changed two runs it never sent. One is a dataset claim
+      // the relay keeps, so the rebuilt copy still lists it as done.
+      changing("claim-dataset");
+      changing("claim-unsent");
+      clock = at(9);
+      const { fake } = await start(2);
+      const row = (claimId: string): CollectionAutomationRun => ({ claimId, state: "done", error: null, createdAtMs: at(8), updatedAtMs: at(8, 10),
+        trigger: { kind: "changed", recordId: "record", by: "human", depth: 0, sharedAuthor: null }, writes: [],
+        definitionChanged: false, neverStarted: false, chainStopped: false, undoUnfinished: false, undone: false });
+      const pages: Record<string, { runs: CollectionAutomationRun[]; next: string | null }> = earlier
+        ? { first: { runs: [row("claim-new"), row("claim-dataset")], next: "page-2" }, "page-2": { runs: [row("claim-old")], next: null } }
+        : { first: { runs: [row("claim-new"), row("claim-dataset"), row("claim-old")], next: null } };
+      const kept = Object.values(pages).flatMap((page) => page.runs.map((run) => run.claimId));
+      fake.executor.runs = async (_automationId, before) => pages[before ?? "first"]!;
+      fake.executor.listedRun = async (_automationId, claimId) => (kept.includes(claimId) ? row(claimId) : null);
+      fake.executor.hasRun = async (_automationId, claimId) => kept.includes(claimId);
+
+      const listed: CollectionAutomationRun[] = [];
+      let before: string | null = null;
+      do {
+        const page = await call(runsOf(before === null ? "" : `&before=${encodeURIComponent(before)}`));
+        expect(page.status).toBe(200);
+        const body = page.body as { runs: CollectionAutomationRun[]; next: string | null };
+        listed.push(...body.runs);
+        before = body.next;
+      } while (before !== null);
+      const lostRun = { state: "failed", error: LOST_ERROR, updatedAtMs: at(8, 5), unsentChangesLost: true };
+      expect(listed.map((run) => run.claimId)).toEqual(["claim-new", "claim-dataset", "claim-old", "claim-unsent"]);
+      expect(listed[1]).toMatchObject({ ...lostRun, trigger: { recordId: "record" } });
+      expect(listed[0]).toMatchObject({ state: "done" });
+      expect(listed[0]!.unsentChangesLost).toBeUndefined();
+      expect(listed[3]).toMatchObject(lostRun);
+      expect(await call(runsOf("&claimId=claim-dataset"))).toMatchObject({ status: 200, body: { run: { claimId: "claim-dataset", ...lostRun } } });
+      expect(await call(runsOf("&claimId=claim-new"))).toMatchObject({ status: 200, body: { run: { claimId: "claim-new", state: "done" } } });
     });
   });
 

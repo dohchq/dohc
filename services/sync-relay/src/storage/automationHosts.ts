@@ -250,9 +250,7 @@ export function confirmAutomationServerRunsSent(storage: StorageContext, input: 
 
 /**
  * This copy replaced an earlier one, whose engine is gone: what that copy had
- * not sent is lost. A run that started longer ago than run history keeps a
- * run, as one that waited for good, goes instead, and so do rows lost that
- * long ago.
+ * not sent is lost. Rows lost longer ago than run history keeps a run go.
  */
 export function markAutomationServerRunsLost(storage: StorageContext, input: { workspaceId: string; incarnation: number; nowMs: number }): void {
   const cutoff = input.nowMs - AUTOMATION_SERVER_LOST_RUN_KEEP_MS;
@@ -263,9 +261,8 @@ export function markAutomationServerRunsLost(storage: StorageContext, input: { w
   if (!stale) return;
   storage.tx(() => {
     storage.db.prepare(
-      `DELETE FROM sync_relay_automation_server_unsent_runs
-       WHERE workspace_id = ? AND ((incarnation <> ? AND lost_at_ms IS NULL AND started_at_ms <= ?) OR lost_at_ms <= ?)`,
-    ).run(input.workspaceId, input.incarnation, cutoff, cutoff);
+      "DELETE FROM sync_relay_automation_server_unsent_runs WHERE workspace_id = ? AND lost_at_ms <= ?",
+    ).run(input.workspaceId, cutoff);
     storage.db.prepare(
       `UPDATE sync_relay_automation_server_unsent_runs SET lost_at_ms = ?
        WHERE workspace_id = ? AND incarnation <> ? AND lost_at_ms IS NULL`,
