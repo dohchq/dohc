@@ -2,7 +2,6 @@ import { readFile } from "node:fs/promises";
 import { release } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { APP_COMPILER_TIMEOUT_WORDS } from "../ipc/errorWords";
 import type { ClosedAppBuild, ClosedAppBuildRequest } from "./closedAppCompiler";
 import type { CompilerProcessBounds } from "./compilerProcessSupervisor";
 
@@ -12,7 +11,7 @@ export function appBuildError(error: unknown): unknown {
   const { reason, diagnostics, details } = error as Error & { reason?: string; diagnostics?: string; details?: string };
   if (reason === "cancelled") return error;
   if (reason === "timeout") {
-    const timeout = new Error(APP_COMPILER_TIMEOUT_WORDS);
+    const timeout = new Error("The app took too long to build. Remove files the app does not use, then try again.");
     timeout.name = "AppCompilerTimeoutError";
     return Object.assign(timeout, { details });
   }
