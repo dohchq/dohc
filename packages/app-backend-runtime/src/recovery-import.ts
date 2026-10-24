@@ -105,7 +105,7 @@ async function validateRecovery(options: RecoveryValidationOptions): Promise<Val
     const info = await lstat(file.path);
     if (!info.isFile() || info.size !== file.entry.byteLength || await blobHash({ path: file.path, offset: 0, byteLength: info.size }, authorize) !== file.entry.sha256) return fail("staged entry changed.");
   }
-  const work = await mkdtemp(join(root, "validation-")), index = new DatabaseSync(join(work, "index.sqlite"));
+  const work = await mkdtemp(join(root, "v-")), index = new DatabaseSync(join(work, "index.sqlite"));
   index.exec(`PRAGMA journal_mode=DELETE; PRAGMA temp_store=FILE;
     CREATE TABLE records(revision INTEGER PRIMARY KEY,metadata TEXT NOT NULL,path TEXT NOT NULL,offset INTEGER NOT NULL,length INTEGER NOT NULL);
     CREATE TABLE metadata(seq INTEGER PRIMARY KEY,body TEXT NOT NULL);
@@ -277,7 +277,7 @@ async function validateRecovery(options: RecoveryValidationOptions): Promise<Val
       if (r.kind === "checkpoint") {
         await worker?.close(); worker = undefined;
         if (workerDirectory) await rm(workerDirectory, { recursive: true, force: true });
-        const sandbox = await mkdtemp(join(work, "checkpoint-")), path = join(sandbox, "checkpoint.sqlite");
+        const sandbox = await mkdtemp(join(work, "c-")), path = join(sandbox, "checkpoint.sqlite");
         workerDirectory = sandbox;
         await blobHash(item.blob, authorize, path);
         worker = await openPersistentAppBackend({ directory: sandbox, checkpointPath: path, schemaSql: r.schemaSql,
