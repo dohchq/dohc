@@ -214,7 +214,7 @@ pub fn collect_current_view_cached(
             tx.execute("INSERT INTO replica_cut_collecting SELECT * FROM replica_cut_touched WHERE workspace=?1",[workspace]).map_err(SyncError::corrupt)?;
             tx.execute("DELETE FROM replica_cut_touched WHERE workspace=?1",[workspace]).map_err(SyncError::corrupt)?;
         }
-        if request.known_text_shas.len() % 64 != 0 || !request.known_text_shas.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) { return Err(SyncError::InvalidInput {reason: "invalid known current view text digests"}); }
+        if !request.known_text_shas.len().is_multiple_of(64) || !request.known_text_shas.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) { return Err(SyncError::InvalidInput {reason: "invalid known current view text digests"}); }
         let mut known: BTreeSet<String> = request.known_text_shas.as_bytes().chunks(64).map(|b| String::from_utf8_lossy(b).into_owned()).collect();
         let mut view = ReplicaCurrentView { workspace_id: workspace.into(), revision: frontier.revision,
             log_cursor: frontier.log_cursor, journal_cursor: frontier.journal_cursor, files: vec![], texts: vec![], moved, next_cursor: None, refused_files: vec![], delta:cache.delta, removed:vec![] };

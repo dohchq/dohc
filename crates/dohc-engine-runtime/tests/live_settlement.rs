@@ -3534,7 +3534,7 @@ impl Fixture {
         let mut terminal = None;
         for (index, update) in updates.iter().enumerate() {
             let cursor = after + index + 1;
-            let authority = if cursor % 8 == 0 {
+            let authority = if cursor.is_multiple_of(8) {
                 ServerDerivedLiveUpdateAuthority::Link {
                     principal_id: "link-principal".into(),
                     grant_id: "link-grant".into(),
