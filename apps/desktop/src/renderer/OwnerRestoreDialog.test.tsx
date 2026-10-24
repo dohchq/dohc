@@ -47,9 +47,9 @@ function fixture(pointCursor = 0) {
     return {status, result: {kind: "resumed", proposalDigest, receipt: {}}};
   });
   window.dohcDesktop = {ownerRestore: call} as unknown as typeof window.dohcDesktop;
-  const close = vi.fn(), restored = vi.fn(), release = vi.fn();
-  const props = {workspaceId: "workspace", path: "notes.md", onClose: close, onRestored: restored, onBeforeRestore: vi.fn(async () => release)};
-  return {call, props, close, restored, release, options, intent, status: () => status};
+  const close = vi.fn(), restored = vi.fn(), release = vi.fn(), error = vi.fn();
+  const props = {workspaceId: "workspace", path: "notes.md", onClose: close, onRestored: restored, onBeforeRestore: vi.fn(async () => release), onError: error};
+  return {call, props, close, restored, release, error, options, intent, status: () => status};
 }
 afterEach(() => {cleanup(); delete window.dohcDesktop;});
 async function openStop(point = "0") {
@@ -74,6 +74,27 @@ it("requires separate stop and content confirmations and names every affected re
   await screen.findByText("File restored");
   expect(f.call).toHaveBeenCalledWith({workspaceId: "workspace", action: "confirm", operationId: "restore", proposalDigest});
   expect(f.restored).toHaveBeenCalledTimes(1); expect(f.release).toHaveBeenCalledTimes(1);
+});
+// The relay refuses to start a restore while live editing of the file is still
+// stopping. Nothing changed, so the shell reports why and the choice stays.
+it.each(["plan", "begin"] as const)("reports a refused %s through the shell and keeps the choice on screen", async action => {
+  const f = fixture(), original = f.call.getMockImplementation()!;
+  const refusal = Error("Live editing is still stopping. Try again in a moment.");
+  f.call.mockImplementation(input => input.action === action ? Promise.reject(refusal) : original(input));
+  render(<OwnerRestoreDialog {...f.props} />);
+  if (action === "plan") {
+    await screen.findByRole("combobox", {name: "Access to stop"});
+    fireEvent.change(screen.getByRole("combobox", {name: "Access to stop"}), {target: {value: "grant"}});
+    fireEvent.change(screen.getByRole("combobox", {name: "Shared restore point"}), {target: {value: "0"}});
+    fireEvent.click(screen.getByRole("button", {name: "Review affected access"}));
+  } else {
+    await openStop();
+    fireEvent.click(screen.getByRole("button", {name: "Stop access"}));
+  }
+  await vi.waitFor(() => expect(f.error).toHaveBeenCalledWith("dohc could not start restoring notes.md.", refusal));
+  expect(screen.getByRole("button", {name: action === "plan" ? "Review affected access" : "Stop access"})).toHaveProperty("disabled", false);
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(f.call.mock.calls.some(([input]) => input.action === "prepare" || input.action === "review")).toBe(false);
 });
 it("marks the agent the owner's change declared beside the authenticated owner", async () => {
   const f = fixture(); render(<OwnerRestoreDialog {...f.props} />); await openStop();

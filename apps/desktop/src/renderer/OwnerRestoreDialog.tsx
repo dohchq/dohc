@@ -84,8 +84,10 @@ function Review({review, emails}: {review: OwnerRestoreReview; emails: Emails}) 
   </>;
 }
 
-export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore, onRestored}: {
+export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore, onRestored, onError}: {
   workspaceId: string; path: string; onClose(): void; onBeforeRestore(): Promise<() => void>; onRestored(): void;
+  /** Reports a refused start through the shell. Nothing changed, so the choice stays on screen. */
+  onError(fallback: string, error: unknown): void;
 }) {
   const [state, setState] = useState<State>({kind: "loading"}), [busy, setBusy] = useState(false);
   const [grantId, setGrantId] = useState(""), [point, setPoint] = useState("");
@@ -98,6 +100,9 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
     running.current = true; setBusy(true); const token = request.next();
     try {await work(token);} catch (error) {if (current(token)) setState({kind: "error", message: ipcErrorMessage(error)});}
     finally {if (current(token)) {running.current = false; setBusy(false);}}
+  }
+  async function start(token: number, work: () => Promise<void>) {
+    try {await work();} catch (error) {if (current(token)) onError(`dohc could not start restoring ${path}.`, error);}
   }
   async function load(token: number, beforeCursor?: number, grantCursor?: NonNullable<OwnerRestoreOptions["nextGrantCursor"]>) {
     const options = await bridge().ownerRestore({workspaceId, action: "options", path, ...(beforeCursor === undefined ? {} : {beforeCursor}), ...(grantCursor === undefined ? {} : {grantCursor})});
@@ -195,15 +200,16 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
     {state.kind === "complete" && <p className="text-[13px] text-muted">The file has been restored. Share again when you want to give access.</p>}
     <div className="mt-4 flex justify-end gap-2">
       <SecondaryButton onClick={onClose}>{state.kind === "stop" ? "Cancel" : "Close"}</SecondaryButton>
-      {state.kind === "options" && <PrimaryButton disabled={busy || !grantId || point === ""} onClick={() => void perform(async token => {
+      {state.kind === "options" && <PrimaryButton disabled={busy || !grantId || point === ""} onClick={() => void perform(token => start(token, async () => {
         const selected = state.options.points.find(p => String(p.cursor) === point)!, grant = state.options.grants.find(g => g.grantId === grantId)!;
         const plan = await bridge().ownerRestore({workspaceId, action: "plan", document: state.options.document, shareId: grant.shareId, grantId,
           restorePointCursor: selected.cursor, restorePointReceiptDigest: selected.receiptDigest});
         if (current(token)) setState({kind: "stop", plan});
-      })}>Review affected access</PrimaryButton>}
+      }))}>Review affected access</PrimaryButton>}
       {state.kind === "stop" && <DangerButton disabled={busy} onClick={() => void perform(async token => {
-        const stopped = await bridge().ownerRestore({workspaceId, action: "begin", intent: state.plan.intent});
-        if (!current(token)) return; operation.current = stopped; await review(token);
+        let stopped: OwnerRestoreStatus | undefined;
+        await start(token, async () => {stopped = await bridge().ownerRestore({workspaceId, action: "begin", intent: state.plan.intent});});
+        if (!stopped || !current(token)) return; operation.current = stopped; await review(token);
       })}>Stop access</DangerButton>}
       {state.kind === "review" && <PrimaryButton disabled={busy} onClick={() => void perform(token => confirm(token, state.review.proposalDigest))}>Restore file</PrimaryButton>}
       {(state.kind === "pending" || state.kind === "error") && <PrimaryButton disabled={busy} onClick={() => void perform(token => operation.current ? review(token) : load(token))}>Retry</PrimaryButton>}

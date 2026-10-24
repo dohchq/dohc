@@ -148,6 +148,8 @@ export function EngineMomentDiffPage({
   >({ status: "idle" });
   const [confirmRestoreOpen, setConfirmRestoreOpen] = useState(false);
   const [sharedRestoreOpen, setSharedRestoreOpen] = useState(false);
+  // Try again on a refused shared restore opens the dialog afresh.
+  const [sharedRestoreAttempt, setSharedRestoreAttempt] = useState(0);
   // The forward restore moment to undo against; null = nothing to undo.
   const [undoMomentId, setUndoMomentId] = useState<string | null>(null);
   const pageRef = useRef<HTMLElement | null>(null);
@@ -658,8 +660,15 @@ export function EngineMomentDiffPage({
           </>
         )}
       </div>
-      {sharedRestoreOpen && <OwnerRestoreDialog key={`${workspaceId}:${moment.path}`} workspaceId={workspaceId} path={moment.path}
-        onClose={() => setSharedRestoreOpen(false)} onBeforeRestore={onBeforeRestore} onRestored={onRestored} />}
+      {sharedRestoreOpen && <OwnerRestoreDialog key={`${workspaceId}:${moment.path}:${sharedRestoreAttempt}`} workspaceId={workspaceId} path={moment.path}
+        onClose={() => setSharedRestoreOpen(false)} onBeforeRestore={onBeforeRestore} onRestored={onRestored}
+        onError={(fallback, error) => {
+          const token = liveToken.current;
+          onError(fallback, error, () => {
+            if (token !== liveToken.current) return;
+            setSharedRestoreAttempt(attempt => attempt + 1); setSharedRestoreOpen(true);
+          }, `shared-restore:${moment.path}`, moment.path);
+        }} />}
       {confirmRestoreOpen ? (
         <ConfirmDialog
           title="Restore this file?"

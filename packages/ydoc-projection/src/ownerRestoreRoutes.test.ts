@@ -4,6 +4,7 @@ import {attachLiveJournalHistory, createLiveJournalHistoryAuthority} from "../..
 import type {StorageContext} from "../../../services/sync-relay/src/storage/context.js";
 import {testHandler} from "../../../services/sync-relay/src/testing/index.js";
 import type {OwnerRestoreHost} from "../../../services/sync-relay/src/ownerRestoreRoutes.js";
+import {retireServiceActivation} from "../../../services/sync-relay/src/storage/serviceActivationRetirement.js";
 
 afterEach(cleanupLiveDeliveryFixtures);
 function fixture() {
@@ -128,6 +129,25 @@ it("closes admission before host preparation and preserves the same cut on retry
       expect(f.storage.readStopRestore(lookup)).toEqual(cut);
     }
     expect(f.host.prepareRestore).toHaveBeenCalledTimes(2);
+  } finally {f.close();}
+});
+
+// Proves: while live editing of the document is still stopping, plan and begin
+// answer a retryable conflict that says why, and access stays as it was.
+it("refuses a restore while live editing is still stopping with a conflict that says why", async () => {
+  const f = fixture();
+  try {
+    const plan = await f.plan(), document = f.input.evidence.document;
+    f.write(db => db.prepare(`INSERT INTO sync_relay_service_activations VALUES ('restore-history',?,?,'main',?,?,'{}','{}',?,x'0000','owner','share','{}',1)`)
+      .run(`ordinary-activation-${"d".repeat(64)}`, document.workspaceId, document.objectId, document.lineageClaimId, document.lineageClaimId));
+    const context = f.storage as StorageContext;
+    context.tx(() => retireServiceActivation(context, document));
+    for (const [suffix, body] of [["/plan", f.planInput], ["", {intent: plan.intent}]] as const) {
+      const response = await f.request(suffix, body);
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ok: false, code: "conflict", error: "Live editing is still stopping. Try again in a moment."});
+    }
+    expect(f.storage.getShareGrant("grant")).toMatchObject({status: "active", generation: 4});
   } finally {f.close();}
 });
 

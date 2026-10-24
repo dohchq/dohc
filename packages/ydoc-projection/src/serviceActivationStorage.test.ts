@@ -917,11 +917,11 @@ it.each([['before',false],['after',true]] as const)('refuses to start a restore 
     if(adopted)ownerCapture(f).acknowledge();else f.prepare()
     f.raw.exec("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)")
     expect(()=>f.storage.readStopRestorePlan({document:f.document,ownerUserId:'owner',operationId:'restore',shareId:'share',grantId:'grant',
-      restorePointCursor:0,restorePointReceiptDigest:f.document.lineageClaimId,maxOutputBytes:1_000_000})).toThrow('conflicts with current authority')
+      restorePointCursor:0,restorePointReceiptDigest:f.document.lineageClaimId,maxOutputBytes:1_000_000})).toThrow('Live editing is still starting.')
     const intent:StopRestoreIntent={deliveryKind:adopted?'owner':'bootstrap',operationId:'restore',ownerUserId:'owner',document:f.document,
       shareId:'share',grantId:'grant',expectedGrantGeneration:1,expectedDependentGrantIds:[],expectedFence:1,restorePointCursor:0,
       restorePointReceiptDigest:f.document.lineageClaimId}
-    expect(()=>f.storage.beginStopRestore(intent,40)).toThrow('conflicts with current authority')
+    expect(()=>f.storage.beginStopRestore(intent,40)).toThrow('Live editing is still starting.')
     expect(f.storage.getShareGrant('grant')).toMatchObject({status:'active',generation:1})
     expect(f.raw.prepare('SELECT admission_state,restore_fence_generation AS fence FROM sync_relay_live_documents').get()).toEqual({admission_state:'open',fence:1})
   }finally{f.close()}

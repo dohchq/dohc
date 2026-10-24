@@ -13,6 +13,7 @@ import {
   parseLiveUpdateReceipt, type LiveUpdateReceipt, type LiveDocumentKey,
 } from "@dohc/live-session-contract/live-update-admission";
 import type { StorageContext } from "./context";
+import { relayError } from "../errors";
 import { revokeShareGrantInTransaction } from "./shares";
 import { readCurrentShareGrant } from "./currentShareGrant";
 import { assertWorkspaceQuota } from "./workspaces";
@@ -114,12 +115,18 @@ function owner(storage: StorageContext, workspaceId: string, ownerUserId: string
 // A fence would strand a pending service activation: it can no longer complete,
 // and service restore continues only a completed one.
 function requireNoPendingActivation(storage: StorageContext, document: LiveDocumentKey): void {
-  if (readServiceActivation(storage, document)?.completion_json === null) refuse();
+  if (readServiceActivation(storage, document)?.completion_json === null) throw relayError("conflict", "Live editing is still starting. Try again in a moment.");
 }
 // A fence would move the generation a pending retirement names, so the engine
 // could never release it.
 function requireNoPendingRetirement(storage: StorageContext, document: LiveDocumentKey): void {
-  if (serviceActivationRetirementPending(storage, document)) refuse();
+  if (serviceActivationRetirementPending(storage, document)) throw relayError("conflict", "Live editing is still stopping. Try again in a moment.");
+}
+// The operation row records the revocation it made. Account deletion may purge
+// that grant; its absence ends the same authority for good.
+export function stopRestoreRevocationHolds(storage: StorageContext, operation: StopRestoreOperation): boolean {
+  const grant = storage.getShareGrant(operation.intent.grantId);
+  return !grant || (grant.status === "revoked" && grant.generation === operation.revokedGeneration && grant.revokedAtMs === operation.invalidatedAtMs);
 }
 function requireUnretiredEnrollment(storage: StorageContext, document: LiveDocumentKey): void {
   // Enrollments are main-only and keyed by workspace/object, even after a path moves.
@@ -360,8 +367,8 @@ export function advanceStopRestoreFence(storage: StorageContext, input: { operat
     const saved = read(storage, operationId, workspaceId);
     if (!saved) refuse();
     if (saved.phase !== "authority-invalidated") return saved;
-    const { intent } = saved, grant = storage.getShareGrant(intent.grantId);
-    if (at < saved.invalidatedAtMs || !grant || grant.status !== "revoked" || grant.generation !== saved.revokedGeneration || grant.revokedAtMs !== saved.invalidatedAtMs) refuse();
+    const { intent } = saved;
+    if (at < saved.invalidatedAtMs || !stopRestoreRevocationHolds(storage, saved)) refuse();
     requireAvailableJournalCursor(storage);
     const current = authority(storage,intent);
     if (!current.current || !current.open || !isDeepStrictEqual(basis(storage,intent,current),saved.basis)) refuse();
@@ -391,8 +398,7 @@ export function requireStopRestoreCut(storage: StorageContext, input: StopRestor
   if (!current.current || current.open || current.binding.restoreFenceGeneration !== operation.newFence) refuse();
   const historical = {...current,open: true,binding: {...current.binding,restoreFenceGeneration: operation.oldFence}};
   if (!isDeepStrictEqual(basis(storage,operation.intent,historical),operation.basis)) refuse();
-  const grant = storage.getShareGrant(operation.intent.grantId);
-  if (!grant || grant.status !== "revoked" || grant.generation !== operation.revokedGeneration || grant.revokedAtMs !== operation.invalidatedAtMs) refuse();
+  if (!stopRestoreRevocationHolds(storage, operation)) refuse();
   const raw = storage.db.prepare("SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch FROM sync_relay_live_update_journal WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? ORDER BY journal_cursor DESC LIMIT 1").get(...key(operation.intent.document));
   const terminal = raw ? parseLiveUpdateReceipt({deliveryId: raw.delivery_id,updateDigest: raw.update_digest,journalCursor: raw.journal_cursor,acceptingHostEpoch: raw.accepting_host_epoch}) : null;
   if (!isDeepStrictEqual(terminal,operation.terminal) || (terminal?.journalCursor ?? 0) !== operation.cutoverCursor) refuse();
