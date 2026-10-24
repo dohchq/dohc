@@ -55,6 +55,7 @@ const Run = z.object({
   neverStarted: z.boolean(),
   undone: z.boolean(),
   undoUnfinished: z.boolean(),
+  unsentChangesLost: z.literal(true).optional(),
 });
 const Retry = z.discriminatedUnion("status", [
   z.object({ status: z.literal("queued"), press: z.boolean() }),

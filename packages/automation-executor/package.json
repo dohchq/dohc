@@ -17,6 +17,7 @@
     "./automation-reach": "./src/automationReach.ts",
     "./automation-run-store": "./src/automationRunStore.ts",
     "./automation-scheduler": "./src/automationScheduler.ts",
+    "./automation-step-run": "./src/automationStepRun.ts",
     "./reach-verdicts": "./src/reachVerdicts.ts",
     "./relayed-presses": "./src/relayedPresses.ts",
     "./roster-listing": "./src/rosterListing.ts",

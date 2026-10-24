@@ -141,6 +141,10 @@ export interface CollectionRecordWrites {
 export interface CollectionAutomationRunDependencies {
   /** Local aggregate observer, after the run's durable successful completion. */
   onUsageSuccess?(invocation: import("./automationUsage").AutomationUsageInvocation): void;
+  /** Before each effect this attempt lands. Throwing fails the run before the effect changes anything. */
+  beforeEffect?(run: StoredRun, effect: StoredStep["effects"][number]): void;
+  /** After a run that saved its steps is saved done or failed, so this attempt changes nothing more. */
+  onRunEnded?(run: StoredRun): void;
   /** Sync earlier writes in this workspace's engine before saving run completion. */
   makeDurable(claimId?: string): Promise<void>;
   checkPresser?(): Promise<void>;

@@ -720,6 +720,38 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     automationHostStorage.recordAutomationServerProgress(this, input);
   }
 
+  recordAutomationServerRunChanging(input: Parameters<typeof automationHostStorage.recordAutomationServerRunChanging>[1]) {
+    automationHostStorage.recordAutomationServerRunChanging(this, input);
+  }
+
+  endAutomationServerRun(input: automationHostStorage.AutomationServerRun) {
+    return automationHostStorage.endAutomationServerRun(this, input);
+  }
+
+  endedAutomationServerRuns(input: { workspaceId: string; incarnation: number }) {
+    return this.readTx(() => automationHostStorage.endedAutomationServerRuns(this, input));
+  }
+
+  confirmAutomationServerRunsSent(input: Parameters<typeof automationHostStorage.confirmAutomationServerRunsSent>[1]) {
+    automationHostStorage.confirmAutomationServerRunsSent(this, input);
+  }
+
+  markAutomationServerRunsLost(input: { workspaceId: string; incarnation: number; nowMs: number }) {
+    automationHostStorage.markAutomationServerRunsLost(this, input);
+  }
+
+  lostAutomationServerRuns(input: Parameters<typeof automationHostStorage.lostAutomationServerRuns>[1]) {
+    return this.readTx(() => automationHostStorage.lostAutomationServerRuns(this, input));
+  }
+
+  unreportedLostAutomationServerRuns(input: { workspaceId: string; nowMs: number }) {
+    return this.readTx(() => automationHostStorage.unreportedLostAutomationServerRuns(this, input));
+  }
+
+  reportAutomationServerRunsLost(input: Parameters<typeof automationHostStorage.reportAutomationServerRunsLost>[1]) {
+    automationHostStorage.reportAutomationServerRunsLost(this, input);
+  }
+
   joinAutomationWorkspace(input: { workspaceId: string; nowMs: number }) {
     return automationWorkspaceStorage.joinAutomationWorkspace(this, input);
   }

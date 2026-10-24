@@ -19,6 +19,13 @@ describe("server automation recovery", () => {
     const server = createServerRuns(async () => ({status: 200, body: {ok: true, runs: [run], next: null}, asker: {account: "owner", current: () => true}}));
     await expect(server.runs("ws", "finish")).resolves.toEqual({runs: [run], next: null});
   });
+  it("keeps the mark of a run whose changes the server's lost copy may not have sent", async () => {
+    const run = {claimId: "lost", state: "failed", error: "Your server lost its copy of this workspace and may not have sent this run's latest changes.",
+      createdAtMs: 1, updatedAtMs: 2, trigger: {kind: null, recordId: null, by: null, sharedAuthor: null, depth: 0}, writes: [],
+      definitionChanged: false, chainStopped: false, neverStarted: false, undone: false, undoUnfinished: false, unsentChangesLost: true};
+    const server = createServerRuns(async () => ({status: 200, body: {ok: true, run}, asker: {account: "owner", current: () => true}}));
+    await expect(server.get("ws", "collection:Tasks#pay", "lost")).resolves.toEqual(run);
+  });
   it("preserves the typed controls target when Try again reaches an off automation", async () => {
     const target = { recovery: "automation-controls" as const, automation: "collection:Tasks#slow", path: "Tasks/automations.yaml" };
     const server = createServerRuns(async () => ({ status: 200, body: { ok: true, status: "switched-off", target }, asker: { account: "owner", current: () => true } }));

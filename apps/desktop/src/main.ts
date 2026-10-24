@@ -4955,6 +4955,8 @@ const { startDesktopCliServer } = createDesktopCliServer({
       automationIdAt: async (collectionPath, id) => (await opened()).automationIdAt(collectionPath, id),
       runs: async (automationId, before) => (await opened()).runs(automationId, before),
       run: async (automationId, claimId) => (await opened()).run(automationId, claimId),
+      serverRuns: (automationId, before) => serverRuns.runs(workspace.workspaceId, automationId, before),
+      serverRun: (automationId, claimId) => serverRuns.get(workspace.workspaceId, automationId, claimId),
       retry: (input) => retryAutomationRun({
         notices: noticeStore(),
         installId: localInstallationId(),
