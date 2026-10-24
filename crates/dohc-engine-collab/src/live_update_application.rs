@@ -1301,6 +1301,7 @@ fn require_binding_workspace(
 /// one it leaves for that one's refused seeds, as the fence does. A state it
 /// cannot keep, as one still waiting on a missing dependency, leaves those
 /// copies refused instead of this registration, which that dependency may need.
+/// A storage failure refuses the registration, so the binding stays put.
 fn keep_left_recovery_checkpoints(
     tx: &Transaction<'_>,
     r: &Registration,

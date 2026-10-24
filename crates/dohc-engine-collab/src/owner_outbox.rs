@@ -1493,8 +1493,14 @@ fn applied_cursor_in(
     conn: &Connection,
     binding: &LiveObjectBinding,
 ) -> Result<Option<i64>, OwnerOutboxError> {
-    crate::live_update_application::read_native_applied_cursor_in(conn, binding)
-        .map_err(|_| OwnerOutboxError::ParentMismatch)
+    crate::live_update_application::read_native_applied_cursor_in(conn, binding).map_err(|error| {
+        match error {
+            crate::live_update_application::ApplicationError::Storage(error) => {
+                OwnerOutboxError::Storage(error)
+            }
+            _ => OwnerOutboxError::ParentMismatch,
+        }
+    })
 }
 
 /// The checkpoint a read of this queue names. A frozen lineage's is the
@@ -1677,6 +1683,9 @@ fn build_recovery_checkpoint_in(
     .map_err(|error| match error {
         crate::live_update_application::ApplicationError::AcceptedStateIncomplete => {
             OwnerOutboxError::AcceptedStateIncomplete
+        }
+        crate::live_update_application::ApplicationError::Storage(error) => {
+            OwnerOutboxError::Storage(error)
         }
         _ => OwnerOutboxError::ParentMismatch,
     })?

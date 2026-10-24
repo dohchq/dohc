@@ -19,7 +19,8 @@ pub(crate) fn read_native_accepted_in(
 /// and that cursor, while its document's application registration, live or
 /// not, is still on that lineage and restore generation: accepted history is
 /// durable. Rebuilt record by record under `policy`. An applied update still
-/// waiting on a missing dependency refuses the read as a conflict.
+/// waiting on a missing dependency refuses the read as
+/// [`AcceptedStateIncomplete`](ApplicationError::AcceptedStateIncomplete).
 pub(crate) fn read_native_accepted_cut_in(
     conn: &Connection,
     binding: &LiveObjectBinding,
