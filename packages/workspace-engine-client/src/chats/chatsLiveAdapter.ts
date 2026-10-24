@@ -10,7 +10,7 @@ import type { ChatChannelType, ChatMessageAutomationInput, ChatThreadLane } from
 import {
   CHATS_METHOD,
   decodeChatsResult,
-  type ChatActor,
+  type ChatWriteActor,
   type ChatAgentReadState,
   type ChatAttachment,
   type ChatBookmark,
@@ -211,7 +211,7 @@ export class ChatsLiveAdapter {
     automation?: ChatMessageAutomationInput;
     title?: string;
     lane?: ChatThreadLane;
-    author: ChatActor;
+    author: ChatWriteActor;
     authorOwnerDisplayName?: string;
     authorUserId?: string;
     authorActorKey: string | null;
@@ -343,7 +343,7 @@ export class ChatsLiveAdapter {
     messageId?: string;
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
-    author: ChatActor;
+    author: ChatWriteActor;
     authorOwnerDisplayName?: string;
     authorUserId?: string;
     authorActorKey: string | null;

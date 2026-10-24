@@ -10,6 +10,7 @@ import { notFound, relayError, RelayError } from "./errors";
 import type { createLinkResponseStreams } from "./linkResponseStreams";
 import type { LinkEgressRateLimiter, ValidatedLinkCapability } from "./linkSecurity";
 import { assertSha256, parseCursor, parseLimit, parseLinkLogHold } from "./requestInputs";
+import { authorizeLinkChatAction } from "./shareAuthorization";
 import { targetVersionId } from "./shareFilter";
 import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
@@ -24,8 +25,11 @@ export type LinkReadRoute =
 export function createLinkReadRoutes(
   storage: Pick<
     SyncRelayStorage,
+    | "findChannelCreateKind"
     | "getShare"
+    | "getShareGrant"
     | "getShareLabels"
+    | "workspaceIsOwnedBy"
     | "getEpochLogFloor"
     | "readCurrentFileState"
     | "currentFileBlobByteLength"
@@ -60,6 +64,12 @@ export function createLinkReadRoutes(
   replica?:ReturnType<SyncRelayStorage["createReplicaLinkReadService"]>,
 ) {
   const identity = createReceivedIdentity(linkKey);
+  // A Group link also reads, or with read-write access posts in, the Group's
+  // channel. The share's answer and its files' answer both name it.
+  const linkChannel = (grantId: string) => {
+    const group = authorizeLinkChatAction({ storage, grantId, action: "read" });
+    return group.ok ? { channel: { channelWireId: group.effectiveSelector.channelWireId, access: group.effectiveSelector.access } } : {};
+  };
   return async function respondToLinkRead(
     request: Request,
     route: LinkReadRoute,
@@ -96,6 +106,7 @@ export function createLinkReadRoutes(
         effectiveSelector: presentation.selector,
         access: fresh.access,
         subjectName: storage.getShareLabels(fresh.shareId).subjectName,
+        ...linkChannel(fresh.grantId),
         ...freshness,
       });
     }
@@ -105,7 +116,7 @@ export function createLinkReadRoutes(
         const body=replica.inventory({grantId:capability.grantId,generation:capability.generation},
           ()=>requireFreshLinkRead(capabilityToken,capability),new URL(request.url).searchParams.get("collectionPath"));
         if(body.files.length>linkCurrentFileLimit)throw notFound();
-        return linkJsonResponse(capability.shareId,capability.grantId,body);
+        return linkJsonResponse(capability.shareId,capability.grantId,{...body,...linkChannel(capability.grantId)});
       }
       const snapshot = storage.readCurrentFileState({
         workspaceId: share.workspaceId,
@@ -144,6 +155,7 @@ export function createLinkReadRoutes(
         effectiveSelector: presentation.selector,
         access: fresh.access,
         subjectName: storage.getShareLabels(fresh.shareId).subjectName,
+        ...linkChannel(fresh.grantId),
         files,
         nextCursor: snapshot.nextCursor,
         epochLogFloor: snapshot.epochLogFloor,

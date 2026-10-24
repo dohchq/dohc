@@ -206,6 +206,25 @@ it("validates nullable desktop authors and oversized-body markers from the relay
   expect(await read.json()).toMatchObject({messages: [{messageId: "next", body: "readable", bodyTooLarge: false}], nextCursor: 5});
 });
 
+it("passes a link holder's post through as a link post with no account, and refuses one that names an account", async () => {
+  const f = await fixture();
+  const payload = {messageId: "link-message:1", threadId: "thread", body: "From a link", authorKind: "link",
+    authorDisplayName: "Sam", linkGrantId: "grant-link", linkPrincipalId: "principal", createdAtMs: 5};
+  f.storage.appendLogBatch({workspaceId: "workspace", originId: "relay:share-link:principal",
+    ops: [{originSeq: 0, opKind: "chat.message.append", payloadJson: JSON.stringify(payload), recordedAtMs: 5}]});
+  const read = await f.web.handle(request());
+  expect(read.status).toBe(200);
+  expect((await read.json()).messages[0]).toEqual({relaySeq: expect.any(Number), messageId: "link-message:1", threadId: "thread",
+    authorUserId: null, authorDisplayName: "Sam", authorKind: "link", authorOwnerDisplayName: null, createdAtMs: 5,
+    body: "From a link", bodyTooLarge: false});
+
+  const forged = {relaySeq: 9, messageId: "m", threadId: "t", authorUserId: "alice", authorDisplayName: "Sam", authorKind: "link",
+    authorOwnerDisplayName: null, createdAtMs: 5, body: "x", bodyTooLarge: false};
+  const web = createNamedRecipientChatClient({relayUrl: "http://relay.test", publicOrigin: origin, exchangeKey, limits,
+    fetchRelay: async () => Response.json({shareId: "share", channelWireId: "wire", messages: [forged], nextCursor: 9, olderCursor: null})});
+  expect((await web(request())).status).toBe(404);
+});
+
 it("isolates a full account follow pool from another account's lists, history and posts", async () => {
   const f = await fixture();
   f.storage.createShare({share: {shareId: "bob-share", workspaceId: "workspace", granterUserId: "owner", createdAtMs: 1,

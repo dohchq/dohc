@@ -31,6 +31,8 @@ export const DISCUSSION_MESSAGE_RATE_WINDOW_MS = 60_000;
 export const DISCUSSION_LIFETIME_MESSAGE_LIMIT = 500;
 export const DISCUSSION_NON_OWNER_SHARE_ROW_LIMIT = 5_000;
 export const LINK_DISCUSSION_PAGE_LIMIT = 100;
+// Every desktop refuses a longer link post on replay.
+export const LINK_CHAT_BODY_BYTE_LIMIT = 8_000;
 // Share creation accepts account ids up to 256 characters. Reserve the
 // four-byte UTF-8 worst case so a later owner tombstone never grows quota.
 export const LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT = 1_024;

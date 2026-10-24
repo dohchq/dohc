@@ -17,7 +17,7 @@ import { Ref } from "../ui/Ref";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { formatChatTime, formatClockDigits, formatShortTime } from "../time";
 import { CopyButton } from "../ui/CopyButton";
-import { AgentName, ChatAvatar } from "./ChatAvatar";
+import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
 import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
 import {
   MentionText,
@@ -565,6 +565,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               </AgentName>
             </span>
             {isAgent && !continues ? <AgentBadge testIdPrefix="chats-comment" author={comment} viewerAuthorId={reactionControls.viewerAuthorId} presentation={comment.presentation} /> : null}
+            {comment.authorKind === "link" ? <LinkHolderMark testId="chats-comment-link-holder" /> : null}
             {comment.authorKind === "automation" && !continues ? (
               <AutomationBadge
                 testIdPrefix="chats-comment"
@@ -735,6 +736,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               </AgentName>
             </span>
             {openingIsAgent ? <AgentBadge testIdPrefix="chats-message" author={openingMessage} viewerAuthorId={reactionControls.viewerAuthorId} presentation={openingMessage.presentation} /> : null}
+            {openingMessage.authorKind === "link" ? <LinkHolderMark testId="chats-message-link-holder" /> : null}
             {openingMessage.authorKind === "automation" ? (
               <AutomationBadge
                 testIdPrefix="chats-message"
