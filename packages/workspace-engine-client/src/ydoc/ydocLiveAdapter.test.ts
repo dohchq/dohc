@@ -1399,6 +1399,57 @@ describe("YdocLiveAdapter", () => {
     adapter.dispose();
   });
 
+  // The state before an edit is encoded only when the note already holds a
+  // U+FFFD. One that arrives remotely between two local edits must count.
+  it("counts a remote U+FFFD that lands between two local edits", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    await session.applyLocalTextEdit({ root: "plainText", index: 0, insert: "a" });
+    session.doc.transact(() => {
+      session.doc.getText("plainText").insert(1, "\uFFFD");
+    }, ENGINE_DELIVERED_ORIGIN);
+
+    await session.applyLocalTextEdit({ root: "plainText", index: 0, insert: "b" });
+    expect(session.doc.getText("plainText").toString()).toBe("ba\uFFFD");
+    expect(engine.recordedUpdates).toHaveLength(2);
+
+    await session.close({ settle: true });
+    adapter.dispose();
+  });
+
+  it("rejects a masked split after a remote U+FFFD lands between local edits", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    await session.applyLocalTextEdit({ root: "plainText", index: 0, insert: "a" });
+    session.doc.transact(() => {
+      session.doc.getText("plainText").insert(0, "\uFFFD\uFFFD😀");
+    }, ENGINE_DELIVERED_ORIGIN);
+
+    expect(() =>
+      session.applyLocalEdit((doc) => {
+        const text = doc.getText("plainText");
+        text.delete(0, 2);
+        text.insert(1, "x");
+      }),
+    ).toThrow(IllFormedUtf16EditError);
+    expect(engine.recordedUpdates).toHaveLength(1);
+
+    await session.close({ settle: true });
+    adapter.dispose();
+  });
+
   it("catches an opaque surrogate split with the net-new replacement backstop", async () => {
     const engine = seedPlaintextEngine();
     const adapter = new YdocLiveAdapter(engine);

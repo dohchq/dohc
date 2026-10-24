@@ -4,7 +4,6 @@ import type { MenuItemConstructorOptions } from "electron";
 import type { DesktopUserSettingsResult } from "../settings/userSettings";
 import type { ChatDispatchService } from "../agents/chatDispatchService";
 import {
-  applyDesktopIconToPlatform,
   resolveDesktopIconDirectory,
   resolveSystemThemeIconPath,
 } from "../systemThemeIcon";
@@ -34,7 +33,6 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   nativeImage: { createFromPath(path: string): Image };
   nativeTheme: { readonly shouldUseDarkColors: boolean };
   Tray: new (image: Image) => DesktopTrayInstance<Image, Menu>;
-  BrowserWindow: { getAllWindows(): Array<{ setIcon(path: string): void }> };
   readCachedUserSettingsFile(directory: string): Promise<DesktopUserSettingsResult>;
   stateDir(): string;
   chatDispatchService: Pick<ChatDispatchService, "isPaused" | "setPaused">;
@@ -44,7 +42,7 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   readonly appLifecycle: { isQuitting(): boolean };
 }) {
   const {
-    app, process, Menu, nativeImage, nativeTheme, Tray, BrowserWindow,
+    app, process, Menu, nativeImage, nativeTheme, Tray,
     readCachedUserSettingsFile, stateDir, chatDispatchService, showOrCreateMainWindow,
   } = dependencies;
 
@@ -140,15 +138,7 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
     rebuildDispatchTrayMenu();
   }
 
-  function refreshSystemThemeDesktopIcons(): void {
-    const iconPath = currentDesktopIconPath();
-    if (iconPath) {
-      applyDesktopIconToPlatform({
-        platform: process.platform,
-        iconPath,
-        windows: BrowserWindow.getAllWindows(),
-      });
-    }
+  function refreshTrayIcon(): void {
     if (dispatchTray) dispatchTray.setImage(dispatchTrayIcon());
   }
 
@@ -171,5 +161,5 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   /** Whether agent dispatch keeps dohc running, as the last refresh read it. */
   const dispatchKeepsRunning = () => dispatchEnabled;
 
-  return { refreshDispatchTray, refreshSystemThemeDesktopIcons, dispatchKeepsRunning };
+  return { refreshDispatchTray, refreshTrayIcon, dispatchKeepsRunning };
 }

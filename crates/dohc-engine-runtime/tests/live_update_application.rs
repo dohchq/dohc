@@ -815,6 +815,10 @@ async fn restore_preparation_reservation_survives_cancellation_and_owner_retirem
     let input = NativeRestorePreparation {
         fence: NativeRestoreFenceReceipt {
             operation: NativeRestoreFence {
+                point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+                    journal_cursor: 0,
+                    receipt_digest: binding("one").lineage_claim_id.clone(),
+                },
                 operation_id: "restore".into(),
                 relay_database_namespace: "relay-A".into(),
                 old_binding: binding("one"),

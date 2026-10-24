@@ -126,6 +126,7 @@ export function parseNativeRestoreProposalReceipt(json: string, budget: RestoreP
     "selectedHistory", "acceptedHistory", "nativeSources", "nativeSourceManifestDigest"]);
   const fence = parseNativeRestoreFenceReceipt(row.fence);
   const point = configRecord(row.point, ["journalCursor", "receiptDigest", "markdownDigest", "projectionDigest"]);
+  require(point.journalCursor === fence.operation.point.journalCursor && point.receiptDigest === fence.operation.point.receiptDigest);
   const vector = (value: unknown) => array(value, budget.maxBytes, v => {const n = integer(v);require(n <= 255);return n;});
   const selectedHistory = historyProof(row.selectedHistory, fence.operation.relayDatabaseNamespace, budget.maxEvents);
   const acceptedHistory = historyProof(row.acceptedHistory, fence.operation.relayDatabaseNamespace, budget.maxEvents - selectedHistory.suffix.length);

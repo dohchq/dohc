@@ -1405,6 +1405,12 @@ describe("RecoveryCloseGuard with pending collection writes", () => {
       (event: EngineYDocSaveStateEvent) => void
     >();
     stubBridge({
+      // A field write checks its record's file before the session opens.
+      readWorkspaceText: vi.fn(async (payload: { relativePath: string }) => ({
+        text: `---\nid: ${payload.relativePath === "tasks/one.md" ? "rec-1" : "rec-2"}\n---\n`,
+        truncated: false,
+        contentHash: payload.relativePath === "tasks/one.md" ? "1".repeat(64) : "2".repeat(64),
+      })),
       openEngineYDocSession: vi.fn(
         async (payload: { path: string; sessionId: string }) => {
           sessionsByPath.set(payload.path, payload.sessionId);

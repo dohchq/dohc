@@ -197,7 +197,7 @@ const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
 
 /** The run store's folder, always this one: the replica made it beside its workspace. */
 function storeFolderOf(dir: string): AutomationStoreFolder {
-  return { forWrite: async () => dir, forRead: async () => dir };
+  return { forWrite: async () => dir, read: (work) => work(dir) };
 }
 
 export async function startAutomationServer(options: AutomationServerOptions) {

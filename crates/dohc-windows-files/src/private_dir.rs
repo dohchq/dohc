@@ -19,8 +19,9 @@ use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION,
     GetAce, GetSecurityDescriptorControl, GetSecurityDescriptorDacl, GetTokenInformation,
     INHERIT_ONLY_ACE, INHERITED_ACE, InitializeAcl, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, TOKEN_QUERY,
-    TOKEN_USER, TokenUser, UNPROTECTED_DACL_SECURITY_INFORMATION,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES,
+    SetKernelObjectSecurity, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    UNPROTECTED_DACL_SECURITY_INFORMATION,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateDirectoryW, FILE_ALL_ACCESS, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
@@ -56,6 +57,10 @@ pub enum NotPrivateReason {
     /// Another account owns the item, or something in the folder, or this
     /// user can't open it or change its DACL.
     OtherOwner,
+    /// This user, Administrators or SYSTEM owns the folder, but this user
+    /// can't open it with what dohc needs, such as changing its DACL, as when
+    /// Administrators own it and give this user Modify.
+    NotChangeable,
 }
 
 impl NotPrivateReason {
@@ -65,6 +70,7 @@ impl NotPrivateReason {
             NotPrivateReason::Link => "link",
             NotPrivateReason::NotFolder => "not-folder",
             NotPrivateReason::OtherOwner => "other-owner",
+            NotPrivateReason::NotChangeable => "not-changeable",
         }
     }
 }
@@ -84,6 +90,7 @@ impl std::fmt::Display for NotPrivate {
             NotPrivateReason::Link => "is a link",
             NotPrivateReason::NotFolder => "is not a folder",
             NotPrivateReason::OtherOwner => "belongs to another user",
+            NotPrivateReason::NotChangeable => "has permissions dohc can't use",
         };
         write!(f, "{} {what}, so dohc can't keep it private", self.path)
     }
@@ -111,6 +118,11 @@ pub fn not_private(err: &io::Error) -> Option<&NotPrivate> {
 /// since an owner can always read an item and change its DACL. Only this
 /// user, Administrators and SYSTEM may own the folders and what is in them.
 ///
+/// Each folder on the way to it, such as `.dohc`, gets the same DACL on
+/// itself alone, and nothing in it changes: an item already in it keeps its
+/// own entries. With that DACL, no other account may add anything to the
+/// folder on the way.
+///
 /// After the folder's DACL changes, everything in it is checked. An item
 /// with entries of its own, or a protected DACL, is given only what the
 /// folder gives it, as is one Windows left as it was. An item another
@@ -123,8 +135,12 @@ pub fn not_private(err: &io::Error) -> Option<&NotPrivate> {
 /// reports DACLs but can't read or set one, and on a network share, whose
 /// server keeps the DACL and may not know this computer's accounts, folders
 /// are created and taken as they are.
-pub fn ensure_private_dir(base: &Path, relative: &Path) -> io::Result<()> {
-    make_private_dir(base, relative, &System::REAL).map(drop)
+///
+/// Returns the folder, held open without sharing it for removal, so the
+/// caller keeps using the folder it checked, and the folders above it stay
+/// where they are.
+pub fn ensure_private_dir(base: &Path, relative: &Path) -> io::Result<File> {
+    make_private_dir(base, relative, &System::REAL).map(|(folder, _)| folder)
 }
 
 /// What [`make_private_dir`] asks of the system, which tests stand in for.
@@ -162,9 +178,9 @@ enum Call {
     Change,
 }
 
-/// [`ensure_private_dir`], returning whether it checked everything in the
-/// folder.
-fn make_private_dir(base: &Path, relative: &Path, system: &System) -> io::Result<bool> {
+/// [`ensure_private_dir`], returning too whether it checked everything in
+/// the folder.
+fn make_private_dir(base: &Path, relative: &Path, system: &System) -> io::Result<(File, bool)> {
     let mut names = Vec::new();
     for part in relative.components() {
         match part {
@@ -180,27 +196,40 @@ fn make_private_dir(base: &Path, relative: &Path, system: &System) -> io::Result
     let mut held = HeldFolders::in_base(base);
     let mut security = None;
     for (index, name) in names.iter().enumerate() {
-        let folder = held.take(name, private, index + 1 == names.len())?;
+        let last = index + 1 == names.len();
+        let folder = held.take(name, private, system)?;
         if let Some(owners) = private {
             match Security::read(folder, system) {
                 Err(err) if unsupported(&err) => private = None,
                 read => {
                     let read = read?;
                     owners.check_owner(&read, &held.path, &held.shown, system)?;
+                    if !last && !owners.is_private_folder(&read)? {
+                        let folder = held.folders.last().ok_or(io::ErrorKind::InvalidInput)?;
+                        match set_own_dacl(folder, owners, system) {
+                            Err(err) if unsupported(&err) => {
+                                private = None;
+                                continue;
+                            }
+                            set => set.map_err(denied_as(&held.shown))?,
+                        }
+                    }
                     security = Some(read);
                 }
             }
         }
     }
-    let (path, shown) = (&held.path, &held.shown);
-    let (Some(private), Some(folder), Some(security)) = (private, held.last(), security) else {
-        return Ok(false);
+    // The folders above stay held until this returns the last one.
+    let (path, shown) = (held.path.clone(), held.shown.clone());
+    let folder = held.folders.pop().ok_or(io::ErrorKind::InvalidInput)?;
+    let (Some(private), Some(security)) = (private, security) else {
+        return Ok((folder, false));
     };
     let records = Records::open(private, system);
-    let record = records.as_ref().and_then(|records| records.of(folder));
+    let record = records.as_ref().and_then(|records| records.of(&folder));
     let folder_private = private.is_private_folder(&security)?;
     if folder_private && record.as_ref().is_some_and(|record| record.exists()) {
-        return Ok(false);
+        return Ok((folder, false));
     }
     // A change that stops before every item is checked leaves no record.
     if let Some(record) = &record {
@@ -211,20 +240,20 @@ fn make_private_dir(base: &Path, relative: &Path, system: &System) -> io::Result
     }
     if !folder_private {
         let protected = PROTECTED_DACL_SECURITY_INFORMATION;
-        match set_security(folder, protected, private.dacl()?, system) {
-            Err(err) if unsupported(&err) => return Ok(false),
-            set => set.map_err(denied_as(shown))?,
+        match set_security(&folder, protected, private.dacl()?, system) {
+            Err(err) if unsupported(&err) => return Ok((folder, false)),
+            set => set.map_err(denied_as(&shown))?,
         }
     }
     // Only this user, Administrators and SYSTEM can add an item from here
     // on, so the check sees everything Windows passed over.
-    check_items(path, shown, private, system)?;
+    check_items(&path, &shown, private, system)?;
     // Without its record, the next open checks everything again.
     if let (Some(records), Some(record)) = (&records, &record) {
         let _ = File::create(record);
         records.prune();
     }
-    Ok(true)
+    Ok((folder, true))
 }
 
 /// Folders taken one inside another from a base, each without following a
@@ -251,7 +280,7 @@ impl HeldFolders {
         &mut self,
         name: &OsStr,
         private: Option<&PrivateDescriptor>,
-        last: bool,
+        system: &System,
     ) -> io::Result<&File> {
         self.path.push(name);
         if !self.shown.is_empty() {
@@ -259,12 +288,8 @@ impl HeldFolders {
         }
         self.shown.push_str(&name.to_string_lossy());
         self.folders
-            .push(take_folder(&self.path, &self.shown, private, last)?);
+            .push(take_folder(&self.path, &self.shown, private, system)?);
         Ok(&self.folders[self.folders.len() - 1])
-    }
-
-    fn last(&self) -> Option<&File> {
-        self.folders.last()
     }
 }
 
@@ -302,11 +327,12 @@ impl Records {
         let mut held = HeldFolders::in_base(&base);
         // `private` is created on the volume `dohc` is on, since a mount point
         // at it is a link.
-        let dohc = held.take("dohc".as_ref(), Some(private), false).ok()?;
+        // Only `private` is read and changed, so `dohc` is only held.
+        let dohc = held.take("dohc".as_ref(), None, system).ok()?;
         if !keeps_dacl(dohc).ok()? {
             return None;
         }
-        let folder = held.take("private".as_ref(), Some(private), true).ok()?;
+        let folder = held.take("private".as_ref(), Some(private), system).ok()?;
         let security = Security::read(folder, system).ok()?;
         private
             .check_owner(&security, &held.path, "", system)
@@ -422,23 +448,24 @@ fn open_folder(path: &Path, shown: &str, access: u32) -> io::Result<File> {
 }
 
 /// Open the folder at `path`, named `shown`, and hold it where it is. When
-/// nothing is there, create it, with `private`'s DACL if it
-/// is the `last`. With `private`, also open it to read its owner and DACL,
-/// and the last to change its DACL.
+/// nothing is there, create it, with `private`'s DACL if
+/// given. With `private`, also open it to read its owner and change its DACL.
+/// One that can't be opened so is refused as another account's, unless one
+/// of [`PrivateDescriptor::sids`] owns it, when it is refused as one whose
+/// DACL dohc can't change.
 fn take_folder(
     path: &Path,
     shown: &str,
     private: Option<&PrivateDescriptor>,
-    last: bool,
+    system: &System,
 ) -> io::Result<File> {
-    let access = match (private, last) {
-        (None, _) => HOLD,
-        (Some(_), false) => HOLD | READ_CONTROL,
-        (Some(_), true) => HOLD | READ_CONTROL | WRITE_DAC,
+    let access = match private {
+        None => HOLD,
+        Some(_) => HOLD | READ_CONTROL | WRITE_DAC,
     };
     match open_folder(path, shown, access) {
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            create_dir(path, private.filter(|_| last))?;
+            create_dir(path, private)?;
             open_folder(path, shown, access)
         }
         // This computer's accounts may have no access at all to a folder
@@ -446,7 +473,21 @@ fn take_folder(
         // itself first.
         Err(err) if denied(&err) => {
             open_folder(path, shown, FILE_READ_ATTRIBUTES).map_err(denied_as(shown))?;
-            Err(refused(shown, NotPrivateReason::OtherOwner))
+            // One of this user's own may still be closed to its DACL.
+            let ours = private.is_some_and(|private| {
+                open_folder(path, shown, READ_CONTROL)
+                    .and_then(|folder| Security::read(&folder, system))
+                    .and_then(|security| private.check_owner(&security, path, shown, system))
+                    .is_ok()
+            });
+            Err(refused(
+                shown,
+                if ours {
+                    NotPrivateReason::NotChangeable
+                } else {
+                    NotPrivateReason::OtherOwner
+                },
+            ))
         }
         folder => folder,
     }
@@ -635,6 +676,31 @@ fn set_security(item: &File, flags: u32, dacl: &ACL, system: &System) -> io::Res
     match status {
         0 => Ok(()),
         status => Err(io::Error::from_raw_os_error(status as i32)),
+    }
+}
+
+/// Give `folder` the private DACL, protected, on itself alone: unlike
+/// [`set_security`], this leaves what is in it as it is.
+fn set_own_dacl(folder: &File, private: &PrivateDescriptor, system: &System) -> io::Result<()> {
+    system.fails(Call::Change)?;
+    let flags = DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION;
+    // SAFETY: The handle is open and the descriptor valid for this
+    // synchronous call, which copies what it needs.
+    #[allow(unsafe_code)]
+    let set = unsafe {
+        SetKernelObjectSecurity(
+            folder.as_raw_handle() as HANDLE,
+            flags,
+            private.descriptor.0,
+        )
+    };
+    if set == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if private.is_private_folder(&Security::read(folder, system)?)? {
+        Ok(())
+    } else {
+        Err(io::Error::other("a folder on the way kept other entries"))
     }
 }
 
@@ -889,16 +955,27 @@ mod tests {
     use dohc_test_scratch::ScratchDir;
     use std::ffi::OsStr;
     use std::path::PathBuf;
-    use windows_sys::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertStringSidToSidW,
+        GetEffectiveRightsFromAclW, NO_MULTIPLE_TRUSTEE, TRUSTEE_IS_SID,
+        TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
+    };
     use windows_sys::Win32::Security::SetFileSecurityW;
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_BASIC_INFO, FILE_DELETE_CHILD, FileBasicInfo,
+    };
 
     const ENGINE: &str = ".dohc/engine";
 
     /// Users, the stand-in for another account as an owner.
     const USERS: &str = "S-1-5-32-545";
 
+    /// Authenticated Users, a stand-in for another account in permission
+    /// tests.
+    const AUTHENTICATED_USERS: &str = "S-1-5-11";
+
     fn open_engine(root: &Path, system: &System) -> io::Result<bool> {
-        make_private_dir(root, Path::new(ENGINE), system)
+        make_private_dir(root, Path::new(ENGINE), system).map(|(_, checked)| checked)
     }
 
     /// A workspace root whose test DACL grants Users read access.
@@ -1076,9 +1153,111 @@ mod tests {
         assert_eq!(sddl(&engine), folder);
         assert_eq!(sddl(&engine.join("displaced")), inner_folder);
         assert_eq!(sddl(&engine.join("engine.db")), file);
-        // `.dohc` itself keeps what the root gives it.
-        assert!(sddl(&root.join(".dohc")).contains(";;;BU)"));
+        // `.dohc` is made private as it is created too.
+        assert_eq!(sddl(&root.join(".dohc")), folder);
         assert!(!open_engine(&root, &real).expect("reopen"));
+    }
+
+    /// The rights the DACL of the item at `path` gives the account `sid`.
+    fn rights_of(path: &Path, sid: &str) -> u32 {
+        let item = open(path, READ_CONTROL, FILE_FLAG_OPEN_REPARSE_POINT).expect("item");
+        let security = Security::read(&item, &System::REAL).expect("security");
+        let sid: Vec<u16> = sid.encode_utf16().chain([0]).collect();
+        let (mut account, mut rights) = (std::ptr::null_mut(), 0);
+        // SAFETY: Each call is synchronous. The SID string ends with a null,
+        // the SID Windows returns is freed once, by `Local`, after its last
+        // use, and the DACL lies in the descriptor `security` keeps alive.
+        #[allow(unsafe_code)]
+        unsafe {
+            assert_ne!(ConvertStringSidToSidW(sid.as_ptr(), &mut account), 0);
+            let account = Local(account);
+            let trustee = TRUSTEE_W {
+                pMultipleTrustee: std::ptr::null_mut(),
+                MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+                TrusteeForm: TRUSTEE_IS_SID,
+                TrusteeType: TRUSTEE_IS_WELL_KNOWN_GROUP,
+                ptstrName: account.0.cast(),
+            };
+            assert_eq!(
+                GetEffectiveRightsFromAclW(security.dacl, &trustee, &mut rights),
+                0
+            );
+        }
+        rights
+    }
+
+    /// When the item at `path` last changed, its DACL included.
+    fn change_time(path: &Path) -> i64 {
+        let item = open(path, FILE_READ_ATTRIBUTES, FILE_FLAG_OPEN_REPARSE_POINT).expect("item");
+        let mut info = FILE_BASIC_INFO::default();
+        // SAFETY: The handle is open and the output is writable for this
+        // synchronous call, which retains neither.
+        #[allow(unsafe_code)]
+        let read = unsafe {
+            GetFileInformationByHandleEx(
+                item.as_raw_handle() as HANDLE,
+                FileBasicInfo,
+                std::ptr::from_mut(&mut info).cast(),
+                size_of::<FILE_BASIC_INFO>() as u32,
+            )
+        };
+        assert_ne!(read, 0);
+        info.ChangeTime
+    }
+
+    /// An open restricts the DACLs of `.dohc`, `.dohc\engine` and
+    /// `.dohc\local`, keeps the entries of what else is in `.dohc`, and
+    /// changes nothing on a later open.
+    #[test]
+    fn an_open_closes_dohc_and_its_private_folders_to_other_accounts() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let real = system(&scratch);
+        let root = scratch.join("root");
+        std::fs::create_dir(&root).expect("root");
+        icacls(&root, &["/grant", "*S-1-5-11:(OI)(CI)M"]);
+        let dohc = root.join(".dohc");
+        let synced = dohc.join("databases").join("ops.jsonl");
+        std::fs::create_dir_all(synced.parent().expect("databases")).expect("folders");
+        std::fs::write(&synced, b"{}").expect("file");
+        assert_ne!(rights_of(&dohc, AUTHENTICATED_USERS) & DELETE, 0);
+
+        let open = |relative: &str| {
+            drop(make_private_dir(&root, Path::new(relative), &real).expect("open"))
+        };
+        open(ENGINE);
+        open(".dohc/local");
+        for account in [USERS, AUTHENTICATED_USERS] {
+            assert_eq!(
+                rights_of(&dohc, account) & (DELETE | FILE_DELETE_CHILD),
+                0,
+                "{account}"
+            );
+            for folder in ["engine", "local"] {
+                assert_eq!(
+                    rights_of(&dohc.join(folder), account) & DELETE,
+                    0,
+                    "{account} {folder}"
+                );
+            }
+        }
+        assert_eq!(sddl(&dohc), private_sddl());
+        // A file `.dohc` keeps for every computer kept the entries it had.
+        assert!(
+            sddl(&synced).contains("(A;ID;0x1301bf;;;AU)"),
+            "{}",
+            sddl(&synced)
+        );
+
+        let items = [
+            dohc.clone(),
+            dohc.join("engine"),
+            dohc.join("local"),
+            synced,
+        ];
+        let changed = items.clone().map(|item| change_time(&item));
+        open(ENGINE);
+        open(".dohc/local");
+        assert_eq!(items.map(|item| change_time(&item)), changed);
     }
 
     /// An older workspace's folder, and everything already in it, loses the
@@ -1172,12 +1351,15 @@ mod tests {
         let real = system(&scratch);
         let (root, engine) = older_workspace(&scratch, "root");
         assert!(open_engine(&root, &real).expect("open"));
+        // Made where Users may read, as `.dohc` no longer lets them.
+        let swapped = root.join("swapped");
+        std::fs::create_dir(&swapped).expect("swapped");
+        std::fs::write(swapped.join("engine.db"), b"history").expect("file");
+        set_folder_dacl(&swapped, &private_sddl());
+        std::fs::write(swapped.join("PRIVATE"), b"").expect("planted");
         std::fs::rename(&engine, root.join(".dohc").join("before")).expect("aside");
-        std::fs::create_dir(&engine).expect("swapped in");
+        std::fs::rename(&swapped, &engine).expect("swapped in");
         let db = engine.join("engine.db");
-        std::fs::write(&db, b"history").expect("file");
-        set_folder_dacl(&engine, &private_sddl());
-        std::fs::write(engine.join("PRIVATE"), b"").expect("planted");
         assert!(sddl(&db).contains("(A;ID;FR;;;BU)"));
         let checked = open_engine(&root, &real).expect("reopen");
         assert_eq!(sddl(&db), private_dacls(false)[2]);
@@ -1436,9 +1618,65 @@ mod tests {
             );
             assert!(!record(&real, &engine).exists(), "{name}");
         }
+        // A folder dohc creates is private as it is made, so the engine folder
+        // takes what `.dohc` gives it, though nothing is checked.
         let fresh = shared_root(&scratch, "fresh");
         assert!(!open_engine(&fresh, &cant_read).expect("create"));
-        assert!(sddl(&fresh.join(ENGINE)).contains("(A;OICIID;FR;;;BU)"));
+        assert_eq!(sddl(&fresh.join(".dohc")), private_dacls(true)[0]);
+        assert!(!sddl(&fresh.join(ENGINE)).contains(";;;BU)"));
+    }
+
+    /// A `.dohc` that Administrators own and let this user change what is in,
+    /// but not its DACL, is refused for that, not as another user's, and
+    /// nothing is made in it.
+    #[test]
+    fn a_folder_on_the_way_whose_dacl_this_user_cannot_change_is_refused_for_that() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let root = shared_root(&scratch, "root");
+        let dohc = root.join(".dohc");
+        std::fs::create_dir(&dohc).expect("dohc");
+        let user = current_user().expect("user");
+        // An OWNER RIGHTS entry takes the place of what an owner may always
+        // do, so this user, its real owner, may change what is in it but not
+        // its DACL.
+        let modify = "0x1301bf";
+        set_folder_dacl(
+            &dohc,
+            &format!(
+                "D:P(A;OICI;{modify};;;{user})(A;;{modify};;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+            ),
+        );
+        let administrators_own = System {
+            owner_of: |path| path.ends_with(".dohc").then_some(ADMINISTRATORS),
+            ..system(&scratch)
+        };
+        assert_eq!(
+            refusal(open_engine(&root, &administrators_own)),
+            (".dohc".into(), NotPrivateReason::NotChangeable)
+        );
+        assert!(!dohc.join("engine").exists());
+        let refused = NotPrivate {
+            path: ".dohc".into(),
+            reason: NotPrivateReason::NotChangeable,
+        };
+        assert_eq!(
+            refused.to_string(),
+            ".dohc has permissions dohc can't use, so dohc can't keep it private"
+        );
+    }
+
+    /// While the caller holds the folder, it and the folders above it stay
+    /// where they are.
+    #[test]
+    fn the_folder_stays_in_place_while_it_is_held() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let (root, engine) = older_workspace(&scratch, "root");
+        let aside = root.join(".dohc").join("aside");
+        let (held, _) =
+            make_private_dir(&root, Path::new(ENGINE), &system(&scratch)).expect("open");
+        assert!(std::fs::rename(&engine, &aside).is_err());
+        drop(held);
+        std::fs::rename(&engine, &aside).expect("rename once released");
     }
 
     /// A link at `.dohc` or at the folder is refused before anything is made

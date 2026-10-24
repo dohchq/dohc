@@ -27,8 +27,8 @@ import {
 } from "./workspaceAssets";
 import {
   localStateFolder,
-  ownedLocalStateDir,
   ownedSqliteFiles,
+  readOwnedLocalState,
   type LocalStateWorkspace,
 } from "./workspaceLocalState";
 import type { OwnedWorkspaceDatabaseReader } from "./ownedWorkspaceFileReader";
@@ -281,7 +281,7 @@ export async function importToDatabase(
 async function operationCounterPath(workspace: LocalStateWorkspace, databasePath: string): Promise<string> {
   const name = `databases/${databaseFolderName(databasePath)}`;
   // Throws, in words that say how to fix it, for a `.dohc` or `.dohc/local` dohc can't trust.
-  await ownedLocalStateDir(workspace.rootPath);
+  await readOwnedLocalState(workspace.rootPath, async () => undefined);
   // Refuses until the engine's open has prepared `.dohc/local`. The desktop
   // waits for an open under way before it takes the workspace lease.
   const counterFolder = await localStateFolder(workspace, name, {

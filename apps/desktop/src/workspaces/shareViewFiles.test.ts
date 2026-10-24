@@ -112,7 +112,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 // opened once its `.dohc/local` exists.
 const OPENED = { localStateReady: true };
 beforeEach(() => {
-  readLocalStateFrom({ currentBinding: () => OPENED });
+  readLocalStateFrom({ currentBinding: () => OPENED, localStateOpenAt: async () => ({ current: () => true }) });
 });
 
 /** A view the engine has opened: its `.dohc/local` is made. */
@@ -2087,6 +2087,7 @@ describe("ShareViewFiles", () => {
         asked.push(view);
         return opened && view.attachmentId === attachmentId ? OPENED : null;
       },
+      localStateOpenAt: async () => (opened ? { current: () => opened } : null),
     });
     const store = mutableTextStore({ initial: [{ path, text: before }] });
     const files = createShareViewFiles({
@@ -2139,6 +2140,8 @@ describe("ShareViewFiles", () => {
         view.attachmentId === undefined
           ? notExcluded
           : null,
+      // The open prepared the folder and could not keep it out of iCloud Drive.
+      localStateOpenAt: async (rootPath) => (rootPath === mounted.rootPath ? { current: () => true } : null),
     });
     const pull = vi.fn(async (): Promise<never> => {
       throw new Error("Unexpected pull");

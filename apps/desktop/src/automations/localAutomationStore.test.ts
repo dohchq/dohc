@@ -1,7 +1,7 @@
 import { chmod, lstat, mkdir, readdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { createAutomationRunStore, type StoredReach, type StoredRun } from "@dohc/automation-executor/automation-run-store";
+import { AutomationStoreNotOpenedError, createAutomationRunStore, type StoredReach, type StoredRun } from "@dohc/automation-executor/automation-run-store";
 import { fakeLocalStateOpens } from "../testing/preparedLocalState";
 import { LocalStateUnavailableError } from "../workspaces/workspaceLocalState";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -204,6 +204,28 @@ describe("this computer's automation store", () => {
       await unread();
     } finally {
       someoneElse.mockRestore();
+    }
+  });
+
+  // Node can't see who may change a folder on Windows, so there the store
+  // trusts `.dohc/local` only while the engine's open holds it. The steps a
+  // person allowed then say the workspace has not opened, not that nobody can
+  // read them, which would ask the person to reset every hold.
+  it("on Windows, reads nothing once no engine open holds .dohc/local, and the allowed steps say the workspace has not opened", async () => {
+    const { opened, store } = await workspace();
+    await engine.open(opened);
+    await store().saveReachVerdicts(allowed);
+    const platform = process.platform;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      await expect(store().readReachVerdicts()).resolves.toEqual({ ...allowed, unreadable: false, missing: false });
+      engine.close(opened);
+      const refused = await store().readReachVerdicts().then(() => null, (error: unknown) => error);
+      expect(refused).toBeInstanceOf(AutomationStoreNotOpenedError);
+      expect((refused as Error).message).toBe("dohc has not finished opening this workspace. Try again when it opens.");
+      await expect(store().runsOf(AUTOMATION, "atc_one")).resolves.toEqual({ runs: [], unreadable: true });
+    } finally {
+      Object.defineProperty(process, "platform", { value: platform });
     }
   });
 });

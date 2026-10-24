@@ -73,7 +73,7 @@ const FRONTMATTER_SOURCE_ITEM_META_PREFIX: &str = "dohcFrontmatterSourceItem:";
 const MARKDOWN_SOURCE_META_KEY: &str = "dohcMarkdownSource";
 const MARKDOWN_SOURCE_SHA_META_KEY: &str = "dohcMarkdownSourceSha256";
 const MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY: &str = "dohcMarkdownSourceProjectionSha256";
-const MARKDOWN_SOURCE_READER_META_KEY: &str = "dohcMarkdownSourceReader";
+pub(crate) const MARKDOWN_SOURCE_READER_META_KEY: &str = "dohcMarkdownSourceReader";
 
 pub(crate) fn reader_source_meta_key(key: &str) -> bool {
     matches!(

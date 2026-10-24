@@ -32,7 +32,7 @@ describe("useShellError", () => {
     act(() => result.current.reportShellError("dohc could not prepare this Collection change.",
       new Error(`Error invoking remote method 'dataset': Error: ${failure.message}`), retry));
     const notice = result.current.shellErrors[0]!;
-    expect(notice.message).toBe('dohc could not prepare this Collection change. dohc cannot use "sources/note.md" for this change. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.');
+    expect(notice.message).toBe('dohc could not prepare this Collection change. dohc cannot use "sources/note.md" for this change. dohc cannot take in this file\'s Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Restore the file\'s exact contents from before that edit. For nested lists, make the edit in dohc after the file opens again.');
     expect(notice.seen).toBe(false);
     expect(notice.retry).toBe(retry);
     act(() => result.current.hideShellError(notice.id));
