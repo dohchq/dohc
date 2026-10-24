@@ -1,8 +1,8 @@
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import {requireResumedBinding,retainedRestoreLifecycle} from "./liveRestoreLifecycleStorage";
 import {readServiceActivationOrigin} from "./serviceActivationOrigin";
-import {readServiceActivation} from "./serviceActivationAccess";
-import {serviceActivationRetirementPending} from "./serviceActivationRetirement";
+import {readServiceActivation,serviceActivationState} from "./serviceActivationAccess";
+import {carryServiceActivationRetirement} from "./serviceActivationRetirement";
 import {SERVICE_HOST_ENROLLMENTS} from "./serviceHostEnrollment";
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
@@ -114,14 +114,14 @@ function owner(storage: StorageContext, workspaceId: string, ownerUserId: string
   if (!storage.workspaceIsOwnedBy(workspaceId, ownerUserId)) refuse();
 }
 // A fence would strand a pending service activation: it can no longer complete,
-// and service restore continues only a completed one.
+// and service restore continues only a completed one. A retiring activation
+// retires before a restore begins; one that starts retiring during a restore
+// is carried by its fence.
 function requireNoPendingActivation(storage: StorageContext, document: LiveDocumentKey): void {
-  if (readServiceActivation(storage, document)?.completion_json === null) throw relayError("conflict", "Live editing is still starting. Try again in a moment.");
-}
-// A fence would move the generation a pending retirement names, so the engine
-// could never release it.
-function requireNoPendingRetirement(storage: StorageContext, document: LiveDocumentKey): void {
-  if (serviceActivationRetirementPending(storage, document)) throw relayError("conflict", "Live editing is still stopping. Try again in a moment.");
+  const state = serviceActivationState(readServiceActivation(storage, document));
+  if (state === "pending") throw relayError("conflict", "Live editing is still starting. Try again in a moment.");
+  if (state === "retiring") throw relayError("conflict", "Live editing is still stopping. Try again in a moment.");
+  if (state !== "absent" && state !== "completed") refuse();
 }
 // The operation row records the revocation it made. Account deletion may purge
 // that grant; its absence ends the same authority for good.
@@ -247,7 +247,6 @@ export function readStopRestorePlan(storage: StorageContext, input: StopRestoreP
     if (!row) refuse();
     requireUnretiredEnrollment(storage, document);
     requireNoPendingActivation(storage, document);
-    requireNoPendingRetirement(storage, document);
     const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
     const selector = storedSelector && effectiveShareSelector(storedSelector, grant.access);
     if (!selector || !isLiveEditShareSelector(selector) || !canonicalLiveSelector(share, selector) ||
@@ -301,7 +300,6 @@ export function beginStopRestore(storage: StorageContext, input: StopRestoreInte
       Number(document.baseline_moment_relay_seq) <= storage.getEpochLogFloor(intent.document.workspaceId) ||
       !currentLiveDocumentMoment(storage, intent.document, String(document.current_path))) refuse();
     requireNoPendingActivation(storage, intent.document);
-    requireNoPendingRetirement(storage, intent.document);
     const existing = storage.db.prepare(`SELECT 1 FROM ${table} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND ${UNFINISHED_RESTORE}`).get(...key(intent.document).slice(0, 3));
     if (existing) refuse();
     // The chain follows the fences restores advanced. One declined before its
@@ -383,6 +381,7 @@ export function advanceStopRestoreFence(storage: StorageContext, input: { operat
       WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND lineage_state='current' AND admission_state='open' AND restore_fence_generation=?`)
       .run(saved.oldFence + 1, ...key(intent.document), saved.oldFence);
     if (Number(changed.changes) !== 1) refuse();
+    carryServiceActivationRetirement(storage, intent.document, saved.oldFence, saved.oldFence + 1, cutover);
     const raw = cutover === 0 ? null : storage.db.prepare("SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(cutover);
     const last = raw ? decodeJournalRow(storage.db,raw) : null;
     if (last) verifyJournalRow(last);
@@ -397,7 +396,7 @@ export function advanceStopRestoreFence(storage: StorageContext, input: { operat
 /**
  * Ends a restore before its fence, in the same serialized writer as the
  * fence, so at most one of them takes the operation. Access stays revoked,
- * and the document keeps its generation and its pending retirement's key.
+ * and the document keeps its generation and its open retirement's key.
  */
 export function declineStopRestore(storage: StorageContext, input: StopRestoreLookup, now: number): StopRestoreOperation {
   const operationId = parseLiveUpdateIdentifier(input.operationId), workspaceId = parseLiveUpdateIdentifier(input.workspaceId), userId = parseLiveUpdateIdentifier(input.ownerUserId), at = integer(now);

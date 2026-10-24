@@ -21,13 +21,13 @@ pub use held::{
     ProofStage, ProofStop, Stop, Work, HELD_PROOF_CLOSE_BOUND, HELD_PROOF_DEADLINE,
     MAX_PROOF_WAITERS,
 };
-pub use preservation::{
-    inspect_held, HeldInspection, Preservation, PreservationFinding, PreservationReason,
-    PreservationStatus, PreservedState,
-};
 #[cfg(all(test, feature = "held-proof-memory"))]
 pub(super) use preservation::{
     deletion_index_bytes, lineage_workload, preserve_lineage, Applications,
+};
+pub use preservation::{
+    inspect_held, HeldInspection, Preservation, PreservationFinding, PreservationReason,
+    PreservationStatus, PreservedState,
 };
 
 /// The synced update protection is decided for: the feed it arrived on and
@@ -304,7 +304,9 @@ impl ReleasedLineageBinding {
 
 /// The value `result` reads, or none when its evidence does not read.
 /// Storage failures and a cancelled read stay errors.
-pub(super) fn readable<T>(result: Result<T, ApplicationError>) -> Result<Option<T>, ApplicationError> {
+pub(super) fn readable<T>(
+    result: Result<T, ApplicationError>,
+) -> Result<Option<T>, ApplicationError> {
     match result {
         Ok(value) => Ok(Some(value)),
         Err(
@@ -1396,12 +1398,16 @@ fn protected_tails(
         SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         SCANS_HERE.with(|scans| scans.set(scans.get() + 1));
     }
-    Ok(window_work(conn, doc, lineage, Stop::NEVER, &mut Stop::NEVER.working())?.map(|work| match work {
-        WindowWork::Listed(tails) => {
-            ProtectedTails::Listed(tails.into_iter().map(|(tail, _)| tail).collect())
-        }
-        WindowWork::Invalid => ProtectedTails::Invalid,
-    }))
+    Ok(
+        window_work(conn, doc, lineage, Stop::NEVER, &mut Stop::NEVER.working())?.map(|work| {
+            match work {
+                WindowWork::Listed(tails) => {
+                    ProtectedTails::Listed(tails.into_iter().map(|(tail, _)| tail).collect())
+                }
+                WindowWork::Invalid => ProtectedTails::Invalid,
+            }
+        }),
+    )
 }
 
 /// The protected tails of the released window, each with what its
@@ -1461,7 +1467,13 @@ pub(super) fn window_work(
         let unproven = match release {
             Some(_) => {
                 if let Some(evidence) = &evidence {
-                    validating.grow(evidence.tail_workload(conn, &namespace, doc, lineage, &activation_id)?)?;
+                    validating.grow(evidence.tail_workload(
+                        conn,
+                        &namespace,
+                        doc,
+                        lineage,
+                        &activation_id,
+                    )?)?;
                 }
                 readable(super::retirement::unproven_retained(
                     conn,
@@ -1524,11 +1536,17 @@ pub(super) fn tail_kept_bytes(tail: &ProtectedTail, work: &TailWork) -> u64 {
             .iter()
             .map(|found| {
                 found.namespace.as_ref().map_or(0, String::capacity)
-                    + found.contribution.as_ref().map_or(0, ContributionLocator::text_bytes)
+                    + found
+                        .contribution
+                        .as_ref()
+                        .map_or(0, ContributionLocator::text_bytes)
             })
             .sum::<usize>();
     let place = 2 * size_of::<(ProtectedTail, TailWork)>()
-        + tail.release.as_ref().map_or(0, |release| release.path.capacity())
+        + tail
+            .release
+            .as_ref()
+            .map_or(0, |release| release.path.capacity())
         + tail.namespace.len();
     u64::try_from(contributions + contradictions + place).unwrap_or(u64::MAX)
 }

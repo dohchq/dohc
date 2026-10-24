@@ -5,7 +5,9 @@ import * as replicaHistoryReads from "./replicaHistoryReads";
 import {createReplicaLinkReadService} from "./replicaLinkReadService";
 import {nextReplicaHistoryPinAt, type ReplicaHistoryObservation} from "./storage/replicaHistoryPins";
 import {prepareLiveApplications} from "./storage/liveApplicationAuthorship";
-import {prepareHostedSettlements} from "./storage/hostedSettlement";
+import {prepareHostedSettlements, prepareSettlementAudits} from "./storage/hostedSettlement";
+import * as serviceActivationPublication from "./storage/serviceActivationPublication";
+import type { ServiceActivationRetirement } from "./storage/serviceActivationRetirement";
 import * as shareLabelsStorage from "./storage/shareLabels";
 import * as replicaReads from "./storage/replicaReads";
 import * as buttonInspections from "./automationButtonInspections";
@@ -418,6 +420,15 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
   serviceHostUploaded(workspaceId: string, sha256: string) {
     return serviceHostUploadStorage.serviceHostUploaded(this, workspaceId, sha256);
+  }
+  prepareSettlementAudits(input: { workspaceId: string; ops: SyncRelayLogInput[]; batched: boolean }, signal?: AbortSignal) {
+    return prepareSettlementAudits(this, input, undefined, signal);
+  }
+  admitRetirementPublication(retirement: ServiceActivationRetirement, op: SyncRelayLogInput, batch: serviceActivationPublication.RetirementBatch) {
+    return serviceActivationPublication.admitRetirementPublication(this, retirement, op, batch);
+  }
+  retirementPublicationConfirmed(op: SyncRelayLogInput) {
+    return serviceActivationPublication.retirementPublicationConfirmed(op);
   }
   scanServiceHostCandidateShares(after?: serviceHostEnrollmentStorage.ServiceHostCandidateCursor, workspaceId?: string) {
     return serviceHostEnrollmentStorage.scanServiceHostCandidateShares(this, after, workspaceId);
@@ -940,6 +951,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     ops: SyncRelayLogInput[];
     guard?: (context: AppendLogBatchGuardContext) => void;
     admit?: (ops: SyncRelayLogInput[]) => void;
+    confirm?: (ops: SyncRelayLogInput[]) => void;
     classifyRedundantRecoveries?: boolean;
   }): AppendLogBatchResult {
     return logStorage.appendLogBatch(this, input);

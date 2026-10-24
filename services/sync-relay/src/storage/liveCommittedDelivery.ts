@@ -1545,7 +1545,9 @@ export class LiveCommittedDeliveryStore {
       if (stage==="resume") {
         integrity(this.#storage.db.prepare(`UPDATE sync_relay_live_documents SET admission_state='open' WHERE ${WHERE_DOCUMENT} AND restore_fence_generation=? AND admission_state='closed' AND lineage_state='current'`)
           .run(...documentParams(saved.operation.intent.document),saved.operation.newFence).changes===1);
-        carryServiceActivationRetirement(this.#storage,saved.operation.intent.document,saved.operation.newFence!);
+        // The fence carried the open retirement to this generation. It now names the restore's own accepted row.
+        carryServiceActivationRetirement(this.#storage,saved.operation.intent.document,saved.operation.newFence!,saved.operation.newFence!,
+          lifecycle.admitted.accepted.receipt.journalCursor);
       }
       requireRestoreLifecycleBudget(this.#storage.db,this.#history.namespace,input.operationId,input.workspaceId,input.maxBytes);
       return structuredClone(lifecycle);

@@ -85,7 +85,10 @@ pub(crate) fn store_busy(error: &RuntimeError) -> bool {
     }
     // A shared sync failure is busy when its original is.
     if let RuntimeError::Sync(sync) = error {
-        return matches!(sync.original(), SyncError::Storage(StorageError::FileLocked));
+        return matches!(
+            sync.original(),
+            SyncError::Storage(StorageError::FileLocked)
+        );
     }
     matches!(
         error,
@@ -394,7 +397,7 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
         }
         RuntimeError::Domain(error) => return map_domain(error),
         RuntimeError::Collab(error) => map_collab_code(error),
-        RuntimeError::Sync(error) => map_sync_code(&error),
+        RuntimeError::Sync(error) => map_sync_code(error),
         RuntimeError::Relay(error) => map_relay_code(error),
         RuntimeError::Search(error) => map_search_code(error),
         materialize @ RuntimeError::Materialize(_) => {

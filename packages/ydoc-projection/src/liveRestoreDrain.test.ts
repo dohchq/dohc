@@ -1,4 +1,4 @@
-import {prepareHostedSettlements} from "../../../services/sync-relay/src/storage/hostedSettlement.js";
+import {nativeSettlementId, prepareHostedSettlements, settlementRecordDigest} from "../../../services/sync-relay/src/storage/hostedSettlement.js";
 import {appendValidatedLiveJournal, readReplicaLiveJournal, decodeJournalRow} from "../../../services/sync-relay/src/storage/liveUpdateJournal.js";
 import {verifyRestoreCheckpoint} from "../../../services/sync-relay/src/storage/liveRestoreCheckpoint.js";
 import {stableJsonStringify} from "../../../services/sync-relay/src/canonicalJson.js";
@@ -1490,27 +1490,31 @@ function hostRestoredDocument(f: ReturnType<typeof fixture>, shareId: string) {
   });
   f.storage.claimWorkspaceIdentity({workspaceId: f.document.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
   f.storage.enrollServiceHostDocument({workspaceId: f.document.workspaceId, path: "docs/a.md", shareId, ownerUserId: "owner", nowMs: 30, guard() {}});
-  f.write(db => db.prepare(`INSERT INTO sync_relay_service_activations VALUES ('restore-test',?,?,'main',?,?,'{}','{}',?,x'0000','owner',?,'{}',1)`)
-    .run(hostedActivationId, f.document.workspaceId, f.document.objectId, f.document.lineageClaimId, f.document.lineageClaimId, shareId));
+  f.write(db => db.prepare(`INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
+      source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes) VALUES ('restore-test',?,?,'main',?,?,?,?,?,x'0000','owner',?,'{}',1)`)
+    .run(hostedActivationId, f.document.workspaceId, f.document.objectId, f.document.lineageClaimId, JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream"}),
+      JSON.stringify({currentPath: "docs/a.md"}), f.document.lineageClaimId, shareId));
 }
 
 // Proves: a retirement recorded while a restore is unfinished, by the
 // restore's own revocation of the last Edit grant or by Pause, keeps live
-// admission fenced, and once the restore resumes it names the restored
-// generation and the restore's own journal cursor, the key the engine accepts
-// then. No other restore of the document begins while it is pending.
+// admission fenced. The fence carries one recorded before it to the fenced
+// generation, and once the restore resumes it names the restore's own journal
+// cursor, the key the engine accepts then: completion at that key retires the
+// activation, and at the old generation is refused. No other restore of the
+// document begins while it is open.
 it.each(["revocation", "pause"] as const)("carries a retirement recorded during a restore to the restored generation: %s", cause => {
   const f = contentProposalFixture("bootstrap", "service", false, false, false, 0,
     hosted => hostRestoredDocument(hosted, cause === "revocation" ? hosted.intent.shareId : "other"));
   try {
     const retirement = () => readServiceActivationRetirement(f.context, f.document);
-    const recorded = {relayDatabaseNamespace: "restore-test", activationId: hostedActivationId, ...f.document};
+    // The revocation records it as the restore begins, before the fence; Pause after the fence.
+    const recorded = {relayDatabaseNamespace: "restore-test", activationId: hostedActivationId, ...f.document, path: "docs/a.md", requestedAtMs: cause === "revocation" ? 40 : 60};
     if (cause === "pause") {
       expect(retirement()).toBeNull();
       f.storage.setServiceHostEnrollmentEnabled({workspaceId: f.document.workspaceId, path: "docs/a.md", ownerUserId: "owner", enabled: false, nowMs: 60, guard() {}});
     }
-    // Recorded where the fence stood: before the restore advanced it, or after.
-    expect(retirement()).toEqual({...recorded, restoreFenceGeneration: cause === "revocation" ? 1 : 2, acceptedThrough: 2});
+    expect(retirement()).toEqual({...recorded, restoreFenceGeneration: 2, acceptedThrough: 2});
     const proposed = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
     const admitted = f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201);
     const application = {fence: admitted.preparation.fence, candidateDigest: admitted.candidateDigest, nativeSourceManifestDigest: admitted.nativeSourceManifestDigest,
@@ -1525,7 +1529,9 @@ it.each(["revocation", "pause"] as const)("carries a retirement recorded during 
       operationId: f.input.operationId, binding: admitted.admitted.accepted.binding, applicationReceipt: admitted.admitted.accepted.receipt,
       settlementId: settlement.settlementId, momentId: settlement.momentId, markdownDigest: settlement.markdownDigest,
       localHeadSequence: application.localHeadSequence, recordedAtMs: 204}).phase).toBe("resumed");
-    expect(retirement()).toEqual({...recorded, restoreFenceGeneration: 2, acceptedThrough: admitted.admitted.accepted.receipt.journalCursor});
+    const carried = {objectId: f.document.objectId, lineageClaimId: f.document.lineageClaimId, activationId: hostedActivationId,
+      restoreFenceGeneration: 2, acceptedThrough: admitted.admitted.accepted.receipt.journalCursor};
+    expect(retirement()).toEqual({...recorded, restoreFenceGeneration: carried.restoreFenceGeneration, acceptedThrough: carried.acceptedThrough});
     expect(f.storage.serviceHostDocumentEnabled(f.document)).toBe(false);
     f.write(db => db.prepare("UPDATE sync_relay_share_grants SET status='active',generation=6,revoked_at_ms=NULL WHERE grant_id=?").run(f.intent.grantId));
     expect(() => f.storage.readStopRestorePlan({operationId: "after-retirement", ownerUserId: "owner", document: f.document, shareId: f.intent.shareId,
@@ -1533,7 +1539,13 @@ it.each(["revocation", "pause"] as const)("carries a retirement recorded during 
       .toThrow("Live editing is still stopping.");
     expect(() => beginStopRestore(f.context, {...f.intent, operationId: "after-retirement", expectedFence: 2, expectedGrantGeneration: 6}, 300))
       .toThrow("Live editing is still stopping.");
-    expect(retirement()).toEqual({...recorded, restoreFenceGeneration: 2, acceptedThrough: admitted.admitted.accepted.receipt.journalCursor});
+    expect(retirement()).toEqual({...recorded, restoreFenceGeneration: carried.restoreFenceGeneration, acceptedThrough: carried.acceptedThrough});
+    const activations = f.storage.createServiceActivationStore(f.history);
+    const complete = (key: typeof carried) => activations.completeRetirement({workspaceId: f.document.workspaceId, key, boundary: null,
+      host: f.input.host, registeredAtMs: 400, nowMs: 400, guard() {}});
+    expect(() => complete({...carried, restoreFenceGeneration: 1, acceptedThrough: 2})).toThrow("Service activation retirement is unavailable.");
+    expect(complete(carried)).toEqual({status: "retired", replayed: false});
+    expect(retirement()).toBeNull();
   } finally {f.close();}
 });
 
@@ -1547,7 +1559,8 @@ it("keeps a retirement's pre-restore key when its restore is declined", () => {
     f.add("before-restore");
     const acceptedThrough = Number(f.raw.prepare("SELECT MAX(journal_cursor) AS cursor FROM sync_relay_live_update_journal").get()!.cursor);
     beginStopRestore(f.context, f.intent, 40);
-    const recorded = {relayDatabaseNamespace: "restore-test", activationId: hostedActivationId, ...f.document, restoreFenceGeneration: 1, acceptedThrough};
+    const recorded = {relayDatabaseNamespace: "restore-test", activationId: hostedActivationId, ...f.document, path: "docs/a.md",
+      restoreFenceGeneration: 1, acceptedThrough, requestedAtMs: 40};
     expect(readServiceActivationRetirement(f.context, f.document)).toEqual(recorded);
     expect(declineStopRestore(f.context, f.lookup, 45).phase).toBe("declined");
     expect(readServiceActivationRetirement(f.context, f.document)).toEqual(recorded);
@@ -1620,7 +1633,7 @@ it("finishes a restore after the stopped collaborator's account is deleted", () 
       settlementId: settlement.settlementId, momentId: settlement.momentId, markdownDigest: settlement.markdownDigest,
       localHeadSequence: application.localHeadSequence, recordedAtMs: 204}).phase).toBe("resumed");
     expect(readServiceActivationRetirement(f.context, f.document)).toEqual({relayDatabaseNamespace: "restore-test", activationId: hostedActivationId,
-      ...f.document, restoreFenceGeneration: 2, acceptedThrough: admitted.admitted.accepted.receipt.journalCursor});
+      ...f.document, path: "docs/a.md", restoreFenceGeneration: 2, acceptedThrough: admitted.admitted.accepted.receipt.journalCursor, requestedAtMs: 40});
   } finally {f.close();}
 });
 
@@ -2172,16 +2185,19 @@ function restorePublication(f: ReturnType<typeof admittedRestoreFixture>, bytes:
     f.storage.putBlob({workspaceId: document.workspaceId, sha256, content, createdAtMs: 1});
   const prior = previous === 0 ? null : f.raw.prepare("SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(previous)!;
   const namespace = String(row.relay_database_namespace), key = [namespace, document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId];
-  const record = {settlementId: `hosted-${id}`, relayDatabaseNamespace: namespace, binding, previousCursor: previous, terminalCursor: terminal,
-    acceptedEventCount: Number(row.accepted_event_count) - Number(prior?.accepted_event_count ?? 0),
+  const acceptedEventCount = Number(row.accepted_event_count) - Number(prior?.accepted_event_count ?? 0);
+  const record = {settlementId: "", relayDatabaseNamespace: namespace, binding,
+    hostCoordinate: {hostId: "host", hostEpoch: 1, instanceId: "instance", connectionId: "connection"}, previousCursor: previous, terminalCursor: terminal,
+    previousYdocSequence: 0, localYdocSequence: 1, applicationCount: acceptedEventCount, nativeIntervalDigest: hash(Buffer.from(`native-interval-${id}`)), acceptedEventCount,
     acceptedIntervalDigest: jsonHash(["live-settlement-accepted-interval-v1", key,
       [Number(prior?.accepted_event_count ?? 0), previous, prior?.accepted_evidence_digest ?? initialAcceptedHistoryDigest(namespace, document)],
       [Number(row.accepted_event_count), terminal, row.accepted_evidence_digest]]),
-    momentId: id, markdownDigest, acceptedStateBlobSha256: stateDigest};
+    momentId: id, markdownDigest, sourceStateVectorDigest: hash(Buffer.from(`state-vector-${id}`)), acceptedStateBlobSha256: stateDigest, recordedAtMs: 1, restoreOperationId: null};
+  record.settlementId = nativeSettlementId(record);
   const payload = {momentId: id, objectId: document.objectId, versionId: "main", path: binding.currentPath, operation: "write",
     payloadBeforePath: binding.currentPath, payloadAfterPath: binding.currentPath, payloadBeforeContentKind: "text", payloadAfterContentKind: "text",
     payloadBeforeBlobSha256: before, payloadAfterBlobSha256: markdownDigest, payloadAfterByteLength: markdown.byteLength, recordedAtMs: 1,
-    settlementReference: {formatVersion: 1, recordDigest: hash(Buffer.from(stableJsonStringify(record))), record}};
+    settlementReference: {formatVersion: 1, recordDigest: settlementRecordDigest(record), record}};
   return {record, payload, markdownDigest, op: {originSeq, opKind: "moment.append", payloadJson: stableJsonStringify(payload), recordedAtMs: 1}};
 }
 

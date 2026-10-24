@@ -48,6 +48,14 @@ pub use accepted_history::{NativeAcceptedCheckpoint, NativeRestoreHistoryProof};
 mod bootstrap;
 pub use adoption::{adopt_owner_committed, OwnerAdoptionAck, OwnerAdoptionCut};
 mod released_protection;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use released_protection::{
+    binding_decodes_on_this_thread, lineage_protection_checks_on_this_thread,
+    on_released_tail_reader, released_head_loads_on_this_thread,
+    released_tail_commitments_on_this_thread, released_tail_scans,
+    released_tail_scans_on_this_thread,
+};
 pub use released_protection::{
     inspect_held, lineage_protection, protection, store_identity, Charged, ContributionArtifact,
     ContributionLocator, HeldInspection, HeldProofAdmission, HeldProofError, HeldProofJob,
@@ -58,14 +66,6 @@ pub use released_protection::{
     ReleasedTails, RetainedAuthors, RetainedContribution, RetainedCoverage, Stop, TailRelease,
     UnprovenCommitment, Validation, ValidationError, Work, HELD_PROOF_CLOSE_BOUND,
     HELD_PROOF_DEADLINE, MAX_PROOF_WAITERS,
-};
-#[cfg(any(test, feature = "test-support"))]
-#[doc(hidden)]
-pub use released_protection::{
-    binding_decodes_on_this_thread, lineage_protection_checks_on_this_thread,
-    on_released_tail_reader, released_head_loads_on_this_thread,
-    released_tail_commitments_on_this_thread,
-    released_tail_scans, released_tail_scans_on_this_thread,
 };
 mod restore_content;
 pub(crate) mod restore_fence;

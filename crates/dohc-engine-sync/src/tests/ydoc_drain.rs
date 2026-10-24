@@ -1844,7 +1844,9 @@ fn a_released_drains_report_outlives_its_request_until_a_commit_acknowledges_it(
         engine
             .write_with(&NoFaults, |tx| {
                 tx.execute_batch(&format!(
-                    "INSERT INTO hosted_replicas(workspace_id,scope_generation,created_at_ms, \
+                    "INSERT OR IGNORE INTO sync_identity(workspace_id,origin_id,replication_epoch, \
+                       stream_identity,created_at_ms) VALUES ('ws','service-host:ws','epoch','stream',0); \
+                     INSERT INTO hosted_replicas(workspace_id,scope_generation,created_at_ms, \
                        main_cursor,last_outbound_seq) VALUES ('ws',1,0,1,-1); \
                      INSERT INTO hosted_documents(workspace_id,object_id,path,state, \
                        held_reason,scope_generation) VALUES ('ws','{OBJECT_ID}','{PATH}', \
@@ -3692,7 +3694,9 @@ fn a_refusal_its_projection_clears_stays_in_the_drain_report() {
                 )
                 .map_err(SyncError::persist)?;
                 tx.execute_batch(&format!(
-                    "INSERT INTO hosted_replicas(workspace_id,scope_generation,created_at_ms, \
+                    "INSERT OR IGNORE INTO sync_identity(workspace_id,origin_id,replication_epoch, \
+                       stream_identity,created_at_ms) VALUES ('ws','service-host:ws','epoch','stream',0); \
+                     INSERT INTO hosted_replicas(workspace_id,scope_generation,created_at_ms, \
                        main_cursor,last_outbound_seq) VALUES ('ws',1,0,1,-1); \
                      INSERT INTO hosted_documents(workspace_id,object_id,path,state, \
                        held_reason,scope_generation) VALUES ('ws','{OBJECT_ID}','{PATH}', \
@@ -3841,7 +3845,11 @@ fn live_classification_over_an_owed_refusal(echo: bool, restart: bool) {
     .expect("stopped drain");
     let owed = refusals_of(&applied.refusals, "owed-peer");
     assert_eq!(owed.len(), 1, "echo={echo}: {applied:?}");
-    assert_eq!(state(&engine), (1, 1, 0, 0), "echo={echo}: nothing refused yet");
+    assert_eq!(
+        state(&engine),
+        (1, 1, 0, 0),
+        "echo={echo}: nothing refused yet"
+    );
 
     // A device binds the document; with `echo`, its session saw the update.
     engine

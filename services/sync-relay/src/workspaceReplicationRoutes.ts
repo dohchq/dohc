@@ -29,6 +29,8 @@ export interface HostedAdmission {
   screen(originId: string, ops: SyncRelayLogInput[]): Promise<void>;
   /** Under the append's writer, for the ops at coordinates the log does not hold yet. */
   admit(ops: SyncRelayLogInput[]): void;
+  /** Under the same writer, after settlement and application confirmation, for those ops. */
+  confirm(ops: SyncRelayLogInput[]): void;
 }
 
 const MAX_IDENTITY_BYTES = 512;
@@ -152,7 +154,7 @@ export function createWorkspaceReplicationRoutes(
         workspaceId: route.workspaceId,
         originId,
         ops,
-        ...(route.serviceHost ? {admit: route.serviceHost.admit} : {classifyRedundantRecoveries: true}),
+        ...(route.serviceHost ? {admit: route.serviceHost.admit, confirm: route.serviceHost.confirm} : {classifyRedundantRecoveries: true}),
         // Identity claim/verification rides the append's BEGIN IMMEDIATE
         // transaction. A gap/conflict/quota/blob failure later in append
         // rolls back a first-adopt claim together with the batch.

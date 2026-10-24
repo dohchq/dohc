@@ -46,7 +46,7 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
     (SELECT length(CAST(payload_json AS BLOB))+length(CAST(json_array(relay_seq,origin_id,origin_seq,op_kind) AS BLOB)) AS bytes ${selected})`).get(...params);
   requireValue(size&&integer(size.entries)&&size.entries>0&&size.entries<=entryLimit,"Ordinary activation history exceeds its configured entry budget.");
   requireValue(integer(size.bytes)&&size.bytes<=bounds.maxBytesPerDrain-baselineBytes.length,"Ordinary activation metadata exceeds its configured byte budget.");
-  const metadata=storage.db.prepare(`SELECT relay_seq,origin_id,origin_seq,op_kind,length(CAST(payload_json AS BLOB)) AS payload_bytes ${selected}`).all(...params);
+  const metadata=storage.db.prepare(`SELECT relay_seq,origin_id,origin_seq,op_kind,relay_admission,length(CAST(payload_json AS BLOB)) AS payload_bytes ${selected}`).all(...params);
   let charged=baselineBytes.length;
   const charge=(bytes:number)=>{requireValue(integer(bytes)&&charged<=bounds.maxBytesPerDrain-bytes,"Ordinary activation history exceeds its configured byte budget.");charged+=bytes;};
   for(const row of metadata){requireValue(integer(row.payload_bytes),"Ordinary activation metadata is damaged.");charge(Number(row.payload_bytes)+Buffer.byteLength(JSON.stringify([row.relay_seq,row.origin_id,row.origin_seq,row.op_kind])));}
@@ -71,7 +71,7 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
     const blob=storage.db.prepare("SELECT byte_length,length(content) AS actual_length FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?").get(document.workspaceId,payload.updateBlobSha256);
     requireValue(blob&&integer(blob.byte_length)&&blob.byte_length===blob.actual_length,"Ordinary activation bytes are unavailable.");
     charge(Number(blob.byte_length));
-    return [{relay_seq:row.relay_seq,origin_id:row.origin_id,origin_seq:row.origin_seq,payload,byteLength:Number(blob.byte_length)}];
+    return [{relay_seq:row.relay_seq,origin_id:row.origin_id,origin_seq:row.origin_seq,ordinary:row.relay_admission===null,payload,byteLength:Number(blob.byte_length)}];
   });
   requireValue(rows.length>0,"Ordinary activation base history is unavailable.");
   const first=rows[0]!;
@@ -103,12 +103,16 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
     moment.content_kind==="text"&&moment.blob_sha256===source.sourceDigest&&moment.byte_length===source.sourceByteLength;
   if(!momentMatches){
     const index=rows.findIndex(row=>source.sourceMomentId===`moment-ydoc-apply-${hash([document.workspaceId,document.mainVersionId,document.objectId,source.currentPath,row.origin_id,row.origin_seq].join("\0"))}`);
-    requireValue(index>=0,"Native activation source moment is not an ordinary history coordinate.");
+    requireValue(index>=0&&rows[index]!.ordinary,"Native activation source moment is not an ordinary history coordinate.");
     requireValue(!moment || Number(moment.relay_seq)<=rows[index]!.relay_seq ||
       (moment.path===source.currentPath&&moment.content_kind==="text"&&moment.blob_sha256===source.sourceDigest&&moment.byte_length===source.sourceByteLength),
       "Ordinary activation found a later ordinary file moment with a divergent projection.");
-    const prefix=index===0?baseline:normalize(updates.slice(1,index),updates[index]!);
-    momentMatches=prefix.projectedMarkdownSha256===source.sourceDigest&&prefix.projectedMarkdownByteLength===source.sourceByteLength;
+    const projects=(evidence:{projectedMarkdownSha256:string;projectedMarkdownByteLength:number})=>
+      evidence.projectedMarkdownSha256===source.sourceDigest&&evidence.projectedMarkdownByteLength===source.sourceByteLength;
+    momentMatches=projects(index===0?baseline:normalize(updates.slice(1,index),updates[index]!));
+    // Every later prefix keeps that projection, so a change and its reversal can't stand behind an earlier source.
+    // The last prefix is the complete history already compared above.
+    for(let end=index+1;momentMatches&&end<updates.length-1;end++)momentMatches=projects(normalize(updates.slice(1,end),updates[end]!));
   }
   requireValue(momentMatches,"Native activation source moment does not project the captured source.");
   const evidence={version:1 as const,document:structuredClone(document),currentPath:source.currentPath,

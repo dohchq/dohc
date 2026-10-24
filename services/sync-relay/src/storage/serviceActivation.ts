@@ -3,22 +3,44 @@ import { parseNativeOwnerActivationSource } from "@dohc/workspace-engine-client/
 import { registerLiveHostInTransaction } from "./hostControl";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import type { NativeOwnerActivation, NativeOwnerActivationSource } from "@dohc/workspace-engine-client/daemon";
-import { parseLiveDocumentKey, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
+import type { NativeOwnerActivation, NativeOwnerActivationSource, RetainedPrefixBody } from "@dohc/workspace-engine-client/daemon";
+import { parseLiveDocumentKey, parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseLiveUpdateReceipt, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { createLiveMarkdownRegistrationValidator, createLiveMarkdownJournalValidator } from "../../../../packages/ydoc-projection/src/liveDocumentValidation";
 import type { StorageContext } from "./context";
 import type { LiveHostConnectionCoordinate } from "./types";
 import { attachLiveJournalHistory, requireLiveJournalHistory, type LiveJournalHistoryAuthority } from "./liveJournalHistory";
-import { currentLiveDocumentBinding, registerOrdinaryActivationBaselineInTransaction } from "./liveDocumentAuthority";
+import { authorityInteger, currentLiveDocumentBinding, registerOrdinaryActivationBaselineInTransaction } from "./liveDocumentAuthority";
+import { initialAcceptedHistoryDigest } from "../liveAcceptedHistory";
+import { LIVE_DELIVERY_OWNERS } from "./liveCommittedDeliverySchema";
+import { forgetIdleServiceHostUploads, restoreInProgress, SERVICE_HOST_ENROLLMENTS } from "./serviceHostEnrollment";
+import type { RetirementKey } from "./serviceActivationRetirement";
 import {verifyOrdinaryActivationCut,type OrdinaryActivationBounds} from "./ordinaryActivationSource";
 export {ServiceActivationStaleCut} from "./ordinaryActivationSource";
 import { assertWorkspaceQuota } from "./workspaces";
-import { SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
-import { readServiceActivation, serviceActivationAccess, type ServiceActivationAccess } from "./serviceActivationAccess";
+import { LIVE_DELIVERY_OWNER_HISTORY, SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
+import { readServiceActivation, serviceActivationAccess, serviceActivationState, type ServiceActivationAccess } from "./serviceActivationAccess";
 import { LIVE_JOURNAL_TABLE } from "./schema";
 
 const digest = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
+function retirementKey(value: RetirementKey): RetirementKey {
+  if (!value || typeof value !== "object" || Object.keys(value).sort().join() !== "acceptedThrough,activationId,lineageClaimId,objectId,restoreFenceGeneration") {
+    throw new TypeError("Invalid retirement key.");
+  }
+  return {objectId: parseLiveUpdateIdentifier(value.objectId, "object ID"), lineageClaimId: parseLiveUpdateDigest(value.lineageClaimId),
+    activationId: parseLiveUpdateIdentifier(value.activationId, "activation ID"), restoreFenceGeneration: authorityInteger(value.restoreFenceGeneration),
+    acceptedThrough: authorityInteger(value.acceptedThrough)};
+}
+// The boundary a release kept, in the one form the relay stores.
+function retainedBoundary(value: RetainedPrefixBody | null): RetainedPrefixBody | null {
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || Object.keys(value).sort().join() !== "eventCount,historyEvidenceDigest,terminalReceipt") {
+    throw new TypeError("Invalid released boundary.");
+  }
+  const terminal = value.terminalReceipt === null ? null : parseLiveUpdateReceipt(value.terminalReceipt);
+  return {terminalReceipt: terminal && {deliveryId: terminal.deliveryId, updateDigest: terminal.updateDigest, journalCursor: terminal.journalCursor,
+    acceptingHostEpoch: terminal.acceptingHostEpoch}, eventCount: authorityInteger(value.eventCount), historyEvidenceDigest: parseLiveUpdateDigest(value.historyEvidenceDigest)};
+}
 const key = (source: NativeOwnerActivationSource): LiveDocumentKey => parseLiveDocumentKey({workspaceId: source.workspaceId,
   mainVersionId: source.mainVersionId, objectId: source.objectId, lineageClaimId: source.lineageClaimId});
 
@@ -116,19 +138,123 @@ export class ServiceActivationStore {
     });
   }
 
+  /**
+   * Retires the activation its open obligation names, once the engine released
+   * it at `boundary` and its document parked. Archives its owner row, keeps
+   * that boundary, and drops its retained state, refunding those bytes once.
+   * Exact replay changes nothing, so it never touches a successor's owner row.
+   * Pending, with nothing changed, while the document's restore is unfinished.
+   */
+  completeRetirement(input: {workspaceId: string; key: RetirementKey; boundary: RetainedPrefixBody | null;
+    host: LiveHostConnectionCoordinate; registeredAtMs: number; nowMs: number; guard(): void}):
+    {status: "retired"; replayed: boolean} | {status: "pending"; reason: "restore"} {
+    const key = retirementKey(input.key), boundary = retainedBoundary(input.boundary), boundaryJson = JSON.stringify(boundary);
+    const nowMs = authorityInteger(input.nowMs);
+    return this.storage.tx(() => {
+      input.guard(); requireLiveJournalHistory(this.storage, this.history);
+      const namespace = this.history.namespace;
+      const row = this.storage.db.prepare(`SELECT workspace_id,object_id,lineage_claim_id,owner_user_id,predecessor_activation_id,length(state_bytes) AS state_length,
+        json_extract(source_json,'$.replicationEpoch') AS replication_epoch,json_extract(source_json,'$.streamIdentity') AS stream_identity,
+        retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor,retired_at_ms,retired_boundary_json FROM ${SERVICE_ACTIVATIONS}
+        WHERE relay_database_namespace=? AND activation_id=?`).get(namespace, key.activationId);
+      if (!row || row.workspace_id !== input.workspaceId || row.object_id !== key.objectId || row.lineage_claim_id !== key.lineageClaimId ||
+          row.retire_requested_at_ms === null || row.retire_restore_generation !== key.restoreFenceGeneration || row.retire_accepted_cursor !== key.acceptedThrough) {
+        throw new Error("Service activation retirement is unavailable.");
+      }
+      if (row.retired_at_ms !== null) {
+        if (row.retired_boundary_json !== boundaryJson) throw new Error("Service activation retired at another boundary.");
+        return {status: "retired", replayed: true};
+      }
+      const document = parseLiveDocumentKey({workspaceId: input.workspaceId, mainVersionId: "main", objectId: key.objectId, lineageClaimId: key.lineageClaimId});
+      const identity = this.storage.getWorkspaceIdentity(document.workspaceId);
+      const enrollment = this.storage.db.prepare(`SELECT owner_user_id,replication_epoch,stream_identity FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=?`)
+        .get(document.workspaceId, document.objectId);
+      if (!this.storage.workspaceIsOwnedBy(document.workspaceId, String(row.owner_user_id)) || !identity || !enrollment || enrollment.owner_user_id !== row.owner_user_id ||
+          enrollment.replication_epoch !== identity.replicationEpoch || enrollment.stream_identity !== identity.streamIdentity ||
+          row.replication_epoch !== identity.replicationEpoch || row.stream_identity !== identity.streamIdentity) {
+        throw new Error("Service activation retirement owner changed.");
+      }
+      // A restore moves the generation the key names, so retirement waits for it.
+      if (restoreInProgress(this.storage, document.workspaceId, document.objectId)) return {status: "pending", reason: "restore"};
+      const current = this.storage.db.prepare(`SELECT lineage_claim_id,restore_fence_generation FROM sync_relay_live_documents
+        WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current'`).get(document.workspaceId, document.objectId);
+      if (current?.lineage_claim_id !== key.lineageClaimId || current.restore_fence_generation !== key.restoreFenceGeneration) {
+        throw new Error("Service activation retirement names another generation.");
+      }
+      if (!registerLiveHostInTransaction(this.storage, {...input.host, updatedAtMs: input.registeredAtMs, guard: input.guard}).ok) {
+        throw new Error("Service activation host is unavailable.");
+      }
+      this.#requireJournalBoundary(document, boundary, key.acceptedThrough);
+      const ownerKey = [namespace, document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId, input.host.hostId];
+      const owner = this.storage.db.prepare(`SELECT origin_json,tip_receipt_json FROM ${LIVE_DELIVERY_OWNERS}
+        WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND host_id=?`).get(...ownerKey);
+      if (owner) {
+        // The release keeps exactly what the retiring owner applied.
+        if (!boundary || JSON.parse(String(owner.origin_json))?.adoptionId !== key.activationId ||
+            !isDeepStrictEqual(JSON.parse(String(owner.tip_receipt_json)), boundary.terminalReceipt)) {
+          throw new Error("Retiring owner delivery differs from its release.");
+        }
+        const archived = this.storage.db.prepare(`INSERT INTO ${LIVE_DELIVERY_OWNER_HISTORY}(relay_database_namespace,activation_id,workspace_id,main_version_id,
+            object_id,lineage_claim_id,host_id,origin_json,tip_receipt_json,tip_cursor,tip_sequence,tip_application_sequence,accounted_bytes)
+          SELECT relay_database_namespace,?,workspace_id,main_version_id,object_id,lineage_claim_id,host_id,origin_json,tip_receipt_json,
+            tip_cursor,tip_sequence,tip_application_sequence,accounted_bytes FROM ${LIVE_DELIVERY_OWNERS}
+          WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND host_id=?`).run(key.activationId, ...ownerKey);
+        const deleted = this.storage.db.prepare(`DELETE FROM ${LIVE_DELIVERY_OWNERS}
+          WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND host_id=?`).run(...ownerKey);
+        if (archived.changes !== 1 || deleted.changes !== 1) throw new Error("Retiring owner delivery is damaged.");
+      } else {
+        // A never-adopted release keeps its released chain tail's boundary, or none.
+        const inherited = row.predecessor_activation_id === null ? "null" : this.storage.db.prepare(`SELECT retired_boundary_json FROM ${SERVICE_ACTIVATIONS}
+          WHERE relay_database_namespace=? AND activation_id=? AND retired_at_ms IS NOT NULL`).get(namespace, row.predecessor_activation_id)?.retired_boundary_json;
+        if (boundaryJson !== inherited) throw new Error("Retiring owner delivery is missing.");
+      }
+      // The archived owner row keeps its charge. The boundary replaces the retained state.
+      const charge = Buffer.byteLength(boundaryJson) - authorityInteger(row.state_length, 2);
+      const retired = this.storage.db.prepare(`UPDATE ${SERVICE_ACTIVATIONS} SET retired_at_ms=?,retired_boundary_json=?,state_bytes=NULL,accounted_bytes=accounted_bytes+?
+        WHERE relay_database_namespace=? AND activation_id=? AND retired_at_ms IS NULL`)
+        .run(Math.max(nowMs, authorityInteger(row.retire_requested_at_ms)), boundaryJson, charge, namespace, key.activationId);
+      const usage = this.storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge, document.workspaceId);
+      if (retired.changes !== 1 || usage.changes !== 1) throw new Error("Service activation retirement is damaged.");
+      forgetIdleServiceHostUploads(this.storage, document.workspaceId);
+      return {status: "retired", replayed: false};
+    });
+  }
+
+  // The boundary must end the lineage's real accepted history at or before F.
+  #requireJournalBoundary(document: LiveDocumentKey, boundary: RetainedPrefixBody | null, acceptedThrough: number): void {
+    if (!boundary) return;
+    const terminal = boundary.terminalReceipt;
+    if (!terminal) {
+      if (boundary.eventCount !== 0 || boundary.historyEvidenceDigest !== initialAcceptedHistoryDigest(this.history.namespace, document)) {
+        throw new Error("Released boundary differs from the live journal.");
+      }
+      return;
+    }
+    const endpoint = this.storage.db.prepare(`SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch,relay_database_namespace,
+      accepted_event_count,accepted_evidence_digest FROM ${LIVE_JOURNAL_TABLE}
+      WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND journal_cursor=?`)
+      .get(document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId, terminal.journalCursor);
+    if (terminal.journalCursor > acceptedThrough || !endpoint || endpoint.relay_database_namespace !== this.history.namespace ||
+        endpoint.accepted_event_count !== boundary.eventCount || endpoint.accepted_evidence_digest !== boundary.historyEvidenceDigest ||
+        !isDeepStrictEqual({deliveryId: endpoint.delivery_id, updateDigest: endpoint.update_digest, journalCursor: endpoint.journal_cursor,
+          acceptingHostEpoch: endpoint.accepting_host_epoch}, terminal)) {
+      throw new Error("Released boundary differs from the live journal.");
+    }
+  }
+
   read(workspaceId: string, path: string, maxBytes: number) {
     requireLiveJournalHistory(this.storage, this.history);
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error("Invalid service activation read budget.");
     return this.storage.readTx(() => {
     const size = this.storage.db.prepare(`SELECT length(a.state_bytes)+length(d.baseline_bytes)+length(CAST(a.source_json AS BLOB)) AS bytes FROM ${SERVICE_ACTIVATIONS} a
       JOIN sync_relay_live_documents d USING(workspace_id,main_version_id,object_id,lineage_claim_id)
-      WHERE a.relay_database_namespace=? AND a.workspace_id=? AND d.current_path=? AND d.lineage_state='current'`)
+      WHERE a.relay_database_namespace=? AND a.workspace_id=? AND d.current_path=? AND d.lineage_state='current' AND a.retired_at_ms IS NULL`)
       .get(this.history.namespace,workspaceId,path);
     if (!size) return null;
     if (typeof size.bytes !== "number" || size.bytes > maxBytes) throw new Error("Retained service activation exceeds its read budget.");
     const row = this.storage.db.prepare(`SELECT a.*,d.baseline_bytes FROM ${SERVICE_ACTIVATIONS} a
       JOIN sync_relay_live_documents d USING(workspace_id,main_version_id,object_id,lineage_claim_id)
-      WHERE a.relay_database_namespace=? AND a.workspace_id=? AND d.current_path=? AND d.lineage_state='current'`)
+      WHERE a.relay_database_namespace=? AND a.workspace_id=? AND d.current_path=? AND d.lineage_state='current' AND a.retired_at_ms IS NULL`)
       .get(this.history.namespace, workspaceId, path);
     if (!row) return null;
     const source = parseNativeOwnerActivationSource(JSON.parse(String(row.source_json)), JSON.parse(String(row.binding_json)).currentPath, 20_971_520);
@@ -178,6 +304,8 @@ export class ServiceActivationStore {
         throw new Error("Service activation owner is unavailable.");
       }
       if (prior) {
+        const state = serviceActivationState(prior);
+        if (state === "retiring" || state === "retired") throw new Error("Service activation is retiring.");
         if (prior.activation_id !== activationId || prior.relay_database_namespace !== this.history.namespace ||
             prior.source_json !== sourceJson || prior.state_digest !== source.fullStateDigest ||
             prior.owner_user_id !== share.granterUserId || prior.share_id !== share.shareId) throw new Error("Service activation already has another retained source.");

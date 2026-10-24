@@ -25,10 +25,12 @@ const UNRELATED_DOCUMENTS: usize = 4;
 const INVALIDATION: &str =
     "UPDATE live_owner_activations SET source_byte_length=source_byte_length";
 
-/// `count` acknowledged native entries of the released tail's outbox, after
-/// the retained one. Applied here, they are the proven history a long-lived
-/// lineage keeps; never applied, each is retained work that protects it.
-/// Written past the store's checks, each still reads as valid.
+/// `count` acknowledged entries of the released tail's outbox, after the
+/// retained one. Applied here, they are native entries, the proven history a
+/// long-lived lineage keeps; never applied, each is retained work that
+/// protects it, and claims no native source, which only a journal row it
+/// lacks could prove. Written past the store's checks, each still reads as
+/// valid.
 pub(super) fn retained_history(w: &RetainedWindow, count: usize, applied: bool) {
     use dohc_engine_collab::owner_outbox::{OwnerOutboxNativeOrigin, OwnerOutboxNativeSource};
     let mut raw = rusqlite::Connection::open(engine_db_path(&w.root).unwrap()).unwrap();
@@ -59,8 +61,12 @@ pub(super) fn retained_history(w: &RetainedWindow, count: usize, applied: bool) 
         let mut application = tx.prepare(APPLIED_EXACTLY).unwrap();
         for index in 0..count as i64 {
             source.native_sequence = HISTORY_SEQUENCE + index;
-            let json = serde_json::to_string(&source).unwrap();
+            let json = applied.then(|| serde_json::to_string(&source).unwrap());
             let delivery_id = format!("history-{index}");
+            let append_key = json.as_ref().map_or_else(
+                || delivery_id.clone(),
+                |json| format!("adopted-local:{}", hex_sha256(json.as_bytes())),
+            );
             let receipt = dohc_engine_collab::OwnerDeliveryReceipt {
                 delivery_id: delivery_id.clone(),
                 update_digest: w.retained_digest.clone(),
@@ -71,7 +77,7 @@ pub(super) fn retained_history(w: &RetainedWindow, count: usize, applied: bool) 
                 .execute(rusqlite::params![
                     outbox,
                     last + 1 + index,
-                    format!("adopted-local:{}", hex_sha256(json.as_bytes())),
+                    append_key,
                     delivery_id,
                     w.retained_digest,
                     json,

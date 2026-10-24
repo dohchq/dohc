@@ -14,6 +14,8 @@ import {createNamedFrameChanges} from "./liveHostChanges.js";
 import {HeldReadBusyError, HeldReadTooLargeError} from "./liveHostRequests.js";
 import {captureOwnerLiveFrameHost} from "./namedLiveFrameHost.js";
 import type {LiveHostConnectionCoordinate} from "./storage.js";
+import type {StorageContext} from "./storage/context.js";
+import {readServiceActivationRetirement} from "./storage/serviceActivationRetirement.js";
 import {ServiceActivationDriver} from "./serviceActivationDriver.js";
 import {ServiceHostedReplication} from "./serviceHostedReplication.js";
 import {liveEditors} from "./liveEditors.js";
@@ -1391,10 +1393,10 @@ it("admits nothing after the last Edit share is deleted while a drain waits, and
   expect(o.client().sendLiveApplication).toHaveBeenCalledTimes(applications);
 });
 
-// Proves: a departure that registered retires the owner's registration. When
-// its owner resumes before the departure finishes, the owner registers again
-// before it delivers, and the document becomes ready again.
-it("registers the owner again when a stopped document resumes before its departure finished", async () => {
+// Proves: a departure that registered retires the owner's registration. A
+// Resume before the departure finishes enables the enrollment, but Stop's
+// retirement obligation stays: the stopped activation never delivers again.
+it("keeps a stopped activation retiring when its owner resumes before its departure finished", async () => {
   const o = await enrolledServiceHost({freshRegistrations: true});
   vi.spyOn(console, "error").mockImplementation(() => {});
   o.stop();
@@ -1407,13 +1409,12 @@ it("registers the owner again when a stopped document resumes before its departu
   o.replies.push = {};
   o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 40, guard() {}});
   await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
-  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
-  await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
-  // A departure reads no owner state, so the first read after Stop is the owner's, right after it registered again.
-  const calls = o.ownerCalls(), resumed = calls.findIndex(([method], index) => index >= sent && method === "liveApplication.ownerState");
-  expect(calls.slice(resumed - 1, resumed + 1)).toEqual([["liveApplication.register", {binding: o.binding, activationId: `ordinary-activation-${"a".repeat(64)}`}],
-    ["liveApplication.ownerState", {registrationId: o.liveRegistration(), sessionId: "native-session"}]]);
-  expect(o.membership.filter(row => row.method === "liveApplication.unloadDocument")).toEqual([]);
+  expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toMatchObject({activationId: `ordinary-activation-${"a".repeat(64)}`, requestedAtMs: 20});
+  expect(o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner", shareId: "share"}}))
+    .toEqual({kind: "refused", reason: "host-unavailable"});
+  await expect(o.host.drain(o.document)).rejects.toThrow("incomplete");
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  expect(o.calls(sent)).not.toContain("liveApplication.ownerState");
 });
 
 // Proves: the engine refuses to register a stopped document that already

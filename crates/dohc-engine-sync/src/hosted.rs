@@ -29,11 +29,10 @@ use crate::{ReplicationEnvelope, SyncError};
 
 pub use held::{
     HeldAnswer, HeldBindingStatus, HeldContributions, HeldDocument, HeldDocumentInspection,
-    HeldDocumentsPage,
-    HeldFreshness, HeldKey, HeldProof, HeldProofAdmission, HeldProofs, HeldRelease,
-    MAX_HELD_DOCUMENTS_PAGE,
-    ProvedHeld, admit_held_proof, check_held_freshness, inspect_held_document,
-    list_held_documents, prove_held_document, release_held_proof, shared_proof_failure,
+    HeldDocumentsPage, HeldFreshness, HeldKey, HeldProof, HeldProofAdmission, HeldProofs,
+    HeldRelease, MAX_HELD_DOCUMENTS_PAGE, ProvedHeld, admit_held_proof, check_held_freshness,
+    inspect_held_document, list_held_documents, prove_held_document, release_held_proof,
+    shared_proof_failure,
 };
 #[cfg(test)]
 pub(crate) use park::OCCUPANTS_READ;
@@ -741,6 +740,10 @@ impl ReleasedHoldContinuation {
     }
 }
 
+/// What a hold stores of a released lineage: its binding's canonical JSON
+/// and digest, its continuation, and whether the binding is stale.
+type StoredRelease = (Option<(String, String)>, Option<&'static str>, bool);
+
 impl HostedHold {
     /// The reason code a hold is stored and reported under.
     pub const fn reason(&self) -> &'static str {
@@ -806,9 +809,7 @@ impl HostedHold {
 
     /// The binding's canonical JSON and digest, continuation and staleness a
     /// released-lineage hold stores; none and fresh for any other.
-    fn released(
-        &self,
-    ) -> Result<(Option<(String, String)>, Option<&'static str>, bool), SyncError> {
+    fn released(&self) -> Result<StoredRelease, SyncError> {
         Ok(match self {
             Self::ReleasedLineageUnsettled {
                 binding,

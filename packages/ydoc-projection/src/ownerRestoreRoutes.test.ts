@@ -4,7 +4,6 @@ import {attachLiveJournalHistory, createLiveJournalHistoryAuthority} from "../..
 import type {StorageContext} from "../../../services/sync-relay/src/storage/context.js";
 import {testHandler} from "../../../services/sync-relay/src/testing/index.js";
 import type {OwnerRestoreHost} from "../../../services/sync-relay/src/ownerRestoreRoutes.js";
-import {retireServiceActivation} from "../../../services/sync-relay/src/storage/serviceActivationRetirement.js";
 import {SyncRelayQuotaExceededError} from "../../../services/sync-relay/src/storage/errors.js";
 
 afterEach(cleanupLiveDeliveryFixtures);
@@ -194,10 +193,10 @@ it("refuses a restore while live editing is still stopping with a conflict that 
   const f = fixture();
   try {
     const plan = await f.plan(), document = f.input.evidence.document;
-    f.write(db => db.prepare(`INSERT INTO sync_relay_service_activations VALUES ('restore-history',?,?,'main',?,?,'{}','{}',?,x'0000','owner','share','{}',1)`)
+    f.write(db => db.prepare(`INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
+        source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes,retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor)
+        VALUES ('restore-history',?,?,'main',?,?,'{}','{}',?,x'0000','owner','share','{}',1,10,1,0)`)
       .run(`ordinary-activation-${"d".repeat(64)}`, document.workspaceId, document.objectId, document.lineageClaimId, document.lineageClaimId));
-    const context = f.storage as StorageContext;
-    context.tx(() => retireServiceActivation(context, document));
     for (const [suffix, body] of [["/plan", f.planInput], ["", {intent: plan.intent}]] as const) {
       const response = await f.request(suffix, body);
       expect(response.status).toBe(409);

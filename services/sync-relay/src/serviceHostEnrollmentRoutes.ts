@@ -1,15 +1,15 @@
-import {ServiceHostRetirementConflict} from "./storage/serviceHostEnrollment";
+import {HELD_CHANGED, ServiceHostRetirementConflict} from "./storage/serviceHostEnrollment";
 import {readBoundedJson} from "@dohc/service-http";
 import type {ResolveActor} from "@dohc/workspace-auth/session";
 import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents";
 import type {SyncRelayStorage} from "./storage";
 import type {LiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
-import type {ServiceHostEnrollment} from "./storage/serviceHostEnrollment";
+import type {ServiceHostEnrollment, ServiceHostHeldActivation} from "./storage/serviceHostEnrollment";
 import type {startSelfHostedLiveHost} from "./selfHostedLiveHost";
 import {effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson} from "./shareFilter";
 import {canonicalLiveSelector} from "./storage/liveDocumentAuthority";
 import {parseShareId, parseWorkspaceId} from "./requestInputs";
-import {badRequest, errorResponse, notFound, RelayError} from "./errors";
+import {badRequest, errorResponse, notFound, RelayError, relayError} from "./errors";
 
 export function serviceHostSharePaths(storage: SyncRelayStorage, input: {workspaceId: string; ownerUserId: string; shareId: string; missingOnly?: boolean}): string[] {
   const share = storage.getShare(input.shareId), parsed = share && parseStoredAnyShareSelectorJson(share.selectorJson);
@@ -104,6 +104,16 @@ export function createServiceHostEnrollmentRoutes(options: {
     if (current.kind !== "current" || !host.ready(document)) return {...base, status: host.unavailable ? "unavailable" : "preparing"};
     return {path: current.binding.currentPath, status: "ready", document: {binding: current.binding, relayDatabaseNamespace: history.namespace, shareId: row.shareId}};
   }
+  // The exact activation of a document the host holds for an unadmitted live
+  // edit. Its Resume retires that activation inside the enrollment transaction,
+  // which checks the hold again there.
+  function heldActivation(row: ServiceHostEnrollment): ServiceHostHeldActivation | undefined {
+    if (host.blocked(row) !== "live-edit-unadmitted") return undefined;
+    const saved = activation.read(row.workspaceId, row.path, 4 * 1024 * 1024), identity = storage.getWorkspaceIdentity(row.workspaceId);
+    if (!saved?.completed || !identity) return undefined;
+    return {activationId: saved.activationId, replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity,
+      assertHeld() {if (host.blocked(row) !== "live-edit-unadmitted") throw relayError("conflict", HELD_CHANGED);}};
+  }
   const response = (body: unknown, status = 200) => Response.json(body, {status, headers: {"cache-control": "private, no-store"}});
   return async (request: Request): Promise<Response> => {
     try {
@@ -151,11 +161,12 @@ export function createServiceHostEnrollmentRoutes(options: {
       if (Object.keys(input).some(key => !["path", "shareId", "retry"].includes(key)) || (input.shareId !== undefined && typeof input.shareId !== "string") ||
         (input.path !== undefined && typeof input.path !== "string") || (input.retry !== undefined && typeof input.retry !== "boolean") ||
         (input.retry === true && (input.path !== undefined || input.shareId === undefined)) || (input.path === undefined && input.shareId === undefined)) throw badRequest("An owned share or retained document is required.");
-      const retained = input.shareId === undefined ? storage.readServiceHostEnrollment(workspaceId, input.path as string) : undefined;
+      const retained = input.path === undefined ? undefined : storage.readServiceHostEnrollment(workspaceId, input.path as string);
       if (input.shareId === undefined && (!retained || retained.ownerUserId !== actor.userId)) throw notFound();
       const shareId = parseShareId(input.shareId ?? retained!.shareId);
       const paths = input.path === undefined ? serviceHostSharePaths(storage, {workspaceId, shareId, ownerUserId: actor.userId, missingOnly: input.retry === true}) : [input.path as string];
-      const rows = storage.enrollServiceHostDocuments(paths.map(path => ({workspaceId, path, shareId, ownerUserId: actor.userId, nowMs: Date.now(), guard})));
+      const held = retained?.ownerUserId === actor.userId ? heldActivation(retained) : undefined;
+      const rows = storage.enrollServiceHostDocuments(paths.map(path => ({workspaceId, path, shareId, ownerUserId: actor.userId, nowMs: Date.now(), guard, ...(held ? {held} : {})})));
       // A Resume gives a blocked document one more attempt in the store it has.
       if (input.path !== undefined) host.unblock(rows[0]!);
       host.reconcile();

@@ -4909,7 +4909,9 @@ pub(crate) fn drain_inactive_ydoc_updates(
                 }
                 if processed == 0 && held.is_empty() {
                     let holds = &drained.holds;
-                    drained.cleared.retain(|object, _| !holds.contains_key(object));
+                    drained
+                        .cleared
+                        .retain(|object, _| !holds.contains_key(object));
                     return Ok(drained);
                 }
                 protected.extend(held);

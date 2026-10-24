@@ -340,7 +340,7 @@ export function retuneShareGrant(storage: StorageContext, input: {
           }
         }
         incrementActiveDependentGenerations(storage, grant.grantId);
-        retireUncoveredServiceActivations(storage, covered);
+        retireUncoveredServiceActivations(storage, covered, Math.trunc(input.changedAtMs));
       }
       return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
     });
@@ -405,7 +405,7 @@ export function revokeShareGrantInTransaction(storage: StorageContext, input: Re
         AND NOT EXISTS (SELECT 1 FROM sync_relay_share_grants
           WHERE share_id = ? AND status = 'active' AND revoked_at_ms IS NULL)`)
         .run(grant.shareId, grant.shareId);
-      retireUncoveredServiceActivations(storage, covered);
+      retireUncoveredServiceActivations(storage, covered, revokedAtMs);
       forgetReplicaCurrentViewCaches(storage,storage.getShare(input.shareId)!.workspaceId);
       return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
   }
@@ -1090,7 +1090,7 @@ export function revokeShareInTransaction(storage: StorageContext, shareId: strin
              )`,
         )
         .run(Math.trunc(revokedAtMs), shareId);
-      retireUncoveredServiceActivations(storage, covered);
+      retireUncoveredServiceActivations(storage, covered, Math.trunc(revokedAtMs));
       forgetReplicaCurrentViewCaches(storage,String(existing.workspace_id));
       storage.db.prepare(`UPDATE sync_relay_share_removals SET voided = 1
         WHERE share_id = ? AND (removed_grant_id IS NOT NULL OR ? > 0)`)

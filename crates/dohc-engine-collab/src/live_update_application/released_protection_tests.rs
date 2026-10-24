@@ -325,8 +325,20 @@ fn contradictory_provenance_invalidates_the_whole_tail_and_names_its_work() {
     };
     let [entry]: [RetainedContribution; 1] = only_unproven(&unapplied()).try_into().unwrap();
     assert_eq!(entry.authors(), &native_agent(), "the journal row's agent");
-    let RetainedContribution::Outbox { delivery_id, .. } = &entry else {
-        panic!("an outbox entry: {entry:?}")
+    // Each fixture names its delivery anew: where its native entry is, and
+    // that delivery.
+    let native_entry = |f: &Fixture| {
+        let locator = f.store.read_with(|conn| conn.query_row(
+            "SELECT outbox_id,sequence,delivery_id,update_digest FROM owner_ydoc_outbox_entries
+             WHERE native_source_json IS NOT NULL",
+            [],
+            |row| Ok(ContributionLocator::Outbox {
+                outbox_id: row.get(0)?, sequence: row.get(1)?, delivery_id: row.get(2)?, update_digest: row.get(3)?,
+            }),
+        )).unwrap();
+        let ContributionLocator::Outbox { delivery_id, .. } = &locator else { unreachable!() };
+        let delivery_id = delivery_id.clone();
+        (locator, delivery_id)
     };
     let automation = r#"{"automationId":"sort","attribution":{"actorKind":"automation","depth":1}}"#;
     let damages: [(&str, PreservationReason, bool, String); 7] = [
@@ -354,18 +366,19 @@ fn contradictory_provenance_invalidates_the_whole_tail_and_names_its_work() {
     ];
     for (case, reason, applications_kept, damage) in damages {
         let mut f = if applications_kept { released_without_carried() } else { unapplied() };
+        let (locator, delivery_id) = native_entry(&f);
         write_unchecked(&mut f, &format!("PRAGMA foreign_keys=OFF; {}", damage.replace("?1", &format!("'{delivery_id}'"))));
         let binding = protected(&f).unwrap_or_else(|| panic!("{case}: still protected"));
         assert_eq!(coverage_of(binding.clone()), [RetainedCoverage::Invalid], "{case}");
         let expected = [PreservationFinding {
             reason,
             namespace: Some("namespace".into()),
-            contribution: Some(entry.locator()),
+            contribution: Some(locator.clone()),
         }];
         let [tail] = <[ProtectedTail; 1]>::try_from(listed(binding.clone())).unwrap();
         let work = tail_work(&f, &tail);
         assert_eq!(work.contradictions, expected, "{case}");
-        assert!(work.contributions.iter().all(|kept| kept.locator() != entry.locator()), "{case}: none made up");
+        assert!(work.contributions.iter().all(|kept| kept.locator() != locator), "{case}: none made up");
         let preservation = inspected(&f, &binding);
         assert_eq!(preservation.status, PreservationStatus::InvalidEvidence, "{case}");
         assert_eq!(preservation.findings, expected, "{case}");
@@ -375,10 +388,12 @@ fn contradictory_provenance_invalidates_the_whole_tail_and_names_its_work() {
     // An acknowledgement lost before the entry recorded it: the relay
     // accepted it and the host applied it, and it is still work.
     let mut f = released_without_carried();
+    let (locator, delivery_id) = native_entry(&f);
     write_unchecked(&mut f, &format!("PRAGMA foreign_keys=OFF;
         UPDATE owner_ydoc_outbox_entries SET pending=1,update_blob_digest=update_digest,accepted_receipt_json=NULL
         WHERE delivery_id='{delivery_id}'"));
-    assert_eq!(only_unproven(&f), [entry.clone()], "pending is no proof, and its acceptance no contradiction");
+    let [kept]: [RetainedContribution; 1] = only_unproven(&f).try_into().unwrap();
+    assert_eq!((kept.locator(), kept.authors()), (locator, &native_agent()), "pending is no proof, and its acceptance no contradiction");
 
     // One Carried delivery's journal row contradicts it; the other still
     // reads, and the tail commits to neither.

@@ -2350,8 +2350,8 @@ mod tests {
     /// never the binding, whose tails are unbounded.
     #[test]
     fn a_released_lineage_hold_reaches_the_wire_as_its_summary() {
-        let held = hosted_hold_json("object", &released_hold(), Some("notes/plan.md"))
-            .expect("summary");
+        let held =
+            hosted_hold_json("object", &released_hold(), Some("notes/plan.md")).expect("summary");
         assert_eq!(
             held,
             json!({
@@ -2479,10 +2479,21 @@ mod tests {
             ..HostedPassOutcome::default()
         };
         let pages = pages(&pass, &["gone".to_owned()]);
-        assert!(pages.len() > 1, "2,000 holds of about 160 bytes pass 240 KiB");
-        assert!(paged(&pages, "held").into_iter().eq(pass.held.keys().cloned()));
+        assert!(
+            pages.len() > 1,
+            "2,000 holds of about 160 bytes pass 240 KiB"
+        );
+        assert!(
+            paged(&pages, "held")
+                .into_iter()
+                .eq(pass.held.keys().cloned())
+        );
         let gone = |page: &Value| page["departed"] == json!(["gone"]);
-        assert!(pages.iter().all(|page| gone(page) && page["departedThrough"].is_null()));
+        assert!(
+            pages
+                .iter()
+                .all(|page| gone(page) && page["departedThrough"].is_null())
+        );
     }
 
     /// Sol's review: departed documents the engine cannot park, more than
@@ -2505,7 +2516,11 @@ mod tests {
         assert!(!object_ids(&pages[0]["departed"]).is_empty());
         assert!(pages[0]["departedThrough"].is_string());
         assert_eq!(paged(&pages, "departed"), departed);
-        assert!(paged(&pages, "held").into_iter().eq(pass.held.keys().cloned()));
+        assert!(
+            paged(&pages, "held")
+                .into_iter()
+                .eq(pass.held.keys().cloned())
+        );
     }
 
     /// Sol's and Opus's review: changed paths, refusals and declined shares
@@ -2565,7 +2580,11 @@ mod tests {
             assert_eq!(listed + omitted, 2_000, "{list}");
         }
         let held = object_ids(&first["held"]);
-        assert!(held.len() > 300, "the held list keeps its share: {}", held.len());
+        assert!(
+            held.len() > 300,
+            "the held list keeps its share: {}",
+            held.len()
+        );
         assert!(!held.contains(&last));
         assert!(object_ids(&first["departed"]).len() > 40, "{first}");
         assert_eq!(
@@ -2575,7 +2594,11 @@ mod tests {
                 &json!(0)
             )
         );
-        assert!(paged(&pages, "held").into_iter().eq(pass.held.keys().cloned()));
+        assert!(
+            paged(&pages, "held")
+                .into_iter()
+                .eq(pass.held.keys().cloned())
+        );
         assert_eq!(paged(&pages, "departed"), departed);
     }
 
@@ -2654,9 +2677,16 @@ mod tests {
             (&last["departed"], &last["departedThrough"]),
             (&json!([departed[999]]), &Value::Null)
         );
-        let unread = commit(None, Err(dohc_engine_runtime::RuntimeError::ActorUnavailable));
+        let unread = commit(
+            None,
+            Err(dohc_engine_runtime::RuntimeError::ActorUnavailable),
+        );
         assert_eq!(
-            (&unread["departed"], &unread["departedThrough"], &unread["hasMore"]),
+            (
+                &unread["departed"],
+                &unread["departedThrough"],
+                &unread["hasMore"]
+            ),
             (&Value::Null, &Value::Null, &json!(true))
         );
     }

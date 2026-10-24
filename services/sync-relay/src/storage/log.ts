@@ -78,6 +78,7 @@ export function appendLogBatch(storage: StorageContext, input: {
     ops: SyncRelayLogInput[];
     guard?: (context: AppendLogBatchGuardContext) => void;
     admit?: (ops: SyncRelayLogInput[]) => void;
+    confirm?: (ops: SyncRelayLogInput[]) => void;
     classifyRedundantRecoveries?: boolean;
   }): AppendLogBatchResult {
     return storage.tx(() => appendLogBatchInTransaction(storage, input));
@@ -90,6 +91,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
   ops: SyncRelayLogInput[];
   guard?: (context: AppendLogBatchGuardContext) => void;
   admit?: (ops: SyncRelayLogInput[]) => void;
+  confirm?: (ops: SyncRelayLogInput[]) => void;
   classifyRedundantRecoveries?: boolean;
 }): AppendLogBatchResult {
       for (const op of input.ops) {
@@ -203,6 +205,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
           confirmLiveApplication(storage, op, input.workspaceId, input.originId, batchCoordinates);
         }
       }
+      input.confirm?.(newOps);
       addedLogBytes=newOps.reduce((bytes,op)=>bytes+Buffer.byteLength(op.payloadJson)+
         (op.admittedAuthorSnapshot===undefined?0:Buffer.byteLength(JSON.stringify(op.admittedAuthorSnapshot)))+
         (op.settlementAdmission===undefined?0:Buffer.byteLength(JSON.stringify(op.settlementAdmission))),0);

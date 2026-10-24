@@ -1,9 +1,9 @@
 import {afterEach, expect, it} from "vitest";
-import {fixture as ticketFixture, binding, scope} from "../liveTickets.test-helper";
+import {fixture as ticketFixture, binding, retainServiceActivation, scope} from "../liveTickets.test-helper";
 import {openSyncRelayStorage} from "../storage";
 import {authorizeServiceHostReplication, deriveServiceHostBearer, serviceHostReplicationRoute} from "../serviceHostCredential";
 import {serviceHostDocumentEnabled, SERVICE_HOST_ENROLLMENTS, SERVICE_HOST_MAX_WORKSPACES} from "./serviceHostEnrollment";
-import {readServiceActivationRetirement, SERVICE_ACTIVATION_RETIREMENTS} from "./serviceActivationRetirement";
+import {readServiceActivationRetirement} from "./serviceActivationRetirement";
 import {fenceAccount, initializeAccountDeletion} from "./accountDeletion";
 import type {StorageContext} from "./context";
 
@@ -528,15 +528,13 @@ it("applies Pause after host release and fences Stop immediately", async () => {
   expect(f.storage.hasKeptServiceHostEnrollment(scope.workspaceId, "docs/stopped.md")).toBe(true);
 });
 
-const activationId = `ordinary-activation-${"c".repeat(64)}`;
 // The fixture document's adopted service activation. Stored metadata is enough here; native activation has its own suites.
 async function activated() {
   const f = await fixture(); f.enroll();
-  f.raw.prepare(`INSERT INTO sync_relay_service_activations VALUES (?,?,?,'main',?,?,'{}','{}',?,x'0000','owner-1',?,'{}',1)`)
-    .run(key.namespace, activationId, scope.workspaceId, binding.objectId, binding.lineageClaimId, binding.lineageClaimId, scope.shareId);
+  retainServiceActivation(f.raw, key.namespace, true);
   const owner = () => f.storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: "owner-1", shareId: scope.shareId}}).kind;
   const retirement = () => readServiceActivationRetirement(f.storage as StorageContext, binding);
-  const retirements = () => f.raw.prepare(`SELECT count(*) AS count FROM ${SERVICE_ACTIVATION_RETIREMENTS}`).get()!.count;
+  const retirements = () => f.raw.prepare("SELECT count(*) AS count FROM sync_relay_service_activations WHERE retire_requested_at_ms IS NOT NULL").get()!.count;
   const share = (shareId: string, grantId: string, access = "edit", userId = "reader-2") => {
     f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,'owner-1',?,0)")
       .run(shareId, scope.workspaceId, JSON.stringify({paths: ["docs"], versionId: null}));
@@ -545,8 +543,9 @@ async function activated() {
   };
   return {...f, owner, retirement, retirements, share};
 }
-const recorded = {relayDatabaseNamespace: key.namespace, activationId, workspaceId: scope.workspaceId, mainVersionId: "main",
-  objectId: binding.objectId, lineageClaimId: binding.lineageClaimId, restoreFenceGeneration: 7, acceptedThrough: 0};
+const recorded = (requestedAtMs: number) => ({relayDatabaseNamespace: key.namespace, activationId: `ordinary-activation-${"a".repeat(64)}`,
+  workspaceId: scope.workspaceId, mainVersionId: "main", objectId: binding.objectId, lineageClaimId: binding.lineageClaimId, path: binding.currentPath,
+  restoreFenceGeneration: 7, acceptedThrough: 0, requestedAtMs});
 
 // Proves: Pause fences admission and records the exact activation's retirement
 // in its own transaction. Repeating it keeps that one record. Resume records
@@ -557,20 +556,20 @@ it("records one retirement when Pause fences the activation, and Resume leaves i
   expect(f.retirement()).toBeNull();
   expect(f.setEnabled(false)).toMatchObject({enabled: true, ownerStop: "pause"});
   expect(f.owner()).toBe("refused");
-  expect(f.retirement()).toEqual(recorded);
+  expect(f.retirement()).toEqual(recorded(20));
   f.setEnabled(false);
-  expect(f.retirement()).toEqual(recorded); expect(f.retirements()).toBe(1);
+  expect(f.retirement()).toEqual(recorded(20)); expect(f.retirements()).toBe(1);
   // Another Edit share neither clears the Pause nor admits anything.
   f.share("another", "another-edit");
   expect(f.storage.hasKeptServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toBe(true);
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toMatchObject({ownerStop: "pause"});
   expect(f.owner()).toBe("refused");
   expect(f.setEnabled(true)).toMatchObject({enabled: true, retired: false, ownerStop: null});
-  expect(f.retirement()).toEqual(recorded);
+  expect(f.retirement()).toEqual(recorded(20));
   expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(false);
   expect(f.owner()).toBe("refused");
   const reopened = openSyncRelayStorage(f.path, f.config);
-  try {expect(readServiceActivationRetirement(reopened as StorageContext, binding)).toEqual(recorded);} finally {reopened.close();}
+  try {expect(readServiceActivationRetirement(reopened as StorageContext, binding)).toEqual(recorded(20));} finally {reopened.close();}
 });
 
 // Proves: "last" is across every Edit share of the owner that covers the
@@ -586,10 +585,10 @@ it("retires the activation only when the last Edit grant covering the document e
   expect(f.retirement()).toBeNull();
   expect(f.owner()).toBe("current");
   expect(f.storage.retuneShareGrant({shareId: "overlap", grantId: "overlap-link", access: "view", changedAtMs: 31, expectedDependentGrantIds: [], guard() {}}).ok).toBe(true);
-  expect(f.retirement()).toEqual(recorded);
+  expect(f.retirement()).toEqual(recorded(31));
   expect(f.owner()).toBe("refused");
   expect(f.storage.revokeShareGrant({shareId: "overlap", grantId: "overlap-view", revokedAtMs: 32}).ok).toBe(true);
-  expect(f.retirement()).toEqual(recorded); expect(f.retirements()).toBe(1);
+  expect(f.retirement()).toEqual(recorded(31)); expect(f.retirements()).toBe(1);
 });
 
 // Proves: revocation and whole-share removal record the retirement at zero
@@ -598,16 +597,16 @@ it("retires the activation only when the last Edit grant covering the document e
 it("keeps a revoked document's retirement pending when it is shared again before reconciliation", async () => {
   const f = await activated();
   expect(f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 30}).ok).toBe(true);
-  expect(f.retirement()).toEqual(recorded);
+  expect(f.retirement()).toEqual(recorded(30));
   expect(f.owner()).toBe("refused");
   f.share("replacement", "replacement-edit");
   expect(f.enroll({shareId: "replacement", nowMs: 31})).toMatchObject({enabled: true, retired: false, ownerStop: null});
   f.raw.prepare("UPDATE sync_relay_share_grants SET status='active',revoked_at_ms=NULL WHERE grant_id=?").run(scope.grantId);
-  expect(f.retirement()).toEqual(recorded);
+  expect(f.retirement()).toEqual(recorded(30));
   expect(f.owner()).toBe("refused");
   expect(f.storage.revokeShare("replacement", 32)).toBe(true);
   expect(f.storage.revokeShare(scope.shareId, 33)).toBe(true);
-  expect(f.retirement()).toEqual(recorded); expect(f.retirements()).toBe(1);
+  expect(f.retirement()).toEqual(recorded(30)); expect(f.retirements()).toBe(1);
 });
 
 // Proves: deleting a collaborator's account records the retirement its
@@ -623,10 +622,11 @@ it("retires the activation when deleting a collaborator's account ends the last 
   expect(f.retirement()).toBeNull();
   expect(f.owner()).toBe("current");
   deleteAccount("reader-2");
-  expect(f.retirement()).toEqual(recorded);
+  const deleted = recorded(f.retirement()!.requestedAtMs);
+  expect(f.retirement()).toEqual(deleted);
   expect(f.owner()).toBe("refused");
   f.share("replacement", "replacement-edit", "edit", "reader-3");
-  expect(f.retirement()).toEqual(recorded); expect(f.retirements()).toBe(1);
+  expect(f.retirement()).toEqual(deleted); expect(f.retirements()).toBe(1);
   expect(f.owner()).toBe("refused");
 });
 

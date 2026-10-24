@@ -636,6 +636,13 @@ export interface SyncRelayStorage {
   /** Stores blob bytes the service host uploaded, with its proof of holding them. */
   putServiceHostBlob(input: {workspaceId: string; sha256: string; content: Uint8Array; createdAtMs: number}): PutBlobResult;
   serviceHostUploaded(workspaceId: string, sha256: string): boolean;
+  /** Proves a settling document's settlement audits before the append's writer. */
+  prepareSettlementAudits(input: {workspaceId: string; ops: SyncRelayLogInput[]; batched: boolean}, signal?: AbortSignal): Promise<void>;
+  /** Under the append's writer: null for a settling document's verified retirement output, otherwise why it is refused. */
+  admitRetirementPublication(retirement: import("./serviceActivationRetirement").ServiceActivationRetirement, op: SyncRelayLogInput,
+    batch: import("./serviceActivationPublication").RetirementBatch): import("./serviceActivationPublication").RetirementRefusal | null;
+  /** After confirmation: whether what that row's admission waited on was confirmed. */
+  retirementPublicationConfirmed(op: SyncRelayLogInput): boolean;
   scanServiceHostCandidateShares(after?: import("./serviceHostEnrollment").ServiceHostCandidateCursor, workspaceId?: string): import("./serviceHostEnrollment").ServiceHostCandidatePage;
   checkServiceHostDocuments(input: {workspaceId: string; ownerUserId: string; shareId: string; paths: readonly string[]}): void;
   setServiceHostEnrollmentEnabled(input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
@@ -860,6 +867,9 @@ export interface SyncRelayStorage {
     // Runs after the guard, under the same lock, with the ops at coordinates
     // the log does not hold yet. It may refuse an op or mark it departed.
     admit?: (ops: SyncRelayLogInput[]) => void;
+    // Runs after settlement and application confirmation, still under the
+    // lock, with the same ops. It may refuse an op that confirmation did not prove.
+    confirm?: (ops: SyncRelayLogInput[]) => void;
     // The owner's publication lane: a copy of retained work another device
     // already published keeps its coordinate and changes nothing else.
     classifyRedundantRecoveries?: boolean;

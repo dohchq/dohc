@@ -264,13 +264,8 @@ impl EngineService {
             });
         }
         if request.method == "sync.heldDocument" {
-            return Box::pin(self.sync_held_document(
-                &ctx,
-                request.workspace,
-                request.params,
-                id,
-            ))
-            .await;
+            return Box::pin(self.sync_held_document(&ctx, request.workspace, request.params, id))
+                .await;
         }
         if request.method == "versionedText.readBlob" {
             let (result, blob_egress) = self
@@ -447,13 +442,8 @@ impl EngineService {
                     .await?
             }
             "sync.pullHosted" => {
-                Box::pin(self.sync_pull_hosted(
-                    &ctx,
-                    request.workspace,
-                    request.params,
-                    request.id,
-                ))
-                .await?
+                Box::pin(self.sync_pull_hosted(&ctx, request.workspace, request.params, request.id))
+                    .await?
             }
             "sync.heldDocuments" => {
                 Box::pin(self.sync_held_documents(

@@ -4217,16 +4217,18 @@ async fn stop_keeps_each_pending_entrys_declared_credit() {
         for repetition in 0..1 {
         let append_key = format!("credit-5-{repetition}");
         let digest: String = tx.query_row("SELECT update_digest FROM owner_ydoc_outbox_entries WHERE append_key=?1", [&append_key], |r| r.get(0)).unwrap();
-        let source = dohc_engine_collab::owner_outbox::OwnerOutboxSource::Native(
-            dohc_engine_collab::owner_outbox::OwnerOutboxNativeSource {
-                binding: f.binding.clone(), adoption_id: "native-credit".into(), native_sequence: 10,
-                update_digest: digest,
-                origin: dohc_engine_collab::owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {
-                    actor_origin_id: Some("native-agent".into()), actor_kind: Some("agent".into()),
-                    on_behalf_of: Some("native-person".into()), chain_depth: Some(3), recorded_at_ms: 9,
-                },
-            });
-        tx.execute("UPDATE owner_ydoc_outbox_entries SET native_source_json=?1,draft_binding_revision=NULL WHERE append_key=?2", [serde_json::to_string(&source).unwrap(),append_key]).unwrap();
+        let native = dohc_engine_collab::owner_outbox::OwnerOutboxNativeSource {
+            binding: f.binding.clone(), adoption_id: "native-credit".into(), native_sequence: 10,
+            update_digest: digest,
+            origin: dohc_engine_collab::owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {
+                actor_origin_id: Some("native-agent".into()), actor_kind: Some("agent".into()),
+                on_behalf_of: Some("native-person".into()), chain_depth: Some(3), recorded_at_ms: 9,
+            },
+        };
+        // The entry declares the agent its native row recorded, as an adopted append writes it.
+        let declared = serde_json::to_string(&native.agent_declaration().unwrap()).unwrap();
+        let source = dohc_engine_collab::owner_outbox::OwnerOutboxSource::Native(native);
+        tx.execute("UPDATE owner_ydoc_outbox_entries SET native_source_json=?1,agent_declaration_json=?3,draft_binding_revision=NULL WHERE append_key=?2", [serde_json::to_string(&source).unwrap(),append_key,declared]).unwrap();
         }
         Ok::<_, dohc_engine_storage::StorageError>(())
     }).unwrap();
@@ -8096,7 +8098,10 @@ fn outbox_only(w: &mut RetainedWindow, text: &str, stored: Stored) -> RetainedCo
             &format!(
                 "INSERT INTO binary_blobs (sha256,byte_length,bytes) VALUES ('{digest}',{},X'{}')",
                 bytes.len(),
-                bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+                bytes
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
             ),
         ),
         Stored::Nothing => {}
@@ -8144,7 +8149,10 @@ fn rebound(w: &mut RetainedWindow) -> Box<ReleasedLineageBinding> {
     else {
         panic!("the drain holds the fold again");
     };
-    assert_eq!(inspected_window(&w.store).document.binding_digest, binding.digest());
+    assert_eq!(
+        inspected_window(&w.store).document.binding_digest,
+        binding.digest()
+    );
     binding
 }
 
@@ -8169,14 +8177,40 @@ async fn inspection_preserves_integrated_retained_work_and_writes_nothing() {
         let (native, rows, ingress) = (w.native(), native_rows(&w.store), ingress_rows(&w.store));
 
         let inspection = inspected_window(&w.store);
-        assert_eq!(inspection.document.binding_digest, binding.digest(), "{case}");
-        assert_eq!(inspection.status, dohc_engine_sync::HeldBindingStatus::Current, "{case}");
-        let preservation = inspection.preservation.expect("a current binding is inspected");
-        assert_eq!(preservation.status, PreservationStatus::Complete, "{case}: {:?}", preservation.findings);
-        assert!(preservation.merged.is_empty(), "{case}: the head holds it all: {:?}", preservation.merged);
+        assert_eq!(
+            inspection.document.binding_digest,
+            binding.digest(),
+            "{case}"
+        );
+        assert_eq!(
+            inspection.status,
+            dohc_engine_sync::HeldBindingStatus::Current,
+            "{case}"
+        );
+        let preservation = inspection
+            .preservation
+            .expect("a current binding is inspected");
+        assert_eq!(
+            preservation.status,
+            PreservationStatus::Complete,
+            "{case}: {:?}",
+            preservation.findings
+        );
+        assert!(
+            preservation.merged.is_empty(),
+            "{case}: the head holds it all: {:?}",
+            preservation.merged
+        );
         let preserved = preservation.preserved.expect("complete");
-        assert!(preserved.markdown.contains(RETAINED), "{case}: {}", preserved.markdown);
-        assert!(same_state(&preserved.full_state, &native), "{case}: the merge is the head");
+        assert!(
+            preserved.markdown.contains(RETAINED),
+            "{case}: {}",
+            preserved.markdown
+        );
+        assert!(
+            same_state(&preserved.full_state, &native),
+            "{case}: the merge is the head"
+        );
         assert_eq!(w.native(), native, "{case}: the head is unchanged");
         assert_eq!(native_rows(&w.store), rows, "{case}: native rows");
         assert_eq!(ingress_rows(&w.store), ingress, "{case}: retained records");
@@ -8188,19 +8222,35 @@ async fn inspection_preserves_integrated_retained_work_and_writes_nothing() {
         assert_eq!(page.documents.len(), 1, "{case}: after a restart");
         assert_eq!(page.documents[0].object_id, "object");
         assert_eq!(page.documents[0].binding_digest, binding.digest());
-        assert_eq!(page.documents[0].continuation, dohc_engine_sync::ReleasedHoldContinuation::Frozen);
+        assert_eq!(
+            page.documents[0].continuation,
+            dohc_engine_sync::ReleasedHoldContinuation::Frozen
+        );
         assert!(!page.has_more && !page.documents[0].binding_stale, "{case}");
         let after = dohc_engine_sync::list_held_documents(&w.store, "workspace", Some("object"), 1)
             .unwrap()
             .unwrap();
-        assert!(after.documents.is_empty() && !after.has_more, "{case}: {after:?}");
+        assert!(
+            after.documents.is_empty() && !after.has_more,
+            "{case}: {after:?}"
+        );
         assert!(
             dohc_engine_sync::list_held_documents(&w.store, "workspace", None, 0).is_err(),
             "{case}: a page holds at least one document"
         );
-        assert_eq!(dohc_engine_sync::list_held_documents(&w.store, "elsewhere", None, 1).unwrap(), None);
-        assert_eq!(dohc_engine_sync::inspect_held_document(&w.store, "workspace", "elsewhere").unwrap(), None);
-        assert_eq!(native_rows(&w.store), rows, "{case}: discovery writes nothing");
+        assert_eq!(
+            dohc_engine_sync::list_held_documents(&w.store, "elsewhere", None, 1).unwrap(),
+            None
+        );
+        assert_eq!(
+            dohc_engine_sync::inspect_held_document(&w.store, "workspace", "elsewhere").unwrap(),
+            None
+        );
+        assert_eq!(
+            native_rows(&w.store),
+            rows,
+            "{case}: discovery writes nothing"
+        );
         desktop.close().await;
         w.close().await;
     }
@@ -8216,23 +8266,47 @@ async fn an_outbox_only_contribution_is_preserved_without_changing_the_head() {
     let earlier = inspected_window(&w.store).document.binding_digest;
     let contribution = outbox_only(&mut w, "Outbox only.", Stored::TheUpdate);
     let stale = inspected_window(&w.store);
-    assert_eq!(stale.document.binding_digest, earlier, "nothing derived it again yet");
+    assert_eq!(
+        stale.document.binding_digest, earlier,
+        "nothing derived it again yet"
+    );
     assert_eq!(stale.status, dohc_engine_sync::HeldBindingStatus::Stale);
     assert_eq!(stale.preservation, None, "a stale binding claims nothing");
 
     rebound(&mut w);
     let (native, rows) = (w.native(), native_rows(&w.store));
     let inspection = inspected_window(&w.store);
-    assert_eq!(inspection.status, dohc_engine_sync::HeldBindingStatus::Current);
+    assert_eq!(
+        inspection.status,
+        dohc_engine_sync::HeldBindingStatus::Current
+    );
     let preservation = inspection.preservation.unwrap();
-    assert_eq!(preservation.status, PreservationStatus::Complete, "{:?}", preservation.findings);
+    assert_eq!(
+        preservation.status,
+        PreservationStatus::Complete,
+        "{:?}",
+        preservation.findings
+    );
     assert_eq!(preservation.merged, vec![contribution]);
     let preserved = preservation.preserved.unwrap();
-    assert!(preserved.markdown.contains("Outbox only.") && preserved.markdown.contains(RETAINED), "{}", preserved.markdown);
+    assert!(
+        preserved.markdown.contains("Outbox only.") && preserved.markdown.contains(RETAINED),
+        "{}",
+        preserved.markdown
+    );
     let pinned = Ydoc::wire();
     pinned.apply(&preserved.full_state).unwrap();
-    assert!(pinned.project(ContentKind::Richdoc).unwrap().content.contains("Outbox only."));
-    assert!(!w.text().contains("Outbox only."), "the head never takes it");
+    assert!(
+        pinned
+            .project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .contains("Outbox only.")
+    );
+    assert!(
+        !w.text().contains("Outbox only."),
+        "the head never takes it"
+    );
     assert_eq!(w.native(), native);
     assert_eq!(native_rows(&w.store), rows);
     desktop.close().await;
@@ -8255,7 +8329,10 @@ async fn missing_corrupt_or_contradictory_evidence_never_preserves() {
             .iter()
             .map(|found| (found.reason, found.contribution.clone()))
             .collect::<Vec<_>>(),
-        [(PreservationReason::SourceMissing, Some(contribution.locator()))]
+        [(
+            PreservationReason::SourceMissing,
+            Some(contribution.locator())
+        )]
     );
     assert_eq!(preservation.preserved, None);
     desktop.close().await;
@@ -8291,7 +8368,11 @@ async fn missing_corrupt_or_contradictory_evidence_never_preserves() {
     let preservation = inspected_window(&w.store).preservation.unwrap();
     assert_eq!(preservation.status, PreservationStatus::InvalidEvidence);
     assert_eq!(
-        preservation.findings.iter().map(|found| found.reason).collect::<Vec<_>>(),
+        preservation
+            .findings
+            .iter()
+            .map(|found| found.reason)
+            .collect::<Vec<_>>(),
         [PreservationReason::ContradictoryEvidence]
     );
     assert_eq!(preservation.preserved, None);
@@ -8307,7 +8388,10 @@ async fn missing_corrupt_or_contradictory_evidence_never_preserves() {
 #[tokio::test]
 async fn coverage_stronger_validation_refuses_inspects_as_stale_then_as_its_finding() {
     let (mut w, desktop, _client) = held_for_a_queued_fold().await;
-    assert_eq!(inspected_window(&w.store).status, dohc_engine_sync::HeldBindingStatus::Current);
+    assert_eq!(
+        inspected_window(&w.store).status,
+        dohc_engine_sync::HeldBindingStatus::Current
+    );
     write_unchecked(
         &w,
         &format!(
@@ -8327,7 +8411,11 @@ async fn coverage_stronger_validation_refuses_inspects_as_stale_then_as_its_find
         preservation
             .findings
             .iter()
-            .map(|found| (found.reason, found.namespace.clone(), found.contribution.clone()))
+            .map(|found| (
+                found.reason,
+                found.namespace.clone(),
+                found.contribution.clone()
+            ))
             .collect::<Vec<_>>(),
         [(
             PreservationReason::ContradictoryEvidence,
@@ -8350,16 +8438,33 @@ async fn coverage_stronger_validation_refuses_inspects_as_stale_then_as_its_find
 #[tokio::test]
 async fn a_binding_that_no_longer_stands_inspects_as_stale() {
     let damages: [(&str, &str); 3] = [
-        ("marked stale", "UPDATE hosted_documents SET released_hold_binding_stale=1 WHERE object_id='object'"),
-        ("moved", "UPDATE path_aliases SET path='notes/moved.md' WHERE object_id='object'"),
-        ("another feed", "UPDATE sync_identity SET stream_identity='another-stream'"),
+        (
+            "marked stale",
+            "UPDATE hosted_documents SET released_hold_binding_stale=1 WHERE object_id='object'",
+        ),
+        (
+            "moved",
+            "UPDATE path_aliases SET path='notes/moved.md' WHERE object_id='object'",
+        ),
+        (
+            "another feed",
+            "UPDATE sync_identity SET stream_identity='another-stream'",
+        ),
     ];
     for (case, damage) in damages {
         let (w, desktop, _client) = held_for_a_queued_fold().await;
-        assert_eq!(inspected_window(&w.store).status, dohc_engine_sync::HeldBindingStatus::Current, "{case}");
+        assert_eq!(
+            inspected_window(&w.store).status,
+            dohc_engine_sync::HeldBindingStatus::Current,
+            "{case}"
+        );
         write_unchecked(&w, damage);
         let inspection = inspected_window(&w.store);
-        assert_eq!(inspection.status, dohc_engine_sync::HeldBindingStatus::Stale, "{case}");
+        assert_eq!(
+            inspection.status,
+            dohc_engine_sync::HeldBindingStatus::Stale,
+            "{case}"
+        );
         assert_eq!(inspection.preservation, None, "{case}");
         desktop.close().await;
         w.close().await;
@@ -8374,11 +8479,18 @@ async fn a_binding_that_no_longer_stands_inspects_as_stale() {
 async fn an_archived_hold_is_inspected_against_its_archive() {
     let (mut w, desktop, client, queued, archive) = archived_window(2).await;
     let first = committed_pass(&mut w.store, &client);
-    assert!(holds_archived(first.held.get("object"), &w.lineage, &archive, &queued[0]), "{first:?}");
+    assert!(
+        holds_archived(first.held.get("object"), &w.lineage, &archive, &queued[0]),
+        "{first:?}"
+    );
     let head = hex_sha256(b"the winning lineage");
     let (current, current_bytes) = safe_row(&[&w.native()], &head, "A paragraph of the head.");
     let current = client.transport().serve(current, current_bytes);
-    let pass = hosted_pass(&mut w.store, &client, &mut dohc_engine_collab::WriterDocCache::new());
+    let pass = hosted_pass(
+        &mut w.store,
+        &client,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+    );
     assert!(journaled(&w.store, &current), "{pass:?}");
     assert!(pass_commit(&mut w.store, &client, &pass).committed);
     assert!(w.text().contains("A paragraph of the head."));
@@ -8395,14 +8507,33 @@ async fn an_archived_hold_is_inspected_against_its_archive() {
     assert_eq!(bound.digest(), inspection.document.binding_digest);
     assert_eq!(bound.lineage_claim_id, w.lineage);
     assert_eq!(bound.head_digest, archive);
-    assert_eq!(inspection.status, dohc_engine_sync::HeldBindingStatus::Current);
+    assert_eq!(
+        inspection.status,
+        dohc_engine_sync::HeldBindingStatus::Current
+    );
     let preservation = inspection.preservation.unwrap();
-    assert_eq!(preservation.status, PreservationStatus::Complete, "{:?}", preservation.findings);
+    assert_eq!(
+        preservation.status,
+        PreservationStatus::Complete,
+        "{:?}",
+        preservation.findings
+    );
     let preserved = preservation.preserved.unwrap();
-    assert!(preserved.markdown.contains(RETAINED), "{}", preserved.markdown);
-    assert!(!preserved.markdown.contains("A paragraph of the head."), "the archive, not the head: {}", preserved.markdown);
+    assert!(
+        preserved.markdown.contains(RETAINED),
+        "{}",
+        preserved.markdown
+    );
+    assert!(
+        !preserved.markdown.contains("A paragraph of the head."),
+        "the archive, not the head: {}",
+        preserved.markdown
+    );
     let archived = w.store.get_binary_blob(&archive).unwrap().unwrap();
-    assert!(same_state(&preserved.full_state, &archived), "the archive holds it all");
+    assert!(
+        same_state(&preserved.full_state, &archived),
+        "the archive holds it all"
+    );
     assert_eq!(archived_state(&w.store, &w.lineage), archive);
     assert_eq!(w.native(), native);
     assert_eq!(native_rows(&w.store), rows);
@@ -8417,22 +8548,45 @@ async fn an_archived_hold_is_inspected_against_its_archive() {
 #[tokio::test]
 async fn a_corrupt_archive_answers_a_finding_not_an_error() {
     for (case, damage) in [
-        ("missing", "DELETE FROM binary_blobs WHERE sha256='{archive}'"),
-        ("mismatched", "UPDATE binary_blobs SET bytes=X'00',byte_length=1 WHERE sha256='{archive}'"),
+        (
+            "missing",
+            "DELETE FROM binary_blobs WHERE sha256='{archive}'",
+        ),
+        (
+            "mismatched",
+            "UPDATE binary_blobs SET bytes=X'00',byte_length=1 WHERE sha256='{archive}'",
+        ),
     ] {
         let (mut w, desktop, client, queued, archive) = archived_window(2).await;
         let first = committed_pass(&mut w.store, &client);
-        assert!(holds_archived(first.held.get("object"), &w.lineage, &archive, &queued[0]), "{case}: {first:?}");
+        assert!(
+            holds_archived(first.held.get("object"), &w.lineage, &archive, &queued[0]),
+            "{case}: {first:?}"
+        );
         write_unchecked(&w, &damage.replace("{archive}", &archive));
         let inspection = inspected_window(&w.store);
-        assert_eq!(inspection.status, dohc_engine_sync::HeldBindingStatus::Current, "{case}");
-        let preservation = inspection.preservation.expect("a current binding is inspected");
-        assert_eq!(preservation.status, PreservationStatus::InvalidEvidence, "{case}");
+        assert_eq!(
+            inspection.status,
+            dohc_engine_sync::HeldBindingStatus::Current,
+            "{case}"
+        );
+        let preservation = inspection
+            .preservation
+            .expect("a current binding is inspected");
+        assert_eq!(
+            preservation.status,
+            PreservationStatus::InvalidEvidence,
+            "{case}"
+        );
         assert_eq!(
             preservation
                 .findings
                 .iter()
-                .map(|found| (found.reason, found.namespace.clone(), found.contribution.clone()))
+                .map(|found| (
+                    found.reason,
+                    found.namespace.clone(),
+                    found.contribution.clone()
+                ))
                 .collect::<Vec<_>>(),
             [(PreservationReason::ContradictoryEvidence, None, None)],
             "{case}"
@@ -9224,7 +9378,11 @@ async fn a_completed_documents_facts_survive_a_later_documents_wait() {
         assert!(pass_commit(&mut w.store, &client, &pass).committed);
         let next = hosted_pass(&mut w.store, &client, &mut cache);
         assert!(next.record_facts.is_empty(), "{after:?}: {next:?}");
-        assert_eq!(record_moments_and_conflicts(&w.store), committed, "{after:?}");
+        assert_eq!(
+            record_moments_and_conflicts(&w.store),
+            committed,
+            "{after:?}"
+        );
         desktop.close().await;
         w.close().await;
     }
@@ -9795,7 +9953,11 @@ async fn a_protected_drain_that_waits_after_a_committed_prefix_keeps_its_rows() 
         assert!(text.contains("A first paragraph."), "{case}: it committed");
         assert!(!text.contains("A second paragraph."), "{case}: it waits");
         assert!(text.contains(RETAINED), "{case}");
-        assert_eq!(queued_updates(&w.store).len(), 2, "{case}: both stay queued");
+        assert_eq!(
+            queued_updates(&w.store).len(),
+            2,
+            "{case}: both stay queued"
+        );
 
         let drained = match from {
             FromPause::Resume => {
@@ -10297,20 +10459,25 @@ async fn a_pass_holds_a_protected_archived_lineage_and_continues_once_it_is_free
 /// for validation of a generation only that transaction holds, which the
 /// worker answers uncommitted on every retry. Beside the window's protected
 /// archived lineage, a second archive of it takes a copy of its queued rows,
-/// later in relay order, in one batch with them: unprotected and decided
-/// after it, protected too, or unprotected and decided before it, so
+/// in one batch with them: later in relay order and unprotected, later and
+/// protected too, or earlier and unprotected, so it is decided first and
 /// applying it moves the generation first. Each pass ends, the window holds
 /// with its own lineage's first row, and only an unprotected copy applies.
 #[tokio::test]
 async fn archived_lineages_of_one_document_drain_in_their_own_transactions() {
-    for case in ["held, then applied", "held, then held", "applied, then held"] {
+    for case in [
+        "held, then applied",
+        "held, then held",
+        "applied, then held",
+    ] {
         let (mut w, desktop, client, queued, archive) = archived_window(2).await;
         let rows = queued_feeds(&w.store);
-        // A batch decides its groups in lineage order.
-        let second = if case == "applied, then held" {
-            "0".repeat(64)
+        // A batch decides its groups in relay order, so the copy that applies
+        // first comes before the window's rows.
+        let (second, shift) = if case == "applied, then held" {
+            ("0".repeat(64), -1000)
         } else {
-            "f".repeat(64)
+            ("f".repeat(64), 1000)
         };
         assert_ne!(second, w.lineage, "{case}");
         write_unchecked(
@@ -10326,7 +10493,7 @@ async fn archived_lineages_of_one_document_drain_in_their_own_transactions() {
                  INSERT INTO replication_log SELECT * FROM temp.log;
                  CREATE TEMP TABLE queued AS SELECT * FROM ydoc_deferred_updates;
                  UPDATE temp.queued SET origin_seq=origin_seq+1000,lineage_claim_id='{second}',
-                   relay_seq=relay_seq+1000;
+                   relay_seq=relay_seq+{shift};
                  INSERT INTO ydoc_deferred_updates SELECT * FROM temp.queued;",
                 first = w.lineage
             ),
@@ -10358,7 +10525,11 @@ async fn archived_lineages_of_one_document_drain_in_their_own_transactions() {
         );
         assert_eq!(archived_state(&w.store, &w.lineage), archive, "{case}");
         if protected {
-            assert_eq!(queued_feeds(&w.store).len(), 2 * rows.len(), "{case}: both stay");
+            assert_eq!(
+                queued_feeds(&w.store).len(),
+                2 * rows.len(),
+                "{case}: both stay"
+            );
             assert_eq!(archived_state(&w.store, &second), archive, "{case}");
         } else {
             assert_eq!(queued_feeds(&w.store), rows, "{case}: the copy applied");
@@ -10720,9 +10891,10 @@ async fn archived_rows_with_no_relay_position_never_stall_the_workspace() {
                     assert_eq!(archived_state(&w.store, &w.lineage), archive, "{case}");
                     blobs_kept(&w.store, &queued);
                     let next = format!("A neighbour, written again ({restarted}).\n");
-                    let edited = client
-                        .transport()
-                        .write("neighbour", NEIGHBOUR_PATH, Some(&text), &next);
+                    let edited =
+                        client
+                            .transport()
+                            .write("neighbour", NEIGHBOUR_PATH, Some(&text), &next);
                     text = next;
                     let again = committed_pass(&mut w.store, &client);
                     assert!(
@@ -11587,6 +11759,7 @@ async fn held_pass() -> HeldPass {
 fn relay_configuration() -> dohc_engine_runtime::RelayConfiguration {
     dohc_engine_runtime::RelayConfiguration {
         base_url: "https://relay.example".into(),
+        socket_path: None,
         bearer_token: "service-credential".into(),
         #[cfg(debug_assertions)]
         allow_insecure_loopback_for_tests: false,

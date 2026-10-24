@@ -73,7 +73,7 @@ export function fenceAccount(storage: StorageContext, key: string, userId: strin
     const covered = storage.db.prepare("SELECT DISTINCT share_id FROM sync_relay_share_grants WHERE status='active' AND (principal_user_id=? OR lower(principal_email)=?)")
       .all(userId, normalizeEmail(email)).flatMap(row => serviceHostEnrollmentsCoveredByShare(storage, String(row.share_id)));
     storage.db.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=?,generation=generation+1 WHERE status='active' AND (principal_user_id=? OR lower(principal_email)=?)").run(Date.now(), userId, normalizeEmail(email));
-    retireUncoveredServiceActivations(storage, covered);
+    retireUncoveredServiceActivations(storage, covered, Date.now());
     storage.db.prepare(`UPDATE sync_relay_share_removals SET voided = 1
       WHERE voided = 0 AND EXISTS (
         SELECT 1 FROM json_each(grants_json) receipt_grant

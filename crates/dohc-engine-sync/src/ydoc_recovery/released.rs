@@ -181,7 +181,9 @@ pub fn keep_retained_version(
     input: &KeepRetainedVersion,
     faults: &dyn FaultInjector,
 ) -> Result<TxnOutcome<KeptRetainedVersion>, SyncError> {
-    store.write_with(faults, |tx| keep_retained_version_in_tx(tx, workspace_id, input))
+    store.write_with(faults, |tx| {
+        keep_retained_version_in_tx(tx, workspace_id, input)
+    })
 }
 
 /// A binding's decisions are read before any identity is allocated. The
@@ -222,7 +224,10 @@ fn keep_retained_version_in_tx(
     let attempt = match decisions.last() {
         None => 0,
         Some(latest) => {
-            if decisions.iter().any(|decision| decision.binding_json != canonical) {
+            if decisions
+                .iter()
+                .any(|decision| decision.binding_json != canonical)
+            {
                 return Err(SyncError::CoordinateDiverged);
             }
             if latest.projection_sha256 != input.projection_sha256
@@ -232,7 +237,10 @@ fn keep_retained_version_in_tx(
             {
                 return Err(invalid("this binding's copy kept other text"));
             }
-            if let Some(settled) = decisions.iter().find(|decision| decision.resolution.is_some()) {
+            if let Some(settled) = decisions
+                .iter()
+                .find(|decision| decision.resolution.is_some())
+            {
                 return kept(tx, workspace_id, &digest, settled, input, false);
             }
             let publication = publication_in_tx(tx, workspace_id, latest)?;
@@ -323,7 +331,9 @@ fn keep_retained_version_in_tx(
                 ));
             }
             if outbound_creation(tx, workspace_id, &identity.moment_id)?.is_none() {
-                return Err(local_corruption("the copy's creation is not journaled for the relay"));
+                return Err(local_corruption(
+                    "the copy's creation is not journaled for the relay",
+                ));
             }
             (path, true)
         }
@@ -395,7 +405,9 @@ fn owner_lane(tx: &Transaction<'_>, workspace_id: &str) -> Result<(), SyncError>
         || !crate::journal::workspace_replicates_with_relay_in_tx(tx, workspace_id)?
         || crate::hosted::is_hosted(tx, workspace_id)?
     {
-        return Err(invalid("this workspace does not publish files to its owner relay"));
+        return Err(invalid(
+            "this workspace does not publish files to its owner relay",
+        ));
     }
     Ok(())
 }
@@ -476,7 +488,10 @@ fn covered_authors(
             every.insert(contribution);
         }
     }
-    if merged.iter().any(|contribution| !every.contains(contribution)) {
+    if merged
+        .iter()
+        .any(|contribution| !every.contains(contribution))
+    {
         return Err(invalid("a merged contribution is not covered"));
     }
     if authors.len() > dohc_engine_domain::MAX_MOMENT_AUTHORS
@@ -517,7 +532,12 @@ fn published_authors(author_json: &str) -> Vec<Option<serde_json::Value>> {
     for repair in repairs {
         let mut payload = serde_json::json!({"authors": kept.clone()});
         repair(&mut payload);
-        forms.push(payload.get("authors").filter(|authors| !authors.is_null()).cloned());
+        forms.push(
+            payload
+                .get("authors")
+                .filter(|authors| !authors.is_null())
+                .cloned(),
+        );
     }
     forms
 }
@@ -600,8 +620,8 @@ fn publication_in_tx(
         )
         .optional()
         .map_err(SyncError::corrupt)?;
-    let (origin_id, origin_seq) =
-        received.ok_or_else(|| local_corruption("a released copy's creation has no journal entry"))?;
+    let (origin_id, origin_seq) = received
+        .ok_or_else(|| local_corruption("a released copy's creation has no journal entry"))?;
     Ok(CopyPublication {
         state: CopyPublicationState::Accepted,
         origin_id,
@@ -651,7 +671,13 @@ fn read_decisions(
     type Row = (
         (i64, String, String, i64, Option<i64>, String, String),
         (String, String, String),
-        (Option<String>, Option<i64>, Option<i64>, Option<String>, Option<i64>),
+        (
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            Option<i64>,
+        ),
     );
     let mut statement = tx
         .prepare_cached(
@@ -724,8 +750,9 @@ fn read_decisions(
                 };
                 let resolution = match (outcome, outcome_at_ms) {
                     (Some(outcome), Some(at_ms)) => Some((
-                        CopyResolutionOutcome::parse(&outcome)
-                            .ok_or_else(|| local_corruption("a copy decision's outcome is unknown"))?,
+                        CopyResolutionOutcome::parse(&outcome).ok_or_else(|| {
+                            local_corruption("a copy decision's outcome is unknown")
+                        })?,
                         at_ms,
                     )),
                     (None, None) => None,
@@ -788,8 +815,7 @@ fn decision_reads(
         return false;
     }
     merged.iter().all(|contribution| {
-        authors.union_json(contribution.authors().json()).is_ok()
-            && authors.json() == author_json
+        authors.union_json(contribution.authors().json()).is_ok() && authors.json() == author_json
     })
 }
 
@@ -843,7 +869,9 @@ pub(crate) fn equivalent_released_copy_in_tx(
         .optional()
         .map_err(SyncError::corrupt)?;
     Ok(stored.is_some_and(|(length, text, author_json, credited)| {
-        creation.after_byte_length.is_none_or(|incoming| incoming == length)
+        creation
+            .after_byte_length
+            .is_none_or(|incoming| incoming == length)
             && i64::try_from(text.len()).is_ok_and(|actual| actual == length)
             && dohc_engine_storage::hex_sha256(text.as_bytes()) == creation.after_blob_sha256
             && match credited {
@@ -929,7 +957,10 @@ pub(crate) fn validate_redundant_recoveries(
             .iter()
             .find(|op| op.origin_seq == recovery.origin_seq)
             .ok_or(RelayError::InvalidResponse)?;
-        let named = op.payload.get("momentId").and_then(serde_json::Value::as_str);
+        let named = op
+            .payload
+            .get("momentId")
+            .and_then(serde_json::Value::as_str);
         if !seen.insert(recovery.origin_seq)
             || op.op_kind != "moment.append"
             || named != Some(recovery.recovery_moment_id.as_str())

@@ -252,9 +252,9 @@ impl OutputGuard for HostOutputGuard {
                 "held document answer deadline elapsed",
             ));
         }
-        self.cancel.is_cancelled().then(|| {
-            WireError::new(ErrorCode::Cancelled, "held document answer cancelled")
-        })
+        self.cancel
+            .is_cancelled()
+            .then(|| WireError::new(ErrorCode::Cancelled, "held document answer cancelled"))
     }
 }
 
@@ -3212,7 +3212,8 @@ mod tests {
                 .is_ok()
         );
         let open = service.open(Some(&workspace)).unwrap();
-        let store = dohc_engine_storage::EngineStore::open_read_only(&open.db_path).unwrap();
+        let store =
+            dohc_engine_storage::EngineStore::open_read_only(open.actor.database_path()).unwrap();
         let available: i64 = store
             .read_with(|conn| {
                 conn.query_row(
@@ -3503,7 +3504,7 @@ mod tests {
     /// Shape rows no engine path writes yet, as foreign keys allow none.
     fn shape(service: &EngineService, workspace: &WorkspaceHandle, sql: &str) {
         let open = service.open(Some(workspace)).unwrap();
-        let conn = rusqlite::Connection::open(&open.db_path).unwrap();
+        let conn = rusqlite::Connection::open(open.actor.database_path()).unwrap();
         conn.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
         conn.execute_batch(sql).unwrap();
     }
@@ -3638,7 +3639,8 @@ mod tests {
             .get("ydoc-unload-document")
             .map(|session| session.activation_id.clone());
         let open = service.open(Some(workspace)).unwrap();
-        let store = dohc_engine_storage::EngineStore::open_read_only(&open.db_path).unwrap();
+        let store =
+            dohc_engine_storage::EngineStore::open_read_only(open.actor.database_path()).unwrap();
         let binding = store
             .read_with(|conn| {
                 conn.query_row(
@@ -4368,7 +4370,8 @@ mod tests {
 
     fn rows(service: &EngineService, workspace: &WorkspaceHandle, table: &str) -> i64 {
         let open = service.open(Some(workspace)).unwrap();
-        let store = dohc_engine_storage::EngineStore::open_read_only(&open.db_path).unwrap();
+        let store =
+            dohc_engine_storage::EngineStore::open_read_only(open.actor.database_path()).unwrap();
         store
             .read_with(|conn| {
                 conn.query_row(

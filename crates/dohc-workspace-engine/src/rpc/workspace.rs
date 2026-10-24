@@ -360,8 +360,8 @@ impl Drop for OpenGuard {
             return;
         }
         let supervisor = self.supervisor;
-        let closing = identity
-            .and_then(|identity| supervisor.begin_close_identity(&identity).ok().flatten());
+        let closing =
+            identity.and_then(|identity| supervisor.begin_close_identity(&identity).ok().flatten());
         // Detached + blocking: never run the actor join on a runtime worker
         // (the cancellation-safety contract). begin_close installed the
         // Closing marker synchronously, so an immediate reopen waits here.
@@ -1051,7 +1051,10 @@ impl EngineService {
                 drop(actor);
                 let closed = match removed {
                     Ok(Some(closing)) => {
-                        matches!(tokio::task::spawn_blocking(move || closing.finish()).await, Ok(Ok(())))
+                        matches!(
+                            tokio::task::spawn_blocking(move || closing.finish()).await,
+                            Ok(Ok(()))
+                        )
                     }
                     Ok(None) => true,
                     Err(_) => false,

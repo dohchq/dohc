@@ -572,7 +572,9 @@ fn resolve_manifest(
         if !listed.insert(carried.receipt.delivery_id.clone()) {
             return Err(ApplicationError::Conflict);
         }
-        inherited.push(resolve_carried(conn, namespace, doc, lineage, carried, chain)?);
+        inherited.push(resolve_carried(
+            conn, namespace, doc, lineage, carried, chain,
+        )?);
     }
     Ok(inherited)
 }
@@ -640,7 +642,9 @@ fn native_provenance(
     source: &OwnerOutboxNativeSource,
 ) -> Result<bool, ApplicationError> {
     match source.origin {
-        OwnerOutboxNativeOrigin::AdoptionSeed => captured_seed(conn, namespace, doc, lineage, source),
+        OwnerOutboxNativeOrigin::AdoptionSeed => {
+            captured_seed(conn, namespace, doc, lineage, source)
+        }
         OwnerOutboxNativeOrigin::NativeUpdate { .. } => {
             source.verify_retained_row(conn).map_err(outbox_error)?;
             Ok(true)
@@ -917,22 +921,24 @@ pub(crate) fn unproven_retained(
         // A native entry of another activation of the lineage is that
         // activation's work; one whose source names nothing it can be is not.
         let source = native
-            .map(|json| -> Result<OwnerOutboxNativeSource, ApplicationError> {
-                let source = native_source(
-                    &json,
-                    native_length.unwrap_or(0),
-                    &append_key,
-                    doc,
-                    lineage,
-                    &update_digest,
-                )?;
-                if !chain.contains(&source.adoption_id)
-                    && !lineage_activation(conn, doc, lineage, &source.adoption_id)?
-                {
-                    return Err(ApplicationError::Conflict);
-                }
-                Ok(source)
-            })
+            .map(
+                |json| -> Result<OwnerOutboxNativeSource, ApplicationError> {
+                    let source = native_source(
+                        &json,
+                        native_length.unwrap_or(0),
+                        &append_key,
+                        doc,
+                        lineage,
+                        &update_digest,
+                    )?;
+                    if !chain.contains(&source.adoption_id)
+                        && !lineage_activation(conn, doc, lineage, &source.adoption_id)?
+                    {
+                        return Err(ApplicationError::Conflict);
+                    }
+                    Ok(source)
+                },
+            )
             .transpose();
         let Some(source) = work.checked(&locator, source)? else {
             continue;
@@ -951,7 +957,8 @@ pub(crate) fn unproven_retained(
                 if receipt.is_some() || terminal.is_some() {
                     return Err(ApplicationError::Conflict);
                 }
-                match accepted_receipt(conn, namespace, doc, lineage, &delivery_id, &update_digest)? {
+                match accepted_receipt(conn, namespace, doc, lineage, &delivery_id, &update_digest)?
+                {
                     Some(accepted) => {
                         applied(conn, namespace, doc, lineage, &accepted)?;
                     }
@@ -1025,7 +1032,8 @@ impl Found<'_, '_> {
         let bytes = self.namespace.len()
             + contribution.map_or(0, ContributionLocator::text_bytes)
             + 3 * std::mem::size_of::<PreservationFinding>();
-        self.working.grow(u64::try_from(bytes).unwrap_or(u64::MAX))?;
+        self.working
+            .grow(u64::try_from(bytes).unwrap_or(u64::MAX))?;
         self.tail.contradictions.push(PreservationFinding {
             reason,
             namespace: Some(self.namespace.to_owned()),
@@ -1076,17 +1084,21 @@ fn retained_authors(
     automation: Option<String>,
     person: Option<i64>,
 ) -> Result<RetainedAuthors, ApplicationError> {
-    let (actor, attribution) =
-        crate::owner_outbox::entry_credit(native, agent, automation, person).map_err(outbox_error)?;
-    RetainedAuthors::credited(actor.as_deref(), attribution.as_ref()).ok_or(ApplicationError::Corrupt)
+    let (actor, attribution) = crate::owner_outbox::entry_credit(native, agent, automation, person)
+        .map_err(outbox_error)?;
+    RetainedAuthors::credited(actor.as_deref(), attribution.as_ref())
+        .ok_or(ApplicationError::Corrupt)
 }
+
+/// An entry's agent and automation declarations and person edit.
+type Declarations = (Option<String>, Option<String>, Option<i64>);
 
 /// The declarations the entry at `sequence` of `outbox_id` keeps.
 fn declarations(
     conn: &Connection,
     outbox_id: &str,
     sequence: i64,
-) -> Result<(Option<String>, Option<String>, Option<i64>), ApplicationError> {
+) -> Result<Declarations, ApplicationError> {
     conn.prepare_cached(
         "SELECT agent_declaration_json,automation_declaration_json,person_edit
          FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND sequence=?2",

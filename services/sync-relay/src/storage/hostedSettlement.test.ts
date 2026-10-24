@@ -3,8 +3,9 @@ import {
   registered,
   cleanupLiveDeliveryFixtures,
 } from "../../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js";
-import { prepareHostedSettlements, parseSettlementAuthors } from "./hostedSettlement.js";
+import { nativeSettlementId, prepareHostedSettlements, parseSettlementAuthors, settlementRecordDigest } from "./hostedSettlement.js";
 import type { StorageContext } from "./context.js";
+import nativeAuthoredSettlement from "../testing/fixtures/nativeAuthoredSettlement.json";
 afterEach(cleanupLiveDeliveryFixtures);
 
 it("fits 1023 named authors and the window's marker in a settlement snapshot", () => {
@@ -12,6 +13,11 @@ it("fits 1023 named authors and the window's marker in a settlement snapshot", (
   const marker = {kind: "unattributed"};
   expect(parseSettlementAuthors([...authors, marker])).toHaveLength(1024);
   expect(() => parseSettlementAuthors([...authors, {kind: "human", humanId: "new", humanName: "Reader"}, marker])).toThrow();
+});
+it("derives the engine's own settlement ID", () => {
+  const {payload} = nativeAuthoredSettlement.find(op => op.opKind === "live.audit.settlement")!;
+  const {record} = payload as unknown as {record: Record<string, unknown>};
+  expect(nativeSettlementId(record)).toBe(record.settlementId);
 });
 it("records deterministic settlement refusal and advances later origin operations without publishing its moment", async () => {
   const f = registered({ deployment: true });
@@ -171,15 +177,19 @@ function publication(
     : null;
   const namespace = String(row.relay_database_namespace),
     document = f.input.evidence.document;
+  const acceptedEventCount = Number(row.accepted_event_count) - Number(prior?.accepted_event_count ?? 0);
   const record = {
-    settlementId: `settlement-${id}`,
+    settlementId: "",
     relayDatabaseNamespace: namespace,
     binding: captured.metadata.binding,
+    hostCoordinate: {hostId: "host", hostEpoch: 1, instanceId: "instance", connectionId: "connection"},
     previousCursor: previous,
     terminalCursor: receipt.journalCursor,
-    acceptedEventCount:
-      Number(row.accepted_event_count) -
-      Number(prior?.accepted_event_count ?? 0),
+    previousYdocSequence: 0,
+    localYdocSequence: 1,
+    applicationCount: acceptedEventCount,
+    nativeIntervalDigest: hash(`native-interval-${id}`),
+    acceptedEventCount,
     acceptedIntervalDigest: hash(
       JSON.stringify([
         "live-settlement-accepted-interval-v1",
@@ -205,8 +215,12 @@ function publication(
     ),
     momentId: id,
     markdownDigest: markdownSha,
+    sourceStateVectorDigest: hash(`state-vector-${id}`),
     acceptedStateBlobSha256: stateSha,
+    recordedAtMs: 1,
+    restoreOperationId: null,
   };
+  record.settlementId = nativeSettlementId(record);
   const payload = {
     momentId: id,
     objectId: document.objectId,
@@ -223,7 +237,7 @@ function publication(
     recordedAtMs: 1,
     settlementReference: {
       formatVersion: 1,
-      recordDigest: hash(stableJsonStringify(record)),
+      recordDigest: settlementRecordDigest(record),
       record,
     },
   };
@@ -448,7 +462,9 @@ it.each([
           ...first.record.binding,
           restoreFenceGeneration: 99,
         };
-      reference.recordDigest = hash(stableJsonStringify(reference.record));
+      // Each forgery names its own settlement, so only the proof it changes refuses it.
+      reference.record.settlementId = nativeSettlementId(reference.record);
+      reference.recordDigest = settlementRecordDigest(reference.record);
       first.op.payloadJson = stableJsonStringify(payload);
       await prepare(f, [first.op]);
       const result = append(f, [first.op]);
@@ -571,9 +587,7 @@ it("rejects altered full content with the same CRDT clocks", async () => {
       createdAtMs: 1,
     });
     first.record.acceptedStateBlobSha256 = sha;
-    first.payload.settlementReference.recordDigest = hash(
-      stableJsonStringify(first.record),
-    );
+    first.payload.settlementReference.recordDigest = settlementRecordDigest(first.record);
     first.op.payloadJson = stableJsonStringify(first.payload);
     await prepare(f, [first.op]);
     expect(append(f, [first.op]).settlementRefusals).toHaveLength(1);
@@ -627,7 +641,7 @@ it("refuses a different full CRDT state even when its Markdown projection is unc
     const sha = hash(bytes);
     f.storage.putBlob({workspaceId:"workspace",sha256:sha,content:bytes,createdAtMs:1});
     first.record.acceptedStateBlobSha256 = sha;
-    first.payload.settlementReference.recordDigest = hash(stableJsonStringify(first.record));
+    first.payload.settlementReference.recordDigest = settlementRecordDigest(first.record);
     first.op.payloadJson = stableJsonStringify(first.payload);
     await prepare(f, [first.op]);
     expect(append(f, [first.op]).settlementRefusals).toHaveLength(1);
@@ -647,8 +661,8 @@ it("publishes admitted automation declaration without inferring its presser as a
     const forged = structuredClone(first.payload);
     forged.momentId = "copied-automation";
     forged.settlementReference.record.momentId = forged.momentId;
-    forged.settlementReference.record.settlementId = "copied-automation";
-    forged.settlementReference.recordDigest = hash(stableJsonStringify(forged.settlementReference.record));
+    forged.settlementReference.record.settlementId = nativeSettlementId(forged.settlementReference.record);
+    forged.settlementReference.recordDigest = settlementRecordDigest(forged.settlementReference.record);
     const copied = {...first.op, originSeq: 1, payloadJson: stableJsonStringify(forged)};
     await prepare(f, [copied]);
     expect(append(f, [copied]).settlementRefusals).toHaveLength(1);

@@ -42,10 +42,26 @@ function journal(storage: StorageContext, workspaceId: string, payload: Record<s
       payload.relayDatabaseNamespace, payload.eventCount, payload.updateBlobSha256);
 }
 
-type Prepared = {workspaceId: string; originId: string; payloadJson: string; cursor: unknown;
+// A valid application keeps its proof even with no authors to confirm.
+type Prepared = {workspaceId: string; originId: string; payloadJson: string; cursor: number;
   coordinate: {originId: string; originSeq: number}; contentJson: string;
-  authors: NonNullable<SyncRelayLogInput["admittedAuthorSnapshot"]>};
+  authors: NonNullable<SyncRelayLogInput["admittedAuthorSnapshot"]> | null};
 const prepared = new WeakMap<SyncRelayLogInput, Prepared>();
+// Audits the push's budget ran out before, and those the writer confirmed.
+const exhaustedProofs = new WeakSet<SyncRelayLogInput>();
+const confirmed = new WeakSet<SyncRelayLogInput>();
+
+/** The journal cursor an application's proof names, "exhausted" when its push's budget ran out first, or null. */
+export function preparedLiveApplication(op: SyncRelayLogInput): number | "exhausted" | null {
+  if (exhaustedProofs.has(op)) return "exhausted";
+  const proof = prepared.get(op);
+  return proof && proof.payloadJson === op.payloadJson ? proof.cursor : null;
+}
+
+/** Whether the writer confirmed the application's proof against its journal and content coordinates. */
+export function liveApplicationConfirmed(op: SyncRelayLogInput): boolean {
+  return confirmed.has(op);
+}
 
 /** Blob work is bounded across the push and runs before acquiring the writer. */
 export async function prepareLiveApplications(storage: StorageContext,
@@ -59,8 +75,9 @@ export async function prepareLiveApplications(storage: StorageContext,
   for (const op of input.ops) {
     if (op.opKind !== "live.audit.application") continue;
     prepared.delete(op);
+    exhaustedProofs.delete(op);
     delete op.admittedAuthorSnapshot;
-    if (exhausted) continue;
+    if (exhausted) {exhaustedProofs.add(op); continue;}
     if (++audits % 32 === 0) await setImmediate(undefined, {signal});
     try {
       const payloadJson = op.payloadJson;
@@ -128,12 +145,12 @@ export async function prepareLiveApplications(storage: StorageContext,
       for (const author of [...(trusted.authorSnapshot ?? []), ...(trusted.checkpointCoverage ?? []).map(entry => entry.author)]) {
         authors.set(JSON.stringify(author), author);
       }
-      if (authors.size) prepared.set(op, {workspaceId: input.workspaceId, originId: input.originId,
-        payloadJson, cursor: header.journal_cursor, coordinate, contentJson: String(content.payloadJson),
-        authors: parseSettlementAuthors([...authors.values()])});
+      prepared.set(op, {workspaceId: input.workspaceId, originId: input.originId,
+        payloadJson, cursor: Number(header.journal_cursor), coordinate, contentJson: String(content.payloadJson),
+        authors: authors.size ? parseSettlementAuthors([...authors.values()]) : null});
     } catch (error) {
       if (signal?.aborted) throw error;
-      if (error instanceof RestoreHistoryBudgetExceeded) exhausted = true;
+      if (error instanceof RestoreHistoryBudgetExceeded) {exhausted = true; exhaustedProofs.add(op);}
       // Exhausted budgets and mismatches retain the audit without confirmation.
     }
   }
@@ -144,6 +161,7 @@ export function confirmLiveApplication(storage: StorageContext, op: SyncRelayLog
   originId: string, batchCoordinates: ReadonlyMap<number, SyncRelayLogInput>) {
   if (op.opKind !== "live.audit.application") return;
   delete op.admittedAuthorSnapshot;
+  confirmed.delete(op);
   const proof = prepared.get(op);
   if (!proof || proof.workspaceId !== workspaceId || proof.originId !== originId || proof.payloadJson !== op.payloadJson) return;
   const payload = JSON.parse(op.payloadJson);
@@ -156,5 +174,7 @@ export function confirmLiveApplication(storage: StorageContext, op: SyncRelayLog
   const pending = proof.coordinate.originId === originId ? batchCoordinates.get(proof.coordinate.originSeq) : undefined;
   const content = pending ?? storage.db.prepare(`SELECT op_kind AS opKind,payload_json AS payloadJson FROM sync_relay_log
     WHERE workspace_id=? AND origin_id=? AND origin_seq=?`).get(workspaceId, proof.coordinate.originId, proof.coordinate.originSeq);
-  if (content?.opKind === "ydoc.update" && content.payloadJson === proof.contentJson) op.admittedAuthorSnapshot = proof.authors;
+  if (content?.opKind !== "ydoc.update" || content.payloadJson !== proof.contentJson) return;
+  confirmed.add(op);
+  if (proof.authors) op.admittedAuthorSnapshot = proof.authors;
 }

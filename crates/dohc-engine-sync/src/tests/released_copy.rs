@@ -101,8 +101,10 @@ fn agents(author_json: &str) -> Vec<String> {
 fn owner_device(origin: &str) -> (ScratchDir, EngineStore) {
     let (scratch, _path, mut store) = open_store();
     seed_replication_version(&mut store, "main", "main");
-    adopt_join_identity(&mut store, "ws", origin, "epoch-1", "stream-1", 1_000, &NoFaults)
-        .expect("identity");
+    adopt_join_identity(
+        &mut store, "ws", origin, "epoch-1", "stream-1", 1_000, &NoFaults,
+    )
+    .expect("identity");
     journal_local_replication_op(
         &mut store,
         "ws",
@@ -145,7 +147,12 @@ fn kept(outcome: Result<TxnOutcome<KeptRetainedVersion>, SyncError>) -> KeptReta
 }
 
 fn keep(store: &mut EngineStore, markdown: &str) -> KeptRetainedVersion {
-    kept(keep_retained_version(store, "ws", &request(markdown), &NoFaults))
+    kept(keep_retained_version(
+        store,
+        "ws",
+        &request(markdown),
+        &NoFaults,
+    ))
 }
 
 fn count(store: &EngineStore, sql: &str, value: &str) -> i64 {
@@ -160,7 +167,7 @@ fn rows(store: &EngineStore, sql: &str) -> Vec<String> {
         .read_with(|conn| {
             let mut statement = conn.prepare(sql)?;
             let columns = statement.column_count();
-            let rows = statement
+            statement
                 .query_map([], |row| {
                     (0..columns)
                         .map(|index| {
@@ -170,8 +177,7 @@ fn rows(store: &EngineStore, sql: &str) -> Vec<String> {
                         .collect::<Result<Vec<_>, _>>()
                         .map(|values| values.join("|"))
                 })?
-                .collect::<Result<Vec<_>, _>>();
-            rows
+                .collect::<Result<Vec<_>, _>>()
         })
         .expect("rows")
 }
@@ -251,7 +257,11 @@ fn a_copy_keeps_the_projection_without_touching_the_held_document() {
     let (_scratch, mut store) = owner_device("local");
     let before = canonical(&store);
     let copy = keep(&mut store, MARKDOWN);
-    assert_eq!(canonical(&store), before, "the held document's state is unchanged");
+    assert_eq!(
+        canonical(&store),
+        before,
+        "the held document's state is unchanged"
+    );
 
     let digest = binding().digest();
     let projection = dohc_engine_storage::hex_sha256(MARKDOWN.as_bytes());
@@ -263,11 +273,21 @@ fn a_copy_keeps_the_projection_without_touching_the_held_document() {
         copy.recovered_path,
         format!("notes/plan (recovered {} {projection}).md", &digest[..8])
     );
-    assert!(copy.recovery_moment_id.starts_with(RELEASED_COPY_MOMENT_PREFIX));
-    assert_eq!(copy_text(&store, &copy.recovery_object_id).as_deref(), Some(MARKDOWN));
+    assert!(
+        copy.recovery_moment_id
+            .starts_with(RELEASED_COPY_MOMENT_PREFIX)
+    );
+    assert_eq!(
+        copy_text(&store, &copy.recovery_object_id).as_deref(),
+        Some(MARKDOWN)
+    );
     assert_eq!(journaled(&store, &copy.recovery_moment_id), 1);
     assert_eq!(
-        (copy.publication.state, copy.publication.origin_id.as_str(), copy.publication.origin_seq),
+        (
+            copy.publication.state,
+            copy.publication.origin_id.as_str(),
+            copy.publication.origin_seq
+        ),
         (CopyPublicationState::Pending, "local", 1)
     );
     assert_eq!(copy.merged_contribution_ids, merged());
@@ -316,23 +336,41 @@ fn a_stored_byte_mismatch_rolls_back_the_copy_and_its_decision() {
             .map_err(SyncError::persist)
         })
         .expect("damaged blob");
-    let before = rows(&store, "SELECT * FROM replication_log ORDER BY origin_id,origin_seq");
+    let before = rows(
+        &store,
+        "SELECT * FROM replication_log ORDER BY origin_id,origin_seq",
+    );
     assert!(keep_retained_version(&mut store, "ws", &request(MARKDOWN), &NoFaults).is_err());
     assert_eq!(decisions(&store), 0);
     assert_eq!(
-        count(&store, "SELECT COUNT(*) FROM moments WHERE moment_id GLOB ?1", "released-copy-*"),
+        count(
+            &store,
+            "SELECT COUNT(*) FROM moments WHERE moment_id GLOB ?1",
+            "released-copy-*"
+        ),
         0
     );
     assert_eq!(
-        count(&store, "SELECT COUNT(*) FROM file_objects WHERE object_id GLOB ?1", "released-copy-*"),
+        count(
+            &store,
+            "SELECT COUNT(*) FROM file_objects WHERE object_id GLOB ?1",
+            "released-copy-*"
+        ),
         0
     );
     assert_eq!(
-        count(&store, "SELECT COUNT(*) FROM materialization_jobs WHERE job_id GLOB ?1", "sync-mat_released-copy-*"),
+        count(
+            &store,
+            "SELECT COUNT(*) FROM materialization_jobs WHERE job_id GLOB ?1",
+            "sync-mat_released-copy-*"
+        ),
         0
     );
     assert_eq!(
-        rows(&store, "SELECT * FROM replication_log ORDER BY origin_id,origin_seq"),
+        rows(
+            &store,
+            "SELECT * FROM replication_log ORDER BY origin_id,origin_seq"
+        ),
         before,
         "nothing was journaled"
     );
@@ -346,23 +384,35 @@ fn the_copy_and_its_decision_survive_faults_and_lost_responses() {
     let (_scratch, mut store) = owner_device("local");
     let crash = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
     assert!(matches!(
-        keep_retained_version(&mut store, "ws", &request(MARKDOWN), &crash),
+        keep_retained_version(&mut store, "ws", &request(MARKDOWN), &*crash),
         Ok(TxnOutcome::Crashed { .. }) | Err(SyncError::FaultCrash)
     ));
     assert_eq!(decisions(&store), 0);
     assert_eq!(
-        count(&store, "SELECT COUNT(*) FROM moments WHERE moment_id GLOB ?1", "released-copy-*"),
+        count(
+            &store,
+            "SELECT COUNT(*) FROM moments WHERE moment_id GLOB ?1",
+            "released-copy-*"
+        ),
         0
     );
 
     let lost = ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
-    let _ = keep_retained_version(&mut store, "ws", &request(MARKDOWN), &lost);
-    assert_eq!(decisions(&store), 1, "the commit stands without its response");
+    let _ = keep_retained_version(&mut store, "ws", &request(MARKDOWN), &*lost);
+    assert_eq!(
+        decisions(&store),
+        1,
+        "the commit stands without its response"
+    );
     let retried = keep(&mut store, MARKDOWN);
     assert_eq!((retried.attempt, retried.created), (0, false));
     assert_eq!(decisions(&store), 1);
     assert_eq!(
-        count(&store, "SELECT COUNT(*) FROM moments WHERE moment_id GLOB ?1", "released-copy-*"),
+        count(
+            &store,
+            "SELECT COUNT(*) FROM moments WHERE moment_id GLOB ?1",
+            "released-copy-*"
+        ),
         1
     );
     assert_eq!(journaled(&store, &retried.recovery_moment_id), 1);
@@ -395,12 +445,24 @@ fn retries_answer_the_same_copy_after_rename_edit_and_deletion() {
         )
         .expect("rename copy");
     let again = keep(&mut store, MARKDOWN);
-    assert_eq!((again.attempt, again.created, again.recovered_path.as_str()), (0, false, copy.recovered_path.as_str()));
+    assert_eq!(
+        (again.attempt, again.created, again.recovered_path.as_str()),
+        (0, false, copy.recovered_path.as_str())
+    );
 
-    rewrite(&mut store, &copy.recovery_object_id, renamed, "# Plan\n\nEdited.\n", "edit-copy");
+    rewrite(
+        &mut store,
+        &copy.recovery_object_id,
+        renamed,
+        "# Plan\n\nEdited.\n",
+        "edit-copy",
+    );
     let again = keep(&mut store, MARKDOWN);
     assert_eq!((again.attempt, again.created), (0, false));
-    assert_eq!(copy_text(&store, &copy.recovery_object_id).as_deref(), Some("# Plan\n\nEdited.\n"));
+    assert_eq!(
+        copy_text(&store, &copy.recovery_object_id).as_deref(),
+        Some("# Plan\n\nEdited.\n")
+    );
 
     VersionedTextStore::new(&mut store)
         .delete_text_file(
@@ -421,10 +483,18 @@ fn retries_answer_the_same_copy_after_rename_edit_and_deletion() {
         .expect("delete copy");
     let again = keep(&mut store, MARKDOWN);
     assert_eq!((again.attempt, again.created), (0, false));
-    assert_eq!(copy_text(&store, &copy.recovery_object_id), None, "a deleted copy stays deleted");
+    assert_eq!(
+        copy_text(&store, &copy.recovery_object_id),
+        None,
+        "a deleted copy stays deleted"
+    );
     assert_eq!(decisions(&store), 1);
     assert_eq!(
-        count(&store, "SELECT COUNT(*) FROM moments WHERE moment_id GLOB ?1", "released-copy-*"),
+        count(
+            &store,
+            "SELECT COUNT(*) FROM moments WHERE moment_id GLOB ?1",
+            "released-copy-*"
+        ),
         1
     );
 }
@@ -473,7 +543,11 @@ fn only_a_genuine_durable_refusal_permits_the_next_attempt() {
         Some(MARKDOWN),
         "the refused copy stays"
     );
-    assert!(refused.recovered_path.ends_with(" 2).md"), "{}", refused.recovered_path);
+    assert!(
+        refused.recovered_path.ends_with(" 2).md"),
+        "{}",
+        refused.recovered_path
+    );
     // The new attempt stands until it is itself refused.
     let again = keep(&mut store, MARKDOWN);
     assert_eq!((again.attempt, again.created), (1, false));
@@ -530,7 +604,10 @@ fn a_copy_past_the_inband_limit_is_kept_whole() {
     let markdown = "# Plan\n\n".to_owned() + &"Kept paragraph.\n\n".repeat(6 * 1024);
     assert!(markdown.len() > 96 * 1024);
     let copy = keep(&mut store, &markdown);
-    assert_eq!(copy_text(&store, &copy.recovery_object_id).as_deref(), Some(markdown.as_str()));
+    assert_eq!(
+        copy_text(&store, &copy.recovery_object_id).as_deref(),
+        Some(markdown.as_str())
+    );
     let length: i64 = store
         .read_with(|conn| {
             conn.query_row(
@@ -557,14 +634,22 @@ fn only_the_owner_lane_keeps_a_copy() {
     ));
     assert_eq!(decisions(&unsynced), 0);
     assert_eq!(
-        count(&unsynced, "SELECT COUNT(*) FROM moments WHERE moment_id GLOB ?1", "released-copy-*"),
+        count(
+            &unsynced,
+            "SELECT COUNT(*) FROM moments WHERE moment_id GLOB ?1",
+            "released-copy-*"
+        ),
         0
     );
 }
 
 /// The probe and the copy's creation `store` journaled as `origin`, as the
 /// feed serves them, the creation at `relay_seq`.
-fn served(store: &EngineStore, origin: &str, relay_seq: i64) -> (ReplicationEnvelope, ReplicationEnvelope) {
+fn served(
+    store: &EngineStore,
+    origin: &str,
+    relay_seq: i64,
+) -> (ReplicationEnvelope, ReplicationEnvelope) {
     let mut ops = list_replication_ops(store, "ws", origin, -1, 10).expect("served ops");
     assert_eq!(ops.len(), 2, "{ops:?}");
     let mut creation = ops.pop().unwrap();
@@ -574,10 +659,20 @@ fn served(store: &EngineStore, origin: &str, relay_seq: i64) -> (ReplicationEnve
     (probe, creation)
 }
 
-fn receive(store: &mut EngineStore, probe: &ReplicationEnvelope, creation: &ReplicationEnvelope) -> ApplyOutcome<i64> {
+fn receive(
+    store: &mut EngineStore,
+    probe: &ReplicationEnvelope,
+    creation: &ReplicationEnvelope,
+) -> ApplyOutcome<i64> {
     apply_envelope_with(store, probe, &NoFaults, insert_probe).expect("probe");
-    apply_moment_envelope(store, creation, &NoFaults, &NoLiveLeases, &ReleasedTails::default())
-        .expect("creation")
+    apply_moment_envelope(
+        store,
+        creation,
+        &NoFaults,
+        &NoLiveLeases,
+        &ReleasedTails::default(),
+    )
+    .expect("creation")
 }
 
 fn accepted(store: &EngineStore) -> Vec<String> {
@@ -605,24 +700,45 @@ fn identical_creations_converge_when_one_device_pulls_before_publishing() {
         (&on_b.recovery_object_id, &on_b.recovery_moment_id),
         "the same attempt names the same copy on every device"
     );
-    rewrite(&mut device_b, &on_b.recovery_object_id, &on_b.recovered_path, "# Plan\n\nEdited on B.\n", "edit-on-b");
+    rewrite(
+        &mut device_b,
+        &on_b.recovery_object_id,
+        &on_b.recovered_path,
+        "# Plan\n\nEdited on B.\n",
+        "edit-on-b",
+    );
     let history = |store: &EngineStore| {
-        count(store, "SELECT COUNT(*) FROM moments WHERE object_id=?1", &on_a.recovery_object_id)
+        count(
+            store,
+            "SELECT COUNT(*) FROM moments WHERE object_id=?1",
+            &on_a.recovery_object_id,
+        )
     };
     let before = history(&device_b);
 
     let (probe, creation) = served(&device_a, "device-a", 7);
-    assert!(matches!(receive(&mut device_b, &probe, &creation).primary, ApplyDisposition::Applied(0)));
+    assert!(matches!(
+        receive(&mut device_b, &probe, &creation).primary,
+        ApplyDisposition::Applied(0)
+    ));
     assert_eq!(history(&device_b), before, "no second creation in history");
     assert_eq!(
         copy_text(&device_b, &on_b.recovery_object_id).as_deref(),
         Some("# Plan\n\nEdited on B.\n"),
         "the later local edit stays"
     );
-    assert_eq!(accepted(&device_b), [r#"Text("device-a")|Integer(1)|Integer(7)"#.to_owned()]);
+    assert_eq!(
+        accepted(&device_b),
+        [r#"Text("device-a")|Integer(1)|Integer(7)"#.to_owned()]
+    );
     let again = keep(&mut device_b, MARKDOWN);
     assert_eq!(
-        (again.attempt, again.created, again.publication.state, again.publication.relay_seq),
+        (
+            again.attempt,
+            again.created,
+            again.publication.state,
+            again.publication.relay_seq
+        ),
         (0, false, CopyPublicationState::Accepted, Some(7))
     );
 
@@ -633,8 +749,14 @@ fn identical_creations_converge_when_one_device_pulls_before_publishing() {
         })
         .unwrap();
     let (probe, redundant) = served(&device_b, "device-b", 9);
-    assert!(matches!(receive(&mut device_a, &probe, &redundant).primary, ApplyDisposition::Applied(0)));
-    assert_eq!(accepted(&device_a), [r#"Text("device-a")|Integer(1)|Integer(7)"#.to_owned()]);
+    assert!(matches!(
+        receive(&mut device_a, &probe, &redundant).primary,
+        ApplyDisposition::Applied(0)
+    ));
+    assert_eq!(
+        accepted(&device_a),
+        [r#"Text("device-a")|Integer(1)|Integer(7)"#.to_owned()]
+    );
     assert_eq!(history(&device_a), 1);
 }
 
@@ -749,13 +871,28 @@ fn a_redundant_publication_adopts_the_accepted_creation() {
         }],
     });
     assert!(matches!(
-        client.push_workspace(&mut device_b, "ws", &NoFaults, &NoLiveLeases, 4_000, 1_000_000),
+        client.push_workspace(
+            &mut device_b,
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            4_000,
+            1_000_000
+        ),
         Ok(SyncPassOutcome::Complete { .. })
     ));
-    assert_eq!(accepted(&device_b), [r#"Text("device-a")|Integer(1)|Integer(7)"#.to_owned()]);
+    assert_eq!(
+        accepted(&device_b),
+        [r#"Text("device-a")|Integer(1)|Integer(7)"#.to_owned()]
+    );
     let again = keep(&mut device_b, MARKDOWN);
     assert_eq!(
-        (again.attempt, again.created, again.publication.origin_id.as_str(), again.publication.state),
+        (
+            again.attempt,
+            again.created,
+            again.publication.origin_id.as_str(),
+            again.publication.state
+        ),
         (0, false, "device-a", CopyPublicationState::Accepted)
     );
     assert_eq!(decisions(&device_b), 1);
@@ -782,14 +919,26 @@ fn keeping_a_copy_already_received_reuses_it() {
         })
         .unwrap();
     let (probe, creation) = served(&device_a, "device-a", 7);
-    assert!(matches!(receive(&mut device_c, &probe, &creation).primary, ApplyDisposition::Applied(_)));
+    assert!(matches!(
+        receive(&mut device_c, &probe, &creation).primary,
+        ApplyDisposition::Applied(_)
+    ));
     let on_c = keep(&mut device_c, MARKDOWN);
     assert_eq!(
-        (on_c.attempt, on_c.created, on_c.recovered_path.as_str(), on_c.publication.origin_id.as_str()),
+        (
+            on_c.attempt,
+            on_c.created,
+            on_c.recovered_path.as_str(),
+            on_c.publication.origin_id.as_str()
+        ),
         (0, false, on_a.recovered_path.as_str(), "device-a")
     );
     assert_eq!(on_c.publication.state, CopyPublicationState::Accepted);
-    assert_eq!(journaled(&device_c, &on_c.recovery_moment_id), 0, "nothing to publish again");
+    assert_eq!(
+        journaled(&device_c, &on_c.recovery_moment_id),
+        0,
+        "nothing to publish again"
+    );
 }
 
 /// Plan r3: different bytes, correlation or authors under the same identity
@@ -830,11 +979,16 @@ fn a_different_creation_under_the_same_identity_is_not_equivalent() {
         &NoLiveLeases,
         &ReleasedTails::default()
     ));
-    assert_eq!(copy_text(&device_b, &on_b.recovery_object_id).as_deref(), Some(MARKDOWN));
+    assert_eq!(
+        copy_text(&device_b, &on_b.recovery_object_id).as_deref(),
+        Some(MARKDOWN)
+    );
 
     let digest = binding().digest();
     let kept: serde_json::Value = serde_json::from_str(&on_b.recovery_author_json).unwrap();
-    let mut equivalent = |correlation: &str, authors: Option<&serde_json::Value>, unavailable: bool| {
+    let mut equivalent = |correlation: &str,
+                          authors: Option<&serde_json::Value>,
+                          unavailable: bool| {
         device_b
             .write_with(&NoFaults, |tx| {
                 crate::ydoc_recovery::equivalent_released_copy_in_tx(
@@ -857,19 +1011,34 @@ fn a_different_creation_under_the_same_identity_is_not_equivalent() {
             })
             .unwrap()
     };
-    assert_eq!(equivalent(&digest, Some(&kept), false), TxnOutcome::Committed(true));
-    assert_eq!(equivalent(&"e".repeat(64), Some(&kept), false), TxnOutcome::Committed(false));
+    assert_eq!(
+        equivalent(&digest, Some(&kept), false),
+        TxnOutcome::Committed(true)
+    );
+    assert_eq!(
+        equivalent(&"e".repeat(64), Some(&kept), false),
+        TxnOutcome::Committed(false)
+    );
     // Sol's Ruling A: retained authorship is part of the copy. Authors left
     // out, one dropped, another added or attribution withheld are another
     // copy's.
     let mut fewer = kept.clone();
     fewer.as_array_mut().unwrap().pop();
     let mut more = kept.clone();
-    more.as_array_mut().unwrap().push(json!({"kind": "agent", "agentId": "stranger"}));
+    more.as_array_mut()
+        .unwrap()
+        .push(json!({"kind": "agent", "agentId": "stranger"}));
     for authors in [None, Some(&fewer), Some(&more)] {
-        assert_eq!(equivalent(&digest, authors, false), TxnOutcome::Committed(false), "{authors:?}");
+        assert_eq!(
+            equivalent(&digest, authors, false),
+            TxnOutcome::Committed(false),
+            "{authors:?}"
+        );
     }
-    assert_eq!(equivalent(&digest, Some(&kept), true), TxnOutcome::Committed(false));
+    assert_eq!(
+        equivalent(&digest, Some(&kept), true),
+        TxnOutcome::Committed(false)
+    );
 }
 
 /// Sol's Ruling A: the copy credits every author whose work the binding
@@ -879,8 +1048,14 @@ fn a_different_creation_under_the_same_identity_is_not_equivalent() {
 fn the_copy_credits_already_contained_work_too() {
     let (_scratch, mut store) = owner_device("local");
     let copy = keep(&mut store, MARKDOWN);
-    assert!(!copy.merged_contribution_ids.contains(&contained()), "merging added nothing of it");
-    assert_eq!(agents(&copy.recovery_author_json), ["earlier-agent", "trip-agent"]);
+    assert!(
+        !copy.merged_contribution_ids.contains(&contained()),
+        "merging added nothing of it"
+    );
+    assert_eq!(
+        agents(&copy.recovery_author_json),
+        ["earlier-agent", "trip-agent"]
+    );
     let moment: Option<String> = store
         .read_with(|conn| {
             conn.query_row(
@@ -890,7 +1065,10 @@ fn the_copy_credits_already_contained_work_too() {
             )
         })
         .unwrap();
-    assert_eq!(agents(&moment.expect("authors")), ["earlier-agent", "trip-agent"]);
+    assert_eq!(
+        agents(&moment.expect("authors")),
+        ["earlier-agent", "trip-agent"]
+    );
 }
 
 /// Sol's Ruling A: a copy credits only what the binding commits to. Covered
@@ -906,28 +1084,68 @@ fn covered_work_must_be_exactly_what_the_binding_commits_to() {
     misattributed.sort();
     let stranger = RetainedContribution::at(merged()[0].locator(), agent("stranger"));
     let mut invalid_binding = binding();
-    invalid_binding.tails = std::sync::Arc::new(
-        dohc_engine_collab::live_update_application::ProtectedTails::Invalid,
-    );
+    invalid_binding.tails =
+        std::sync::Arc::new(dohc_engine_collab::live_update_application::ProtectedTails::Invalid);
     let refused: [(&str, KeepRetainedVersion); 6] = [
-        ("work left out", KeepRetainedVersion { covered_contributions: vec![("relay".into(), merged())], ..request(MARKDOWN) }),
-        ("work credited to someone else", KeepRetainedVersion {
-            covered_contributions: vec![("relay".into(), misattributed)], ..request(MARKDOWN) }),
-        ("another namespace", KeepRetainedVersion { covered_contributions: vec![("other".into(), covered())], ..request(MARKDOWN) }),
-        ("no tail", KeepRetainedVersion { covered_contributions: Vec::new(), ..request(MARKDOWN) }),
-        ("a merged contribution nothing covers", KeepRetainedVersion {
-            merged_contribution_ids: vec![stranger], ..request(MARKDOWN) }),
-        ("coverage that does not read", KeepRetainedVersion { binding: invalid_binding, ..request(MARKDOWN) }),
+        (
+            "work left out",
+            KeepRetainedVersion {
+                covered_contributions: vec![("relay".into(), merged())],
+                ..request(MARKDOWN)
+            },
+        ),
+        (
+            "work credited to someone else",
+            KeepRetainedVersion {
+                covered_contributions: vec![("relay".into(), misattributed)],
+                ..request(MARKDOWN)
+            },
+        ),
+        (
+            "another namespace",
+            KeepRetainedVersion {
+                covered_contributions: vec![("other".into(), covered())],
+                ..request(MARKDOWN)
+            },
+        ),
+        (
+            "no tail",
+            KeepRetainedVersion {
+                covered_contributions: Vec::new(),
+                ..request(MARKDOWN)
+            },
+        ),
+        (
+            "a merged contribution nothing covers",
+            KeepRetainedVersion {
+                merged_contribution_ids: vec![stranger],
+                ..request(MARKDOWN)
+            },
+        ),
+        (
+            "coverage that does not read",
+            KeepRetainedVersion {
+                binding: invalid_binding,
+                ..request(MARKDOWN)
+            },
+        ),
     ];
     for (case, request) in refused {
         assert!(
-            matches!(keep_retained_version(&mut store, "ws", &request, &NoFaults), Err(SyncError::InvalidInput { .. })),
+            matches!(
+                keep_retained_version(&mut store, "ws", &request, &NoFaults),
+                Err(SyncError::InvalidInput { .. })
+            ),
             "{case}"
         );
     }
     assert_eq!(decisions(&store), 0);
     assert_eq!(
-        count(&store, "SELECT COUNT(*) FROM moments WHERE moment_id GLOB ?1", "released-copy-*"),
+        count(
+            &store,
+            "SELECT COUNT(*) FROM moments WHERE moment_id GLOB ?1",
+            "released-copy-*"
+        ),
         0
     );
 }
@@ -958,9 +1176,14 @@ fn a_decision_that_does_not_read_is_corruption() {
         let (_scratch, mut store) = owner_device("local");
         keep(&mut store, MARKDOWN);
         store
-            .write_with(&NoFaults, |tx| tx.execute(damage, []).map_err(SyncError::persist))
+            .write_with(&NoFaults, |tx| {
+                tx.execute(damage, []).map_err(SyncError::persist)
+            })
             .unwrap_or_else(|error| panic!("{case}: {error:?}"));
-        assert!(keep_retained_version(&mut store, "ws", &request(MARKDOWN), &NoFaults).is_err(), "{case}");
+        assert!(
+            keep_retained_version(&mut store, "ws", &request(MARKDOWN), &NoFaults).is_err(),
+            "{case}"
+        );
         assert_eq!(decisions(&store), 1, "{case}: no other attempt");
     }
 }
@@ -983,15 +1206,36 @@ fn a_redundant_classification_must_name_a_copy_in_the_batch() {
         crate::ydoc_recovery::validate_redundant_recoveries(redundant, &batch, hosted)
     };
     assert_eq!(validate(std::slice::from_ref(&named), false), Ok(()));
-    assert_eq!(validate(std::slice::from_ref(&named), true), Err(RelayError::InvalidResponse));
+    assert_eq!(
+        validate(std::slice::from_ref(&named), true),
+        Err(RelayError::InvalidResponse)
+    );
     for wrong in [
-        RedundantRecovery { origin_seq: 0, ..named.clone() },
-        RedundantRecovery { recovery_moment_id: "released-copy-moment-other".into(), ..named.clone() },
-        RedundantRecovery { accepted_origin_id: "device-b".into(), ..named.clone() },
-        RedundantRecovery { accepted_relay_seq: 0, ..named.clone() },
-        RedundantRecovery { accepted_origin_id: String::new(), ..named.clone() },
+        RedundantRecovery {
+            origin_seq: 0,
+            ..named.clone()
+        },
+        RedundantRecovery {
+            recovery_moment_id: "released-copy-moment-other".into(),
+            ..named.clone()
+        },
+        RedundantRecovery {
+            accepted_origin_id: "device-b".into(),
+            ..named.clone()
+        },
+        RedundantRecovery {
+            accepted_relay_seq: 0,
+            ..named.clone()
+        },
+        RedundantRecovery {
+            accepted_origin_id: String::new(),
+            ..named.clone()
+        },
     ] {
         assert_eq!(validate(&[wrong], false), Err(RelayError::InvalidResponse));
     }
-    assert_eq!(validate(&[named.clone(), named], false), Err(RelayError::InvalidResponse));
+    assert_eq!(
+        validate(&[named.clone(), named], false),
+        Err(RelayError::InvalidResponse)
+    );
 }

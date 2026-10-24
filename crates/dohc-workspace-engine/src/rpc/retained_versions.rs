@@ -67,14 +67,22 @@ fn keep_request(
     }
     let merged_contribution_ids = contributions(&params.merged_contribution_ids)
         .ok_or_else(|| invalid("invalid merged contribution"))?;
-    if !merged_contribution_ids.windows(2).all(|pair| pair[0] < pair[1]) {
+    if !merged_contribution_ids
+        .windows(2)
+        .all(|pair| pair[0] < pair[1])
+    {
         return Err(invalid("merged contributions are not in canonical order"));
     }
     // The store checks them against the binding's commitments.
     let covered_contributions = params
         .covered_contributions
         .iter()
-        .map(|covered| Some((covered.namespace.clone(), contributions(&covered.contributions)?)))
+        .map(|covered| {
+            Some((
+                covered.namespace.clone(),
+                contributions(&covered.contributions)?,
+            ))
+        })
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| invalid("invalid covered contribution"))?;
     if params.projection_byte_length > dohc_engine_domain::MAX_TEXT_BYTES
@@ -172,7 +180,6 @@ fn kept_json(kept: &KeptRetainedVersion) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
 
     fn binding() -> Value {
         json!({
@@ -220,13 +227,21 @@ mod tests {
     fn a_copy_past_the_inband_limit_arrives_whole() {
         let markdown = "# Plan\n\n".to_owned() + &"Kept paragraph.\n\n".repeat(8 * 1024);
         assert!(markdown.len() > 96 * 1024);
-        let (workspace_id, input) = keep_request(parse(params(markdown.as_bytes())).unwrap()).unwrap();
+        let (workspace_id, input) =
+            keep_request(parse(params(markdown.as_bytes())).unwrap()).unwrap();
         assert_eq!(workspace_id, "ws");
         assert_eq!(input.markdown, markdown);
-        assert_eq!(input.projection_sha256, dohc_engine_storage::hex_sha256(markdown.as_bytes()));
+        assert_eq!(
+            input.projection_sha256,
+            dohc_engine_storage::hex_sha256(markdown.as_bytes())
+        );
         assert_eq!(input.binding.to_json(), binding());
         assert_eq!(
-            input.merged_contribution_ids.iter().map(RetainedContribution::to_json).collect::<Vec<_>>(),
+            input
+                .merged_contribution_ids
+                .iter()
+                .map(RetainedContribution::to_json)
+                .collect::<Vec<_>>(),
             vec![outbox(1), outbox(2)]
         );
         let [(namespace, covered)] = input.covered_contributions.as_slice() else {
@@ -234,7 +249,10 @@ mod tests {
         };
         assert_eq!(namespace, "relay");
         assert_eq!(
-            covered.iter().map(RetainedContribution::to_json).collect::<Vec<_>>(),
+            covered
+                .iter()
+                .map(RetainedContribution::to_json)
+                .collect::<Vec<_>>(),
             vec![outbox(1), outbox(2), outbox(3)],
             "with their authors"
         );
@@ -252,37 +270,83 @@ mod tests {
             edit(&mut value);
             refused(value)
         };
-        assert_eq!(with(&|value| value["projectionSha256"] = json!("e".repeat(64))), "markdown does not match its digest");
-        assert_eq!(with(&|value| value["projectionByteLength"] = json!(text.len() + 1)), "markdown does not match its digest");
-        assert_eq!(with(&|value| value["markdownBase64"] = json!("not base64!")), "invalid-input");
-        assert_eq!(with(&|value| value["preservation"] = json!("missing-evidence")), "preservation is not complete");
-        assert_eq!(with(&|value| value["binding"]["version"] = json!(1)), "invalid binding");
-        assert_eq!(with(&|value| value["binding"]["extra"] = json!(true)), "invalid binding");
-        assert_eq!(with(&|value| value["mergedContributionIds"] = json!([outbox(2), outbox(1)])), "merged contributions are not in canonical order");
-        assert_eq!(with(&|value| value["mergedContributionIds"] = json!([outbox(1), outbox(1)])), "merged contributions are not in canonical order");
-        assert_eq!(with(&|value| value["mergedContributionIds"] = json!([{"kind": "outbox"}])), "invalid merged contribution");
+        assert_eq!(
+            with(&|value| value["projectionSha256"] = json!("e".repeat(64))),
+            "markdown does not match its digest"
+        );
+        assert_eq!(
+            with(&|value| value["projectionByteLength"] = json!(text.len() + 1)),
+            "markdown does not match its digest"
+        );
+        assert_eq!(
+            with(&|value| value["markdownBase64"] = json!("not base64!")),
+            "invalid-input"
+        );
+        assert_eq!(
+            with(&|value| value["preservation"] = json!("missing-evidence")),
+            "preservation is not complete"
+        );
+        assert_eq!(
+            with(&|value| value["binding"]["version"] = json!(1)),
+            "invalid binding"
+        );
+        assert_eq!(
+            with(&|value| value["binding"]["extra"] = json!(true)),
+            "invalid binding"
+        );
+        assert_eq!(
+            with(&|value| value["mergedContributionIds"] = json!([outbox(2), outbox(1)])),
+            "merged contributions are not in canonical order"
+        );
+        assert_eq!(
+            with(&|value| value["mergedContributionIds"] = json!([outbox(1), outbox(1)])),
+            "merged contributions are not in canonical order"
+        );
+        assert_eq!(
+            with(&|value| value["mergedContributionIds"] = json!([{"kind": "outbox"}])),
+            "invalid merged contribution"
+        );
         assert_eq!(
             with(&|value| {
-                value["mergedContributionIds"][0].as_object_mut().unwrap().remove("authors");
+                value["mergedContributionIds"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("authors");
             }),
             "invalid merged contribution"
         );
         assert_eq!(
-            with(&|value| value["coveredContributions"][0]["contributions"][0]["sequence"] = json!(0)),
+            with(
+                &|value| value["coveredContributions"][0]["contributions"][0]["sequence"] =
+                    json!(0)
+            ),
             "invalid covered contribution"
         );
         assert_eq!(
-            with(&|value| value["coveredContributions"][0]["contributions"][1]["authors"] = json!([])),
+            with(
+                &|value| value["coveredContributions"][0]["contributions"][1]["authors"] =
+                    json!([])
+            ),
             "invalid covered contribution"
         );
         assert_eq!(
             with(&|value| {
-                value.as_object_mut().unwrap().remove("coveredContributions");
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("coveredContributions");
             }),
             "invalid parameters"
         );
-        assert_eq!(with(&|value| value["projectionByteLength"] = json!(dohc_engine_domain::MAX_TEXT_BYTES + 1)), "content-exceeds-capture-cap");
-        assert_eq!(with(&|value| value["markdown"] = json!("# Plan\n")), "invalid parameters");
+        assert_eq!(
+            with(&|value| value["projectionByteLength"] =
+                json!(dohc_engine_domain::MAX_TEXT_BYTES + 1)),
+            "content-exceeds-capture-cap"
+        );
+        assert_eq!(
+            with(&|value| value["markdown"] = json!("# Plan\n")),
+            "invalid parameters"
+        );
         let invalid_utf8 = [0xff_u8, 0xfe];
         assert_eq!(refused(params(&invalid_utf8)), "invalid-utf8");
     }
@@ -326,14 +390,20 @@ mod tests {
         let refused = service
             .dispatch(
                 ctx,
-                request("documents.keepRetainedVersion", Some(handle.clone()), params(b"# Plan\n")),
+                request(
+                    "documents.keepRetainedVersion",
+                    Some(handle.clone()),
+                    params(b"# Plan\n"),
+                ),
             )
             .await
-            .err()
-            .expect("refused");
+            .expect_err("refused");
         assert_eq!(
             (refused.code, refused.message.as_str()),
-            (ErrorCode::Forbidden, "configured host method is unavailable")
+            (
+                ErrorCode::Forbidden,
+                "configured host method is unavailable"
+            )
         );
         service.workspace_close(Some(handle)).await.unwrap();
     }

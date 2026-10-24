@@ -2615,13 +2615,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     }
                 }
                 Ok::<_, SyncError>((
-                    settled,
-                    held,
-                    held_paths,
-                    newly_held,
-                    unparks,
-                    standing,
-                    heads,
+                    settled, held, held_paths, newly_held, unparks, standing, heads,
                 ))
             })
             .map_err(local)?;

@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use dohc_engine_collab::DocKey;
 use dohc_engine_collab::live_update_application::{
-    self as live, Charged, ContributionArtifact, HeldInspection, HeldProofJob,
-    LineageCoordinates, Preservation, UnprovenCommitment, Work, inspect_held, store_identity,
+    self as live, Charged, ContributionArtifact, HeldInspection, HeldProofJob, LineageCoordinates,
+    Preservation, UnprovenCommitment, Work, inspect_held, store_identity,
 };
 
 use super::*;
@@ -119,7 +119,9 @@ pub enum HeldContributions {
     /// The artifact would pass what one blob streams, so only its merged
     /// list's commitment, hashed as a stream, answers. The preservation, and
     /// its Markdown, still answer.
-    TooLarge { merged: UnprovenCommitment },
+    TooLarge {
+        merged: UnprovenCommitment,
+    },
 }
 
 impl HeldContributions {
@@ -677,7 +679,8 @@ mod tests {
     #[test]
     fn inspection_rolls_its_transaction_back() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE probe (value INTEGER)").unwrap();
+        conn.execute_batch("CREATE TABLE probe (value INTEGER)")
+            .unwrap();
         let count = |conn: &Connection| {
             conn.query_row("SELECT count(*) FROM probe", [], |row| row.get::<_, i64>(0))
                 .map_err(SyncError::corrupt)
@@ -702,7 +705,10 @@ mod tests {
     fn a_shared_failure_keeps_its_class_for_every_caller() {
         use dohc_engine_collab::live_update_application::ApplicationError;
         use dohc_engine_storage::StorageError;
-        assert!(matches!(protection_failure(ApplicationError::Cancelled), SyncError::Cancelled));
+        assert!(matches!(
+            protection_failure(ApplicationError::Cancelled),
+            SyncError::Cancelled
+        ));
         assert!(matches!(
             protection_failure(ApplicationError::Storage(StorageError::FileLocked)),
             SyncError::Storage(StorageError::FileLocked)
@@ -724,15 +730,21 @@ mod tests {
             SyncError::InvalidInput { reason: "bad" },
             malformed(),
         ] {
-            let (code, disposition, message) =
-                (failure.code(), failure.share_disposition(), failure.to_string());
+            let (code, disposition, message) = (
+                failure.code(),
+                failure.share_disposition(),
+                failure.to_string(),
+            );
             let shared = Arc::new(failure);
             for caller in 0..2 {
                 let answered = shared_proof_failure(&shared);
                 assert_eq!(answered.code(), code, "caller {caller}");
                 assert_eq!(answered.share_disposition(), disposition, "caller {caller}");
                 assert_eq!(answered.to_string(), message, "caller {caller}");
-                assert!(std::ptr::eq(answered.original(), &*shared), "caller {caller}");
+                assert!(
+                    std::ptr::eq(answered.original(), &*shared),
+                    "caller {caller}"
+                );
             }
         }
     }
