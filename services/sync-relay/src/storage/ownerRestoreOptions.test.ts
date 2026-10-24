@@ -272,6 +272,23 @@ describe("owner restore options", () => {
     expect(() => f.storage.readOwnerRestoreStatus({workspaceId: scope.workspaceId, ownerUserId: scope.userId, operationId: "restore"})).toThrow("not found");
   });
 
+  // Proves: one restore whose status fails its checks is counted, and the
+  // workspace's other unfinished restores are still listed.
+  it("lists every readable unfinished restore and counts the one it could not read", async () => {
+    const f = await fixture(); f.begin();
+    const copy = (table: string, where: string, change: Record<string, string | number>) => {
+      const row = {...f.raw.prepare(`SELECT * FROM ${table} WHERE ${where}`).get()!, ...change}, columns = Object.keys(row);
+      f.raw.prepare(`INSERT INTO ${table}(${columns.join(",")}) VALUES(${columns.map(() => "?").join(",")})`).run(...Object.values(row));
+    };
+    copy("sync_relay_live_documents", "lineage_state='current'", {object_id: "other-object", lineage_state: "retired",
+      admission_state: "closed", retired_at_ms: 1});
+    copy("sync_relay_live_restore_operations", "operation_id='restore'", {operation_id: "damaged", object_id: "other-object",
+      intent_json: JSON.stringify({padding: "a".repeat(MAX_PAYLOAD_JSON_BYTES)})});
+    expect(f.storage.readOwnerUnfinishedRestores({workspaceId: scope.workspaceId, ownerUserId})).toEqual({
+      restores: [{operationId: "restore", path: binding.currentPath, phase: "authority-invalidated", proposalDigest: null}],
+      unreadable: 1, nextCursor: null});
+  });
+
   it("does not report resumed when the retained lifecycle cannot authenticate it", async () => {
     const f = await fixture(), {lookup} = nativeFenced(f);
     f.raw.prepare("UPDATE sync_relay_live_restore_operations SET phase='resumed' WHERE operation_id='restore'").run();

@@ -42,7 +42,8 @@ export type OwnerRestoreOptions = {
 
 // One restore the owner has not finished or declined, at its file's current path.
 export type OwnerUnfinishedRestore = Pick<OwnerRestoreStatus, "operationId" | "path" | "phase" | "proposalDigest">;
-export type OwnerUnfinishedRestores = {restores: OwnerUnfinishedRestore[]; nextCursor: string | null};
+// `unreadable` counts this page's restores whose status could not be read.
+export type OwnerUnfinishedRestores = {restores: OwnerUnfinishedRestore[]; unreadable: number; nextCursor: string | null};
 const UNFINISHED_RESTORE_PAGE = 50;
 
 /** The longest account email the route adds to a grant or an author. */
@@ -183,11 +184,17 @@ export function readOwnerUnfinishedRestores(storage: StorageContext, input: {wor
       d.main_version_id=o.main_version_id AND d.object_id=o.object_id AND d.lineage_claim_id=o.lineage_claim_id) AS current_path
       FROM ${LIVE_RESTORE_OPERATIONS} o WHERE relay_database_namespace=? AND workspace_id=? AND ${UNFINISHED_RESTORE} AND operation_id>?
       ORDER BY operation_id LIMIT ?`).all(namespace, workspaceId, after, UNFINISHED_RESTORE_PAGE + 1);
-    const restores = rows.slice(0, UNFINISHED_RESTORE_PAGE).map((row): OwnerUnfinishedRestore => {
-      const status = statusInTransaction(storage, {workspaceId, ownerUserId: input.ownerUserId, operationId: parseLiveUpdateIdentifier(row.operation_id)});
-      return {operationId: status.operationId, path: String(row.current_path), phase: status.phase, proposalDigest: status.proposalDigest};
-    });
-    const result = {restores, nextCursor: rows.length > UNFINISHED_RESTORE_PAGE ? restores.at(-1)!.operationId : null};
+    const page = rows.slice(0, UNFINISHED_RESTORE_PAGE), restores: OwnerUnfinishedRestore[] = [];
+    // One restore whose status fails its checks is counted, not listed, so
+    // the rest stay findable.
+    for (const row of page) {
+      try {
+        const status = statusInTransaction(storage, {workspaceId, ownerUserId: input.ownerUserId, operationId: parseLiveUpdateIdentifier(row.operation_id)});
+        restores.push({operationId: status.operationId, path: String(row.current_path), phase: status.phase, proposalDigest: status.proposalDigest});
+      } catch {}
+    }
+    const result = {restores, unreadable: page.length - restores.length,
+      nextCursor: rows.length > UNFINISHED_RESTORE_PAGE ? String(page.at(-1)!.operation_id) : null};
     bounded(Buffer.byteLength(JSON.stringify(result)));
     return result;
   });

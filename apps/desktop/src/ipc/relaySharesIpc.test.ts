@@ -433,7 +433,7 @@ describe("registered owner restore handler", () => {
       const responses = action === "options" ? [options] : action === "plan" ? [plan]
         : action === "begin" || action === "status" ? [status]
         : action === "decline" ? [{...status, phase: "declined"}]
-        : action === "unfinished" ? [{restores: [{operationId: "restore", path: "notes.md", phase: "fenced", proposalDigest: null}], nextCursor: "restore"}]
+        : action === "unfinished" ? [{restores: [{operationId: "restore", path: "notes.md", phase: "fenced", proposalDigest: null}], unreadable: 1, nextCursor: "restore"}]
         : [{status, result: {kind: "pending"}}, {status, result: {kind: "review-required"}},
           ...(action === "prepare" ? [{status, result: {kind: "prepared", proposalDigest: "b".repeat(64), candidateDigest: "c".repeat(64), recordedAtMs: 1, replayed: false}}]
             : action === "review" ? [{status, result: null}, {status, result: review}]
@@ -456,10 +456,10 @@ describe("registered owner restore handler", () => {
     await h.invoke(relayShareOperations.ownerRestore.channel, {...statusInput, action: "decline"});
     expect(h.request).toHaveBeenLastCalledWith(h.credentials, "/sync/workspace/live-restores/restore/decline",
       {method: "POST", body: "{}"}, {retainRestoreConflict: true});
-    h.request.mockResolvedValue({restores: [], nextCursor: null});
+    h.request.mockResolvedValue({restores: [], unreadable: 0, nextCursor: null});
     await h.invoke(relayShareOperations.ownerRestore.channel, {workspaceId, action: "unfinished", after: "a/b"});
     expect(h.request).toHaveBeenLastCalledWith(h.credentials, "/sync/workspace/live-restores/unfinished?after=a%2Fb", undefined, {retainRestoreConflict: true});
-    h.request.mockResolvedValue({restores: [{operationId: "restore", path: "notes.md", phase: "resumed", proposalDigest: null}], nextCursor: null});
+    h.request.mockResolvedValue({restores: [{operationId: "restore", path: "notes.md", phase: "resumed", proposalDigest: null}], unreadable: 0, nextCursor: null});
     await expect(h.invoke(relayShareOperations.ownerRestore.channel, {workspaceId, action: "unfinished"})).rejects.toThrow();
   });
 

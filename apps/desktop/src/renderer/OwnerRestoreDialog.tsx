@@ -100,8 +100,10 @@ function Review({review, emails}: {review: OwnerRestoreReview; emails: Emails}) 
   </>;
 }
 
-export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore, onRestored, onError, onSettled}: {
+export function OwnerRestoreDialog({workspaceId, path, operationId, onClose, onBeforeRestore, onRestored, onError, onSettled, onChanged}: {
   workspaceId: string; path: string;
+  /** Opens this saved restore by its own status, without the choices for a new one. */
+  operationId?: string;
   /** Closes the dialog with the restore it knows of, so an unfinished one stays in Notices. */
   onClose(operation: OwnerRestoreStatus | null): void;
   onBeforeRestore(): Promise<() => void>; onRestored(): void;
@@ -109,6 +111,8 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
   onError(fallback: string, error: unknown): void;
   /** A start went through, so an earlier refusal no longer holds. */
   onSettled(): void;
+  /** The restore began, was declined, or finished. */
+  onChanged(): void;
 }) {
   const [state, setState] = useState<State>({kind: "loading"}), [busy, setBusy] = useState(false);
   const [grantId, setGrantId] = useState(""), [point, setPoint] = useState("");
@@ -133,14 +137,8 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
     if (!current(token)) return;
     setEmails(known => new Map([...known, ...[...options.grants, ...options.authors]
       .flatMap(row => row.userId !== null && row.email !== null ? [[row.userId, row.email] as const] : [])]));
-    if (options.pendingOperation) {
-      const saved = await bridge().ownerRestore({workspaceId, action: "status", operationId: options.pendingOperation.operationId});
-      if (!current(token)) return;
-      operation.current = saved;
-      const stage = unfinishedRestoreStage(saved.phase);
-      if (stage) setState({kind: "pending", message: STAGE_MESSAGES[stage]});
-      else setState({kind: "error", message: "The restore changed. Close this review and open it again."});
-    } else {
+    if (options.pendingOperation) await resume(token, options.pendingOperation.operationId);
+    else {
       if (grantCursor === undefined) setPoint("");
       setState(previous => {
         if (previous.kind !== "options") return {kind: "options", options};
@@ -153,13 +151,24 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
       });
     }
   }
+  // Where a saved restore stands, read by its own ID. It needs none of the
+  // file's restore points, so it opens even after they are gone.
+  async function resume(token: number, id: string) {
+    const saved = await bridge().ownerRestore({workspaceId, action: "status", operationId: id});
+    if (!current(token)) return;
+    operation.current = saved;
+    const stage = unfinishedRestoreStage(saved.phase);
+    setState(stage ? {kind: "pending", message: STAGE_MESSAGES[stage]} : saved.phase === "declined" ? {kind: "declined"}
+      : {kind: "error", message: "The restore changed. Close this review and open it again."});
+  }
   useEffect(() => {
     const token = request.next();
     operation.current = null; setGrantId(""); setPoint(""); setEmails(new Map()); running.current = true; setBusy(true); setState({kind: "loading"});
-    void load(token).catch(error => {if (current(token)) setState({kind: "error", message: ipcErrorMessage(error)});})
+    void (operationId === undefined ? load(token) : resume(token, operationId))
+      .catch(error => {if (current(token)) setState({kind: "error", message: ipcErrorMessage(error)});})
       .finally(() => {if (current(token)) {running.current = false; setBusy(false);}});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId, path]);
+  }, [workspaceId, path, operationId]);
   async function review(token: number) {
     const saved = await bridge().ownerRestore({workspaceId, action: "status", operationId: operation.current!.operationId});
     if (!current(token)) return;
@@ -202,7 +211,7 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
       if (!current(token)) return;
       operation.current = result.status;
       if (result.result.kind === "resumed" && result.status.phase === "resumed" && result.result.proposalDigest === proposalDigest) {
-        setState({kind: "complete"}); onRestored();
+        setState({kind: "complete"}); onChanged(); onRestored();
       } else setState({kind: "pending", message: result.result.kind !== "resumed" && result.result.cause === "quota" ? QUOTA_MESSAGE
         : result.result.kind === "review-required" ? "The restore needs a new review. Retry to review it again."
         : STAGE_MESSAGES.finishing});
@@ -212,6 +221,7 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
     const saved = operation.current!;
     try {
       const declined = await bridge().ownerRestore({workspaceId, action: "decline", operationId: saved.operationId});
+      onChanged();
       if (!current(token)) return;
       operation.current = declined; setState({kind: "declined"});
     } catch (error) {
@@ -242,17 +252,17 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
     {state.kind === "stop" && <>
       <p className="text-[13px] text-ink">This access stays stopped, even if you decline the restore.</p>
       {state.plan.recipients.some(row => row.principalKind === "link") && <p className="text-[13px] text-muted">The old link will stop working.</p>}
-      <p className="text-[13px] text-muted">Restoring is a separate decision. If you decline, the file stays unchanged. Share again to restore access.</p>
+      <p className="text-[13px] text-muted">Restoring is a separate decision. If you decline, the file stays unchanged. Live editing through this access stays stopped until you share the file again.</p>
       <ul className="space-y-1 pl-5 text-[13px] text-muted">{state.plan.recipients.map(row => <li key={row.grantId}>{recipient(row, emails)}</li>)}</ul>
       <p className="text-[13px] text-muted">Next, review the changes to remove before restoring the file.</p>
     </>}
     {state.kind === "review" && <Review key={state.review.proposalDigest} review={state.review} emails={emails} />}
     {state.kind === "pending" || state.kind === "error" ? <p role="alert" className="text-[13px] text-muted">{state.message}</p> : null}
     {operation.current && state.kind !== "complete" && state.kind !== "declined" && <p className="text-[12px] text-muted">{declinable
-      ? "Access has stopped. Declining keeps the file unchanged, and access stays stopped."
+      ? "Access has stopped. Declining keeps the file unchanged. Live editing through this access stays stopped until you share the file again."
       : "Access has stopped. Closing this review does not restore the old access."}</p>}
     {state.kind === "complete" && <p className="text-[13px] text-muted">The file has been restored. Share again when you want to give access.</p>}
-    {state.kind === "declined" && <p className="text-[13px] text-muted">The file stays unchanged. Access stays stopped. Share again when you want to give access.</p>}
+    {state.kind === "declined" && <p className="text-[13px] text-muted">The file stays unchanged. Live editing through this access stays stopped until you share the file again.</p>}
     <div className="mt-4 flex justify-end gap-2">
       <SecondaryButton onClick={close}>{state.kind === "stop" ? "Cancel" : "Close"}</SecondaryButton>
       {state.kind === "options" && <PrimaryButton disabled={busy || !grantId || point === ""} onClick={() => void perform(token => start(token, async () => {
@@ -265,11 +275,13 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
       {state.kind === "stop" && <DangerButton disabled={busy} onClick={() => void perform(async token => {
         let stopped: OwnerRestoreStatus | undefined;
         await start(token, async () => {stopped = await bridge().ownerRestore({workspaceId, action: "begin", intent: state.plan.intent});});
+        if (stopped) onChanged();
         if (!stopped || !current(token)) return; operation.current = stopped; onSettled(); await review(token);
       })}>Stop access</DangerButton>}
       {state.kind === "review" && <PrimaryButton disabled={busy} onClick={() => void perform(token => confirm(token, state.review.proposalDigest))}>Restore file</PrimaryButton>}
       {declinable && <SecondaryButton disabled={busy} onClick={() => void perform(token => decline(token))}>Decline restore</SecondaryButton>}
-      {(state.kind === "pending" || state.kind === "error") && <PrimaryButton disabled={busy} onClick={() => void perform(token => operation.current ? review(token) : load(token))}>{declinable ? "Review restore" : "Retry"}</PrimaryButton>}
+      {(state.kind === "pending" || state.kind === "error") && <PrimaryButton disabled={busy} onClick={() => void perform(token => operation.current ? review(token)
+        : operationId === undefined ? load(token) : resume(token, operationId))}>{declinable ? "Review restore" : "Retry"}</PrimaryButton>}
     </div>
   </Overlay>;
 }

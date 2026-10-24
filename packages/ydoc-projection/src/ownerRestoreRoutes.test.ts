@@ -70,12 +70,12 @@ it("lists an unfinished restore and declines it before its fence", async () => {
   try {
     const plan = await f.plan(); await f.request("", {intent: plan.intent});
     expect(await (await f.request("/unfinished")).json()).toEqual({restores: [{operationId: "restore", path: plan.path,
-      phase: "authority-invalidated", proposalDigest: null}], nextCursor: null});
+      phase: "authority-invalidated", proposalDigest: null}], unreadable: 0, nextCursor: null});
     const declined = await f.request("/restore/decline", {});
     expect(declined.status).toBe(200);
     expect(await declined.json()).toMatchObject({operationId: "restore", phase: "declined"});
     expect(f.storage.getShareGrant("grant")).toMatchObject({status: "revoked", generation: 5});
-    expect(await (await f.request("/unfinished")).json()).toEqual({restores: [], nextCursor: null});
+    expect(await (await f.request("/unfinished")).json()).toEqual({restores: [], unreadable: 0, nextCursor: null});
     const prepared = await f.request("/restore/prepare", {});
     expect(prepared.status).toBe(409);
     expect(await prepared.json()).toMatchObject({status: {phase: "declined"}, result: {kind: "pending"}});

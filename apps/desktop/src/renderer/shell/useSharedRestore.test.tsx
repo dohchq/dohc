@@ -2,7 +2,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { OwnerRestoreRequest } from "../../ipc/ownerRestoreContract";
-import { sharedRestoreIdentity, useSharedRestore } from "./useSharedRestore";
+import { deferred } from "../../testing/deferred";
+import { sharedRestoreIdentity, sharedRestoreListingIdentity, useSharedRestore } from "./useSharedRestore";
 import { useShellError } from "./useShellError";
 
 afterEach(() => { cleanup(); delete window.dohcDesktop; });
@@ -51,7 +52,7 @@ it("reopens the change and its dialog from Try again after the page unmounts, an
     if (input.action === "options") return options();
     if (input.action === "plan" && refuse) throw Error("Live editing is still stopping. Try again in a moment.");
     if (input.action === "plan") return { intent, path: "docs/a.md", recipients: [] };
-    if (input.action === "unfinished") return { restores: [], nextCursor: null };
+    if (input.action === "unfinished") return { restores: [], unreadable: 0, nextCursor: null };
     throw Error(`Unexpected ${input.action}`);
   });
   fireEvent.click(screen.getByRole("button", { name: "Restore shared file…" }));
@@ -75,7 +76,7 @@ it("reopens the change and its dialog from Try again after the page unmounts, an
 
 // Proves: every unfinished restore the relay lists has a row that opens it.
 // One that can still be declined offers Review restore and Decline restore;
-// a later one offers Try again. Decline ends it and says access stays stopped.
+// a later one offers Try again. Decline ends it and says what stays stopped.
 it("files a row for each unfinished restore, and Decline from the row ends it", async () => {
   const restores = [
     { operationId: "first", path: "docs/a.md", phase: "authority-invalidated", proposalDigest: null },
@@ -83,14 +84,15 @@ it("files a row for each unfinished restore, and Decline from the row ends it", 
     { operationId: "third", path: "docs/c.md", phase: "relay-admitted", proposalDigest: digest },
   ];
   const f = fixture(async input => {
-    if (input.action === "unfinished") return { restores, nextCursor: null };
+    if (input.action === "unfinished") return { restores, unreadable: 0, nextCursor: null };
     if (input.action === "decline") { restores.shift(); return status("declined", "first"); }
-    if (input.action === "options") return options();
+    if (input.action === "status") return status("native-fenced", "second");
     throw Error(`Unexpected ${input.action}`);
   }, true);
   await waitFor(() => expect(f.row("docs/c.md")).toBeDefined());
   expect(f.row()).toMatchObject({ tone: "warning", title: "Restore waiting for you", retry: null,
-    message: "Access to docs/a.md stopped for a restore. Review the restore, or decline it to keep the file unchanged and access stopped.",
+    message: "Access to docs/a.md stopped for a restore. Review the restore, or decline it to keep the file unchanged. " +
+      "Live editing through that access stays stopped until you share the file again.",
     action: { label: "Review restore", additional: [{ label: "Decline restore" }] } });
   expect(f.row("docs/b.md")).toMatchObject({ title: "Restore waiting", message: "The restore of docs/b.md has not finished. Live editing of this file stays stopped until it does." });
   expect(f.row("docs/c.md")).toMatchObject({ title: "Finishing restore", message: "The restore of docs/c.md has not finished. Try again to finish it." });
@@ -98,11 +100,88 @@ it("files a row for each unfinished restore, and Decline from the row ends it", 
   act(() => shell.runShellErrorAction(f.row()!.id, 1));
   await waitFor(() => expect(f.row()).toBeUndefined());
   expect(f.ownerRestore).toHaveBeenCalledWith({ workspaceId: "workspace", action: "decline", operationId: "first" });
-  expect(shell.shellErrors.some(error => error.tone === "success" &&
-    error.message === "Declined the restore of docs/a.md. The file is unchanged, and access stays stopped.")).toBe(true);
+  expect(shell.shellErrors.some(error => error.tone === "success" && error.message ===
+    "Declined the restore of docs/a.md. The file is unchanged. Live editing through that access stays stopped until you share the file again.")).toBe(true);
   act(() => shell.retryShellError(f.row("docs/b.md")!.id));
-  expect(await screen.findByTestId("owner-restore-dialog")).toBeTruthy();
-  expect(f.ownerRestore).toHaveBeenCalledWith({ workspaceId: "workspace", action: "options", path: "docs/b.md" });
+  expect(await screen.findByText("The restore has not finished. Live editing of this file stays stopped until it does. Retry to continue it.")).toBeTruthy();
+  expect(f.ownerRestore).toHaveBeenCalledWith({ workspaceId: "workspace", action: "status", operationId: "second" });
+});
+
+// Proves: a row opens its own restore. The saved basis of this one was
+// compacted away, so the file's restore choices are gone, and the dialog
+// still opens the listed restore rather than an error about them.
+it("opens the listed restore from its row after the file's restore points are gone", async () => {
+  const f = fixture(async input => {
+    if (input.action === "unfinished") return { restores: [{ operationId: "restore", path: "docs/a.md", phase: "authority-invalidated",
+      proposalDigest: null }], unreadable: 0, nextCursor: null };
+    if (input.action === "options") throw Error("The restore point is no longer retained for this document.");
+    if (input.action === "status") return status("authority-invalidated");
+    throw Error(`Unexpected ${input.action}`);
+  }, true);
+  await waitFor(() => expect(f.row()).toBeDefined());
+  act(() => shell.runShellErrorAction(f.row()!.id, 0));
+  expect(await screen.findByText("Access stopped for this restore. Review the restore, or decline it to keep the file unchanged.")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Decline restore" })).toBeTruthy();
+  expect(f.actions()).not.toContain("options");
+});
+
+// Proves: a listing that fails, or reads only some restores, files one row
+// with Try again and keeps the rows already filed. A later full listing
+// clears it.
+it("files one row when the listing fails or reads only some restores, and a full listing clears it", async () => {
+  const listingRow = () => shell.shellErrors.find(error => error.identity === sharedRestoreListingIdentity);
+  const listed = [{ operationId: "restore", path: "docs/a.md", phase: "native-fenced", proposalDigest: null }];
+  let answer: "ok" | "fail" | "partial" = "ok";
+  const f = fixture(async input => {
+    if (input.action !== "unfinished") throw Error(`Unexpected ${input.action}`);
+    if (answer === "fail") throw Error("dohc could not reach the relay.");
+    return answer === "partial" ? { restores: [], unreadable: 2, nextCursor: null } : { restores: listed, unreadable: 0, nextCursor: null };
+  }, true);
+  await waitFor(() => expect(f.row()).toBeDefined());
+  answer = "fail";
+  f.rerenderShell({ enabled: false });
+  f.rerenderShell({ enabled: true });
+  await waitFor(() => expect(listingRow()).toMatchObject({ seen: false,
+    message: "dohc could not read this workspace's unfinished restores. dohc could not reach the relay." }));
+  expect(listingRow()?.retry).toBeTypeOf("function");
+  expect(f.row()).toBeDefined();
+  answer = "partial";
+  act(() => shell.retryShellError(listingRow()!.id));
+  await waitFor(() => expect(listingRow()?.message).toBe("dohc could not read 2 of this workspace's unfinished restores."));
+  // The restore it could not read may be this one, so its row stays.
+  expect(f.row()).toBeDefined();
+  answer = "ok";
+  act(() => shell.retryShellError(listingRow()!.id));
+  await waitFor(() => expect(f.actions().filter(action => action === "unfinished")).toHaveLength(4));
+  await waitFor(() => expect(listingRow()).toBeUndefined());
+  expect(f.row()).toBeDefined();
+});
+
+// Proves: a listing read before a Decline cannot file the declined restore
+// again when its reply arrives late.
+it("keeps a declined row gone when an older listing replies after the decline", async () => {
+  const restore = { operationId: "restore", path: "docs/a.md", phase: "authority-invalidated", proposalDigest: null };
+  const late = deferred<unknown>();
+  let declined = false, listings = 0;
+  const f = fixture(async input => {
+    if (input.action === "unfinished") {
+      listings += 1;
+      if (listings === 2) return late.promise;
+      return { restores: declined ? [] : [restore], unreadable: 0, nextCursor: null };
+    }
+    if (input.action === "decline") { declined = true; return status("declined"); }
+    throw Error(`Unexpected ${input.action}`);
+  }, true);
+  await waitFor(() => expect(f.row()).toBeDefined());
+  f.rerenderShell({ enabled: false });
+  f.rerenderShell({ enabled: true });
+  await waitFor(() => expect(listings).toBe(2));
+  act(() => shell.runShellErrorAction(f.row()!.id, 1));
+  await waitFor(() => expect(f.row()).toBeUndefined());
+  await act(async () => late.resolve({ restores: [restore], unreadable: 0, nextCursor: null }));
+  expect(f.row()).toBeUndefined();
+  // The Decline listed again from current state.
+  expect(listings).toBe(3);
 });
 
 // Proves: closing the dialog on an unfinished restore keeps it findable, and
@@ -110,7 +189,7 @@ it("files a row for each unfinished restore, and Decline from the row ends it", 
 it("keeps a row for the restore a closed dialog left unfinished, until a listing drops it", async () => {
   let listed: unknown[] = [];
   const f = fixture(async input => {
-    if (input.action === "unfinished") return { restores: listed, nextCursor: null };
+    if (input.action === "unfinished") return { restores: listed, unreadable: 0, nextCursor: null };
     if (input.action === "options") return options({ operationId: "restore", phase: "authority-invalidated", proposalDigest: null });
     if (input.action === "status") return status("authority-invalidated");
     throw Error(`Unexpected ${input.action}`);

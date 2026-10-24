@@ -40,6 +40,8 @@ export const OwnerRestorePlan = z.object({intent: OwnerRestoreIntent, path: z.st
 export const OwnerUnfinishedRestores = z.object({
   restores: z.array(z.object({operationId: id, path: z.string().min(1).max(4096), phase: OwnerRestorePhase, proposalDigest: digest.nullable()})
     .refine(restore => restore.phase !== "resumed" && restore.phase !== "declined", "The restore has finished.")).max(50),
+  // This page's restores the relay could not read.
+  unreadable: integer.max(50),
   nextCursor: id.nullable(),
 });
 export type OwnerUnfinishedRestores = z.infer<typeof OwnerUnfinishedRestores>;

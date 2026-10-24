@@ -50,9 +50,10 @@ function fixture(pointCursor = 0) {
     return {status, result: {kind: "resumed", proposalDigest, receipt: {}}};
   });
   window.dohcDesktop = {ownerRestore: call} as unknown as typeof window.dohcDesktop;
-  const close = vi.fn(), restored = vi.fn(), release = vi.fn(), error = vi.fn(), settled = vi.fn();
-  const props = {workspaceId: "workspace", path: "notes.md", onClose: close, onRestored: restored, onBeforeRestore: vi.fn(async () => release), onError: error, onSettled: settled};
-  return {call, props, close, restored, release, error, settled, options, intent, status: () => status};
+  const close = vi.fn(), restored = vi.fn(), release = vi.fn(), error = vi.fn(), settled = vi.fn(), changed = vi.fn();
+  const props = {workspaceId: "workspace", path: "notes.md", onClose: close, onRestored: restored, onBeforeRestore: vi.fn(async () => release), onError: error,
+    onSettled: settled, onChanged: changed};
+  return {call, props, close, restored, release, error, settled, changed, options, intent, status: () => status};
 }
 afterEach(() => {cleanup(); delete window.dohcDesktop;});
 async function openStop(point = "0") {
@@ -67,8 +68,11 @@ it("requires separate stop and content confirmations and names every affected re
   expect(screen.getByText("This access stays stopped, even if you decline the restore.")).toBeTruthy();
   expect(screen.getByText("reader@example.test")).toBeTruthy();
   expect(f.call.mock.calls.some(([i]) => i.action === "begin" || i.action === "confirm")).toBe(false);
+  expect(f.changed).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", {name: "Stop access"}));
   await screen.findByRole("button", {name: "Restore file"});
+  // The begin changed the workspace's restores; the plan before it did not.
+  expect(f.changed).toHaveBeenCalledTimes(1);
   expect(screen.getByText("Restore point: Before accepted edits")).toBeTruthy();
   expect(f.call.mock.calls.some(([i]) => i.action === "confirm")).toBe(false);
   expect(screen.getByRole("textbox", {name: "Current file before restore"})).toHaveProperty("value", "Current text");
@@ -77,6 +81,7 @@ it("requires separate stop and content confirmations and names every affected re
   await screen.findByText("File restored");
   expect(f.call).toHaveBeenCalledWith({workspaceId: "workspace", action: "confirm", operationId: "restore", proposalDigest});
   expect(f.restored).toHaveBeenCalledTimes(1); expect(f.release).toHaveBeenCalledTimes(1);
+  expect(f.changed).toHaveBeenCalledTimes(2);
 });
 // The relay refuses to start a restore while live editing of the file is still
 // stopping. Nothing changed, so the shell reports why and the choice stays.
@@ -149,6 +154,18 @@ it("names a full workspace when admission refuses the confirmed restore", async 
   await screen.findByText("This workspace has reached its limit on the server. Free some space, then retry the restore.");
   expect(f.restored).not.toHaveBeenCalled();
 });
+// Proves: a restore opened by its ID reads only its own status, so it opens
+// as itself after the file's restore points are gone.
+it("opens a saved restore by its ID without the file's restore choices", async () => {
+  const f = fixture(), original = f.call.getMockImplementation()!;
+  f.call.mockImplementation(input => input.action === "options"
+    ? Promise.reject(Error("The restore point is no longer retained for this document.")) : original(input));
+  render(<OwnerRestoreDialog {...f.props} operationId="restore" />);
+  await screen.findByText("Access stopped for this restore. Review the restore, or decline it to keep the file unchanged.");
+  expect(screen.getByRole("button", {name: "Decline restore"})).toBeTruthy();
+  expect(f.call.mock.calls.map(([input]) => input.action)).toEqual(["status"]);
+  expect(f.call).toHaveBeenCalledWith({workspaceId: "workspace", action: "status", operationId: "restore"});
+});
 // Before live editing of the file stops for it, the owner can decline a
 // restore. Access stays stopped and the file stays unchanged.
 it("declines a reopened restore before its fence", async () => {
@@ -158,10 +175,11 @@ it("declines a reopened restore before its fence", async () => {
     : input.action === "decline" ? Promise.resolve({...f.status(), phase: "declined"}) : original(input));
   render(<OwnerRestoreDialog {...f.props} />);
   await screen.findByText("Access stopped for this restore. Review the restore, or decline it to keep the file unchanged.");
-  expect(screen.getByText("Access has stopped. Declining keeps the file unchanged, and access stays stopped.")).toBeTruthy();
+  expect(screen.getByText("Access has stopped. Declining keeps the file unchanged. Live editing through this access stays stopped until you share the file again.")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", {name: "Decline restore"}));
   await screen.findByText("Restore declined");
-  expect(screen.getByText("The file stays unchanged. Access stays stopped. Share again when you want to give access.")).toBeTruthy();
+  expect(screen.getByText("The file stays unchanged. Live editing through this access stays stopped until you share the file again.")).toBeTruthy();
+  expect(f.changed).toHaveBeenCalledTimes(1);
   expect(f.call).toHaveBeenCalledWith({workspaceId: "workspace", action: "decline", operationId: "restore"});
   expect(f.call.mock.calls.some(([input]) => input.action === "prepare" || input.action === "confirm")).toBe(false);
   fireEvent.click(screen.getByRole("button", {name: "Close"}));

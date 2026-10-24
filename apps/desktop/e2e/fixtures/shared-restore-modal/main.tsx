@@ -151,6 +151,7 @@ function SharedRestoreFixture() {
           onRestored={() => setRestored(true)}
           onError={ignore}
           onSettled={ignore}
+          onChanged={ignore}
         />
       ) : null}
     </main>
