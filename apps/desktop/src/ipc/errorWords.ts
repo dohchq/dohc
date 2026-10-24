@@ -12,6 +12,8 @@ import type { DaemonErrorCode } from "@dohc/workspace-engine-client";
 // sentence stands alone. Copy details still carry the error as it arrived.
 type Words = string | null;
 
+export const APP_COMPILER_TIMEOUT_WORDS = "The app took too long to build. Remove files the app does not use, then try again.";
+
 const UPDATING = "dohc is still reading this workspace's files. Try again when it finishes.";
 const NOT_READ = "dohc has not read this file yet. Try again when it has.";
 const TOO_LARGE = "It is too large.";
@@ -160,6 +162,7 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
   EngineClientError: { "*": null },
   DaemonProtocolError: { "*": null },
   DaemonClientCapabilityError: { "*": null },
+  AppCompilerTimeoutError: { "*": APP_COMPILER_TIMEOUT_WORDS },
   CompilerProcessError: {
     exit: "The app's code did not build.",
     timeout: "Building the app took too long. Try again.",
@@ -267,9 +270,13 @@ function decodedComputer(wire: string | undefined): string | null {
 export function ipcWireError(error: unknown): unknown {
   if (!(error instanceof Error)) return error;
   const code = codeOf(error);
-  if (code === null) return error;
-  const wire = new Error(error.message, { cause: error });
-  wire.name = wireName(error, code);
+  // Electron sends only toString(). Keep safe compiler facts in Copy details,
+  // while readError maps this name back to the unchanged sentence above.
+  const details: unknown = error.name === "AppCompilerTimeoutError"
+    ? Reflect.get(error, "details") : undefined;
+  if (code === null && typeof details !== "string") return error;
+  const wire = new Error(`${error.message}${typeof details === "string" ? `\n${details}` : ""}`, { cause: error });
+  wire.name = code === null ? error.name : wireName(error, code);
   return wire;
 }
 

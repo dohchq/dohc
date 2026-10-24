@@ -112,7 +112,15 @@ for(const mode of ['cancel','timeout','normal-exit'])test(`${mode} closes owned 
   const context=await fixture(t,`import {spawn}from'node:child_process';import{existsSync,writeFileSync}from'node:fs';${markerLine}${proceedLine}const child=spawn(process.execPath,['-e','console.log(process.pid);setInterval(()=>{},1000)'],{windowsHide:true,stdio:['ignore','pipe','ignore']});child.stdout.once('data',chunk=>{writeFileSync(marker,JSON.stringify({worker:process.pid,descendant:Number(chunk.toString())}));${mode==='normal-exit'?'proceed(()=>process.exit(0))':'setInterval(()=>{},1000)'}});`);
   const {directory,runtime}=context;runtime.workerArgs=[join(directory,'ready.json')];let owner;runtime.onOwnerSpawn=pid=>{owner=pid;};const controller=new AbortController();
   const running=runOwnedCompilerProcess(runtime,{input:Buffer.alloc(0),bounds,signal:controller.signal});
-  const outcome=mode==='normal-exit'?running:assert.rejects(running,{reason:mode==='cancel'?'cancelled':'timeout'});
+  const outcome=mode==='normal-exit'?running:assert.rejects(running,error=>{
+    assert.equal(error.reason,mode==='cancel'?'cancelled':'timeout');
+    if(mode==='timeout'){
+      assert.match(error.details,/Last stage: /);assert.match(error.details,/elapsed=\d+ms/);assert.match(error.details,/stderr tail: /);
+      if(process.platform==='win32')for(const stage of ['PowerShell running','Add-Type done','job assigned','admitted','worker spawned'])assert.match(error.details,new RegExp(`${stage}=\\d+ms`));
+      t.diagnostic(error.details);
+    }
+    return true;
+  });
   const identities=await waitForMarker(context);await proceed(context);if(mode==='cancel')controller.abort();await outcome;
   for(const pid of [owner,identities.worker,identities.descendant])assert.equal(await exited(pid),true,`process ${pid} exited`);
 });

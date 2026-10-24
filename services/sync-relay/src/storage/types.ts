@@ -877,6 +877,7 @@ export interface SyncRelayStorage {
     workspaceId: string; originId: string; messageId: string; ops: SyncRelayLogInput[];
     guard?: (context: AppendLogBatchGuardContext) => void;
   }): AppendLogBatchResult;
+  appendLinkChatPost(input: Parameters<typeof import("./linkChat").appendLinkChatPost>[1]): import("./linkChat").AppendLinkChatPostResult;
   fetchLogCoordinate(input: {
     workspaceId: string;
     originId: string;

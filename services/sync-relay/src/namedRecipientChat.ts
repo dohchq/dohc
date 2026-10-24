@@ -9,7 +9,7 @@ import { DiscussionActivityCapacityError, linkLogWaitGroup, type DiscussionActiv
 import type { NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import type { createNamedShareTransportRoutes } from "./namedShareTransportRoutes";
 import { accountDisplayName } from "./accountDisplayName";
-import { namedShareOrigin, type LogAuthorNameLookup } from "./relayLogInputs";
+import { linkChatOrigin, LINK_CHAT_MESSAGE_ID_PREFIX, namedShareOrigin, type LogAuthorNameLookup } from "./relayLogInputs";
 import { parseLimit, parseString, parseLinkLogHold } from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";
 import { chatSideOf, filterOpForShare, type AnyShareSelector, type ChatShareThreadResolver } from "./shareFilter";
@@ -27,19 +27,34 @@ export interface NamedChatMessage {
   threadId: string;
   authorUserId: string | null;
   authorDisplayName: string;
-  authorKind: "human" | "agent" | "automation";
+  authorKind: "human" | "agent" | "automation" | "link";
   authorOwnerDisplayName: string | null;
   createdAtMs: number;
   body: string | null;
   bodyTooLarge: boolean;
 }
 
-function messageFromOp(op: Record<string, unknown>): NamedChatMessage | null {
+const linkId = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 200 &&
+  value.trim() === value && !/\p{Cc}/u.test(value);
+
+// Only the relay writes a link post, under its principal's origin, with link
+// IDs and nothing account-shaped. Every desktop refuses any other row that
+// names a link, so no reader shows one either.
+function linkProvenanceHolds(p: Record<string, unknown>, originId: string): boolean {
+  if (p.authorKind !== "link") return !Object.hasOwn(p, "linkGrantId") && !Object.hasOwn(p, "linkPrincipalId");
+  return linkId(p.linkGrantId) && linkId(p.linkPrincipalId) && originId === linkChatOrigin(p.linkPrincipalId) &&
+    String(p.messageId).startsWith(LINK_CHAT_MESSAGE_ID_PREFIX) &&
+    !["authorUserId", "authorOwnerDisplayName", "chainDepth"].some(key => Object.hasOwn(p, key));
+}
+
+/** A stored chat message as a browser reads it; `originId` is the origin the relay stored it under. */
+export function messageFromOp(op: Record<string, unknown>, originId: string): NamedChatMessage | null {
   if (op.opKind !== "chat.message.append" || !op.payload || typeof op.payload !== "object") return null;
   const p = op.payload as Record<string, unknown>;
   if (typeof op.relaySeq !== "number" || typeof p.messageId !== "string" || typeof p.threadId !== "string" ||
       typeof p.authorDisplayName !== "string" || typeof p.body !== "string" ||
-      typeof p.createdAtMs !== "number" || !["human", "agent", "automation"].includes(String(p.authorKind))) return null;
+      typeof p.createdAtMs !== "number" || !["human", "agent", "automation", "link"].includes(String(p.authorKind)) ||
+      !linkProvenanceHolds(p, originId)) return null;
   return {relaySeq: op.relaySeq, messageId: p.messageId, threadId: p.threadId, authorUserId: typeof p.authorUserId === "string" ? p.authorUserId : null,
     authorDisplayName: p.authorDisplayName, authorKind: p.authorKind as NamedChatMessage["authorKind"],
     authorOwnerDisplayName: typeof p.authorOwnerDisplayName === "string" ? p.authorOwnerDisplayName : null,
@@ -199,7 +214,7 @@ export function createNamedRecipientChat(options: {
                 authorUserId: actor.userId, ...(authorOwnerDisplayName === undefined ? {} : {authorOwnerDisplayName}), createdAtMs}},
             ].map((op, originSeq) => ({...op, originSeq, recordedAtMs: createdAtMs}));
             boundedJson({shareId, channelWireId, message: messageFromOp({relaySeq: Number.MAX_SAFE_INTEGER,
-              opKind: "chat.message.append", payload: ops[ops.length - 1]!.payload})});
+              opKind: "chat.message.append", payload: ops[ops.length - 1]!.payload}, storedOrigin)});
             return options.transport(new Request(request.url, {method: "POST", signal: controller.signal,
               headers: {"content-type": "application/json"}, body: JSON.stringify({originId, ops})}), {route: "share-log", shareId}, actor, messageId);
           };
@@ -209,7 +224,7 @@ export function createNamedRecipientChat(options: {
           const row = storage.fetchChatMessage({workspaceId: share.workspaceId, originId: storedOrigin, messageId});
           if (!row) throw notFound();
           recheck();
-          return json({shareId, channelWireId, message: messageFromOp({relaySeq: row.relaySeq, opKind: row.opKind, payload: JSON.parse(row.payloadJson)})});
+          return json({shareId, channelWireId, message: messageFromOp({relaySeq: row.relaySeq, opKind: row.opKind, payload: JSON.parse(row.payloadJson)}, row.originId)});
         }
         return json(await readSharedChannelPage({storage, resolver: options.reads.chatResolverFor(share.workspaceId),
           selector: authority.effectiveSelector, workspaceId: share.workspaceId, shareId, channelWireId, query: url.searchParams,
@@ -272,7 +287,7 @@ export async function readSharedChannelPage<Message extends {relaySeq: number}>(
     for (const row of result.rows) {
       if (row.settlementAdmission?.status === "refused") continue;
       const decision = filterOpForShare(input.selector, row.opKind, row.payloadJson, input.resolver, "chat");
-      const message = decision.allowed ? messageFromOp({relaySeq: row.relaySeq, opKind: row.opKind, payload: decision.payload}) : null;
+      const message = decision.allowed ? messageFromOp({relaySeq: row.relaySeq, opKind: row.opKind, payload: decision.payload}, row.originId) : null;
       if (message) messages.push(message);
     }
     return {messages, nextCursor: following ? result.nextCursor : result.latestCursor,

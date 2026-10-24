@@ -1193,6 +1193,66 @@ fn start_channel_thread_creates_thread_and_first_message_atomically() {
     assert_eq!(rs.revision, 1);
 }
 
+/// Only the relay writes a link message. Neither local write path takes a
+/// link author, with or without an account, and a refusal writes nothing.
+#[test]
+fn local_writes_refuse_a_link_author() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .expect("gen");
+    let refused = |result: Result<_, DomainError>| {
+        matches!(
+            result,
+            Err(DomainError::InvalidInput {
+                reason: "only the relay writes a link message"
+            })
+        )
+    };
+    for author_user_id in [Some("user-ada".to_owned()), None] {
+        let start = StartChannelThread {
+            author_user_id,
+            ..start_thread(
+                "gen-1",
+                "t-link",
+                "m-link",
+                "hello",
+                ChatActorKind::Link,
+                20,
+            )
+        };
+        assert!(refused(
+            chats.start_channel_thread(&start, &NO_FAULTS).map(|_| ())
+        ));
+    }
+    chats
+        .start_channel_thread(
+            &start_thread("gen-1", "t1", "m1", "hello", ChatActorKind::Human, 20),
+            &NO_FAULTS,
+        )
+        .expect("start");
+    let reply = SendMessage {
+        author_kind: ChatActorKind::Link,
+        ..send_msg("t1", "m-link-reply", None, "hi", 30)
+    };
+    assert!(refused(chats.send_message(&reply, &NO_FAULTS).map(|_| ())));
+    let page = chats.list_messages(WS, "t1", 10, None).expect("list");
+    assert_eq!(
+        page.messages
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["m1"]
+    );
+    assert!(
+        chats.get_message(WS, "m-link").is_err(),
+        "no link thread was started"
+    );
+}
+
 #[test]
 fn conversation_revision_tracks_local_content_winners_but_not_read_state() {
     let scratch = ScratchDir::new().expect("scratch");

@@ -13,6 +13,7 @@ import {
   OrphanedDraftNotices,
   EngineRemovalInProgressNotice,
   LossyNoteNotice,
+  OpenExternallyLink,
 } from "./fileInspectorUi";
 import {
   DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
@@ -31,7 +32,7 @@ import {
 import { resolveLinkNavigation } from "./wikilinkNavigation";
 import { reportTextSave } from "./shell/useDocumentSaveNotices";
 import { CopyButton } from "./ui/CopyButton";
-import { outsideVersionWaitingMessage } from "../ipc/errorWords";
+import { captureHeldLiveMessage, outsideVersionWaitingMessage } from "../ipc/errorWords";
 import { sameFrontmatterValue } from "@dohc/ydoc-projection/frontmatter";
 import { frontmatterMapValues } from "@dohc/ydoc-projection/frontmatter-map";
 import { SkeletonRows } from "./ui/SkeletonRows";
@@ -296,6 +297,9 @@ export function MarkdownView(props: {
   // until this is "clear", so "checking" waits as an open does.
   lossyNote: LossyNoteCheck;
   onEditAnyway: () => void;
+  // Set while capture holds the note. A held lossy note shows the hold, which
+  // Edit anyway would reach only after its warning.
+  onRetryHeldCapture?: () => void;
   // Reopen the engine session after `engine.engineMayHoldDocument`.
   // Owned by the inspector, like the open itself. Required: the notice must
   // never render without its retry, and the one caller always passes it.
@@ -2301,8 +2305,12 @@ export function MarkdownView(props: {
           that same render and the capture above sets a draft typed before the
           timeout aside — where the user can copy it — instead of letting it
           reach disk over the artifact the engine is binding. */}
-      {props.lossyNote === "lossy" ? (
-        <LossyNoteNotice workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} onEditAnyway={props.onEditAnyway} />
+      {props.lossyNote === "lossy" && props.onRetryHeldCapture ? (
+        <EngineMayHoldDocumentNotice onRetry={props.onRetryHeldCapture} contentShown message={captureHeldLiveMessage(props.path)}>
+          <OpenExternallyLink workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} />
+        </EngineMayHoldDocumentNotice>
+      ) : props.lossyNote === "lossy" ? (
+        <LossyNoteNotice workspaceId={props.workspaceId} path={props.path} contentHash={props.contentHash} onError={props.onButtonError} onEditAnyway={props.onEditAnyway} />
       ) : null}
       {engine.engineMayHoldDocument || engine.liveHostUnavailable ? (
         <EngineMayHoldDocumentNotice onRetry={props.onRetryEngineOpen} contentShown message={engine.openRefusal ?? engine.sharedWaiting?.message} />

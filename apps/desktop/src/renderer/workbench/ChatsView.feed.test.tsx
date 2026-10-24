@@ -138,6 +138,21 @@ describe("ChatsView hybrid feed", () => {
     expect(bridgeMock.setChatReaction).toHaveBeenCalledTimes(locked ? 0 : 1);
   });
 
+  it("shows a link holder's Home post in a share link's ring with the link holder mark", async () => {
+    const item = personalFeedItem("Count me in", "message-link");
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [{ ...item, message: { ...item.message, authorKind: "link", authorDisplayName: "Ada" } }],
+    });
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const feedItem = await screen.findByTestId("chats-feed-item");
+    expect(feedItem.dataset.authorKind).toBe("link");
+    expect(within(feedItem).getByTestId("chats-feed-link-holder").textContent).toBe("Link holder");
+    const avatar = within(feedItem).getByTitle("Ada");
+    expect(avatar.dataset.authorKind).toBe("link");
+    expect(avatar.className).toContain("border-dashed");
+  });
+
   it("shows a known viewer's Like before the write and its listing answer", async () => {
     const write = deferred<unknown>();
     const listing = deferred<unknown>();

@@ -182,13 +182,15 @@ pub(super) fn hydrate(
     params![ws,version,key],|r| r.get(0)).optional().map_err(sql)?;
     if let Some(path) = path {
         let author: Option<Value>=c.prepare_cached(
-        "SELECT m.author_kind,substr(m.author_display_name,1,100),m.author_owner_display_name,m.author_user_id,m.author_actor_key
+        "SELECT m.author_kind,substr(m.author_display_name,1,100),m.author_owner_display_name,m.author_user_id,m.author_actor_key,
+                m.link_grant_id,m.link_principal_id
          FROM chat_messages m JOIN chat_threads t ON t.workspace_id=m.workspace_id AND t.thread_id=m.thread_id
          JOIN chat_channels ch ON ch.workspace_id=t.workspace_id AND ch.channel_id=t.channel_id
          WHERE m.workspace_id=?1 AND m.message_id=?2 AND m.thread_id=?3 AND t.channel_id=?4").map_err(sql)?.query_row(
         params![ws,message,thread,channel],|r| {
             let mut author=json!({"authorKind":r.get::<_,String>(0)?,"authorDisplayName":r.get::<_,String>(1)?});
-            for (index,name) in [(2,"authorOwnerDisplayName"),(3,"authorUserId"),(4,"authorActorKey")] {
+            for (index,name) in [(2,"authorOwnerDisplayName"),(3,"authorUserId"),(4,"authorActorKey"),
+                (5,"linkGrantId"),(6,"linkPrincipalId")] {
                 if let Some(value)=r.get::<_,Option<String>>(index)? { author[name]=json!(value); }
             }
             Ok(author)

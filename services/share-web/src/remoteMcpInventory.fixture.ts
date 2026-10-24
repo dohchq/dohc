@@ -1,11 +1,17 @@
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { serveRemoteMcp } from "./remoteMcp";
 
-export const REMOTE_MCP_INVENTORY_CASES = (["view", "comment", "edit"] as const).flatMap(access =>
+const FILE_LINK_CASES = (["view", "comment", "edit"] as const).flatMap(access =>
   [null, "pinned"].flatMap(versionId => [false, true].map(live => ({
     key: `${access}/${versionId === null ? "current" : "pinned"}/${live ? "live" : "without-live"}`,
-    access, versionId, live,
+    access, versionId, live, channel: null,
   }))));
+
+// A Group share's link also has the Group's channel. Its files read as View
+// for a read-only link and as Edit for a read-write one.
+export const REMOTE_MCP_INVENTORY_CASES = [...FILE_LINK_CASES, ...(["read-only", "read-write"] as const).map(channel => ({
+  key: `group/${channel}`, access: channel === "read-write" ? "edit" as const : "view" as const, versionId: null, live: true, channel,
+}))];
 
 type RemoteOptions = Parameters<typeof serveRemoteMcp>[1];
 const liveLimits: NonNullable<RemoteOptions["liveLimits"]> = {
@@ -22,8 +28,8 @@ const linkLive: NonNullable<RemoteOptions["linkLive"]> = {
 };
 
 // Exercises the actual remoteMcp registration and HTTP transport, after admission.
-// No tools are called. The only relay response is the admitted share metadata.
-export async function advertisedRemoteTools({ access, versionId, live }: typeof REMOTE_MCP_INVENTORY_CASES[number]) {
+// No tools are called. The only relay response is the admitted share metadata, with its channel if any.
+export async function advertisedRemoteTools({ access, versionId, live, channel }: typeof REMOTE_MCP_INVENTORY_CASES[number]) {
   const client = new Client({ name: "main-inventory", version: "1" });
   try {
     await client.connect(new StreamableHTTPClientTransport(new URL("https://share.example.test/mcp"), {
@@ -35,7 +41,8 @@ export async function advertisedRemoteTools({ access, versionId, live }: typeof 
           ...(live ? { linkLive, liveLimits } : {}),
           request: async path => {
             if (path !== "/api/view/meta") throw new Error(`Unexpected inventory request: ${path}`);
-            return Response.json({ ok: true, access, effectiveSelector: { access, versionId, paths: [] } });
+            return Response.json({ ok: true, access, effectiveSelector: { access, versionId, paths: [] },
+              ...(channel === null ? {} : { channel: { channelWireId: "wire", access: channel } }) });
           },
         });
         return new Response(result.body, { status: result.status, headers: result.headers });

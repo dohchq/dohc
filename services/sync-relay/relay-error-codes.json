@@ -27,6 +27,7 @@
   { "code": "key_envelope_not_found", "status": 404 },
   { "code": "link_discussion_blocked", "status": 403 },
   { "code": "link_discussion_paused", "status": 403 },
+  { "code": "link_name_already_set", "status": 409 },
   { "code": "link_read_rate_limited", "status": 429 },
   { "code": "method_not_allowed", "status": 405 },
   { "code": "not_found", "status": 404 },

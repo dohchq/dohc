@@ -2,6 +2,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { EngineDaemonUnavailableError } from "@dohc/workspace-engine-client/daemon";
 import { describe, expect, it } from "vitest";
+import { ipcWireError } from "../ipc/errorWords";
 import {
   CRASH_EVENT_MAX_CHARS,
   crashReportRoot,
@@ -89,6 +90,19 @@ describe("code locations for error reports", () => {
 });
 
 describe("crash report messages", () => {
+  it("keeps the compiler timeout type while withholding its message and details", () => {
+    const details = "Last stage: worker ready; elapsed=1000ms; stderr tail: [redacted stderr]; ENOMEM";
+    const timeout = Object.assign(new Error("The app took too long to build."), { name: "AppCompilerTimeoutError", details });
+    for (const error of [timeout, ipcWireError(timeout)]) {
+      const text = mainError(error);
+      expect(text).toContain("Error: AppCompilerTimeoutError: <message withheld>");
+      expect(text).not.toContain(timeout.message);
+      expect(text).not.toContain("Last stage:");
+      expect(text).not.toContain("stderr tail:");
+      expect(text).not.toContain("ENOMEM");
+    }
+  });
+
   it("withholds a message dohc did not write from a known template, and keeps the class", () => {
     for (const message of [
       "Cookie: theme=light; sid=abc123",

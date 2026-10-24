@@ -26,8 +26,8 @@ export const CLI_JSON_SCHEMA_VERSION = 3;
 // Who runs a CLI command. The CLI never writes as an automation.
 const cliActorSchema = z.enum(["human", "agent"]);
 export type CliActor = z.infer<typeof cliActorSchema>;
-// Who wrote a message the CLI reads back.
-const cliAuthorKindSchema = z.enum(["human", "agent", "automation"]);
+// Who wrote a message the CLI reads back. Only the relay writes a link author.
+const cliAuthorKindSchema = z.enum(["human", "agent", "automation", "link"]);
 
 const requestBase = {
   token: z.string().regex(/^[a-f0-9]{64}$/),

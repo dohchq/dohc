@@ -41,6 +41,38 @@ fn share_view_and_shared_channel_fail_closed_outside_boundary() {
     ));
 }
 
+/// A replicated origin reads its source after `shared:<shareId>:`, so a share
+/// id with `:` is refused before anything applies.
+#[test]
+fn a_share_id_with_a_colon_is_refused() {
+    let (_scratch, _path, mut engine) = open_store();
+    let boundary = ShareBoundary {
+        share_id: "share:relay".to_owned(),
+        surface: ShareSurface::SharedChannel,
+        channel_wire_id: Some("wire-allowed".to_owned()),
+        granted: None,
+    };
+    let op = envelope(
+        "peer",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "c-allow",
+            "name": "Allowed",
+            "slug": "allowed",
+            "kind": "channel",
+            "createdAtMs": 1,
+            "wireId": "wire-allowed"
+        }),
+    );
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &boundary, &op, &NoFaults),
+        Err(SyncError::InvalidInput {
+            reason: "share_id must not contain ':'"
+        })
+    ));
+}
+
 #[test]
 fn shared_channel_channel_create_without_wire_id_is_rejected() {
     let (_scratch, _path, mut engine) = open_store();
@@ -720,5 +752,246 @@ fn a_shared_channel_pull_reports_the_group_message_claims_it_applied() {
         vec![dohc_engine_domain::AutomationTrigger::Key {
             key: "message:m-task".to_owned()
         }]
+    );
+}
+
+/// A link post reaches a named recipient as the relay serves it on the
+/// Group lane: with its link and no account. It applies, and claims no
+/// automation even where a person's message would.
+#[test]
+fn a_shared_channel_link_post_applies_with_its_link_and_claims_nothing() {
+    let (_scratch, _path, mut engine) = open_store();
+    let client = RelaySyncClient::new(PagedShareRelay::new(
+        [
+            (
+                0,
+                SharedChannelResponse {
+                    own_origin_id: None,
+                    ops: vec![
+                        share_op(
+                            0,
+                            "chat.channel.create",
+                            json!({
+                                "channelId": "c-shared",
+                                "name": "Trip",
+                                "slug": "trip",
+                                "kind": "channel",
+                                "createdAtMs": 1,
+                                "wireId": "channel-wire"
+                            }),
+                        ),
+                        share_op(
+                            1,
+                            "chat.thread.create",
+                            json!({
+                                "threadId": "t-shared",
+                                "title": "Plans",
+                                "createdAtMs": 2,
+                                "channelWireId": "channel-wire"
+                            }),
+                        ),
+                    ],
+                    next_cursor: 2,
+                    has_more: false,
+                    push: None,
+                },
+            ),
+            (
+                2,
+                SharedChannelResponse {
+                    own_origin_id: None,
+                    ops: vec![ShareReplicationEnvelope {
+                        origin_id: format!(
+                            "{}principal-1",
+                            dohc_engine_domain::chats::LINK_ORIGIN_PREFIX
+                        ),
+                        ..share_op(
+                            0,
+                            "chat.message.append",
+                            json!({
+                                "messageId": "link-message:m-task",
+                                "threadId": "t-shared",
+                                "body": "/task Book",
+                                "authorKind": "link",
+                                "authorDisplayName": "Sam",
+                                "linkGrantId": "grant-1",
+                                "linkPrincipalId": "principal-1",
+                                "createdAtMs": 12
+                            }),
+                        )
+                    }],
+                    next_cursor: 3,
+                    has_more: false,
+                    push: None,
+                },
+            ),
+        ],
+        [],
+    ));
+    client
+        .pull_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
+        .expect("the Group arrives");
+    let channel_id: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT channel_id FROM chat_threads WHERE thread_id = 't-shared'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("shared Group");
+    dohc_engine_domain::watch_automation_groups(
+        &mut engine,
+        "ws",
+        &dohc_engine_domain::AutomationGroupWatch {
+            generation: 0,
+            subscriptions: vec![dohc_engine_domain::AutomationGroupSubscription {
+                automation_id: "collection:object-tasks#task".to_owned(),
+                channel_id,
+                starts_with: Some("/task".to_owned()),
+            }],
+            relay: None,
+        },
+        3,
+        &NoFaults,
+    )
+    .expect("watch");
+
+    let pulled = client
+        .pull_shared_channel(&mut engine, "ws", "share", "channel-wire", &NoFaults)
+        .expect("the link post arrives");
+    assert_eq!((pulled.applied, pulled.refused), (1, 0));
+    assert!(client.take_automation_claims().is_empty());
+    let author: (String, Option<String>, Option<String>, Option<String>) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT author_kind, author_user_id, link_grant_id, link_principal_id \
+                 FROM chat_messages WHERE message_id = 'link-message:m-task'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+        })
+        .expect("link post");
+    assert_eq!(
+        author,
+        (
+            "link".to_owned(),
+            None,
+            Some("grant-1".to_owned()),
+            Some("principal-1".to_owned())
+        )
+    );
+}
+
+/// A named recipient stores a shared op under `shared:<shareId>:<source>`.
+/// A link post's new thread and the post still read as the link holder's,
+/// and a named member's ops that claim a link thread or a link are refused.
+#[test]
+fn a_shared_link_thread_and_post_apply_only_from_the_link_origin() {
+    let (_scratch, _path, mut engine) = open_store();
+    let boundary = ShareBoundary {
+        share_id: "share-allowed".to_owned(),
+        surface: ShareSurface::SharedChannel,
+        channel_wire_id: Some("wire-allowed".to_owned()),
+        granted: None,
+    };
+    let member = "relay:share-member:x";
+    let link = "relay:share-link:p";
+    let thread = |thread_id: &str, title: &str| {
+        json!({
+            "threadId": thread_id,
+            "title": title,
+            "createdAtMs": 2,
+            "channelWireId": "wire-allowed",
+            "lane": "chat"
+        })
+    };
+    let link_post = |message_id: &str, thread_id: &str| {
+        json!({
+            "messageId": message_id,
+            "threadId": thread_id,
+            "authorKind": "link",
+            "authorDisplayName": "Sam",
+            "linkGrantId": "grant-1",
+            "linkPrincipalId": "p",
+            "body": "Hi",
+            "createdAtMs": 3
+        })
+    };
+    let apply = |engine: &mut EngineStore, origin: &str, seq: i64, kind: &str, payload| {
+        apply_shared_envelope(
+            engine,
+            &boundary,
+            &envelope(origin, seq, kind, payload),
+            &NoFaults,
+        )
+    };
+    let applied = || ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()));
+    let group = json!({
+        "channelId": "c-allow",
+        "name": "Allowed",
+        "slug": "allowed",
+        "kind": "channel",
+        "createdAtMs": 1,
+        "wireId": "wire-allowed"
+    });
+    assert_eq!(
+        apply(&mut engine, "owner", 0, "chat.channel.create", group).expect("Group"),
+        applied()
+    );
+
+    let squat = thread("link-thread:squat", "Taken");
+    assert_invalid_refusal!(apply(&mut engine, member, 0, "chat.thread.create", squat));
+    let own = thread("t-member", "Plans");
+    assert_eq!(
+        apply(&mut engine, member, 1, "chat.thread.create", own).expect("member thread"),
+        applied()
+    );
+    let forged = link_post("link-message:forged", "t-member");
+    assert_invalid_refusal!(apply(&mut engine, member, 2, "chat.message.append", forged));
+
+    let link_thread = thread("link-thread:p-1", "");
+    assert_eq!(
+        apply(&mut engine, link, 0, "chat.thread.create", link_thread).expect("link thread"),
+        applied()
+    );
+    let post = link_post("link-message:p-1", "link-thread:p-1");
+    assert_eq!(
+        apply(&mut engine, link, 1, "chat.message.append", post).expect("link post"),
+        applied()
+    );
+
+    type MessageRow = (String, String, Option<String>);
+    let (threads, messages): (Vec<String>, Vec<MessageRow>) = engine
+        .read_with(|conn| {
+            let threads = conn
+                .prepare(
+                    "SELECT thread_id FROM chat_threads \
+                     WHERE thread_id IN ('link-thread:squat', 'link-thread:p-1', 't-member') \
+                     ORDER BY thread_id",
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let messages = conn
+                .prepare(
+                    "SELECT message_id, author_kind, link_principal_id FROM chat_messages \
+                     WHERE thread_id IN ('link-thread:p-1', 't-member') ORDER BY message_id",
+                )?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok::<_, rusqlite::Error>((threads, messages))
+        })
+        .expect("shared rows");
+    assert_eq!(
+        threads,
+        vec!["link-thread:p-1".to_owned(), "t-member".to_owned()]
+    );
+    assert_eq!(
+        messages,
+        vec![(
+            "link-message:p-1".to_owned(),
+            "link".to_owned(),
+            Some("p".to_owned())
+        )]
     );
 }

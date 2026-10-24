@@ -13,6 +13,8 @@ export interface ViewMeta {
   };
   lastSettledAtMs: number | null;
   lastSettledKnown: boolean;
+  /** A Group link's channel. The share's answer without one confirms the link has none. */
+  channel?: { channelWireId: string };
 }
 
 export interface RelayOp {

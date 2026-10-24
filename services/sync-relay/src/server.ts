@@ -685,6 +685,8 @@ export function createSyncRelayHandler({
 
   const respondToLinkChat = createLinkChatRoutes({
     storage,
+    linkKey,
+    nowMs,
     requireLinkRead,
     requireFreshLinkRead,
     linkJsonResponse,
