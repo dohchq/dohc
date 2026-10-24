@@ -165,14 +165,14 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
 
 
   // Without a tray, as on stock GNOME, nothing shows that dohc keeps running
-  // after its last window closes. Say so once a run, and how to quit.
-  let backgroundNoticeShown = false;
+  // after its last window closes. Say so once a run, and how to quit. The
+  // notice is kept: Electron drops its click listener once it is collected.
+  let backgroundNotice: InstanceType<typeof dependencies.Notification> | null = null;
   async function noticeRunningInBackground(): Promise<void> {
-    if (process.platform !== "linux" || backgroundNoticeShown) return;
+    if (process.platform !== "linux" || backgroundNotice) return;
     const trayShown = await dependencies.linuxTrayShown();
     // A quit, or another close's notice, may have come during the check.
-    if (trayShown || backgroundNoticeShown || dependencies.appLifecycle.isQuitting()) return;
-    backgroundNoticeShown = true;
+    if (trayShown || backgroundNotice || dependencies.appLifecycle.isQuitting()) return;
     const schedules = dependencies.runningSchedules();
     const notice = new dependencies.Notification({
       title: "dohc is still running",
@@ -182,6 +182,7 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
         "To quit, open dohc and press Ctrl+Q.",
       ].join(" "),
     });
+    backgroundNotice = notice;
     notice.on("click", () => {
       void showOrCreateMainWindow();
     });
