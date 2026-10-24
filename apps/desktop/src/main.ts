@@ -1,4 +1,5 @@
 import { createChatLinksReader } from "./workspaces/chatLinks";
+import { workspaceRootForOperation, workspaceRootsMatch } from "./workspaces/workspaceRootsMatch";
 import { createActorPresentationRequest } from "./workspaces/actorPresentation";
 import { agentColorsForPresentation } from "./settings/userSettingsStore";
 import { createChatFileMentionsReader } from "./workspaces/chatFileMentions";
@@ -37,6 +38,7 @@ import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
 import { ipcWireError, KEEP_COLLECTIONS_HERE, readError, withErrorWords } from "./ipc/errorWords";
 import { assertRootNotPrivacyDenied, withPrivacyDenial } from "./workspaces/privacyDenial";
+import { onNetworkShare } from "./workspaces/networkShare";
 import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { registerSystemMotionIpc } from "./ipc/systemMotionIpc";
 import { registerSystemPrivacySettingsIpc } from "./ipc/systemPrivacySettingsIpc";
@@ -50,6 +52,7 @@ import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
 import { registerCollectionAutomationsIpc } from "./ipc/collectionAutomationsIpc";
 import { registerStopAndRestoreIpc } from "./ipc/stopAndRestoreIpc";
 import { createServerRuns } from "./automations/serverRuns";
+import { readServerDataset } from "./automations/serverDataset";
 import { createPressWindows, refreshSharedButtonInspections, registerAutomationButtonsIpc } from "./ipc/automationButtonsIpc";
 import { RECORD_ID_FRONTMATTER_KEY } from "@dohc/workspace-contracts/collection";
 import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collection-values";
@@ -64,7 +67,7 @@ import { adoptLocalDatasetStore, createLocalDatasetHost, localDatasetStoreExists
 import { collectionsHolderRequired, collectionsKeptElsewhere, CollectionsRefusalError, keepCollectionsHere, keepQuestionWords, type CollectionsHolderCheck, type KeepQuestion } from "./workspaces/collectionsHolder";
 import { localCollectionEngine } from "./workspaces/localCollectionEngine";
 import { createInstalledDatasetCompiler } from "./workspaces/installedDatasetCompiler";
-import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget, createServerCollectionsData, resolveRemoteDatasetRevision, type OwnerDatasetData } from "./workspaces/remoteDataset";
+import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget, createServerCollectionsData, resolveRemoteDatasetRevision, type OwnerDatasetData, type RemoteDatasetData } from "./workspaces/remoteDataset";
 import { createNamedDatasetData } from "./workspaces/namedDataset";
 import { createNamedDatasetCacheRegistry } from "./workspaces/namedDatasetCache";
 import { namedDatasetFetch } from "./workspaces/namedDatasetTransport";
@@ -224,7 +227,7 @@ import {
   type AutoUpdateController,
   type PublicUpdateState,
 } from "./updates/electronUpdater";
-import { initialUpdateState } from "./updates/updateMachine";
+import { initialUpdateState, releaseChannelPreloadArguments } from "./updates/updateMachine";
 import { createUpdateAfterFailure } from "./updates/updateAfterFailure";
 import { confirmRestartDialog, showDownloadingDialog } from "./updates/failureDialogs";
 import { finishLaunch } from "./launch/launchMarker";
@@ -991,13 +994,18 @@ function workspaceSummaries(): WorkspaceSummary[] {
 // every renderer's preload, so a packaged app with the env var set shows
 // nothing.
 const devToolsGranted = devToolsEnabled(process.env, app);
+// Every window's preload gets that decision and this build's release channel.
+const preloadArguments = [
+  ...devToolsPreloadArguments(devToolsGranted),
+  ...releaseChannelPreloadArguments(resolveUpdateChannel(app.getVersion())),
+];
 
 const desktopWindows = createDesktopWindows({
   app, Menu, dialog, process, workspaceSummaries, currentUpdateState,
   stateDir, readCachedUserSettingsFile, createMainWindow,
   // Menu clicks arrive after startup, when the settings owner exists.
   stepWindowZoom: (step) => settingsIpc.stepWindowZoom(step),
-  preloadArguments: devToolsPreloadArguments(devToolsGranted),
+  preloadArguments,
   afterRendererCrashLoop,
   get rendererWorkspaceSessions(): Pick<
     RendererWorkspaceSessionOwner<WebContents>, "current" | "retireForReload" | "retireAfterCrash"
@@ -2210,6 +2218,12 @@ function testSyncTimingOverrides(): {
   };
 }
 
+// Test-only network-share seam: every workspace reads as on a network
+// share, so its notice can be seen on any computer.
+function testNetworkShare(): boolean {
+  return process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged && process.env.DOHC_TEST_NETWORK_SHARE === "1";
+}
+
 // Test-only settle seams for the crash spec. The debounce holds an edit
 // unsettled until the spec kills the app, instead of racing the kill. The
 // gate holds a reopened document's recovery settle while its file exists,
@@ -2451,6 +2465,7 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
     if (waiting === null) throw new Error("The workspace engine is not running.");
     return waiting;
   },
+  onNetworkShare: rootPath => (testNetworkShare() ? Promise.resolve(true) : onNetworkShare(rootPath)),
   // The engine capture gate (engineCaptureGate.ts) owns the shared-view rule:
   // main only states whether the workspace is one, and the decision
   // carries the cause.
@@ -3013,7 +3028,7 @@ async function withEngineAdapter<T>(
   if (!registered) return await read(workspace);
   if (
     workspace.attachmentId === undefined &&
-    registered.rootPath !== workspace.rootPath
+    !workspaceRootsMatch(registered.rootPath, workspace.rootPath)
   ) {
     throw new Error(
       "This workspace changed while this ran. Try again.",
@@ -3202,8 +3217,10 @@ async function syncWorkspaceForDispatch(
         return await withEngineStoreRecoveredForAuthority(lease, async () => {
           lease.assertCurrent();
           if (activity.listOpenWorkspaceIds().includes(workspaceId)) {
+            const activityRootPath = activity.workspaceRootPath(workspaceId);
             if (
-              activity.workspaceRootPath(workspaceId) !== workspace.rootPath
+              activityRootPath === null ||
+              !workspaceRootsMatch(activityRootPath, workspace.rootPath)
             ) {
               throw new Error(
                 "This workspace was closed. Open it again.",
@@ -3220,7 +3237,7 @@ async function syncWorkspaceForDispatch(
               // Guarded above: a shared view already returned false.
               shareView: false,
             },
-            { onCaptureOutcome: () => undefined, onAtomicPlacementUnavailable: () => undefined, onRecoveryUnavailable: () => undefined, onKeptFiles: () => undefined, onHeldFiles: () => undefined },
+            { onCaptureOutcome: () => undefined, onAtomicPlacementUnavailable: () => undefined, onRecoveryUnavailable: () => undefined, onKeptFiles: () => undefined, onRetainedCopies: () => undefined, onHeldFiles: () => undefined },
             requireEngineSessions(),
           );
           if (!capture) return false;
@@ -4215,14 +4232,20 @@ const automationHosts = createAutomationHosts({
 // answers that the server has none to show.
 const serverRuns = createServerRuns(async (workspaceId, request) => {
   const workspace = findWorkspace(workspaceId);
-  if (!workspace?.remote || workspace.shareView !== undefined) return null;
+  if (!workspace || workspace.shareView !== undefined) return null;
   // A sign-in dohc could not read is not a sign-out, so the ask fails. The
   // failure comes from the load this ask waited on, not from shared state.
   const unreadable = await credentialSessionCache.warm(() => cloudLogin().credentials());
   if (unreadable) throw unreadable.error;
   let credentials: CloudSessionCredentials;
   let credentialGeneration: number;
-  try {
+  if (!workspace.remote) {
+    // A computer that doesn't sync the workspace or keep its Collections asks
+    // the server its Collections moved to, with that server's session.
+    const server = await serverCollectionsFor(workspace, AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS));
+    if (server === null) return null;
+    ({ credentials, credentialGeneration } = server);
+  } else try {
     ({ credentials, credentialGeneration } = await remoteForWorkspace(workspace));
   } catch {
     // Signed out, or signed in to another account or server.
@@ -4619,6 +4642,16 @@ function createCollectionAutomationsFor(
     resolveButtonInspection: (id) => hostButtonAuthority(workspaceId, id, true),
     onError: (context, error) =>
       console.warn(`[desktop] Collection automations in ${workspaceId}: ${context}:`, error),
+    // A Collection on the server, read for a person who asked about it. The server runs it.
+    serverDataset: (datasetId) => withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
+      if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed. Open it again.");
+      const server = await serverCollectionOf(operation.workspace, datasetId, operation.signal);
+      return server && await readServerDataset(workspaceId, datasetId, server.data, server.automationHost).catch((error: unknown) => {
+        // The server doesn't have it: the computer that keeps the workspace's other Collections does.
+        if (error instanceof CollectionsRefusalError) return null;
+        throw error;
+      });
+    }),
     withDatasetHost: async (work, open) => {
       // An open host serves the executor until disposal closes it, so a
       // closing executor can still hand its claims back. The executor opens
@@ -4711,7 +4744,7 @@ interface ServerCollectionsSession {
   credentialGeneration: number;
   elsewhere: ServerCollections["elsewhere"];
   /** The server's Collections, for work under `signal` while `assertCurrent` passes. */
-  data(signal: AbortSignal, assertCurrent: () => void): OwnerDatasetData;
+  data(signal: AbortSignal, assertCurrent: () => void): RemoteDatasetData;
 }
 // The workspace does not start syncing, and its server and account stay as
 // they are. Null where this computer keeps the Collections, or where it has
@@ -4746,17 +4779,51 @@ async function collectionsAuthorityFor(workspace: RegistryEntry & { attachmentId
   const server = await serverCollectionsFor(workspace, signal);
   return server ? { kind: "server", server } : { kind: "local", local: await localDatasetHostFor(workspace, signal) };
 }
+// The server a Collection moved to, which runs its automations, as this
+// computer reaches it: with the session the server issued, at its own origin,
+// following no redirect. Null for a Collection kept on this computer.
+interface ServerCollection {
+  data: RemoteDatasetData;
+  /** The owner's automation host state, which says what the server runs. */
+  automationHost(): Promise<{ status: number; body: unknown }>;
+}
+async function serverCollectionOf(workspace: RegistryEntry & { attachmentId?: symbol }, datasetId: string, signal: AbortSignal): Promise<ServerCollection | null> {
+  const authority = await collectionsAuthorityFor(workspace, signal);
+  let credentials: CloudSessionCredentials, credentialGeneration: number;
+  if (authority.kind === "server") ({ credentials, credentialGeneration } = authority.server);
+  else {
+    const transfer = authority.local.transferStatus(datasetId);
+    if (transfer === null) return null;
+    if (transfer.state !== "imported") throw new Error("This Collection is transferring. Wait for the transfer to finish, then retry.");
+    ({ credentials, credentialGeneration } = await remoteForWorkspace(workspace));
+    signal.throwIfAborted();
+    if (!credentials.relayUrl || new URL(credentials.relayUrl).origin !== transfer.targetOrigin) throw new Error("Sign in to the server that hosts this Collection.");
+  }
+  const remote = { workspaceId: workspace.workspaceId, credentials, credentialGeneration, signal,
+    currentCredentialGeneration: () => credentialCacheGeneration, assertCurrent: () => signal.throwIfAborted() };
+  return {
+    data: authority.kind === "server" ? authority.server.data(signal, remote.assertCurrent)
+      : createRemoteDatasetData({ ...remote, relayJson: (credentials, path, init) => relayShareJsonWithCredentials(credentials, path, { ...init, redirect: "error" }) }),
+    automationHost: async () => {
+      const response = await relayShareResponseWithCredentials(credentials, `/sync/${encodeURIComponent(workspace.workspaceId)}/automation-host`,
+        { method: "GET", signal: AbortSignal.any([signal, AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS)]) });
+      signal.throwIfAborted();
+      if (credentialCacheGeneration !== credentialGeneration) throw new Error("Your server session changed. Try again.");
+      return { status: response.status, body: await response.json().catch(() => undefined) };
+    },
+  };
+}
 let installedDatasetCompiler: ReturnType<typeof createInstalledDatasetCompiler> | undefined;
 const datasetRuntimePath = () => join(app.isPackaged ? process.resourcesPath : join(desktopPackageRootInDev(), "resources"), "app-backend-runtime");
 const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: string }, signal: AbortSignal) =>
   workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
     signal.throwIfAborted(); operation.assertCurrent();
-    if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("This workspace changed while this ran. Try again.");
+    const workspaceRoot = workspaceRootForOperation(operation.workspace.rootPath, workspace.rootPath);
     const slot = operation.state.datasetHost;
     let pending = slot.pending;
     if (!pending) {
       const runtimePath = datasetRuntimePath(), attachment = { workspaceId: workspace.workspaceId, attachmentId: operation.workspace.attachmentId };
-      pending = createLocalDatasetHost({ workspaceId: workspace.workspaceId, workspaceRoot: workspace.rootPath, attachmentId: attachment.attachmentId, localPersonId: localUserId,
+      pending = createLocalDatasetHost({ workspaceId: workspace.workspaceId, workspaceRoot, attachmentId: attachment.attachmentId, localPersonId: localUserId,
         holder: collectionsHolderCheck(workspace.workspaceId),
         trashItem: path => shell.trashItem(path),
         runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, true), entryPath: join(runtimePath, "child.mjs") },
@@ -4780,11 +4847,11 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
         },
         onDatasetsChanged: () => collectionAutomationsOf(workspace.workspaceId)?.datasetsChanged(),
         collectionEngine: () => {
-          const capture = activity.engineCaptureFor(workspace.workspaceId, workspace.rootPath);
+          const capture = activity.engineCaptureFor(workspace.workspaceId, workspaceRoot);
           if (!capture) throw new Error("The workspace engine is unavailable.");
-          return localCollectionEngine({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath, capture,
+          return localCollectionEngine({ workspaceId: workspace.workspaceId, rootPath: workspaceRoot, capture,
             withAdapter: async work => {
-              const result = await withEngineAdapter({ ...workspace, attachmentId: attachment.attachmentId }, async adapter => ({ value: await work(adapter) }));
+              const result = await withEngineAdapter({ ...workspace, rootPath: workspaceRoot, attachmentId: attachment.attachmentId }, async adapter => ({ value: await work(adapter) }));
               if (result === null) throw new Error("The workspace engine is unavailable.");
               return result.value;
             } });
@@ -4888,6 +4955,8 @@ const { startDesktopCliServer } = createDesktopCliServer({
       automationIdAt: async (collectionPath, id) => (await opened()).automationIdAt(collectionPath, id),
       runs: async (automationId, before) => (await opened()).runs(automationId, before),
       run: async (automationId, claimId) => (await opened()).run(automationId, claimId),
+      serverRuns: (automationId, before) => serverRuns.runs(workspace.workspaceId, automationId, before),
+      serverRun: (automationId, claimId) => serverRuns.get(workspace.workspaceId, automationId, claimId),
       retry: (input) => retryAutomationRun({
         notices: noticeStore(),
         installId: localInstallationId(),
@@ -5109,11 +5178,11 @@ function broadcastUpdateState(state: PublicUpdateState): void {
   }
 }
 
-const { refreshDispatchTray, refreshSystemThemeDesktopIcons, dispatchKeepsRunning } = createDesktopTray<
+const { refreshDispatchTray, refreshTrayIcon, dispatchKeepsRunning } = createDesktopTray<
   ReturnType<typeof nativeImage.createFromPath>,
   ReturnType<typeof Menu.buildFromTemplate>
 >({
-  app, process, Menu, nativeImage, nativeTheme, Tray, BrowserWindow,
+  app, process, Menu, nativeImage, nativeTheme, Tray,
   moduleDirectory: import.meta.dirname,
   readCachedUserSettingsFile, stateDir, chatDispatchService, showOrCreateMainWindow,
   runningSchedules: () => automationScheduler.runningSchedules(),
@@ -5125,7 +5194,7 @@ const desktopEngine = createDesktopEngine({
   onWorkspaceOpened: workspaceId => {
     const workspace = findWorkspace(workspaceId);
     if (workspace) void withWorkspaceAttachment({workspaceId}, lease => recoverOutageTyping(canonicalWorkspaceFor(lease)));
-    if (workspace && activity.engineCaptureFor(workspaceId)) reconcileLocalCollectionApps(workspace);
+    if (workspace && activity.engineCaptureFor(workspaceId)) withWorkspaceAttachment({workspaceId}, lease => reconcileLocalCollectionApps(canonicalWorkspaceFor(lease)));
     void noticeStore().refreshRefusals(workspaceId).catch(error => {
       console.warn("[notices] could not refresh workspace sync refusals after open", error);
     });
@@ -5717,7 +5786,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       createMainWindow({
         beforeRendererReload: prepareAfterRendererCrash,
         afterRendererCrashLoop,
-        preloadArguments: devToolsPreloadArguments(devToolsGranted),
+        preloadArguments,
       }),
     ),
     whenLoaded: (window) => new Promise<boolean>((resolve) => {
@@ -5796,7 +5865,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       }).then((directory) => { linuxStableCliBinDir = directory; });
     },
     registerHandlers: () => {
-      nativeTheme.on("updated", refreshSystemThemeDesktopIcons);
+      nativeTheme.on("updated", refreshTrayIcon);
       // A backoff can outlast a sleep. On wake, try each failing sync now.
       powerMonitor.on("resume", () => activity.retryFailingCloudSyncs());
       for (const workspace of listWorkspaces()) {
@@ -6520,6 +6589,9 @@ function registerIpcHandlers(): void {
         throw new Error("dohc could not capture this app. Restart dohc and try again.");
       }
       await capture.flush();
+      const result = await withEngineAdapter(workspace, adapter => adapter.flushCapture());
+      if (!result) throw new Error("dohc could not capture this app. Restart dohc and try again.");
+      return result;
     },
     withAdapter: withEngineAdapter,
     compile: async (request, signal) => {
@@ -6563,8 +6635,11 @@ function registerIpcHandlers(): void {
         offline: { relayResponse: (credentials, path, init) => relayShareResponseWithCredentials(credentials, path, init, true), cache },
       }); } catch (error) { await cache.clear(); throw error; }
     },
-    dataForWorkspace: async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) => {
-      const local = await datasetForWorkspace(workspace, signal);
+    dataForWorkspace: async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal): Promise<OwnerDatasetData> => {
+      // On a computer that doesn't keep the Collections, the server's, as every Collection action chooses.
+      const authority = await collectionsAuthorityFor(workspace, signal);
+      if (authority.kind === "server") return authority.server.data(signal, () => signal.throwIfAborted());
+      const { local } = authority;
       return createDatasetAuthorityRouter(local, {
         status: async datasetId => { signal.throwIfAborted(); return local.transferStatus(datasetId); },
         remote: async (targetOrigin, datasetId) => {
@@ -6577,11 +6652,12 @@ function registerIpcHandlers(): void {
             currentCredentialGeneration: () => credentialCacheGeneration,
             assertCurrent: () => signal.throwIfAborted(), relayJson: relayShareJsonWithCredentials });
           const ownerKey = datasetCopyOwnerKey(remote.credentials);
-          let attachmentId: symbol | undefined;
+          let copyWorkspace: EngineWorkspace | undefined;
           const openCopy = () => workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
-            signal.throwIfAborted(); operation.assertCurrent(); attachmentId = operation.workspace.attachmentId;
-            if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("This workspace changed while this ran. Try again.");
-            return ownerDatasetCopies.get({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath, attachmentId: operation.workspace.attachmentId,
+            signal.throwIfAborted(); operation.assertCurrent();
+            const rootPath = workspaceRootForOperation(operation.workspace.rootPath, workspace.rootPath);
+            copyWorkspace = { ...operation.workspace, rootPath };
+            return ownerDatasetCopies.get({ ...copyWorkspace,
               datasetId, origin: targetOrigin, ownerKey, lifetime: operation.signal,
               assertOwner: () => {
                 if (!cachedCredentials || datasetCopyOwnerKey(cachedCredentials) !== ownerKey) throw new Error("Sign in as this Collection's owner.");
@@ -6594,8 +6670,8 @@ function registerIpcHandlers(): void {
           // way. If the folder still isn't ready, the server holds the
           // Collection, so it works online without an offline copy.
           const copy = await openCopy().catch(async (error: unknown) => {
-            if (!(error instanceof LocalStateUnavailableError) || error.refusal !== "not-opened") throw error;
-            await localStateOpened({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath, attachmentId });
+            if (!(error instanceof LocalStateUnavailableError) || error.refusal !== "not-opened" || !copyWorkspace) throw error;
+            await localStateOpened(copyWorkspace);
             return openCopy();
           }).catch((error: unknown) => { if (error instanceof LocalStateUnavailableError) return null; throw error; });
           if (copy === null) return data;
@@ -6987,6 +7063,7 @@ function registerIpcHandlers(): void {
       }
       return automationPressRelay({ baseUrl: normalizeServerUrl(credentials.relayUrl), token: credentials.token, fetch: relayShareFetch }).inspect(shareId, input);
     },
+    serverCollection: (operation, datasetId) => serverCollectionOf(operation.workspace, datasetId, operation.signal),
     inspectionChanged: (workspaceId, attachmentId) => {
       withWorkspaceAttachment({ workspaceId }, lease => {
         if (lease.binding.attachmentId === attachmentId) notifyCollectionAutomationsChanged(workspaceId);

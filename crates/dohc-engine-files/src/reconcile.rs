@@ -621,6 +621,8 @@ impl ReconcileController {
         let deferred: BTreeSet<&str> = result.deferred_paths.iter().map(String::as_str).collect();
         let deferred_retires: BTreeSet<&str> =
             result.deferred_retires.iter().map(String::as_str).collect();
+        let deferred_writes: BTreeSet<&str> =
+            result.deferred_writes.iter().map(String::as_str).collect();
         let captured: std::collections::BTreeMap<&str, (u64, &str)> = result
             .captured
             .iter()
@@ -668,9 +670,9 @@ impl ReconcileController {
                 // A deferred ingest is not captured. An entry left from an
                 // earlier file at the path would make the next scan call it
                 // unchanged whenever the bytes match that file, and capture
-                // would never check them. A deferred retire keeps its entry,
-                // so the next scan retires the path again.
-                if !deferred_retires.contains(op.path()) {
+                // would never check them. Deferred retires and outside writes
+                // keep their entries, so release retries the original change.
+                if !deferred_retires.contains(op.path()) && !deferred_writes.contains(op.path()) {
                     next.remove(op.path());
                 }
                 continue;
@@ -981,6 +983,7 @@ mod ack_receipt_tests {
             failed_applies: Vec::new(),
             deferred_paths: Vec::new(),
             deferred_retires: Vec::new(),
+            deferred_writes: Vec::new(),
             held_observations: Vec::new(),
             crashed_after_durable_boundary: None,
             degraded: false,
@@ -1023,6 +1026,7 @@ mod ack_receipt_tests {
             failed_applies: Vec::new(),
             deferred_paths: Vec::new(),
             deferred_retires: Vec::new(),
+            deferred_writes: Vec::new(),
             held_observations: Vec::new(),
             crashed_after_durable_boundary: None,
             degraded: false,

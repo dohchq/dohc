@@ -16,6 +16,7 @@ const definition: DatasetDefinition = {
   tables: [{ tableId: id(2), name: "Registrations", sqlName: "registrations", primaryKey: "record_id", fields: [
     { fieldId: id(3), name: "ID", sqlColumn: "record_id", type: "text", required: true, unique: true },
     { fieldId: id(4), name: "Name", sqlColumn: "name", type: "text", required: true, unique: false },
+    { fieldId: id(8), name: "Confirm", type: "button" },
   ] }],
   operations: [
     { operationId: id(5), name: "read", label: "Read", tableId: id(2), kind: "read", access: "owner", readOnly: true, fieldIds: [id(3), id(4)] },
@@ -23,6 +24,31 @@ const definition: DatasetDefinition = {
     { operationId: id(7), name: "edit", label: "Edit", tableId: id(2), kind: "edit", access: "owner", readOnly: false, fieldIds: [id(4)] },
   ],
 };
+
+// The Collection's automations, which the server runs once it moved there.
+const AUTOMATIONS = `version: 1
+automations:
+  - id: confirm
+    name: Confirm registration
+    when:
+      button: Confirm
+    do:
+      - set:
+          Name: Confirmed
+        operation: edit
+`;
+
+async function shootPanel(page: Page, name: string): Promise<void> {
+  for (const theme of ["light", "dark"] as const) {
+    await page.evaluate(async (value) => {
+      document.documentElement.setAttribute("data-theme", value);
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    }, theme);
+    await page.getByTestId("collection-automations-panel").screenshot({ path: test.info().outputPath(`${name}-panel-${theme}.png`) });
+    await page.screenshot({ path: test.info().outputPath(`${name}-${theme}.png`) });
+  }
+  await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
+}
 
 async function shoot(page: Page, name: string): Promise<void> {
   for (const theme of ["light", "dark"] as const) {
@@ -61,6 +87,7 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
       await mkdir(dirname(join(workspace.rootPath, path)), { recursive: true });
       await writeFile(join(workspace.rootPath, path), contents);
     }
+    await writeFile(join(workspace.rootPath, "registrations", "automations.yaml"), AUTOMATIONS);
     await writeFile(join(workspace.rootPath, ".dohc", "collections.json"), `${JSON.stringify({ version: 1, workspaceId,
       installId: "install-studio-mac", label: "Studio Mac", storeId: "5b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f" })}\n`);
     // No server binding: the workspace reached this computer as a folder.
@@ -114,6 +141,22 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
     await expect(page.getByTestId("history-collection-change").filter({ hasText: "Registrations" })).toContainText("Create");
     await page.screenshot({ path: test.info().outputPath("collections-server-history.png") });
     await rail.getByRole("button", { name: "Explorer", exact: true }).click();
+
+    // The ⚡ panel lists the Collection's automations as the server's. This
+    // server runs no automations, so each says so and its button is off.
+    // Nothing here runs them.
+    const off = "This server does not run automations.";
+    await page.getByTestId("collection-automations-button").click();
+    const panel = page.getByTestId("collection-automations-panel");
+    await expect(panel.getByTestId("automation-confirm")).toContainText("Confirm registration");
+    await expect(panel.getByTestId("automation-confirm")).toContainText(off);
+    await expect(panel.getByTestId("automations-on-server")).toHaveCount(0);
+    const confirm = collection.getByRole("button", { name: /^Confirm for / });
+    await expect(confirm).toHaveAttribute("aria-disabled", "true");
+    await expect(confirm).toHaveAccessibleDescription(off);
+    await shootPanel(page, "collections-server-automations-off");
+    await page.getByTestId("collection-automations-button").click();
+    await expect(panel).toHaveCount(0);
 
     // Approving a Collection stays with the computer that keeps them, and nothing above opened a store here.
     const refused = await page.evaluate(async workspaceId => {

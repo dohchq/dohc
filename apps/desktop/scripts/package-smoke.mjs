@@ -25,8 +25,8 @@ for (const worker of ["workspace-database-worker", "document-projection-worker",
     `build output exists: dist/main/${worker}.js`,
   );
 }
-for (const icon of ["build/icon.png", "build/icon-light.png", "build/icon-dark.png", "build/icon.icns", "build/trayTemplate.png", "build/trayTemplate@2x.png"]) {
-  check(existsSync(join(desktopDir, icon)), `system theme icon exists: ${icon}`);
+for (const icon of ["build/icon.png", "build/icon.ico", "build/icon-light.png", "build/icon-dark.png", "build/icon.icns", "build/trayTemplate.png", "build/trayTemplate@2x.png"]) {
+  check(existsSync(join(desktopDir, icon)), `icon exists: ${icon}`);
 }
 check(
   existsSync(join(desktopDir, "resources/cli-bin/dohc")),
@@ -95,7 +95,7 @@ if (config) {
     extraResources.some(
       (entry) => entry?.from === "build/icon.png" && entry?.to === "icon.png",
     ),
-    "static icon ships as the packaged runtime fallback",
+    "window icon ships as an extraResource",
   );
   for (const theme of ["light", "dark"]) {
     check(
@@ -174,6 +174,25 @@ if (config) {
   // A Linux desktop entry names types, not extensions.
   for (const type of ["text/markdown", "text/plain", "text/csv", "application/json"]) {
     check(config.linux?.mimeTypes?.includes(type), `Linux Open with dohc includes ${type}`);
+  }
+  // deb.depends replaces electron-builder's default list (app-builder-lib's
+  // FpmTarget.getDefaultDepends), so it repeats that list and adds the
+  // libraries Electron links that the list does not bring. Without one, the
+  // .deb still installs, then the app does not start.
+  for (const dependency of [
+    "libgtk-3-0",
+    "libnotify4",
+    "libnss3",
+    "libxss1",
+    "libxtst6",
+    "xdg-utils",
+    "libatspi2.0-0",
+    "libuuid1",
+    "libsecret-1-0",
+    "libasound2t64 | libasound2",
+    "libgbm1",
+  ]) {
+    check(config.deb?.depends?.includes(dependency), `the .deb depends on ${dependency}`);
   }
   check(
     Array.isArray(config.protocols) &&

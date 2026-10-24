@@ -1025,6 +1025,48 @@ impl EngineStore {
         self.require_materialization_owner()?;
         materialize::record_retained_read(&self.conn, old, new, bytes, now_ms)
     }
+    /// The retained row with `id`, if it is still retained.
+    pub fn retained_displacement(
+        &self,
+        id: i64,
+    ) -> Result<Option<crate::RetainedDisplacement>, StorageError> {
+        materialize::retained_row_by_id(&self.conn, id)
+    }
+    /// How many of the workspace's retained originals the sweep can never
+    /// release, and their logical size.
+    pub fn retained_summary(
+        &self,
+        workspace_id: &str,
+    ) -> Result<crate::RetainedSummary, StorageError> {
+        materialize::retained_summary(&self.conn, workspace_id)
+    }
+    /// At most `limit` of the workspace's retained originals the sweep can
+    /// never release, after `after`, quiet since `quiet_before_ms`.
+    pub fn blocked_retained_displacements(
+        &self,
+        workspace_id: &str,
+        quiet_before_ms: i64,
+        after: i64,
+        limit: i64,
+    ) -> Result<Vec<crate::RetainedDisplacement>, StorageError> {
+        materialize::blocked_retained_rows(&self.conn, workspace_id, quiet_before_ms, after, limit)
+    }
+    /// Whether recovery may still need `row`'s original.
+    pub fn retained_original_needed(
+        &self,
+        row: &crate::RetainedDisplacement,
+    ) -> Result<bool, StorageError> {
+        materialize::retained_original_needed(&self.conn, row)
+    }
+    /// Record whether `row`'s volume can refuse to unlink an open file.
+    pub fn record_retained_busy_check(
+        &self,
+        row: &crate::RetainedDisplacement,
+        unsupported: bool,
+    ) -> Result<(), StorageError> {
+        self.require_materialization_owner()?;
+        materialize::record_retained_busy_check(&self.conn, row, unsupported)
+    }
     pub fn release_retained(&self, id: i64) -> Result<(), StorageError> {
         self.require_materialization_owner()?;
         self.conn

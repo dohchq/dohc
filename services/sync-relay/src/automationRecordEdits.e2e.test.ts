@@ -360,7 +360,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   const delivery = automationRecordDelivery({replica, namespace, ownerUserId: "owner", capture});
   const recordEngine = replicaRecordEngine(replica);
   recordEngine.prepareSharedRecord = (_path, signal) => delivery.synchronize(binding, signal);
-  recordEngine.deliverSharedRecord = (_path, signal) => delivery.drain(binding, signal);
+  recordEngine.deliverSharedRecord = async (_path, signal) => { await delivery.drain(binding, signal); };
   const context = replicaRecordEditContext(replica, recordEngine, copy.lifetime);
   const author = {...AUTOMATION, onBehalfOf: "owner"};
   loseAck = true;

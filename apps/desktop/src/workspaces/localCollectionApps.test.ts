@@ -100,7 +100,7 @@ async function fixture(options: { workspaceRoot?: string; engine?: Engine; autho
   const collectionApp = (readFields = options.readFields ?? ["destination", "name"]) => {
     sources.set("trip/app.publish.json", JSON.stringify({ version: 1, entryPath: "main.ts", inputs: ["main.ts"], packageMap: {},
       collection: { kind: "collection-create", collectionPath: "responses", allowedFields: ["destination", "name"], requiredFields: ["destination"], readFields } }));
-    return prepareLocalAppPublication({ workspaceId: "w", appRoot: "trip" }, { adapter: sourceCaptureAdapter(sources), compile: compileClosedApp, signal: signal(), assertCurrent() {} });
+    return prepareLocalAppPublication({ workspaceId: "w", appRoot: "trip" }, { deferredWrites: [], adapter: sourceCaptureAdapter(sources), compile: compileClosedApp, signal: signal(), assertCurrent() {} });
   };
   const prepared = await collectionApp();
   const published = await host.apps.activate(prepared, signal());
@@ -121,7 +121,7 @@ async function fixture(options: { workspaceRoot?: string; engine?: Engine; autho
     const form = generateDatasetFormSources({ datasetPath: "data/dataset.json", approvedRevision: revision, tableId: definition.tables[0]!.tableId,
       createOperationId: definition.operations[0]!.operationId, appRoot: "trip", fieldIds: [definition.tables[0]!.fields[1]!.fieldId] });
     for (const [path, source] of Object.entries(form.files)) sources.set(`trip/${path}`, source);
-    return prepareLocalAppPublication({ workspaceId: "w", appRoot: "trip" }, { adapter: sourceCaptureAdapter(sources), compile: compileClosedApp, signal: signal(),
+    return prepareLocalAppPublication({ workspaceId: "w", appRoot: "trip" }, { deferredWrites: [], adapter: sourceCaptureAdapter(sources), compile: compileClosedApp, signal: signal(),
       assertCurrent() {}, async resolveDatasetRevision(binding) { return target.approvedArtifacts(binding.datasetId).revision; } });
   };
   return { host, engine, workspaceRoot, open, prepared, published, collectionApp, datasetApp, create, list, inspect };

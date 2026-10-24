@@ -72,6 +72,8 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_list_changes: ["history.list"],
   dohc_list_kept_copies: ["file.kept.list"],
   dohc_save_kept_copy: ["file.kept.save"],
+  dohc_list_retained_copies: ["file.retained.list"],
+  dohc_delete_retained_copies: ["file.retained.delete"],
   dohc_chat_file_mentions: ["chat.read"],
   dohc_chat_links: ["chat.read"],
   dohc_links_edges: ["links.edges"],
@@ -2211,17 +2213,35 @@ export async function saveKeptCopy(ctx: ToolContext, args: { id: number }) {
   return requestCli(ctx, "saveKeptCopy", { id: args.id });
 }
 
+// Old file copies kept on a drive that cannot tell dohc whether a program
+// still has one open. The desktop shows their count and size as one Notices
+// row and deletes them after the same warning an agent accepts here.
+export async function listRetainedCopies(ctx: ToolContext) {
+  return requestCli(ctx, "retainedCopies", {});
+}
+
+export async function deleteRetainedCopies(
+  ctx: ToolContext,
+  args: { copies: { id: number; revision: number }[]; acceptLateWriteRisk: true },
+) {
+  return requestCli(ctx, "deleteRetainedCopies", {
+    copies: args.copies,
+    acceptLateWriteRisk: args.acceptLateWriteRisk,
+  });
+}
+
 // An automation's runs, and Try again, through the desktop's Automations
 // panel calls. An automation is named by its Collection's folder and its id
 // in that Collection's automations.yaml.
 export async function listAutomationRuns(
   ctx: ToolContext,
-  args: { collectionPath: string; automation: string; page?: string },
+  args: { collectionPath: string; automation: string; page?: string; server?: boolean },
 ) {
   const resolved = await safeResolve(ctx, args.collectionPath, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   return requestCli(ctx, "automationRuns", {
     collectionPath: resolved.normalized, automation: args.automation, ...(args.page === undefined ? {} : { page: args.page }),
+    ...(args.server ? { server: true } : {}),
   });
 }
 
@@ -2241,11 +2261,12 @@ export async function switchAutomation(ctx: ToolContext, args: {
 
 export async function readAutomationRun(
   ctx: ToolContext,
-  args: { collectionPath: string; automation: string; run: string },
+  args: { collectionPath: string; automation: string; run: string; server?: boolean },
 ) {
   const resolved = await safeResolve(ctx, args.collectionPath, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  return requestCli(ctx, "automationRun", { ...args, collectionPath: resolved.normalized });
+  const { server, ...read } = args;
+  return requestCli(ctx, "automationRun", { ...read, collectionPath: resolved.normalized, ...(server ? { server: true } : {}) });
 }
 
 export async function retryAutomationRun(

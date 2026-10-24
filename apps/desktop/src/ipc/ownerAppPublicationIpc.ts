@@ -24,7 +24,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
   withWorkspaceOperation<Result>(caller: Caller, workspaceId: string, work: (operation: Operation) => Promise<Result>): Promise<Result>;
   remoteForWorkspace(workspace: Workspace, options?: { allowPaused: boolean }): Promise<{ credentials: CloudCredentials; credentialGeneration: number }>;
   currentCredentialGeneration(): number;
-  flushCapture(workspace: Workspace): Promise<void>;
+  flushCapture(workspace: Workspace): Promise<{ deferredWrites: readonly string[] }>;
   withAdapter<Result>(workspace: Workspace, work: (adapter: VersionedLiveAdapter) => Promise<Result>): Promise<Result | null>;
   compile(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
   relayJson(credentials: CloudCredentials, path: string, init?: RequestInit): Promise<unknown>;
@@ -276,9 +276,9 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
       };
       try {
       const grant = await currentGrant(input.shareId, input.grantId);
-      await session.run(() => dependencies.flushCapture(operation.workspace));
+      const capture = await session.run(() => dependencies.flushCapture(operation.workspace));
       const prepared = await session.run(() => dependencies.withAdapter(operation.workspace, adapter => prepareOwnerAppPublication(input, grant!, {
-        adapter, signal: operation.signal, assertCurrent: assertPreparing, compile: dependencies.compile, resolveDatasetRevision,
+        adapter, signal: operation.signal, assertCurrent: assertPreparing, compile: dependencies.compile, resolveDatasetRevision, deferredWrites: capture.deferredWrites,
       })));
       if (!prepared) throw new Error("dohc could not capture this app. Restart dohc and try again.");
       const { candidate } = prepared;

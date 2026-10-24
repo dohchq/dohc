@@ -202,7 +202,7 @@ function RunRow(props: {
   useEffect(() => {
     if (props.opened) row.current?.scrollIntoView({ block: "nearest" });
   }, [props.opened]);
-  const canRetry = run.undoUnfinished || (run.state === "failed" && !run.neverStarted && !run.undone);
+  const canRetry = run.undoUnfinished || (run.state === "failed" && !run.neverStarted && !run.undone && !run.unsentChangesLost);
   const canUndo = (run.state === "done" || run.state === "failed") && !run.undone &&
     run.writes.some((write) => write.kind === "field" || write.kind === "created" || write.kind === "dataset-edit" ||
       (write.kind === "dataset-action" && write.undo !== undefined) ||

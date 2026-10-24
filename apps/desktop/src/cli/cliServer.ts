@@ -73,6 +73,8 @@ import {
   type GranularChatMessageSearchResponse,
   type GranularChatMessageSearchResult,
   type KeptCopySaveResult,
+  type RetainedCopiesDeleteResult,
+  type RetainedCopiesListResult,
 } from "@dohc/workspace-engine-client";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -242,6 +244,14 @@ export interface CliKeptCopiesPort {
   save(id: number): Promise<KeptCopySaveResult>;
 }
 
+// Old file copies kept on a drive that cannot tell dohc whether a program
+// still has one open, and the step that deletes listed ones. The desktop's
+// Notices row offers the same step after the same warning.
+export interface CliRetainedCopiesPort {
+  list(): Promise<RetainedCopiesListResult>;
+  delete(copies: readonly { id: number; revision: number }[]): Promise<RetainedCopiesDeleteResult>;
+}
+
 // The Automations panel's run history and Try again, for the automation
 // verbs. Main answers with the same executor calls the panel's IPC makes,
 // so a run is listed, read, and tried again under the same rules.
@@ -253,6 +263,9 @@ export interface CliAutomationsPort {
   /** One page of runs, newest first, after `before`, and the `before` of the next page or null. */
   runs(automationId: string, before?: string): Promise<{ runs: CollectionAutomationRun[]; next: string | null }>;
   run(automationId: string, claimId: string): Promise<CollectionAutomationRunDetail | null>;
+  /** The same reads of the workspace's self-hosted server's runs. Null when this computer cannot ask it as the owner. */
+  serverRuns(automationId: string, before?: string): Promise<{ runs: CollectionAutomationRun[]; next: string | null } | null>;
+  serverRun(automationId: string, claimId: string): Promise<CollectionAutomationRun | null>;
   retry(input: { automationId: string; claimId: string; startOver: boolean }): Promise<AutomationRunRetry>;
 }
 
@@ -324,6 +337,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   deletePath?(path: string, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileDelete"]>;
   // Absent in a shared view, which keeps no copies of its own.
   keptCopies?: CliKeptCopiesPort;
+  retainedCopies?: CliRetainedCopiesPort;
   automations?: CliAutomationsPort;
   buttons?: CliButtonsPort;
 }
@@ -740,7 +754,15 @@ function keptCopiesUnavailable() {
   };
 }
 
+function retainedCopiesUnavailable() {
+  return {
+    ok: false as const,
+    reason: "Old file copies are kept only in the owning workspace. Open it to continue.",
+  };
+}
+
 const SHARED_VIEW_AUTOMATIONS = SHARED_AUTOMATION_HISTORY_REASON;
+const SERVER_RUNS_UNREADABLE = "Your server has no runs in this workspace that this computer can read.";
 
 // Try again as the panel answers it, in words for an agent: a run that
 // would start over needs startOver, as the panel's confirmation asks.
@@ -780,6 +802,7 @@ function automationRunFields(run: Omit<CollectionAutomationRun, "writes">) {
     neverStarted: run.neverStarted,
     chainStopped: run.chainStopped,
     undone: run.undone,
+    ...(run.unsentChangesLost ? { unsentChangesLost: true as const } : {}),
   };
 }
 
@@ -2760,13 +2783,21 @@ async function dispatchWorkspace(
         const automationId = await automations.automationIdAt(validated.normalized, request.args.automation);
         if (automationId === null) return { ok: false as const, reason: `"${validated.normalized}" is not a Collection in this workspace.` };
         if (request.verb === "automationRuns") {
-          const page = await automations.runs(automationId, request.args.page);
+          const page = request.args.server ? await automations.serverRuns(automationId, request.args.page) : await automations.runs(automationId, request.args.page);
+          if (page === null) return { ok: false as const, reason: SERVER_RUNS_UNREADABLE };
           const listed: CliResultByVerb["automationRuns"] = {
             ok: true,
             runs: page.runs.map(({ writes, ...run }) => ({ ...automationRunFields(run), changes: writes.length })),
             next: page.next,
           };
           return listed;
+        }
+        if (request.verb === "automationRun" && request.args.server) {
+          const run = await automations.serverRun(automationId, request.args.run);
+          if (run === null) return { ok: false as const, reason: `Your server has no run ${request.args.run} of this automation that this computer can read.` };
+          const { writes, ...fields } = run;
+          const read: CliResultByVerb["automationRun"] = { ok: true, run: { ...automationRunFields(fields), server: true, changes: writes } };
+          return read;
         }
         if (request.verb === "automationRun") {
           const run = await automations.run(automationId, request.args.run);
@@ -2934,6 +2965,26 @@ async function dispatchWorkspace(
         return { ok: true as const, ...saved };
       } catch (error) {
         return mcpFailure(error, `failed to save kept copy ${request.args.id}`);
+      }
+    }
+
+    case "retainedCopies": {
+      const retainedCopies = context.retainedCopies;
+      if (!retainedCopies) return retainedCopiesUnavailable();
+      try {
+        return { ok: true as const, ...(await retainedCopies.list()) };
+      } catch (error) {
+        return mcpFailure(error, "failed to list old file copies");
+      }
+    }
+
+    case "deleteRetainedCopies": {
+      const retainedCopies = context.retainedCopies;
+      if (!retainedCopies || context.readOnly) return retainedCopiesUnavailable();
+      try {
+        return { ok: true as const, ...(await retainedCopies.delete(request.args.copies)) };
+      } catch (error) {
+        return mcpFailure(error, "failed to delete old file copies");
       }
     }
 

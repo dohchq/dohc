@@ -5,7 +5,6 @@ import {EngineRequestError,isHostedDocumentUnready,isLiveDocumentWithoutLineage,
 import {parseLiveDocumentKey,parseLiveUpdateIdentifier,type LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
 import {validateUserWritePath} from "@dohc/workspace-core";
 import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents";
-import {createLiveMarkdownRegistrationValidator,createLiveMarkdownJournalValidator} from "../../../packages/ydoc-projection/src/liveDocumentValidation";
 import type {OrderedLiveUpdateCutPolicy} from "../../../packages/ydoc-projection/src/orderedLiveUpdateCut";
 import {configRecord} from "./deviceLiveHostConfig";
 import {OwnerCommittedDelivery} from "./ownerCommittedDelivery";
@@ -13,7 +12,7 @@ import {settlementResult,type CommittedSettlement} from "./liveSettlement";
 import {authorityInteger} from "./storage/liveDocumentAuthority";
 import {liveValidation} from "./liveValidation.js";
 import {serviceOwnerTransport} from "./serviceOwnerTransport";
-import {ServiceActivationStaleCut,type ServiceActivationStore} from "./storage/serviceActivation";
+import {ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooLarge,type ServiceActivationStore} from "./storage/serviceActivation";
 import type {ServiceActivationAccess} from "./storage/serviceActivationAccess";
 import type {SyncRelayStorage,LiveHostConnectionCoordinate} from "./storage";
 import type {LiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
@@ -43,16 +42,16 @@ export function parseServiceActivationConfig(value:unknown){
   const policy=configRecord(row.validation,["maxStructVisits","maxValueNodeVisits","maxDecodedPayloadByteVisits","maxStructClientGroupVisits","maxDeleteClientGroupVisits","maxDeleteIntervalVisits","maxIndexOperations"]);
   for(const value of Object.values(policy))positive(value);
   const validation=Object.freeze({...policy}) as unknown as OrderedLiveUpdateCutPolicy;
-  return Object.freeze({targets:Object.freeze(targets),validateBaseline:createLiveMarkdownRegistrationValidator(validation),
-    validateJournal:createLiveMarkdownJournalValidator(validation),validateAdmission:liveValidation.validator(validation),maxCaptureBytes:positive(row.maxCaptureBytes),
+  return Object.freeze({targets:Object.freeze(targets),validateActivation:liveValidation.ordinaryActivation(validation),
+    validateAdmission:liveValidation.validator(validation),maxCaptureBytes:positive(row.maxCaptureBytes),
     maxEntriesPerDrain:positive(row.maxEntriesPerDrain),maxBytesPerDrain:positive(row.maxBytesPerDrain),
     maxDocumentsPerPass:positive(row.maxDocumentsPerPass),pollIntervalMs:positive(row.pollIntervalMs),passDeadlineMs:positive(row.passDeadlineMs),
     idleUnloadMs:positive(row.idleUnloadMs),idleRetryMs:positive(row.idleRetryMs)});
 }
 export type ServiceActivationConfig=NonNullable<ReturnType<typeof parseServiceActivationConfig>>;
 /**
- * Why a document waits for its owner: the engine refused it, its copy here misses an edit made while live
- * editing was off, or it has no Y.Doc lineage to activate.
+ * Why a document waits for its owner: the engine refused it or its capture ran validation out of memory,
+ * its copy here misses an edit made while live editing was off, or it has no Y.Doc lineage to activate.
  */
 export type ServiceActivationBlock="refused"|"live-edit-unadmitted"|"without-lineage";
 type Owner={consumer:OwnerCommittedDelivery;transport:ReturnType<typeof serviceOwnerTransport>;completed:boolean;activationPending:boolean;
@@ -312,10 +311,7 @@ export class ServiceActivationDriver {
     const check=()=>{signal.throwIfAborted();o.assertCurrent();};
     const request=()=>({id:o.nextRequestId(),workspace:workspace.handle,deadlineMs:o.deadlineMs});
     check();
-    const key=targetKey(target),block=this.#blocked.get(key);
-    if(block && !(block.reason==="without-lineage" && this.#latestUpdate(target)>block.update)){
-      return {kind:"pending" as const,reason:"Hosted document is blocked until the owner tries again."};
-    }
+    const key=targetKey(target);
     const releaseStale=async()=>{
       const lease=this.#staleLeases.get(key);
       if(!lease)return;
@@ -323,7 +319,12 @@ export class ServiceActivationDriver {
       if(configRecord(released.result,["released"]).released!==true)throw new Error("Stale native activation lease was not released.");
       this.#staleLeases.delete(key);
     };
+    // A blocked target still releases the lease its failed capture left.
     await releaseStale();
+    const block=this.#blocked.get(key);
+    if(block && !(block.reason==="without-lineage" && this.#latestUpdate(target)>block.update)){
+      return {kind:"pending" as const,reason:"Hosted document is blocked until the owner tries again."};
+    }
     let saved=this.#store.read(target.workspaceId,target.path,c.maxCaptureBytes);
     if(!saved)this.#completedTargets.delete(key);
     if(saved && saved.shareId!==target.shareId)throw new Error("Service activation share changed.");
@@ -347,6 +348,8 @@ export class ServiceActivationDriver {
       let capture:NativeOwnerActivation;
       try{capture=await o.client.captureOwnerActivation(request(),target.path,c.maxCaptureBytes,signal,saved?.activationId);}
       catch(error){this.#refused(key,saved!==null,update,error);throw error;}
+      // A fresh capture's lease stays recorded until the relay retains it, so a pass releases it after any failure, as at the pass deadline.
+      if(!saved)this.#staleLeases.set(key,{activationId:capture.activationId,sessionId:capture.sessionId});
       check();
       this.#blocked.delete(key);this.#held.delete(key);this.#objects.set(key,capture.source.objectId);
       if(capture.source.workspaceId!==target.workspaceId || capture.source.relayDatabaseNamespace!==o.history.namespace ||
@@ -355,15 +358,18 @@ export class ServiceActivationDriver {
       }
       if(!saved){
         try{
-          this.#store.prepare({capture,host:o.host,shareId:target.shareId,registeredAtMs:Date.now(),guard:check,
-            validateBaseline:c.validateBaseline,validateJournal:c.validateJournal,bounds:{maxCaptureBytes:c.maxCaptureBytes,
+          await this.#store.prepare({capture,host:o.host,shareId:target.shareId,registeredAtMs:Date.now(),guard:check,signal,
+            validate:c.validateActivation,bounds:{maxCaptureBytes:c.maxCaptureBytes,
               maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain}});
         }catch(error){
-          if(!(error instanceof ServiceActivationStaleCut))throw error;
-          this.#staleLeases.set(key,{activationId:capture.activationId,sessionId:capture.sessionId});
+          const tooLarge=error instanceof ServiceActivationTooLarge;
+          if(!(error instanceof ServiceActivationStaleCut) && !(error instanceof ServiceActivationBusy) && !tooLarge)throw error;
+          // The same capture would run its validation out of memory again, so it waits for its owner.
+          if(tooLarge)this.#blocked.set(key,{reason:"refused"});
           await releaseStale();
-          return {kind:"pending" as const,reason:"Hosted replication advanced before activation."};
+          return {kind:"pending" as const,reason:error instanceof ServiceActivationStaleCut?"Hosted replication advanced before activation.":error.message};
         }
+        this.#staleLeases.delete(key);
         o.registered();
         saved=this.#store.read(target.workspaceId,target.path,c.maxCaptureBytes)!;
       }

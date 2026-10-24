@@ -24,8 +24,8 @@
 //! whose policy widens re-ingest.
 
 use crate::capture_sink::{
-    CaptureProvenance, CapturedRoot, PolicyState, SelfWriteSuppression, StoreCaptureSink,
-    StoreCaptureSinkParams,
+    CaptureProvenance, CapturedRoot, DeferredWrites, PolicyState, SelfWriteSuppression,
+    StoreCaptureSink, StoreCaptureSinkParams,
 };
 use crate::{CAPTURE_MOMENT_RECORDED_EVENT, CAPTURE_NO_ATOMIC_PLACEMENT_EVENT, EngineEvents};
 use dohc_engine_collab::LeaseRegistry;
@@ -863,6 +863,7 @@ impl ScanGauge {
 #[derive(Default)]
 pub(crate) struct DriverStatus {
     bits: std::sync::atomic::AtomicU8,
+    deferred_writes: std::sync::Mutex<DeferredWrites>,
     collection_lease_held: std::sync::atomic::AtomicBool,
     collection_release_generation: std::sync::atomic::AtomicU64,
 }
@@ -948,6 +949,10 @@ pub(crate) struct StatusSnapshot {
 }
 
 impl DriverStatus {
+    pub(crate) fn deferred_writes(&self) -> Vec<String> {
+        crate::lock(&self.deferred_writes).keys().cloned().collect()
+    }
+
     /// One load; all flags decoded from the same word.
     pub(crate) fn snapshot(&self) -> StatusSnapshot {
         let bits = self.bits.load(Ordering::Acquire);
@@ -2365,7 +2370,7 @@ impl DriverEnv for RealEnv {
             let initial_settle = async {
                 let mut settled = apply_run(
                     self.initial_apply_context(&provenance, early_import),
-                    &fresh,
+                    &fresh.files.handle(),
                     initial,
                     &initial_cancel,
                 )
@@ -2408,7 +2413,7 @@ impl DriverEnv for RealEnv {
                         Ok(run) => {
                             apply_run(
                                 self.initial_apply_context(&provenance, early_import),
-                                &fresh,
+                                &fresh.files.handle(),
                                 run,
                                 &initial_cancel,
                             )
@@ -2539,7 +2544,8 @@ impl DriverEnv for RealEnv {
                     ..
                 },
             ) => {
-                let applied = apply_run(self.apply_context(), layer, run, cancel).await;
+                let applied =
+                    apply_run(self.apply_context(), &layer.files.handle(), run, cancel).await;
                 if applied.collection_busy_exhausted {
                     return TickIo::CollectionBusyExhausted;
                 }
@@ -2560,7 +2566,8 @@ impl DriverEnv for RealEnv {
                 }
             }
             Ok(run) => {
-                let applied = apply_run(self.apply_context(), layer, run, cancel).await;
+                let applied =
+                    apply_run(self.apply_context(), &layer.files.handle(), run, cancel).await;
                 if applied.collection_busy_exhausted {
                     return TickIo::CollectionBusyExhausted;
                 }
@@ -2780,6 +2787,7 @@ struct ApplyRunContext<'a> {
 struct CaptureThreadOutcome {
     plan: ReconcilePlan,
     result: CaptureApplyResult,
+    deferred_writes: DeferredWrites,
     policy_held: bool,
     collections: Option<Result<bool, CollectionReconcileFailure>>,
     collection_release_generation: u64,
@@ -2832,12 +2840,14 @@ fn moment_recorded_payload(
     })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ApplyOutcome {
     clean: bool,
     collection_busy_exhausted: bool,
     /// The policy pass retired a path the scan retained unread.
     retired_unread: bool,
+    /// Only the live driver's acknowledged pass may publish this snapshot.
+    deferred_writes: Option<DeferredWrites>,
 }
 
 impl ApplyOutcome {
@@ -2845,11 +2855,13 @@ impl ApplyOutcome {
         clean: true,
         collection_busy_exhausted: false,
         retired_unread: false,
+        deferred_writes: None,
     };
     const FAILED: Self = Self {
         clean: false,
         collection_busy_exhausted: false,
         retired_unread: false,
+        deferred_writes: None,
     };
 }
 
@@ -2865,6 +2877,7 @@ impl CollectionReconcileFailure {
             clean: false,
             collection_busy_exhausted: matches!(self, Self::BusyBudgetExhausted),
             retired_unread: false,
+            deferred_writes: None,
         }
     }
 }
@@ -2879,11 +2892,16 @@ impl CollectionReconcileFailure {
 /// the paths stay dirty, and the next cycle retries.
 async fn apply_run(
     context: ApplyRunContext<'_>,
-    layer: &FilesLayer,
+    files: &FilesHandle,
     run: RootBoundRun,
     cancel: &CancellationToken,
 ) -> ApplyOutcome {
-    apply_bound_run_with_handle(context, &layer.files.handle(), run, cancel).await
+    let status = Arc::clone(context.status);
+    let mut outcome = apply_bound_run_with_handle(context, files, run, cancel).await;
+    if let Some(writes) = outcome.deferred_writes.take() {
+        *crate::lock(&status.deferred_writes) = writes;
+    }
+    outcome
 }
 
 async fn apply_bound_run_with_handle(
@@ -3062,6 +3080,7 @@ async fn apply_bound_run_with_handle(
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     let apply_plan = plan.clone();
     let apply_author_json = author_json.clone();
+    let apply_deferred_writes = crate::lock(&status.deferred_writes).clone();
     let apply_cancel = cancel.clone();
     let apply_events = events.clone();
     let apply_captured_root = Arc::clone(&captured_root);
@@ -3094,6 +3113,7 @@ async fn apply_bound_run_with_handle(
                 self_writes: apply_self_writes,
                 provenance: apply_provenance,
             });
+            sink.set_deferred_writes(apply_deferred_writes);
             #[cfg(test)]
             if let Some(wait) = apply_probe
                 .as_ref()
@@ -3156,6 +3176,7 @@ async fn apply_bound_run_with_handle(
             let _ = done_tx.send(CaptureThreadOutcome {
                 plan: apply_plan,
                 result,
+                deferred_writes: sink.take_deferred_writes(),
                 policy_held: sink.policy_held(),
                 collections,
                 collection_release_generation,
@@ -3174,6 +3195,7 @@ async fn apply_bound_run_with_handle(
     let Some(CaptureThreadOutcome {
         plan,
         mut result,
+        mut deferred_writes,
         policy_held: sink_policy_held,
         collections: collection_result,
         collection_release_generation,
@@ -3381,18 +3403,27 @@ async fn apply_bound_run_with_handle(
             moment_recorded_payload(workspace_id, &result.applied_paths, &result.not_owned_paths),
         );
     }
-    if result.completed() && files.acknowledge_capture(plan, result).await.is_err() {
+    let completed = result.completed();
+    // A failed observation retains attribution until a later pass can read it.
+    deferred_writes.retain(|path, _| {
+        result.deferred_writes.contains(path)
+            || result.failed_applies.contains(path)
+            || plan.degraded_paths.contains(path)
+    });
+    if completed && files.acknowledge_capture(plan, result).await.is_err() {
         status.mark_degraded();
         return ApplyOutcome {
             clean: false,
             collection_busy_exhausted,
             retired_unread,
+            deferred_writes: None,
         };
     }
     ApplyOutcome {
         clean,
         collection_busy_exhausted,
         retired_unread,
+        deferred_writes: completed.then_some(deferred_writes),
     }
 }
 
@@ -3521,10 +3552,9 @@ async fn materialize_ydoc_recoveries(
 }
 
 /// Re-offer unrecorded paths when a document session releases its lease.
-/// Empty new files and deleted files are deferred; outside writes to held new
-/// files are quarantined after repeated refusals. All need a rescan even when
-/// nothing on disk changes after the session ends. The release must wake
-/// quarantined paths itself: once the WAL is reused in place, nothing else will.
+/// New files, deleted files, and outside writes wait for sessions. All need a
+/// rescan even when nothing on disk changes after the session ends. Also wake
+/// quarantined paths: once the WAL is reused in place, nothing else will.
 async fn offer_unrecorded_after_release(
     leases: &LeaseRegistry,
     workspace_id: &str,
@@ -3553,6 +3583,7 @@ async fn ack_all_failed(files: &FilesHandle, plan: ReconcilePlan, status: &Arc<D
         failed_applies: failed,
         deferred_paths: Vec::new(),
         deferred_retires: Vec::new(),
+        deferred_writes: Vec::new(),
         held_observations: Vec::new(),
         crashed_after_durable_boundary: None,
         degraded: true,

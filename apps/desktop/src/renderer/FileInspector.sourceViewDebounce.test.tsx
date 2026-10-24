@@ -54,6 +54,9 @@ function engineState(doc: Y.Doc): UseEngineDoc {
     deletedDraftId: null,
     recoveryAssets: null,
     permanentFailureWhileEditing: false,
+    changedOutside: null,
+    outsideWriteWaiting: false,
+    unsavedEditsPending: () => false,
     readOnlyWhileEditing: false,
     readOnlyDraftId: null,
     readOnlyCause: null,
@@ -167,11 +170,13 @@ describe("FileInspector engine source update scheduling", () => {
     const doc = markdownToYDoc(INITIAL_MARKDOWN);
     engineDocState = engineState(doc);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    // The engine view shows once the note's check answers.
+    const toggle = await screen.findByTestId("markdown-source-toggle");
     const serialize = vi.mocked(yDocToMarkdown);
     serialize.mockClear();
 
     vi.useFakeTimers();
-    fireEvent.click(screen.getByTestId("markdown-source-toggle"));
+    fireEvent.click(toggle);
     await act(async () => {
       await Promise.resolve();
       // SourceCodeEditor commits on its next frame. This stays well below the

@@ -56,8 +56,10 @@ export type ShellErrorKind =
   | "kept-copies-summary"
   | "kept-copies-more"
   | "drive-no-atomic-placement"
+  | "network-share"
   | "file-recovery-unavailable"
   | "kept-files"
+  | "retained-copies"
   | "record-history"
   | "record-history-run"
   | "reports"
@@ -462,6 +464,23 @@ export function useShellError(workspaceId: string) {
       ),
     [push],
   );
+  // A workspace on a network share: one warning row. Nothing failed, so it
+  // offers no Try again.
+  const reportNetworkShare = useCallback(
+    (notice: { title: string; message: string; toast: boolean }) =>
+      push(
+        {
+          tone: "warning",
+          title: notice.title,
+          message: notice.message,
+          details: [["Detail", "network-share"]],
+          retry: null,
+          kind: "network-share",
+        },
+        !notice.toast,
+      ),
+    [push],
+  );
   const reportRecoveryUnavailable = useCallback(
     (unavailable: boolean, retry: () => void, openFolder: () => void) => {
       if (!unavailable) {
@@ -491,6 +510,33 @@ export function useShellError(workspaceId: string) {
         action: { label: "Show recovery folder", run: openFolder },
         kind: "kept-files",
       }, !notice.toast);
+    },
+    [clearKind, push],
+  );
+  // Old file copies on a drive that cannot tell dohc whether a program
+  // still uses them: one warning per workspace, updated where it stands.
+  // `toast` files it with a toast, once each time the copies pass the size;
+  // otherwise it updates the row, or files it quietly. Null clears it.
+  const showRetainedCopies = useCallback(
+    (notice: {
+      title: string;
+      message: string;
+      action: { label: string; run: () => void };
+      onDismiss: () => void;
+    } | null, toast: boolean) => {
+      if (notice === null) {
+        clearKind("retained-copies");
+        return;
+      }
+      push({
+        tone: "warning",
+        title: notice.title,
+        message: notice.message,
+        retry: null,
+        action: notice.action,
+        onDismiss: notice.onDismiss,
+        kind: "retained-copies",
+      }, toast ? false : "quiet");
     },
     [clearKind, push],
   );
@@ -771,7 +817,9 @@ export function useShellError(workspaceId: string) {
     reportCollectionsWaiting,
     clearCollectionsWaiting,
     reportDriveLimit,
+    reportNetworkShare,
     reportKeptFiles,
+    showRetainedCopies,
     reportRecoveryUnavailable,
     showTabLimitError,
     clearTabLimitError,

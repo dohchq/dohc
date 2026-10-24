@@ -1,4 +1,15 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  memo,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactElement,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -19,6 +30,8 @@ import { initialChunkCount, splitMarkdownBlocks } from "./splitMarkdownBlocks";
 // behavior to the pre-incremental path.
 const INCREMENTAL_THRESHOLD_BYTES = 32 * 1024;
 const FIRST_WINDOW_BYTES = 12 * 1024;
+// The chunks of about two large documents.
+const CHUNK_CACHE_BYTES = 512 * 1024;
 
 type IdleScheduler = (cb: () => void) => () => void;
 
@@ -39,15 +52,80 @@ const scheduleIdle: IdleScheduler = (cb) => {
 // would. Still no raw HTML — remark-gfm adds syntax, not an HTML escape.
 const REMARK_PLUGINS = [remarkGfm];
 
+// Links reach the document that mounted them through context, so a chunk's
+// rendered elements hold nothing of the document and can be reused.
+const OpenWorkspaceLink = createContext<
+  RefObject<((target: WorkspaceLinkTarget) => void) | undefined>
+>({ current: undefined });
+
+function ReadOnlyLink({ children, href }: { children?: ReactNode; href?: string }) {
+  const openWorkspaceLink = useContext(OpenWorkspaceLink);
+  if (!href) {
+    return <span className="text-accent underline">{children}</span>;
+  }
+  const activate = (
+    event: React.MouseEvent<HTMLAnchorElement> | React.KeyboardEvent<HTMLAnchorElement>,
+  ) =>
+    activateReadOnlyLinkHref(href, event, (target) =>
+      openWorkspaceLink.current?.(target),
+    );
+  return (
+    <a
+      href={href}
+      onClick={activate}
+      onAuxClick={(event) => {
+        if (event.button === 1) activate(event);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") activate(event);
+      }}
+    >
+      {children}
+    </a>
+  );
+}
+
+// Reopening a document mounts every chunk again. Keep the rendered elements
+// of recent chunks so a reopen skips parsing the text it already parsed,
+// oldest evicted first once their source passes `maxBytes`. Elements name
+// their components, so a hit needs the same map.
+export function createMarkdownChunkRenderer(maxBytes: number) {
+  const cache = new Map<string, { components: Components; element: ReactElement }>();
+  let cachedBytes = 0;
+  return (source: string, components: Components): ReactElement => {
+    const cached = cache.get(source);
+    if (cached) {
+      cache.delete(source);
+      cachedBytes -= source.length;
+    }
+    const element =
+      cached?.components === components
+        ? cached.element
+        : Markdown({
+            children: source,
+            components: { ...components, a: ReadOnlyLink },
+            remarkPlugins: REMARK_PLUGINS,
+          });
+    if (source.length <= maxBytes) {
+      cache.set(source, { components, element });
+      cachedBytes += source.length;
+      for (const oldest of cache.keys()) {
+        if (cachedBytes <= maxBytes) break;
+        cache.delete(oldest);
+        cachedBytes -= oldest.length;
+      }
+    }
+    return element;
+  };
+}
+
+const renderChunk = createMarkdownChunkRenderer(CHUNK_CACHE_BYTES);
+
 const MarkdownChunk = memo(function MarkdownChunk(props: {
   source: string;
   components: Components;
 }) {
-  return (
-    <Markdown components={props.components} remarkPlugins={REMARK_PLUGINS}>
-      {props.source}
-    </Markdown>
-  );
+  return renderChunk(props.source, props.components);
 });
 
 export function IncrementalMarkdownDocument(props: {
@@ -57,37 +135,6 @@ export function IncrementalMarkdownDocument(props: {
 }) {
   const onOpenWorkspaceLinkRef = useRef(props.onOpenWorkspaceLink);
   onOpenWorkspaceLinkRef.current = props.onOpenWorkspaceLink;
-  const components = useMemo<Components>(
-    () => ({
-      ...props.components,
-      a: ({ children, href }) => {
-        if (!href) {
-          return <span className="text-accent underline">{children}</span>;
-        }
-        const activate = (
-          event: React.MouseEvent<HTMLAnchorElement> | React.KeyboardEvent<HTMLAnchorElement>,
-        ) =>
-          activateReadOnlyLinkHref(href, event, (target) =>
-            onOpenWorkspaceLinkRef.current?.(target),
-          );
-        return (
-          <a
-            href={href}
-            onClick={activate}
-            onAuxClick={(event) => {
-              if (event.button === 1) activate(event);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") activate(event);
-            }}
-          >
-            {children}
-          </a>
-        );
-      },
-    }),
-    [props.components],
-  );
   const chunks = useMemo(
     () =>
       props.body.length <= INCREMENTAL_THRESHOLD_BYTES
@@ -131,13 +178,13 @@ export function IncrementalMarkdownDocument(props: {
   }, [visibleCount, chunks]);
 
   return (
-    <>
+    <OpenWorkspaceLink.Provider value={onOpenWorkspaceLinkRef}>
       {chunks.slice(0, visibleCount).map((chunk, i) => (
         // Chunks are content-stable for a given body; index keys are correct
         // because a body change rebuilds the whole list.
-        <MarkdownChunk key={i} source={chunk} components={components} />
+        <MarkdownChunk key={i} source={chunk} components={props.components} />
       ))}
-    </>
+    </OpenWorkspaceLink.Provider>
   );
 }
 

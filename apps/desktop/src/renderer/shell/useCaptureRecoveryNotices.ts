@@ -7,17 +7,17 @@ import type { CaptureRecoveryNotice } from "./useShellError";
 
 type CaptureRecovery = CaptureRecoveryStatusResult["captureRecoveries"][number];
 
-export const CAPTURE_RECOVERY_TITLE = "Typing kept in History";
+export const CAPTURE_RECOVERY_TITLE = "Text kept in History";
 
 // History Restore refuses a shared live file. Restore shared file returns
 // only changes the host accepted, and kept typing is in none of them, so the
 // way back for a shared file is to put the kept version in by hand, as
 // History Restore would. The outside change stays in History either way.
 export function captureRecoveryMessage(path: string, shared: boolean, deleted = false): string {
-  if (deleted) return `The file "${path}" was deleted. Your typing is in History. Open the recovery change and choose Restore to recreate the file.`;
+  if (deleted) return `The file "${path}" was deleted. Your text is in History. Open the recovery change and choose Restore to recreate the file.`;
   return shared
-    ? `The file "${path}" changed outside dohc. Your typing is in History. The file is shared live, so replace its text with your version from the recovery change.`
-    : `The file "${path}" changed outside dohc. Your typing is in History. Open the recovery change and choose Restore.`;
+    ? `The file "${path}" changed outside dohc. Your text is in History. The file is shared live, so replace its text with your version from the recovery change.`
+    : `The file "${path}" changed outside dohc. Your text is in History. Open the recovery change and choose Restore.`;
 }
 
 /**

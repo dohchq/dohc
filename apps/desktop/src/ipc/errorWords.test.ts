@@ -1,3 +1,9 @@
+import { installWorkspaceDataKey, SECRET_KEY_RELATIVE_PATH } from "../workspaces/workspaceDataKey";
+import { mkdir } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { atomicCreateFile } from "../atomicReplaceFile";
+import { createTestScratch } from "../workspaces/testTemp";
+import { ipcErrorMessage } from "../renderer/ipcError";
 import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 import { ServerCollectionsUnavailableError } from "../workspaces/remoteDataset";
 import { ReservedWorkspaceIdError } from "@dohc/workspace-core";
@@ -6,7 +12,7 @@ import { readFileSync } from "node:fs";
 import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
 import { DatasetReopenWaitError } from "@dohc/app-backend-runtime/supervisor";
 import { DaemonRefusalError, type DaemonErrorCode } from "@dohc/workspace-engine-client";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CompilerProcessError } from "../workspaces/compilerProcessSupervisor";
 import { WorkspaceManifestError } from "../workspaces/createWorkspaceFolder";
 import { LiveDocumentMutationError, RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
@@ -30,9 +36,14 @@ import {
   withErrorWords,
 } from "./errorWords";
 
+vi.mock("../atomicReplaceFile", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../atomicReplaceFile")>();
+  return { ...actual, atomicCreateFile: vi.fn(actual.atomicCreateFile) };
+});
+
 it("explains the held-file live-open refusal after Electron serializes it", () => {
   const error = new Error("Error invoking remote method 'desktop:engine-ydoc-open': DaemonRefusalError [CONFLICT]: capture-file-held: notes/held.md");
-  expect(readError(error).words).toBe('dohc cannot open "notes/held.md" for live editing. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.');
+  expect(readError(error).words).toBe('dohc cannot open "notes/held.md" for live editing. dohc cannot take in this file\'s Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Restore the file\'s exact contents from before that edit. For nested lists, make the edit in dohc after the file opens again.');
 });
 
 // What the renderer receives when a main-process handler rejects: Electron
@@ -52,6 +63,22 @@ const engineCodes = [
 ].map((match) => match[1]!);
 
 describe("error words", () => {
+  it.each([
+    ["desktop:cloud-enable-sync", "dohc could not enable sync for this workspace."],
+    ["desktop:cloud-join-workspace", "Couldn't join the workspace."],
+  ])("keeps the key-install refusal unchanged across %s", async (channel, prefix) => {
+    const root = await createTestScratch("dohc-key-ipc-words-");
+    await mkdir(dirname(join(root, SECRET_KEY_RELATIVE_PATH)), { recursive: true });
+    vi.mocked(atomicCreateFile).mockRejectedValueOnce(
+      Object.assign(new Error("link failed"), { code: "ENOTSUP", syscall: "link" }),
+    );
+    const failure = await installWorkspaceDataKey(root, Buffer.alloc(32, 7)).catch(error => error);
+    const sentence = "This drive can't store the workspace's secret key safely. Move the workspace to an NTFS, APFS or ext4 drive, then try again.";
+    const received = acrossIpc(failure, channel);
+    expect(readError(received).words).toBe(sentence);
+    expect(ipcErrorMessage(received, prefix)).toBe(sentence);
+  });
+
   it.each([
     ["chat-mention-access-changed", "Chat access changed. Try again."],
     ["chat-mention-version-changed", "It changed while dohc was working on it. Try again."],
@@ -203,6 +230,7 @@ describe("error words", () => {
   const OTHER_OWNER = "Make it yours again, then try again.";
   const OTHER_OWNER_FOLDER = "Make it and everything in it yours again, then try again.";
   const MOVE_ASIDE = "Rename or move it, then try again.";
+  const NOT_CHANGEABLE = "Give your account full control of this folder and everything in it, then try again.";
   it.each([
     ["link .dohc", `This workspace's .dohc is a link, so dohc can't keep its History private. ${LINK}`],
     ["link .dohc/engine/engine.db-journal", `This workspace's .dohc/engine/engine.db-journal is a link, so dohc can't keep its History private. ${LINK}`],
@@ -212,10 +240,13 @@ describe("error words", () => {
     ["other-owner .dohc/engine", `This workspace's .dohc/engine belongs to another user, so dohc can't keep its History private. ${OTHER_OWNER_FOLDER}`],
     ["other-owner .dohc/engine/engine.db", `This workspace's .dohc/engine/engine.db belongs to another user, so dohc can't keep its History private. ${OTHER_OWNER}`],
     ["unchecked-volume .dohc/engine", "This workspace's .dohc/engine is on a disk dohc can't check, so dohc can't keep its History private. Move the workspace to a disk formatted as APFS, then try again."],
+    ["unchecked-system .dohc/engine", "This workspace's .dohc/engine is on a system where dohc can't check it, so dohc can't keep its History private. Run dohc where it can read its own /proc/self/fd, then try again."],
     ["link .dohc/engine/engine.db-shm", `This workspace's .dohc/engine/engine.db-shm is a link, so dohc can't keep its History private. ${LINK}`],
     ["link .dohc/local", `This workspace's .dohc/local is a link, so dohc can't keep this computer's own data private. ${LINK}`],
     ["not-folder .dohc/local", `This workspace's .dohc/local is not a folder, so dohc can't keep this computer's own data private. ${MOVE_ASIDE}`],
     ["other-owner .dohc/local", `This workspace's .dohc/local belongs to another user, so dohc can't keep this computer's own data private. ${OTHER_OWNER_FOLDER}`],
+    ["not-changeable .dohc", `This workspace's .dohc has permissions dohc can't use, so dohc can't keep its History private. ${NOT_CHANGEABLE}`],
+    ["not-changeable .dohc/local", `This workspace's .dohc/local has permissions dohc can't use, so dohc can't keep this computer's own data private. ${NOT_CHANGEABLE}`],
   ])("names what keeps a workspace's History from being private, where, and the fix that keeps it: %s", (detail, words) => {
     const message = `engine-folder-not-private: ${detail}`;
     expect(readError(acrossIpc(refusal("INTERNAL", message), "desktop:open-workspace"))).toEqual({

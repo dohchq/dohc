@@ -45,7 +45,7 @@ async function fixture(initial: DatasetDefinition = definition, remote = false) 
   let signal = new AbortController().signal, scope = "window:1", credentialGeneration = 1;
   let alterSources: ((paths: string[]) => void) | undefined;
   const local = remote ? { approvedArtifacts() { throw new Error("Local store is fenced"); }, prepareMigrationCandidate() { throw new Error("Local store is fenced"); }, approveMigrationCandidate() { throw new Error("Local store is fenced"); } } as unknown as LocalDatasetHost : host;
-  const handler = createDatasetHandler({ flushSourceCapture: async () => [], withWorkspaceOperation: async (_caller, _id, work) => {
+  const handler = createDatasetHandler({ flushSourceCapture: async () => ({ heldFiles: [], deferredWrites: [] }), withWorkspaceOperation: async (_caller, _id, work) => {
     let active = true;
     try { return await work({ workspace, signal, scope, assertCurrent() { if (!active) throw new Error("This workspace authority lease was released."); } }); }
     finally { active = false; }
@@ -143,7 +143,7 @@ it("refuses a button from a shared view before writing any source", async () => 
   const written: string[] = [];
   const shareView = { shareId: "share-1", granterEmail: "owner@example.com", genericChatWritable: false,
     grantedSelector: { paths: ["people"], versionId: null, access: "edit" } };
-  const recipient = createDatasetHandler({ flushSourceCapture: async () => [], hostForWorkspace: async () => f.host,
+  const recipient = createDatasetHandler({ flushSourceCapture: async () => ({ heldFiles: [], deferredWrites: [] }), hostForWorkspace: async () => f.host,
     withWorkspaceOperation: async (_caller, _id, work) => work({ workspace: { workspaceId: "w", shareView }, signal: new AbortController().signal, assertCurrent() {} }),
     withAdapter: async (_workspace, work) => work(f.adapter),
     createSources: async (_workspace, sources) => { written.push(...Object.keys(sources)); } });

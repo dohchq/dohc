@@ -117,7 +117,9 @@ import { useUsageRecordStops } from "./shell/usageRecordStops";
 import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { useCollectionsWaitingNotice } from "./shell/useCollectionsWaitingNotice";
 import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
+import { useRetainedCopiesNotice } from "./shell/useRetainedCopiesNotice";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
+import { useNetworkShareNotice } from "./shell/useNetworkShareNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
 import { errorDetails } from "./shell/copyDetails";
 import { shareCaptureNoticeState } from "../workspaces/shareCaptureNotice";
@@ -850,7 +852,9 @@ export function DesktopWorkspaceShell(props: {
     reportCollectionsWaiting,
     clearCollectionsWaiting,
     reportDriveLimit,
+    reportNetworkShare,
     reportKeptFiles,
+    showRetainedCopies,
     reportRecoveryUnavailable,
     showTabLimitError,
     clearTabLimitError,
@@ -4055,9 +4059,13 @@ export function DesktopWorkspaceShell(props: {
     function onKeyDown(event: KeyboardEvent) {
       // A stopped workspace answers no workspace shortcut.
       if (storeUpdateRequiredRef.current) return;
-      const blockingModal = hasBlockingModal();
       const platform = bridge().platform;
-      const command = blockingModal ? matchShellShortcutChord(event, platform) : matchShellShortcut(event, platform);
+      // Typing matches no chord, so a keystroke never pays for the page-wide
+      // modal query, which grows with a long note's elements.
+      const chord = matchShellShortcutChord(event, platform);
+      if (!chord) return;
+      const blockingModal = hasBlockingModal();
+      const command = blockingModal ? chord : matchShellShortcut(event, platform);
       if (!command) return;
       // A modal owns the keyboard while it is visible. Native/main-owned
       // shortcuts such as Close Window and zoom never reach this listener,
@@ -5027,6 +5035,12 @@ export function DesktopWorkspaceShell(props: {
     unavailable: syncStatus?.atomicPlacementUnavailable === true,
     report: reportDriveLimit,
   });
+  const networkShareNotice = useNetworkShareNotice({
+    workspaceId,
+    onNetworkShare: syncStatus?.onNetworkShare === true,
+    platform: bridge().platform,
+    report: reportNetworkShare,
+  });
   const revealRecoveryWorkspace = useCallback(() => {
     const askedFor = workspaceId;
     void bridge().revealWorkspaceFolder({ workspaceId: askedFor, recoveryCopies: true }).catch((error) => {
@@ -5056,6 +5070,15 @@ export function DesktopWorkspaceShell(props: {
     report: reportKeptFiles,
     openFolder: revealRecoveryWorkspace,
   });
+  const retainedCopiesDialog = useRetainedCopiesNotice({
+    workspaceId,
+    workspaceName: workspaceName(props.workspace),
+    summary: syncStatus?.retainedCopies,
+    show: showRetainedCopies,
+    showDone: showSuccessNotice,
+    report: reportShellFailure,
+    reportError: reportShellError,
+  });
   // Keep each notice kind's dismissal state across remounts.
   const dismissWorkspaceError = useCallback(
     (id: string) => {
@@ -5074,6 +5097,7 @@ export function DesktopWorkspaceShell(props: {
       if (kind === "cloud-sync") syncFailureNotice.noteDismissed();
       if (kind === "collections-waiting") collectionsWaitingNotice.noteDismissed();
       if (kind === "drive-no-atomic-placement") driveLimitNotice.noteDismissed();
+      if (kind === "network-share") networkShareNotice.noteDismissed();
       if (kind === "kept-files") keptFilesNotice.noteDismissed();
       if (kind === "collection-copies-left") collectionCopiesLeftNotice.noteDismissed();
       if (kind === "share-capture" && shareView?.shareId) {
@@ -5094,7 +5118,7 @@ export function DesktopWorkspaceShell(props: {
         });
       } else dismissShellError(id);
     },
-    [dismissShellError, driveLimitNotice, keptFilesNotice, collectionCopiesLeftNotice, shellErrors, shareView, syncFailureNotice, collectionsWaitingNotice, props.sentNotices, workspaceId, reportShellError, stopAndRestore],
+    [dismissShellError, driveLimitNotice, networkShareNotice, keptFilesNotice, collectionCopiesLeftNotice, shellErrors, shareView, syncFailureNotice, collectionsWaitingNotice, props.sentNotices, workspaceId, reportShellError, stopAndRestore],
   );
   return (
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
@@ -6535,6 +6559,7 @@ export function DesktopWorkspaceShell(props: {
         </Overlay>
       ) : null}
       <ExternalLinkConfirm workspaceId={workspaceId} />
+      {retainedCopiesDialog}
     </div>
     </ShellErrorReporter.Provider>
     </CollectionFieldMarksProvider>

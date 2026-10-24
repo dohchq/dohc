@@ -1,5 +1,5 @@
 use super::{
-    ActorHandle,
+    ActorHandle, HeldReader,
     versioned::{
         WriteConditions, versioned_text_write_with_publication_on_store,
         with_local_file_mutation_cache_reset,
@@ -254,7 +254,7 @@ impl ActorHandle {
             guard = session_ops.clone().lock_owned() => guard,
         };
         let (journal_ws, journal_op) = (workspace.clone(), operation.clone());
-        let (db, external, checkpoint) = self
+        let (external, checkpoint) = self
             .run(move |store, _| {
                 let _admission = serial;
                 #[cfg(test)]
@@ -273,16 +273,13 @@ impl ActorHandle {
                             .map_err(StorageError::corrupt_public)?,
                     )
                 })?;
-                Ok((
-                    store.database_path().to_path_buf(),
-                    external,
-                    Arc::new(store.checkpoint_cycle()),
-                ))
+                Ok((external, Arc::new(store.checkpoint_cycle())))
             })
             .await?;
         let state = self.link_rewrites.clone();
+        let held = self.location();
         let (plan, mut result) = tokio::task::spawn_blocking(move || -> Result<_, RuntimeError> {
-            let mut store = EngineStore::open_read_only(&db)?;
+            let mut store = HeldReader::open(held)?;
             store
                 .read_with(|conn| conn.execute_batch("BEGIN"))
                 .map_err(StorageError::corrupt_public)?;

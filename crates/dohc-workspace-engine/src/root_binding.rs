@@ -32,9 +32,10 @@ pub enum RootBindingError {
     #[error("this computer's folder in .dohc could not be prepared")]
     LocalStateUnwritable,
     /// `.dohc`, the engine's folder or `.dohc/local`, the second field, is a
-    /// link, is not a folder, or is another user's, the first. On a Mac,
-    /// `NotPrivate` names it, with the same message.
-    #[cfg(not(target_os = "macos"))]
+    /// link, is not a folder, or is another user's, or on Linux the engine
+    /// can't reach its folder through the descriptor it holds, the first. On
+    /// a Mac and on Windows, `NotPrivate` names it, with the same message.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[error("engine-folder-not-private: {0} {1}")]
     NotPrivate(&'static str, &'static str),
     /// macOS refused dohc the root's folder. See
@@ -50,6 +51,13 @@ pub enum RootBindingError {
     #[cfg(target_os = "macos")]
     #[error("{0}")]
     NotPrivate(dohc_macos_files::NotPrivate),
+    /// `.dohc`, the engine's folder or `.dohc/local` is a link, is not a
+    /// folder, or is another account's or this user can't change it, or
+    /// something in one of those folders is, in the message a Mac sends as
+    /// `NotPrivate`.
+    #[cfg(windows)]
+    #[error("engine-folder-not-private: {} {}", .0.reason.code(), .0.path)]
+    NotPrivate(dohc_windows_files::NotPrivate),
 }
 
 /// A macOS privacy refusal at `path`, a volume that shares new files, or a
@@ -66,6 +74,10 @@ fn io_failure(
         }
         #[cfg(target_os = "macos")]
         if let Some(refused) = dohc_macos_files::not_private(&error) {
+            return RootBindingError::NotPrivate(refused.clone());
+        }
+        #[cfg(windows)]
+        if let Some(refused) = dohc_windows_files::not_private(&error) {
             return RootBindingError::NotPrivate(refused.clone());
         }
         if dohc_engine_files::privacy_denied(&error, path) {
@@ -181,10 +193,10 @@ pub fn write_root_binding(root: &Path, token: &str) -> Result<(), RootBindingErr
 }
 
 /// The engine's folder, ready for the root binding: the marker's path and,
-/// on a Mac, the folder that path goes through, open.
+/// on a Mac and Linux, the folder that path goes through, open.
 struct BindingDir {
     marker: PathBuf,
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     _folder: std::os::fd::OwnedFd,
 }
 
@@ -193,6 +205,7 @@ fn create_binding_dir(root: &Path) -> Result<BindingDir, RootBindingError> {
     let (Some(relative), Some(name)) = (marker.parent(), marker.file_name()) else {
         return Err(RootBindingError::Unwritable);
     };
+    #[cfg(not(target_os = "linux"))]
     let parent = root.join(relative);
     // A mode does not limit an ACL entry, so on a Mac each open makes the
     // folder 0700 with no entries, whoever created it, and refuses a link at
@@ -213,17 +226,41 @@ fn create_binding_dir(root: &Path) -> Result<BindingDir, RootBindingError> {
             _folder: folder,
         })
     }
+    // Linux holds the folder checked here and writes the marker through its
+    // descriptor, so a folder put at its name since then is not reached.
+    // Without that path the marker is refused.
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        create_engine_dir(root, rustix::process::geteuid().as_raw())?;
+        let folder = create_engine_dir(root, rustix::process::geteuid().as_raw())?;
+        let folder = std::os::fd::OwnedFd::from(folder);
+        #[cfg(target_os = "linux")]
+        let dir = {
+            use dohc_linux_files::held::{NotHeld, held_path, not_held};
+            held_path(std::os::fd::AsFd::as_fd(&folder), relative).map_err(|err| match not_held(
+                &err,
+            ) {
+                Some(_) => RootBindingError::NotPrivate(NotHeld::CODE, ".dohc/engine"),
+                None => RootBindingError::Unwritable,
+            })?
+        };
+        #[cfg(not(target_os = "linux"))]
+        let dir = parent;
         Ok(BindingDir {
-            marker: parent.join(name),
+            marker: dir.join(name),
+            _folder: folder,
         })
     }
-    #[cfg(not(unix))]
+    // Windows opens a file for anyone its own DACL admits, even in a folder
+    // they can't list, so each open there gives the folder, and what is in
+    // it, the DACL of a user's profile folder, and refuses a link and what
+    // another account owns.
+    #[cfg(windows)]
     {
-        std::fs::create_dir_all(&parent)
-            .map_err(io_failure(&parent, RootBindingError::Unwritable))?;
+        // Only `.dohc/local` stays held, for the desktop's readers.
+        drop(
+            dohc_windows_files::ensure_private_dir(root, relative)
+                .map_err(io_failure(&parent, RootBindingError::Unwritable))?,
+        );
         Ok(BindingDir {
             marker: parent.join(name),
         })
@@ -256,16 +293,41 @@ fn exclude_from_icloud(engine_dir: &Path) {
 /// iCloud Drive skip it, before anything is written in it. If that fails,
 /// the folder could sync, so it is not ready and the desktop writes nothing
 /// in it, but the workspace still opens.
-pub fn prepare_local_state(root: &Path) -> Result<bool, RootBindingError> {
+///
+/// On Windows the folder gets what the engine's folder gets, and stays held
+/// until the open that prepared it ends.
+pub fn prepare_local_state(root: &Path) -> Result<LocalState, RootBindingError> {
     #[cfg(target_os = "macos")]
     {
         prepare_local_state_with(root, dohc_macos_files::exclude_from_sync)
+            .map(|ready| LocalState { ready })
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        let relative = Path::new(LOCAL_STATE_RELATIVE_PATH);
+        let unwritable = RootBindingError::LocalStateUnwritable;
+        let held = dohc_windows_files::ensure_private_dir(root, relative)
+            .map_err(io_failure(&root.join(relative), unwritable))?;
+        Ok(LocalState {
+            ready: true,
+            _held: held,
+        })
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         create_local_state_dir(root)?;
-        Ok(true)
+        Ok(LocalState { ready: true })
     }
+}
+
+/// What an open that writes prepared in `.dohc/local`.
+pub struct LocalState {
+    /// Whether this computer's state can go in the folder.
+    pub ready: bool,
+    /// On Windows, where the desktop can't see who may change the folder, it
+    /// trusts the folder while the engine's open holds it in place.
+    #[cfg(windows)]
+    _held: std::fs::File,
 }
 
 #[cfg(target_os = "macos")]
@@ -297,44 +359,17 @@ fn create_local_state_dir(root: &Path) -> Result<(), RootBindingError> {
     let refused = not_private(root, shown, RootBindingError::LocalStateUnwritable, owner);
     create_folder(root, shown, owner)
         .and_then(make_private)
+        .map(drop)
         .map_err(refused)
-}
-
-#[cfg(not(unix))]
-fn create_local_state_dir(root: &Path) -> Result<(), RootBindingError> {
-    let dir = root.join(LOCAL_STATE_RELATIVE_PATH);
-    match std::fs::create_dir(&dir) {
-        Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
-            return Err(io_failure(&dir, RootBindingError::LocalStateUnwritable)(
-                error,
-            ));
-        }
-        _ => {}
-    }
-    let kind = std::fs::symlink_metadata(&dir)
-        .map_err(io_failure(&dir, RootBindingError::LocalStateUnwritable))?
-        .file_type();
-    if kind.is_symlink() {
-        return Err(RootBindingError::NotPrivate(
-            "link",
-            LOCAL_STATE_RELATIVE_PATH,
-        ));
-    }
-    if !kind.is_dir() {
-        return Err(RootBindingError::NotPrivate(
-            "not-folder",
-            LOCAL_STATE_RELATIVE_PATH,
-        ));
-    }
-    Ok(())
 }
 
 /// Create `.dohc` and the engine's folder in `root`, or take the ones there,
 /// and make the engine's folder private, as a Mac does. Both must belong to
 /// `owner`. A link, anything but a folder, or another user's folder at either
-/// is refused by name before anything changes.
+/// is refused by name before anything changes. Returns the engine's folder,
+/// open.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn create_engine_dir(root: &Path, owner: u32) -> Result<(), RootBindingError> {
+fn create_engine_dir(root: &Path, owner: u32) -> Result<std::fs::File, RootBindingError> {
     let refused = |shown| not_private(root, shown, RootBindingError::Unwritable, owner);
     create_folder(root, ".dohc", owner).map_err(refused(".dohc"))?;
     create_folder(root, ".dohc/engine", owner)
@@ -364,11 +399,16 @@ fn create_folder(root: &Path, shown: &str, owner: u32) -> std::io::Result<std::f
 }
 
 /// Give `folder` mode 0700 through its descriptor, whoever created it and
-/// however, as the Mac path does.
+/// however, as the Mac path does, and return it. A folder that is private
+/// already is left as it is, so a process that may not change modes, as a
+/// replica's sandbox forbids, still opens it.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn make_private(folder: std::fs::File) -> std::io::Result<()> {
+fn make_private(folder: std::fs::File) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::PermissionsExt;
-    folder.set_permissions(std::fs::Permissions::from_mode(0o700))
+    if folder.metadata()?.permissions().mode() & 0o777 != 0o700 {
+        folder.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(folder)
 }
 
 /// What kept the folder `shown` in `root` from being created, opened or made
@@ -725,7 +765,7 @@ mod tests {
     /// The engine's folder moves after the open checks it, and another takes
     /// its name. The marker still lands in the checked folder, and the other
     /// gets nothing (#2375).
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn the_marker_lands_in_the_folder_the_open_checked() {
         let scratch = ScratchDir::new().expect("scratch");
@@ -741,6 +781,39 @@ mod tests {
             std::fs::read_to_string(moved.join("ROOT_BINDING")).expect("marker"),
             token
         );
+    }
+
+    /// Where the engine can't reach its checked folder through the descriptor
+    /// it holds, as without `/proc`, minting and writing a binding are refused,
+    /// naming the folder, and no marker, lock or temporary file is written.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_binding_whose_folder_cannot_be_held_is_refused_before_anything_is_written() {
+        use dohc_linux_files::held::test_support::with_fds;
+        let scratch = ScratchDir::new().expect("scratch");
+        let no_fds = scratch.join("no-fds");
+        let minted = with_fds(&no_fds, || write_new_root_binding(scratch.path()));
+        let written = with_fds(&no_fds, || {
+            write_root_binding(scratch.path(), &"a".repeat(TOKEN_HEX_LEN))
+        });
+        for refused in [minted.map(drop), written] {
+            assert!(
+                matches!(
+                    refused,
+                    Err(RootBindingError::NotPrivate(
+                        "unchecked-system",
+                        ".dohc/engine"
+                    ))
+                ),
+                "{refused:?}"
+            );
+        }
+        let engine = scratch.join(".dohc").join("engine");
+        let left: Vec<_> = std::fs::read_dir(&engine)
+            .expect("engine folder")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
     }
 
     /// iCloud Drive must never sync the engine's folder, in a new workspace or
@@ -845,7 +918,7 @@ mod tests {
         let local = scratch.join(".dohc").join("local");
         // As an open does: the root binding makes `.dohc` first.
         write_new_root_binding(scratch.path()).expect("mint");
-        assert!(prepare_local_state(scratch.path()).expect("prepare"));
+        assert!(prepare_local_state(scratch.path()).expect("prepare").ready);
         assert!(std::fs::symlink_metadata(&local).expect("local").is_dir());
         #[cfg(unix)]
         {
@@ -869,7 +942,7 @@ mod tests {
             assert!(removed.success());
             assert!(!excluded_at(&local));
         }
-        assert!(prepare_local_state(scratch.path()).expect("reopen"));
+        assert!(prepare_local_state(scratch.path()).expect("reopen").ready);
         #[cfg(target_os = "macos")]
         assert!(excluded_at(&local));
         assert_eq!(
@@ -891,5 +964,139 @@ mod tests {
         let unsupported = ScratchDir::new().expect("scratch");
         let no_xattrs = |_: &Path| Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
         assert!(prepare_local_state_with(unsupported.path(), no_xattrs).expect("prepare"));
+    }
+
+    /// What `icacls /save` writes for the item at `path`: its DACL in SDDL.
+    #[cfg(windows)]
+    fn sddl(scratch: &ScratchDir, path: &Path) -> String {
+        let saved = scratch.join("saved.sddl");
+        icacls(path, &["/save".as_ref(), saved.as_os_str()]);
+        let bytes = std::fs::read(&saved).expect("saved");
+        let text: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        let text = String::from_utf16_lossy(&text);
+        text.lines().nth(1).expect("sddl").trim().to_owned()
+    }
+
+    #[cfg(windows)]
+    fn icacls(path: &Path, args: &[&std::ffi::OsStr]) {
+        let status = std::process::Command::new("icacls")
+            .arg(path)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("icacls");
+        assert!(status.success(), "icacls {} {args:?}", path.display());
+    }
+
+    /// A workspace whose test DACL grants Users read access, with the
+    /// automation steps a person allowed already in `.dohc/local`.
+    #[cfg(windows)]
+    fn shared_workspace(scratch: &ScratchDir) -> (PathBuf, PathBuf) {
+        let root = scratch.join("root");
+        std::fs::create_dir(&root).expect("root");
+        icacls(
+            &root,
+            &["/grant".as_ref(), "*S-1-5-32-545:(OI)(CI)R".as_ref()],
+        );
+        let reach = root.join(".dohc/local/automations/reach.json");
+        std::fs::create_dir_all(reach.parent().expect("automations")).expect("folders");
+        std::fs::write(&reach, b"{}").expect("reach");
+        assert!(sddl(scratch, &reach).contains("(A;ID;FR;;;BU)"));
+        (root, reach)
+    }
+
+    /// On Windows, an open that writes gives `.dohc/local` and what is in it
+    /// only this user, Administrators and SYSTEM, and holds the folder, so
+    /// the open keeps using the folder it checked.
+    #[cfg(windows)]
+    #[test]
+    fn an_open_on_windows_makes_this_computers_folder_private_and_holds_it() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let (root, reach) = shared_workspace(&scratch);
+        let local = root.join(".dohc").join("local");
+        let prepared = prepare_local_state(&root).expect("prepare");
+        assert!(prepared.ready);
+        let folder = sddl(&scratch, &local);
+        assert!(
+            folder.starts_with("D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"),
+            "{folder}"
+        );
+        let allowed = sddl(&scratch, &reach);
+        assert!(
+            allowed.starts_with("D:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)"),
+            "{allowed}"
+        );
+        assert!(!allowed.contains("BU"), "{allowed}");
+        let aside = root.join(".dohc").join("aside");
+        assert!(std::fs::rename(&local, &aside).is_err());
+        // Nor can `.dohc`, which would take `.dohc/local` with it.
+        let dohc_aside = root.join("dohc-aside");
+        assert!(std::fs::rename(root.join(".dohc"), &dohc_aside).is_err());
+        drop(prepared);
+        // After the open ends, `.dohc` keeps its private DACL. Existing
+        // unrelated items keep their own entries.
+        let dohc = sddl(&scratch, &root.join(".dohc"));
+        assert!(
+            dohc.starts_with("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"),
+            "{dohc}"
+        );
+        assert!(!dohc.contains("BU"), "{dohc}");
+        std::fs::rename(&local, &aside).expect("rename once the open ends");
+        std::fs::rename(root.join(".dohc"), &dohc_aside).expect("rename .dohc once the open ends");
+    }
+
+    /// A different folder at `.dohc/local`, with the private DACL but with an
+    /// item that keeps entries of its own, has no record, so the open checks
+    /// what is in it.
+    #[cfg(windows)]
+    #[test]
+    fn a_different_folder_at_this_computers_folder_path_is_checked_in_full() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let (root, _) = shared_workspace(&scratch);
+        let local = root.join(".dohc").join("local");
+        drop(prepare_local_state(&root).expect("prepare"));
+        std::fs::rename(&local, root.join(".dohc").join("before")).expect("aside");
+        let reach = local.join("reach.json");
+        std::fs::create_dir(&local).expect("swapped in");
+        std::fs::write(&reach, b"{}").expect("reach");
+        let user = format!("{}:(F)", std::env::var("USERNAME").expect("user"));
+        let readable = ["/inheritance:r", "/grant:r", "*S-1-5-32-545:(R)", &user];
+        icacls(&reach, &readable.map(std::ffi::OsStr::new));
+        let user = format!("{}:(OI)(CI)(F)", std::env::var("USERNAME").expect("user"));
+        let private = [
+            "/inheritance:r",
+            "/grant:r",
+            "*S-1-5-18:(OI)(CI)(F)",
+            "*S-1-5-32-544:(OI)(CI)(F)",
+            &user,
+        ];
+        icacls(&local, &private.map(std::ffi::OsStr::new));
+        assert!(sddl(&scratch, &reach).contains("(A;;FR;;;BU)"));
+        drop(prepare_local_state(&root).expect("reopen"));
+        assert!(!sddl(&scratch, &reach).contains("BU"));
+    }
+
+    /// An item in `.dohc/local` this user can't change, as one another
+    /// account owns, refuses the open, in words the desktop shows.
+    #[cfg(windows)]
+    #[test]
+    fn an_item_this_user_cannot_change_in_this_computers_folder_refuses_the_open() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let (root, reach) = shared_workspace(&scratch);
+        // Owner rights limited to reading, and a denied right to change the
+        // DACL, stand in for a file another account owns. The denial goes
+        // first: once owner rights are limited, only an entry for this user
+        // could still let the DACL change, and the folder above may have none.
+        let deny = format!("{}:(WDAC)", std::env::var("USERNAME").expect("user"));
+        icacls(&reach, &["/deny".as_ref(), deny.as_ref()]);
+        icacls(&reach, &["/grant".as_ref(), "*S-1-3-4:(R)".as_ref()]);
+        let refused = prepare_local_state(&root).err().expect("refused");
+        assert_eq!(
+            refused.to_string(),
+            "engine-folder-not-private: other-owner .dohc/local"
+        );
     }
 }

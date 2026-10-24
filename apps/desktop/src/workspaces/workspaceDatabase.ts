@@ -1,6 +1,10 @@
 import {
   databaseFolderName,
   databaseOpLogPath,
+  DOHC_DATABASES_GUARD,
+  hardLinkedFileRefusal,
+  notAFileRefusal,
+  notARealFolderRefusal,
   mediaTypeForPath,
   validateUserMaterializePath,
 } from "@dohc/workspace-core";
@@ -8,6 +12,7 @@ import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import { createHash, randomUUID } from "node:crypto";
 import {
   link,
+  lstat,
   mkdir,
   realpath,
   rm,
@@ -22,8 +27,8 @@ import {
 } from "./workspaceAssets";
 import {
   localStateFolder,
-  ownedLocalStateDir,
   ownedSqliteFiles,
+  readOwnedLocalState,
   type LocalStateWorkspace,
 } from "./workspaceLocalState";
 import type { OwnedWorkspaceDatabaseReader } from "./ownedWorkspaceFileReader";
@@ -38,6 +43,7 @@ import {
   createWorkspaceDatabaseWorkerOwner,
   type WorkspaceDatabaseWorkerOwner,
 } from "./workspaceDatabaseWorker";
+import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 import { UNCOUNTABLE_LOG_VERSION } from "./workspaceDatabaseProtocol";
 
 export type {
@@ -146,6 +152,39 @@ export function readDatabasePageFromBytes(
   });
 }
 
+async function prepareDatabaseFolder(directory: string, path: string) {
+  try {
+    await mkdir(directory, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  const stats = await lstat(directory, { bigint: true });
+  if (stats.isSymbolicLink() || !stats.isDirectory()) {
+    throw new Error(notARealFolderRefusal({ ...DOHC_DATABASES_GUARD, path }, stats));
+  }
+  return stats;
+}
+
+async function prepareDatabaseStorage(rootPath: string, databasePath: string) {
+  const metadata = await resolveWorkspaceMetadataDir(rootPath);
+  const slug = databaseFolderName(databasePath);
+  const databases = join(metadata, "databases");
+  // Check each folder before creating anything beneath it.
+  await prepareDatabaseFolder(databases, ".dohc/databases");
+  const directory = join(databases, slug);
+  const { dev, ino } = await prepareDatabaseFolder(directory, `.dohc/databases/${slug}`);
+  const logPath = join(directory, "operations.jsonl");
+  try {
+    const stats = await lstat(logPath);
+    const guard = { ...DOHC_DATABASES_GUARD, path: `.dohc/databases/${slug}/operations.jsonl` };
+    if (!stats.isFile()) throw new Error(notAFileRefusal(guard, stats));
+    if (stats.nlink > 1) throw new Error(hardLinkedFileRefusal(guard));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  return { logPath, storageIdentity: { dev, ino } };
+}
+
 // Atomically writes bytes to a new workspace-relative path, enforcing
 // path-safety and real-path containment (no traversal, no symlink escape).
 // Containment is checked against the deepest existing ancestor before mkdir —
@@ -242,7 +281,7 @@ export async function importToDatabase(
 async function operationCounterPath(workspace: LocalStateWorkspace, databasePath: string): Promise<string> {
   const name = `databases/${databaseFolderName(databasePath)}`;
   // Throws, in words that say how to fix it, for a `.dohc` or `.dohc/local` dohc can't trust.
-  await ownedLocalStateDir(workspace.rootPath);
+  await readOwnedLocalState(workspace.rootPath, async () => undefined);
   // Refuses until the engine's open has prepared `.dohc/local`. The desktop
   // waits for an open under way before it takes the workspace lease.
   const counterFolder = await localStateFolder(workspace, name, {
@@ -301,12 +340,13 @@ export function createWorkspaceDatabaseAccess(workspaceDatabaseWorker: Workspace
     const statePath = await operationCounterPath(input.workspace, resolved.normalized);
     if (input.signal?.aborted) throw new Error("Database edit was cancelled.");
     const source = await prepareWorkspaceFileRead(rootPath, resolved.resolvedPath);
+    const storage = await prepareDatabaseStorage(rootPath, resolved.normalized);
     const logPath = databaseOpLogPath(resolved.normalized);
     return source.withVerifiedPath((absolutePath) =>
       workspaceDatabaseWorker.editPath({
         absolutePath,
         path: resolved.normalized,
-        logPath: join(rootPath, logPath),
+        ...storage,
         statePath,
         edit: input.edit,
         operation: {

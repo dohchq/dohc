@@ -42,6 +42,7 @@ export type SaveStateKey =
   | "saved" | "saving" | "error" | "saved-to-host" | "pending-share" | "file-locked" | "changed-on-disk"
   | "deleted" | "object-changed" | "read-only"
   | "recovery"
+  | "reloaded"
   | "read-only-transition"
   | "read-only-unavailable"
   | "too-large";
@@ -89,10 +90,17 @@ export const SAVE_STATE: Record<SaveStateKey, StatePresentation> = {
     mark: "held",
     title: "This file is too large to edit in dohc.",
   },
+  // Shown for a moment after an open document took in a change made outside
+  // dohc. Nothing in it was unsaved.
+  reloaded: {
+    label: "Reloaded",
+    mark: "settled",
+    title: "This file changed outside dohc. dohc opened the new version.",
+  },
   "changed-on-disk": {
-    label: "Changed on disk",
+    label: "Changed outside dohc",
     mark: "attention",
-    title: "This file changed outside dohc while it was open. Open History to restore your text.",
+    title: "This file changed outside dohc while it was open. dohc keeps your text in History.",
   },
   deleted: {
     label: "Deleted",

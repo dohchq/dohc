@@ -63,6 +63,8 @@ import {
   readDocument,
   readWorkspaceFile,
   saveKeptCopy,
+  listRetainedCopies,
+  deleteRetainedCopies,
   searchWorkspaceFiles,
   testApp,
   writeWorkspaceFile,
@@ -218,6 +220,31 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: { id: z.number().int() },
     },
     async (args) => text(await saveKeptCopy(ctx, args)),
+  );
+
+  register(
+    "dohc_list_retained_copies",
+    {
+      description:
+        "List old file copies dohc keeps on a drive that cannot tell it whether another program still has one open, such as a macFUSE volume. dohc never deletes these itself. `total` counts them all, with their logical size in `bytes`; deleting them may free less disk space. `copies` lists those dohc_delete_retained_copies can delete now, oldest first, with the `revision` each delete must match. Copies changed in the last 30 seconds, copies whose file waits for review, and copies an unfinished save still needs are not listed. `more` is true when more copies remain past this list.",
+      inputSchema: {},
+    },
+    async () => text(await listRetainedCopies(ctx)),
+  );
+
+  register(
+    "dohc_delete_retained_copies",
+    {
+      description:
+        "Permanently delete up to 100 copies listed by dohc_list_retained_copies. They do not go to the trash. dohc cannot check whether another program still has one open: such a program may lose what it writes next. Ask the person to close other programs that use this workspace first, and set acceptLateWriteRisk to true. A copy that changed since it was listed, or whose file waits for review, is skipped and stays. Returns how many copies were `deleted`, `skipped` and `failed`, and the `remaining` count and bytes. List again to delete more.",
+      inputSchema: {
+        copies: z
+          .array(z.object({ id: z.number().int(), revision: z.number().int() }))
+          .max(100),
+        acceptLateWriteRisk: z.literal(true),
+      },
+    },
+    async (args) => text(await deleteRetainedCopies(ctx, args)),
   );
 
   register(
@@ -617,8 +644,8 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_list_automation_runs",
     {
       description:
-        "List an automation's runs on this computer, 20 at a time, newest first: each run's id, state, what started it, how many changes it made, and why it failed. Name the automation by its Collection's folder and its id in automations.yaml. When older runs remain, `next` is not null; pass it as `page` to list them. Each computer keeps the runs of the automations it ran for 30 days after they end.",
-      inputSchema: { ...automationInput, page: z.string().min(1).max(512).optional() },
+        "List an automation's runs on this computer, 20 at a time, newest first: each run's id, state, what started it, how many changes it made, and why it failed. Name the automation by its Collection's folder and its id in automations.yaml. When older runs remain, `next` is not null; pass it as `page` to list them. Each computer keeps the runs of the automations it ran for 30 days after they end. With server true, list the runs of the workspace's self-hosted server instead. A run marked unsentChangesLost ran in a copy the server lost, and its latest changes may not have been sent.",
+      inputSchema: { ...automationInput, page: z.string().min(1).max(512).optional(), server: z.boolean().optional() },
     },
     async (args) => text(await listAutomationRuns(ctx, args)),
   );
@@ -627,8 +654,8 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_read_automation_run",
     {
       description:
-        "Read one automation run: what started it, what each step changed, why it failed, which step failed, and whether Try again resumes there or starts over. Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.",
-      inputSchema: { ...automationInput, run: z.string().min(1).max(256) },
+        "Read one automation run: what started it, what each step changed, why it failed, which step failed, and whether Try again resumes there or starts over. Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed. With server true, read a run of the workspace's self-hosted server: it lists what the run changed, oldest first, as `changes` instead of steps.",
+      inputSchema: { ...automationInput, run: z.string().min(1).max(256), server: z.boolean().optional() },
     },
     async (args) => text(await readAutomationRun(ctx, args)),
   );

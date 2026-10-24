@@ -182,7 +182,7 @@ for (const mode of ["quit", "last-window", "crash", "crash-reopen-before-import"
         await expect.poll(() => checkpointText(temp.homeDir)).toBe("");
         await expect(access(join(temp.rootPath, path))).rejects.toThrow();
         await openHistoryView(desktop.page);
-        await expect(desktop.page.getByTestId("engine-history-list").getByText("Typing kept",{exact:true})).toHaveCount(1);
+        await expect(desktop.page.getByTestId("engine-history-list").getByText("Text kept",{exact:true})).toHaveCount(1);
         await desktop.page.locator(`[data-testid="engine-moment-open"][data-moment-id="${momentId}"]`).click();
         await expect(desktop.page.getByTestId("engine-diff-lines")).toContainText(sentinels[2]!);
         await holdSystemClipboard(test.info(), async (remainingMs) => {

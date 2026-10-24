@@ -1195,7 +1195,7 @@ async fn live_lease_blocks_text_and_binary_capture_without_mutation_until_retry(
     assert!(matches!(
         refused,
         RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState {
-            reason: "ydoc-session-live"
+            reason: dohc_engine_runtime::actor::CAPTURE_WRITE_WAITS_FOR_SESSION
         })
     ));
     assert_eq!(state(), after_text);
@@ -1216,7 +1216,7 @@ async fn live_lease_blocks_text_and_binary_capture_without_mutation_until_retry(
     assert!(matches!(
         refused,
         RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState {
-            reason: "ydoc-session-live"
+            reason: dohc_engine_runtime::actor::CAPTURE_WRITE_WAITS_FOR_SESSION
         })
     ));
     assert_eq!(state(), after_text);
@@ -1262,7 +1262,7 @@ async fn live_lease_blocks_text_and_binary_capture_without_mutation_until_retry(
     assert!(matches!(
         refused,
         RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState {
-            reason: "ydoc-session-live"
+            reason: dohc_engine_runtime::actor::CAPTURE_WRITE_WAITS_FOR_SESSION
         })
     ));
     assert_eq!(state(), after_binary);

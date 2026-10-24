@@ -2058,6 +2058,7 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
     workspaceId: WORKSPACE_ID,
     path: PATH,
     origin,
+    assertEditable: async () => undefined,
     change: async (state, options) =>
       documentEditUpdate(state, { find: "Start here.", replacement: "Start over here.\n\n## Added" }, options),
   })).resolves.toEqual({ path: PATH, changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING });

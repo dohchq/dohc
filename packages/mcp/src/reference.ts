@@ -192,6 +192,8 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_read_file: "`{ ok: true, path, mediaType, encoding, bytes, offsetBytes, sha256, truncated, content }`",
   dohc_list_kept_copies: { cli: "keptCopies" },
   dohc_save_kept_copy: { cli: "saveKeptCopy" },
+  dohc_list_retained_copies: { cli: "retainedCopies" },
+  dohc_delete_retained_copies: { cli: "deleteRetainedCopies" },
   dohc_read_document: { cli: "documentRead" },
   dohc_edit_document: { cli: "documentEdit" },
   dohc_create_document: { cli: "documentCreate" },
@@ -389,6 +391,7 @@ const NOT_SHARED_READS: Record<string, string> = {
   dohc_read_share_copy: "The code and invite link belong to the owner's sharing. Shared profiles do not offer this read.",
   dohc_list_automation_runs: "A shared view keeps no automation runs, so it does not offer this tool.",
   dohc_read_automation_run: "A shared view keeps no automation runs, so it does not offer this tool.",
+  dohc_list_retained_copies: "A shared view keeps no old file copies, so it does not offer this tool.",
 };
 
 async function mcpSection(): Promise<{ text: string; version: string }> {

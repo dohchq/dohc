@@ -441,6 +441,11 @@ impl EngineService {
             .await
             .map_err(map_runtime)?;
         let held_files = held_files_json(&holds);
+        let retained_copies = crate::rpc::retained_copies::summary_json(
+            crate::rpc::retained_copies::retained_summary(&open)
+                .await
+                .unwrap_or_default(),
+        );
         let guard = lock(&open.capture);
         Ok(match guard.as_ref() {
             Some(driver) => {
@@ -457,7 +462,9 @@ impl EngineService {
                     "keptFiles": kept_files,
                     "captureRecoveries": capture_recoveries,
                     "heldFiles": held_files,
+                    "deferredWrites": driver.status().deferred_writes(),
                     "recoveryUnavailable": recovery_unavailable,
+                    "retainedCopies": retained_copies,
                 })
             }
             // The driver is only absent mid-teardown; report an honest
@@ -471,7 +478,9 @@ impl EngineService {
                 "keptFiles": kept_files,
                 "captureRecoveries": capture_recoveries,
                 "heldFiles": held_files,
-                    "recoveryUnavailable": recovery_unavailable,
+                "deferredWrites": [],
+                "recoveryUnavailable": recovery_unavailable,
+                "retainedCopies": retained_copies,
             }),
         })
     }
@@ -517,6 +526,8 @@ impl EngineService {
             "running": outcome.running,
             "degraded": outcome.degraded,
             "heldFiles": held_files,
+            "deferredWrites": lock(&open.capture).as_ref()
+                .map(|driver| driver.status().deferred_writes()).unwrap_or_default(),
         }))
     }
 
