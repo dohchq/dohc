@@ -350,6 +350,8 @@ describe("error words", () => {
   });
 
   it("reads the app compiler and the Collection worker by their codes", () => {
+    const timeout = Object.assign(new CompilerProcessError("timeout", "Compiler timed out."), { details: "Supervisor-only details" });
+    expect(String(ipcWireError(timeout))).not.toContain(timeout.details);
     expect(readError(acrossIpc(new CompilerProcessError("exit", "Compiler exited (1).")))).toEqual({
       words: "The app's code did not build.",
       mapped: true,

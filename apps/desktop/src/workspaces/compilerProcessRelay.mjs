@@ -15,7 +15,9 @@ try {
     end = header.indexOf(10);
   }
   const { worker, args } = JSON.parse(header.subarray(0, end).toString('utf8'));
+  process.stderr.write('[dohc-compiler] admitted\n');
   child = spawn(process.execPath, [worker, ...args], { windowsHide: true, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+  child.once('spawn', () => process.stderr.write('[dohc-compiler] worker spawned\n'));
   const closed = once(child, 'close');
   child.stdout.pipe(process.stdout);child.stderr.pipe(process.stderr);
   const transfer = pipeline(Readable.from((async function* () {
