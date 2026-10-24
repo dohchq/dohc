@@ -8,6 +8,7 @@ import { initializeAppPublicationSchema } from "./publicationSchema";
 import { initializeAppCollectionSchema } from "./appCollectionSchema";
 import { initializeLiveCommittedDeliverySchema } from "./liveCommittedDeliverySchema";
 import { initializeServiceActivationSchema } from "./serviceActivationSchema";
+import { initializeServiceActivationRetirementSchema } from "./serviceActivationRetirement";
 import { initializeServiceHostEnrollmentSchema } from "./serviceHostEnrollment";
 import { initializeServiceHostFeedIndex } from "./serviceHostFeed";
 import { initializeRelayAdmissionColumn } from "./relayAdmission";
@@ -1264,6 +1265,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeDeviceHostCredentialSchema(db);
     initializeLiveDocumentAuthoritySchema(db);
     initializeServiceActivationSchema(db);
+    initializeServiceActivationRetirementSchema(db);
     initializeServiceHostEnrollmentSchema(db);
     initializeServiceHostUploadSchema(db);
     initializeLiveRestoreOperationSchema(db);

@@ -3,6 +3,7 @@ import {fixture as ticketFixture, binding, scope} from "../liveTickets.test-help
 import {openSyncRelayStorage} from "../storage";
 import {authorizeServiceHostReplication, deriveServiceHostBearer, serviceHostReplicationRoute} from "../serviceHostCredential";
 import {serviceHostDocumentEnabled, SERVICE_HOST_ENROLLMENTS, SERVICE_HOST_MAX_WORKSPACES} from "./serviceHostEnrollment";
+import {readServiceActivationRetirement, SERVICE_ACTIVATION_RETIREMENTS} from "./serviceActivationRetirement";
 import type {StorageContext} from "./context";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -60,17 +61,17 @@ it("refuses foreign owners, foreign or non-covering shares, side versions and no
   expect(f.storage.listServiceHostEnrollments()).toEqual([]);
 });
 
-it("keeps a paused document's binding and credential until its release, and fences owner or epoch changes immediately", async () => {
+it("fences a paused document's admission at once, keeps its credential until its release, and fences owner or epoch changes immediately", async () => {
   const f = await fixture(), first = f.enroll(), bearer = deriveServiceHostBearer(first, key);
   const enabled = () => serviceHostDocumentEnabled(f.storage as StorageContext, binding);
   expect(enabled()).toBe(true);
   expect(f.storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: "owner-1", shareId: scope.shareId}}).kind).toBe("current");
   expect(f.setEnabled(false)).toMatchObject({enabled: true, ownerStop: "pause"});
-  // Unsettled work can still settle while the host unloads the document.
-  expect(enabled()).toBe(true); expect(f.authorize(bearer)).toBe("owner-1");
+  // The host keeps its credential while applied work settles, but nothing new is admitted.
+  expect(enabled()).toBe(false); expect(f.authorize(bearer)).toBe("owner-1");
+  expect(f.storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: "owner-1", shareId: scope.shareId}})).toEqual({kind: "refused", reason: "host-unavailable"});
   expect(f.release()).toMatchObject({enabled: false, retired: false, ownerStop: "pause"});
   expect(enabled()).toBe(false); expect(f.authorize(bearer)).toBeNull();
-  expect(f.storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: "owner-1", shareId: scope.shareId}})).toEqual({kind: "refused", reason: "host-unavailable"});
   f.setEnabled(true);
   f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='other' WHERE workspace_id=?").run(scope.workspaceId);
   expect(enabled()).toBe(false); expect(f.authorize(bearer)).toBeNull();
@@ -524,6 +525,88 @@ it("applies Pause after host release and fences Stop immediately", async () => {
   expect(f.release()).toMatchObject({enabled: false, retired: true, ownerStop: "pause"});
   expect(f.storage.hasKeptServiceHostEnrollment(scope.workspaceId, enrolled.path)).toBe(true);
   expect(f.storage.hasKeptServiceHostEnrollment(scope.workspaceId, "docs/stopped.md")).toBe(true);
+});
+
+const activationId = `ordinary-activation-${"c".repeat(64)}`;
+// The fixture document's adopted service activation. Stored metadata is enough here; native activation has its own suites.
+async function activated() {
+  const f = await fixture(); f.enroll();
+  f.raw.prepare(`INSERT INTO sync_relay_service_activations VALUES (?,?,?,'main',?,?,'{}','{}',?,x'0000','owner-1',?,'{}',1)`)
+    .run(key.namespace, activationId, scope.workspaceId, binding.objectId, binding.lineageClaimId, binding.lineageClaimId, scope.shareId);
+  const owner = () => f.storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: "owner-1", shareId: scope.shareId}}).kind;
+  const retirement = () => readServiceActivationRetirement(f.storage as StorageContext, binding);
+  const retirements = () => f.raw.prepare(`SELECT count(*) AS count FROM ${SERVICE_ACTIVATION_RETIREMENTS}`).get()!.count;
+  const share = (shareId: string, grantId: string, access = "edit") => {
+    f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,'owner-1',?,0)")
+      .run(shareId, scope.workspaceId, JSON.stringify({paths: ["docs"], versionId: null}));
+    f.raw.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+      VALUES (?,?,'user','reader-2',NULL,?,1,'active',0,NULL,NULL)`).run(grantId, shareId, access);
+  };
+  return {...f, owner, retirement, retirements, share};
+}
+const recorded = {relayDatabaseNamespace: key.namespace, activationId, workspaceId: scope.workspaceId, mainVersionId: "main",
+  objectId: binding.objectId, lineageClaimId: binding.lineageClaimId, restoreFenceGeneration: 7, acceptedThrough: 0};
+
+// Proves: Pause fences admission and records the exact activation's retirement
+// in its own transaction. Repeating it keeps that one record. Resume records
+// the return without clearing the retirement, so nothing revives the activation.
+it("records one retirement when Pause fences the activation, and Resume leaves it pending", async () => {
+  const f = await activated();
+  expect(f.owner()).toBe("current");
+  expect(f.retirement()).toBeNull();
+  expect(f.setEnabled(false)).toMatchObject({enabled: true, ownerStop: "pause"});
+  expect(f.owner()).toBe("refused");
+  expect(f.retirement()).toEqual(recorded);
+  f.setEnabled(false);
+  expect(f.retirement()).toEqual(recorded); expect(f.retirements()).toBe(1);
+  // Another Edit share neither clears the Pause nor admits anything.
+  f.share("another", "another-edit");
+  expect(f.storage.hasKeptServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toBe(true);
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toMatchObject({ownerStop: "pause"});
+  expect(f.owner()).toBe("refused");
+  expect(f.setEnabled(true)).toMatchObject({enabled: true, retired: false, ownerStop: null});
+  expect(f.retirement()).toEqual(recorded);
+  expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(false);
+  expect(f.owner()).toBe("refused");
+  const reopened = openSyncRelayStorage(f.path, f.config);
+  try {expect(readServiceActivationRetirement(reopened as StorageContext, binding)).toEqual(recorded);} finally {reopened.close();}
+});
+
+// Proves: "last" is across every Edit share of the owner that covers the
+// document. Removing one of two keeps the activation; downgrading the last
+// Edit grant records its retirement in the same transaction, once.
+it("retires the activation only when the last Edit grant covering the document ends", async () => {
+  const f = await activated();
+  f.share("overlap", "overlap-view", "view");
+  expect(f.storage.createLinkGrant({grant: {grantId: "overlap-link", shareId: "overlap", principalKind: "link", principalUserId: null, principalEmail: null,
+    access: "edit", generation: 1, status: "active", createdAtMs: 0, revokedAtMs: null, parentGrantId: null},
+    credential: {credentialId: "overlap-credential", grantId: "overlap-link", secretHash: "d".repeat(64), generation: 1, mintedAtMs: 0, retiredAtMs: null}})).toBe(true);
+  expect(f.storage.revokeShare(scope.shareId, 30)).toBe(true);
+  expect(f.retirement()).toBeNull();
+  expect(f.owner()).toBe("current");
+  expect(f.storage.retuneShareGrant({shareId: "overlap", grantId: "overlap-link", access: "view", changedAtMs: 31, expectedDependentGrantIds: [], guard() {}}).ok).toBe(true);
+  expect(f.retirement()).toEqual(recorded);
+  expect(f.owner()).toBe("refused");
+  expect(f.storage.revokeShareGrant({shareId: "overlap", grantId: "overlap-view", revokedAtMs: 32}).ok).toBe(true);
+  expect(f.retirement()).toEqual(recorded); expect(f.retirements()).toBe(1);
+});
+
+// Proves: revocation and whole-share removal record the retirement at zero
+// coverage. Sharing again, or restoring the grant, before the host reconciles
+// records the return but leaves the retirement pending and admission fenced.
+it("keeps a revoked document's retirement pending when it is shared again before reconciliation", async () => {
+  const f = await activated();
+  expect(f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 30}).ok).toBe(true);
+  expect(f.retirement()).toEqual(recorded);
+  expect(f.owner()).toBe("refused");
+  f.share("replacement", "replacement-edit");
+  expect(f.enroll({shareId: "replacement", nowMs: 31})).toMatchObject({enabled: true, retired: false, ownerStop: null});
+  f.raw.prepare("UPDATE sync_relay_share_grants SET status='active',revoked_at_ms=NULL WHERE grant_id=?").run(scope.grantId);
+  expect(f.retirement()).toEqual(recorded);
+  expect(f.owner()).toBe("refused");
+  expect(f.storage.revokeShare("replacement", 32)).toBe(true);
+  expect(f.storage.revokeShare(scope.shareId, 33)).toBe(true);
+  expect(f.retirement()).toEqual(recorded); expect(f.retirements()).toBe(1);
 });
 
 it("candidate scanning advances past a full page of noncanonical shares", async () => {

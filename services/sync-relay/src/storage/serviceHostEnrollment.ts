@@ -10,6 +10,7 @@ import {canonicalLiveSelector, currentLiveDocumentMoment} from "./liveDocumentAu
 import {LIVE_RESTORE_OPERATIONS} from "./liveRestoreOperationSchema";
 import {assertWorkspaceQuota} from "./workspaces";
 import {forgetServiceHostUploads} from "./serviceHostUploads";
+import {readServiceActivationRetirement, retireServiceActivation} from "./serviceActivationRetirement";
 import {badRequest, notFound, relayError} from "../errors";
 
 export const SERVICE_HOST_ENROLLMENTS = "sync_relay_service_host_enrollments";
@@ -18,9 +19,9 @@ export const SERVICE_HOST_MAX_WORKSPACES = 16;
 const MIGRATION = "service-host-enrollments-v2";
 const DRAIN_MIGRATION = "service-host-enrollments-v3";
 // `owner_stop` is the owner's Pause or Stop. Stop applies at once. Pause cuts
-// the service host's reads at once and applies in full once the host no
-// longer holds the document; until then the enrollment stays enabled, so the
-// document keeps its binding and its writes while unsettled work settles.
+// the service host's reads and live admission at once and applies in full once
+// the host no longer holds the document; until then the enrollment stays
+// enabled, so the host keeps its credential while applied work settles.
 const SQL = `CREATE TABLE ${SERVICE_HOST_ENROLLMENTS} (
   workspace_id TEXT NOT NULL,
   object_id TEXT NOT NULL,
@@ -426,7 +427,9 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
       if (current.retired) assertCapacity(storage, workspaceId);
     }
     const ownerStop = input.enabled ? null : input.retire === true || current.ownerStop === "retire" ? "retire" : "pause";
-    // Pause leaves the host's reads now and keeps the binding until host unload. Stop fences new acceptance in this transaction.
+    // Pause fences admission and retires the activation in this transaction, and keeps the enrollment until host unload.
+    // Stop fences new acceptance here too. Resume leaves an unfinished retirement in place.
+    if (ownerStop === "pause") retireServiceActivation(storage, current);
     const enabled = input.retire ? false : input.enabled || current.enabled;
     const retired = !enabled && (current.retired || ownerStop === "retire");
     storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop=?,enabled=?,retired=?,host_drained_at_ms=?,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
@@ -460,6 +463,24 @@ function coveredByEditGrant(storage: StorageContext, enrollment: Pick<ServiceHos
   for (const value of shares) if (value.share_id !== enrollment.shareId && coversEnrolledPath(value, enrollment.path)) return true;
   return false;
 }
+/**
+ * The enrolled documents an active Edit grant on the share covers. A change
+ * that may end Edit grants reads them first, inside its transaction.
+ */
+export function serviceHostEnrollmentsCoveredByShare(storage: StorageContext, shareId: string): readonly ServiceHostEnrollment[] {
+  const share = storage.db.prepare(`SELECT ${EDIT_SHARE_COLUMNS} FROM sync_relay_shares s WHERE s.share_id=? AND ${ACTIVE_EDIT_GRANT}`).get(shareId);
+  if (!share) return [];
+  // Capacity bounds the active rows.
+  return storage.db.prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND owner_user_id=? AND retired=0`)
+    .all(String(share.workspace_id), String(share.granter_user_id)).map(row).filter(enrollment => coversEnrolledPath(share, enrollment.path));
+}
+/**
+ * Records, inside the change's transaction, the retirement of each document's
+ * activation that no Edit grant on any of its owner's shares covers now.
+ */
+export function retireUncoveredServiceActivations(storage: StorageContext, enrollments: readonly ServiceHostEnrollment[]): void {
+  for (const enrollment of enrollments) if (!coveredByEditGrant(storage, enrollment)) retireServiceActivation(storage, enrollment);
+}
 /** Whether an active Edit grant on any of the owner's shares still covers the enrolled document. */
 export function serviceHostEnrollmentHasEditGrant(storage: StorageContext, enrollment: Pick<ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path">): boolean {
   storage.captureStanding();
@@ -489,15 +510,17 @@ export function releaseServiceHostEnrollment(storage: StorageContext, input: {wo
 
 /**
  * Absence preserves explicitly configured hosts. A retained enrollment fences
- * its document once its owner stops it, its workspace changes, or no Edit
- * grant of its owner covers its enrolled path.
+ * its document once its owner pauses or stops it, its workspace changes, or no
+ * Edit grant of its owner covers its enrolled path. A pending retirement of
+ * its activation fences it whatever the enrollment says.
  */
 export function serviceHostDocumentEnabled(storage: StorageContext, document: {workspaceId: string; objectId: string}): boolean {
-  const value = storage.db.prepare(`SELECT e.enabled,e.retired,e.owner_user_id,e.path,e.share_id,e.replication_epoch,e.stream_identity,
+  if (readServiceActivationRetirement(storage, document)) return false;
+  const value = storage.db.prepare(`SELECT e.enabled,e.retired,e.owner_stop,e.owner_user_id,e.path,e.share_id,e.replication_epoch,e.stream_identity,
     w.owner_user_id AS current_owner,w.replication_epoch AS current_epoch,w.stream_identity AS current_stream
     FROM ${SERVICE_HOST_ENROLLMENTS} e JOIN sync_relay_workspaces w USING(workspace_id)
     WHERE e.workspace_id=? AND e.object_id=?`).get(document.workspaceId, document.objectId);
-  return !value || (value.enabled === 1 && value.retired === 0 && value.owner_user_id === value.current_owner &&
+  return !value || (value.enabled === 1 && value.retired === 0 && value.owner_stop === null && value.owner_user_id === value.current_owner &&
     value.replication_epoch === value.current_epoch && value.stream_identity === value.current_stream &&
     coveredByEditGrant(storage, {workspaceId: document.workspaceId, ownerUserId: String(value.owner_user_id), path: String(value.path), shareId: String(value.share_id)}));
 }

@@ -377,7 +377,7 @@ export class LiveCommittedDeliveryStore {
   }
   /**
    * The adoption's owner delivery once its owner lost live authority, as after
-   * Stop or the loss of the last Edit grant. It needs this connection's standing
+   * Pause, Stop or the loss of the last Edit grant. It needs this connection's standing
    * and the adoption's exact binding, not the document's live authority, so
    * what the host already applied can settle. Null when the host never adopted it.
    */

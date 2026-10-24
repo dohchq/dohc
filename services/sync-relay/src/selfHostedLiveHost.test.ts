@@ -297,8 +297,9 @@ it("keeps the workspace attachment unchanged when the document that first attach
 });
 
 // Proves: a departed document is released only once its workspace's replica
-// confirms it gone, while a sibling keeps the workspace attached.
-it("keeps a paused document's binding until its replica retires it, then pauses it", async () => {
+// confirms it gone, while a sibling keeps the workspace attached. Pause fences
+// its admission at once, though its enrollment waits for that release.
+it("keeps a paused document's enrollment until its replica retires it, then pauses it", async () => {
   const f = await fixture(); f.add(); await f.waitStarted(1);
   await f.waitUpdate(["docs/a.md", "docs/b.md"]);
   f.pending.add(binding.objectId);
@@ -306,7 +307,7 @@ it("keeps a paused document's binding until its replica retires it, then pauses 
   await f.waitUpdate(["docs/b.md"]);
   await f.waitPasses();
   expect(f.enrollment()).toMatchObject({enabled: true, retired: false, ownerStop: "pause", hostDrainedAtMs: null});
-  expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(true);
+  expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(false);
   f.pending.delete(binding.objectId);
   await vi.waitFor(() => expect(f.enrollment()).toMatchObject({enabled: false, retired: false, ownerStop: "pause"}), {timeout: 10_000});
   expect(f.enrollment()!.hostDrainedAtMs).not.toBeNull();

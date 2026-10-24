@@ -65,7 +65,7 @@ export function readServiceHostFeedScope(storage: StorageContext, workspaceId: s
     hosted.set(row.objectId, row.path);
     if (storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path: row.path}) !== row.objectId) departed.add(row.objectId);
     // A Pause cuts reads at once, like a revoked grant, while the enabled
-    // binding stays writable until the host releases it.
+    // enrollment takes the host's settled work until the host releases it.
     else if (row.ownerStop === null && selectors.some(selector => pathVisibleThroughShare(selector, row.path))) shared.set(row.objectId, row.path);
   }
   const token = createHash("sha256").update(JSON.stringify(["dohc-hosted-scope-v1", workspaceId, replicationEpoch, streamIdentity, [...shared]])).digest("hex");

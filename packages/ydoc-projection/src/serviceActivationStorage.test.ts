@@ -16,6 +16,7 @@ import {createLiveMarkdownRegistrationValidator,createLiveMarkdownJournalValidat
 import {openSyncRelayStorage} from '../../../services/sync-relay/src/storage.js'
 import {createLiveJournalHistoryAuthority} from '../../../services/sync-relay/src/storage/liveJournalHistory.js'
 import {ServiceActivationStaleCut} from '../../../services/sync-relay/src/storage/serviceActivation.js'
+import {readServiceActivationRetirement} from '../../../services/sync-relay/src/storage/serviceActivationRetirement.js'
 import {verifyOrdinaryActivationCut} from '../../../services/sync-relay/src/storage/ordinaryActivationSource.js'
 import {selfHostLiveProfile} from '../../../services/sync-relay/src/selfHostLiveProfile.js'
 import {requireStopRestoreOwnerOrigin,type StopRestoreBasis,type StopRestoreIntent} from '../../../services/sync-relay/src/storage/liveRestoreOperation.js'
@@ -78,6 +79,25 @@ it('retains the original lineage and edited ordinary cut, closing ordinary autho
     expect(saved.baselineBytes).toEqual(new Uint8Array(f.capture.baselineBytes))
     expect(saved.fullState).toEqual(new Uint8Array(f.capture.fullState))
     expect(f.prepare()).toMatchObject({replayed:true,completed:false})
+  }finally{f.close()}
+})
+// Proves: Pause retires a captured activation the host never adopted, keyed
+// as the engine's release case expects. Its pending access admits nothing
+// more, and Resume does not reopen it while the retirement is pending.
+it('retires a captured activation the host never adopted when its owner pauses',()=>{
+  const f=fixture();try{
+    f.raw.exec("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)")
+    const enrollment={workspaceId:'workspace',path:'docs/a.md',shareId:'share',ownerUserId:'owner',nowMs:10,guard(){}}
+    f.storage.enrollServiceHostDocument(enrollment)
+    expect(f.prepare()).toEqual({document:f.document,replayed:false,completed:false})
+    const access=f.store.pending(f.document,host),refused={kind:'refused',reason:'host-unavailable'}
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access).kind).toBe('current')
+    f.storage.setServiceHostEnrollmentEnabled({...enrollment,enabled:false,nowMs:20})
+    expect(readServiceActivationRetirement(f.storage as StorageContext,f.document)).toEqual({relayDatabaseNamespace:'history',
+      activationId:f.capture.activationId,...f.document,restoreFenceGeneration:1,acceptedThrough:0})
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access)).toEqual(refused)
+    f.storage.setServiceHostEnrollmentEnabled({...enrollment,enabled:true,nowMs:30})
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access)).toEqual(refused)
   }finally{f.close()}
 })
 it('activates a receiver projection derived from the ordinary Ydoc base and suffix without a matching file moment',()=>{

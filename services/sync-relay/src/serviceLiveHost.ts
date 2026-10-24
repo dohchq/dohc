@@ -502,8 +502,8 @@ export async function startServiceLiveHost(options: {
     };
     const settleTarget: Parameters<ServiceActivationDriver["activate"]>[2] = config.settlement
       ? (consumer, document, joined) => consumer.settle(document, joined) : undefined;
-    // Whether a hosted document's owner lost live authority over it: Stop
-    // fenced it, or no Edit grant of its owner covers it any more.
+    // Whether a hosted document's owner lost live authority over it: Pause or
+    // Stop fenced it, or no Edit grant of its owner covers it any more.
     const authorityLost = ({target, objectId}: {target: ServiceActivationTarget; objectId: string}) => {
       const share = storage.getShare(target.shareId);
       return !storage.serviceHostDocumentEnabled({workspaceId: target.workspaceId, objectId}) || !share || share.workspaceId !== target.workspaceId ||
