@@ -1048,7 +1048,7 @@ describe("LiveDocumentsDialog", () => {
       h.load.mockImplementation(async (_workspaceId, retiredAfter) => retiredAfter === undefined
         ? page([row("docs/live.md"), row("docs/b.md", { status: "retired" })], "docs/b.md")
         : retiredAfter === "docs/b.md" ? page([row("docs/c.md", { status: "retired" })], "docs/c.md")
-        : page([row("docs/z.md", { status: "retired", quarantine: "not-written" })]));
+        : page([row("docs/z.md", { status: "retired", quarantine: "not-written", objectId: "object-z" })]));
       render(<LiveDocumentsDialog workspaceId="ws" reveal="docs/z.md" {...h} />);
       const again = await screen.findByRole("button", { name: "Try again to write your kept edits to docs/z.md" });
       await vi.waitFor(() => expect(document.activeElement).toBe(again));
@@ -1110,7 +1110,7 @@ describe("LiveDocumentsDialog", () => {
 
     it("offers Try again and a recovery copy for edits a Stop took but could not write", async () => {
       const h = harness();
-      h.load.mockResolvedValue(page([row("docs/a.md", { status: "retired", quarantine: "not-written" })]));
+      h.load.mockResolvedValue(page([row("docs/a.md", { status: "retired", quarantine: "not-written", objectId: "object-a" })]));
       h.stop.mockResolvedValueOnce({ keptEdits: "recovered" });
       render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
       const kept = await screen.findByTestId("live-document-row-docs/a.md");
@@ -1119,13 +1119,14 @@ describe("LiveDocumentsDialog", () => {
       expect(actions("docs/a.md")).toEqual(["Try again", "Save recovery copy"]);
       await userEvent.setup().click(within(kept).getByRole("button", { name: "Try again to write your kept edits to docs/a.md" }));
       await vi.waitFor(() => expect(h.onStopped).toHaveBeenCalledExactlyOnceWith("docs/a.md", "recovered"));
-      expect(h.stop).toHaveBeenCalledExactlyOnceWith("ws", "docs/a.md");
+      // Try again names the row's document: another document may now have its path.
+      expect(h.stop).toHaveBeenCalledExactlyOnceWith("ws", "docs/a.md", { objectId: "object-a", recovery: "not-written" });
     });
 
     it("offers only a recovery copy once dohc can't finish writing the edits, and Stop for a document live again", async () => {
       const h = harness();
       h.load.mockResolvedValue(page([row("docs/a.md", { status: "retired", quarantine: "cannot-write" }), row("docs/b.md", { quarantine: "cannot-write" }),
-        row("docs/c.md", { quarantine: "not-written" })]));
+        row("docs/c.md", { quarantine: "not-written", objectId: "object-c" })]));
       render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
       const kept = await screen.findByTestId("live-document-row-docs/a.md");
       expect(within(kept).getByText("Stopped")).toBeTruthy();
@@ -1142,7 +1143,7 @@ describe("LiveDocumentsDialog", () => {
 
     it("disables a row's Save recovery copy while its save runs", async () => {
       const h = harness();
-      h.load.mockResolvedValue(page([row("docs/a.md", { status: "retired", quarantine: "not-written" })]));
+      h.load.mockResolvedValue(page([row("docs/a.md", { status: "retired", quarantine: "not-written", objectId: "object-a" })]));
       const saving = deferred();
       h.saveRecoveryCopy.mockReturnValueOnce(saving.promise);
       render(<LiveDocumentsDialog workspaceId="ws" {...h} />);

@@ -1,7 +1,7 @@
 import {OwnerYDocOutbox, OwnerYDocOutboxReadChangedError, type JsonValue, type LiveObjectBinding, type OwnerYDocOutboxRecovery} from "@dohc/workspace-engine-client";
 import type {EngineClient, OwnerYDocDraftDescriptor} from "@dohc/workspace-engine-client/daemon";
 import {z} from "zod";
-import {recoverySnapshot, type UnwrittenRelease} from "./ownerLiveReleases";
+import {recoverySnapshot, sameBinding, type UnwrittenRelease} from "./ownerLiveReleases";
 
 const ServerKeptEdits = z.object({
   objectId: z.string().min(1).max(512), path: z.string().min(1).max(4096), outboxId: z.string().min(1).max(512),
@@ -164,11 +164,11 @@ export async function readOwnerLiveQuarantines(client: EngineClient, workspace: 
     };
     // While the queue a record came from remains, its row speaks for both. A
     // later queue, even under the same binding and head, holding other edits
-    // leaves the record its own row.
+    // leaves the record its own row, and so does a record not read whole.
     const queues = [...found];
     for (const release of options.unwritten ?? []) {
-      const queue = release.snapshot === null ? undefined
-        : queues.find(row => row.objectId === release.objectId && row.headDeliveryId === release.headDeliveryId);
+      const queue = release.binding === null || release.snapshot === null ? undefined
+        : queues.find(row => row.objectId === release.objectId && row.headDeliveryId === release.headDeliveryId && sameBinding(row.binding, release.binding));
       if (queue?.outboxId && await snapshotOf(queue.outboxId) === release.snapshot) continue;
       found.push({objectId: release.objectId, path: release.path, reason: release.reason, outboxId: null,
         binding: release.binding, headDeliveryId: release.headDeliveryId, recovery: release.retry ? "not-written" : "cannot-write"});

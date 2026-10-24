@@ -104,7 +104,8 @@ fn released_owner_accepts_an_ordinary_peer_update_through_replication() {
             release::release_in_tx(
                 tx,
                 &observed.binding,
-                observed.accepted_cursor,
+                Some(observed.accepted_cursor),
+                None,
                 21,
                 |_, _, _, _, _| Ok(()),
             )

@@ -243,6 +243,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     // Only the queue of the generation this release takes.
     const kept = (await readOwnerQuarantinesInto(workspaceId, client, workspaceHandle))
       .find(row => row.objectId === binding.objectId && row.outboxId !== null && sameGeneration(row.binding, binding));
+    let keptSnapshot: string | undefined;
     if (kept?.outboxId) {
       const release = {workspaceId, objectId: binding.objectId, path: kept.path, reason: kept.reason, binding, headDeliveryId: kept.headDeliveryId, retry: true};
       // Checked before the whole queue is read; the put checks its edits too, under its lock.
@@ -250,13 +251,16 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       if (earlier) throw keptEarlierError(earlier.path);
       const {liveRecoveryPackage} = await import("./ownerLiveRecoveryCopy");
       const queue = await readOwnerLiveQueue(client, workspaceHandle, kept);
-      await dependencies.ownerLiveReleases.put({...release, snapshot: recoverySnapshot(queue)},
+      keptSnapshot = recoverySnapshot(queue);
+      await dependencies.ownerLiveReleases.put({...release, snapshot: keptSnapshot},
         JSON.stringify(liveRecoveryPackage(queue, {path: kept.path, reason: kept.reason, storedOn: "this-computer"})));
     }
-    const released = await client.ownerYDocRelease({id: 0, workspace: workspaceHandle, deadlineMs: 30_000}, binding, acceptedCursor, signal);
-    // A written file ends this release's record. A deferred release leaves the
-    // edits in their queue, whose row hides the record until it ends.
-    if (released.materialized === true) await dependencies.ownerLiveReleases.written(workspaceId, binding.objectId, binding);
+    // The engine's Stop keeps the snapshot of the edits its release took, which names this record.
+    const released = await client.ownerYDocRelease({id: 0, workspace: workspaceHandle, deadlineMs: 30_000}, binding,
+      {acceptedCursor, ...(keptSnapshot === undefined ? {} : {keptSnapshot})}, signal);
+    // A written file ends the record of the edits this release took. A deferred
+    // release leaves them in their queue, whose row hides the record until it ends.
+    if (released.materialized === true) await dependencies.ownerLiveReleases.written(workspaceId, binding.objectId, {binding, snapshot: released.keptSnapshot ?? null});
     return released;
   }
   function refreshOwnerLiveQuarantines(workspace: EngineWorkspace): Promise<void> {
@@ -853,19 +857,26 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     },
     /**
      * Try again for a Stop whose release took refused edits but could not
-     * write the file: settles that release again and never starts a new Stop.
-     * When the engine no longer holds that release, nothing shows the file has
-     * the edits: the record and its package stay, offering only Save recovery copy.
+     * write the file: settles that release again and never starts a release.
+     * The record names that release by the snapshot of its edits, so an older
+     * Stop under the same binding, restored from an earlier engine state, does
+     * not answer for it. When the engine no longer holds that release, nothing
+     * shows the file has the edits: the record and its package stay, offering
+     * only Save recovery copy.
      */
     async retryOwnerLiveRelease(workspace: EngineWorkspace, objectId: string) {
       return withEngineClient(workspace, async (client, handle) => {
         const releases = dependencies.ownerLiveReleases;
-        const binding = (await releases.list(workspace.workspaceId)).find(row => row.objectId === objectId && row.retry)?.binding;
-        if (!binding) throw new Error("This document changed. Open Live documents to check it.");
+        const record = (await releases.list(workspace.workspaceId)).find(row => row.objectId === objectId && row.retry);
+        const {binding, snapshot} = record ?? {};
+        if (!binding || !snapshot) throw new Error("This document changed. Open Live documents to check it.");
         try {
-          const released = await client.ownerYDocRelease({id: 0, workspace: handle, deadlineMs: 30_000}, binding, 0);
-          if (released.materialized === true) await releases.written(workspace.workspaceId, objectId, binding);
-          return released;
+          const released = await client.ownerYDocRelease({id: 0, workspace: handle, deadlineMs: 30_000}, binding, {keptSnapshot: snapshot});
+          if (released.materialized === true) await releases.written(workspace.workspaceId, objectId, {binding, snapshot: released.keptSnapshot ?? null});
+          if (released.keptSnapshot === snapshot) return released;
+          // The engine holds another release under this binding, which says nothing about this record's edits.
+          await releases.endRetry(workspace.workspaceId, objectId, binding);
+          return undefined;
         } catch (error) {
           if (!(error instanceof EngineRequestError && error.message === "owner-stop-conflict")) throw error;
           await releases.endRetry(workspace.workspaceId, objectId, binding);

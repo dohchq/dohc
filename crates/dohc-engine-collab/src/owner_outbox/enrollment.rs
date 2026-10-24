@@ -435,17 +435,34 @@ fn advance_generation_in_tx(
         return Err(OwnerOutboxError::ParentMismatch);
     }
     // Native state past the old accepted checkpoint is private work its pending
-    // rows may not hold. Retain it in the old generation before quarantine.
+    // rows may not hold. Retain it in the old generation before quarantine. A
+    // queue that takes no more edits, such as one already refused, keeps it
+    // without reopening: its refusal stays.
     if local_bytes != bounded_blob(tx, &previous.checkpoint_digest)? {
-        super::draft::append_draft_in_tx(
-            tx,
-            workspace,
-            old,
-            previous.revision,
-            format!("owner-restore-fenced:{}", input.captured.local_state_digest),
-            local_bytes.clone(),
-            now_ms,
-        )?;
+        let append_key = format!("owner-restore-fenced:{}", input.captured.local_state_digest);
+        match find_parent_for_binding(tx, old)? {
+            Some(parent) if parent.state != OwnerOutboxState::Active => {
+                super::retain_fenced_in_tx(
+                    tx,
+                    &parent,
+                    previous.revision,
+                    &append_key,
+                    &local_bytes,
+                    now_ms,
+                )?
+            }
+            _ => {
+                super::draft::append_draft_in_tx(
+                    tx,
+                    workspace,
+                    old,
+                    previous.revision,
+                    append_key,
+                    local_bytes.clone(),
+                    now_ms,
+                )?;
+            }
+        }
     }
     let outboxes = {
         let mut stmt = tx.prepare(

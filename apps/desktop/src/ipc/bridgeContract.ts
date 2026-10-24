@@ -466,6 +466,8 @@ export const OwnerLiveDocument = z.object({
   storedOn: OwnerLiveQuarantine.shape.storedOn.optional(),
   // Those kept edits' incident, which Save recovery copy names to save them.
   incident: OwnerLiveQuarantine.shape.incident.optional(),
+  // Their document, which a Stop again names: a record can keep a path another document now has.
+  objectId: OwnerLiveQuarantine.shape.objectId.optional(),
 }).strict();
 export type OwnerLiveDocument = z.infer<typeof OwnerLiveDocument>;
 // What a Stop did with edits the server refused: wrote them into the file,

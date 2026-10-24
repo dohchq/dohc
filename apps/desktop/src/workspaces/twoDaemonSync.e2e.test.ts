@@ -982,8 +982,14 @@ it.skipIf(engine.missing).each([
           const client = source.nativeClient(), request = {id: 0, workspace, deadlineMs: REAL_DAEMON_DEADLINE_MS};
           if (action === "clear") {await client.ownerYDocStopClear(request, stopPath);return;}
           if (action==="retired") {await client.ownerYDocStopRetired(request,binding!);return;}
-          return action === "request" ? client.ownerYDocStopRequest(request, stopPath) : client.ownerYDocRelease(request, binding as import("@dohc/live-session-contract").LiveObjectBinding, acceptedCursor!);
-        }), ownerLiveQuarantines: () => [], unwrittenOwnerLiveReleases: async () => [], retryOwnerLiveQuarantine: unexpected, retryOwnerLiveRelease: unexpected, saveOwnerLiveRecoveryCopy: unexpected,
+          return action === "request" ? client.ownerYDocStopRequest(request, binding as {mainVersionId: string; objectId: string; currentPath: string})
+            : client.ownerYDocRelease(request, binding as import("@dohc/live-session-contract").LiveObjectBinding, {acceptedCursor: acceptedCursor!});
+        }), liveDocument: async (_workspace, target) => {
+          const resolved = await source.sessions.run(source.workspace, async ({client, workspace}) =>
+            new VersionedLiveAdapter(client, workspace, {workspaceId: source.workspace.workspaceId}).resolveFiles({workspaceId: source.workspace.workspaceId, targets: [target]}));
+          const [file] = resolved.results;
+          return file?.status === "found" ? {mainVersionId: resolved.versionId, objectId: file.objectId, currentPath: file.path} : null;
+        }, withoutEditors: (_workspace, _path, change) => change(), ownerLiveQuarantines: () => [], unwrittenOwnerLiveReleases: async () => [], retryOwnerLiveQuarantine: unexpected, retryOwnerLiveRelease: unexpected, saveOwnerLiveRecoveryCopy: unexpected,
         sharesChanged: unexpected, reconcileReceivedShares: unexpected,
       });
       registerOperations({

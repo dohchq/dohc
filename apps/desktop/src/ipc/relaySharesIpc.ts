@@ -62,7 +62,7 @@ import { isSharedWithMePath } from "@dohc/workspace-core";
 import type { createPresencePollRegistry } from "../collab/presencePollRegistry";
 
 const RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS = 35_000;
-const liveDocumentStatus = OwnerLiveDocument.omit({canResume: true}).strip();
+const liveDocumentStatus = OwnerLiveDocument.omit({canResume: true, objectId: true}).strip();
 const activeLiveDocuments = z.object({ok: z.literal(true), documents: z.array(liveDocumentStatus.extend({
   status: z.enum(["ready", "preparing", "paused", "unavailable"]),
 })).max(64)});
@@ -102,7 +102,12 @@ export interface OwnerLiveDocumentActionDependencies<Workspace> {
   }>;
   currentCredentialGeneration(): number;
   relayShareJsonWithCredentials: RelayShareRequest;
+  // A request names its document; a release its binding.
   ownerLiveStop(workspace: Workspace, action: "request" | "release" | "clear" | "retired", path: string, binding?: LiveObjectBinding | OwnerLiveStop["document"], acceptedCursor?: number): Promise<OwnerLiveStop | undefined>;
+  // The document at a path now, or where an object's document is now. Null when there is none.
+  liveDocument(workspace: Workspace, target: {path: string} | {objectId: string}): Promise<OwnerLiveStop["document"] | null>;
+  // Holds off editors of the path while the change runs: refused while one holds it.
+  withoutEditors<Result>(workspace: Workspace, path: string, change: () => Promise<Result>): Promise<Result>;
   // Documents whose edits the server refused for good, as this computer last read them.
   ownerLiveQuarantines(workspace: Workspace): readonly OwnerLiveQuarantine[];
   // Stops that took refused edits but could not write the file, from their own records.
@@ -116,8 +121,9 @@ export type OwnerLiveStopAgain = {objectId: string; recovery: "not-written" | "s
 
 /**
  * Stop and Resume of one owner live document, with the owner's credentials
- * and this workspace's own record of its kept edits. The caller closes or
- * holds off any editor of the document first.
+ * and this workspace's own record of its kept edits. A window closes its own
+ * editors of the document first; a Stop holds off every editor where the
+ * document is now.
  */
 export function createOwnerLiveDocumentActions<
   Workspace extends { workspaceId: string; shareView?: unknown },
@@ -130,58 +136,70 @@ export function createOwnerLiveDocumentActions<
   // in the document with a record that its file still needs them.
   const keptEditsOf = (released: OwnerLiveStop | undefined): StopOwnerLiveDocumentResult["keptEdits"] =>
     released?.materialized === true && !released.deferred ? "recovered" : "kept";
-  const ownerLiveDocumentAction = async (stop: boolean, input: {workspaceId: string; path: string; again?: OwnerLiveStopAgain;
-    revalidate?: () => Promise<void>}, operation: Operation): Promise<StopOwnerLiveDocumentResult> => {
+  // The server's live document list, as one owner request.
+  const liveHost = async (operation: Operation, method: "DELETE" | "POST", body: object) => {
+    const {credentials,credentialGeneration}=await remoteForWorkspace(operation.workspace);
+    if (credentialGeneration!==currentCredentialGeneration()) throw new Error("Sharing account changed.");
+    const result=await relayShareJsonWithCredentials<unknown>(credentials,`/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host`,{
+      method,body:JSON.stringify(body),
+    });
+    operation.assertCurrent();
+    if (credentialGeneration!==currentCredentialGeneration()) throw new Error("Sharing account changed.");
+    return result;
+  };
+  /**
+   * A Stop names its document before it changes anything: the document at the
+   * path now, or with `again` the document its row names, wherever it is now.
+   * A record, or a document that left the path, never stands in for it.
+   */
+  const stop = async (input: {workspaceId: string; path: string; again?: OwnerLiveStopAgain}, operation: Operation): Promise<StopOwnerLiveDocumentResult> => {
     operation.assertCurrent();assertOriginalWorkspace(operation.workspace);
-    return withOwnerLiveStopTransition(input.workspaceId,input.path,async (): Promise<StopOwnerLiveDocumentResult> => {
-      const {again}=input;
-      await input.revalidate?.();
+    const {again}=input, target=again ? {objectId:again.objectId} : {path:input.path};
+    const document=await dependencies.liveDocument(operation.workspace,target);
+    operation.assertCurrent();
+    if (!document) throw changed();
+    // Still that document, at that path: a rename while the Stop waits acts on nothing it did not hold.
+    const unchanged=async () => {
+      const now=await dependencies.liveDocument(operation.workspace,target);
+      operation.assertCurrent();
+      if (now?.objectId!==document.objectId || now.mainVersionId!==document.mainVersionId || now.currentPath!==document.currentPath) throw changed();
+    };
+    return dependencies.withoutEditors(operation.workspace,document.currentPath,() => withOwnerLiveStopTransition(input.workspaceId,document.currentPath,async (): Promise<StopOwnerLiveDocumentResult> => {
+      await unchanged();
       // Stop again writes the file a finished release could not, from that release alone. The records
       // decide, never a list not yet read, so no ordinary Stop starts over a release the file still needs.
       // A release the engine no longer holds keeps its edits for Save recovery copy.
-      const unwritten=stop && again?.recovery!=="stopping" ? (await dependencies.unwrittenOwnerLiveReleases(operation.workspace))
-        .find(record => record.retry && (again ? record.objectId===again.objectId : record.path===input.path)) : undefined;
+      const unwritten=again?.recovery==="stopping" ? undefined : (await dependencies.unwrittenOwnerLiveReleases(operation.workspace))
+        .find(record => record.retry && record.objectId===document.objectId);
       operation.assertCurrent();
       if (again?.recovery==="not-written" && !unwritten) throw changed();
       if (unwritten) {
-        const released=await dependencies.retryOwnerLiveRelease(operation.workspace,unwritten.objectId);
+        const released=await dependencies.retryOwnerLiveRelease(operation.workspace,document.objectId);
         operation.assertCurrent();
         return {keptEdits:released ? keptEditsOf(released) : "kept"};
       }
-      const local=stop ? await dependencies.ownerLiveStop(operation.workspace,"request",input.path) : undefined;
+      const local=await dependencies.ownerLiveStop(operation.workspace,"request",document.currentPath,document);
       operation.assertCurrent();
-      // A waiting Stop runs again only for the document its row names.
-      if (again && local?.document.objectId!==again.objectId) throw changed();
+      if (local?.document.objectId!==document.objectId) throw changed();
       // This computer's release can write only the edits it keeps. Edits the server keeps stay there,
       // and edits an earlier release could not write are not this Stop's to claim.
-      const kept=local===undefined ? undefined : dependencies.ownerLiveQuarantines(operation.workspace).find(row => row.objectId===local.document.objectId && row.recovery!=="cannot-write");
+      const kept=dependencies.ownerLiveQuarantines(operation.workspace).find(row => row.objectId===document.objectId && row.recovery!=="cannot-write");
       const quarantined=kept?.storedOn==="this-computer", onServer=kept?.storedOn==="server";
-      if (stop && local && !local.retirementOwed) return {keptEdits:quarantined || onServer ? "kept" : "none"};
+      if (!local.retirementOwed) return {keptEdits:quarantined || onServer ? "kept" : "none"};
       let result: unknown;
       try {
-        const {credentials,credentialGeneration}=await remoteForWorkspace(operation.workspace);
-        if (credentialGeneration!==currentCredentialGeneration()) throw new Error("Sharing account changed.");
-        result=await relayShareJsonWithCredentials<unknown>(credentials,`/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host`,{
-          method:stop ? "DELETE" : "POST",body:JSON.stringify(stop ? {path:local!.document.currentPath,objectId:local!.document.objectId,retire:true,...(local!.binding ? {restoreFenceGeneration:local!.binding.restoreFenceGeneration} : {})} : {path:input.path}),
-        });
-        operation.assertCurrent();
-        if (credentialGeneration!==currentCredentialGeneration()) throw new Error("Sharing account changed.");
+        result=await liveHost(operation,"DELETE",{path:local.document.currentPath,objectId:local.document.objectId,retire:true,
+          ...(local.binding ? {restoreFenceGeneration:local.binding.restoreFenceGeneration} : {})});
       } catch (error) {
         operation.assertCurrent();
-        if (stop) throw new Error("Stop live editing is waiting. Reconnect or wait for the restore to finish.",{cause:error});
-        throw error;
+        throw new Error("Stop live editing is waiting. Reconnect or wait for the restore to finish.",{cause:error});
       }
-      const response=z.object({ok:z.literal(true),objectId:stop ? z.literal(local!.document.objectId) : z.string().optional(),path:stop ? z.string().min(1) : z.literal(input.path),status:stop ? z.literal("retired") : z.enum(["ready","preparing","unavailable"]),acceptedCursor:stop ? z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER) : z.number().optional()}).parse(result);
-      if (response.status==="unavailable") throw new Error("This document could not resume live editing. Refresh the list and try again.");
-      if (!stop) {
-        await dependencies.ownerLiveStop(operation.workspace,"clear",input.path);
-        operation.assertCurrent();
-        return {keptEdits:"none"};
-      }
+      const response=z.object({ok:z.literal(true),objectId:z.literal(local.document.objectId),path:z.string().min(1),status:z.literal("retired"),
+        acceptedCursor:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).parse(result);
       let released: OwnerLiveStop | undefined;
-      await input.revalidate?.();
+      await unchanged();
       try {
-        released=await dependencies.ownerLiveStop(operation.workspace,local!.binding ? "release" : "retired",input.path,local!.binding ?? local!.document,response.acceptedCursor);
+        released=await dependencies.ownerLiveStop(operation.workspace,local.binding ? "release" : "retired",document.currentPath,local.binding ?? local.document,response.acceptedCursor);
       } catch (error) {
         // The server already stopped live editing. A release that did not
         // commit kept the queue, and Stop reconciliation tries it again; one
@@ -193,27 +211,25 @@ export function createOwnerLiveDocumentActions<
       }
       operation.assertCurrent();
       return {keptEdits:onServer ? "kept" : !quarantined ? "none" : keptEditsOf(released)};
+    }));
+  };
+  const resume = async (input: {workspaceId: string; path: string}, operation: Operation): Promise<void> => {
+    operation.assertCurrent();assertOriginalWorkspace(operation.workspace);
+    await withOwnerLiveStopTransition(input.workspaceId,input.path,async () => {
+      let result: unknown;
+      try {result=await liveHost(operation,"POST",{path:input.path});}
+      catch (error) {operation.assertCurrent();throw error;}
+      const response=z.object({ok:z.literal(true),objectId:z.string().optional(),path:z.literal(input.path),status:z.enum(["ready","preparing","unavailable"]),
+        acceptedCursor:z.number().optional()}).parse(result);
+      if (response.status==="unavailable") throw new Error("This document could not resume live editing. Refresh the list and try again.");
+      await dependencies.ownerLiveStop(operation.workspace,"clear",input.path);
+      operation.assertCurrent();
     });
   };
   return {
-    /** A Stop, or with `again` a Stop again of that row's document only. */
-    stop: (input: {workspaceId: string; path: string; again?: OwnerLiveStopAgain}, operation: Operation) => ownerLiveDocumentAction(true, input, operation),
-    resume: async (input: {workspaceId: string; path: string}, operation: Operation) => { await ownerLiveDocumentAction(false, input, operation); },
-    /**
-     * An agent's Stop again of the kept edits it read. A record keeps the path
-     * its document had when it stopped, so editors are held off at the
-     * document's current path, which must still be its path when the Stop acts.
-     */
-    stopAgain: async (input: {workspaceId: string; path: string; again: OwnerLiveStopAgain}, operation: Operation, door: {
-      documentPath(objectId: string): Promise<string | null>;
-      withoutEditors<Result>(path: string, change: () => Promise<Result>): Promise<Result>;
-    }) => {
-      const pathNow = async () => await door.documentPath(input.again.objectId) ?? input.path;
-      const path = await pathNow();
-      operation.assertCurrent();
-      return door.withoutEditors(path, () => ownerLiveDocumentAction(true, {...input, path,
-        revalidate: async () => {if (await pathNow() !== path) throw changed();}}, operation));
-    },
+    /** A Stop, or with `again` a Stop again of that row's document only, for the window and agents alike. */
+    stop,
+    resume,
   };
 }
 
@@ -301,7 +317,7 @@ export function createRelaySharesIpcHandlers<
         if (deferred) Object.assign(row, {deferredStop: deferred,
           canResume: row.reason !== "session-host-diverged" && row.reason !== "live-edit-unadmitted"});
         const quarantine = quarantines.find(candidate => candidate.path === row.path);
-        if (quarantine) Object.assign(row, {quarantine: quarantine.recovery, storedOn: quarantine.storedOn, incident: quarantine.incident});
+        if (quarantine) Object.assign(row, {quarantine: quarantine.recovery, storedOn: quarantine.storedOn, incident: quarantine.incident, objectId: quarantine.objectId});
       }
       return OwnerLiveDocumentsResult.parse({documents: [...documents.values()], nextCursor: stopped.nextCursor});
     }, assertOriginalWorkspace);

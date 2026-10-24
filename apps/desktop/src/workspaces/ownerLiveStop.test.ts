@@ -42,7 +42,7 @@ it("retains a waiting Stop and retries with the engine's successor binding", asy
   retire.mockResolvedValueOnce(17);
   await reconcileOwnerLiveStops(options);
   expect(retire.mock.calls).toHaveLength(2);
-  expect(release).toHaveBeenCalledWith({id: 0, workspace: "handle", deadlineMs: 30_000}, row.binding, 17, options.signal);
+  expect(release).toHaveBeenCalledWith({id: 0, workspace: "handle", deadlineMs: 30_000}, row.binding, {acceptedCursor: 17}, options.signal);
 });
 
 it("does not retire a Stop cancelled before its document transition runs", async () => {

@@ -26,20 +26,22 @@ it("keeps a damaged record without Try again, skips an unreadable one, and sets 
   vi.spyOn(console, "error").mockImplementation(() => {});
   try {
     const releases = createUnwrittenReleases(() => file);
-    // Three identifiers are enough to keep a record and its package.
-    expect(await releases.list("owner")).toEqual([release("good"), {...release("bad"), binding: null, retry: false}, release("other"),
-      {...release("unexplained"), reason: "unreadable-record", binding: null, retry: false}]);
+    // Three identifiers are enough to keep a record and its package. A damaged record names no edits, even when its snapshot survived.
+    expect(await releases.list("owner")).toEqual([release("good"), {...release("bad"), binding: null, snapshot: null, retry: false}, release("other"),
+      {...release("unexplained"), reason: "unreadable-record", binding: null, snapshot: null, retry: false}]);
     // A second start with the same content keeps no second copy.
     await createUnwrittenReleases(() => file).list("owner");
     const aside = await asideFiles(file);
     expect(aside).toHaveLength(1);
     expect(await readFile(join(dirname(file), aside[0]!), "utf8")).toBe(raw);
-    await releases.written("owner", "good", binding("good"));
+    await releases.written("owner", "good", {binding: binding("good"), snapshot: release("good").snapshot});
     expect((await createUnwrittenReleases(() => file).list("owner")).map(row => [row.objectId, row.retry])).toEqual([["bad", false], ["other", true], ["unexplained", false]]);
     expect(await asideFiles(file)).toHaveLength(1);
     // The damaged record ends only when its stored package has been saved.
-    await releases.written("owner", "bad", binding("bad"));
+    await releases.written("owner", "bad", {binding: binding("bad"), snapshot: release("bad").snapshot});
     await releases.remove("owner", "bad", {binding: null, headDeliveryId: release("bad").headDeliveryId, snapshot: release("bad").snapshot});
+    expect((await createUnwrittenReleases(() => file).list("owner")).map(row => row.objectId)).toEqual(["bad", "other", "unexplained"]);
+    await releases.remove("owner", "bad", {binding: null, headDeliveryId: release("bad").headDeliveryId, snapshot: null});
     expect((await createUnwrittenReleases(() => file).list("owner")).map(row => row.objectId)).toEqual(["other", "unexplained"]);
   } finally {vi.restoreAllMocks();}
 });
@@ -77,7 +79,10 @@ it("keeps each record's recovery package until that record is removed by its own
   const reopened = createUnwrittenReleases(() => file);
   expect(await reopened.recovery("owner", "plan")).toBe("plan package");
   // A release of another generation of the same document ends nothing, nor does a save of another queue's record.
-  await reopened.written("owner", "plan", binding("plan", 1));
+  await reopened.written("owner", "plan", {binding: binding("plan", 1), snapshot: release("plan").snapshot});
+  // Nor does a release of another Stop under the same binding, which took other edits or named none.
+  await reopened.written("owner", "plan", {binding: binding("plan"), snapshot: "6".repeat(64)});
+  await reopened.written("owner", "plan", {binding: binding("plan"), snapshot: null});
   await reopened.remove("owner", "plan", {binding: binding("plan"), headDeliveryId: "rebuilt-outbox:1:digest", snapshot: release("plan").snapshot});
   await reopened.remove("owner", "plan", {...release("plan"), snapshot: "6".repeat(64)});
   expect(await reopened.recovery("owner", "plan")).toBe("plan package");
@@ -100,7 +105,7 @@ it("keeps a record the engine no longer holds, without Try again, and no later r
   await expect(reopened.put(release("plan"), "later package")).rejects.toThrow("Save a recovery copy of plan.md first.");
   await expect(reopened.put({...release("plan"), binding: binding("plan", 1)}, "later package")).rejects.toThrow("Save a recovery copy of plan.md first.");
   // Only Save ends it: a release of the same binding that wrote the file does not.
-  await reopened.written("owner", "plan", binding("plan"));
+  await reopened.written("owner", "plan", {binding: binding("plan"), snapshot: release("plan").snapshot});
   expect(await reopened.recovery("owner", "plan")).toBe("same release");
   expect(await reopened.list("owner")).toEqual([{...release("plan"), retry: false}]);
 });
@@ -158,7 +163,7 @@ it("reports a removed record as removed when its package cannot be deleted", asy
   const errors = vi.spyOn(console, "error").mockImplementation(() => {});
   fs.rm.mockRejectedValueOnce(Object.assign(new Error("EBUSY: resource busy or locked, unlink"), {code: "EBUSY"}));
   try {
-    await expect(releases.written("owner", "plan", binding("plan"))).resolves.toBeUndefined();
+    await expect(releases.written("owner", "plan", {binding: binding("plan"), snapshot: release("plan").snapshot})).resolves.toBeUndefined();
     expect(errors).toHaveBeenCalledWith(expect.stringContaining("could not remove a written live recovery package"), expect.any(Error));
     expect(await createUnwrittenReleases(() => file).list("owner")).toEqual([]);
   } finally {vi.restoreAllMocks();}

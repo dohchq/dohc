@@ -35,7 +35,7 @@ export async function reconcileOwnerLiveStops(options: {
     if (acceptedCursor===null) return;
     options.assertCurrent();
     try {
-      if (stop.binding) await (options.release ? options.release(stop.binding,acceptedCursor,options.signal) : options.client.ownerYDocRelease(request(),stop.binding,acceptedCursor,options.signal));
+      if (stop.binding) await (options.release ? options.release(stop.binding,acceptedCursor,options.signal) : options.client.ownerYDocRelease(request(),stop.binding,{acceptedCursor},options.signal));
       else await options.client.ownerYDocStopRetired(request(),stop.document,options.signal);
     }
     catch (error) {

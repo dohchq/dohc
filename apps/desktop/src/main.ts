@@ -6552,7 +6552,10 @@ function registerIpcHandlers(): void {
           const client=desktopEngine.daemon?.currentClient();
           if (!(client instanceof EngineClient)) throw new Error("dohc could not change live editing. Restart dohc and try again.");
           const request={id:0,workspace:session.workspace,deadlineMs:30_000};
-          if (action==="request") return client.ownerYDocStopRequest(request,path);
+          if (action==="request") {
+            if (!binding || "lineageClaimId" in binding) throw new TypeError("A Stop request names its document.");
+            return client.ownerYDocStopRequest(request,binding);
+          }
           if (action==="retired") {await client.ownerYDocStopRetired(request,binding!);return undefined;}
           return undefined;
         });
@@ -6570,16 +6573,20 @@ function registerIpcHandlers(): void {
       desktopEngine.retryOwnerDelivery(workspace.workspaceId);
       return result;
     },
+    liveDocument: async (workspace,target) => {
+      const resolved=await withEngineAdapter(workspace,adapter => adapter.resolveFiles({workspaceId:workspace.workspaceId,targets:[target]}));
+      if (!resolved) throw new Error("dohc could not change live editing. Restart dohc and try again.");
+      const [file]=resolved.results;
+      return file?.status==="found" ? {mainVersionId:resolved.versionId,objectId:file.objectId,currentPath:file.path} : null;
+    },
+    withoutEditors: (workspace,path,change) => engineYDocSessionIpc.withLiveEditingChange(workspace.attachmentId,path,change),
     ownerLiveQuarantines: workspace => desktopEngine.ownerLiveQuarantines(workspace.workspaceId),
     unwrittenOwnerLiveReleases: workspace => desktopEngine.unwrittenOwnerLiveReleases(workspace.workspaceId),
     retryOwnerLiveRelease: (workspace,objectId) => desktopEngine.retryOwnerLiveRelease(workspace,objectId),
   };
   const agentOwnerLiveDocuments = createOwnerLiveDocumentActions<DesktopWorkspaceOperation["workspace"], DesktopWorkspaceOperation>(ownerLiveDocumentDependencies);
-  ownerLiveStopAgainForCli = (operation, kept) => agentOwnerLiveDocuments.stopAgain(
-    {workspaceId: operation.workspace.workspaceId, path: kept.path, again: kept}, operation, {
-      documentPath: async objectId => await activity.engineCaptureFor(operation.workspace.workspaceId)?.filePathForObjectId(objectId) ?? null,
-      withoutEditors: (path, change) => engineYDocSessionIpc.withLiveEditingChange(operation.workspace.attachmentId, path, change),
-    });
+  ownerLiveStopAgainForCli = (operation, kept) => agentOwnerLiveDocuments.stop(
+    {workspaceId: operation.workspace.workspaceId, path: kept.path, again: kept}, operation);
   const relayShareHandlers = createRelaySharesIpcHandlers<
     WebContents,
     IpcMainInvokeEvent,
