@@ -1365,7 +1365,8 @@ it("holds a departing document whose unrecorded copy misses a later accepted edi
 // Proves: the departure reaches every queue of the document, not only the
 // first page of them, so a Try again granted on a queue past that page ends
 // too. A queue the engine no longer holds loses its row instead of failing
-// every departure.
+// every departure. Each departure reads all 258 queue headers again, which
+// took 43 s under load.
 it("ends a Try again past the first page of a stopped document's queues, and forgets a queue the engine no longer holds", async () => {
   const o = await enrolledServiceHost(), k = keptEdits(o);
   const errors = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -1380,7 +1381,7 @@ it("ends a Try again past the first page of a stopped document's queues, and for
   expect(o.keptOutbox).toMatchObject({state: "quarantined", retryDeliveryId: null});
   expect(o.f.storage.readServiceKeptEdits(k.queue("released-queue"))).toBeNull();
   expect(k.row()).toMatchObject({retrying: false, copied: false});
-});
+}, 120_000);
 
 // Proves: a row of the store an identity rotation left behind holds nothing.
 // A fresh daemon under the new identity lets the stopped document go, reaches

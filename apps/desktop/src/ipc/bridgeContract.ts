@@ -428,7 +428,9 @@ export const OwnerLiveQuarantine = z.object({
   // the edits into the document but could not write them to the file.
   // copied: the server keeps them, and a recovery copy is on this computer.
   // cannot-write: as not-written, but dohc can only save a recovery copy.
-  recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write", "copied"]),
+  // unreadable: the engine on this computer refused to read the queue, for
+  // `reason`; only Try again, which reads it again, can act on it.
+  recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write", "copied", "unreadable"]),
   // The server keeps them in an earlier copy of the workspace, copied or not, so Try again cannot reach them.
   earlier: z.literal(true).optional(),
 }).strict();

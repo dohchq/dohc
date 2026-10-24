@@ -337,6 +337,7 @@ const DOCUMENT_VERBS = {
       "A recovery of not-written or stopping means a Stop kept the edits. Run stop-again to finish it.",
       "A recovery of cannot-write means only a recovery copy can return the edits. Copied means a recovery copy of edits the server keeps is saved.",
       "If the server accepts a later edit to the document, copied returns to paused. Save another recovery copy to include that edit.",
+      "A recovery of unreadable means dohc could not read the edits it keeps on this computer, and reason says why. Run retry-kept-edits to read them again.",
       "earlier is true when the server keeps the edits in an earlier copy of the workspace. Save a recovery copy to get them back; try again cannot reach them."],
     parse: input => {
       noExtraArgs(input.operands, "document kept-edits");
@@ -347,7 +348,7 @@ const DOCUMENT_VERBS = {
     capabilityId: "share.live.document.recovery.save",
     summary: "Save a document's kept edits next to it.",
     operands: "<path> [<incident>]",
-    notes: ["Accepts every recovery.",
+    notes: ["Accepts every recovery but unreadable.",
       "With an incident from kept-edits, dohc saves exactly those kept edits. Without one, it saves edits a Stop could not write first.",
       "dohc writes a recovery package with every kept edit, and a readable copy when it can read the edits as a document.",
       "For edits the server keeps, dohc then tells the server the copy is saved, and the recovery becomes copied.",
@@ -366,6 +367,7 @@ const DOCUMENT_VERBS = {
     summary: "Send a document's kept edits to the server once more.",
     operands: "<path> <incident>",
     notes: ["Take the incident from kept-edits. Accepts a recovery of paused, or copied for edits the server keeps.",
+      "For unreadable, dohc reads the kept edits again. It fails with the reason while it still cannot read them.",
       "A not-written or stopping document needs stop-again instead.",
       "Run kept-edits again to follow it: retrying until the server answers, paused with a new incident if it refuses again."],
     parse: input => {

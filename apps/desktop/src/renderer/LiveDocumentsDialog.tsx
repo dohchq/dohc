@@ -13,7 +13,7 @@ export type LiveDocumentRow = {
   canResume: boolean;
   deferredStop?: {unsentEdits: number; editable: boolean};
   /** The server refused this document's edits for good, and dohc keeps them where `storedOn` says. */
-  quarantine?: "paused" | "retrying" | "stopping" | "stopped-kept" | "not-written" | "cannot-write" | "copied";
+  quarantine?: "paused" | "retrying" | "stopping" | "stopped-kept" | "not-written" | "cannot-write" | "copied" | "unreadable";
   /** The server keeps them in an earlier copy of the workspace, copied or not. */
   earlier?: true;
   storedOn?: "this-computer" | "server";
@@ -61,6 +61,8 @@ export type LiveDocumentsDialogProps = {
   reveal?: string;
   /** Writes the kept edits a row shows next to its file, settling when the save ends. The shell reports the result. */
   saveRecoveryCopy?: (workspaceId: string, path: string, incident?: string) => Promise<void>;
+  /** Reads again the kept edits of a row dohc could not read, named by its incident. */
+  readKeptEdits?: (workspaceId: string, objectId: string, incident: string) => Promise<void>;
   /** One page of refused shares, from the share id the previous page ended on. */
   loadRefusals: (workspaceId: string, after?: string) => Promise<LiveRefusalPage>;
   /** Asks the engine to enrol one refused share again. */
@@ -76,7 +78,8 @@ type Work =
   | { kind: "reload" }
   | { kind: "more"; cursor: string }
   | { kind: "stop"; path: string; objectId: string; again?: LiveDocumentStopAgain }
-  | { kind: "resume"; path: string };
+  | { kind: "resume"; path: string }
+  | { kind: "read"; path: string; objectId: string; incident: string };
 type ListState =
   | { kind: "loading" }
   | { kind: "ready"; rows: LiveDocumentRow[]; nextCursor: string | null }
@@ -157,6 +160,7 @@ function mergeRows(
 }
 
 function statusLabel(row: LiveDocumentRow): string {
+  if (row.quarantine === "unreadable") return "Can't read edits";
   if (row.quarantine === "paused" && row.earlier) return "Kept on the server";
   if (row.quarantine === "paused" || row.quarantine === "copied") return "Paused";
   if (row.quarantine === "retrying") return "Trying again";
@@ -226,6 +230,8 @@ function quarantineNote(row: LiveDocumentRow): string | null {
       return "When live editing stopped, dohc kept your unsent edits but could not write them to your file. Save a recovery copy to get them back.";
     case "cannot-write":
       return "When live editing stopped, dohc kept your unsent edits but can't finish writing them to your file. Save a recovery copy to get them back.";
+    case "unreadable":
+      return "The server could not accept your edits. dohc kept them on this computer, but could not read them. Try again to read them.";
     default:
       return null;
   }
@@ -239,12 +245,15 @@ function busyLabel(work: Work): string {
       return "Loading more live documents…";
     case "stop":
       return `Stopping live editing for ${work.path}…`;
+    case "read":
+      return `Reading your kept edits for ${work.path}…`;
     default:
       return `Resuming live editing for ${work.path}…`;
   }
 }
 
 function failureMessage(work: Work, readFailed: boolean): string {
+  if (work.kind === "read" && !readFailed) return `dohc could not read the edits it kept for ${work.path}.`;
   if (readFailed || !isMutation(work)) return readFailedMessage;
   return work.kind === "stop"
     ? `dohc could not stop live editing for ${work.path}.`
@@ -296,6 +305,7 @@ export function LiveDocumentsDialog({
   onStopped,
   reveal,
   saveRecoveryCopy,
+  readKeptEdits,
 }: LiveDocumentsDialogProps) {
   const [state, setState] = useState<ListState>({ kind: "loading" });
   const listRef = useRef<HTMLUListElement | null>(null);
@@ -373,6 +383,10 @@ export function LiveDocumentsDialog({
           if (keptEdits !== "none") onStopped?.(work.path, keptEdits);
         } else if (work.kind === "resume") {
           await resume(workspaceId, work.path);
+          if (!isCurrent()) return;
+          mutated = true;
+        } else if (work.kind === "read" && readKeptEdits) {
+          await readKeptEdits(workspaceId, work.objectId, work.incident);
           if (!isCurrent()) return;
           mutated = true;
         }
@@ -662,11 +676,25 @@ export function LiveDocumentsDialog({
                     Try again
                   </SecondaryButton>
                 ) : null}
+                {row.quarantine === "unreadable" && readKeptEdits ? (
+                  <SecondaryButton
+                    size="compact"
+                    className="shrink-0"
+                    disabled={listBusy}
+                    aria-label={`Try again to read your kept edits for ${row.path}`}
+                    onClick={() => {
+                      if (row.incident !== undefined) perform({ kind: "read", path: row.path, objectId: row.objectId, incident: row.incident });
+                    }}
+                  >
+                    Try again
+                  </SecondaryButton>
+                ) : null}
+                {/* Save needs the queue head dohc could not read. */}
                 {row.quarantine !== undefined && saveRecoveryCopy ? (
                   <SecondaryButton
                     size="compact"
                     className="shrink-0"
-                    disabled={savingCopies.has(`${workspaceId}\n${row.path}`)}
+                    disabled={row.quarantine === "unreadable" || savingCopies.has(`${workspaceId}\n${row.path}`)}
                     aria-busy={savingCopies.has(`${workspaceId}\n${row.path}`) || undefined}
                     aria-label={`Save recovery copy of ${row.path}`}
                     onClick={() => {
