@@ -908,6 +908,7 @@ impl EngineService {
             // suppression only after the shutdown drain — an in-flight
             // reconcile apply still consults the registry.
             open.shutdown_capture().await;
+            lock(&open.local_state).take();
             self.self_writes
                 .scoped(&open.root)
                 .clear_workspace(&open.workspace_id);
@@ -3418,6 +3419,34 @@ mod tests {
         close(read).await;
     }
 
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn closing_a_workspace_releases_its_local_folder_while_retained() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let local = scratch.path().join(".dohc/local");
+        let renamed = scratch.path().join(".dohc/local-renamed");
+        let service = EngineService::new();
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                open_params(scratch.path(), "local", json!({ "captureMode": "none" })),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        let retained = service.open(Some(&handle)).expect("retained binding");
+        assert!(std::fs::rename(&local, &renamed).is_err());
+
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
+        std::fs::rename(&local, &renamed)
+            .expect("close releases local while the binding is retained");
+        drop(retained);
+    }
+
     /// While a binding is open, `.dohc/local` can change outside dohc, except
     /// on Windows, where the open holds the folder. A second open of the live
     /// binding prepares it again and answers what it found.
@@ -4337,6 +4366,16 @@ mod tests {
             serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
 
         let retained = service.open(Some(&handle)).expect("retained dead binding");
+        #[cfg(windows)]
+        {
+            assert!(
+                std::fs::rename(
+                    scratch.path().join(".dohc/local"),
+                    scratch.path().join(".dohc/local-renamed"),
+                )
+                .is_err()
+            );
+        }
 
         lock(&service.pending_cursors).insert(
             "evicted-token".to_owned(),
@@ -4394,5 +4433,12 @@ mod tests {
             .workspace_close(Some(rebound))
             .await
             .expect("final workspace close");
+        #[cfg(windows)]
+        std::fs::rename(
+            scratch.path().join(".dohc/local"),
+            scratch.path().join(".dohc/local-renamed"),
+        )
+        .expect("eviction releases local while the dead binding is retained");
+        drop(retained);
     }
 }
