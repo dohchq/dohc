@@ -194,6 +194,32 @@ describe("desktop tray owner", () => {
     expect(h.notices[0]?.options.body).toBe("Running 1 schedule. To quit, open dohc and press Ctrl+Q.");
   });
 
+  it("sends one notice when two closes overlap", async () => {
+    const h = await harness("linux");
+    await h.asset("icon-light.png");
+    await h.owner.refreshDispatchTray();
+    const check = deferred<boolean>();
+    h.linuxTrayShown.mockImplementation(() => check.promise);
+    const first = h.owner.noticeRunningInBackground();
+    const second = h.owner.noticeRunningInBackground();
+    check.resolve(false);
+    await Promise.all([first, second]);
+    expect(h.notices).toHaveLength(1);
+  });
+
+  it("sends no notice once dohc quits during the check", async () => {
+    const quitting = await harness("linux");
+    await quitting.asset("icon-light.png");
+    await quitting.owner.refreshDispatchTray();
+    const late = deferred<boolean>();
+    quitting.linuxTrayShown.mockImplementation(() => late.promise);
+    const notice = quitting.owner.noticeRunningInBackground();
+    quitting.setLifecycle({ isQuitting: () => true });
+    late.resolve(false);
+    await notice;
+    expect(quitting.notices).toHaveLength(0);
+  });
+
   it("leaves the notice to the tray where one shows", async () => {
     const linux = await harness("linux");
     await linux.asset("icon-light.png");

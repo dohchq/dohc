@@ -169,7 +169,9 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   let backgroundNoticeShown = false;
   async function noticeRunningInBackground(): Promise<void> {
     if (process.platform !== "linux" || backgroundNoticeShown) return;
-    if (await dependencies.linuxTrayShown()) return;
+    const trayShown = await dependencies.linuxTrayShown();
+    // A quit, or another close's notice, may have come during the check.
+    if (trayShown || backgroundNoticeShown || dependencies.appLifecycle.isQuitting()) return;
     backgroundNoticeShown = true;
     const schedules = dependencies.runningSchedules();
     const notice = new dependencies.Notification({
