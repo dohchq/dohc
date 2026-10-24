@@ -26,7 +26,7 @@ If the purpose, state, or next click disappears, show it with an icon, position,
 | A type label (`DOCUMENT`) | The file's icon |
 | A panel title that repeats the active rail icon | The rail's active mark |
 | The same status twice (`Local · saved`, then `Saved`) | One mark in one place |
-| A helper sentence under a control | A live preview of its effect |
+| A helper sentence under a control | A live preview of its effect, or a tooltip |
 | A scope tag on every row | One group heading per scope |
 | Prose about what changed | A number, a bar, or the changed words highlighted |
 | A label saying who is an agent | The agent's square avatar |
@@ -41,7 +41,12 @@ Some meaning still needs words or its own mark:
 
 ## Words
 
-Say what is true, what changed, and what to do next. Keep that order, and use as few words as it takes.
+Use as few words as possible in anything a person sees without a hover or a click.
+Put further detail behind a tooltip, a **More details** disclosure, or a **Learn more** link.
+Link **Learn more** only to a page that exists.
+Keep an error and its next step in view.
+
+Say what is true, what changed, and what to do next, in that order.
 
 Most strings do one of four jobs:
 
@@ -262,7 +267,8 @@ A running agent shows a 6px round `bg-agent` dot.
 1. Is the surface's one job obvious, and does it carry the most visual weight?
 2. Does every border earn its place? Prefer space and background steps to boxes inside boxes.
 3. Are hover, active, focus-visible, disabled, empty, loading, and error states all there?
-4. Does each string do one job, and does every error and empty state give a Next?
-5. Does every noun match the surrounding UI?
-6. Read each string as someone whose sync just failed. Does it help them?
-7. Would Notion or Linear ship it? If not, it is not done.
+4. Is every visible string as short as it can be, with further detail behind a hover or a click?
+5. Does each string do one job, and does every error and empty state give a Next?
+6. Does every noun match the surrounding UI?
+7. Read each string as someone whose sync just failed. Does it help them?
+8. Would Notion or Linear ship it? If not, it is not done.
