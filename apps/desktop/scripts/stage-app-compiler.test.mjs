@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { before, test } from "node:test";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -14,6 +14,9 @@ import { createInstalledDatasetCompiler } from "../src/workspaces/installedDatas
 import { stageAppCompiler, requireAppCompiler, readPinnedCompilerNode, archiveMember } from "./stage-app-compiler.mjs";
 
 import { PINNED_NODE } from "./pinned-node.mjs";
+import { warmWindowsCompiler } from "./warm-windows-compiler.mjs";
+
+before(warmWindowsCompiler, { timeout: 190000 });
 
 const require = createRequire(import.meta.url);
 const builderRequire = createRequire(require.resolve("electron-builder/package.json"));
