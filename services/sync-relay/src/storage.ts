@@ -423,8 +423,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   recordServiceKeptEdits(input: Parameters<typeof serviceKeptEditsStorage.recordServiceKeptEdits>[1]) {
     return serviceKeptEditsStorage.recordServiceKeptEdits(this, input);
   }
-  forgetServiceKeptEdits(input: {workspaceId: string; outboxId: string}) {
-    return serviceKeptEditsStorage.forgetServiceKeptEdits(this, input);
+  forgetServiceKeptEdits(queue: serviceKeptEditsStorage.ServiceKeptEditsQueue) {
+    return serviceKeptEditsStorage.forgetServiceKeptEdits(this, queue);
   }
   releaseServiceKeptEdits(document: {workspaceId: string; objectId: string}) {
     return serviceKeptEditsStorage.releaseServiceKeptEdits(this, document);
@@ -432,8 +432,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   listServiceKeptEdits(workspaceId: string, after?: number) {
     return serviceKeptEditsStorage.listServiceKeptEdits(this, workspaceId, after);
   }
-  readServiceKeptEdits(workspaceId: string, outboxId: string) {
-    return serviceKeptEditsStorage.readServiceKeptEdits(this, workspaceId, outboxId);
+  readServiceKeptEdits(queue: serviceKeptEditsStorage.ServiceKeptEditsQueue) {
+    return serviceKeptEditsStorage.readServiceKeptEdits(this, queue);
+  }
+  readServiceKeptEditsRefusal(input: {workspaceId: string; outboxId: string; generation: number}) {
+    return serviceKeptEditsStorage.readServiceKeptEditsRefusal(this, input);
   }
   serviceKeptEditsOf(document: {workspaceId: string; objectId: string}, after?: number) {
     return serviceKeptEditsStorage.serviceKeptEditsOf(this, document, after);
@@ -441,8 +444,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   markServiceKeptEditsRetrying(input: {workspaceId: string; outboxId: string; generation: number}) {
     return serviceKeptEditsStorage.markServiceKeptEditsRetrying(this, input);
   }
-  endServiceKeptEditsRetry(input: {workspaceId: string; outboxId: string}) {
-    return serviceKeptEditsStorage.endServiceKeptEditsRetry(this, input);
+  endServiceKeptEditsRetry(queue: serviceKeptEditsStorage.ServiceKeptEditsQueue) {
+    return serviceKeptEditsStorage.endServiceKeptEditsRetry(this, queue);
   }
   confirmServiceKeptEditsCopy(input: {workspaceId: string; outboxId: string; generation: number}) {
     return serviceKeptEditsStorage.confirmServiceKeptEditsCopy(this, input);

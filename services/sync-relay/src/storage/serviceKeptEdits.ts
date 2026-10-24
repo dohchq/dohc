@@ -7,7 +7,9 @@ import {parseWorkspaceId} from "../requestInputs";
 // Owner queues the service host keeps refused, one row per queue, so the owner
 // can see and recover them after the host unloads, retires or restarts. The
 // host's engine holds the bytes, in the store of the workspace identity the
-// row names. Each refusal gets a new row whose `generation` the relay never
+// row names. An outbox ID names a queue only within one store: a store of a
+// later identity can hold another queue with the same ID, so the identity is
+// part of the key. Each refusal gets a new row whose `generation` the relay never
 // hands out again, so a recovery copy, a Try again or a confirmation names
 // exactly the refusal it saw. A refused queue only shrinks until it is
 // refused again. The generation counts across the relay, so the gap between
@@ -29,7 +31,7 @@ const SQL = `CREATE TABLE ${SERVICE_KEPT_EDITS} (
   retrying INTEGER NOT NULL CHECK (retrying IN (0,1)),
   copied INTEGER NOT NULL CHECK (copied IN (0,1)),
   recorded_at_ms INTEGER NOT NULL CHECK (recorded_at_ms >= 0),
-  UNIQUE (workspace_id, outbox_id),
+  UNIQUE (workspace_id, replication_epoch, stream_identity, outbox_id),
   FOREIGN KEY (workspace_id) REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
 ) STRICT`;
 const OBJECT_INDEX = "idx_sync_relay_service_kept_edits_object";
@@ -41,6 +43,8 @@ export const SERVICE_KEPT_EDITS_REASONS: readonly string[] = ["provenance-refuse
 
 /** The workspace identity whose hosted store holds a queue. */
 export interface ServiceKeptEditsIdentity {readonly replicationEpoch: string; readonly streamIdentity: string}
+/** One queue, in the store of one workspace identity. */
+export interface ServiceKeptEditsQueue {readonly workspaceId: string; readonly identity: ServiceKeptEditsIdentity; readonly outboxId: string}
 export const sameKeptEditsIdentity = (a: ServiceKeptEditsIdentity, b: {replicationEpoch: string | null; streamIdentity: string | null} | null | undefined) =>
   !!b && a.replicationEpoch === b.replicationEpoch && a.streamIdentity === b.streamIdentity;
 
@@ -91,6 +95,10 @@ function row(value: Record<string, unknown>): ServiceKeptEdits {
     generation, retrying: value.retrying === 1, copied: value.copied === 1});
 }
 
+const QUEUE = "workspace_id=? AND replication_epoch=? AND stream_identity=? AND outbox_id=?";
+const queueKey = (queue: ServiceKeptEditsQueue) => [parseWorkspaceId(queue.workspaceId), parseLiveUpdateIdentifier(queue.identity.replicationEpoch, "replication epoch"),
+  parseLiveUpdateIdentifier(queue.identity.streamIdentity, "stream identity"), parseLiveUpdateIdentifier(queue.outboxId, "outbox ID")] as const;
+
 /**
  * Records a refusal of the queue's head, identified by its refusal key. The
  * same refusal recorded again changes nothing; any other is a new generation,
@@ -101,25 +109,23 @@ export function recordServiceKeptEdits(storage: StorageContext, input: {identity
   const binding = parseLiveObjectBinding(input.binding), outboxId = parseLiveUpdateIdentifier(input.outboxId, "outbox ID");
   if (!SERVICE_KEPT_EDITS_REASONS.includes(input.reason)) throw new Error("Invalid kept edits reason.");
   const refusalKey = parseLiveUpdateIdentifier(input.refusalKey, "refusal key");
-  const epoch = parseLiveUpdateIdentifier(input.identity.replicationEpoch, "replication epoch"), stream = parseLiveUpdateIdentifier(input.identity.streamIdentity, "stream identity");
+  const queue = queueKey({workspaceId: binding.workspaceId, identity: input.identity, outboxId});
   const standing = storage.captureStanding();
   storage.tx(() => {
     standing();
-    const existing = storage.db.prepare(`SELECT refusal_key,replication_epoch,stream_identity FROM ${SERVICE_KEPT_EDITS} WHERE workspace_id=? AND outbox_id=?`)
-      .get(binding.workspaceId, outboxId);
-    if (existing?.refusal_key === refusalKey && existing.replication_epoch === epoch && existing.stream_identity === stream) return;
-    storage.db.prepare(`DELETE FROM ${SERVICE_KEPT_EDITS} WHERE workspace_id=? AND outbox_id=?`).run(binding.workspaceId, outboxId);
+    if (storage.db.prepare(`SELECT refusal_key FROM ${SERVICE_KEPT_EDITS} WHERE ${QUEUE}`).get(...queue)?.refusal_key === refusalKey) return;
+    storage.db.prepare(`DELETE FROM ${SERVICE_KEPT_EDITS} WHERE ${QUEUE}`).run(...queue);
     storage.db.prepare(`INSERT INTO ${SERVICE_KEPT_EDITS}(workspace_id,replication_epoch,stream_identity,outbox_id,object_id,binding_json,reason,head_delivery_id,refusal_key,retrying,copied,recorded_at_ms)
-      VALUES (?,?,?,?,?,?,?,?,?,0,0,?)`).run(binding.workspaceId, epoch, stream, outboxId, binding.objectId, JSON.stringify(binding),
+      VALUES (?,?,?,?,?,?,?,?,?,0,0,?)`).run(...queue, binding.objectId, JSON.stringify(binding),
       input.reason, parseLiveUpdateIdentifier(input.headDeliveryId, "delivery ID"), refusalKey, input.nowMs);
   });
 }
 
 /** Forgets a queue its host delivers again or no longer holds. */
-export function forgetServiceKeptEdits(storage: StorageContext, input: {workspaceId: string; outboxId: string}): void {
-  const workspaceId = parseWorkspaceId(input.workspaceId), standing = storage.captureStanding();
-  if (!storage.db.prepare(`SELECT 1 FROM ${SERVICE_KEPT_EDITS} WHERE workspace_id=? AND outbox_id=?`).get(workspaceId, input.outboxId)) return;
-  storage.tx(() => {standing(); storage.db.prepare(`DELETE FROM ${SERVICE_KEPT_EDITS} WHERE workspace_id=? AND outbox_id=?`).run(workspaceId, input.outboxId);});
+export function forgetServiceKeptEdits(storage: StorageContext, queue: ServiceKeptEditsQueue): void {
+  const key = queueKey(queue), standing = storage.captureStanding();
+  if (!storage.db.prepare(`SELECT 1 FROM ${SERVICE_KEPT_EDITS} WHERE ${QUEUE}`).get(...key)) return;
+  storage.tx(() => {standing(); storage.db.prepare(`DELETE FROM ${SERVICE_KEPT_EDITS} WHERE ${QUEUE}`).run(...key);});
 }
 
 /** Forgets the document's rows once it left its host with a recovery copy of every refusal. */
@@ -141,9 +147,18 @@ export function listServiceKeptEdits(storage: StorageContext, workspaceId: strin
   return {keptEdits, nextCursor: values.length > SERVICE_KEPT_EDITS_PAGE ? keptEdits.at(-1)!.generation : null};
 }
 
-export function readServiceKeptEdits(storage: StorageContext, workspaceId: string, outboxId: string): ServiceKeptEdits | null {
+/** The row of one queue in one identity's store. */
+export function readServiceKeptEdits(storage: StorageContext, queue: ServiceKeptEditsQueue): ServiceKeptEdits | null {
   storage.captureStanding();
-  const value = storage.db.prepare(`SELECT * FROM ${SERVICE_KEPT_EDITS} WHERE workspace_id=? AND outbox_id=?`).get(parseWorkspaceId(workspaceId), outboxId);
+  const value = storage.db.prepare(`SELECT * FROM ${SERVICE_KEPT_EDITS} WHERE ${QUEUE}`).get(...queueKey(queue));
+  return value ? row(value) : null;
+}
+
+/** The row of one refusal, as its owner names it: the queue and the refusal's generation, whatever store holds it. */
+export function readServiceKeptEditsRefusal(storage: StorageContext, input: {workspaceId: string; outboxId: string; generation: number}): ServiceKeptEdits | null {
+  storage.captureStanding();
+  const value = storage.db.prepare(`SELECT * FROM ${SERVICE_KEPT_EDITS} WHERE workspace_id=? AND outbox_id=? AND generation=?`)
+    .get(parseWorkspaceId(input.workspaceId), input.outboxId, input.generation);
   return value ? row(value) : null;
 }
 
@@ -168,11 +183,11 @@ export function markServiceKeptEditsRetrying(storage: StorageContext, input: {wo
 }
 
 /** Records that the host ended the owner's Try again of this queue without an attempt. */
-export function endServiceKeptEditsRetry(storage: StorageContext, input: {workspaceId: string; outboxId: string}): void {
-  const standing = storage.captureStanding();
+export function endServiceKeptEditsRetry(storage: StorageContext, queue: ServiceKeptEditsQueue): void {
+  const key = queueKey(queue), standing = storage.captureStanding();
   storage.tx(() => {
     standing();
-    storage.db.prepare(`UPDATE ${SERVICE_KEPT_EDITS} SET retrying=0 WHERE workspace_id=? AND outbox_id=?`).run(parseWorkspaceId(input.workspaceId), input.outboxId);
+    storage.db.prepare(`UPDATE ${SERVICE_KEPT_EDITS} SET retrying=0 WHERE ${QUEUE}`).run(...key);
   });
 }
 

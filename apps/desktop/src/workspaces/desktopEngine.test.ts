@@ -1456,7 +1456,7 @@ describe("server owner peer lifecycle", () => {
     const kept = await keptRelease();
     await kept.records().endRetry("owner", "object", keptBinding);
     const {f, credentials} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}], {kept: () =>
-      [{objectId: "object", path: "notes/plan.md", outboxId: "server-outbox", reason: "invalid-update", generation: 1, recovery: "paused"}]});
+      [{objectId: "object", path: "notes/plan.md", outboxId: "server-outbox", reason: "invalid-update", generation: 1, store: "store", recovery: "paused"}]});
     f.dependencies.ownerLiveReleases = kept.records();
     ownerDeliveryMock.pass.mockResolvedValue("frozen");
     try {
@@ -1492,7 +1492,7 @@ describe("server owner peer lifecycle", () => {
   // them, Save recovery copy writes the server's queue beside the document and
   // only then tells the server, and Try again names the server's refusal.
   it("saves edits the server keeps from the server's queue, then confirms the copy, and tries them again on the server", async () => {
-    let kept = [{objectId: "object", path: "notes/plan.md", outboxId: "server-outbox", reason: "invalid-update", generation: 1, recovery: "paused"}];
+    let kept = [{objectId: "object", path: "notes/plan.md", outboxId: "server-outbox", reason: "invalid-update", generation: 1, store: "store", recovery: "paused"}];
     const requests: {action: string; outboxId: string; generation: number}[] = [];
     const pages = servedPages({...recoveryQueue(keptBinding).queue, outboxId: "server-outbox"});
     const {f, credentials, workspace} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}], {kept: () => kept,
@@ -1536,7 +1536,7 @@ describe("server owner peer lifecycle", () => {
     const served: OwnerYDocOutboxRecovery = {...queue, outboxId: "server-outbox", entries: queue.entries.map(entry => ({...entry, personEdit: true as const,
       agentDeclaration: {agentId: "agent", onBehalfOf: null, depth: 1}, nativeSource: {binding: keptBinding, adoptionId: "adoption", nativeSequence: 2, updateDigest: entry.updateDigest,
         origin: {kind: "nativeUpdate" as const, actorOriginId: "origin", actorKind: "agent", onBehalfOf: "owner", chainDepth: 1, recordedAtMs: 1}}}))};
-    const row = {objectId: "object", path: "notes/plan.md", outboxId: "server-outbox", reason: "invalid-update", generation: 1, recovery: "paused" as const};
+    const row = {objectId: "object", path: "notes/plan.md", outboxId: "server-outbox", reason: "invalid-update", generation: 1, store: "store", recovery: "paused" as const};
     const pages = servedPages(served, 2);
     let reads = 0;
     expect(await readServerKeptEditsQueue(row, async cursor => {reads++; return {ok: true, page: pages(cursor)};})).toEqual(served);
@@ -1552,7 +1552,7 @@ describe("server owner peer lifecycle", () => {
   // fails keeps the last complete list.
   it("discovers and saves row 257 of the server's kept edits, and keeps the last complete list when a page fails", async () => {
     const row = (index: number) => ({objectId: `object-${index}`, path: `notes/plan-${index}.md`, outboxId: `server-outbox-${index}`, reason: "invalid-update",
-      generation: index, recovery: "paused"});
+      generation: index, store: "store", recovery: "paused"});
     const firstPage = Array.from({length: 256}, (_, index) => row(index + 1));
     let failing = false;
     const pageRequests: number[] = [], actions: string[] = [];
@@ -1590,8 +1590,8 @@ describe("server owner peer lifecycle", () => {
   // and one it cannot reach reads as unreachable and offers neither Save nor Try again.
   it("drops a server row the server answers changed, and marks one it cannot reach", async () => {
     let answer: "changed" | "unreachable" = "changed";
-    const kept = [{objectId: "object", path: "notes/plan.md", outboxId: "server-outbox", reason: "invalid-update", generation: 1, recovery: "paused"},
-      {objectId: "object-2", path: "notes/other.md", outboxId: "server-outbox-2", reason: "invalid-update", generation: 2, recovery: "paused"}];
+    const kept = [{objectId: "object", path: "notes/plan.md", outboxId: "server-outbox", reason: "invalid-update", generation: 1, store: "store", recovery: "paused"},
+      {objectId: "object-2", path: "notes/other.md", outboxId: "server-outbox-2", reason: "invalid-update", generation: 2, store: "store", recovery: "paused"}];
     const {f, credentials, workspace} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}], {kept: () => kept,
       keptEdits: async () => {throw new ServerKeptEditsConflict(answer === "unreachable");}});
     ownerDeliveryMock.pass.mockResolvedValue("frozen");
@@ -1604,6 +1604,33 @@ describe("server owner peer lifecycle", () => {
       await expect(f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "notes/other.md")).rejects.toThrow("earlier copy of this workspace");
       expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{objectId: "object-2", recovery: "unreachable"}]);
       await expect(f.engine.retryOwnerLiveQuarantine(await workspace(), "object-2", "server:server-outbox-2:2")).rejects.toThrow("earlier copy of this workspace");
+    } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
+  });
+
+  // Proves: the server's rows of two copies of the workspace that share an
+  // outbox ID stay two rows, and saving the current copy's row confirms that
+  // row alone, leaving the earlier copy's row as it was.
+  it("keeps the server's rows of two copies apart when they share an outbox ID", async () => {
+    const pages = servedPages({...recoveryQueue(keptBinding).queue, outboxId: "server-outbox"});
+    const row = {objectId: "object", path: "notes/plan.md", outboxId: "server-outbox", reason: "invalid-update"};
+    let kept = [{...row, generation: 1, store: "earlier", recovery: "unreachable"}, {...row, generation: 2, store: "current", recovery: "paused"}];
+    const actions: unknown[] = [];
+    const {f, credentials, workspace} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}], {kept: () => kept,
+      keptEdits: async input => {
+        if (input.action === "page") return {ok: true, page: pages(input.cursor)};
+        actions.push(input);
+        kept = kept.map(candidate => candidate.generation === input.generation ? {...candidate, recovery: "copied"} : candidate);
+        return {ok: true};
+      }});
+    ownerDeliveryMock.pass.mockResolvedValue("frozen");
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([
+        {incident: "server:server-outbox:1", recovery: "unreachable"}, {incident: "server:server-outbox:2", recovery: "paused"}]));
+      expect(await f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "notes/plan.md", "server:server-outbox:2")).toMatchObject({keptEdits: "copied"});
+      expect(actions).toEqual([{action: "copied", outboxId: "server-outbox", generation: 2}]);
+      expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([
+        {incident: "server:server-outbox:1", recovery: "unreachable"}, {incident: "server:server-outbox:2", recovery: "copied"}]);
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
   });
 

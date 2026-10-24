@@ -202,7 +202,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     try {return await work();}
     catch (error) {
       if (error instanceof ServerKeptEditsConflict) setServerQuarantines(workspaceId, serverQuarantinesOf(workspaceId).flatMap(candidate =>
-        candidate.outboxId !== row.outboxId ? [candidate] : error.unreachable ? [{...candidate, recovery: "unreachable" as const}] : []));
+        candidate.generation !== row.generation ? [candidate] : error.unreachable ? [{...candidate, recovery: "unreachable" as const}] : []));
       throw error;
     }
   }
@@ -928,7 +928,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
           await serverKeptEditsAction(workspace.workspaceId, held, () => withServerSession(workspace.workspaceId, (session, signal) =>
             session.keptEdits({action: "copied", outboxId: held.outboxId, generation: held.generation}, signal)));
           setServerQuarantines(workspace.workspaceId, serverQuarantinesOf(workspace.workspaceId)
-            .map((row): ServerKeptEdits => row.outboxId === held.outboxId && row.generation === held.generation ? {...row, recovery: "copied"} : row));
+            .map((row): ServerKeptEdits => row.generation === held.generation ? {...row, recovery: "copied"} : row));
         } catch (error) {
           // The copy is written. The server keeps the edits until a later save confirms one.
           console.error("[desktop] the server did not record the recovery copy:", error);

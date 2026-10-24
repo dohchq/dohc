@@ -88,14 +88,16 @@ export async function drainOwnerOutbox(options: {
   };
   const status = await readStatus(), outboxId = status.outboxId;
   const refusals = admission.refusals, held = JSON.stringify([host.mode,host.hostId,outboxId]);
+  // The row of this queue in the attached store. A store of another identity can hold a queue with the same ID.
+  const queue = admission.keptOnServer && typeof outboxId === "string" ? {workspaceId: binding.workspaceId, identity: admission.keptOnServer, outboxId} : undefined;
   // A queue that delivers again, as after an accepted Try again, is no longer
   // kept for its owner. Its status is read again under the hold, so a refusal
   // another pass is recording keeps its row.
-  if (admission.keptOnServer && typeof outboxId === "string" && status.quarantined === undefined && storage.readServiceKeptEdits(binding.workspaceId, outboxId)) {
+  if (queue && status.quarantined === undefined && storage.readServiceKeptEdits(queue)) {
     if (!refusals.hold(held)) return {admittedEntries: 0, hasMore: true};
     try {
       const current = await readStatus();
-      if (current.outboxId === outboxId && current.quarantined === undefined) storage.forgetServiceKeptEdits({workspaceId: binding.workspaceId, outboxId});
+      if (current.outboxId === outboxId && current.quarantined === undefined) storage.forgetServiceKeptEdits(queue);
     } finally {refusals.release(held);}
   }
   let receivedBytes = 0, admittedEntries = 0;
@@ -127,12 +129,12 @@ export async function drainOwnerOutbox(options: {
     const known = refusals.get(held);
     try {
       // A quarantine whose record was lost, or forgotten once its document left, is recorded from the engine's queue.
-      if (admission.keptOnServer && typeof outboxId === "string" && !storage.readServiceKeptEdits(binding.workspaceId, outboxId)) {
-        if (known) keep(outboxId, known);
+      if (queue && !storage.readServiceKeptEdits(queue)) {
+        if (known) keep(queue.outboxId, known);
         else {
-          const head = await outbox.readDeliveryHead(outboxId, binding); check();
+          const head = await outbox.readDeliveryHead(queue.outboxId, binding); check();
           if (head.entry && head.quarantineReason !== null && SERVICE_KEPT_EDITS_REASONS.includes(head.quarantineReason)) {
-            keep(outboxId, {reason: head.quarantineReason, deliveryId: head.entry.deliveryId, key: `quarantined:${head.entry.deliveryId}`});
+            keep(queue.outboxId, {reason: head.quarantineReason, deliveryId: head.entry.deliveryId, key: `quarantined:${head.entry.deliveryId}`});
           }
         }
       }

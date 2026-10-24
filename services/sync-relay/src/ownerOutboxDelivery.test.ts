@@ -349,16 +349,21 @@ it("delivers a Try again a later validator accepts under its original delivery, 
   expect(committedDeliveries(f)).toHaveLength(4);
 });
 
-// The relay's records of server-held refusals, one per queue. Recording the same refusal again changes nothing.
-type KeptRow = {outboxId: string; reason: string; headDeliveryId: string; refusalKey: string};
+// The relay's records of server-held refusals, one per queue of each store. Recording the same refusal again changes nothing.
+type Store = {replicationEpoch: string; streamIdentity: string};
+type KeptRow = {identity: Store; outboxId: string; reason: string; headDeliveryId: string; refusalKey: string};
 const store = {replicationEpoch: "epoch", streamIdentity: "stream"};
-function keptOnServer(f: ReturnType<typeof fixture>) {
-  const rows = new Map<string, KeptRow>();
-  Object.assign(f.admission, {keptOnServer: store});
+// The key of a queue's row in the store of `identity`.
+const at = (outboxId: string, identity: Store = store) => JSON.stringify([identity.replicationEpoch, identity.streamIdentity, outboxId]);
+function keptOnServer(f: ReturnType<typeof fixture>, rows = new Map<string, KeptRow>(), identity: Store = store) {
+  Object.assign(f.admission, {keptOnServer: identity});
   Object.assign(f.storage, {
-    recordServiceKeptEdits: vi.fn((input: KeptRow) => {if (rows.get(input.outboxId)?.refusalKey !== input.refusalKey) rows.set(input.outboxId, input);}),
-    readServiceKeptEdits: (_workspaceId: string, outboxId: string) => rows.get(outboxId) ?? null,
-    forgetServiceKeptEdits: vi.fn((input: {outboxId: string}) => {rows.delete(input.outboxId);})});
+    recordServiceKeptEdits: vi.fn((input: KeptRow) => {
+      const key = at(input.outboxId, input.identity);
+      if (rows.get(key)?.refusalKey !== input.refusalKey) rows.set(key, input);
+    }),
+    readServiceKeptEdits: (queue: {identity: Store; outboxId: string}) => rows.get(at(queue.outboxId, queue.identity)) ?? null,
+    forgetServiceKeptEdits: vi.fn((queue: {identity: Store; outboxId: string}) => {rows.delete(at(queue.outboxId, queue.identity));})});
   return rows;
 }
 
@@ -368,13 +373,13 @@ it("records each refusal of a server-held queue for its owner until a Try again 
   expect(await service.run()).toEqual({admittedEntries: 0, hasMore: false});
   expect([...rows.values()]).toEqual([{identity: store, outboxId: "outbox", binding: expect.objectContaining({objectId: "object"}),
     reason: "invalid-update", headDeliveryId: "delivery-1", refusalKey: expect.any(String), nowMs: expect.any(Number)}]);
-  const first = rows.get("outbox")!.refusalKey;
+  const first = rows.get(at("outbox"))!.refusalKey;
   // A quarantined queue, and one whose Try again is waiting, are still kept. A second refusal is a new record.
   expect(await service.run()).toEqual({admittedEntries: 0, hasMore: false});
   service.state.retryDeliveryId = "delivery-1";
   refuseOnce(service);
   expect(await service.run()).toEqual({admittedEntries: 0, hasMore: false});
-  expect(rows.get("outbox")!.refusalKey).not.toBe(first);
+  expect(rows.get(at("outbox"))!.refusalKey).not.toBe(first);
   // An accepted Try again resumes the queue; the next pass forgets it.
   service.state.retryDeliveryId = "delivery-1";
   expect(await service.run()).toEqual({admittedEntries: 3, hasMore: false});
@@ -395,14 +400,14 @@ it("leaves no server-held quarantine without its record, whatever is lost betwee
   quarantinedBy(f, ["lost"]); refuseOnce(f);
   await expect(f.run()).rejects.toThrow("Engine response lost.");
   expect(f.state.value).toBe("quarantined");
-  expect(rows.get("outbox")).toMatchObject({reason: "invalid-update", headDeliveryId: "delivery-1"});
+  expect(rows.get(at("outbox"))).toMatchObject({reason: "invalid-update", headDeliveryId: "delivery-1"});
   // The relay restarts having lost the record and every refusal it received.
   rows.clear(); Object.assign(f.admission, {refusals: new OwnerKnownRefusals()});
   expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
-  expect(rows.get("outbox")).toMatchObject({reason: "invalid-update", headDeliveryId: "delivery-1"});
-  const rebuilt = rows.get("outbox")!.refusalKey;
+  expect(rows.get(at("outbox"))).toMatchObject({reason: "invalid-update", headDeliveryId: "delivery-1"});
+  const rebuilt = rows.get(at("outbox"))!.refusalKey;
   expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
-  expect(rows.get("outbox")!.refusalKey).toBe(rebuilt);
+  expect(rows.get(at("outbox"))!.refusalKey).toBe(rebuilt);
   expect(f.validate).toHaveBeenCalledTimes(1); expect(f.receipts).toEqual([]);
 
   const healed = fixture(3), kept = keptOnServer(healed);
@@ -422,11 +427,11 @@ it("leaves no server-held quarantine without its record, whatever is lost betwee
 // keeps the record, and so does one whose second read sees that quarantine.
 it("forgets a server-held queue's record only under its hold, after reading its status again", async () => {
   const f = fixture(3), rows = keptOnServer(f);
-  rows.set("outbox", {outboxId: "outbox", reason: "invalid-update", headDeliveryId: "delivery-1", refusalKey: "recording"});
+  rows.set(at("outbox"), {identity: store, outboxId: "outbox", reason: "invalid-update", headDeliveryId: "delivery-1", refusalKey: "recording"});
   const held = JSON.stringify([undefined, "host", "outbox"]);
   expect(f.admission.refusals.hold(held)).toBe(true);
   expect(await f.run()).toEqual({admittedEntries: 0, hasMore: true});
-  expect(rows.has("outbox")).toBe(true);
+  expect(rows.has(at("outbox"))).toBe(true);
   f.admission.refusals.release(held);
   // The other pass's quarantine lands between this pass's two status reads.
   const answer = f.client.sendRequest.getMockImplementation()!;
@@ -436,8 +441,33 @@ it("forgets a server-held queue's record only under its hold, after reading its 
     return answer(request);
   });
   expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
-  expect(rows.has("outbox")).toBe(true);
+  expect(rows.has(at("outbox"))).toBe(true);
   expect(f.validate).not.toHaveBeenCalled();
+});
+
+// Proves: a row of an earlier store's queue survives everything the attached
+// store's queue with the same outbox ID goes through: draining while active, a
+// refusal, and a rebuild of its record once it is quarantined with none.
+it("keeps an earlier store's record of a queue whose outbox ID the attached store's queue shares", async () => {
+  const earlier = {replicationEpoch: "old-epoch", streamIdentity: "old-stream"};
+  const old = {identity: earlier, outboxId: "outbox", reason: "invalid-update", headDeliveryId: "delivery-1", refusalKey: "old-refusal"};
+  const rows = new Map([[at("outbox", earlier), old]]);
+  // Active, the attached store's queue drains.
+  const active = fixture(3);
+  keptOnServer(active, rows);
+  expect(await active.run()).toEqual({admittedEntries: 3, hasMore: false});
+  expect(rows.get(at("outbox", earlier))).toBe(old);
+  // Refused, it gets its own record.
+  const refused = fixture(3);
+  keptOnServer(refused, rows); quarantinedBy(refused); refuseOnce(refused);
+  expect(await refused.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(rows.get(at("outbox"))).toMatchObject({identity: store, headDeliveryId: "delivery-1"});
+  // Its record lost, a later pass rebuilds it from the engine's queue.
+  rows.delete(at("outbox")); Object.assign(refused.admission, {refusals: new OwnerKnownRefusals()});
+  expect(await refused.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(rows.get(at("outbox"))).toMatchObject({identity: store, refusalKey: "quarantined:delivery-1"});
+  expect(rows.get(at("outbox", earlier))).toBe(old);
+  expect(rows.size).toBe(2);
 });
 
 it.each(["admission-unavailable", "host-unavailable"])("retries the same head without quarantine while commit answers %s", async reason => {

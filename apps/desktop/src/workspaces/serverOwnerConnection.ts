@@ -11,6 +11,12 @@ import {OwnerLiveRefusalsResult} from "../ipc/bridgeContract";
 import {ServerKeptEditsConflict} from "./ownerLiveQuarantine";
 import {z} from "zod";
 
+// A list page holds up to 256 rows of edits the server kept. A row is at most
+// about 13 KiB: its 4096-character path alone can take 12 KiB of UTF-8.
+const KEPT_EDITS_PAGE_BYTES = 256 * 13 * 1024 + 64 * 1024;
+// The live document list carries its documents and the first such page.
+const LIVE_DOCUMENTS_BYTES = 1_048_576 + KEPT_EDITS_PAGE_BYTES;
+
 export function createServerOwnerConnection(options: {
   stateDir(): string;
   workspaces(): RegistryEntry[];
@@ -128,7 +134,7 @@ export function createServerOwnerConnection(options: {
           });
           assertCurrent(); requestSignal.throwIfAborted();
           if (!response.ok) {await response.body?.cancel(); throw new Error("Owner kept edits discovery failed.");}
-          const value = await readBoundedJson(response, 1_048_576, requestSignal);
+          const value = await readBoundedJson(response, KEPT_EDITS_PAGE_BYTES, requestSignal);
           assertCurrent();
           return value;
         },
@@ -165,7 +171,7 @@ export function createServerOwnerConnection(options: {
               assertCurrent(); requestSignal.throwIfAborted();
               if (next.done) break;
               bytes += next.value.byteLength;
-              if (bytes > 1_048_576) throw new Error("Owner live document response exceeds its byte limit.");
+              if (bytes > LIVE_DOCUMENTS_BYTES) throw new Error("Owner live document response exceeds its byte limit.");
               chunks.push(next.value);
             }
           } finally {await reader.cancel().catch(() => undefined); reader.releaseLock();}

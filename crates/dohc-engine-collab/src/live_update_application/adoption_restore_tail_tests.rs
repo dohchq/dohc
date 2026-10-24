@@ -1496,6 +1496,136 @@ fn native_restore_keeps_enrolled_owner_drafts_as_truthful_sources() {
 }
 
 #[test]
+fn a_queue_frozen_at_a_refused_seed_lets_its_document_leave_with_later_accepted_work() {
+    let mut f = Fixture::new();
+    f.local_edit_before_adoption();
+    f.adopt().unwrap();
+    let outbox: String = f
+        .store
+        .read_with(|conn| conn.query_row("SELECT outbox_id FROM owner_ydoc_outboxes", [], |r| r.get(0)))
+        .unwrap();
+    // Another person's edit the relay accepted after the adoption, on the accepted base without the seed.
+    let other = Ydoc::wire();
+    other.apply(&f.cut.baseline_bytes).unwrap();
+    let before = other.state_vector();
+    let bytes = other.richdoc_append_paragraph("Recipient text");
+    let mut first_seen: Vec<_> = other
+        .state_vector()
+        .iter()
+        .filter_map(|(client, clock)| {
+            let start = before.get(client);
+            (*clock > start).then_some(LiveUpdateStructRange {
+                client_id: client.get() as i64,
+                start_clock: i64::from(start),
+                end_clock: i64::from(*clock),
+            })
+        })
+        .collect();
+    first_seen.sort_by_key(|range| range.client_id);
+    let event = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: "recipient-edit".into(),
+                    update_digest: hex_sha256(&bytes),
+                    journal_cursor: 1,
+                    accepting_host_epoch: 1,
+                },
+                binding: f.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Named {
+                    principal_id: "recipient".into(),
+                    grant_id: "grant".into(),
+                    grant_generation: 1,
+                },
+                received_at_ms: 1,
+            },
+            first_seen,
+            canonical_version: Some(2),
+            author_snapshot: Some(vec![LiveAuthorEntry::Human {
+                human_id: "recipient".into(),
+                human_name: "Recipient".into(),
+            }]),
+            first_seen_deletes: Some(vec![]),
+            checkpoint_coverage: None,
+        },
+        update_bytes: bytes,
+    };
+    assert!(matches!(
+        apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            event,
+            &NoFaults,
+            100_000_000,
+            |_, _, _, _| Ok(())
+        )
+        .unwrap(),
+        ApplicationResult::Applied(..)
+    ));
+    let pending = |f: &Fixture| {
+        f.store
+            .read_with(|conn| {
+                Ok::<_, ApplicationError>((
+                    unload_pending(conn, "workspace", "object")?,
+                    park_pending(conn, "workspace", "object")?,
+                    frozen_at_refused_seed(conn, &f.key)?,
+                ))
+            })
+            .unwrap()
+    };
+    // The seed still delivers.
+    assert_eq!(
+        pending(&f),
+        (Some(UnloadPending::Delivery), Some(UnloadPending::Delivery), false)
+    );
+    owner_outbox::quarantine(
+        &mut f.store,
+        "workspace",
+        owner_outbox::OwnerOutboxQuarantineInput {
+            outbox_id: outbox.clone(),
+            reason: "invalid-update".into(),
+            observed_binding: None,
+        },
+        8,
+    )
+    .unwrap();
+    // Refused for good, the seed keeps the recipient's edit from settling, and
+    // nothing holds the document: the store keeps the edit and the queue.
+    assert_eq!(pending(&f), (None, None, true));
+    let kept: (i64, i64) = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT (SELECT count(*) FROM live_device_update_applications WHERE delivery_id='recipient-edit'),
+                 (SELECT count(*) FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1)",
+                [&outbox],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(kept, (1, 1));
+    // A granted Try again delivers the seed again, and settlement waits for it.
+    assert!(matches!(
+        f.store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE owner_ydoc_outboxes SET retry_delivery_id=(SELECT delivery_id FROM owner_ydoc_outbox_entries
+                     WHERE outbox_id=?1 AND pending=1 ORDER BY sequence LIMIT 1) WHERE outbox_id=?1",
+                    [&outbox],
+                )
+                .map_err(write_sql)
+            })
+            .unwrap(),
+        TxnOutcome::Committed(1)
+    ));
+    assert_eq!(
+        pending(&f),
+        (Some(UnloadPending::Delivery), Some(UnloadPending::Delivery), false)
+    );
+}
+
+#[test]
 fn native_restore_tail_keeps_adoption_seed_overlap_separate_from_admission() {
     let mut f = Fixture::new();
     f.local_edit_before_adoption();

@@ -3497,6 +3497,12 @@ pub(super) fn ydoc_unload_pending(
     if !reconcile_author_coverage(store, key, now_ms, &NoFaults)? {
         return Ok(Some(UnloadPending::Materialization));
     }
+    // The store keeps the head no settlement can write while the owner's adoption seed stays refused.
+    if store.read_with(|conn| {
+        dohc_engine_collab::live_update_application::frozen_at_refused_seed(conn, key)
+    })? {
+        return Ok(None);
+    }
     let Some(marker) = dohc_engine_collab::read_marker(store, key)? else {
         return Ok(None);
     };

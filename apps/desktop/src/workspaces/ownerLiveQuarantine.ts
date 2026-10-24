@@ -5,12 +5,14 @@ import {recoverySnapshot, type UnwrittenRelease} from "./ownerLiveReleases";
 
 const ServerKeptEdits = z.object({
   objectId: z.string().min(1).max(512), path: z.string().min(1).max(4096), outboxId: z.string().min(1).max(512),
-  reason: z.string().min(1).max(128), generation: z.number().int().positive().safe(),
+  reason: z.string().min(1).max(128), generation: z.number().int().positive().safe(), store: z.string().min(1).max(64),
   recovery: z.enum(["paused", "retrying", "copied", "unreachable"]),
 }).strict();
 /**
  * A refused queue the server keeps for a document it hosts. `generation`
- * names the refusal; Try again and a confirmed copy name it back.
+ * names the refusal; Try again and a confirmed copy name it back. `store`
+ * names the server's copy of the workspace that holds it: copies can hold
+ * different queues with the same outbox ID.
  * `unreachable`: the server keeps them in an earlier copy of the workspace
  * that it cannot read now, so neither Try again nor Save can reach them.
  */
@@ -39,10 +41,11 @@ const LaterKeptEditsPage = z.object({ok: z.literal(true), keptEdits: z.array(Ser
  */
 export async function readServerKeptEdits(response: unknown, page: (after: number) => Promise<unknown>): Promise<ServerKeptEdits[]> {
   const first = FirstKeptEditsPage.parse(response), rows = new Map<string, ServerKeptEdits>();
-  for (const row of first.keptEdits ?? []) rows.set(row.outboxId, row);
+  const queue = (row: ServerKeptEdits) => JSON.stringify([row.store, row.outboxId]);
+  for (const row of first.keptEdits ?? []) rows.set(queue(row), row);
   for (let after = first.keptEditsCursor; after !== undefined;) {
     const next = LaterKeptEditsPage.parse(await page(after));
-    for (const row of next.keptEdits) {rows.delete(row.outboxId); rows.set(row.outboxId, row);}
+    for (const row of next.keptEdits) {rows.delete(queue(row)); rows.set(queue(row), row);}
     if (next.nextCursor !== null && next.nextCursor <= after) throw new Error("The server's kept edits cursor did not advance.");
     after = next.nextCursor ?? undefined;
   }

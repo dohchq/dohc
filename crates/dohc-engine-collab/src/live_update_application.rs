@@ -1090,11 +1090,28 @@ pub enum UnloadPending {
     Materialization,
 }
 
+/// A queue of the lineage frozen at its owner's adoption seed: quarantined,
+/// with no Try again granted, and the seed never applied. Settlement refuses
+/// to pass the seed, so nothing applied on that lineage since the adoption
+/// can settle. That work stays in the store, unsettled and unpublished.
+/// `a` names the lineage.
+macro_rules! frozen_at_refused_seed {
+    () => {
+        "EXISTS(SELECT 1 FROM owner_ydoc_outboxes q JOIN owner_ydoc_outbox_entries e ON e.outbox_id=q.outbox_id
+            WHERE q.workspace_id=a.workspace_id AND q.main_version_id=a.main_version_id
+                AND q.object_id=a.object_id AND q.lineage_claim_id=a.lineage_claim_id
+                AND q.state='quarantined' AND q.retry_delivery_id IS NULL
+                AND e.pending=1 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed'
+                AND NOT EXISTS(SELECT 1 FROM live_device_update_applications s WHERE s.delivery_id=e.delivery_id))"
+    };
+}
+
 /// The settlement clause reads only the binding's current lineage: a restore
 /// replaces the lineage, and the replaced one never settles again. `?3` counts
 /// deferred updates. A refused queue waits for its owner, not for delivery,
-/// unless the owner's Try again granted its head an attempt.
-const UNLOAD_PENDING: &str = "SELECT
+/// unless the owner's Try again granted its head an attempt. A lineage frozen
+/// at a refused adoption seed waits for nothing to settle.
+const UNLOAD_PENDING: &str = concat!("SELECT
     EXISTS(SELECT 1 FROM live_restore_fences
         WHERE workspace_id=?1 AND object_id=?2 AND resume_receipt_json IS NULL),
     (?3 AND EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND object_id=?2))
@@ -1114,7 +1131,25 @@ const UNLOAD_PENDING: &str = "SELECT
             COALESCE((SELECT o.terminal_cursor FROM live_owner_adoptions o
                 WHERE o.relay_database_namespace=a.relay_database_namespace AND o.workspace_id=a.workspace_id
                 AND o.main_version_id=a.main_version_id AND o.object_id=a.object_id
-                AND o.lineage_claim_id=a.lineage_claim_id),0)))";
+                AND o.lineage_claim_id=a.lineage_claim_id),0))
+            AND NOT ", frozen_at_refused_seed!(), ")");
+
+/// Whether the document's current lineage is frozen at a refused adoption
+/// seed. Its head then holds work no settlement can write, so the artifact
+/// need not hold it before the document unloads or parks.
+pub fn frozen_at_refused_seed(conn: &Connection, key: &DocKey) -> Result<bool, ApplicationError> {
+    conn.query_row(
+        concat!(
+            "SELECT EXISTS(SELECT 1 FROM (SELECT workspace_id,version_id AS main_version_id,object_id,lineage_claim_id
+                FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3) a WHERE ",
+            frozen_at_refused_seed!(),
+            ")"
+        ),
+        params![key.workspace_id, key.version_id, key.object_id],
+        |row| row.get(0),
+    )
+    .map_err(read_sql)
+}
 
 /// Name the first incomplete restore, delivery, or settlement record for one
 /// document. The caller still proves the artifact holds the head.

@@ -455,6 +455,7 @@ export async function startServiceLiveHost(options: {
     };
     const forget = (key: string) => {
       activation!.removeTarget(hosted.get(key)!.target); hosted.delete(key); leaving.delete(key); recovering.delete(key); parking.delete(key); idle.delete(key); unloading.delete(key); keeping.delete(key);
+      grantsEnded.delete(key); seededOf.delete(key);
     };
     // The engine's reason while it holds unfinished work for the document, or undefined once nothing of it is loaded.
     const requestUnload = async (document: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal) => {
@@ -485,6 +486,12 @@ export async function startServiceLiveHost(options: {
     // still read them. Once it settled and unloaded, passes only check the copy.
     const KEPT = "Waiting for its owner to save a recovery copy of the edits the server kept.";
     const keeping = new Set<string>();
+    // Once its owner lost live authority, nothing grants a Try again on a
+    // departing document or delivers its queues, so each of these scans runs
+    // once until the document returns: the documents whose departure ended
+    // every grant, and the lineages each one's first scan in its document's
+    // work found frozen at the seed.
+    const grantsEnded = new Set<string>(), seededOf = new Map<string, ReadonlySet<string>>();
     // Whether one of the document's refusals in its attached store has no recovery copy.
     const uncopied = (row: {target: ServiceActivationTarget; objectId: string}) => {
       const attached = attachments.get(row.target.workspaceId);
@@ -568,7 +575,7 @@ export async function startServiceLiveHost(options: {
       // Nothing can deliver a Try again once its owner lost live authority, so
       // none stays granted, whatever this departure waits for next.
       const lost = authorityLost(row);
-      if (lost) await endKeptRetries(row, joined, false);
+      if (lost && !grantsEnded.has(key)) {await endKeptRetries(row, joined, false); grantsEnded.add(key);}
       if (keeping.has(key) && kept(key, row)) return KEPT;
       const attached = attachments.get(row.target.workspaceId)!, required = parking.get(key);
       if (required !== undefined) {
@@ -586,7 +593,8 @@ export async function startServiceLiveHost(options: {
           // unsettled: settling would drop the owner's pre-adoption head from
           // the file. It unloads with its queue's bytes kept and nothing published.
           const waiting = await runDocument(document, joined, async operation => {
-            const seeded = await endKeptRetries(row, operation, true);
+            let seeded = seededOf.get(key);
+            if (!seeded) {seeded = await endKeptRetries(row, operation, true); seededOf.set(key, seeded);}
             if (settleTarget && !seeded.has(document.lineageClaimId)) {
               const settled = await activation!.settleDeparted(row.target, document, operation);
               if (settled?.kind === "unready") return awaitParking(key, row);
@@ -783,7 +791,10 @@ export async function startServiceLiveHost(options: {
       // One that returns before it is gone activates again; a recovered or parking one was never in activation passes.
       for (const [key, document] of hosted) {
         if (isDeepStrictEqual(wanted.get(key), document)) {
-          if (leaving.delete(key)) {recovering.delete(key); parking.delete(key); keeping.delete(key); activation.addTarget(document.target, document.objectId);}
+          if (leaving.delete(key)) {
+            recovering.delete(key); parking.delete(key); keeping.delete(key); grantsEnded.delete(key); seededOf.delete(key);
+            activation.addTarget(document.target, document.objectId);
+          }
         } else if (!changed.includes(document.target.workspaceId)) leaving.add(key);
       }
       // A workspace stays wanted while anything of it may remain in its replica, so one that is not has nothing left to drain.
@@ -1039,7 +1050,7 @@ export async function startServiceLiveHost(options: {
         const outcome = await withKeptOutbox(kept, callerSignal, async outbox => {
           guard();
           if (!live()) return "unavailable" as const;
-          const current = storage.readServiceKeptEdits(kept.workspaceId, kept.outboxId);
+          const current = storage.readServiceKeptEdits(kept);
           if (current?.generation !== kept.generation || current.retrying) return "changed" as const;
           await outbox.retry({outboxId: kept.outboxId, binding: kept.binding});
           // A grant the relay could not record ends at once.

@@ -186,11 +186,25 @@ it("rejects a late discovery response after disconnect or workspace rebinding", 
 });
 
 it("rejects discovery errors and bounds response bytes before parsing", async () => {
-  for (const response of [new Response("", {status: 403}), new Response("x".repeat(1_048_577))]) {
+  for (const [response, error] of [[new Response("", {status: 403}), "discovery failed"], [new Response("x".repeat(5 * 1024 * 1024)), "byte limit"]] as const) {
     const f = fixture(); f.fetch.mockResolvedValue(response);
     const session = await f.connection.connect(f.workspace, new AbortController().signal);
-    await expect(session!.documents(new AbortController().signal)).rejects.toThrow();
+    await expect(session!.documents(new AbortController().signal)).rejects.toThrow(error);
   }
+});
+
+// Proves: a full page of the edits the server kept fits its response limit
+// even when every row has the longest path, in characters UTF-8 spends three bytes on.
+it("reads a full page of kept edits whose paths are all as long as a path can be", async () => {
+  const keptEdits = Array.from({length: 256}, (_, index) => ({objectId: `object-${index}`, path: "界".repeat(4096), outboxId: "o".repeat(512),
+    reason: "invalid-update", generation: index + 1, store: "s".repeat(32), recovery: "paused"}));
+  const page = JSON.stringify({ok: true, keptEdits, nextCursor: null});
+  expect(Buffer.byteLength(page)).toBeGreaterThan(3 * 1024 * 1024);
+  const f = fixture(), session = (await f.connection.connect(f.workspace, new AbortController().signal))!;
+  f.fetch.mockResolvedValueOnce(new Response(page));
+  expect(await session.keptEditsPage(256, new AbortController().signal)).toEqual({ok: true, keptEdits, nextCursor: null});
+  f.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ok: true, documents: [], keptEdits, keptEditsCursor: 256})));
+  expect(await session.documents(new AbortController().signal)).toMatchObject({keptEdits: {length: 256}});
 });
 
 it("keeps the credential account when discovery contains a client-selected account", async () => {

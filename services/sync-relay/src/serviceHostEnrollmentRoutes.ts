@@ -1,3 +1,4 @@
+import {createHash} from "node:crypto";
 import {ServiceHostRetirementConflict} from "./storage/serviceHostEnrollment";
 import {readBoundedJson} from "@dohc/service-http";
 import type {ResolveActor} from "@dohc/workspace-auth/session";
@@ -79,11 +80,13 @@ export function serviceHostEnrollmentRefusals(storage: SyncRelayStorage, workspa
 /**
  * A refused queue the server keeps, as its owner sees it. One in the store of
  * an earlier workspace identity is `unreachable`: its bytes stay there, but
- * no attachment of the current identity can read them.
+ * no attachment of the current identity can read them. `store` tells queues
+ * of different stores apart that share an outbox ID, without naming either identity.
  */
 function keptView(row: ServiceKeptEdits, identity: {replicationEpoch: string | null; streamIdentity: string | null} | null) {
   const reachable = sameKeptEditsIdentity(row.identity, identity);
   return {objectId: row.objectId, path: row.binding.currentPath, outboxId: row.outboxId, reason: row.reason, generation: row.generation,
+    store: createHash("sha256").update(JSON.stringify([row.identity.replicationEpoch, row.identity.streamIdentity])).digest("hex").slice(0, 32),
     recovery: reachable && row.retrying ? "retrying" : row.copied ? "copied" : reachable ? "paused" : "unreachable"};
 }
 
@@ -112,12 +115,13 @@ async function keptEditsAction(storage: SyncRelayStorage, host: KeptEditsHost, w
   if ((keys !== "action,generation,outboxId" && !(keys === "action,cursor,generation,outboxId" && input.action === "page" && isPageCursor(input.cursor))) ||
     !["page", "retry", "copied"].includes(String(input.action)) ||
     typeof input.outboxId !== "string" || !Number.isSafeInteger(input.generation)) throw badRequest("A kept edits action, queue and refusal are required.");
-  const kept = storage.readServiceKeptEdits(workspaceId, input.outboxId);
-  if (!kept || kept.generation !== input.generation) throw new KeptEditsConflict("kept-edits-changed");
+  // A generation names one row, whatever store holds its queue.
+  const refusal = {workspaceId, outboxId: input.outboxId, generation: Number(input.generation)}, kept = storage.readServiceKeptEditsRefusal(refusal);
+  if (!kept) throw new KeptEditsConflict("kept-edits-changed");
   if (!sameKeptEditsIdentity(kept.identity, storage.getWorkspaceIdentity(workspaceId))) throw new KeptEditsConflict("kept-edits-unreachable");
   if (input.action === "page") {
     const page = await host.keptEdits.page(kept, input.cursor as JsonValue | undefined, signal);
-    if (storage.readServiceKeptEdits(workspaceId, kept.outboxId)?.generation !== kept.generation) throw new KeptEditsConflict("kept-edits-changed");
+    if (!storage.readServiceKeptEditsRefusal(refusal)) throw new KeptEditsConflict("kept-edits-changed");
     return {ok: true, page};
   }
   if (input.action === "copied") {
@@ -157,12 +161,18 @@ function readTurns(max: number) {
     return () => {if (released) return; released = true; active--; waiting.shift()?.();};
   };
 }
-// A page's body keeps its read slot until the client takes it, cancels it or goes away.
+// A page's body keeps its read slot until the client took all of it, cancels it
+// or goes away. The slot ends at the read after the body's one chunk, which a
+// writer under backpressure makes only once that chunk drained.
 function heldResponse(body: unknown, release: () => void, signal: AbortSignal): Response {
   const bytes = new TextEncoder().encode(JSON.stringify(body));
+  let sent = false;
   signal.addEventListener("abort", release, {once: true});
   return new Response(new ReadableStream<Uint8Array>({
-    pull(controller) {controller.enqueue(bytes); controller.close(); release();},
+    pull(controller) {
+      if (!sent) {sent = true; controller.enqueue(bytes); return;}
+      controller.close(); release();
+    },
     cancel() {release();},
   }, {highWaterMark: 0}), {headers: {"content-type": "application/json", "cache-control": "private, no-store"}});
 }

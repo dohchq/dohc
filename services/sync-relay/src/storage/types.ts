@@ -629,13 +629,14 @@ export interface SyncRelayStorage {
   /** Owner queues the service host keeps refused, until they are delivered or the host no longer holds them. */
   recordServiceKeptEdits(input: {identity: import("./serviceKeptEdits").ServiceKeptEditsIdentity; outboxId: string;
     binding: import("@dohc/live-session-contract/live-object-binding").LiveObjectBinding; reason: string; headDeliveryId: string; refusalKey: string; nowMs: number}): void;
-  forgetServiceKeptEdits(input: {workspaceId: string; outboxId: string}): void;
+  forgetServiceKeptEdits(queue: import("./serviceKeptEdits").ServiceKeptEditsQueue): void;
   releaseServiceKeptEdits(document: {workspaceId: string; objectId: string}): void;
   listServiceKeptEdits(workspaceId: string, after?: number): {keptEdits: readonly import("./serviceKeptEdits").ServiceKeptEdits[]; nextCursor: number | null};
-  readServiceKeptEdits(workspaceId: string, outboxId: string): import("./serviceKeptEdits").ServiceKeptEdits | null;
+  readServiceKeptEdits(queue: import("./serviceKeptEdits").ServiceKeptEditsQueue): import("./serviceKeptEdits").ServiceKeptEdits | null;
+  readServiceKeptEditsRefusal(input: {workspaceId: string; outboxId: string; generation: number}): import("./serviceKeptEdits").ServiceKeptEdits | null;
   serviceKeptEditsOf(document: {workspaceId: string; objectId: string}, after?: number): {keptEdits: readonly import("./serviceKeptEdits").ServiceKeptEdits[]; nextCursor: number | null};
   markServiceKeptEditsRetrying(input: {workspaceId: string; outboxId: string; generation: number}): boolean;
-  endServiceKeptEditsRetry(input: {workspaceId: string; outboxId: string}): void;
+  endServiceKeptEditsRetry(queue: import("./serviceKeptEdits").ServiceKeptEditsQueue): void;
   confirmServiceKeptEditsCopy(input: {workspaceId: string; outboxId: string; generation: number}): boolean;
   serviceKeptEditsHeld(document: {workspaceId: string; objectId: string}, identity: import("./serviceKeptEdits").ServiceKeptEditsIdentity): boolean;
   scanServiceHostCandidateShares(after?: import("./serviceHostEnrollment").ServiceHostCandidateCursor, workspaceId?: string): import("./serviceHostEnrollment").ServiceHostCandidatePage;
