@@ -1215,9 +1215,18 @@ fn local_writes_refuse_a_link_author() {
     for author_user_id in [Some("user-ada".to_owned()), None] {
         let start = StartChannelThread {
             author_user_id,
-            ..start_thread("gen-1", "t-link", "m-link", "hello", ChatActorKind::Link, 20)
+            ..start_thread(
+                "gen-1",
+                "t-link",
+                "m-link",
+                "hello",
+                ChatActorKind::Link,
+                20,
+            )
         };
-        assert!(refused(chats.start_channel_thread(&start, &NO_FAULTS).map(|_| ())));
+        assert!(refused(
+            chats.start_channel_thread(&start, &NO_FAULTS).map(|_| ())
+        ));
     }
     chats
         .start_channel_thread(
@@ -1238,7 +1247,10 @@ fn local_writes_refuse_a_link_author() {
             .collect::<Vec<_>>(),
         ["m1"]
     );
-    assert!(chats.get_message(WS, "m-link").is_err(), "no link thread was started");
+    assert!(
+        chats.get_message(WS, "m-link").is_err(),
+        "no link thread was started"
+    );
 }
 
 #[test]

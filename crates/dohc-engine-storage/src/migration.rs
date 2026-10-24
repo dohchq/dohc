@@ -6338,9 +6338,19 @@ mod tests {
         let legacy: i64 = conn
             .query_row("PRAGMA legacy_alter_table", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(legacy, 0, "the migration leaves renames in their normal mode");
+        assert_eq!(
+            legacy, 0,
+            "the migration leaves renames in their normal mode"
+        );
 
-        type Row = (String, String, Option<String>, Option<String>, Option<String>, Option<String>);
+        type Row = (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
         let rows: Vec<Row> = conn
             .prepare(
                 "SELECT message_id, author_kind, author_user_id, automation_id, author_actor_key, link_grant_id \
@@ -6382,13 +6392,23 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(kept, (1, 1), "the mention and the pending discovery row survive");
+        assert_eq!(
+            kept,
+            (1, 1),
+            "the mention and the pending discovery row survive"
+        );
         let violations: i64 = conn
-            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(violations, 0);
 
-        let insert = |order: i64, kind: &str, user: Option<&str>, grant: Option<&str>, principal: Option<&str>| {
+        let insert = |order: i64,
+                      kind: &str,
+                      user: Option<&str>,
+                      grant: Option<&str>,
+                      principal: Option<&str>| {
             conn.execute(
                 "INSERT INTO chat_messages \
                      (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, \
@@ -6399,7 +6419,14 @@ mod tests {
         };
         insert(10, "link", None, Some("grant-1"), Some("principal-1")).expect("a link message");
         assert!(
-            insert(11, "link", Some("user-ice"), Some("grant-1"), Some("principal-1")).is_err(),
+            insert(
+                11,
+                "link",
+                Some("user-ice"),
+                Some("grant-1"),
+                Some("principal-1")
+            )
+            .is_err(),
             "a link message names no account"
         );
         assert!(
@@ -6411,7 +6438,14 @@ mod tests {
             "a link message names its grant"
         );
         assert!(
-            insert(14, "human", Some("user-ice"), Some("grant-1"), Some("principal-1")).is_err(),
+            insert(
+                14,
+                "human",
+                Some("user-ice"),
+                Some("grant-1"),
+                Some("principal-1")
+            )
+            .is_err(),
             "only link messages name a link"
         );
         conn.execute(

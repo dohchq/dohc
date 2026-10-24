@@ -961,7 +961,8 @@ fn a_shared_link_thread_and_post_apply_only_from_the_link_origin() {
         applied()
     );
 
-    let (threads, messages): (Vec<String>, Vec<(String, String, Option<String>)>) = engine
+    type MessageRow = (String, String, Option<String>);
+    let (threads, messages): (Vec<String>, Vec<MessageRow>) = engine
         .read_with(|conn| {
             let threads = conn
                 .prepare(

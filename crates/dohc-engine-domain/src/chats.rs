@@ -1688,7 +1688,11 @@ pub fn validate_replicated_link_author(
             && value.trim_matches(is_js_trim_ws) == value
             && !has_projection_control_char(value)
     };
-    match (author_kind == ChatActorKind::Link.as_str(), grant_id, principal_id) {
+    match (
+        author_kind == ChatActorKind::Link.as_str(),
+        grant_id,
+        principal_id,
+    ) {
         (false, None, None) if !message_id.starts_with(LINK_MESSAGE_ID_PREFIX) => Ok(None),
         (true, Some(grant_id), Some(principal_id))
             if id(grant_id)

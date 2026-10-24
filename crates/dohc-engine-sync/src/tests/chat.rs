@@ -1467,7 +1467,10 @@ fn a_link_message_replays_with_its_link_and_no_account() {
     assert_eq!(read.author_kind, ChatActorKind::Link);
     assert_eq!(read.author_display_name, "Guest");
     assert_eq!(
-        (read.author_user_id.as_deref(), read.author_owner_display_name.as_deref()),
+        (
+            read.author_user_id.as_deref(),
+            read.author_owner_display_name.as_deref()
+        ),
         (None, None)
     );
     let link = Some(ChatMessageLinkAuthor {
@@ -1513,7 +1516,11 @@ fn a_link_message_replays_with_its_link_and_no_account() {
         .get_message("ws", "link-message:early")
         .expect("read the replayed link message");
     assert_eq!(
-        (replayed.author_kind, replayed.author_user_id, replayed.link_author),
+        (
+            replayed.author_kind,
+            replayed.author_user_id,
+            replayed.link_author
+        ),
         (ChatActorKind::Link, None, link)
     );
 }
@@ -1557,7 +1564,11 @@ fn a_link_message_with_an_account_or_without_its_link_is_refused() {
         assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
     }
     // The relay's post itself, from any origin but its link principal's.
-    for origin in ["relay-link", "relay:share-link:principal-2", "relay:share-link:"] {
+    for origin in [
+        "relay-link",
+        "relay:share-link:principal-2",
+        "relay:share-link:",
+    ] {
         let op = envelope(
             origin,
             0,
@@ -1738,7 +1749,14 @@ fn a_message_from_an_unknown_author_kind_is_refused_and_the_workspace_continues(
         )
     );
     assert_eq!(stored, 0);
-    let next = group_message("peer", 4, "after-newer", "thread-imported", "human", "Still here");
+    let next = group_message(
+        "peer",
+        4,
+        "after-newer",
+        "thread-imported",
+        "human",
+        "Still here",
+    );
     assert_eq!(
         apply_chat_envelope(&mut engine, &next, &NoFaults).expect("next op"),
         ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
