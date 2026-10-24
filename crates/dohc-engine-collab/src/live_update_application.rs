@@ -1094,15 +1094,17 @@ pub enum UnloadPending {
 /// with no Try again granted, and the seed never applied. Settlement refuses
 /// to pass the seed, so nothing applied on that lineage since the adoption
 /// can settle. That work stays in the store, unsettled and unpublished.
-/// `a` names the lineage.
+/// `a` names the lineage and `$generation` the current binding's restore
+/// generation: an earlier generation's seed never holds a successor's work.
 macro_rules! frozen_at_refused_seed {
-    () => {
-        "EXISTS(SELECT 1 FROM owner_ydoc_outboxes q JOIN owner_ydoc_outbox_entries e ON e.outbox_id=q.outbox_id
+    ($generation:literal) => {
+        concat!("EXISTS(SELECT 1 FROM owner_ydoc_outboxes q JOIN owner_ydoc_outbox_entries e ON e.outbox_id=q.outbox_id
             WHERE q.workspace_id=a.workspace_id AND q.main_version_id=a.main_version_id
                 AND q.object_id=a.object_id AND q.lineage_claim_id=a.lineage_claim_id
+                AND q.restore_fence_generation=", $generation, "
                 AND q.state='quarantined' AND q.retry_delivery_id IS NULL
                 AND e.pending=1 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed'
-                AND NOT EXISTS(SELECT 1 FROM live_device_update_applications s WHERE s.delivery_id=e.delivery_id))"
+                AND NOT EXISTS(SELECT 1 FROM live_device_update_applications s WHERE s.delivery_id=e.delivery_id))")
     };
 }
 
@@ -1132,17 +1134,20 @@ const UNLOAD_PENDING: &str = concat!("SELECT
                 WHERE o.relay_database_namespace=a.relay_database_namespace AND o.workspace_id=a.workspace_id
                 AND o.main_version_id=a.main_version_id AND o.object_id=a.object_id
                 AND o.lineage_claim_id=a.lineage_claim_id),0))
-            AND NOT ", frozen_at_refused_seed!(), ")");
+            AND NOT ", frozen_at_refused_seed!("b.restore_fence_generation"), ")");
 
-/// Whether the document's current lineage is frozen at a refused adoption
-/// seed. Its head then holds work no settlement can write, so the artifact
-/// need not hold it before the document unloads or parks.
+/// Whether the document's current lineage, at its current binding's restore
+/// generation, is frozen at a refused adoption seed. Its head then holds work
+/// no settlement can write, so the artifact need not hold it before the
+/// document unloads or parks.
 pub fn frozen_at_refused_seed(conn: &Connection, key: &DocKey) -> Result<bool, ApplicationError> {
     conn.query_row(
         concat!(
-            "SELECT EXISTS(SELECT 1 FROM (SELECT workspace_id,version_id AS main_version_id,object_id,lineage_claim_id
-                FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3) a WHERE ",
-            frozen_at_refused_seed!(),
+            "SELECT EXISTS(SELECT 1 FROM (SELECT d.workspace_id,d.version_id AS main_version_id,d.object_id,d.lineage_claim_id,b.restore_fence_generation
+                FROM ydoc_docs d JOIN live_device_application_bindings b ON b.workspace_id=d.workspace_id
+                    AND b.main_version_id=d.version_id AND b.object_id=d.object_id AND b.lineage_claim_id=d.lineage_claim_id
+                WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3) a WHERE ",
+            frozen_at_refused_seed!("a.restore_fence_generation"),
             ")"
         ),
         params![key.workspace_id, key.version_id, key.object_id],

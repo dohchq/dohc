@@ -1,7 +1,9 @@
+import {join} from "node:path";
 import {expect, it, vi} from "vitest";
 import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
 import type {OwnerYDocOutboxRecovery} from "@dohc/workspace-engine-client";
-import {recoverySnapshot} from "./ownerLiveReleases";
+import {createUnwrittenReleases, recoverySnapshot} from "./ownerLiveReleases";
+import {createTestScratch} from "./testTemp";
 
 // The engine's queue heads, by outbox, as the outbox read answers them.
 const outboxes = vi.hoisted(() => ({heads: new Map<string, unknown>(), pending: new Map<string, unknown>(), retried: [] as unknown[],
@@ -110,6 +112,28 @@ it("shows a damaged record beside the queue it came from, even with that queue's
     headDeliveryId: "delivery-intact", snapshot: recoverySnapshot(contents), retry: false};
   expect(await readOwnerLiveQuarantines(client, "handle", {unwritten: [damaged]})).toEqual([record("intact", "paused"),
     {objectId: "intact", path: "intact.md", reason: "invalid-update", outboxId: null, binding: null, headDeliveryId: "delivery-intact", recovery: "cannot-write"}]);
+});
+
+// A Stop's release failed, then the server accepted another edit, which moved
+// the queue's checkpoint. The next Stop's package replaces the first, and the
+// queue's row still speaks for the record of the same refused edits.
+it("keeps one release's record across a checkpoint advance: the next put replaces it, and the queue's row still hides it", async () => {
+  head("plan", "invalid-update");
+  const queue = (checkpoint: number): OwnerYDocOutboxRecovery => ({outboxId: "outbox-plan", binding: binding("plan"), baseUpdateDigest: "b".repeat(64),
+    baseUpdate: new Uint8Array([0]), checkpoint: new Uint8Array([checkpoint]), state: "quarantined", pendingBytes: 1, oldestEntryAtMs: 1,
+    quarantineReason: "invalid-update", observedBinding: null, retryDeliveryId: null,
+    entries: [{sequence: 1, deliveryId: "delivery-plan", appendKey: "a", updateDigest: "d".repeat(64), update: new Uint8Array([1]), byteLength: 1, createdAtMs: 1}]});
+  const release = (contents: OwnerYDocOutboxRecovery) => ({workspaceId: "workspace", objectId: "plan", path: "plan.md", reason: "invalid-update",
+    binding: binding("plan"), headDeliveryId: "delivery-plan", snapshot: recoverySnapshot(contents), retry: true});
+  const scratch = await createTestScratch("dohc-checkpoint-advance-");
+  const releases = createUnwrittenReleases(() => join(scratch, "owner-live-releases.json"));
+  await releases.put(release(queue(1)), "before the advance");
+  await releases.put(release(queue(2)), "after the advance");
+  expect(await releases.recovery("workspace", "plan")).toBe("after the advance");
+  outboxes.pending.set("outbox-plan", queue(2));
+  const client = {sendRequest: vi.fn(), ownerYDocStopList: vi.fn(async () => [stop("plan", "requested")]),
+    ownerYDocListDrafts: vi.fn(async () => ({drafts: [draft("plan", "quarantined")], next: null}))} as unknown as EngineClient;
+  expect(await readOwnerLiveQuarantines(client, "handle", {unwritten: await releases.list("workspace")})).toEqual([record("plan", "stopping")]);
 });
 
 // A large parked queue is read once: its base never, its head only when the draft changed.

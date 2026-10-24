@@ -141,7 +141,7 @@ it("refuses a package of other edits under the identical binding and head, and k
   expect(await reopened.list("owner")).toEqual([]);
 });
 
-it("digests a queue's whole contents, not when it was read", async () => {
+it("digests a queue's refused edits, not when it was read nor what the server accepted since", async () => {
   const update = new Uint8Array([1, 2, 3]);
   const entry = (sequence: number) => ({sequence, appendKey: `e${sequence}`, deliveryId: `outbox:${sequence}:digest`, updateDigest: "d".repeat(64),
     update, byteLength: 3, createdAtMs: sequence});
@@ -152,8 +152,9 @@ it("digests a queue's whole contents, not when it was read", async () => {
   expect(snapshot).toMatch(/^[0-9a-f]{64}$/);
   expect(recoverySnapshot({...queue, oldestEntryAtMs: 5, retryDeliveryId: "outbox:1:digest", quarantineReason: "capacity-refused"})).toBe(snapshot);
   expect(recoverySnapshot({...queue, entries: [entry(1)], pendingBytes: 3})).not.toBe(snapshot);
-  expect(recoverySnapshot({...queue, checkpoint: new Uint8Array([8])})).not.toBe(snapshot);
-  expect(recoverySnapshot({...queue, checkpoint: null})).not.toBe(snapshot);
+  expect(recoverySnapshot({...queue, baseUpdateDigest: "c".repeat(64)})).not.toBe(snapshot);
+  expect(recoverySnapshot({...queue, checkpoint: new Uint8Array([8])})).toBe(snapshot);
+  expect(recoverySnapshot({...queue, checkpoint: null})).toBe(snapshot);
 });
 
 it("reports a removed record as removed when its package cannot be deleted", async () => {

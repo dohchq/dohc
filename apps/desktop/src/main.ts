@@ -6560,7 +6560,10 @@ function registerIpcHandlers(): void {
           return undefined;
         });
         if (action==="release" && binding && "lineageClaimId" in binding) result=await desktopEngine.releaseOwnerLiveStop(workspace,binding,acceptedCursor!);
-        if (action==="clear") await desktopEngine.clearOwnerLiveStop(workspace,path);
+        if (action==="clear") {
+          if (!binding || "lineageClaimId" in binding) throw new TypeError("A Resume names its document.");
+          await desktopEngine.clearOwnerLiveStop(workspace,binding);
+        }
       } finally {
         // Each step of a Stop, failed or not, and a Resume change which refused
         // queues remain and how: a requested Stop shows as waiting at once.
@@ -6569,7 +6572,7 @@ function registerIpcHandlers(): void {
       }
       if ((result?.state==="released" && !result.retirementOwed) || action==="retired") {
         desktopEngine.clearOwnerLiveStopFailure(workspace.workspaceId,{objectId:result?.document.objectId ?? binding!.objectId});
-      } else if (action==="clear") desktopEngine.clearOwnerLiveStopFailure(workspace.workspaceId,{path});
+      } else if (action==="clear") desktopEngine.clearOwnerLiveStopFailure(workspace.workspaceId,{objectId:binding!.objectId});
       desktopEngine.retryOwnerDelivery(workspace.workspaceId);
       return result;
     },

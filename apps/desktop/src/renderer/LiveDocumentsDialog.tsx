@@ -17,8 +17,8 @@ export type LiveDocumentRow = {
   storedOn?: "this-computer" | "server";
   /** Those kept edits' incident, so Save recovery copy saves what the row shows. */
   incident?: string;
-  /** Their document, so Try again acts on it even after another document took its path. */
-  objectId?: string;
+  /** The server's document at this path, so Stop and Try again act on it alone. */
+  objectId: string;
 };
 
 /** What a Stop did with edits the server refused. */
@@ -50,7 +50,8 @@ export type LiveRefusalPage = {
 export type LiveDocumentsDialogProps = {
   workspaceId: string;
   load: (workspaceId: string, retiredAfter?: string) => Promise<LiveDocumentPage>;
-  stop: (workspaceId: string, path: string, again?: LiveDocumentStopAgain) => Promise<LiveDocumentStopResult>;
+  /** Stops the row's document, named by the server's `objectId`. */
+  stop: (workspaceId: string, path: string, objectId: string, again?: LiveDocumentStopAgain) => Promise<LiveDocumentStopResult>;
   resume: (workspaceId: string, path: string) => Promise<void>;
   /** Told when a Stop wrote refused edits into the file, or kept them on this computer. */
   onStopped?: (path: string, keptEdits: "recovered" | "kept") => void;
@@ -72,7 +73,7 @@ export type LiveDocumentsDialogProps = {
 type Work =
   | { kind: "reload" }
   | { kind: "more"; cursor: string }
-  | { kind: "stop"; path: string; again?: LiveDocumentStopAgain }
+  | { kind: "stop"; path: string; objectId: string; again?: LiveDocumentStopAgain }
   | { kind: "resume"; path: string };
 type ListState =
   | { kind: "loading" }
@@ -122,7 +123,7 @@ function refusalReason(row: LiveRefusalRow): string {
     : "Copy the details to check the server setup before trying again.";
 }
 
-function isMutation(work: Work): work is { kind: "stop" | "resume"; path: string } {
+function isMutation(work: Work): work is Extract<Work, { kind: "stop" | "resume" }> {
   return work.kind === "stop" || work.kind === "resume";
 }
 
@@ -366,7 +367,7 @@ export function LiveDocumentsDialog({
       let mutated = false;
       try {
         if (work.kind === "stop") {
-          const { keptEdits } = await (work.again ? stop(workspaceId, work.path, work.again) : stop(workspaceId, work.path));
+          const { keptEdits } = await (work.again ? stop(workspaceId, work.path, work.objectId, work.again) : stop(workspaceId, work.path, work.objectId));
           if (!isCurrent()) return;
           mutated = true;
           if (keptEdits !== "none") onStopped?.(work.path, keptEdits);
@@ -642,21 +643,21 @@ export function LiveDocumentsDialog({
                     disabled={listBusy}
                     data-live-document-stop=""
                     aria-label={`Stop live editing for ${row.path}`}
-                    onClick={() => perform({ kind: "stop", path: row.path })}
+                    onClick={() => perform({ kind: "stop", path: row.path, objectId: row.objectId })}
                   >
                     Stop live editing
                   </SecondaryButton>
                 ) : null}
                 {/* The Stop runs again for the row's document, and writes the file it could not before. */}
-                {row.quarantine === "not-written" && row.objectId !== undefined ? (
+                {row.quarantine === "not-written" ? (
                   <SecondaryButton
                     size="compact"
                     className="shrink-0"
                     disabled={listBusy}
                     data-live-document-stop=""
                     aria-label={`Try again to write your kept edits to ${row.path}`}
-                    onClick={() => perform({ kind: "stop", path: row.path,
-                      again: { objectId: row.objectId!, recovery: "not-written" } })}
+                    onClick={() => perform({ kind: "stop", path: row.path, objectId: row.objectId,
+                      again: { objectId: row.objectId, recovery: "not-written" } })}
                   >
                     Try again
                   </SecondaryButton>

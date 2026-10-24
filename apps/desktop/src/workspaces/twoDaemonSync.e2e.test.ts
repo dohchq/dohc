@@ -980,7 +980,7 @@ it.skipIf(engine.missing).each([
         listOwnerLiveStops: () => source.sessions.run(source.workspace, async ({workspace}) => source.nativeClient().ownerYDocStopList({id:0,workspace,deadlineMs:REAL_DAEMON_DEADLINE_MS})),
         ownerLiveStop: (_workspace, action, stopPath, binding, acceptedCursor) => source.sessions.run(source.workspace, async ({workspace}) => {
           const client = source.nativeClient(), request = {id: 0, workspace, deadlineMs: REAL_DAEMON_DEADLINE_MS};
-          if (action === "clear") {await client.ownerYDocStopClear(request, stopPath);return;}
+          if (action === "clear") {await client.ownerYDocStopClear(request, binding as {mainVersionId: string; objectId: string; currentPath: string});return;}
           if (action==="retired") {await client.ownerYDocStopRetired(request,binding!);return;}
           return action === "request" ? client.ownerYDocStopRequest(request, binding as {mainVersionId: string; objectId: string; currentPath: string})
             : client.ownerYDocRelease(request, binding as import("@dohc/live-session-contract").LiveObjectBinding, {acceptedCursor: acceptedCursor!});

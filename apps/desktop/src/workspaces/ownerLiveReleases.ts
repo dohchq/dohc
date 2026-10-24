@@ -13,7 +13,7 @@ import {atomicWriteFile} from "../atomicReplaceFile";
  * the recovery package saved before the release still holds them.
  *
  * `headDeliveryId` names the refused queue the package came from, and
- * `snapshot` its whole contents: a queue rebuilt under the same binding, or
+ * `snapshot` the edits it holds: a queue rebuilt under the same binding, or
  * restored from an earlier engine state with the same head but other edits,
  * is another. `retry` is false once the engine no longer holds that release,
  * or when the record could not be read whole: then only Save recovery copy
@@ -54,13 +54,13 @@ const sameQueue = (row: QueueIdentity, record: QueueIdentity) =>
 export const sameRelease = (row: ReleaseIdentity, record: ReleaseIdentity) => row.snapshot === record.snapshot && sameQueue(row, record);
 
 /**
- * What a refused queue holds, as one digest: its binding, base, accepted
- * checkpoint and every pending update with its recorded author. When it was
- * read or saved is not part of it.
+ * Which refused edits a queue holds, as one digest: its binding, base and
+ * every pending update with its recorded author. When it was read or saved is
+ * not part of it, nor is the accepted checkpoint, which moves as the server
+ * accepts other edits: a Stop whose release failed keeps the same edits.
  */
 export function recoverySnapshot(queue: OwnerYDocOutboxRecovery): string {
-  const checkpoint = queue.checkpoint === null ? null : createHash("sha256").update(queue.checkpoint).digest("hex");
-  return createHash("sha256").update(JSON.stringify([queue.outboxId, parseLiveObjectBinding(queue.binding), queue.baseUpdateDigest, checkpoint,
+  return createHash("sha256").update(JSON.stringify([queue.outboxId, parseLiveObjectBinding(queue.binding), queue.baseUpdateDigest,
     queue.entries.map(({update: _update, ...entry}) => entry)])).digest("hex");
 }
 

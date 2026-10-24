@@ -833,10 +833,16 @@ export class EngineClient implements EngineTransport {
     const rows=await this.ownerLiveStop(request,"retired",{document},signal);
     if (rows.length) throw new TypeError("Invalid retirement response.");
   }
-  /** Clears the document's Stop and returns it, whatever its state; undefined when it had none. */
-  async ownerYDocStopClear(request: OwnerYDocDeliveryRequest, path: string, signal?: AbortSignal) {
-    const rows = await this.ownerLiveStop(request, "clear", {path}, signal);
-    if (rows.length > 1) throw new TypeError("Invalid Stop cancellation response.");
+  /**
+   * Clears the document's Stop and returns it, whatever its state; undefined
+   * when it had none. It names the document, so another document that took
+   * its old path keeps its own Stop.
+   */
+  async ownerYDocStopClear(request: OwnerYDocDeliveryRequest, document: {mainVersionId: string; objectId: string; currentPath: string}, signal?: AbortSignal) {
+    const rows = await this.ownerLiveStop(request, "clear", {document}, signal);
+    if (rows.length > 1 || (rows[0] && (rows[0].document.objectId !== document.objectId || rows[0].document.mainVersionId !== document.mainVersionId))) {
+      throw new TypeError("Invalid Stop cancellation response.");
+    }
     return rows[0];
   }
   async ownerYDocStopList(request: OwnerYDocDeliveryRequest, signal?: AbortSignal) {

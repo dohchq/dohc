@@ -466,8 +466,8 @@ export const OwnerLiveDocument = z.object({
   storedOn: OwnerLiveQuarantine.shape.storedOn.optional(),
   // Those kept edits' incident, which Save recovery copy names to save them.
   incident: OwnerLiveQuarantine.shape.incident.optional(),
-  // Their document, which a Stop again names: a record can keep a path another document now has.
-  objectId: OwnerLiveQuarantine.shape.objectId.optional(),
+  // The server's document at this path, whose kept edits the row shows and which its Stop and Try again name.
+  objectId: OwnerLiveQuarantine.shape.objectId,
 }).strict();
 export type OwnerLiveDocument = z.infer<typeof OwnerLiveDocument>;
 // What a Stop did with edits the server refused: wrote them into the file,
@@ -488,7 +488,10 @@ export type OwnerLiveDocumentsResult = z.infer<typeof OwnerLiveDocumentsResult>;
 export const OwnerLiveDocumentActionPayload = WorkspaceIdPayload.extend({path: SAFE_RELATIVE_PATH}).strict();
 export type OwnerLiveDocumentActionPayload = z.infer<typeof OwnerLiveDocumentActionPayload>;
 // Stop again from a kept-edits row names that row's document, so it acts on no other.
+// `objectId` is the server's document a list row names: the Stop acts on it
+// alone, and on the server only when this computer no longer has it.
 export const StopOwnerLiveDocumentPayload = OwnerLiveDocumentActionPayload.extend({
+  objectId: OwnerLiveQuarantine.shape.objectId.optional(),
   again: z.object({objectId: OwnerLiveQuarantine.shape.objectId, recovery: z.enum(["not-written", "stopping"])}).strict().optional(),
 }).strict();
 export type StopOwnerLiveDocumentPayload = z.infer<typeof StopOwnerLiveDocumentPayload>;

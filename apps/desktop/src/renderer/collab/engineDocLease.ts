@@ -1700,15 +1700,17 @@ export async function disposeEngineDocLeasesForTests(): Promise<void> {
 }
 
 /**
- * Flush and close every pane for this document before changing its live mode.
- * With its object id, panes that opened the document at another path close too.
+ * Flush and close every pane for this document before changing its live mode:
+ * the panes at its path, or with its object id, the panes bound to it at
+ * whatever path they opened it, and no pane of another document at its old path.
  */
-export async function withClosedEngineDocSession(workspaceId: string, path: string, work: () => Promise<void>, objectId?: string): Promise<void> {
-  const bound = (lease: EngineDocLease) => {
+export async function withClosedEngineDocSession(workspaceId: string, document: {path: string} | {objectId: string}, work: () => Promise<void>): Promise<void> {
+  const held = (lease: EngineDocLease) => {
+    if ("path" in document) return lease.documentKey === documentKey(workspaceId, document.path);
     const {outcome} = lease.getSnapshot();
-    return objectId !== undefined && lease.workspaceId === workspaceId && outcome?.kind === "bound" && outcome.objectId === objectId;
+    return lease.workspaceId === workspaceId && outcome?.kind === "bound" && outcome.objectId === document.objectId;
   };
-  const leases = [...engineDocLeases.values()].filter(lease => lease.documentKey === documentKey(workspaceId, path) || bound(lease));
+  const leases = [...engineDocLeases.values()].filter(held);
   const close = (index: number): Promise<void> => index === leases.length ? work() : leases[index]!.withClosedSession(() => close(index + 1));
   await close(0);
 }

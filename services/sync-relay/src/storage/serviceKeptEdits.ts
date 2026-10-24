@@ -12,9 +12,10 @@ import {parseWorkspaceId} from "../requestInputs";
 // part of the key. Each refusal gets a new row whose `generation` the relay never
 // hands out again, so a recovery copy, a Try again or a confirmation names
 // exactly the refusal it saw. A refused queue only shrinks until it is
-// refused again. The generation counts across the relay, so the gap between
-// two of an owner's rows tells them how many refusals other workspaces had
-// meanwhile; that count is all it reveals.
+// refused again: only owner enrollment adds to a refused queue, and the
+// service host's engine refuses that method. The generation counts across
+// the relay, so the gap between two of an owner's rows tells them how many
+// refusals other workspaces had meanwhile; that count is all it reveals.
 export const SERVICE_KEPT_EDITS = "sync_relay_service_kept_edits";
 const MIGRATION = "service-kept-edits-v1";
 const SQL = `CREATE TABLE ${SERVICE_KEPT_EDITS} (

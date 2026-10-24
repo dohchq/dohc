@@ -1,5 +1,5 @@
 import { installedReaderConfig } from "./installedReaderConfig";
-import {reconcileOwnerLiveStops, type OwnerStopRetirementTarget} from "./ownerLiveStop";
+import {reconcileOwnerLiveStops, type OwnerLiveStop, type OwnerStopRetirementTarget} from "./ownerLiveStop";
 import { waitForEnginePublicationGate } from "./testEnginePublicationGate";
 import type { App, Dialog } from "electron";
 import {
@@ -37,7 +37,7 @@ import {readOwnerLiveQuarantines, readOwnerLiveQueue, readServerKeptEdits, readS
   type OwnerLiveHeadCache, type OwnerLiveQuarantineRecord, type ServerKeptEdits} from "./ownerLiveQuarantine";
 import type {JsonValue} from "@dohc/workspace-engine-client";
 import {z} from "zod";
-import {keptEarlierError, keptEarlierRelease, recoverySnapshot, sameRelease, type UnwrittenRelease, type UnwrittenReleases} from "./ownerLiveReleases";
+import {keptEarlierError, keptEarlierRelease, recoverySnapshot, sameBinding, sameRelease, type UnwrittenRelease, type UnwrittenReleases} from "./ownerLiveReleases";
 import type {LiveRecoveryFiles, LiveRecoveryPackage} from "./ownerLiveRecoveryCopy";
 import type {DocumentProjection} from "./documentProjection";
 import {createDurableFile} from "./workspaceFiles";
@@ -849,9 +849,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
      * and the next Stop is an ordinary one. The engine names the Stop it
      * cleared, including a finished one its list no longer shows.
      */
-    clearOwnerLiveStop(workspace: EngineWorkspace, path: string): Promise<void> {
+    clearOwnerLiveStop(workspace: EngineWorkspace, document: OwnerLiveStop["document"]): Promise<void> {
       return withEngineClient(workspace, async (client, handle) => {
-        const cleared = (await client.ownerYDocStopClear({id: 0, workspace: handle, deadlineMs: 30_000}, path))?.binding;
+        const cleared = (await client.ownerYDocStopClear({id: 0, workspace: handle, deadlineMs: 30_000}, document))?.binding;
         if (cleared) await dependencies.ownerLiveReleases.endRetry(workspace.workspaceId, cleared.objectId, cleared);
       });
     },
@@ -862,9 +862,11 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
      * Stop under the same binding, restored from an earlier engine state, does
      * not answer for it. When the engine no longer holds that release, nothing
      * shows the file has the edits: the record and its package stay, offering
-     * only Save recovery copy.
+     * only Save recovery copy. A release that never committed leaves its Stop
+     * requested: Try again keeps the record's, and answers "requested" so the
+     * Stop goes on as an ordinary one with the same edits.
      */
-    async retryOwnerLiveRelease(workspace: EngineWorkspace, objectId: string) {
+    async retryOwnerLiveRelease(workspace: EngineWorkspace, objectId: string): Promise<OwnerLiveStop | "requested" | undefined> {
       return withEngineClient(workspace, async (client, handle) => {
         const releases = dependencies.ownerLiveReleases;
         const record = (await releases.list(workspace.workspaceId)).find(row => row.objectId === objectId && row.retry);
@@ -879,6 +881,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
           return undefined;
         } catch (error) {
           if (!(error instanceof EngineRequestError && error.message === "owner-stop-conflict")) throw error;
+          const stops = await client.ownerYDocStopList({id: 0, workspace: handle, deadlineMs: 30_000});
+          if (stops.some(stop => stop.state === "requested" && sameBinding(stop.binding, binding))) return "requested";
           await releases.endRetry(workspace.workspaceId, objectId, binding);
           return undefined;
         } finally {
@@ -965,13 +969,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       await end();
       return {...files, keptEdits: "ended"};
     },
-    clearOwnerLiveStopFailure(workspaceId:string,target:{objectId:string}|{path:string}) {
-      const failures=ownerStopFailures.get(workspaceId);if (!failures) return;
-      let changed=false;
-      for (const [key,failure] of failures) {
-        if ("objectId" in target ? key===target.objectId : failure.path===target.path) {failures.delete(key);changed=true;}
-      }
-      if (changed) notifyRenderer({workspaceId});
+    clearOwnerLiveStopFailure(workspaceId:string,target:{objectId:string}) {
+      if (ownerStopFailures.get(workspaceId)?.delete(target.objectId)) notifyRenderer({workspaceId});
     },
     ownerLiveDeliveryReason(workspaceId: string): OwnerLiveDeliveryReason | undefined {
       return dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) ? serverOwnerUnavailable ? "restart-required" : ownerDeliveryReason.get(workspaceId) : undefined;

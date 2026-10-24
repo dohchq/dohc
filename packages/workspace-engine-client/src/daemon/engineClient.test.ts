@@ -124,7 +124,7 @@ describe("private owner delivery transport", () => {
       if (e.type !== "request") return;
       const action = e.method.split(".").at(-1);
       expect(e.method).toBe(`ydoc.ownerStop.${action}`);
-      expect(e.params).toEqual(action === "release" ? {binding: target.binding,acceptedCursor:0} : action === "list" ? {} : {path: "a.md"});
+      expect(e.params).toEqual(action === "release" ? {binding: target.binding,acceptedCursor:0} : action === "list" ? {} : action === "clear" ? {document: stopTarget.document} : {path: "a.md"});
       peer.send({type: "response", id: e.id, result: {stops: action === "clear" ? cleared++ === 0 ? [finished] : cleared === 2 ? [] : [finished, finished]
         : [{...stopTarget, ...(action === "release" ? {state: "released", materialized: true} : {state: "requested"})}]}});
     };
@@ -132,9 +132,9 @@ describe("private owner delivery transport", () => {
       expect((await transport.ownerYDocStopRequest(request, "a.md")).state).toBe("requested");
       expect(await transport.ownerYDocRelease(request, target.binding, {acceptedCursor: 0})).toMatchObject({state: "released", materialized: true});
       expect(await transport.ownerYDocStopList(request)).toEqual([{...stopTarget, state: "requested"}]);
-      expect(await transport.ownerYDocStopClear(request, "a.md")).toEqual(finished);
-      expect(await transport.ownerYDocStopClear(request, "a.md")).toBeUndefined();
-      await expect(transport.ownerYDocStopClear(request, "a.md")).rejects.toThrow("Invalid Stop cancellation response.");
+      expect(await transport.ownerYDocStopClear(request, stopTarget.document)).toEqual(finished);
+      expect(await transport.ownerYDocStopClear(request, stopTarget.document)).toBeUndefined();
+      await expect(transport.ownerYDocStopClear(request, stopTarget.document)).rejects.toThrow("Invalid Stop cancellation response.");
     } finally {transport.close();}
   });
   it.each(["binding", "state", "extra", "namespace", "unmaterialized", "materialized text"])("rejects an invalid Stop release response: %s", async scenario => {

@@ -934,13 +934,14 @@ export function DesktopWorkspaceShell(props: {
       }),
     [],
   );
-  // A Try again names its row's document, whose editors may be at a new path.
+  // A Stop names the row's document. A Try again closes that document's
+  // editors wherever they opened it, and no other document's at its old path.
   const stopLiveDocument = useCallback(
-    async (id: string, path: string, again?: LiveDocumentStopAgain) => {
+    async (id: string, path: string, objectId: string, again?: LiveDocumentStopAgain) => {
       let result: LiveDocumentStopResult = { keptEdits: "none" };
-      await withClosedEngineDocSession(id, path, async () => {
-        result = await bridge().stopOwnerLiveDocument({ workspaceId: id, path, ...(again ? { again } : {}) });
-      }, again?.objectId);
+      await withClosedEngineDocSession(id, again ? { objectId: again.objectId } : { path }, async () => {
+        result = await bridge().stopOwnerLiveDocument({ workspaceId: id, path, objectId, ...(again ? { again } : {}) });
+      });
       return result;
     },
     [],
@@ -1806,7 +1807,7 @@ export function DesktopWorkspaceShell(props: {
       const identity=`owner-stop:${workspaceId}:${failure.path}`;
       if (shownStopFailures.current.get(identity)===failure.detail) continue;
       shownStopFailures.current.set(identity,failure.detail);
-      const retry=() => {void withClosedEngineDocSession(workspaceId,failure.path,async ()=>{await bridge().stopOwnerLiveDocument({workspaceId,path:failure.path});}).catch(error => {
+      const retry=() => {void withClosedEngineDocSession(workspaceId,{path:failure.path},async ()=>{await bridge().stopOwnerLiveDocument({workspaceId,path:failure.path});}).catch(error => {
         if (!workspaceAdmission.superseded) reportShellError("dohc could not stop live editing.",error,retry,undefined,identity);
       });};
       reportShellFailure({message:`dohc could not stop live editing for "${failure.path}".`,details:[["Reason",failure.detail]],retry,identity});
@@ -1843,7 +1844,7 @@ export function DesktopWorkspaceShell(props: {
       const again=row.recovery==="not-written" || row.recovery==="stopping" ? {objectId:row.objectId,recovery:row.recovery} : undefined;
       const stopAgain=() => {
         let result:LiveDocumentStopResult={keptEdits:"none"};
-        void withClosedEngineDocSession(workspaceId,row.path,async () => {result=await bridge().stopOwnerLiveDocument({workspaceId,path:row.path,...(again ? {again} : {})});},row.objectId)
+        void withClosedEngineDocSession(workspaceId,again ? {objectId:again.objectId} : {path:row.path},async () => {result=await bridge().stopOwnerLiveDocument({workspaceId,path:row.path,...(again ? {again} : {})});})
           .then(() => {if (workspaceIdRef.current===workspaceId && result.keptEdits==="recovered") liveDocumentStopped(row.path,"recovered");},
             (error: unknown) => {
               if (workspaceIdRef.current!==workspaceId || workspaceAdmission.superseded) return;

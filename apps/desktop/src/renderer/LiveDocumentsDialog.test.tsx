@@ -13,8 +13,9 @@ import {
   type LiveRefusalRow,
 } from "./LiveDocumentsDialog";
 
+// The server names each row's document; here, after its path.
 function row(path: string, overrides: Partial<LiveDocumentRow> = {}): LiveDocumentRow {
-  return { path, status: "ready", canResume: false, ...overrides };
+  return { path, objectId: `object:${path}`, status: "ready", canResume: false, ...overrides };
 }
 
 function page(
@@ -38,7 +39,7 @@ function refusalPage(
 function harness() {
   return {
     load: vi.fn((workspaceId: string, retiredAfter?: string) => Promise.resolve(page([]))),
-    stop: vi.fn((workspaceId: string, path: string): Promise<LiveDocumentStopResult> => Promise.resolve({ keptEdits: "none" })),
+    stop: vi.fn((workspaceId: string, path: string, objectId: string): Promise<LiveDocumentStopResult> => Promise.resolve({ keptEdits: "none" })),
     onStopped: vi.fn((path: string, keptEdits: "recovered" | "kept") => {}),
     resume: vi.fn((workspaceId: string, path: string) => Promise.resolve()),
     loadRefusals: vi.fn((workspaceId: string, after?: string) =>
@@ -459,7 +460,7 @@ describe("LiveDocumentsDialog", () => {
     await screen.findByTestId("live-document-row-docs/a.md");
     await user.click(screen.getByRole("button", { name: "Stop live editing for docs/a.md" }));
 
-    expect(h.stop).toHaveBeenCalledWith("ws-1", "docs/a.md");
+    expect(h.stop).toHaveBeenCalledWith("ws-1", "docs/a.md", "object:docs/a.md");
     await vi.waitFor(() => {
       expect(actions("docs/a.md")).toEqual(["Resume live editing"]);
     });
@@ -557,7 +558,7 @@ describe("LiveDocumentsDialog", () => {
       await stopping.promise;
     });
 
-    expect(h.stop).toHaveBeenCalledWith("ws-a", "docs/a.md");
+    expect(h.stop).toHaveBeenCalledWith("ws-a", "docs/a.md", "object:docs/a.md");
     // Workspace A's Stop never reports into workspace B.
     expect(h.onStopped).not.toHaveBeenCalled();
     expect(h.load).toHaveBeenCalledTimes(2);
@@ -1120,7 +1121,7 @@ describe("LiveDocumentsDialog", () => {
       await userEvent.setup().click(within(kept).getByRole("button", { name: "Try again to write your kept edits to docs/a.md" }));
       await vi.waitFor(() => expect(h.onStopped).toHaveBeenCalledExactlyOnceWith("docs/a.md", "recovered"));
       // Try again names the row's document: another document may now have its path.
-      expect(h.stop).toHaveBeenCalledExactlyOnceWith("ws", "docs/a.md", { objectId: "object-a", recovery: "not-written" });
+      expect(h.stop).toHaveBeenCalledExactlyOnceWith("ws", "docs/a.md", "object-a", { objectId: "object-a", recovery: "not-written" });
     });
 
     it("offers only a recovery copy once dohc can't finish writing the edits, and Stop for a document live again", async () => {

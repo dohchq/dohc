@@ -637,7 +637,7 @@ it("keeps a diverged store detached and reported after the relay restarts", asyn
   const routes = createServiceHostEnrollmentRoutes({storage: f.storage, history: f.history, host: restarted,
     resolveActor: async () => ({workspaceId: scope.workspaceId, userId: "owner-1"})});
   const response = await routes(new Request(`https://relay.test/sync/${scope.workspaceId}/live-host`, {headers: {authorization: "Bearer account-token"}}));
-  expect(await response.json()).toEqual({ok: true, diverged: true, documents: [{path: binding.currentPath, status: "unavailable", reason: "session-host-diverged"}]});
+  expect(await response.json()).toEqual({ok: true, diverged: true, documents: [{path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason: "session-host-diverged"}]});
   const passes = vi.spyOn(f.storage, "listUndrainedServiceHostEnrollments");
   await vi.waitFor(() => {restarted.reconcile(); expect(passes.mock.calls.length).toBeGreaterThanOrEqual(3);}, {timeout: 10_000});
   expect(f.starts).toHaveLength(1);

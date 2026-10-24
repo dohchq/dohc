@@ -1623,6 +1623,29 @@ fn a_queue_frozen_at_a_refused_seed_lets_its_document_leave_with_later_accepted_
         pending(&f),
         (Some(UnloadPending::Delivery), Some(UnloadPending::Delivery), false)
     );
+    // Refused again, the seed holds its own generation's work. Once the binding
+    // moves to a successor generation, that seed exempts nothing: the accepted
+    // work waits for settlement before the document unloads or parks.
+    let change = |f: &mut Fixture, sql: &str| {
+        assert!(matches!(
+            f.store
+                .write_with(&NoFaults, |tx| tx.execute(sql, [&outbox]).map_err(write_sql))
+                .unwrap(),
+            TxnOutcome::Committed(1)
+        ));
+    };
+    change(&mut f, "UPDATE owner_ydoc_outboxes SET retry_delivery_id=NULL WHERE outbox_id=?1");
+    assert_eq!(pending(&f), (None, None, true));
+    change(
+        &mut f,
+        "UPDATE live_device_application_bindings SET restore_fence_generation=restore_fence_generation+1
+         WHERE (workspace_id,main_version_id,object_id,lineage_claim_id)=(SELECT workspace_id,main_version_id,object_id,lineage_claim_id
+             FROM owner_ydoc_outboxes WHERE outbox_id=?1)",
+    );
+    assert_eq!(
+        pending(&f),
+        (Some(UnloadPending::Settlement), Some(UnloadPending::Settlement), false)
+    );
 }
 
 #[test]

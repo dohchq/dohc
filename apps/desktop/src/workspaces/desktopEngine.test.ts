@@ -304,8 +304,12 @@ async function keptRelease(path = "notes/plan.md", stored: ReturnType<typeof rec
     const methods: string[] = [];
     f.client.respond = async request => {
       methods.push(request.method);
+      // As the engine resolves it: a document names its own Stop; a path every Stop that had it, and two refuse.
       if (request.method === "ydoc.ownerStop.clear") {
-        const path = (request.params as {path: string}).path, cleared = engine.stops.filter(stop => stop.document.currentPath === path);
+        const {path, document} = request.params as {path?: string; document?: {objectId: string}};
+        const cleared = engine.stops.filter(stop => document ? stop.document.objectId === document.objectId
+          : stop.document.currentPath === path || stop.binding.currentPath === path);
+        if (cleared.length > 1) throw new EngineRequestError(request.id, {code: "INVALID_PARAMS", message: "owner-stop-conflict", retry: "no"});
         engine.stops = engine.stops.filter(stop => !cleared.includes(stop));
         return {id: request.id, result: {stops: cleared}};
       }
@@ -1257,6 +1261,50 @@ describe("server owner peer lifecycle", () => {
     } finally {credentials.abort(); await f.close(); quarantineMock.read.mockReset(); quarantineMock.queue.mockReset(); vi.restoreAllMocks();}
   });
 
+  // The background release failed before it committed, so the engine's Stop
+  // still waits. Try again cannot settle a release that never happened: it
+  // keeps the record's Try again, and reconciliation still finishes the Stop.
+  it("keeps Try again for a release that never committed, and lets reconciliation finish the Stop", async () => {
+    const {f, credentials, binding, workspace} = await quarantinedOwner([]);
+    const stopRow = (state: "requested" | "released") => ({binding, document: {mainVersionId: "main", objectId: "object", currentPath: "notes/plan.md"},
+      relayDatabaseNamespace: "namespace", retirementOwed: state === "requested", state});
+    let released = false, failRelease = true;
+    const releases: {acceptedCursor?: number; keptSnapshot?: string}[] = [];
+    f.client.respond = async request => {
+      if (request.method === "ydoc.ownerStop.release") {
+        const params = request.params as {acceptedCursor?: number; keptSnapshot?: string};
+        releases.push(params);
+        // A waiting Stop takes only a release at the relay's cursor, never a Try again.
+        if (params.acceptedCursor === undefined) return releaseConflict(request);
+        if (failRelease) throw new Error("dohc could not write the file.");
+        released = true;
+        return {id: request.id, result: {stops: [{...stopRow("released"), keptSnapshot: params.keptSnapshot, materialized: true}]}};
+      }
+      if (request.method === "ydoc.ownerStop.list") return {id: request.id, result: {stops: released ? [] : [stopRow("requested")]}};
+      if (request.method === "ydoc.ownerStop.request") return {id: request.id, result: {stops: [stopRow("requested")]}};
+      return {id: request.id, result: request.method === "workspace.open" ? {workspace: "workspace-handle"} : request.method === "engine.ping" ? {ok: true} : null};
+    };
+    quarantineMock.read.mockImplementation(async () => released ? [] :
+      [{objectId: "object", path: "notes/plan.md", reason: "invalid-update", outboxId: "outbox", binding, headDeliveryId: "delivery", recovery: "stopping"}]);
+    quarantineMock.queue.mockResolvedValue(recoveryQueue(binding).queue);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(f.engine.ownerLiveStopFailures("owner")).toHaveLength(1));
+      const snapshot = f.unwritten[0]?.snapshot;
+      expect(f.unwritten).toMatchObject([{objectId: "object", retry: true}]);
+      await expect(f.engine.retryOwnerLiveRelease(await workspace(), "object")).resolves.toBe("requested");
+      expect(f.unwritten).toMatchObject([{objectId: "object", snapshot, retry: true}]);
+      failRelease = false;
+      f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toEqual([]));
+      expect(f.engine.ownerLiveStopFailures("owner")).toEqual([]);
+      // The background release named the same edits, which the file now holds.
+      expect(releases.at(-1)).toMatchObject({acceptedCursor: 0, keptSnapshot: snapshot});
+      expect(f.unwritten).toEqual([]);
+    } finally {credentials.abort(); await f.close(); quarantineMock.read.mockReset(); quarantineMock.queue.mockReset(); vi.restoreAllMocks();}
+  });
+
   // A release took refused edits but could not write the file. A restart, or
   // an engine store reset that forgets the release, keeps the record and its
   // stored package. Try again settles that release again by the record's
@@ -1279,7 +1327,7 @@ describe("server owner peer lifecycle", () => {
         expect(second.f.engine.ownerLiveQuarantines("owner")).toMatchObject([{objectId: "object", path: "notes/old plan.md", recovery: "not-written"}]);
         const released = await second.f.engine.retryOwnerLiveRelease(second.workspace, "object");
         expect(stopMethods(second.methods)).toEqual(["ydoc.ownerStop.release"]);
-        expect(released?.materialized).toBe(outcome === "conflict" ? undefined : outcome === "materialized");
+        expect(released === "requested" ? released : released?.materialized).toBe(outcome === "conflict" ? undefined : outcome === "materialized");
       } finally {await second.f.close();}
       if (outcome === "materialized") {
         expect(await kept.records().list("owner")).toEqual([]);
@@ -1315,13 +1363,29 @@ describe("server owner peer lifecycle", () => {
     const {f, workspace, methods} = await kept.launch();
     try {
       expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{recovery: "not-written"}]);
-      await f.engine.clearOwnerLiveStop(workspace, "notes/plan.md");
+      await f.engine.clearOwnerLiveStop(workspace, releasedStop.document);
       expect(await kept.records().list("owner")).toMatchObject([{objectId: "object", headDeliveryId: "delivery", retry: false}]);
       expect(await kept.records().recovery("owner", "object")).toEqual(expect.any(String));
       await f.engine.refreshOwnerLiveQuarantines(workspace);
       expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{recovery: "cannot-write"}]);
       await expect(f.engine.retryOwnerLiveRelease(workspace, "object")).rejects.toThrow("This document changed.");
       expect(stopMethods(methods)).toEqual(["ydoc.ownerStop.clear"]);
+    } finally {await f.close(); quarantineMock.read.mockReset();}
+  });
+
+  // Document A stopped at notes/plan.md, then moved; B now has that path and
+  // its own Stop. Resume of B clears B's Stop by its document, where a path
+  // would name both. A's Stop and its record's Try again stay.
+  it("clears only the resumed document's Stop when another document's Stop kept its path", async () => {
+    const kept = await keptRelease();
+    const moved = {...releasedStop, document: {...releasedStop.document, currentPath: "notes/moved.md"}};
+    const other = {...releasedStop, binding: {...keptBinding, objectId: "other"}, document: {...releasedStop.document, objectId: "other"}};
+    kept.engine.stops = [moved, other];
+    const {f, workspace} = await kept.launch();
+    try {
+      await f.engine.clearOwnerLiveStop(workspace, other.document);
+      expect(kept.engine.stops).toEqual([moved]);
+      expect(await kept.records().list("owner")).toMatchObject([{objectId: "object", retry: true}]);
     } finally {await f.close(); quarantineMock.read.mockReset();}
   });
 

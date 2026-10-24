@@ -3385,7 +3385,7 @@ describe("sync status IPC contract", () => {
   it("carries a document the server refused or whose server copy diverged to the status and the live documents list", () => {
     const status = { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
       historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 0, ownerLiveDelivery: "retrying" };
-    const row = { path: "docs/a.md", status: "unavailable", canResume: true };
+    const row = { path: "docs/a.md", objectId: "object", status: "unavailable", canResume: true };
     for (const reason of ["session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted"] as const) {
       expect(SyncStatusResult.parse({ ...status, ownerLiveDeliveryReason: reason }).ownerLiveDeliveryReason).toBe(reason);
       expect(OwnerLiveDocument.parse({ ...row, reason }).reason).toBe(reason);

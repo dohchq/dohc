@@ -828,7 +828,8 @@ fn append_with_retained_base(
 /// Keeps native work a restore fenced in its generation's queue, which no
 /// longer takes edits. The queue keeps its state: a refusal stays, with its
 /// head, and a sealed queue stays sealed. Only a Stop's release or a recovery
-/// copy reaches the work.
+/// copy reaches the work. Only owner enrollment gets here, which a configured
+/// live host refuses, so a queue the service host kept refused never grows.
 fn retain_fenced_in_tx(
     tx: &rusqlite::Transaction<'_>,
     parent: &ParentRow,

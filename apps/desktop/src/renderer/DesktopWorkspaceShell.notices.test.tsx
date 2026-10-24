@@ -46,8 +46,8 @@ describe("edits the server refused", () => {
   const BODY = "The server could not accept your edits. dohc kept them on this computer. Save a recovery copy to get them back.";
   const RECOVERED = "Live editing stopped for notes/plan.md. dohc wrote your kept edits into the file.";
   const liveRows = (): OwnerLiveDocumentsResult => ({nextCursor: null, documents: [
-    {path: "other.md", status: "ready", canResume: false},
-    {path: "notes/plan.md", status: "ready", canResume: false, quarantine: "paused"},
+    {path: "other.md", objectId: "object-other", status: "ready", canResume: false},
+    {path: "notes/plan.md", objectId: "object-1", status: "ready", canResume: false, quarantine: "paused"},
   ]});
 
   it("names the document and where its edits are, as a toast and one Notices row with copy beside the text", async () => {
@@ -157,7 +157,7 @@ describe("edits the server refused", () => {
     const user = userEvent.setup();
     await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", {name: "Open Live documents"}));
     await user.click(await within(await screen.findByTestId("live-documents-dialog")).findByRole("button", {name: "Stop live editing for notes/plan.md"}));
-    expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledWith({workspaceId: WORKSPACE.workspaceId, path: "notes/plan.md"});
+    expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledWith({workspaceId: WORKSPACE.workspaceId, path: "notes/plan.md", objectId: "object-1"});
     expect(screen.queryByText(RECOVERED)).toBeNull();
     await act(async () => { stopping.resolve({keptEdits: "recovered"}); await stopping.promise; });
     expect(await screen.findByText(RECOVERED)).toBeTruthy();
@@ -2380,6 +2380,7 @@ describe("file transfers", () => {
 describe("owner live documents", () => {
   const LIVE_ROW = {
     path: "notes/today.md",
+    objectId: "object-today",
     status: "ready" as const,
     canResume: false,
   };
@@ -2426,6 +2427,7 @@ describe("owner live documents", () => {
       expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledWith({
         workspaceId: WORKSPACE.workspaceId,
         path: LIVE_ROW.path,
+        objectId: LIVE_ROW.objectId,
       }),
     );
   });

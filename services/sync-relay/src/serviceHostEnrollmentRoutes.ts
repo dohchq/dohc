@@ -187,8 +187,9 @@ export function createServiceHostEnrollmentRoutes(options: {
   // Nothing its owner does, not even a Pause or Stop, continues a document
   // whose hosted replica diverged. Its store stays for the operator.
   const diverged = (row: ServiceHostEnrollment) => !changed(row) && host.diverged(row);
+  // Each row names its document, so its owner's Stop and Resume act on that document alone.
   function state(row: ServiceHostEnrollment) {
-    const base = {path: row.path};
+    const base = {path: row.path, objectId: row.objectId};
     if (diverged(row)) return {...base, status: "unavailable", reason: "session-host-diverged"};
     // A Pause still waiting for its document to unload reads as paused.
     if (!row.enabled || row.ownerStop) return {...base, status: "paused"};
@@ -205,7 +206,7 @@ export function createServiceHostEnrollmentRoutes(options: {
     const document = {workspaceId: row.workspaceId, mainVersionId: "main", objectId: saved.source.objectId, lineageClaimId: saved.source.lineageClaimId};
     const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: row.ownerUserId, shareId: row.shareId}});
     if (current.kind !== "current" || !host.ready(document)) return {...base, status: host.unavailable ? "unavailable" : "preparing"};
-    return {path: current.binding.currentPath, status: "ready", document: {binding: current.binding, relayDatabaseNamespace: history.namespace, shareId: row.shareId}};
+    return {...base, path: current.binding.currentPath, status: "ready", document: {binding: current.binding, relayDatabaseNamespace: history.namespace, shareId: row.shareId}};
   }
   const response = (body: unknown, status = 200) => Response.json(body, {status, headers: {"cache-control": "private, no-store"}});
   return async (request: Request): Promise<Response> => {
@@ -233,7 +234,7 @@ export function createServiceHostEnrollmentRoutes(options: {
         url.searchParams.has("after") ? parseShareId(url.searchParams.get("after") ?? undefined) : undefined)});
       if (retiredPage) {
         const page = storage.listRetiredServiceHostEnrollments(workspaceId, url.searchParams.get("after") ?? undefined);
-        return response({ok: true, documents: page.documents.map(row => ({path: row.path, status: "retired",
+        return response({ok: true, documents: page.documents.map(row => ({path: row.path, objectId: row.objectId, status: "retired",
           ...(diverged(row) ? {reason: "session-host-diverged"} : {})})), nextCursor: page.nextCursor});
       }
       // Later pages of the edits the server kept, after the first page's `keptEditsCursor`.
