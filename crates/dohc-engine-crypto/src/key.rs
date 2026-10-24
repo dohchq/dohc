@@ -264,8 +264,8 @@ fn verify_key_dir(engine_dir: &std::path::Path) -> Result<(), CryptoError> {
 /// orphaned ciphertext would strand it silently; the capture layer checks the
 /// encrypted store first and fails closed instead (TS parity:
 /// `loadSecretDataKey` checks protected rows before its create branch).
-/// A drive without hard links, such as exFAT or FAT32, gets the key created
-/// at its name instead (`create_in_place`).
+/// A drive without hard links, such as exFAT or FAT32, gets the key by a
+/// rename instead (`publish_by_rename`).
 pub fn create_key_file(engine_dir: &std::path::Path) -> Result<SecretDataKey, CryptoError> {
     create_key_file_with(engine_dir, |temp, path| std::fs::hard_link(temp, path))
 }
@@ -285,7 +285,7 @@ fn create_key_file_with(
     // a crash that lost a visible-but-unflushed key would strand every
     // sealed snapshot, and a later restart would silently re-mint. The
     // link-publish also means a partially written key can never be visible
-    // at the final path, except on a drive without hard links.
+    // at the final path.
     // Unique per attempt: pid + a process-wide counter, so two same-process
     // minters can never share (and cross-delete) one temp file.
     static MINT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -295,17 +295,18 @@ fn create_key_file_with(
     // like every other buffer holding key material.
     let payload = Zeroizing::new(key.to_key_file());
     let mut file = create_new_key_file(&temp).map_err(|err| key_create_error(&err))?;
-    let written = write_and_flush(&mut file, &payload);
+    let written = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        file.write_all(payload.as_bytes())?;
+        file.sync_all()
+    })();
     drop(file);
     if written.is_err() {
         let _ = std::fs::remove_file(&temp);
         return Err(CryptoError::KeyFileMalformed);
     }
     let publication = match link(&temp, &path) {
-        Err(err) if hard_links_unsupported(&err) => {
-            let _ = std::fs::remove_file(&temp);
-            create_in_place(&path, &payload)
-        }
+        Err(err) if hard_links_unsupported(&err) => publish_by_rename(&temp, &path),
         published => published,
     };
     finish_key_publication(&path, &temp, publication)
@@ -336,31 +337,19 @@ fn create_new_key_file(path: &std::path::Path) -> std::io::Result<std::fs::File>
     }
 }
 
-fn write_and_flush(file: &mut std::fs::File, payload: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    file.write_all(payload.as_bytes())?;
-    file.sync_all()
-}
-
-/// Publish the key on a drive without hard links by creating it at its
-/// name. The create still never replaces a key, and the key is flushed
-/// before anything is sealed under it. A reader that comes between the
-/// create and the write finds a key that fails closed for that try, as
-/// every reader does after a crash in that moment.
-fn create_in_place(path: &std::path::Path, payload: &str) -> std::io::Result<()> {
-    let mut file = create_new_key_file(path)?;
-    let written = write_and_flush(&mut file, payload);
-    drop(file);
-    // Nothing adopts a key it cannot parse, so only such a file can go.
-    let complete = || {
-        read_key_file_no_follow(path)
-            .map(Zeroizing::new)
-            .is_ok_and(|content| SecretDataKey::parse_key_file(&content).is_ok())
-    };
-    if written.is_err() && !complete() {
-        let _ = std::fs::remove_file(path);
-    }
-    written
+/// Publish the flushed key at `temp` on a drive without hard links. An empty
+/// file claims the name, so a key already there stays, and the rename
+/// replaces only that claim. A reader finds the empty claim, which fails
+/// closed for that try, or the whole flushed key. A crash between the two
+/// leaves the empty claim.
+fn publish_by_rename(temp: &std::path::Path, path: &std::path::Path) -> std::io::Result<()> {
+    drop(create_new_key_file(path)?);
+    std::fs::rename(temp, path).inspect_err(|_| {
+        // An empty claim holds nothing a reader could use, so it can go.
+        if std::fs::symlink_metadata(path).is_ok_and(|claim| claim.is_file() && claim.len() == 0) {
+            let _ = std::fs::remove_file(path);
+        }
+    })
 }
 
 /// Whether a hard link failed because the drive has none. The rule is
@@ -821,9 +810,41 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
+    #[test]
+    fn the_rename_replaces_only_its_own_claim() {
+        let dir = dohc_test_scratch::ScratchDir::new_named("key-claim").unwrap();
+        let path = dir.join(SECRET_KEY_FILE_NAME);
+        let temp = dir.join("pending-key");
+        let winner = SecretDataKey::from_bytes(&[2; SECRET_KEY_BYTES]).unwrap();
+        std::fs::write(&path, winner.to_key_file()).unwrap();
+        std::fs::write(&temp, "candidate").unwrap();
+        let claimed = publish_by_rename(&temp, &path);
+        assert_eq!(
+            claimed.unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            winner.to_key_file()
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(publish_by_rename(&temp, &path).is_ok());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "candidate");
+        assert!(!temp.exists());
+    }
+
+    #[test]
+    fn a_failed_rename_leaves_no_claim() {
+        let dir = dohc_test_scratch::ScratchDir::new_named("key-claim-failure").unwrap();
+        let path = dir.join(SECRET_KEY_FILE_NAME);
+        assert!(publish_by_rename(&dir.join("missing"), &path).is_err());
+        assert!(!path.exists());
+    }
+
     #[cfg(unix)]
     #[test]
-    fn only_a_drive_without_hard_links_publishes_in_place() {
+    fn only_a_drive_without_hard_links_publishes_by_rename() {
         for code in [libc::EPERM, libc::ENOTSUP, libc::EOPNOTSUPP] {
             assert!(hard_links_unsupported(&std::io::Error::from_raw_os_error(
                 code

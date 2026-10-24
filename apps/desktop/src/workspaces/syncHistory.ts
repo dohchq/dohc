@@ -131,7 +131,7 @@ export async function guardedFileExists(path: string, guard: DohcPathGuard): Pro
 
 async function createGuardedFileOnce(path: string, guard: DohcPathGuard, text: string): Promise<void> {
   if (await guardedFileExists(path, guard)) return;
-  if (!await atomicCreateFile(path, text, 0o666, { directWriteAfter: () => true })) {
+  if (!await atomicCreateFile(path, text, 0o666, { renameAfter: () => true })) {
     await guardedFileExists(path, guard);
   }
 }
@@ -266,7 +266,7 @@ export async function scheduleComputer(rootPath: string, here: Computer): Promis
   if (read.kind !== "absent") return scheduleComputerOf(read);
   if (record.host !== null) return { kind: "computer", computer: record.host };
   try {
-    if (await atomicCreateFile(join(await marksFolder(rootPath), "schedules.json"), computerText(here), 0o666, { directWriteAfter: () => true })) {
+    if (await atomicCreateFile(join(await marksFolder(rootPath), "schedules.json"), computerText(here), 0o666, { renameAfter: () => true })) {
       return { kind: "computer", computer: here };
     }
     // Another reader recorded one first: read it, once.

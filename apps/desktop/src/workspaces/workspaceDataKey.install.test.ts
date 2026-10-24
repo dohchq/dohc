@@ -53,7 +53,7 @@ describe.each(["win32", "linux", "darwin"] as const)("key publication on %s", pl
     ["EACCES", -4092, false],
     ["EXDEV", -4037, false],
     ["EIO", -4070, false],
-  ] as const)("writes the key in place only on a drive without hard links: %s", async (code, errno, inPlace) => {
+  ] as const)("publishes the key by rename only on a drive without hard links: %s", async (code, errno, inPlace) => {
     const { root, path } = await keyFolder();
     const link = failLinks(code, errno);
     const installed = onPlatform(platform, () => installWorkspaceDataKey(root, Buffer.alloc(32, 7)));
@@ -69,14 +69,14 @@ describe.each(["win32", "linux", "darwin"] as const)("key publication on %s", pl
   });
 });
 
-it("writes the key in place readable only by its owner", async () => {
+it("publishes the key by rename readable only by its owner", async () => {
   const { root, path } = await keyFolder();
   failLinks("ENOTSUP", -4049);
   await installWorkspaceDataKey(root, Buffer.alloc(32, 7));
   if (process.platform !== "win32") expect((await stat(path)).mode & 0o777).toBe(0o600);
 });
 
-it("keeps a different key that appears while the key is written in place", async () => {
+it("keeps a different key that claims the name first", async () => {
   const { root, path } = await keyFolder();
   failLinks("ENOTSUP", -4049, destination => writeFile(destination, keyFile(9)));
   await expect(installWorkspaceDataKey(root, Buffer.alloc(32, 7))).rejects.toMatchObject({
@@ -85,6 +85,23 @@ it("keeps a different key that appears while the key is written in place", async
   });
   expect(await readFile(path, "utf8")).toBe(keyFile(9));
   expect(await readdir(dirname(path))).toEqual(["secret.key"]);
+});
+
+it("removes its empty claim when the rename over it fails", async () => {
+  const { root, path } = await keyFolder();
+  vi.mocked(atomicCreateFile).mockImplementationOnce((destination, data, mode, options) =>
+    actual.atomicCreateFile(destination, data, mode, {
+      ...options,
+      link: async () => {
+        throw Object.assign(new Error("link failed"), { code: "ENOTSUP", errno: -4049, syscall: "link" });
+      },
+      rename: async () => {
+        throw Object.assign(new Error("rename failed"), { code: "EIO" });
+      },
+    }),
+  );
+  await expect(installWorkspaceDataKey(root, Buffer.alloc(32, 7))).rejects.toMatchObject({ code: "key-corrupt", message: generalWords });
+  expect(await readdir(dirname(path))).toEqual([]);
 });
 
 it("keeps the general words when the temporary file cannot be opened", async () => {
