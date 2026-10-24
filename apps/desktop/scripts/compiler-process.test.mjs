@@ -11,6 +11,9 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
+import { warmWindowsCompiler } from './warm-windows-compiler.mjs';
+
+before(warmWindowsCompiler,{timeout:190000});
 
 function reportCompilerFailure(running){
   // assert.rejects' property comparison omits custom error fields. Observe
