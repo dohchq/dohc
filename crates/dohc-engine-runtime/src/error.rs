@@ -7,6 +7,8 @@ use dohc_engine_storage::StorageError;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RuntimeError {
+    #[error(transparent)]
+    CaptureBatchPass(std::sync::Arc<RuntimeError>),
     #[error("chat-mention-access-changed")]
     ChatMentionAccessChanged,
     #[error("chat-mention-version-changed")]
@@ -131,6 +133,7 @@ impl RuntimeError {
     /// The stable machine code, preserving the storage code where wrapped.
     pub fn code(&self) -> &'static str {
         match self {
+            RuntimeError::CaptureBatchPass(error) => error.code(),
             RuntimeError::ChatMentionAccessChanged => "chat-mention-access-changed",
             RuntimeError::ChatMentionVersionChanged => "chat-mention-version-changed",
             RuntimeError::ChatConversationLinksChanged => "chat-conversation-links-changed",
