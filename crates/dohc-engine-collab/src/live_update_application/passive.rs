@@ -34,6 +34,30 @@ pub struct ReplicaJournalRow {
     pub restore: Option<ReplicaRestore>,
 }
 
+/// A restore the relay declined after its native fence committed, as the
+/// journal carries it at its own cursor, between accepted deliveries. It is
+/// no delivery: no update, no event count, no evidence digest of its own.
+/// `cancellation` is the host's terminal cancellation, which binds the
+/// operation and its fence to the stopped binding at the new generation and
+/// the accepted endpoint the fence froze. A replica at exactly the fence's
+/// old generation and that endpoint advances its generation; its document
+/// state and accepted history stay, and no retained work arrives with it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReplicaRestoreCancellation {
+    pub relay_database_namespace: String,
+    pub journal_cursor: i64,
+    pub cancellation: NativeRestoreCancellationReceipt,
+}
+
+/// One entry of a replica page, in journal order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ReplicaJournalEntry {
+    Update(ReplicaJournalRow),
+    Cancellation(ReplicaRestoreCancellation),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReplicaPageResult {
@@ -50,7 +74,7 @@ pub fn apply_page(
     workspace: &str,
     after: i64,
     epoch_log_floor: i64,
-    rows: &[ReplicaJournalRow],
+    rows: &[ReplicaJournalEntry],
     faults: &dyn FaultInjector,
 ) -> Result<ReplicaPageResult, ApplicationError> {
     if !store.is_passive() {
@@ -74,7 +98,27 @@ pub fn apply_page(
         let mut previous_cursor = after;
         #[cfg(any(test, feature = "test-support"))]
         timings.start_rows();
-        for row in rows {
+        for entry in rows {
+            let row = match entry {
+                ReplicaJournalEntry::Update(row) => row,
+                ReplicaJournalEntry::Cancellation(record) => {
+                    if record.journal_cursor <= previous_cursor {
+                        return Err(ApplicationError::Conflict);
+                    }
+                    previous_cursor = record.journal_cursor;
+                    match apply_cancellation(tx, workspace, frontier.journal_cursor, record)? {
+                        Control::Applied => result.applied += 1,
+                        Control::Skipped => result.skipped += 1,
+                        Control::Blocked => {
+                            result.blocked_cursor = Some(record.journal_cursor);
+                            break;
+                        }
+                    }
+                    if faults.poll(FaultPoint::SyncBeforeApplyCommit)==FaultAction::Crash { return Err(ApplicationError::Interrupted); }
+                    result.journal_cursor = result.journal_cursor.max(record.journal_cursor);
+                    continue;
+                }
+            };
             row.admitted.validate()?;
             identifier(&row.relay_database_namespace, 512)?;
             digest(&row.evidence_digest)?;
@@ -306,6 +350,87 @@ fn apply_row(
     )?;
     save_position(tx, row, count, &evidence)?;
     Ok(appended || !append.deduped)
+}
+
+enum Control {
+    Applied,
+    Skipped,
+    Blocked,
+}
+
+/// Advance the replica's lineage past a cancelled restore. The record must
+/// agree with itself and name this namespace, and the replica must stand at
+/// exactly the fence's old generation and the endpoint the cancellation
+/// kept: its event count, evidence digest and cursor. Anything else refuses.
+/// A record at or below the frontier was handled before; a retired lineage
+/// skips it, as its deliveries skip.
+fn apply_cancellation(
+    tx: &Transaction<'_>,
+    workspace: &str,
+    frontier: i64,
+    record: &ReplicaRestoreCancellation,
+) -> Result<Control, ApplicationError> {
+    identifier(&record.relay_database_namespace, 512)?;
+    integer(record.journal_cursor, 1, SAFE)?;
+    let cancellation = &record.cancellation;
+    cancellation
+        .validate()
+        .map_err(|_| ApplicationError::Conflict)?;
+    let operation = &cancellation.fence.operation;
+    let endpoint = &cancellation.endpoint;
+    let b = &cancellation.binding;
+    let endpoint_cursor = endpoint
+        .terminal_receipt
+        .as_ref()
+        .map_or(0, |r| r.journal_cursor);
+    if b.workspace_id != workspace {
+        return Err(ApplicationError::WorkspaceMismatch);
+    }
+    if operation.relay_database_namespace != record.relay_database_namespace
+        || endpoint_cursor >= record.journal_cursor
+    {
+        return Err(ApplicationError::Conflict);
+    }
+    let key = DocKey::new(workspace, &b.main_version_id, &b.object_id)?;
+    let matches = durable::read_marker_in(tx, &key)?
+        .is_some_and(|m| m.lineage_claim_id.as_deref() == Some(&b.lineage_claim_id));
+    if !matches {
+        let retired: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_inactive_lineages WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)",
+            params![workspace,b.main_version_id,b.object_id,b.lineage_claim_id], |r| r.get(0)).map_err(read_sql)?;
+        return Ok(if retired {
+            Control::Skipped
+        } else {
+            Control::Blocked
+        });
+    }
+    type Position = (String, i64, i64, String, i64);
+    // A replica keeps no position before its lineage's first accepted event,
+    // so it can prove no cancellation there.
+    let (namespace, generation, count, evidence, cursor): Position = tx.query_row(
+        "SELECT relay_database_namespace,restore_generation,event_count,evidence_digest,journal_cursor FROM replica_documents WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(read_sql)?
+        .ok_or(ApplicationError::Conflict)?;
+    if namespace != record.relay_database_namespace {
+        return Err(ApplicationError::Conflict);
+    }
+    if record.journal_cursor <= frontier && generation >= operation.new_fence {
+        return Ok(Control::Skipped);
+    }
+    if generation != operation.old_binding.restore_fence_generation
+        || count != endpoint.event_count
+        || evidence != endpoint.history_evidence_digest
+        || cursor != endpoint_cursor
+    {
+        return Err(ApplicationError::Conflict);
+    }
+    let changed = tx.execute(
+        "UPDATE replica_documents SET restore_generation=?5 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_generation=?6",
+        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,operation.new_fence,generation],
+    ).map_err(write_sql)?;
+    if changed != 1 {
+        return Err(ApplicationError::Corrupt);
+    }
+    Ok(Control::Applied)
 }
 
 // The index contains disjoint ranges. The last range starting before a

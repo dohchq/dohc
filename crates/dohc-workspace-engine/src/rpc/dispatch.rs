@@ -136,6 +136,7 @@ impl EngineService {
                     | "liveApplication.appliedRead"
                     | "liveApplication.settle"
                     | "liveApplication.fenceRestore"
+                    | "liveApplication.cancelRestoreFence"
                     | "liveApplication.prepareRestore"
                     | "liveApplication.applyRestore"
                     | "liveApplication.settleRestore"
@@ -360,6 +361,14 @@ impl EngineService {
             "liveApplication.releaseActivation" => {
                 Box::pin(self.live_application_release(&ctx, request.workspace, request.params))
                     .await?
+            }
+            "liveApplication.cancelRestoreFence" => {
+                Box::pin(self.live_application_cancel_restore_fence(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                ))
+                .await?
             }
             "liveApplication.register" => {
                 self.live_application_register(&ctx, request.workspace, request.params)

@@ -3258,21 +3258,15 @@ mod tests {
         assert!(dropped.load(Ordering::SeqCst));
     }
 
-    // A held details answer cancelled, or past its deadline, mid-frame
-    // finishes that frame, and the connection's next answer still arrives. A
-    // lost owner still stops it mid-frame.
+    // A held details answer cancelled mid-frame finishes that frame, and the
+    // connection's next answer still arrives. A lost owner still stops it
+    // mid-frame.
     #[tokio::test]
-    async fn held_read_cancelled_or_expired_mid_frame_finishes_its_answer() {
-        for interruption in [
-            ErrorCode::Cancelled,
-            ErrorCode::DeadlineExceeded,
-            ErrorCode::WorkspaceUnavailable,
-        ] {
+    async fn held_read_cancelled_mid_frame_finishes_its_answer() {
+        for interruption in [ErrorCode::Cancelled, ErrorCode::WorkspaceUnavailable] {
             let cancel = CancelSignal::new();
             let retired = CancelSignal::new();
             let dropped = Arc::new(AtomicBool::new(false));
-            let deadline = (interruption == ErrorCode::DeadlineExceeded)
-                .then(|| std::time::Instant::now() + Duration::from_secs(1));
             // As large as a held answer gets, far more than a pipe holds.
             let details =
                 serde_json::json!({ "status": "current", "padding": "x".repeat(200 * 1024) });
@@ -3285,7 +3279,7 @@ mod tests {
                 guard: Arc::new(TestOutputGuard {
                     cancel: cancel.clone(),
                     retired: retired.clone(),
-                    deadline,
+                    deadline: None,
                     dropped: dropped.clone(),
                     read_connection: Some(CancelSignal::new()),
                 }),
@@ -3314,7 +3308,7 @@ mod tests {
                 } else {
                     cancel
                 },
-                deadline,
+                deadline: None,
             };
             let written = write_output(output, &mut rx, &limits, active.clone()).await;
             assert!(dropped.load(Ordering::SeqCst));
@@ -3347,6 +3341,129 @@ mod tests {
             );
             assert!(decoder.next_frame().unwrap().is_none());
         }
+    }
+
+    /// Takes half of the first write and returns once `deadline` has passed,
+    /// then reports a full pipe until `writable`, as a slow reader keeps the
+    /// writer waiting mid-frame past its deadline. Signals `waiting` each
+    /// time it reports a full pipe.
+    struct PendingPastDeadline {
+        output: Arc<Mutex<Vec<u8>>>,
+        deadline: std::time::Instant,
+        started: bool,
+        writable: Arc<AtomicBool>,
+        waiting: Arc<Notify>,
+        waker: Arc<Mutex<Option<std::task::Waker>>>,
+    }
+
+    impl AsyncWrite for PendingPastDeadline {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if !self.started {
+                self.started = true;
+                let half = bytes.len().div_ceil(2);
+                lock(&self.output).extend_from_slice(&bytes[..half]);
+                while std::time::Instant::now() < self.deadline {
+                    std::thread::yield_now();
+                }
+                return Poll::Ready(Ok(half));
+            }
+            if !self.writable.load(Ordering::SeqCst) {
+                *lock(&self.waker) = Some(cx.waker().clone());
+                self.waiting.notify_one();
+                return Poll::Pending;
+            }
+            lock(&self.output).extend_from_slice(bytes);
+            Poll::Ready(Ok(bytes.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    // A held details answer whose deadline passes mid-frame finishes that
+    // frame even when its writer waits past a timer tick after the deadline,
+    // and the connection's next answer still arrives.
+    #[tokio::test]
+    async fn held_read_expired_mid_frame_finishes_once_its_writer_can() {
+        let cancel = CancelSignal::new();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let details = serde_json::json!({ "status": "current", "padding": "x".repeat(200 * 1024) });
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        tx.send(OutputItem::Guarded {
+            response: WireResponse {
+                id: 9,
+                result: details.clone(),
+            },
+            guard: Arc::new(TestOutputGuard {
+                cancel: cancel.clone(),
+                retired: CancelSignal::new(),
+                deadline: Some(deadline),
+                dropped: dropped.clone(),
+                read_connection: Some(CancelSignal::new()),
+            }),
+        })
+        .await
+        .unwrap();
+        tx.send(OutputItem::Envelope(Envelope::Response(WireResponse {
+            id: 10,
+            result: serde_json::json!({ "ok": true }),
+        })))
+        .await
+        .unwrap();
+        drop(tx);
+        let active: ActiveEgress = Arc::new(Mutex::new(HashMap::from([(9, Some(cancel))])));
+        let transcript = Arc::new(Mutex::new(Vec::new()));
+        let (writable, waiting) = (Arc::new(AtomicBool::new(false)), Arc::new(Notify::new()));
+        let waker = Arc::new(Mutex::new(None));
+        let output = PendingPastDeadline {
+            output: transcript.clone(),
+            deadline,
+            started: false,
+            writable: writable.clone(),
+            waiting: waiting.clone(),
+            waker: waker.clone(),
+        };
+        let writer_active = active.clone();
+        let task = tokio::spawn(async move {
+            write_output(output, &mut rx, &WireLimits::default(), writer_active).await
+        });
+        waiting.notified().await;
+        // The timer has fired everything due by the deadline once this
+        // returns, so a deadline the writer still waited on has fired too.
+        tokio::time::sleep_until(deadline.into()).await;
+        writable.store(true, Ordering::SeqCst);
+        if let Some(waker) = lock(&waker).take() {
+            waker.wake();
+        }
+        task.await
+            .unwrap()
+            .expect("an expired read's started answer leaves the connection writing");
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(lock(&active).is_empty());
+        let limits = WireLimits::default();
+        let mut decoder = FrameDecoder::new(limits.clone());
+        decoder.push(&lock(&transcript));
+        let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+            panic!("the expired answer did not finish");
+        };
+        assert!(
+            matches!(decode_control(&payload, &limits).unwrap(), Envelope::Response(response) if response.id == 9 && response.result == details)
+        );
+        let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+            panic!("following response missing");
+        };
+        assert!(
+            matches!(decode_control(&payload, &limits).unwrap(), Envelope::Response(response) if response.id == 10 && response.result["ok"] == true)
+        );
+        assert!(decoder.next_frame().unwrap().is_none());
     }
 
     // A held read cancelled, past its deadline, or whose owner retired, after

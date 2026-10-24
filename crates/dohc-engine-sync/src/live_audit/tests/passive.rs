@@ -1,6 +1,6 @@
 use super::*;
 use dohc_engine_collab::live_update_application::passive::{
-    ReplicaAuthority, ReplicaJournalRow, ReplicaPageResult,
+    ReplicaAuthority, ReplicaJournalEntry, ReplicaJournalRow, ReplicaPageResult,
 };
 use dohc_engine_collab::live_update_application::{
     AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, ApplicationError, LiveUpdateReceipt,
@@ -16,8 +16,20 @@ fn apply_page(
     faults: &dyn FaultInjector,
 ) -> Result<ReplicaPageResult, ApplicationError> {
     dohc_engine_collab::live_update_application::passive::apply_page(
-        store, workspace, after, 0, rows, faults,
+        store,
+        workspace,
+        after,
+        0,
+        &entries(rows),
+        faults,
     )
+}
+
+fn entries(rows: &[ReplicaJournalRow]) -> Vec<ReplicaJournalEntry> {
+    rows.iter()
+        .cloned()
+        .map(ReplicaJournalEntry::Update)
+        .collect()
 }
 
 fn copy_blobs(source: &EngineStore, replica: &mut EngineStore) {
@@ -304,6 +316,181 @@ fn passive_audit_without_content_still_applies_the_update() {
     let result = apply_page(&mut replica, "ws", 0, &[first], &NoFaults).unwrap();
     assert_eq!(state(&replica), state(&source.store));
     assert_eq!(result.applied, 1);
+}
+
+/// Sol's replica format: a restore the relay cancelled after its native fence
+/// reaches a replica as a control record. At the replica's exact generation
+/// and endpoint it advances the generation and nothing else, and a replay
+/// skips. The next delivery at the new generation then applies on the
+/// normal count and evidence chain. A forged or altered record refuses, and
+/// so does a delivery at the new generation without one, or one from the
+/// generation before after it.
+#[test]
+fn passive_replica_crosses_a_cancelled_restore_by_its_control_record() {
+    use dohc_engine_collab::live_update_application::passive::ReplicaRestoreCancellation;
+    use dohc_engine_collab::live_update_application::{
+        NativeRestoreCancellationReceipt, NativeRestoreFence, NativeRestoreFenceReceipt,
+        RestoreDeliveryOrigin, RetainedPrefixBody,
+    };
+    let mut source = fixture_with_binding_generation(true, None, 1);
+    bootstrap(&mut source, false).unwrap();
+    let (_scratch, _path, mut replica) = receiver(&source);
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&source.bytes).unwrap();
+    let previous = initial(&source);
+    let first = row(&mut source, 1, &previous, &doc);
+    apply_page(
+        &mut replica,
+        "ws",
+        0,
+        std::slice::from_ref(&first),
+        &NoFaults,
+    )
+    .unwrap();
+    let terminal = first.admitted.metadata.accepted.receipt.clone();
+    let mut stopped = source.binding.clone();
+    stopped.restore_fence_generation = 2;
+    let record = ReplicaRestoreCancellation {
+        relay_database_namespace: "relay".into(),
+        journal_cursor: 2,
+        cancellation: NativeRestoreCancellationReceipt {
+            fence: NativeRestoreFenceReceipt {
+                operation: NativeRestoreFence {
+                    operation_id: "restore".into(),
+                    relay_database_namespace: "relay".into(),
+                    old_binding: source.binding.clone(),
+                    host_id: "host".into(),
+                    new_fence: 2,
+                    origin: RestoreDeliveryOrigin::Bootstrap {
+                        id: "bootstrap".into(),
+                    },
+                    terminal: Some(terminal.clone()),
+                    applied_sequence: 1,
+                },
+                local_head_sequence: 1,
+                recorded_at_ms: 2,
+            },
+            binding: stopped.clone(),
+            endpoint: RetainedPrefixBody {
+                terminal_receipt: Some(terminal),
+                event_count: 1,
+                history_evidence_digest: first.evidence_digest.clone(),
+            },
+            recorded_at_ms: 2,
+        },
+    };
+    let mut template = first.clone();
+    template.admitted.metadata.accepted.binding = stopped;
+    template
+        .authority
+        .as_mut()
+        .unwrap()
+        .restore_fence_generation = 2;
+    let bytes = doc.richdoc_append_paragraph("After the cancelled restore.");
+    let next = row_with_count(&template, 3, 2, &first.evidence_digest, bytes);
+    let page = |entries: Vec<ReplicaJournalEntry>, after: i64, replica: &mut EngineStore| {
+        dohc_engine_collab::live_update_application::passive::apply_page(
+            replica, "ws", after, 0, &entries, &NoFaults,
+        )
+    };
+    assert!(
+        page(
+            vec![ReplicaJournalEntry::Update(next.clone())],
+            1,
+            &mut replica
+        )
+        .is_err(),
+        "a new generation needs its control record"
+    );
+    let mut forged = Vec::new();
+    let changes: [fn(&mut NativeRestoreCancellationReceipt); 5] = [
+        |c: &mut NativeRestoreCancellationReceipt| {
+            c.endpoint.history_evidence_digest = "f".repeat(64)
+        },
+        |c: &mut NativeRestoreCancellationReceipt| c.endpoint.event_count = 2,
+        |c: &mut NativeRestoreCancellationReceipt| {
+            c.fence.operation.relay_database_namespace = "other".into()
+        },
+        |c: &mut NativeRestoreCancellationReceipt| c.binding.restore_fence_generation = 3,
+        |c: &mut NativeRestoreCancellationReceipt| {
+            c.fence.operation.old_binding.restore_fence_generation = 2;
+            c.fence.operation.new_fence = 3;
+            c.binding.restore_fence_generation = 3;
+        },
+    ];
+    for change in changes {
+        let mut altered = record.clone();
+        change(&mut altered.cancellation);
+        forged.push(altered);
+    }
+    let mut late = record.clone();
+    late.journal_cursor = 1;
+    forged.push(late);
+    for altered in forged {
+        assert!(
+            page(
+                vec![ReplicaJournalEntry::Cancellation(altered.clone())],
+                1,
+                &mut replica
+            )
+            .is_err(),
+            "{altered:?}"
+        );
+    }
+    let before = state(&replica);
+    let position = |replica: &EngineStore| -> (i64, i64, String) {
+        replica
+            .read_with(|c| {
+                c.query_row(
+                    "SELECT restore_generation,event_count,evidence_digest FROM replica_documents",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+            })
+            .unwrap()
+    };
+    let applied = page(
+        vec![ReplicaJournalEntry::Cancellation(record.clone())],
+        1,
+        &mut replica,
+    )
+    .unwrap();
+    assert_eq!((applied.applied, applied.journal_cursor), (1, 2));
+    assert_eq!(state(&replica), before, "document state stays");
+    assert_eq!(position(&replica), (2, 1, first.evidence_digest.clone()));
+    assert_eq!(count(&replica, "live_accepted_updates"), 1);
+    assert_eq!(
+        count(&replica, "owner_ydoc_outboxes"),
+        0,
+        "no retained work arrives"
+    );
+    let replay = page(
+        vec![ReplicaJournalEntry::Cancellation(record)],
+        1,
+        &mut replica,
+    )
+    .unwrap();
+    assert_eq!((replay.applied, replay.skipped), (0, 1));
+    let mut old = row_with_count(
+        &first,
+        4,
+        2,
+        &first.evidence_digest,
+        doc.richdoc_append_paragraph("Old session."),
+    );
+    old.authority.as_mut().unwrap().restore_fence_generation = 2;
+    assert!(
+        page(vec![ReplicaJournalEntry::Update(old)], 2, &mut replica).is_err(),
+        "the generation before refuses"
+    );
+    let result = page(
+        vec![ReplicaJournalEntry::Update(next.clone())],
+        2,
+        &mut replica,
+    )
+    .unwrap();
+    assert_eq!(result.applied, 1);
+    assert_eq!(position(&replica), (2, 2, next.evidence_digest));
 }
 
 fn row_with_bytes(
@@ -676,7 +863,7 @@ fn passive_epoch_floor_skips_missing_old_baselines_but_preserves_current_markers
         "ws",
         0,
         2,
-        std::slice::from_ref(&first),
+        &entries(std::slice::from_ref(&first)),
         &NoFaults,
     )
     .unwrap();
@@ -687,7 +874,7 @@ fn passive_epoch_floor_skips_missing_old_baselines_but_preserves_current_markers
         "ws",
         0,
         2,
-        std::slice::from_ref(&first),
+        &entries(std::slice::from_ref(&first)),
         &NoFaults,
     )
     .unwrap();
@@ -701,7 +888,7 @@ fn passive_epoch_floor_skips_missing_old_baselines_but_preserves_current_markers
         "ws",
         1,
         2,
-        &[post_floor],
+        &entries(&[post_floor]),
         &NoFaults,
     )
     .unwrap();

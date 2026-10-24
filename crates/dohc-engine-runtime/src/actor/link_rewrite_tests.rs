@@ -170,56 +170,59 @@ impl Fixture {
             capture: Arc::default(),
         }
     }
+    /// `operation`, retried as a client retries a busy store: each time
+    /// write admission refuses it, once the store's background checkpoint,
+    /// which admission waited on, has finished again.
+    async fn admitted<T, F>(&self, mut operation: impl FnMut() -> F) -> Result<T, RuntimeError>
+    where
+        F: std::future::Future<Output = Result<T, RuntimeError>>,
+    {
+        loop {
+            let completed = self.actor.checkpoints_completed_for_test().await?;
+            match operation().await {
+                Err(
+                    RuntimeError::Storage(StorageError::FileLocked)
+                    | RuntimeError::Domain(DomainError::Storage(StorageError::FileLocked))
+                    | RuntimeError::Collab(dohc_engine_collab::CollabError::Storage(
+                        StorageError::FileLocked,
+                    )),
+                ) => {
+                    self.actor
+                        .wait_for_checkpoint_completion_for_test(completed)
+                        .await?;
+                }
+                result => return result,
+            }
+        }
+    }
     async fn pass(
         &self,
         request: &str,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<Value, RuntimeError> {
         // A pass can still return FileLocked after its one-second checkpoint cap.
-        let deadline = Instant::now() + Duration::from_secs(60);
-        let mut backoff = Duration::from_millis(100);
-        let mut retries = 0;
-        let result = loop {
-            let result = self
-                .actor
-                .history_rewrite_links(
-                    self.ws.clone(),
-                    OP.into(),
-                    request.into(),
-                    None,
-                    self.root.to_path_buf(),
-                    self.leases.clone(),
-                    [self.capture.clone(), self.serial.clone()],
-                    faults.clone(),
-                    (
-                        {
-                            let leases = self.leases.clone();
-                            Arc::new(move |key| leases.is_held_by_session(key))
-                        },
-                        Arc::new(|_| {}),
-                    ),
-                    Arc::new(()),
-                    CancellationToken::new(),
-                )
-                .await;
-            match result {
-                Err(RuntimeError::Storage(StorageError::FileLocked)) => {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        break result;
-                    }
-                    tokio::time::sleep(backoff.min(remaining)).await;
-                    if Instant::now() >= deadline {
-                        break result;
-                    }
-                    backoff = (backoff * 2).min(Duration::from_secs(1));
-                }
-                result => break result,
-            }
-            retries += 1;
-        };
-        eprintln!("LINK_REWRITE_RETRIES request={request} retries={retries}");
-        result
+        self.admitted(|| {
+            self.actor.history_rewrite_links(
+                self.ws.clone(),
+                OP.into(),
+                request.into(),
+                None,
+                self.root.to_path_buf(),
+                self.leases.clone(),
+                [self.capture.clone(), self.serial.clone()],
+                faults.clone(),
+                (
+                    {
+                        let leases = self.leases.clone();
+                        Arc::new(move |key| leases.is_held_by_session(key))
+                    },
+                    Arc::new(|_| {}),
+                ),
+                Arc::new(()),
+                CancellationToken::new(),
+            )
+        })
+        .await
     }
     async fn text(&self, path: &str) -> String {
         let (ws, path) = (self.ws.clone(), path.to_owned());
@@ -1296,13 +1299,22 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
     // Measure forward and Undo turns here; publication has its own bulk proof.
     let _publication = f.capture.clone().lock_owned().await;
     let initial_hold = f.actor.hold_link_drain();
-    let ws = f.ws.clone();
-    f.actor.run(move |store, _| {
-        undo_probe::enable_work_probe(store);
-        store.write_with(&NoFaults, |tx| tx.execute(
-            "INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) SELECT workspace_id,version_id,object_id,1 FROM snapshots WHERE workspace_id=?1 AND version_id='main' ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1", [&ws]
-        ).map_err(StorageError::persist_public))?;
-        Ok(())
+    f.actor
+        .run(|store, _| {
+            undo_probe::enable_work_probe(store);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    // The fixture's seed leaves a WAL the next write may wait on.
+    f.admitted(|| {
+        let ws = f.ws.clone();
+        f.actor.run(move |store, _| {
+            store.write_with(&NoFaults, |tx| tx.execute(
+                "INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) SELECT workspace_id,version_id,object_id,1 FROM snapshots WHERE workspace_id=?1 AND version_id='main' ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1", [&ws]
+            ).map_err(StorageError::persist_public))?;
+            Ok(())
+        })
     }).await.unwrap();
 
     let crash = Arc::new(CrashAfterDocuments {
@@ -1337,13 +1349,15 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
         .await
         .unwrap();
     let _index_hold = f.actor.hold_link_drain();
-    let ws = f.ws.clone();
-    f.actor.run(move |store, _| {
-        store.write_with(&NoFaults, |tx| {
-            tx.execute("INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) SELECT workspace_id,version_id,object_id,1 FROM snapshots WHERE workspace_id=?1 AND version_id='main' ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1", [&ws]).map_err(StorageError::persist_public)?;
-            Ok::<_, RuntimeError>(())
-        })?;
-        Ok(())
+    f.admitted(|| {
+        let ws = f.ws.clone();
+        f.actor.run(move |store, _| {
+            store.write_with(&NoFaults, |tx| {
+                tx.execute("INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) SELECT workspace_id,version_id,object_id,1 FROM snapshots WHERE workspace_id=?1 AND version_id='main' ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1", [&ws]).map_err(StorageError::persist_public)?;
+                Ok::<_, RuntimeError>(())
+            })?;
+            Ok(())
+        })
     }).await.unwrap();
     let committed = Arc::new(tokio::sync::Notify::new());
     probes().lock().unwrap().get_mut(&f.ws).unwrap().committed = Some(committed.clone());
@@ -1479,7 +1493,7 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
         (waits, positions, gaps, retry_evidence)
     });
     let undo_start = Instant::now();
-    let undo = f.undo().await.unwrap();
+    let undo = f.admitted(|| f.undo()).await.unwrap();
     assert_eq!(undo.moments.len(), 2001);
     assert!(undo.not_restored.is_empty());
     let undo_ns = undo_start.elapsed().as_nanos();

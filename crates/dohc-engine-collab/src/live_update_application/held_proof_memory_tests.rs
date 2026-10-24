@@ -16,7 +16,8 @@
 // what the factor 22 reserves for, and what the contributions added per
 // byte of Σb on its own. The rest of the peak is reported as the
 // projection's. A measurement counts only once its preservation is complete,
-// with the Markdown the case expects and every contribution merged.
+// with the Markdown the case expects and every contribution merged, or, for
+// work the lineage already holds, none.
 //
 // Two stages the projection's peak hides are measured on their own as well.
 // The index of the ranges the merged state deleted is built from empty on
@@ -42,8 +43,11 @@
 // The cases: plaintext and rich documents of 1, 5 and 10 MiB of content;
 // documents of 1 and 3 MiB rewritten from exact Markdown source the
 // projection writes otherwise, whose preservation rebuilds and reprojects
-// that source; one typed a keystroke at a time by interleaved clients, with
-// backspaces, merged with an edit and a removal of what they typed; two whose
+// that source; documents of 1 and 3 MiB from exact source given only a
+// source-preserving frontmatter edit, merged fresh and already contained,
+// where rebuilding the source is most of the proof; one typed a keystroke
+// at a time by interleaved clients, with backspaces, merged with an edit and
+// a removal of what they typed; two whose
 // deletions span 2,000 clients, over 64 KiB and over 4 KiB of content, where
 // the clients outweigh the content, merged with an edit and a removal; one with
 // heavy history; a snapshot with many journal rows after it; holds of 10,000
@@ -216,15 +220,35 @@ fn reprojected(content: usize) -> (Ydoc, Vec<Vec<u8>>, String) {
     (doc, vec![edit], edited)
 }
 
+/// A rich document rewritten from exact source of about `content` bytes,
+/// the small source-preserving frontmatter edit another writer makes over
+/// it, and the source that edit binds: the merged state's exact source is
+/// fresh and differs from its projection, so preserving it rebuilds a whole
+/// document from that source against little retained work.
+fn frontmatter_edited(content: usize) -> (Ydoc, Vec<Vec<u8>>, String) {
+    let source = lexical_source(content);
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, &source)
+        .expect("rewrite from source");
+    let writer = Ydoc::wire();
+    writer.apply(&doc.encode_full_state()).unwrap();
+    let edited = format!("---\ntitle: changed\n---\n{source}");
+    let edit = writer
+        .frontmatter_set_preserving_markdown_source("title", "changed", &edited)
+        .expect("a source-preserving frontmatter edit");
+    (doc, vec![edit], edited)
+}
+
 /// A document's lineage as a store keeps it, with the blobs of the work a
 /// hold covers.
 struct Lineage {
-    _directory: ScratchDir,
     store: EngineStore,
     key: DocKey,
     claim: String,
     /// The full state the lineage loads to.
     full_state: Vec<u8>,
+    /// Dropped last, once the store has closed.
+    _directory: ScratchDir,
 }
 
 /// A store whose document `object` claims `base` as its base, of `kind`,
@@ -275,11 +299,11 @@ fn lineage(base: &Ydoc, kind: ContentKind, rows: &[Vec<u8>], updates: &[Vec<u8>]
         .and_then(|marker| marker.lineage_claim_id)
         .expect("a claimed lineage");
     Lineage {
-        _directory: directory,
         store,
         key,
         claim,
         full_state: head_of(base, rows).encode_full_state(),
+        _directory: directory,
     }
 }
 
@@ -456,11 +480,10 @@ struct Applying {
 }
 
 /// Refuse a measurement whose preservation is not the complete one its case
-/// expects: every contribution of `covered` merged, and its Markdown as
-/// `expected` says.
-fn accepted(case: &str, preservation: &Preservation, covered: &[RetainedContribution], expected: &Expected<'_>) {
+/// expects: `merged` merged, and its Markdown as `expected` says.
+fn accepted(case: &str, preservation: &Preservation, merged: &[RetainedContribution], expected: &Expected<'_>) {
     assert_eq!(preservation.status, PreservationStatus::Complete, "{case}: {:?}", preservation.findings);
-    assert_eq!(preservation.merged, covered, "{case}: every contribution merged");
+    assert_eq!(preservation.merged, merged, "{case}: what it merged");
     let markdown = &preservation.preserved.as_ref().expect("a complete preservation keeps its state").markdown;
     match expected {
         Expected::Containing(text) => assert!(markdown.contains(text), "{case}: {text:?} is missing"),
@@ -536,6 +559,16 @@ fn report(measured: &Measured<'_>) {
 /// Measure one hold: `lineage` merged with `updates`, whose preserved
 /// Markdown must be as `expected` says.
 fn measure(case: &str, lineage: &Lineage, updates: &[Vec<u8>], expected: &Expected<'_>) {
+    measure_hold(case, lineage, updates, true, expected);
+}
+
+/// Measure one hold whose `updates` `lineage` already contains: the merge
+/// applies each and adds nothing, so it merges none.
+fn measure_contained(case: &str, lineage: &Lineage, updates: &[Vec<u8>], expected: &Expected<'_>) {
+    measure_hold(case, lineage, updates, false, expected);
+}
+
+fn measure_hold(case: &str, lineage: &Lineage, updates: &[Vec<u8>], merges: bool, expected: &Expected<'_>) {
     let kept = kept_state(&lineage.store, &lineage.key, &lineage.claim, updates);
     let covered = covered(updates);
     let tail = ProtectedTail {
@@ -579,7 +612,7 @@ fn measure(case: &str, lineage: &Lineage, updates: &[Vec<u8>], expected: &Expect
     let (preserved, artifact, stopped) = answer.expect("the proof ran");
     assert_eq!(stopped, None, "{case}: nothing stops it");
     let preservation = preserved.unwrap().expect("the lineage loads");
-    accepted(case, &preservation, &covered, expected);
+    accepted(case, &preservation, if merges { &covered[..] } else { &[] }, expected);
     let artifact = artifact.expect("encoded").unwrap();
     report(&Measured {
         case,
@@ -723,6 +756,19 @@ fn measure_held_proof_peak_heap() {
             &edit,
             &Expected::Exactly(&source),
         );
+    }
+    // Exact source with little retained work, where rebuilding the source
+    // costs most per merged byte: a frontmatter edit, then the same edit
+    // already journaled in the lineage.
+    for size in [mib, 3 * mib] {
+        let (state, edit, source) = frontmatter_edited(size);
+        let fresh = lineage(&state, ContentKind::Richdoc, &[], &edit);
+        let case = format!("exact source, then a frontmatter edit, {} MiB", size / mib);
+        measure(&case, &fresh, &edit, &Expected::Exactly(&source));
+        drop(fresh);
+        let contained = lineage(&state, ContentKind::Richdoc, &edit, &edit);
+        let case = format!("exact source, its frontmatter edit already contained, {} MiB", size / mib);
+        measure_contained(&case, &contained, &edit, &Expected::Exactly(&source));
     }
     let keystrokes = typed(64 * 1024, 4);
     let edits = edit_and_removal(&keystrokes);

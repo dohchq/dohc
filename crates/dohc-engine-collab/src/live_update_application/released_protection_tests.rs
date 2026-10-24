@@ -328,6 +328,10 @@ fn contradictory_provenance_invalidates_the_whole_tail_and_names_its_work() {
     // Each fixture names its delivery anew: where its native entry is, and
     // that delivery.
     let native_entry = |f: &Fixture| {
+        let native: i64 = f.store.read_with(|conn| conn.query_row(
+            "SELECT COUNT(*) FROM owner_ydoc_outbox_entries WHERE native_source_json IS NOT NULL", [], |row| row.get(0),
+        )).unwrap();
+        assert_eq!(native, 1, "the fixture's only native entry");
         let locator = f.store.read_with(|conn| conn.query_row(
             "SELECT outbox_id,sequence,delivery_id,update_digest FROM owner_ydoc_outbox_entries
              WHERE native_source_json IS NOT NULL",

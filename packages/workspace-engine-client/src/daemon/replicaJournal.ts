@@ -30,6 +30,24 @@ export interface ReplicaJournalRow {
   readonly authority: { readonly lineageClaimId: string; readonly baselineSequence: number; readonly restoreFenceGeneration: number } | null;
   readonly restore: { readonly operationId: string; readonly checkpointDigest: string; readonly checkpointBytes: Uint8Array; readonly proof: ReplicaRestoreAdmission } | null;
 }
+/**
+ * A restore the relay declined after the host's native fence committed. The journal keeps it at its own
+ * cursor, between deliveries; it is no delivery and carries no bytes. `cancellation` is the host's
+ * `fenceCancelled` receipt from `liveApplication.cancelRestoreFence`, unchanged. A replica at exactly the
+ * fence's old generation and the receipt's endpoint advances its generation and nothing else.
+ */
+export interface ReplicaRestoreCancellation {
+  readonly relayDatabaseNamespace: string;
+  readonly journalCursor: number;
+  readonly cancellation: {
+    readonly fence: ReplicaRestoreAdmission["preparation"]["fence"];
+    readonly binding: LiveObjectBinding;
+    readonly endpoint: {readonly terminalReceipt: LiveUpdateReceipt | null; readonly eventCount: number; readonly historyEvidenceDigest: string};
+    readonly recordedAtMs: number;
+  };
+}
+/** One entry of a replica page, in journal order. */
+export type ReplicaJournalEntry = ReplicaJournalRow | ReplicaRestoreCancellation;
 export interface ReplicaFrontiers { readonly revision: number; readonly logCursor: number; readonly journalCursor: number }
 export interface ReplicaPageResult extends ReplicaFrontiers {
   readonly applied: number; readonly skipped: number; readonly blockedCursor: number | null;

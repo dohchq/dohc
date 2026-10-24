@@ -316,11 +316,97 @@ fn native_saved(
     Ok(Some(receipt))
 }
 
+/// How a restore fence that moved the registration's generation ended.
+pub(super) enum Settled {
+    /// The restore applied and resumed.
+    Resumed(Box<NativeRestoreResumeReceipt>),
+    /// The restore was cancelled before anything applied it.
+    Cancelled(Box<NativeRestoreCancellationReceipt>),
+}
+
+impl Settled {
+    pub(super) fn operation_id(&self) -> &str {
+        match self {
+            Self::Resumed(receipt) => &receipt.operation_id,
+            Self::Cancelled(receipt) => &receipt.fence.operation.operation_id,
+        }
+    }
+
+    fn binding(&self) -> &LiveObjectBinding {
+        match self {
+            Self::Resumed(receipt) => &receipt.binding,
+            Self::Cancelled(receipt) => &receipt.binding,
+        }
+    }
+}
+
+/// The resumed restore that produced the registration's generation; None for
+/// a generation no restore produced, or one a cancelled restore did.
+#[cfg(test)]
 pub(super) fn generation(
     conn: &Connection,
     held: &Registration,
 ) -> Result<Option<NativeRestoreResumeReceipt>, ApplicationError> {
+    Ok(match settled(conn, held)? {
+        Some(Settled::Resumed(receipt)) => Some(*receipt),
+        _ => None,
+    })
+}
+
+pub(super) fn settled(
+    conn: &Connection,
+    held: &Registration,
+) -> Result<Option<Settled>, ApplicationError> {
     generation_with(conn, held, None)
+}
+
+// The generation reads' index holds each cancellation, so this never walks
+// a fence row's restore proof.
+pub(super) const CANCELLED: &str = "SELECT length(CAST(cancelled_json AS BLOB)),cancelled_json FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND new_generation=?4 AND relay_database_namespace=?5 AND cancelled_json IS NOT NULL";
+
+/// The cancellation that ended the restore fenced into the registration's
+/// exact generation and binding, if one did.
+fn cancellation(
+    conn: &Connection,
+    held: &Registration,
+    budget: Option<&mut Budget>,
+) -> Result<Option<NativeRestoreCancellationReceipt>, ApplicationError> {
+    let b = &held.binding;
+    let mut query = conn.prepare(CANCELLED).map_err(read_sql)?;
+    let mut rows = query
+        .query(params![
+            b.workspace_id,
+            b.main_version_id,
+            b.object_id,
+            b.restore_fence_generation,
+            held.namespace
+        ])
+        .map_err(read_sql)?;
+    let mut budget = budget;
+    while let Some(row) = rows.next().map_err(read_sql)? {
+        let length: i64 = row.get(0).map_err(read_sql)?;
+        match budget.as_deref_mut() {
+            Some(budget) => {
+                budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?
+            }
+            None if (1..=NativeHistoryReconstruction::HEADER_BYTES as i64).contains(&length) => {}
+            None => return Err(ApplicationError::Corrupt),
+        }
+        let receipt: NativeRestoreCancellationReceipt =
+            serde_json::from_str(&row.get::<_, String>(1).map_err(read_sql)?)
+                .map_err(|_| ApplicationError::Corrupt)?;
+        // Another lineage of the document can reach the same generation.
+        if receipt.binding.lineage_claim_id != b.lineage_claim_id {
+            continue;
+        }
+        receipt.validate().map_err(|_| ApplicationError::Corrupt)?;
+        if receipt.fence.operation.relay_database_namespace != held.namespace {
+            return Err(ApplicationError::Corrupt);
+        }
+        settlement::validate_historical_binding(&receipt.binding, b)?;
+        return Ok(Some(receipt));
+    }
+    Ok(None)
 }
 
 /// Native generation reads bounded committed associations. An explicit budget
@@ -329,7 +415,7 @@ fn generation_with(
     conn: &Connection,
     held: &Registration,
     mut budget: Option<&mut Budget>,
-) -> Result<Option<NativeRestoreResumeReceipt>, ApplicationError> {
+) -> Result<Option<Settled>, ApplicationError> {
     let b = &held.binding;
     let generation = "FROM live_restore_fences WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND new_generation=?6";
     let p = params![
@@ -361,11 +447,20 @@ fn generation_with(
     let Some(id) = id else {
         return Ok(None);
     };
+    if let Some(cancelled) = cancellation(conn, held, budget.as_deref_mut())? {
+        if cancelled.fence.operation.operation_id != id {
+            return Err(ApplicationError::Corrupt);
+        }
+        return Ok(Some(Settled::Cancelled(Box::new(cancelled))));
+    }
     let receipt = match budget {
         Some(budget) => saved_in(conn, held, &id, budget, None)?.map(|(receipt, ..)| receipt),
         None => native_saved(conn, held, &id)?,
     };
-    receipt.ok_or(ApplicationError::Conflict).map(Some)
+    receipt
+        .map(|receipt| Settled::Resumed(Box::new(receipt)))
+        .ok_or(ApplicationError::Conflict)
+        .map(Some)
 }
 
 pub(super) fn validate_origin_binding(
@@ -385,11 +480,13 @@ pub(super) fn validate_origin_binding_with(
     if original.restore_fence_generation == held.binding.restore_fence_generation {
         return settlement::validate_historical_binding(original, &held.binding);
     }
-    let resumed = generation_with(conn, held, budget)?.ok_or(ApplicationError::Conflict)?;
+    // A resumed restore, or one cancelled after its fence, produced the
+    // registration's generation.
+    let settled = generation_with(conn, held, budget)?.ok_or(ApplicationError::Conflict)?;
     let mut same = original.clone();
     same.restore_fence_generation = held.binding.restore_fence_generation;
     settlement::validate_historical_binding(&same, &held.binding)?;
-    if resumed.binding != held.binding {
+    if *settled.binding() != held.binding {
         return Err(ApplicationError::Conflict);
     };
     Ok(())

@@ -889,7 +889,7 @@ impl ActorHandle {
         workspace: String,
         after: i64,
         epoch_log_floor: i64,
-        rows: Vec<dohc_engine_collab::live_update_application::passive::ReplicaJournalRow>,
+        rows: Vec<dohc_engine_collab::live_update_application::passive::ReplicaJournalEntry>,
         reservation: Arc<dyn Send + Sync>,
     ) -> Result<dohc_engine_collab::live_update_application::passive::ReplicaPageResult, RuntimeError>
     {

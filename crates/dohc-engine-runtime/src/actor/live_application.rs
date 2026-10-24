@@ -10,11 +10,11 @@ use dohc_engine_collab::live_update_application::{
     NativeRestoreApplicationReceipt, NativeRestoreFence, NativeRestoreFenceReceipt,
     NativeRestorePreparation, NativeRestoreProposal, NativeRestoreResume,
     NativeRestoreResumeReceipt, OwnerAdoptionAck, OwnerAdoptionCut, Reconciliation, Release,
-    RetiredActivations, RetirementKey, RetirementScope, RetirementTarget, UnloadPending,
-    adopt_owner_committed, apply_committed, begin_retirement, bootstrap_committed,
-    read_application_ack, reconcile_activation, release_activation, unload_pending,
-    validate_application_binding, validate_registration_activation, with_retirement_settlement,
-    with_settlement,
+    RestoreFenceCancellation, RestoreFenceCancellationOutcome, RetiredActivations, RetirementKey,
+    RetirementScope, RetirementTarget, UnloadPending, adopt_owner_committed, apply_committed,
+    begin_retirement, bootstrap_committed, cancel_restore_fence, read_application_ack,
+    reconcile_activation, release_activation, unload_pending, validate_application_binding,
+    validate_registration_activation, with_retirement_settlement, with_settlement,
 };
 use dohc_engine_collab::live_update_application::{
     AppliedPosition, AppliedSyncCut, AppliedSyncPolicy, NextAppliedUpdate,
@@ -423,6 +423,35 @@ impl ActorLiveApplicationOwner {
             .map_err(|_| RuntimeError::ActorUnavailable)??;
         current(&self.actor, &self.token)?;
         Ok(receipt)
+    }
+
+    /// Cancel through the same writer queue as the fence; see
+    /// [`cancel_restore_fence`].
+    pub async fn cancel_restore_fence(
+        &self,
+        namespace: String,
+        host_id: String,
+        input: RestoreFenceCancellation,
+        now_ms: i64,
+    ) -> Result<RestoreFenceCancellationOutcome, RuntimeError> {
+        current(&self.actor, &self.token)?;
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .tx
+            .send(Command::LiveApplication(Box::new(
+                Request::CancelRestoreFence {
+                    workspace_id: self.workspace_id.clone(),
+                    token: self.token.clone(),
+                    namespace,
+                    host_id,
+                    input,
+                    now_ms,
+                    reply,
+                },
+            )))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        receive.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
     /// Retire handles synchronously at the transport's close boundary.
@@ -1113,6 +1142,15 @@ pub(super) enum Request {
         faults: Arc<dyn FaultInjector>,
         reply: Reply<NativeRestoreFenceReceipt>,
     },
+    CancelRestoreFence {
+        workspace_id: String,
+        token: Token,
+        namespace: String,
+        host_id: String,
+        input: RestoreFenceCancellation,
+        now_ms: i64,
+        reply: Reply<RestoreFenceCancellationOutcome>,
+    },
     AdoptOwner {
         workspace_id: String,
         token: Token,
@@ -1483,6 +1521,29 @@ impl Request {
                     .map_err(Into::into)
                 });
                 let _ = reply.send(super::drained(store, result));
+            }
+            Self::CancelRestoreFence {
+                workspace_id,
+                token,
+                namespace,
+                host_id,
+                input,
+                now_ms,
+                reply,
+            } => {
+                let result = registry.owner(&workspace_id, &token).and_then(|_| {
+                    cancel_restore_fence(
+                        store,
+                        &namespace,
+                        &workspace_id,
+                        &host_id,
+                        &input,
+                        now_ms,
+                        &dohc_engine_storage::NoFaults,
+                    )
+                    .map_err(Into::into)
+                });
+                let _ = reply.send(result);
             }
             Self::AdoptOwner {
                 workspace_id,
