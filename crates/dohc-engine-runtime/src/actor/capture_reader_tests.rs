@@ -677,8 +677,13 @@ async fn outside_reader_fold_round1_stale_retry_keeps_receipt_bytes_and_author()
     drop(store);
     let supervisor = crate::WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 3).unwrap().actor;
+    let reader = Arc::new(Reader::new(Some(
+        serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap(),
+    )));
     actor
-        .configure_reader_resolver(Arc::new(resolver()))
+        .configure_reader_resolver(Arc::new(reader_resolver::ReaderResolver::new(
+            reader.clone(),
+        )))
         .await
         .unwrap();
     let mut captured = input("**Receipt A**");
@@ -709,6 +714,15 @@ async fn outside_reader_fold_round1_stale_retry_keeps_receipt_bytes_and_author()
         result.moment.author_json, author,
         "stale retry lost the sink author"
     );
+    assert_eq!(reader.dispatch_count(), 1);
+    assert!(
+        hooks()
+            .lock()
+            .unwrap()
+            .remove(scratch.path())
+            .unwrap()
+            .is_empty()
+    );
     let later = round1_batch(
         actor,
         scratch.path().to_owned(),
@@ -717,7 +731,7 @@ async fn outside_reader_fold_round1_stale_retry_keeps_receipt_bytes_and_author()
     )
     .unwrap();
     assert_eq!(later[0].as_ref().unwrap().snapshot.text, "**Later B**");
-    hooks().lock().unwrap().remove(scratch.path());
+    assert_eq!(reader.dispatch_count(), 2);
     supervisor.close(&db).unwrap();
 }
 
