@@ -161,6 +161,8 @@ export function EngineMayHoldDocumentNotice(props: {
   // content the user cannot see.
   contentShown: boolean;
   message?: string;
+  // Actions left of Try again.
+  children?: ReactNode;
 }) {
   return (
     <div
@@ -180,14 +182,38 @@ export function EngineMayHoldDocumentNotice(props: {
         {props.message ?? "dohc could not open this document for editing."}
         {!props.message && props.contentShown ? " It is read-only for now." : ""}
       </span>
-      <button
-        type="button"
-        onClick={props.onRetry}
-        className="shrink-0 whitespace-nowrap text-subtle hover:text-ink"
-      >
-        Try again
-      </button>
+      <span className="flex shrink-0 items-center gap-3">
+        {props.children}
+        <button
+          type="button"
+          onClick={props.onRetry}
+          className="whitespace-nowrap text-subtle hover:text-ink"
+        >
+          Try again
+        </button>
+      </span>
     </div>
+  );
+}
+
+// Opens a read-only note in the system's app for the file.
+export function OpenExternallyLink(props: { workspaceId: string; path: string; onError?: ReportButtonError }) {
+  const openExternally = () => {
+    void bridge()
+      .openFileExternally({ workspaceId: props.workspaceId, relativePath: props.path })
+      .catch((error: unknown) =>
+        props.onError?.("dohc could not open this document externally.", error, openExternally, `lossy-note-open:${props.path}`),
+      );
+  };
+  return (
+    <button
+      type="button"
+      data-testid="lossy-note-open-externally"
+      onClick={openExternally}
+      className="whitespace-nowrap text-subtle hover:text-ink"
+    >
+      Open externally
+    </button>
   );
 }
 
@@ -196,46 +222,39 @@ export function EngineMayHoldDocumentNotice(props: {
 export function LossyNoteNotice(props: {
   workspaceId: string;
   path: string;
+  // The hash of the bytes the note was read from, which saving would rewrite.
+  contentHash: string | null;
   onError?: ReportButtonError;
   // Binds the editor for this open, after the person confirms the warning.
   onEditAnyway?: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
-  // History keeps the original only of a file it shows. A path files.toml
-  // leaves out, or one not captured yet, has none to restore. History's own
-  // list for the file answers, as About's does, with its rules applied. Until
-  // it answers, the warning says nothing about History.
-  const offersEdit = props.onEditAnyway !== undefined;
-  const file = `${props.workspaceId}\u0000${props.path}`;
-  const [history, setHistory] = useState<{ file: string; keeps: boolean } | null>(null);
+  // Each opening of the warning asks History again: capture can record an
+  // outside edit after the note opened.
+  const [opened, setOpened] = useState(0);
+  // History keeps the original only when its latest moment for the file
+  // recorded these exact bytes. A path files.toml leaves out has none to
+  // restore. Neither has a file capture has not recorded yet, or an outside
+  // edit capture holds. History's own list for the file answers, as About's
+  // does, with its rules applied. Until it answers, the warning says nothing
+  // about History.
+  const asked = `${props.workspaceId}\u0000${props.path}\u0000${props.contentHash}\u0000${opened}`;
+  const [history, setHistory] = useState<{ asked: string; keeps: HistoryKeeps } | null>(null);
   useEffect(() => {
-    if (!offersEdit) return;
+    if (!confirming) return;
     let live = true;
-    void Promise.resolve()
-      .then(async () => {
-        const chats = await bridge().listFileChats({ workspaceId: props.workspaceId, path: props.path });
-        if (!("fileObjectId" in chats)) return null;
-        if (chats.fileObjectId === null) return false;
-        const moments = await bridge().listEngineMoments({ workspaceId: props.workspaceId, objectId: chats.fileObjectId, limit: 1 });
-        return "moments" in moments ? moments.moments.length > 0 : null;
-      })
+    void historyKeeps(props.workspaceId, props.path, props.contentHash)
       .then((keeps) => {
-        if (live && keeps !== null) setHistory({ file, keeps });
+        if (live && keeps !== null) setHistory({ asked, keeps });
       }, () => undefined);
     return () => {
       live = false;
     };
-  }, [offersEdit, file, props.workspaceId, props.path]);
-  const historyLine = history?.file !== file ? null
-    : history.keeps ? "History keeps the original."
-    : "History does not track this file, so dohc can't restore the original.";
-  const openExternally = () => {
-    void bridge()
-      .openFileExternally({ workspaceId: props.workspaceId, relativePath: props.path })
-      .catch((error: unknown) =>
-        props.onError?.("dohc could not open this document externally.", error, openExternally, `lossy-note-open:${props.path}`),
-      );
-  };
+  }, [confirming, asked, props.workspaceId, props.path, props.contentHash]);
+  const historyLine = history?.asked !== asked ? null
+    : history.keeps === "kept" ? "History keeps the original."
+    : history.keeps === "untracked" ? "History does not track this file, so dohc can't restore the original."
+    : "dohc could not confirm that History can restore the original.";
   return (
     <div
       data-testid="lossy-note-notice"
@@ -247,19 +266,15 @@ export function LossyNoteNotice(props: {
         dohc can't edit this document yet without changing parts it can't show.
       </span>
       <span className="flex shrink-0 items-center gap-3">
-        <button
-          type="button"
-          data-testid="lossy-note-open-externally"
-          onClick={openExternally}
-          className="whitespace-nowrap text-subtle hover:text-ink"
-        >
-          Open externally
-        </button>
+        <OpenExternallyLink workspaceId={props.workspaceId} path={props.path} onError={props.onError} />
         {props.onEditAnyway ? (
           <button
             type="button"
             data-testid="lossy-note-edit-anyway"
-            onClick={() => setConfirming(true)}
+            onClick={() => {
+              setOpened((count) => count + 1);
+              setConfirming(true);
+            }}
             className="whitespace-nowrap text-subtle hover:text-ink"
           >
             Edit anyway
@@ -288,6 +303,27 @@ export function LossyNoteNotice(props: {
       ) : null}
     </div>
   );
+}
+
+type HistoryKeeps = "kept" | "untracked" | "not-recorded";
+
+// Whether History's latest moment for the note holds the bytes `contentHash`
+// names; null when History can't say.
+async function historyKeeps(workspaceId: string, path: string, contentHash: string | null): Promise<HistoryKeeps | null> {
+  const chats = await bridge().listFileChats({ workspaceId, path });
+  if (!("fileObjectId" in chats)) return null;
+  if (chats.fileObjectId === null) return "untracked";
+  const moments = await bridge().listEngineMoments({ workspaceId, objectId: chats.fileObjectId, limit: 1 });
+  if (!("moments" in moments)) return null;
+  const latest = moments.moments[0];
+  if (latest === undefined || contentHash === null) return "not-recorded";
+  const read = await bridge().readEngineMoment({ workspaceId, momentId: latest.id });
+  if ("status" in read) return read.status === "untracked" ? "untracked" : null;
+  const text = read.moment?.afterText;
+  if (typeof text !== "string") return "not-recorded";
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
+  const hex = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return hex === contentHash ? "kept" : "not-recorded";
 }
 
 export function EngineArtifactAssetsInvalidNotice(props: {

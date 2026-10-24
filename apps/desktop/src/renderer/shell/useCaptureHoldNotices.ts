@@ -55,4 +55,5 @@ export function useCaptureHoldNotices(input: {
     if (input.heldFiles === undefined) return;
     publish(input.heldFiles);
   }, [input.workspaceId, input.heldFiles, requests, input.show]);
+  return retry;
 }

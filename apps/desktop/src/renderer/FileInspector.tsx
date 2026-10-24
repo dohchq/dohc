@@ -306,6 +306,9 @@ type FileInspectorProps = {
   // The file is a received share's: a shared view, or a mount in shared-with-me.
   receivedShare?: boolean;
   accessEnded?: boolean;
+  // Capture holds this file's outside edit, and Try again asks it to retry.
+  captureHeld?: boolean;
+  onRetryHeldCapture?: (path: string) => void;
   // G2-C-3: a monotonic token that changes when the ACTIVE VERSION of this
   // workspace changes while the same file stays open (the shell's versionEpoch).
   // Threaded to the engine editor so a version switch re-binds it to the new
@@ -845,6 +848,7 @@ export const FileInspector = memo(function FileInspector(
             engine={engine}
             lossyNote={lossyNote}
             onEditAnyway={() => setEditAnyway({ open: lossyOpen, source: contentHash })}
+            onRetryHeldCapture={props.captureHeld && props.onRetryHeldCapture ? () => props.onRetryHeldCapture?.(props.path) : undefined}
             onRetryEngineOpen={retryEngineOpen}
             onReloadChangedOutside={reloadChangedOutside}
             writesRefusedRef={writesRefusedRef}
