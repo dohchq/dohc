@@ -4414,6 +4414,20 @@ mod tests {
             .workspace_open(&RequestContext::unbounded(), open_params)
             .await
             .expect("workspace reopen after the actor died");
+        assert!(
+            lock(&retained.local_state).is_none(),
+            "eviction must release the dead binding's local state"
+        );
+        #[cfg(windows)]
+        {
+            assert!(
+                std::fs::rename(
+                    scratch.path().join(".dohc/local"),
+                    scratch.path().join(".dohc/local-renamed"),
+                )
+                .is_err()
+            );
+        }
         let rebound: WorkspaceHandle =
             serde_json::from_value(reopened["workspace"].clone()).expect("rebound handle");
         assert_ne!(rebound, handle, "eviction must mint a fresh handle");
@@ -4434,11 +4448,13 @@ mod tests {
             .await
             .expect("final workspace close");
         #[cfg(windows)]
-        std::fs::rename(
-            scratch.path().join(".dohc/local"),
-            scratch.path().join(".dohc/local-renamed"),
-        )
-        .expect("eviction releases local while the dead binding is retained");
+        {
+            std::fs::rename(
+                scratch.path().join(".dohc/local"),
+                scratch.path().join(".dohc/local-renamed"),
+            )
+            .expect("eviction releases local while the dead binding is retained");
+        }
         drop(retained);
     }
 }
