@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentBadge, AgentSettingsContext, isOwnAuthor } from "./AgentBadge";
+import { AgentBadge, AgentSettingsContext, AgentSettingsProvider, isOwnAuthor, useIsOwnAuthor } from "./AgentBadge";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 
 afterEach(cleanup);
@@ -60,5 +60,17 @@ describe("whose message it is", () => {
     expect(isOwnAuthor("agent", { authorDisplayName: "Nova", authorOwnerDisplayName: "Grace" }, undefined, profile)).toBe(false);
     // Before you name yourself or your agent, main records "You" and "Agent".
     expect(isOwnAuthor("agent", { authorDisplayName: "Agent", authorOwnerDisplayName: "You" }, undefined, {})).toBe(true);
+  });
+
+  it("never takes a link holder for you, whatever name they chose", () => {
+    let isOwn: ReturnType<typeof useIsOwnAuthor> | undefined;
+    function Probe() {
+      isOwn = useIsOwnAuthor();
+      return null;
+    }
+    render(<AgentSettingsProvider settings={{ ...DEFAULT_USER_SETTINGS, profile: profile }}><Probe /></AgentSettingsProvider>);
+    expect(isOwn!("human", { authorDisplayName: "Ada" }, undefined)).toBe(true);
+    expect(isOwn!("link", { authorDisplayName: "Ada" }, undefined)).toBe(false);
+    expect(isOwn!("link", { authorDisplayName: "You" }, undefined)).toBe(false);
   });
 });

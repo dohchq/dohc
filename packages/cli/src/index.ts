@@ -273,6 +273,7 @@ function buildCliRequest(
         args: {
           cwd: common.cwd, actor: common.actor, collectionPath: command.collectionPath, automation: command.automation,
           ...(command.page === undefined ? {} : { page: command.page }),
+          ...(command.server ? { server: true } : {}),
         },
       };
     case "automationList":
@@ -291,6 +292,7 @@ function buildCliRequest(
           collectionPath: command.collectionPath,
           automation: command.automation,
           run: command.run,
+          ...(command.server ? { server: true } : {}),
         },
       };
     case "automationRetry":

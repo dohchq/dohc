@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { assertClientLogProvenance, namedShareOrigin, SHARE_MEMBER_ORIGIN_PREFIX, COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX, SERVICE_HOST_ORIGIN_PREFIX } from "./relayLogInputs";
+import { assertClientLogProvenance, namedShareOrigin, SHARE_MEMBER_ORIGIN_PREFIX, COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX, SERVICE_HOST_ORIGIN_PREFIX, SHARED_REPLAY_ORIGIN_PREFIX } from "./relayLogInputs";
 import { claimWorkspace, closeTestStorages, createShare, jsonBody, request, testHandler, testStorage } from "./testing";
 
 afterEach(closeTestStorages);
 
-const RELAY_ORIGIN_PREFIXES = [SHARE_MEMBER_ORIGIN_PREFIX, COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX];
+const RELAY_ORIGIN_PREFIXES = [SHARE_MEMBER_ORIGIN_PREFIX, COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX, SHARED_REPLAY_ORIGIN_PREFIX];
 const RELAY_AUTHORS = [
   // A live author snapshot's account or link holder is the relay's to admit.
   {kind: "human", humanId: "recipient", humanName: "Recipient"},
@@ -58,6 +58,18 @@ describe("client log provenance", () => {
     for (const prefix of [...RELAY_ORIGIN_PREFIXES, SERVICE_HOST_ORIGIN_PREFIX]) {
       expect(() => assertClientLogProvenance(`${prefix}grant`, [])).toThrow();
     }
+  });
+  it.each(["owner", "recipient"] as const)("refuses an %s that writes as a replayed link origin", async user => {
+    const storage = await testStorage();
+    const handler = testHandler(storage);
+    await claimWorkspace(handler, "owner", "workspace");
+    const share = await createShare(handler, "owner", "workspace", {recipientUserId: "recipient", paths: ["poll"], access: "edit"});
+    const body = {originId: "shared:x:relay:share-link:p", ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: 1, payload: {}}]};
+    const url = user === "owner" ? "/sync/workspace/log" : `/sync/shares/${share}/log`;
+    const response = await handler(request(user, url, jsonBody(body)));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({code: "bad_request"});
+    expect(storage.fetchLogPage({workspaceId: "workspace", sinceRelaySeq: 0, limit: 100}).rows).toEqual([]);
   });
   it("lets only the service host's feed write from its reserved origins", () => {
     expect(() => assertClientLogProvenance(`${SERVICE_HOST_ORIGIN_PREFIX}host`, [], {serviceHost: true})).not.toThrow();

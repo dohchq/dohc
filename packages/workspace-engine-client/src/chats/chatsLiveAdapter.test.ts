@@ -1422,6 +1422,23 @@ describe("automation authors", () => {
   });
 });
 
+describe("link authors", () => {
+  it("cannot be written through either local write method", async () => {
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Trip" });
+    const link = { kind: "link", displayName: "Guest", grantId: "grant-1", principalId: "principal-1" } as const;
+    // @ts-expect-error Only the relay writes a link author.
+    await expect(adapter.startChannelThread({ authorActorKey: null, workspaceId: "workspace", channelId: "channel", author: link, body: "Hi" }))
+      .rejects.toThrow("invalid-sender");
+    const { thread } = await adapter.startChannelThread({ authorActorKey: null, workspaceId: "workspace", channelId: "channel",
+      author: { kind: "human", displayName: "Ice" }, body: "Hi" });
+    // @ts-expect-error Only the relay writes a link author.
+    await expect(adapter.sendMessage({ authorActorKey: null, workspaceId: "workspace", threadId: thread.id, author: link, body: "Hi" }))
+      .rejects.toThrow("invalid-sender");
+    expect((await adapter.listMessages({ workspaceId: "workspace", threadId: thread.id })).map((message) => message.author.kind)).toEqual(["human"]);
+  });
+});
+
 describe("local chat actor key transport", () => {
   it("passes admission keys through the native write door and preserves the own-store column on reads", async () => {
     const key = '{"kind":"installation","installationId":"device"}';

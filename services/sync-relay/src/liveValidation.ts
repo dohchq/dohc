@@ -5,7 +5,9 @@ import type { Socket } from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { OrderedLiveUpdateCutPolicy } from "@dohc/ydoc-projection/live-journal-validation";
 import type { OwnerOutboxAdmission, CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
+import type { OrdinaryActivationValidation, OrdinaryActivationValidator, OrdinaryActivationWork } from "./storage/ordinaryActivationSource.js";
 import type { LiveJournalValidation } from "./storage/types.js";
+import { liveRestoreValidator, type LiveRestoreReply, type LiveRestoreValidator, type LiveRestoreWork } from "./liveRestoreValidation.js";
 
 export type SettlementNormalizationInput = {
   document: import("@dohc/live-session-contract").LiveDocumentKey;
@@ -34,13 +36,15 @@ export type SettlementNormalizationResult =
 export type LiveValidationWork = { policy: OrderedLiveUpdateCutPolicy } & (
   | { kind: "journal"; input: Parameters<OwnerOutboxAdmission["validate"]>[0] }
   | { kind: "settlement"; input: SettlementNormalizationInput }
+  | { kind: "activation"; input: OrdinaryActivationWork }
+  | { kind: "restore"; input: LiveRestoreWork }
 );
 type CapacityRetry = {
   kind: "retry";
   reason: "admission-unavailable";
   waitForCapacity(signal?: AbortSignal): Promise<void>;
 };
-type Slot = { child: ChildProcess; busy: boolean; heapExhausted: boolean; exited: Promise<void> };
+type Slot = { child: ChildProcess; busy: boolean; auxiliary: boolean; heapExhausted: boolean; exited: Promise<void> };
 /** The validator threw instead of judging the edit, so the edit is tried again. */
 export class LiveValidatorFailure extends Error {
   constructor(readonly errorClass: string) {
@@ -64,6 +68,7 @@ export function createValidatorFailureLog(log: (message: string) => void = messa
 /**
  * Two process-wide validation slots, with no retained waiting inputs. Each job
  * runs in a child process: a V8 heap-limit abort ends that child, not the relay.
+ * Activation and restore together hold at most one slot, so live edits always keep the other.
  */
 export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFailure = createValidatorFailureLog()) {
   const slots = new Set<Slot>();
@@ -134,7 +139,7 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
     );
     let exit: () => void = () => {};
     const exited = new Promise<void>((resolve) => (exit = resolve));
-    const slot: Slot = { child, busy: false, heapExhausted: false, exited };
+    const slot: Slot = { child, busy: false, auxiliary: false, heapExhausted: false, exited };
     slots.add(slot);
     const release = () => {
       slots.delete(slot);
@@ -171,7 +176,8 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
   ): Promise<Result | CapacityRetry> {
     signal?.throwIfAborted();
     if (closed) throw new Error("Live validation closed.");
-    const slot =
+    const auxiliary = work.kind === "activation" || work.kind === "restore";
+    const slot = auxiliary && [...slots].some((slot) => slot.auxiliary) ? undefined :
       [...slots].find((slot) => !slot.busy) ??
       (slots.size < 2 ? spawn() : undefined);
     if (!slot)
@@ -181,6 +187,7 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
         waitForCapacity,
       };
     slot.busy = true;
+    slot.auxiliary = auxiliary;
     hold(slot, true);
     return new Promise<Result>((resolve, reject) => {
       let done = false;
@@ -210,6 +217,7 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
       const complete = (value: unknown) => {
         if (!settle()) return;
         slot.busy = false;
+        slot.auxiliary = false;
         // A result that arrives after `close` began must not release its hold.
         if (!closed) hold(slot, false);
         const failed = value as {kind?: unknown; errorClass?: unknown};
@@ -248,6 +256,27 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
       });
     return Object.assign(validate, { waitForCapacity, hasCapacity });
   }
+  /** Activation does not wait for a slot: a busy pool answers `retry`, and a later pass captures again. */
+  function ordinaryActivation(policy: OrderedLiveUpdateCutPolicy): OrdinaryActivationValidator {
+    const ownedPolicy = Object.freeze({ ...policy });
+    return (input, signal) =>
+      submit<OrdinaryActivationValidation>(
+        { kind: "activation", policy: ownedPolicy, input },
+        { kind: "capacity-refused" },
+        signal,
+      );
+  }
+  /** Restore does not wait for a slot either: a busy pool refuses it as busy. */
+  function restore(policy: OrderedLiveUpdateCutPolicy): LiveRestoreValidator {
+    const ownedPolicy = Object.freeze({ ...policy });
+    return liveRestoreValidator((input, signal) =>
+      submit<LiveRestoreReply | { kind: "capacity-refused" }>(
+        { kind: "restore", policy: ownedPolicy, input },
+        { kind: "capacity-refused" },
+        signal,
+      ),
+    );
+  }
   async function close() {
     closed = true;
     notify();
@@ -262,6 +291,8 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
   }
   return {
     validator,
+    ordinaryActivation,
+    restore,
     async normalizeSettlement(
       input: SettlementNormalizationInput,
       signal?: AbortSignal,

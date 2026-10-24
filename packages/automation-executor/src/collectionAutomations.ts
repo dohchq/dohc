@@ -403,6 +403,8 @@ export interface CollectionAutomationsOptions {
    */
   onRunsChanged(): void;
   onUsageSuccess?: CollectionAutomationRunDependencies["onUsageSuccess"];
+  beforeEffect?: CollectionAutomationRunDependencies["beforeEffect"];
+  onRunEnded?: CollectionAutomationRunDependencies["onRunEnded"];
   /**
    * Sends the notice for an automation's newest failure on this computer,
    * and takes back the notice for its failure `replaces` counted, if any.
@@ -710,6 +712,12 @@ export interface CollectionAutomationRun {
   /** A person undid what it changed. */
   undone: boolean;
   undoUnfinished: boolean;
+  /**
+   * The server lost the copy it ran in, and may not have sent its changes
+   * from `updatedAtMs` on. Nothing can run or undo it, since its run history
+   * is gone.
+   */
+  unsentChangesLost?: true;
 }
 
 /** One run with what each of its steps changed, for reading a single run. */
@@ -5608,6 +5616,8 @@ export class CollectionAutomations {
       },
       makeDurable: (claimId) => this.makeWritesDurable(claimId),
       onUsageSuccess: this.options.onUsageSuccess,
+      beforeEffect: this.options.beforeEffect,
+      onRunEnded: this.options.onRunEnded,
       withReads: (work) => this.withLiveEngine(work),
       withRecordWrites: this.options.withRecordWrites,
       collectionIdOf: (path) => this.collections.get(path) ?? null,

@@ -36,7 +36,7 @@ vi.mock("../../../packages/workspace-engine-client/src/daemon/engineClient.js", 
 export interface AutomaticViewAdmission {
   readContexts: number;
   maxPagesPerPull: number;
-  activation: Omit<ServiceActivationConfig, "targets" | "validateBaseline" | "validateJournal">;
+  activation: Omit<ServiceActivationConfig, "targets" | "validateActivation">;
   adoption: {maxBytes: number; maxEvents: number; ownerOutbox: {maxPendingBytes: number; maxPendingAgeMs: number}};
 }
 interface Options {

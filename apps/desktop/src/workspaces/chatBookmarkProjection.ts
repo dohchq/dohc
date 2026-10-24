@@ -3,7 +3,7 @@ export type ChatBookmarkProjectionState = "current" | "stale";
 
 export interface ChatBookmarkProjectionMessage {
   id: string;
-  authorKind: "human" | "agent" | "automation";
+  authorKind: "human" | "agent" | "automation" | "link";
   authorDisplayName: string;
   body: string;
   createdAtMs: number;

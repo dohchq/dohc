@@ -60,7 +60,7 @@ const EDGE_PX = 12;
  */
 export function AgentColorScope(props: {
   name: string;
-  kind: "human" | "agent" | "automation";
+  kind: "human" | "agent" | "automation" | "link";
   presentation: ActorPresentation;
   children: ReactNode;
 }) {

@@ -177,9 +177,7 @@ function get(port, path, { host = `127.0.0.1:${port}`, method = "GET", headers =
 
 test("the server answers reads only on this host's names and the tailnet", async t => {
   const root = await queueRoot(t);
-  // The server reads the clock; give it the fixture's, so the fixture's runs stay within its window.
-  t.mock.timers.enable({ apis: ["Date"], now });
-  const server = startMonitor({ root, port: 0 });
+  const server = startMonitor({ root, port: 0, now: () => now });
   t.after(() => server.close());
   if (!server.listening) await once(server, "listening");
   const { port } = server.address();
@@ -318,7 +316,7 @@ function slotRoot(t) {
 async function monitor(t, root, options = {}) {
   const slots = "slotRoot" in options ? options.slotRoot : slotRoot(t);
   // A Mac refuses the lane switch; these tests choose, so they read the same on every host.
-  const server = startMonitor({ root, port: 0, oneLane: false, ...options, slotRoot: slots });
+  const server = startMonitor({ root, port: 0, now: () => now, oneLane: false, ...options, slotRoot: slots });
   t.after(() => server.close());
   if (!server.listening) await once(server, "listening");
   const { port } = server.address();

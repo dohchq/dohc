@@ -254,6 +254,7 @@ export async function runSteps(
   }
   run.finishedAtMs = dependencies.nowMs();
   await dependencies.store.save(run);
+  dependencies.onRunEnded?.(run);
   if (dependencies.onUsageSuccess && outcome.kind === "done") {
     for (const invocation of automationUsageInvocations(run, effect => backend.isWriteAction?.(effect) === true)) {
       // Measurement must not change a run's result.
@@ -264,7 +265,7 @@ export async function runSteps(
 }
 
 /** What running steps needs besides a backend. */
-type StepRunDependencies = Pick<CollectionAutomationRunDependencies, "makeDurable" | "evaluator" | "store" | "nowMs" | "chat" | "recipientVerdicts" | "readCode" | "onUsageSuccess">;
+type StepRunDependencies = Pick<CollectionAutomationRunDependencies, "makeDurable" | "evaluator" | "store" | "nowMs" | "chat" | "recipientVerdicts" | "readCode" | "onUsageSuccess" | "beforeEffect" | "onRunEnded">;
 
 /** The text of the code file a run-file step runs, or why it cannot run. */
 export async function readCodeFile(
@@ -438,6 +439,7 @@ async function walkSteps(
       let writes: RunWrite[];
       const writeStarted = dependencies.nowMs();
       try {
+        dependencies.beforeEffect?.(run, effect);
         const applied = await backend.apply(run, receipt === null ? effect : replayEffect(effect, receipt.writes), { index, ordinal: step.ordinal, part, mode, recorded }, messages.chat);
         if ("outcome" in applied) return applied.outcome;
         writes = receipt === null ? applied : [...receipt.writes.filter(write => !engineWrite(write)), ...applied];

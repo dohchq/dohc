@@ -15,8 +15,10 @@ function message(value: unknown): boolean {
   return ["messageId", "threadId", "authorDisplayName"].every(key => typeof value[key] === "string") &&
     (value.authorUserId === null || typeof value.authorUserId === "string") &&
     ((value.bodyTooLarge === true && value.body === null) || (value.bodyTooLarge === false && typeof value.body === "string")) &&
-    ["human", "agent", "automation"].includes(String(value.authorKind)) &&
+    ["human", "agent", "automation", "link"].includes(String(value.authorKind)) &&
     (value.authorOwnerDisplayName === null || typeof value.authorOwnerDisplayName === "string") &&
+    // A link holder has no account.
+    (value.authorKind !== "link" || (value.authorUserId === null && value.authorOwnerDisplayName === null)) &&
     Number.isSafeInteger(value.createdAtMs) && Number.isSafeInteger(value.relaySeq) && Number(value.relaySeq) > 0;
 }
 

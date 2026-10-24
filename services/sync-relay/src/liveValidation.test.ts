@@ -7,6 +7,7 @@ import { afterEach, expect, it } from "vitest";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
 import { createLiveValidationExecutor, createValidatorFailureLog, LiveValidatorFailure } from "./liveValidation.js";
+import { LiveRestoreBusy, LiveRestoreTooLarge } from "./liveRestoreValidation.js";
 
 import {registered, cleanupLiveDeliveryFixtures} from '../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js';
 const {encodeStateAsUpdate} = createRequire(new URL("../../../packages/ydoc-projection/package.json", import.meta.url))("yjs") as {
@@ -192,6 +193,48 @@ it.each(["journal", "settlement"] as const)("refuses %s work whose child runs ou
   expect(result).toEqual({kind: "refused", reason: "capacity-refused", source: kind === "journal" ? "final" : "registration-input"});
   expect(validate.hasCapacity?.()).toBe(true);
   expect((await validate(input)).kind).toBe("accepted");
+}, 60_000);
+
+it("keeps a slot for live edits while an activation validates", async () => {
+  const {pool, input, validate} = fixture(), {checkpoint} = nestedEmphasis(3000), activate = pool.ordinaryActivation(policy);
+  const work = {document: input.document, currentPath: input.currentPath, baselineBytes: checkpoint};
+  // The held job runs far longer than the test.
+  const held = new AbortController(), running = Promise.resolve(activate(work, held.signal)).catch((error: unknown) => error);
+  expect(await activate(work)).toMatchObject({kind: "retry", reason: "admission-unavailable"});
+  expect(validate.hasCapacity?.()).toBe(true);
+  expect((await validate(input)).kind).toBe("accepted");
+  held.abort(new Error("released")); expect(await running).toMatchObject({message: "released"});
+}, 60_000);
+
+/** A restore point at `checkpoint`, with no stored artifacts. */
+function restorePoint(input: ReturnType<typeof fixture>["input"], checkpoint: Uint8Array) {
+  return {binding: {...input.document, currentPath: input.currentPath}, checkpoint: {bytes: checkpoint}, events: [],
+    point: {journalCursor: 0, receiptDigest: "a".repeat(64)}, artifact: () => undefined, assertCurrent() {}};
+}
+
+it("refuses restore work whose child runs out of heap, and validates the next restore", async () => {
+  const {input} = fixture(), pool = createLiveValidationExecutor(128); pools.push(pool);
+  const restore = pool.restore(policy), validate = pool.validator(policy);
+  const doc = markdownToYDoc("a\n\n".repeat(80_000)), checkpoint = encodeStateAsUpdate(doc); doc.destroy();
+  await expect(restore.point(restorePoint(input, checkpoint))).rejects.toBeInstanceOf(LiveRestoreTooLarge);
+  expect(validate.hasCapacity?.()).toBe(true);
+  expect(await restore.point(restorePoint(input, input.checkpoint))).toMatchObject({journalCursor: 0, receiptDigest: "a".repeat(64)});
+}, 60_000);
+
+it.each(["activation", "restore"] as const)("lets activation and restore share one slot while %s validates", async held => {
+  const {pool, input, validate} = fixture(), {checkpoint} = nestedEmphasis(3000);
+  const activate = pool.ordinaryActivation(policy), restore = pool.restore(policy);
+  const activation = {document: input.document, currentPath: input.currentPath, baselineBytes: checkpoint};
+  // The held job runs far longer than the test.
+  const release = new AbortController();
+  const running = (held === "activation" ? Promise.resolve(activate(activation, release.signal)) : restore.point(restorePoint(input, checkpoint), release.signal))
+    .catch((error: unknown) => error);
+  // A job given the second slot would run past this deadline instead of refusing.
+  if (held === "activation") await expect(restore.point(restorePoint(input, checkpoint), AbortSignal.timeout(10_000))).rejects.toBeInstanceOf(LiveRestoreBusy);
+  else expect(await activate(activation, AbortSignal.timeout(10_000))).toMatchObject({kind: "retry", reason: "admission-unavailable"});
+  expect(validate.hasCapacity?.()).toBe(true);
+  expect((await validate(input)).kind).toBe("accepted");
+  release.abort(new Error("released")); expect(await running).toMatchObject({message: "released"});
 }, 60_000);
 
 it("fails a job whose child exits abnormally, and replaces the child", async () => {
