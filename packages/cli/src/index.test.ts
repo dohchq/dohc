@@ -223,6 +223,25 @@ describe("executeCli", () => {
     expect(transport).toHaveBeenCalledWith(join(stateDir, "dohc-cli.sock"), expect.any(String), timeoutMs ?? 90_000);
   });
 
+  it("waits for a recovery copy the server takes longer than 30 seconds to prepare", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const stateDir = await tempStateDir();
+      // As the socket's deadline would: the reply comes after 40 seconds, unless the deadline is shorter.
+      const transport = vi.fn((_path: string, _body: string, timeoutMs: number | undefined) => new Promise<unknown>((resolve, reject) => {
+        if (timeoutMs !== undefined && timeoutMs < 40_000) setTimeout(() => reject(new Error("desktop app did not respond")), timeoutMs);
+        setTimeout(() => resolve({ protocolVersion: CLI_PROTOCOL_VERSION, ok: true,
+          result: { ok: true, copyPath: null, packagePath: "plan (recovered).dohc-recovery.json", folder: ".", storedOn: "server", keptEdits: "copied" } }), 40_000);
+      }));
+      const pending = executeCli({ argv: ["document", "save-recovery-copy", "plan.md"], cwd: "/workspace", env: {},
+        client: { stateDir, transport, platform: "linux" } });
+      await vi.waitFor(() => expect(transport).toHaveBeenCalled());
+      await vi.advanceTimersByTimeAsync(40_000);
+      expect((await pending).exitCode).toBe(0);
+      expect(transport).toHaveBeenCalledWith(join(stateDir, "dohc-cli.sock"), expect.any(String), 420_000);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("passes the ambient run id through every chat write request only", async () => {
     const requests: CliRequestWithoutToken[] = [];
     const request = async (value: CliRequestWithoutToken): Promise<unknown> => {

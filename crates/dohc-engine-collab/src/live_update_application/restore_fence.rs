@@ -395,7 +395,9 @@ impl ApplicationOwner {
             ).map_err(write_sql)?;
             crate::owner_outbox::keep_recovery_checkpoints_in_tx(tx, b).map_err(|error| match error {
                 crate::OwnerOutboxError::Storage(error) => ApplicationError::Storage(error),
-                crate::OwnerOutboxError::AcceptedStateIncomplete => ApplicationError::Conflict,
+                crate::OwnerOutboxError::AcceptedStateIncomplete => {
+                    ApplicationError::AcceptedStateIncomplete
+                }
                 _ => ApplicationError::Corrupt,
             })?;
             let changed = tx.execute(

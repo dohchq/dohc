@@ -712,14 +712,22 @@ impl EngineService {
             .map_err(|_| WireError::new(ErrorCode::Internal, "live-application-interrupted"))?
         {
             Ok(receipt) => receipt,
-            // Nothing committed. The host publishes ordinary work and asks again.
+            // Nothing committed. The host publishes ordinary work, or waits for
+            // a deferred update's dependency, and asks again.
             Err(dohc_engine_runtime::RuntimeError::LiveApplication(
-                dohc_engine_collab::live_update_application::ApplicationError::PublicationPending,
+                pending @ (dohc_engine_collab::live_update_application::ApplicationError::PublicationPending
+                | dohc_engine_collab::live_update_application::ApplicationError::AcceptedStateIncomplete),
             )) => {
+                let reason = match pending {
+                    dohc_engine_collab::live_update_application::ApplicationError::PublicationPending => {
+                        "publication-pending"
+                    }
+                    _ => "accepted-state-incomplete",
+                };
                 return Ok(ServiceResponse {
                     response: Response {
                         id: request.id,
-                        result: json!({"status":"pending", "reason":"publication-pending"}),
+                        result: json!({"status":"pending", "reason":reason}),
                     },
                     blob_egress: None,
                     output_guard: Some(guard),

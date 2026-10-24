@@ -181,6 +181,10 @@ pub enum OwnerOutboxError {
     /// The writer must build the frozen lineage's recovery checkpoint before a read names it.
     #[error("owner Y.Doc outbox recovery checkpoint is out of date")]
     RecoveryCheckpointOutdated,
+    /// A refused seed of a generation its document left has no recovery
+    /// checkpoint proven to hold that generation's final accepted state.
+    #[error("owner Y.Doc outbox recovery checkpoint is unavailable")]
+    RecoveryCheckpointUnavailable,
     #[error("owner Y.Doc outbox accepted state waits on a missing dependency")]
     AcceptedStateIncomplete,
     #[error("owner Y.Doc outbox was not found")]
@@ -1454,8 +1458,10 @@ enum RefusedSeed {
     /// lineage since the adoption can settle past the seed, so a recovery copy
     /// must carry it.
     Frozen(i64),
-    /// It holds a refused seed of a generation its document left. The restore
-    /// fence kept that generation's final accepted state as its recovery checkpoint.
+    /// It holds a refused seed of a generation its document left, or whose
+    /// binding is gone. The restore fence, or the registration that moved the
+    /// binding, kept that generation's final accepted state as its recovery
+    /// checkpoint.
     Earlier,
 }
 
@@ -1494,7 +1500,8 @@ fn applied_cursor_in(
 /// The checkpoint a read of this queue names. A frozen lineage's is the
 /// recovery checkpoint built at its current applied cursor, which only the
 /// writer builds, so a missing or older one is out of date. An earlier
-/// generation's is the one its restore fence kept.
+/// generation's is the one kept as it ended, served only if nothing was
+/// applied on it after; no other checkpoint stands in for it.
 fn checkpoint_in(
     conn: &Connection,
     parent: &ParentRow,
@@ -1514,8 +1521,15 @@ fn checkpoint_in(
                 .filter(|_| built == Some(*cursor))
                 .ok_or(OwnerOutboxError::RecoveryCheckpointOutdated)?
         }
-        (RefusedSeed::Earlier, Some(digest)) => digest,
-        _ => return accepted_checkpoint_in(conn, &parent.outbox_id, &parent.binding),
+        (RefusedSeed::Earlier, digest) => match (digest, built) {
+            (Some(digest), Some(built)) if !applied_after_in(conn, &parent.binding, built)? => {
+                digest
+            }
+            _ => return Err(OwnerOutboxError::RecoveryCheckpointUnavailable),
+        },
+        (RefusedSeed::None, _) => {
+            return accepted_checkpoint_in(conn, &parent.outbox_id, &parent.binding);
+        }
     };
     let length: i64 = conn
         .query_row(
@@ -1527,6 +1541,28 @@ fn checkpoint_in(
         .map_err(read_sql)?
         .ok_or(OwnerOutboxError::Corrupt)?;
     Ok(Some((digest, length)))
+}
+
+/// Whether an update was applied on `binding`'s lineage and restore
+/// generation after `cursor`, through any relay.
+fn applied_after_in(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+    cursor: i64,
+) -> Result<bool, OwnerOutboxError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM live_device_update_applications WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND journal_cursor>?6)",
+        params![
+            binding.workspace_id,
+            binding.main_version_id,
+            binding.object_id,
+            binding.lineage_claim_id,
+            binding.restore_fence_generation,
+            cursor
+        ],
+        |row| row.get(0),
+    )
+    .map_err(read_sql)
 }
 
 /// A copy of the accepted state would miss an accepted update that still
@@ -1567,11 +1603,11 @@ pub fn prepare_recovery_checkpoint(
     committed(outcome)
 }
 
-/// Before a restore fence moves `binding`'s document to its next generation,
-/// while that generation's last applied cursor is final, keeps that accepted
-/// state as the recovery checkpoint of each of its queues holding an
-/// adoption seed nothing applied. A copy of such a queue reads it once the
-/// generation moved on.
+/// Before a restore fence or a registration moves `binding`'s document off
+/// its lineage or generation, while its last applied cursor is final, keeps
+/// that accepted state as the recovery checkpoint of each of its queues
+/// holding an adoption seed nothing applied. A copy of such a queue reads it
+/// once the binding moved on.
 pub(crate) fn keep_recovery_checkpoints_in_tx(
     tx: &rusqlite::Transaction<'_>,
     binding: &LiveObjectBinding,

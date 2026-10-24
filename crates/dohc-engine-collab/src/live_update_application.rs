@@ -102,6 +102,12 @@ pub enum ApplicationError {
     Interrupted,
     #[error("this document's settlement moments must reach the relay before a restore fence")]
     PublicationPending,
+    /// An accepted update still waits on a missing dependency, so the restore
+    /// fence cannot yet keep the accepted state a refused seed's copy needs.
+    #[error(
+        "this document's accepted updates must receive their dependencies before a restore fence"
+    )]
+    AcceptedStateIncomplete,
     #[error(
         "this document's last settlement must reach its file before its interval can name another author"
     )]
@@ -1008,6 +1014,7 @@ impl ApplicationOwner {
                 &registration.namespace,
                 &registration.binding,
             )?;
+            keep_left_recovery_checkpoints(tx, &registration)?;
             install_binding(tx, &registration)
         })?;
         if !matches!(outcome, TxnOutcome::Committed(())) {
@@ -1289,6 +1296,29 @@ fn require_binding_workspace(
     }
     Ok(())
 }
+/// Before `r` moves its document's binding to another lineage or restore
+/// generation without a restore fence, keeps the final accepted state of the
+/// one it leaves for that one's refused seeds, as the fence does. A state it
+/// cannot keep, as one still waiting on a missing dependency, leaves those
+/// copies refused instead of this registration, which that dependency may need.
+fn keep_left_recovery_checkpoints(
+    tx: &Transaction<'_>,
+    r: &Registration,
+) -> Result<(), ApplicationError> {
+    let Some((left, _, _)) = read_binding(tx, r)? else {
+        return Ok(());
+    };
+    if left.lineage_claim_id == r.binding.lineage_claim_id
+        && left.restore_fence_generation == r.binding.restore_fence_generation
+    {
+        return Ok(());
+    }
+    match crate::owner_outbox::keep_recovery_checkpoints_in_tx(tx, &left) {
+        Err(crate::OwnerOutboxError::Storage(error)) => Err(ApplicationError::Storage(error)),
+        _ => Ok(()),
+    }
+}
+
 fn install_binding(tx: &Transaction<'_>, r: &Registration) -> Result<(), ApplicationError> {
     let b = &r.binding;
     let c = &r.coordinate;

@@ -818,6 +818,7 @@ export async function startServiceLiveHost(options: {
     // whose answer was lost, or whose lookup failed without the engine
     // refusing it, stays recorded with no handle, and a close that fails keeps
     // its handle: either closes on the workspace's next turn, or once idle.
+    // A record drops its handle only once a close of it ended.
     type Recovery = {readonly identity: ServiceKeptEditsIdentity; readonly root: string; handle?: string; idle?: ReturnType<typeof setTimeout>};
     const recoveries = new Map<string, Recovery>();
     const recoveryTurns = new Map<string, Promise<void>>();
@@ -838,21 +839,26 @@ export async function startServiceLiveHost(options: {
       if (typeof opened.workspaceHandle !== "string" || !opened.workspaceHandle) throw new Error("Invalid recovery store response.");
       return open.handle = opened.workspaceHandle;
     };
+    // Closes the record's handle; the engine answers a close of a handle
+    // already closing once that close ends. Resolves once the handle is gone,
+    // and throws, keeping it, while that is unknown.
+    const endRecoveryHandle = async (open: Recovery, joined: AbortSignal) => {
+      try {await membershipRequest("liveApplication.closeRecoveryStore", open.handle, {}, joined);}
+      catch (error) {if (engineCode(error) !== "WORKSPACE_UNAVAILABLE") throw error;}
+      delete open.handle;
+    };
     const closeRecovery = async (workspaceId: string) => {
       const open = recoveries.get(workspaceId);
       if (!open) return;
       clearTimeout(open.idle);
-      let handle: string;
-      try {handle = await recoveryHandle(workspaceId, open, signal);}
+      try {await recoveryHandle(workspaceId, open, signal);}
       catch (error) {
         if (RECOVERY_OPEN_REFUSALS.has(engineCode(error) ?? "")) {recoveries.delete(workspaceId); return;}
         idleRecovery(workspaceId, open);
         throw error;
       }
-      try {await membershipRequest("liveApplication.closeRecoveryStore", handle, {}, signal);}
-      catch (error) {
-        if (engineCode(error) !== "WORKSPACE_UNAVAILABLE") {idleRecovery(workspaceId, open); throw error;}
-      }
+      try {await endRecoveryHandle(open, signal);}
+      catch (error) {idleRecovery(workspaceId, open); throw error;}
       recoveries.delete(workspaceId);
     };
     const idleRecovery = (workspaceId: string, open: Recovery) => {
@@ -896,8 +902,11 @@ export async function startServiceLiveHost(options: {
                 params: {outboxId: kept.outboxId, ...(cursor === undefined ? {} : {cursor})}, deadlineMs: config.client.requestDeadlineMs}, joined)).result);
             } catch (error) {
               const code = engineCode(error);
-              // A handle whose close timed out is gone: its store opens once more.
-              if (code === "WORKSPACE_UNAVAILABLE" && !reopened) {delete open.handle; continue;}
+              // The engine reads nothing through a handle whose close began, as
+              // one that timed out, and may still be preparing behind it. The
+              // record keeps the handle until a close of it ends or finds it
+              // gone; only then does its store open once more.
+              if (code === "WORKSPACE_UNAVAILABLE" && !reopened) {await endRecoveryHandle(open, joined); continue;}
               if (code === undefined || RECOVERY_READ_TRANSIENT.has(code)) throw error;
               await closeRecovery(kept.workspaceId).catch(() => {});
               throw recoveryRefusal(error);
@@ -1195,9 +1204,16 @@ export async function startServiceLiveHost(options: {
         if (!sameKeptEditsIdentity(kept.identity, attachments.get(kept.workspaceId)?.identity) &&
           !sameKeptEditsIdentity(kept.identity, storage.getWorkspaceIdentity(kept.workspaceId))) return readEarlierKeptEdits(kept, store, cursor, callerSignal);
         check();
-        return withKeptOutbox(kept, callerSignal, async (_outbox, joined) => keptPage((await client.sendRequest({id: nextRequestId(),
-          workspace: reachable(kept).handle, method: "ydoc.ownerOutbox.readPending",
-          params: {outboxId: kept.outboxId, ...(cursor === undefined ? {} : {cursor})}, deadlineMs: config.client.requestDeadlineMs}, joined)).result));
+        return withKeptOutbox(kept, callerSignal, async (_outbox, joined) => {
+          try {
+            return keptPage((await client.sendRequest({id: nextRequestId(), workspace: reachable(kept).handle, method: "ydoc.ownerOutbox.readPending",
+              params: {outboxId: kept.outboxId, ...(cursor === undefined ? {} : {cursor})}, deadlineMs: config.client.requestDeadlineMs}, joined)).result);
+          } catch (error) {
+            // A refused seed whose earlier generation's final accepted state was not kept.
+            if (error instanceof EngineRequestError && error.wireError?.message === "owner-outbox-recovery-checkpoint-unavailable") throw recoveryRefusal(error);
+            throw error;
+          }
+        });
       },
       /**
        * Closes the recovery handle of the earlier store that holds the queue,

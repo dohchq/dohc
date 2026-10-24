@@ -220,8 +220,12 @@ pub(crate) struct Discovery {
     /// preparation and page reads finished, even if its caller went away.
     recovery: Arc<Mutex<Vec<RecoveryStore>>>,
     /// Where earlier stores that need migrations are copied, when the host's
-    /// operator configured it. Without it no store opens for recovery.
+    /// operator configured it. Without it only a store this build fully
+    /// migrated opens for recovery.
     copies: Option<Arc<super::recovery_copies::RecoveryCopies>>,
+    /// One permit: preparations check and copy earlier stores one at a time,
+    /// so together they never need more room or work than the largest.
+    preparations: Arc<tokio::sync::Semaphore>,
 }
 
 /// One attached workspace, in attach order. An entry whose handle has no live
@@ -247,11 +251,40 @@ struct RecoveryStore {
     /// from opening or attaching, outlasts all of them.
     reads: Arc<tokio::sync::RwLock<()>>,
     /// Set by a close, or once preparation runs out of time: the worker stops.
-    cancelled: Arc<AtomicBool>,
+    cancel: Arc<Cancel>,
     prepared: Arc<Mutex<Preparation>>,
     /// Set once a close began. The handle then reads nothing.
     closing: bool,
 }
+
+/// Stops a preparation, waiting for its turn or running.
+#[derive(Default)]
+struct Cancel {
+    /// Read by the store's statements.
+    cancelled: Arc<AtomicBool>,
+    woken: tokio::sync::Notify,
+}
+
+impl Cancel {
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.woken.notify_waiters();
+    }
+
+    async fn cancelled(&self) {
+        let woken = self.woken.notified();
+        tokio::pin!(woken);
+        woken.as_mut().enable();
+        if !self.cancelled.load(Ordering::SeqCst) {
+            woken.await;
+        }
+    }
+}
+
+/// How long a preparation may take on a host whose operator configured no
+/// recovery copies: the longest a configured one may take.
+const UNCONFIGURED_PREPARATION_DEADLINE: std::time::Duration =
+    super::recovery_copies::MAX_PREPARATION_DEADLINE;
 
 /// Where the preparation of a store open for recovery stands.
 enum Preparation {
@@ -281,10 +314,18 @@ pub(super) struct RecoveryRead {
     pub(super) _lease: tokio::sync::OwnedRwLockReadGuard<()>,
 }
 
-/// Preparations wait here, in tests, until their gate opens.
+/// Preparations of a root wait here, in tests, until their gate opens. They
+/// say when they start waiting for their turn and when they began.
 #[cfg(test)]
-static PREPARATION_GATES: Mutex<Vec<(PathBuf, std::sync::mpsc::Receiver<()>)>> =
-    Mutex::new(Vec::new());
+struct PreparationGate {
+    root: PathBuf,
+    open: std::sync::mpsc::Receiver<()>,
+    waiting: Option<tokio::sync::oneshot::Sender<()>>,
+    began: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+#[cfg(test)]
+static PREPARATION_GATES: Mutex<Vec<PreparationGate>> = Mutex::new(Vec::new());
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -329,12 +370,13 @@ fn open_recovery_handle(
 /// that holds no versioned state of another workspace and holds `identity`
 /// with a hosted replica, checked in the snapshot it is then read or copied
 /// from. A store this build has not fully migrated is copied into a new
-/// folder of `copies` and migrated there; the source is never changed.
+/// folder of `copies` and migrated there; the source is never changed. With
+/// no `copies`, such a store is refused.
 fn prepare_recovery(
     root: &Path,
     workspace_id: &str,
     identity: &HostedStoreIdentity,
-    copies: &super::recovery_copies::RecoveryCopies,
+    copies: Option<&super::recovery_copies::RecoveryCopies>,
     cancelled: &Arc<AtomicBool>,
 ) -> Preparation {
     use dohc_engine_storage::{RecoveryError, StorageError};
@@ -343,11 +385,14 @@ fn prepare_recovery(
     {
         let gate = {
             let mut gates = lock(&PREPARATION_GATES);
-            let found = gates.iter().position(|(gated, _)| gated == root);
-            found.map(|index| gates.remove(index).1)
+            let found = gates.iter().position(|gate| gate.root == root);
+            found.map(|index| gates.remove(index))
         };
-        if let Some(gate) = gate {
-            let _ = gate.recv();
+        if let Some(mut gate) = gate {
+            if let Some(began) = gate.began.take() {
+                let _ = began.send(());
+            }
+            let _ = gate.open.recv();
         }
     }
     let (Ok(Some(token)), Ok(now_ms)) = (
@@ -377,7 +422,9 @@ fn prepare_recovery(
                 && identity.held_in(conn, workspace_id)?)
         },
         || {
-            let folder = copies.folder()?;
+            let folder = copies
+                .ok_or_else(|| std::io::Error::other("recovery copies are not configured"))?
+                .folder()?;
             copy = Some(folder.clone());
             Ok(folder)
         },
@@ -391,7 +438,7 @@ fn prepare_recovery(
             copy,
         },
         Err(error) => {
-            if let Some(copy) = copy {
+            if let (Some(copy), Some(copies)) = (copy, copies) {
                 copies.remove(copy);
             }
             Preparation::Failed(invalid(match error {
@@ -509,6 +556,7 @@ impl EngineService {
             adoption: config.adoption,
             recovery: Arc::new(Mutex::new(Vec::new())),
             copies,
+            preparations: Arc::new(tokio::sync::Semaphore::new(1)),
         });
         let mut result = Ok(());
         for workspace in config.workspaces {
@@ -614,8 +662,10 @@ impl EngineService {
     /// for, so its owner can copy the edits the host kept there. Nothing
     /// captures, relays, applies or settles in it, and its handle answers
     /// only `ydoc.ownerOutbox.readPending`. The reply comes at once: a worker
-    /// then checks the store and, if this build has not fully migrated it,
-    /// copies and migrates it privately, within the configured deadline.
+    /// then waits for the daemon's one preparation at a time, checks the store
+    /// and, if this build has not fully migrated it, copies and migrates it
+    /// privately, all within the configured deadline. A host configured
+    /// without recovery copies refuses a store that would need one.
     /// Until then each page read answers `preparing`, and after a refusal,
     /// the refusal. A workspace has at most one: opening its store again
     /// returns the same handle, whatever its preparation's state, and any
@@ -651,10 +701,7 @@ impl EngineService {
             replication_epoch: params.replication_epoch,
             stream_identity: params.stream_identity,
         };
-        let copies = discovery
-            .copies
-            .clone()
-            .ok_or_else(|| invalid("recovery copies are not configured"))?;
+        let copies = discovery.copies.clone();
         // The same store again, as after an open whose reply was lost, keeps its handle.
         if let Some(handle) = open_recovery_handle(
             &lock(&discovery.recovery),
@@ -666,14 +713,14 @@ impl EngineService {
         }
         let _membership = discovery.membership.lock().await;
         self.configured_host_caller(ctx)?;
-        let (handle, lease, cancelled, prepared) = {
+        let (handle, lease, cancel, prepared) = {
             let mut recovery = lock(&discovery.recovery);
             if let Some(handle) =
                 open_recovery_handle(&recovery, &params.workspace_id, &root, &identity)?
             {
                 return Ok(json!({"workspaceHandle": handle}));
             }
-            if copies.overlaps(&root)
+            if copies.as_ref().is_some_and(|copies| copies.overlaps(&root))
                 || recovery.iter().any(|entry| overlaps(&entry.root, &root))
                 || lock(&self.handles)
                     .values()
@@ -694,8 +741,8 @@ impl EngineService {
                 .clone()
                 .try_read_owned()
                 .map_err(|_| WireError::new(ErrorCode::Internal, "recovery store lease"))?;
-            let (cancelled, prepared) = (
-                Arc::<AtomicBool>::default(),
+            let (cancel, prepared) = (
+                Arc::<Cancel>::default(),
                 Arc::new(Mutex::new(Preparation::Running)),
             );
             recovery.push(RecoveryStore {
@@ -704,25 +751,58 @@ impl EngineService {
                 handle: handle.clone(),
                 identity: identity.clone(),
                 reads,
-                cancelled: cancelled.clone(),
+                cancel: cancel.clone(),
                 prepared: prepared.clone(),
                 closing: false,
             });
-            (handle, lease, cancelled, prepared)
+            (handle, lease, cancel, prepared)
         };
         // The worker owns the source's lease until it recorded its outcome,
         // so a close waits for it, and the root stays reserved meanwhile.
-        // Membership operations do not wait on it.
+        // Membership operations do not wait on it. Its deadline covers its
+        // wait for the daemon's preparation permit, so every preparation ends
+        // within the deadline of its open.
         let deadline = tokio::spawn({
-            let (cancelled, wait) = (cancelled.clone(), copies.deadline);
+            let cancel = cancel.clone();
+            let wait = copies
+                .as_ref()
+                .map_or(UNCONFIGURED_PREPARATION_DEADLINE, |copies| copies.deadline);
             async move {
                 tokio::time::sleep(wait).await;
-                cancelled.store(true, Ordering::Relaxed);
+                cancel.cancel();
             }
         });
-        tokio::task::spawn_blocking(move || {
-            let outcome =
-                prepare_recovery(&root, &params.workspace_id, &identity, &copies, &cancelled);
+        let preparations = discovery.preparations.clone();
+        tokio::spawn(async move {
+            #[cfg(test)]
+            if let Some(waiting) = lock(&PREPARATION_GATES)
+                .iter_mut()
+                .find(|gate| gate.root == root)
+                .and_then(|gate| gate.waiting.take())
+            {
+                let _ = waiting.send(());
+            }
+            let permit = tokio::select! {
+                biased;
+                () = cancel.cancelled() => None,
+                permit = preparations.acquire_owned() => permit.ok(),
+            };
+            let outcome = match permit {
+                Some(permit) => tokio::task::spawn_blocking(move || {
+                    let outcome = prepare_recovery(
+                        &root,
+                        &params.workspace_id,
+                        &identity,
+                        copies.as_deref(),
+                        &cancel.cancelled,
+                    );
+                    drop(permit);
+                    outcome
+                })
+                .await
+                .unwrap_or_else(|_| Preparation::Failed(invalid("recovery store unavailable"))),
+                None => Preparation::Failed(invalid("recovery-store-preparation-timed-out")),
+            };
             deadline.abort();
             *lock(&prepared) = outcome;
             drop(lease);
@@ -761,7 +841,7 @@ impl EngineService {
                 .find(|entry| entry.handle == handle)
                 .ok_or_else(super::error::workspace_unavailable)?;
             entry.closing = true;
-            entry.cancelled.store(true, Ordering::Relaxed);
+            entry.cancel.cancel();
             (entry.reads.clone(), entry.prepared.clone(), handle)
         };
         let (recovery, copies) = (discovery.recovery.clone(), discovery.copies.clone());
@@ -781,7 +861,7 @@ impl EngineService {
             .iter_mut()
             .map(|entry| {
                 entry.closing = true;
-                entry.cancelled.store(true, Ordering::Relaxed);
+                entry.cancel.cancel();
                 (
                     entry.reads.clone(),
                     entry.prepared.clone(),
@@ -2287,11 +2367,16 @@ mod tests {
     /// binding and hosted identity of the detached store at `reference`. Its
     /// schema comes from the genuine migration prefix.
     fn earlier_copy_of(reference: &Path, earlier: &Path) {
+        older_copy_of(reference, earlier, 1);
+    }
+
+    /// The same, from a build that lacked this build's last `missing` migrations.
+    fn older_copy_of(reference: &Path, earlier: &Path, missing: usize) {
         let token = crate::root_binding::read_root_binding(reference)
             .unwrap()
             .unwrap();
         crate::root_binding::write_root_binding(earlier, &token).unwrap();
-        dohc_engine_storage::recovery::create_earlier_store_for_test(&database(earlier), 1)
+        dohc_engine_storage::recovery::create_earlier_store_for_test(&database(earlier), missing)
             .unwrap();
         let conn = rusqlite::Connection::open(database(earlier)).unwrap();
         conn.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
@@ -2370,61 +2455,65 @@ mod tests {
         pages
     }
 
+    /// Makes the store at `root` one where a daemon refused the owner's edits
+    /// and then detached it. Returns the refused queue.
+    async fn refused_store(root: &Path) -> String {
+        let (service, owner, _ingress) = EngineService::configured_live_host(config(&[]))
+            .await
+            .unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let attached: WorkspaceHandle = serde_json::from_value(
+            service
+                .configured_attach_workspace(
+                    &ctx,
+                    host_request(
+                        "liveApplication.attachWorkspace",
+                        None,
+                        json!({"root": root, "workspaceId": "workspace",
+                            "maxRegistrations": 4, "relay": {"baseUrl": "https://relay.invalid",
+                            "bearerToken": "owner"}}),
+                    ),
+                )
+                .await
+                .unwrap()["workspaceHandle"]
+                .clone(),
+        )
+        .unwrap();
+        let appended = service
+            .owner_ydoc_outbox_append(
+                &ctx,
+                Some(attached.clone()),
+                append("workspace", b"refused edits"),
+            )
+            .await
+            .unwrap();
+        let outbox = appended["outboxId"].as_str().unwrap().to_owned();
+        service
+            .owner_ydoc_outbox_quarantine(
+                &ctx,
+                Some(attached.clone()),
+                json!({"outboxId": outbox, "reason": "invalid-update"}),
+            )
+            .await
+            .unwrap();
+        service
+            .configured_detach_workspace(
+                &ctx,
+                host_request("liveApplication.detachWorkspace", Some(attached), json!({})),
+            )
+            .await
+            .unwrap();
+        outbox
+    }
+
     #[tokio::test]
     async fn an_earlier_store_of_an_older_build_is_copied_migrated_and_read_whole() {
         let reference = dohc_engine_testkit::ScratchDir::new().unwrap();
         let earlier = dohc_engine_testkit::ScratchDir::new().unwrap();
         let copies = dohc_engine_testkit::ScratchDir::new().unwrap();
         // A daemon refused the owner's edits, then the workspace's identity changed.
-        let outbox = {
-            let (service, owner, _ingress) = EngineService::configured_live_host(config(&[]))
-                .await
-                .unwrap();
-            let mut ctx = RequestContext::unbounded();
-            ctx.connection = Some(owner.handle());
-            let attached: WorkspaceHandle = serde_json::from_value(
-                service
-                    .configured_attach_workspace(
-                        &ctx,
-                        host_request(
-                            "liveApplication.attachWorkspace",
-                            None,
-                            json!({"root": reference.path(), "workspaceId": "workspace",
-                                "maxRegistrations": 4, "relay": {"baseUrl": "https://relay.invalid",
-                                "bearerToken": "owner"}}),
-                        ),
-                    )
-                    .await
-                    .unwrap()["workspaceHandle"]
-                    .clone(),
-            )
-            .unwrap();
-            let appended = service
-                .owner_ydoc_outbox_append(
-                    &ctx,
-                    Some(attached.clone()),
-                    append("workspace", b"refused edits"),
-                )
-                .await
-                .unwrap();
-            let outbox = appended["outboxId"].as_str().unwrap().to_owned();
-            service
-                .owner_ydoc_outbox_quarantine(
-                    &ctx,
-                    Some(attached.clone()),
-                    json!({"outboxId": outbox, "reason": "invalid-update"}),
-                )
-                .await
-                .unwrap();
-            service
-                .configured_detach_workspace(
-                    &ctx,
-                    host_request("liveApplication.detachWorkspace", Some(attached), json!({})),
-                )
-                .await
-                .unwrap();
-            outbox
-        };
+        let outbox = refused_store(reference.path()).await;
         host_identity(reference.path(), "earlier");
         earlier_copy_of(reference.path(), earlier.path());
         assert!(matches!(
@@ -2558,7 +2647,12 @@ mod tests {
         for ending in ["close", "shutdown"] {
             // The worker waits at its gate, before it opens the store.
             let (open_gate, gate) = std::sync::mpsc::channel();
-            lock(&PREPARATION_GATES).push((std::fs::canonicalize(store.path()).unwrap(), gate));
+            lock(&PREPARATION_GATES).push(PreparationGate {
+                root: std::fs::canonicalize(store.path()).unwrap(),
+                open: gate,
+                waiting: None,
+                began: None,
+            });
             let opened = service
                 .dispatch(ctx.clone(), recover(store.path(), "workspace", "epoch"))
                 .await
@@ -2670,6 +2764,149 @@ mod tests {
         assert_eq!(store_files(store.path()), before);
         service
             .dispatch(ctx.clone(), close_request(&handle))
+            .await
+            .unwrap();
+    }
+
+    /// One preparation at a time per daemon: another workspace's store waits
+    /// for the running one to end, and a close of the waiting one frees its
+    /// root at once, without its preparation ever beginning.
+    #[tokio::test]
+    async fn preparations_take_turns_across_workspaces_and_a_closed_waiter_frees_its_root() {
+        let (reference, store, other, copies) = (
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+        );
+        let (service, owner, _ingress) =
+            EngineService::configured_live_host(recovering(copies.path()))
+                .await
+                .unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        earlier_store(&service, &ctx, reference.path(), store.path()).await;
+        let gate = |root: &Path| {
+            let (open, gate) = std::sync::mpsc::channel();
+            let (waiting, waits) = tokio::sync::oneshot::channel();
+            let (began, beginning) = tokio::sync::oneshot::channel();
+            lock(&PREPARATION_GATES).push(PreparationGate {
+                root: std::fs::canonicalize(root).unwrap(),
+                open: gate,
+                waiting: Some(waiting),
+                began: Some(began),
+            });
+            (open, waits, beginning)
+        };
+        let open = |root: &Path, id: &str| {
+            let request = recover(root, id, "epoch");
+            let service = service.clone();
+            let ctx = ctx.clone();
+            async move {
+                let opened = service
+                    .dispatch(ctx, request)
+                    .await
+                    .unwrap()
+                    .response
+                    .result;
+                serde_json::from_value::<WorkspaceHandle>(opened["workspaceHandle"].clone())
+                    .unwrap()
+            }
+        };
+        // The first store's preparation holds the daemon's permit at its gate.
+        let (open_first, _, first_began) = gate(store.path());
+        let first = open(store.path(), "workspace").await;
+        first_began.await.unwrap();
+        // The second's worker reached its turn: it waits there, or with no
+        // permit to wait for, it is already on its way to its gate.
+        let (_open_second, second_waits, second_began) = gate(other.path());
+        let second = open(other.path(), "other").await;
+        second_waits.await.unwrap();
+        assert_eq!(
+            first_page(&service, ctx.clone(), &second, "outbox")
+                .await
+                .unwrap(),
+            json!({"kind": "preparing"})
+        );
+        tokio::select! {
+            biased;
+            _ = second_began => panic!("two preparations ran at once"),
+            closed = service.dispatch(ctx.clone(), close_request(&second)) => {
+                closed.unwrap();
+            }
+        }
+        assert!(!service.is_recovery_handle(Some(&second)));
+        let other_root = std::fs::canonicalize(other.path()).unwrap();
+        assert!(
+            lock(&PREPARATION_GATES)
+                .iter()
+                .any(|gate| gate.root == other_root)
+        );
+        lock(&PREPARATION_GATES).retain(|gate| gate.root != other_root);
+        assert!(service.is_recovery_handle(Some(&first)));
+        open_first.send(()).unwrap();
+        prepared(&service, &first).await;
+        assert!(matches!(
+            service.recovery_read(Some(&first)),
+            Some(Ok(RecoveryPage::Read(_)))
+        ));
+        service
+            .dispatch(ctx.clone(), close_request(&first))
+            .await
+            .unwrap();
+    }
+
+    /// A host whose operator configured no recovery copies still reads a
+    /// store this build fully migrated, in place, and refuses one that would
+    /// need a copy with the reason a server check covers.
+    #[tokio::test]
+    async fn a_host_without_recovery_copies_reads_a_current_store_and_refuses_an_older_one() {
+        let (current, earlier) = (
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+        );
+        let outbox = refused_store(current.path()).await;
+        host_identity(current.path(), "epoch");
+        let (service, owner, _ingress) = EngineService::configured_live_host(config(&[]))
+            .await
+            .unwrap();
+        let ctx = || {
+            let mut ctx = RequestContext::unbounded();
+            ctx.connection = Some(owner.handle());
+            ctx
+        };
+        let handle = open_prepared(
+            &service,
+            ctx(),
+            recover(current.path(), "workspace", "epoch"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            queued(&service, ctx, &handle, &outbox).await.unwrap(),
+            b"refused edits"
+        );
+        service
+            .dispatch(ctx(), close_request(&handle))
+            .await
+            .unwrap();
+        earlier_copy_of(current.path(), earlier.path());
+        let handle = open_prepared(
+            &service,
+            ctx(),
+            recover(earlier.path(), "workspace", "epoch"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            first_page(&service, ctx(), &handle, &outbox)
+                .await
+                .unwrap_err()
+                .message,
+            "recovery store unavailable"
+        );
+        service
+            .dispatch(ctx(), close_request(&handle))
             .await
             .unwrap();
     }
@@ -2791,8 +3028,9 @@ mod tests {
         drop(held);
     }
 
-    /// Prepares an earlier store of `RECOVERY_LARGE_STORE_MB` megabytes and
-    /// prints how long it took and how much the copy held at its peak.
+    /// Prepares an earlier store of `RECOVERY_LARGE_STORE_MB` megabytes, from
+    /// a build 10 migrations behind, and prints how long it took and how much
+    /// its copy folder held at its peak, sampled while it ran.
     #[tokio::test]
     #[ignore = "measures a large store; run by hand"]
     async fn a_large_earlier_store_prepares_within_its_deadline() {
@@ -2812,7 +3050,40 @@ mod tests {
                 .unwrap();
         let mut ctx = RequestContext::unbounded();
         ctx.connection = Some(owner.handle());
-        earlier_store(&service, &ctx, reference.path(), store.path()).await;
+        detached_store(&service, &ctx, reference.path()).await;
+        host_identity(reference.path(), "epoch");
+        older_copy_of(reference.path(), store.path(), 10);
+        let daemon = service
+            .configured_live_host
+            .get()
+            .unwrap()
+            .copies
+            .clone()
+            .unwrap();
+        // Samples every file under the daemon's copy folder until stopped.
+        let sampling = Arc::new(AtomicBool::new(false));
+        let sampler = std::thread::spawn({
+            let (sampling, folder) = (sampling.clone(), daemon.daemon().to_path_buf());
+            move || {
+                fn size(path: &Path) -> u64 {
+                    std::fs::read_dir(path).map_or(0, |entries| {
+                        entries
+                            .flatten()
+                            .map(|entry| match entry.file_type() {
+                                Ok(kind) if kind.is_dir() => size(&entry.path()),
+                                _ => entry.metadata().map_or(0, |metadata| metadata.len()),
+                            })
+                            .sum()
+                    })
+                }
+                let mut peak = 0;
+                while !sampling.load(Ordering::Relaxed) {
+                    peak = peak.max(size(&folder));
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                peak
+            }
+        });
         {
             let conn = rusqlite::Connection::open(database(store.path())).unwrap();
             let tx = conn.unchecked_transaction().unwrap();
@@ -2841,27 +3112,16 @@ mod tests {
             .is_ok_and(|page| page["kind"] == "preparing");
         prepared(&service, &handle).await;
         let prepared_in = started.elapsed();
-        let daemon = service
-            .configured_live_host
-            .get()
-            .unwrap()
-            .copies
-            .clone()
-            .unwrap();
-        let copy = std::fs::read_dir(daemon.daemon())
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
-        let peak: u64 = std::fs::read_dir(&copy)
-            .unwrap()
-            .map(|entry| entry.unwrap().metadata().unwrap().len())
-            .sum();
+        assert!(matches!(
+            service.recovery_read(Some(&handle)),
+            Some(Ok(RecoveryPage::Read(_)))
+        ));
+        sampling.store(true, Ordering::Relaxed);
+        let peak = sampler.join().unwrap();
         println!(
-            "recovery preparation: source {source_bytes} bytes, prepared in {prepared_in:?}, \
-             copy {peak} bytes; an unrelated attach and detach took {attached_in:?} \
-             (still preparing after it: {preparing_after_attach})"
+            "recovery preparation: source {source_bytes} bytes, 10 migrations behind, prepared in \
+             {prepared_in:?}, copy folder at most {peak} bytes; an unrelated attach and detach \
+             took {attached_in:?} (still preparing after it: {preparing_after_attach})"
         );
         service
             .dispatch(ctx.clone(), close_request(&handle))

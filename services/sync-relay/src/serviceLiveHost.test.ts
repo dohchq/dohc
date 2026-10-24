@@ -551,12 +551,15 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
     (engine.generation === undefined || engine.generation === (queue.binding as {restoreFenceGeneration: number}).restoreFenceGeneration);
   // Earlier stores open read-only for recovery, by workspace, at most one each as the engine allows.
   // Each serves its own queue, whose head's append key names its root.
-  const recoveryStores = new Map<string, {root: string; handle: string}>();
+  // A closing store reads nothing and keeps its workspace from opening another, as the engine's.
+  const recoveryStores = new Map<string, {root: string; handle: string; closing?: boolean}>();
   let recoveryOpens = 0;
   // `loseOpen` loses the next open's answer after the engine opened the store; `failOpen` fails the next open before it opens;
   // `failClose` fails the next close before it closes; `preparing` answers that many recovery reads with `preparing`;
-  // `failRead` fails the next recovery read.
-  const recoveryFaults: {loseOpen?: boolean; failOpen?: Error; failClose?: Error; preparing?: number; failRead?: Error} = {};
+  // `failRead` fails the next recovery read, and `failCurrentRead` the next read of an attached store; while `worker`
+  // is pending, the first close of a store times out and leaves it closing, and a later one waits for it.
+  const recoveryFaults: {loseOpen?: boolean; failOpen?: Error; failClose?: Error; preparing?: number; failRead?: Error; failCurrentRead?: Error;
+    worker?: Promise<void>} = {};
   const keptPage = (request: {id: number; params: Record<string, unknown>}, queue = outboxOf(request)) => {
     const {params} = request;
     const header = {outboxId: params.outboxId, binding: queue.binding, baseUpdateDigest: (queue.binding as {lineageClaimId: string}).lineageClaimId,
@@ -643,9 +646,13 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
         case "ydoc.ownerOutbox.retry": outboxOf(request).retryDeliveryId = "refused"; return reply({retryDeliveryId: "refused"});
         case "ydoc.ownerOutbox.quarantine": {const queue = outboxOf(request); queue.state = "quarantined"; queue.retryDeliveryId = null; return reply({});}
         case "ydoc.ownerOutbox.readPending": {
-          if (!request.workspace?.startsWith("recovery-")) return reply(keptPage(request));
+          if (!request.workspace?.startsWith("recovery-")) {
+            const currentFailure = recoveryFaults.failCurrentRead;
+            if (currentFailure) {recoveryFaults.failCurrentRead = undefined; throw currentFailure;}
+            return reply(keptPage(request));
+          }
           const open = [...recoveryStores.values()].find(store => store.handle === request.workspace);
-          if (!open) throw new EngineRequestError(request.id, {code: "WORKSPACE_UNAVAILABLE", message: "workspace handle is unavailable", retry: "no"} as never);
+          if (!open || open.closing) throw new EngineRequestError(request.id, {code: "WORKSPACE_UNAVAILABLE", message: "workspace handle is unavailable", retry: "no"} as never);
           if (recoveryFaults.preparing) {recoveryFaults.preparing--; return reply({kind: "preparing"});}
           const readFailure = recoveryFaults.failRead;
           if (readFailure) {recoveryFaults.failRead = undefined; throw readFailure;}
@@ -655,7 +662,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
           const openFailure = recoveryFaults.failOpen;
           if (openFailure) {recoveryFaults.failOpen = undefined; throw openFailure;}
           const {root, workspaceId} = request.params as {root: string; workspaceId: string}, open = recoveryStores.get(workspaceId);
-          if (open && open.root !== root) throw new EngineRequestError(request.id, {code: "CONFLICT", message: "a recovery store is already open for this workspace", retry: "no"} as never);
+          if (open && (open.root !== root || open.closing)) throw new EngineRequestError(request.id, {code: "CONFLICT", message: "a recovery store is already open for this workspace", retry: "no"} as never);
           recoveryStores.set(workspaceId, open ?? {root, handle: `recovery-${++recoveryOpens}`});
           if (recoveryFaults.loseOpen) {recoveryFaults.loseOpen = false; throw new Error("Open reply lost.");}
           return reply({workspaceHandle: recoveryStores.get(workspaceId)!.handle});
@@ -664,6 +671,12 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
           const open = [...recoveryStores].find(([, store]) => store.handle === request.workspace), failure = recoveryFaults.failClose;
           if (failure) {recoveryFaults.failClose = undefined; throw failure;}
           if (!open) throw new EngineRequestError(request.id, {code: "WORKSPACE_UNAVAILABLE", message: "workspace handle is unavailable", retry: "no"} as never);
+          const worker = recoveryFaults.worker;
+          if (worker && !open[1].closing) {
+            open[1].closing = true;
+            throw new EngineRequestError(request.id, {code: "DEADLINE_EXCEEDED", message: "request deadline exceeded", retry: "afterBackoff"} as never);
+          }
+          await worker;
           recoveryStores.delete(open[0]);
           return reply({closed: true});
         }
@@ -1203,6 +1216,16 @@ it("lets a document refused at its adoption seed depart with later accepted work
   expect(o.calls(sent).every(method => method === "liveApplication.unloadDocument")).toBe(true);
 });
 
+// Proves: a refused seed of an earlier generation whose final accepted state
+// was never kept reaches its owner as the recovery copy refusal, as an
+// earlier store's refusal does, rather than as a server failure.
+it("turns an attached store's missing recovery checkpoint into the recovery copy refusal", async () => {
+  const o = await enrolledServiceHost(), k = keptEdits(o);
+  o.recoveryFaults.failCurrentRead = new EngineRequestError(0, {code: "INVALID_PARAMS", message: "owner-outbox-recovery-checkpoint-unavailable", retry: "no"} as never);
+  await expect(o.host.readKeptEditsPage(k.row()!, undefined, o.workspace.root)).rejects.toMatchObject({reason: "server"});
+  await expect(o.host.readKeptEditsPage(k.row()!, undefined, o.workspace.root)).resolves.toMatchObject({kind: "page", part: "header"});
+});
+
 // The accepted state a recovery copy reads, as the engine pages it through the host.
 async function keptCheckpoint(host: Awaited<ReturnType<typeof enrolledServiceHost>>["host"], kept: ServiceKeptEdits, store: string) {
   type Page = {kind: string; snapshot: string; bytesBase64: string};
@@ -1524,6 +1547,35 @@ it("opens an earlier store again when the engine no longer holds its recovery ha
   await expect(r.read()).resolves.toMatchObject({kind: "page", part: "header"});
   expect(r.k.engine("liveApplication.openRecoveryStore")).toHaveLength(2);
   expect([...r.recoveryStores.values()]).toEqual([{root: r.root, handle: "recovery-2"}]);
+});
+
+// Proves: a recovery handle whose close timed out while the engine's worker
+// still runs stays recorded. A read through it, which the engine refuses as
+// closing, closes it again and waits for that close before its store opens
+// once more, so an account deletion queued behind it waits for the worker too.
+it("keeps a closing recovery handle until its close ends, so a deletion waits for its worker", async () => {
+  const r = await rotatedServiceHost();
+  await r.read();
+  const worker = deferred<void>();
+  r.recoveryFaults.worker = worker.promise;
+  // An abandoned read's close times out while the worker runs.
+  const abandoned = new AbortController(), parked = r.park("ydoc.ownerOutbox.readPending");
+  const reading = r.restarted.readKeptEditsPage(r.earlier, undefined, r.root, abandoned.signal).catch(() => undefined);
+  await parked.entered.promise;
+  abandoned.abort(); parked.release.resolve();
+  await reading;
+  expect(r.closes()).toEqual(["recovery-1"]);
+  expect([...r.recoveryStores.values()]).toEqual([{root: r.root, handle: "recovery-1", closing: true}]);
+  const read = r.read();
+  await vi.waitFor(() => expect(r.closes()).toEqual(["recovery-1", "recovery-1"]));
+  const deleting = r.restarted.deleteWorkspaces(["workspace"]);
+  r.recoveryFaults.worker = undefined;
+  worker.resolve();
+  await expect(read).resolves.toMatchObject({kind: "page", part: "header"});
+  await deleting;
+  expect(r.k.engine("liveApplication.openRecoveryStore")).toHaveLength(2);
+  expect(r.closes()).toEqual(["recovery-1", "recovery-1", "recovery-2"]);
+  expect(r.recoveryStores.size).toBe(0);
 });
 
 // Proves: a read answers `preparing` while the engine prepares the earlier

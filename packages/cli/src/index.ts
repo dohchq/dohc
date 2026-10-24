@@ -372,6 +372,8 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
       result = await sendCliRequest<typeof command.verb>(request, {
         ...options.client,
         timeoutMs: options.client?.timeoutMs ?? (command.verb === "accountDelete" ? 120_000
+          // The server may take 5 minutes to prepare an earlier store, and dohc waits up to 6.
+          : command.verb === "saveRecoveryCopy" ? 420_000
           : command.verb === "historyUndo" || command.verb === "dataset" || command.verb === "appPublication" || command.verb === "ownerAppResponses" ? 90_000 : DEFAULT_RESPONSE_TIMEOUT_MS),
         env,
       });

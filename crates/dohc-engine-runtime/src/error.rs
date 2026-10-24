@@ -163,6 +163,9 @@ impl RuntimeError {
                     }
                     ApplicationError::Interrupted => "operation-crashed",
                     ApplicationError::PublicationPending => "live-application-publication-pending",
+                    ApplicationError::AcceptedStateIncomplete => {
+                        "live-application-accepted-state-incomplete"
+                    }
                     ApplicationError::MaterializationPending => {
                         "settlement-materialization-pending"
                     }

@@ -461,14 +461,16 @@ fn open_engine_db_configured(
 /// Open an existing, fully migrated v2 store without creating files, changing
 /// persistent pragmas, or applying migrations. This is the reader primitive
 /// for daemon requests that run while another engine owns workspace writes.
+/// Its checks stop once `cancelled` is set.
 pub(crate) fn open_engine_db_read_only(
     path: &Path,
     work: Option<Arc<AtomicU64>>,
+    cancelled: Option<Arc<AtomicBool>>,
 ) -> Result<OpenedEngineDb, StorageError> {
     reject_undersized_database(path)?;
     let conn =
         crate::open_store(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(StorageError::corrupt)?;
-    count_open_work(&conn, work, None)?;
+    count_open_work(&conn, work, cancelled)?;
     apply_session_pragmas(&conn)?;
     validate_current(&conn)?;
     stop_counting(&conn)?;

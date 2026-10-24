@@ -222,7 +222,7 @@ impl EngineStore {
         path: &Path,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, StorageError> {
-        let opened = open_engine_db_read_only(path, work)?;
+        let opened = open_engine_db_read_only(path, work, None)?;
         let passive = crate::schema::store_is_passive(&opened.conn)?;
         Ok(Self::from_read_only(opened.conn, path, passive))
     }

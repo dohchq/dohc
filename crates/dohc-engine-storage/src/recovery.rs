@@ -52,7 +52,7 @@ pub struct PreparedRecovery {
     store: EngineStore,
     copied: bool,
     // Dropped after `store` closes.
-    _created: CreatedWal,
+    created: CreatedWal,
 }
 
 impl PreparedRecovery {
@@ -67,29 +67,83 @@ impl PreparedRecovery {
     }
 }
 
-/// The source's WAL when the source had none: a WAL-mode connection creates
-/// an empty one as it opens. Dropped after that connection closes, it removes
-/// the file if it is still empty, so the source's folder is left as it was.
-#[derive(Debug)]
+impl Drop for PreparedRecovery {
+    fn drop(&mut self) {
+        self.created.remove_while_held();
+    }
+}
+
+/// The source's WAL when the source had none and its connection made it: a
+/// WAL-mode connection creates an empty one as it first reads. Recorded only
+/// once that connection holds the store exclusively, so no other connection
+/// has it open. Removed if still empty, so the source's folder is left as it
+/// was: POSIX removes it before the connection closes, while the store is
+/// still held; Windows refuses to remove a file in use, so there it goes once
+/// it is dropped, after the connection closed.
+#[derive(Debug, Default)]
 struct CreatedWal(Option<PathBuf>);
 
 impl CreatedWal {
-    fn watch(source: &Path) -> Self {
-        let mut wal = source.as_os_str().to_owned();
-        wal.push("-wal");
-        let wal = PathBuf::from(wal);
-        Self(std::fs::symlink_metadata(&wal).is_err().then_some(wal))
+    fn remove(&mut self) {
+        if let Some(wal) = self.0.take()
+            && std::fs::symlink_metadata(&wal).is_ok_and(|wal| wal.is_file() && wal.len() == 0)
+        {
+            let _ = std::fs::remove_file(wal);
+        }
+    }
+
+    /// Before its connection closes.
+    fn remove_while_held(&mut self) {
+        #[cfg(unix)]
+        self.remove();
     }
 }
 
 impl Drop for CreatedWal {
     fn drop(&mut self) {
-        if let Some(wal) = &self.0
-            && std::fs::symlink_metadata(wal).is_ok_and(|wal| wal.is_file() && wal.len() == 0)
-        {
-            let _ = std::fs::remove_file(wal);
+        self.remove();
+    }
+}
+
+/// A connection to the source, with the WAL it made there.
+struct Source {
+    conn: Option<Connection>,
+    // Dropped after `conn` closes.
+    created: CreatedWal,
+}
+
+impl Source {
+    fn conn(&self) -> &Connection {
+        self.conn
+            .as_ref()
+            .expect("a source keeps its connection until it becomes a store")
+    }
+
+    /// The source read in place, as a store for queries only.
+    fn into_prepared(mut self, path: &Path, passive: bool) -> PreparedRecovery {
+        PreparedRecovery {
+            store: EngineStore::from_read_only(
+                self.conn.take().expect("a source becomes a store once"),
+                path,
+                passive,
+            ),
+            copied: false,
+            created: std::mem::take(&mut self.created),
         }
     }
+}
+
+impl Drop for Source {
+    fn drop(&mut self) {
+        self.created.remove_while_held();
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs, in tests, once the source's WAL was looked for and before the source opens.
+    static AFTER_WAL_CHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
 }
 
 /// Open the store at `source` for recovery. `accept` checks its contents
@@ -123,28 +177,39 @@ fn prepare(
     cancelled: &Arc<AtomicBool>,
     now_ms: i64,
 ) -> Result<PreparedRecovery, RecoveryError> {
-    // Declared first, so it drops after the connection.
-    let created = CreatedWal::watch(source);
-    let conn = open_source(source, cancelled.clone())?;
-    let ledger = crate::schema::classify_existing(&conn)?;
-    let passive = crate::schema::store_is_passive(&conn)?;
-    if !accept(&conn).map_err(StorageError::corrupt)? {
+    let mut wal = source.as_os_str().to_owned();
+    wal.push("-wal");
+    let wal = PathBuf::from(wal);
+    let had_wal = std::fs::symlink_metadata(&wal).is_ok();
+    #[cfg(test)]
+    if let Some(hook) = AFTER_WAL_CHECK.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+    let mut held = Source {
+        conn: Some(open_source(source, cancelled.clone())?),
+        created: CreatedWal::default(),
+    };
+    let ledger = crate::schema::classify_existing(held.conn());
+    // Any answer but a busy store means the first read took the store
+    // exclusively, so a WAL that was not there before is this connection's.
+    if !matches!(ledger, Err(StorageError::FileLocked)) && !had_wal {
+        held.created = CreatedWal(Some(wal));
+    }
+    let ledger = ledger?;
+    let conn = held.conn();
+    let passive = crate::schema::store_is_passive(conn)?;
+    if !accept(conn).map_err(StorageError::corrupt)? {
         return Err(RecoveryError::Refused);
     }
     if ledger == LedgerState::Current {
-        crate::schema::check_current(&conn)?;
+        crate::schema::check_current(conn)?;
         conn.execute_batch("COMMIT")
             .map_err(StorageError::corrupt)?;
         // Page reads are not part of the preparation.
         conn.progress_handler(0, None::<fn() -> bool>)
             .map_err(StorageError::corrupt)?;
-        return Ok(PreparedRecovery {
-            store: EngineStore::from_read_only(conn, source, passive),
-            copied: false,
-            _created: created,
-        });
+        return Ok(held.into_prepared(source, passive));
     }
-    let folder = folder().map_err(RecoveryError::Folder)?;
     let pragma = |name| {
         conn.pragma_query_value(None, name, |row| row.get::<_, i64>(0))
             .map_err(StorageError::corrupt)
@@ -152,6 +217,17 @@ fn prepare(
     let bytes = u64::try_from(pragma("page_count")?.saturating_mul(pragma("page_size")?))
         .map_err(|_| StorageError::StateCorrupt { source: None })?;
     let needed = bytes.saturating_mul(2).saturating_add(COPY_HEADROOM_BYTES);
+    let folder = folder().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::StorageFull {
+            StorageError::DiskFull {
+                needed,
+                available: 0,
+            }
+            .into()
+        } else {
+            RecoveryError::Folder(error)
+        }
+    })?;
     let available = free_space.available_bytes(&folder)?;
     if available < needed {
         return Err(StorageError::DiskFull { needed, available }.into());
@@ -161,29 +237,39 @@ fn prepare(
         &copy,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
     )
-    .map_err(StorageError::corrupt)?;
-    copy_snapshot(&conn, &mut target, cancelled)
+    .map_err(|error| {
+        full(
+            StorageError::corrupt(error).into(),
+            needed,
+            free_space,
+            &folder,
+        )
+    })?;
+    copy_snapshot(conn, &mut target, cancelled)
         .map_err(|error| full(error, needed, free_space, &folder))?;
     drop(target);
     conn.execute_batch("COMMIT")
         .map_err(StorageError::corrupt)?;
-    drop(conn);
-    drop(created);
+    drop(held);
     let migrated =
         crate::schema::open_engine_db_cancellable(&copy, now_ms, passive, cancelled.clone())
-            .map_err(|error| {
-                if cancelled.load(Ordering::Relaxed) {
-                    RecoveryError::Cancelled
-                } else {
-                    full(error.into(), needed, free_space, &folder)
-                }
-            })?;
+            .map_err(|error| full(error.into(), needed, free_space, &folder))?;
     drop(migrated);
+    let store = open_copy(&copy, cancelled)
+        .map_err(|error| full(error.into(), needed, free_space, &folder))?;
     Ok(PreparedRecovery {
-        store: EngineStore::open_read_only(&copy)?,
+        store,
         copied: true,
-        _created: CreatedWal(None),
+        created: CreatedWal::default(),
     })
+}
+
+/// The migrated copy at `copy`, checked once more and then read only. Setting
+/// `cancelled` stops that check; page reads are not part of it.
+fn open_copy(copy: &Path, cancelled: &Arc<AtomicBool>) -> Result<EngineStore, StorageError> {
+    let opened = crate::schema::open_engine_db_read_only(copy, None, Some(cancelled.clone()))?;
+    let passive = crate::schema::store_is_passive(&opened.conn)?;
+    Ok(EngineStore::from_read_only(opened.conn, copy, passive))
 }
 
 /// A connection to `path` that reads it as one quiescent snapshot and changes
@@ -516,6 +602,31 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(refused, RecoveryError::Refused));
+        // An older store holding declared v1 accepted evidence, which the runner refuses.
+        let scratch = dohc_test_scratch::ScratchDir::new_named("recovery-refused").unwrap();
+        let (store, folder) = (scratch.path().join("store"), scratch.path().join("copy"));
+        std::fs::create_dir(&store).unwrap();
+        let source = store.join("engine.db");
+        let receipts = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-live-admitted-metadata-receipts")
+            .unwrap();
+        create_earlier_store_for_test(&source, BASELINE_MIGRATIONS.len() - receipts).unwrap();
+        {
+            let conn = Connection::open(&source).unwrap();
+            let digest = put_binary_blob(&conn, &[0, 0]).unwrap();
+            conn.execute("INSERT INTO live_device_update_applications (relay_database_namespace,workspace_id,delivery_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,update_digest,update_byte_length,journal_cursor,accepting_host_epoch,principal_kind,principal_id,received_at_ms,first_seen_count,local_ydoc_sequence,applied_host_id,applied_host_epoch,applied_instance_id,applied_connection_id,declared_agent_id,declared_on_behalf_of,declared_depth) VALUES ('relay','workspace','delivery','main','object','lineage','docs/a.md','[\"docs\"]',0,?1,2,1,1,'owner','owner',30,0,1,'host',1,'instance','connection','trip-agent','owner',2)", [&digest]).unwrap();
+            conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
+                .unwrap();
+        }
+        let before = contents(&store);
+        let refused = open(&source, &folder, &RealFreeSpace, &Arc::default()).unwrap_err();
+        assert!(
+            matches!(&refused, RecoveryError::Storage(error) if error.code() == "migration-failed"),
+            "{refused:?}"
+        );
+        assert!(!folder.exists());
+        assert_eq!(contents(&store), before);
     }
 
     #[test]
@@ -613,5 +724,82 @@ mod tests {
             "{refused:?}"
         );
         assert!(!scratch.path().join("copy").exists());
+    }
+
+    /// The WAL another connection makes after the source's WAL was looked for,
+    /// as it opens the store first, stays: the busy open never held the store.
+    #[test]
+    fn a_busy_open_leaves_the_wal_another_connection_made() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("recovery-busy-wal").unwrap();
+        let store = scratch.path().join("store");
+        std::fs::create_dir(&store).unwrap();
+        let source = store.join("engine.db");
+        earlier_store(&source);
+        let wal = store.join("engine.db-wal");
+        assert!(!wal.exists());
+        let holder = std::rc::Rc::new(std::cell::RefCell::new(None));
+        AFTER_WAL_CHECK.with(|hook| {
+            let (holder, source, wal) = (holder.clone(), source.clone(), wal.clone());
+            *hook.borrow_mut() = Some(Box::new(move || {
+                // Out of WAL mode, its exclusive lock keeps every reader out,
+                // and the empty WAL it leaves is open nowhere, so even Windows
+                // would let it be removed.
+                let conn = Connection::open(&source).unwrap();
+                let mode: String = conn
+                    .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(mode, "delete");
+                conn.execute_batch("BEGIN EXCLUSIVE").unwrap();
+                std::fs::write(&wal, b"").unwrap();
+                *holder.borrow_mut() = Some(conn);
+            }));
+        });
+        let refused = open(
+            &source,
+            &scratch.path().join("copy"),
+            &RealFreeSpace,
+            &Arc::default(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(refused, RecoveryError::Storage(StorageError::FileLocked)),
+            "{refused:?}"
+        );
+        assert!(wal.exists());
+        drop(holder);
+    }
+
+    #[test]
+    fn the_last_check_of_a_migrated_copy_stops_once_cancelled() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("recovery-last-check").unwrap();
+        let copy = scratch.path().join("engine.db");
+        drop(EngineStore::open(&copy, 1).unwrap());
+        assert!(open_copy(&copy, &Arc::new(AtomicBool::new(true))).is_err());
+        assert!(open_copy(&copy, &Arc::default()).is_ok());
+    }
+
+    #[test]
+    fn a_full_volume_for_the_copy_folder_is_a_volume_without_room() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("recovery-folder-full").unwrap();
+        let store = scratch.path().join("store");
+        std::fs::create_dir(&store).unwrap();
+        let source = store.join("engine.db");
+        earlier_store(&source);
+        let refused = open_for_recovery(
+            &source,
+            |_| Ok(true),
+            || Err(std::io::ErrorKind::StorageFull.into()),
+            &RealFreeSpace,
+            &Arc::default(),
+            1,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                refused,
+                RecoveryError::Storage(StorageError::DiskFull { .. })
+            ),
+            "{refused:?}"
+        );
     }
 }

@@ -13,6 +13,9 @@ use std::time::Duration;
 /// The folder under the store root that holds every daemon's copies.
 const COPIES: &str = ".recovery";
 
+/// The longest a host may let one preparation take.
+pub(super) const MAX_PREPARATION_DEADLINE: Duration = Duration::from_secs(300);
+
 /// Trusted host configuration for recovery copies.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -73,7 +76,7 @@ impl RecoveryCopies {
     /// are gone, and make this daemon's.
     pub(crate) fn start(config: RecoveryConfig) -> Result<Self, WireError> {
         let deadline = Duration::from_millis(config.preparation_deadline_ms);
-        if config.preparation_deadline_ms == 0 || deadline > Duration::from_secs(300) {
+        if config.preparation_deadline_ms == 0 || deadline > MAX_PREPARATION_DEADLINE {
             return Err(WireError::new(
                 ErrorCode::InvalidParams,
                 "invalid recovery preparation deadline",
