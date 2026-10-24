@@ -10,6 +10,8 @@ import {canonicalLiveSelector, currentLiveDocumentMoment} from "./liveDocumentAu
 import {LIVE_RESTORE_OPERATIONS} from "./liveRestoreOperationSchema";
 import {assertWorkspaceQuota} from "./workspaces";
 import {forgetServiceHostUploads} from "./serviceHostUploads";
+import {openServiceActivationRetirement, serviceActivationRetirementOpen} from "./serviceActivationRetirement";
+import {SERVICE_ACTIVATIONS} from "./serviceActivationSchema";
 import {badRequest, notFound, relayError} from "../errors";
 
 export const SERVICE_HOST_ENROLLMENTS = "sync_relay_service_host_enrollments";
@@ -110,6 +112,13 @@ export interface ServiceHostEnrollment {
 }
 export interface EnrollServiceHostDocumentInput {
   workspaceId: string; path: string; shareId: string; ownerUserId: string; nowMs: number; guard(): void;
+  /** The host's snapshot of a document it holds for an unadmitted live edit. Its Resume retires that activation. */
+  held?: ServiceHostHeldActivation;
+}
+export interface ServiceHostHeldActivation {
+  readonly activationId: string; readonly replicationEpoch: string; readonly streamIdentity: string;
+  /** Throws unless the host still holds the document for an unadmitted live edit. Runs inside the enrollment transaction. */
+  assertHeld(): void;
 }
 export interface SetServiceHostEnrollmentEnabledInput {
   workspaceId: string; path: string; objectId?: string; ownerUserId: string; enabled: boolean; retire?: boolean; restoreFenceGeneration?: number; nowMs: number; guard(): void;
@@ -301,10 +310,12 @@ function enrollInsideTransaction(storage: StorageContext, input: EnrollServiceHo
       assertCurrent(storage, current, ownerUserId);
       if (current.objectId !== objectId) throw relayError("conflict", "Service host enrollment path belongs to another document.");
       if (current.retired) assertCapacity(storage, workspaceId);
+      if (input.held) retireHeldActivation(storage, current, identity, input.held, nowMs);
       storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop=NULL,enabled=1,retired=0,host_drained_at_ms=NULL,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
         .run(Math.max(nowMs, current.updatedAtMs), workspaceId, objectId);
       return read(storage, workspaceId, path)!;
     }
+    if (input.held) throw relayError("conflict", HELD_CHANGED);
     if (storage.db.prepare(`SELECT 1 FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=?`).get(workspaceId, objectId)) throw relayError("conflict", "Service host enrollment document moved from its retained path.");
     assertCapacity(storage, workspaceId);
     const charge = Buffer.byteLength(JSON.stringify([workspaceId, objectId, path, ownerUserId, shareId, identity.replicationEpoch, identity.streamIdentity])) + 64;
@@ -313,6 +324,29 @@ function enrollInsideTransaction(storage: StorageContext, input: EnrollServiceHo
       .run(workspaceId, objectId, path, ownerUserId, shareId, identity.replicationEpoch, identity.streamIdentity, nowMs, nowMs, charge);
     storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge, workspaceId);
     return read(storage, workspaceId, path)!;
+}
+const HELD_CHANGED = "This document changed while live editing resumed. Try again.";
+const restoreInProgress = (storage: StorageContext, workspaceId: string, objectId: string) =>
+  storage.db.prepare(`SELECT 1 FROM ${LIVE_RESTORE_OPERATIONS} WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND phase<>'resumed'`)
+    .get(workspaceId, objectId) !== undefined;
+/**
+ * A Resume of a document the host holds for an unadmitted live edit retires
+ * the held activation before enabling it, as Stop does: its live session
+ * cannot continue, so a successor must replace it.
+ */
+function retireHeldActivation(storage: StorageContext, enrollment: ServiceHostEnrollment,
+  identity: {replicationEpoch: string; streamIdentity: string}, held: ServiceHostHeldActivation, nowMs: number): void {
+  held.assertHeld();
+  const activation = storage.db.prepare(`SELECT a.activation_id,a.completion_json,json_extract(a.binding_json,'$.currentPath') AS path
+    FROM ${SERVICE_ACTIVATIONS} a JOIN sync_relay_live_documents d USING(workspace_id,main_version_id,object_id,lineage_claim_id)
+    WHERE a.workspace_id=? AND a.main_version_id='main' AND a.object_id=? AND a.retired_at_ms IS NULL AND d.lineage_state='current'`)
+    .get(enrollment.workspaceId, enrollment.objectId);
+  if (identity.replicationEpoch !== held.replicationEpoch || identity.streamIdentity !== held.streamIdentity ||
+    activation?.activation_id !== held.activationId || activation.completion_json === null || activation.path !== enrollment.path) {
+    throw relayError("conflict", HELD_CHANGED);
+  }
+  if (restoreInProgress(storage, enrollment.workspaceId, enrollment.objectId)) throw relayError("restore-in-progress", "This document is being restored. Resume live editing once it finishes.");
+  openServiceActivationRetirement(storage, enrollment, nowMs);
 }
 export function listServiceHostEnrollments(storage: StorageContext, workspaceId?: string): readonly ServiceHostEnrollment[] {
   return storage.readLiveAuthority(() => {
@@ -409,14 +443,15 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
     if (!current || current.ownerUserId !== input.ownerUserId || !storage.workspaceIsOwnedBy(workspaceId, input.ownerUserId)) return null;
     let acceptedCursor: number | undefined;
     if (input.retire) {
-      if (storage.db.prepare(`SELECT 1 FROM ${LIVE_RESTORE_OPERATIONS} WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND phase<>'resumed'`)
-        .get(workspaceId, current.objectId)) throw relayError("restore-in-progress", "Stop live editing is waiting. You can keep editing.");
+      if (restoreInProgress(storage, workspaceId, current.objectId)) throw relayError("restore-in-progress", "Stop live editing is waiting. You can keep editing.");
       if (input.restoreFenceGeneration !== undefined && (!Number.isSafeInteger(input.restoreFenceGeneration) || input.restoreFenceGeneration < 0)) throw badRequest("Invalid restore generation.");
       const document=storage.db.prepare("SELECT restore_fence_generation FROM sync_relay_live_documents WHERE workspace_id=? AND object_id=? AND main_version_id='main' AND lineage_state='current'").get(workspaceId,current.objectId);
       const generation=document?.restore_fence_generation ?? 0;
       if (typeof generation !== "number" || !Number.isSafeInteger(generation)) throw new Error("Invalid document restore generation.");
       if (input.restoreFenceGeneration !== undefined && generation !== input.restoreFenceGeneration) throw new ServiceHostRetirementConflict(generation);
-      const high = storage.db.prepare("SELECT MAX(journal_cursor) AS cursor FROM sync_relay_live_update_journal WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=(SELECT lineage_claim_id FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current')")
+      // The prepared activation's obligation keeps the fence of the first Stop.
+      const retirement = openServiceActivationRetirement(storage, {workspaceId, objectId: current.objectId}, nowMs);
+      const high = retirement ? {cursor: retirement.acceptedThrough} : storage.db.prepare("SELECT MAX(journal_cursor) AS cursor FROM sync_relay_live_update_journal WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=(SELECT lineage_claim_id FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current')")
         .get(workspaceId,current.objectId,workspaceId,current.objectId);
       acceptedCursor = timestamp(high?.cursor ?? 0);
     }
@@ -490,9 +525,11 @@ export function releaseServiceHostEnrollment(storage: StorageContext, input: {wo
 /**
  * Absence preserves explicitly configured hosts. A retained enrollment fences
  * its document once its owner stops it, its workspace changes, or no Edit
- * grant of its owner covers its enrolled path.
+ * grant of its owner covers its enrolled path. An open retirement fences it
+ * until its activation retires, whatever its enrollment.
  */
 export function serviceHostDocumentEnabled(storage: StorageContext, document: {workspaceId: string; objectId: string}): boolean {
+  if (serviceActivationRetirementOpen(storage, document)) return false;
   const value = storage.db.prepare(`SELECT e.enabled,e.retired,e.owner_user_id,e.path,e.share_id,e.replication_epoch,e.stream_identity,
     w.owner_user_id AS current_owner,w.replication_epoch AS current_epoch,w.stream_identity AS current_stream
     FROM ${SERVICE_HOST_ENROLLMENTS} e JOIN sync_relay_workspaces w USING(workspace_id)

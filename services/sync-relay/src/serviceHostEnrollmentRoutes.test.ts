@@ -1,6 +1,8 @@
 import {createHash} from "node:crypto";
 import {afterEach, expect, it, vi} from "vitest";
-import {fixture as ticketFixture, binding, scope} from "./liveTickets.test-helper";
+import {fixture as ticketFixture, binding, retainServiceActivation, scope} from "./liveTickets.test-helper";
+import {readServiceActivationRetirement} from "./storage/serviceActivationRetirement";
+import type {StorageContext} from "./storage/context";
 import {createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import {createServiceHostEnrollmentRoutes, discoverServiceHostDocuments} from "./serviceHostEnrollmentRoutes";
 import {createServiceHostReplication} from "./serviceHostReplication";
@@ -95,14 +97,7 @@ it("reports ready only with completed retained activation and the current native
   };
   f.host.ready.mockReturnValue(true);
   expect(await state()).toEqual({path: binding.currentPath, status: "preparing"});
-  const source = {version: 1, relayDatabaseNamespace: namespace, workspaceId: scope.workspaceId, mainVersionId: "main", objectId: binding.objectId,
-    lineageClaimId: binding.lineageClaimId, currentPath: binding.currentPath, replicationEpoch: "epoch", streamIdentity: "stream", committedCursor: 1,
-    baseOriginId: "origin", baseOriginSeq: 0, baseRelaySeq: 1, sourceMomentId: "moment-1", sourceDigest: "b".repeat(64), sourceByteLength: 1,
-    nativeHeadSequence: 0, fullStateDigest: binding.lineageClaimId, fullStateByteLength: 2};
-  // Stored metadata exercises route readiness; native activation is covered by the engine integration suite.
-  f.raw.prepare(`INSERT INTO sync_relay_service_activations VALUES (?,?,?,?,?,?,?, ?,?,x'0000','owner-1',?,NULL,1)`)
-    .run(namespace, `ordinary-activation-${"a".repeat(64)}`, scope.workspaceId, "main", binding.objectId, binding.lineageClaimId,
-      JSON.stringify(source), JSON.stringify(binding), binding.lineageClaimId, scope.shareId);
+  retainServiceActivation(f.raw, namespace);
   expect((await state()).status).toBe("preparing");
   f.raw.exec("UPDATE sync_relay_service_activations SET completion_json='{}'");
   f.host.ready.mockReturnValue(false);
@@ -167,6 +162,27 @@ it("reports a document edited while live editing was off apart from other refusa
   expect(f.host.unblock).toHaveBeenCalledTimes(1);
   f.host.block(enrolled.objectId, "live-edit-unadmitted");
   expect(await documents()).toEqual([unadmitted]);
+});
+
+// Proves: Resume of a document held for an unadmitted live edit records the
+// retirement of its exact completed activation in the enrollment transaction,
+// before the host may try it again. A hold that ended before that transaction
+// changes nothing, and the Resume does not reopen the document's admission.
+it("retires the held activation when its owner resumes a document edited while live editing was off", async () => {
+  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const activationId = retainServiceActivation(f.raw, namespace, true);
+  const retirement = () => readServiceActivationRetirement(f.storage as StorageContext, enrolled);
+  f.host.block(enrolled.objectId, "live-edit-unadmitted");
+  f.host.blocked.mockReturnValueOnce("live-edit-unadmitted").mockReturnValueOnce(undefined);
+  expect((await f.handle(f.request("POST", {path: binding.currentPath}))).status).toBe(409);
+  expect(retirement()).toBeNull();
+  expect(f.host.unblock).not.toHaveBeenCalled();
+  expect((await f.handle(f.request("POST", {path: binding.currentPath}))).status).toBe(202);
+  expect(retirement()).toEqual({relayDatabaseNamespace: namespace, activationId, workspaceId: scope.workspaceId, mainVersionId: "main",
+    objectId: binding.objectId, lineageClaimId: binding.lineageClaimId, path: binding.currentPath, restoreFenceGeneration: 7, acceptedThrough: 0,
+    requestedAtMs: expect.any(Number)});
+  expect(f.host.unblock).toHaveBeenCalledTimes(1);
+  expect(f.storage.serviceHostDocumentEnabled(enrolled)).toBe(false);
 });
 
 // Proves: a document whose hosted replica diverged reads as its own reason

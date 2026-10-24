@@ -15,6 +15,19 @@ const bytes = new Uint8Array([0, 0]);
 export const binding = { workspaceId: scope.workspaceId, mainVersionId: "main", objectId: "object-1",
   lineageClaimId: createHash("sha256").update(bytes).digest("hex"), currentPath: "docs/a.md", selectorPaths: ["docs"], restoreFenceGeneration: 7 };
 export const report = { connection: host, binding };
+/** Stored metadata of a retained service activation of `binding`. Native activation is covered by the engine integration suite. */
+export function retainServiceActivation(raw: InstanceType<typeof DatabaseSync>, namespace: string, completed = false): string {
+  const activationId = `ordinary-activation-${"a".repeat(64)}`;
+  const source = {version: 1, relayDatabaseNamespace: namespace, workspaceId: scope.workspaceId, mainVersionId: "main", objectId: binding.objectId,
+    lineageClaimId: binding.lineageClaimId, currentPath: binding.currentPath, replicationEpoch: "epoch", streamIdentity: "stream", committedCursor: 1,
+    baseOriginId: "origin", baseOriginSeq: 0, baseRelaySeq: 1, sourceMomentId: "moment-1", sourceDigest: "b".repeat(64), sourceByteLength: 1,
+    nativeHeadSequence: 0, fullStateDigest: binding.lineageClaimId, fullStateByteLength: 2};
+  raw.prepare(`INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
+      source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes) VALUES (?,?,?,?,?,?,?,?,?,x'0000','owner-1',?,?,1)`)
+    .run(namespace, activationId, scope.workspaceId, "main", binding.objectId, binding.lineageClaimId,
+      JSON.stringify(source), JSON.stringify(binding), binding.lineageClaimId, scope.shareId, completed ? "{}" : null);
+  return activationId;
+}
 export const audience = "https://share.example.test";
 export const key = new Uint8Array(32).fill(13);
 export const table = "sync_relay_live_session_tickets";
