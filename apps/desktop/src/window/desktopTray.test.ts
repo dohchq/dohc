@@ -198,6 +198,15 @@ describe("desktop tray owner", () => {
     expect(h.notices[0]?.options.body).toBe("Running 1 schedule. To quit, open dohc and press Ctrl+Q.");
   });
 
+  it("says agent dispatch is paused when it is", async () => {
+    const h = await harness("linux");
+    await h.asset("icon-light.png");
+    await h.owner.refreshDispatchTray();
+    h.service.setPaused(true);
+    await h.owner.noticeRunningInBackground();
+    expect(h.notices[0]?.options.body).toBe("Agent dispatch is paused. To quit, open dohc and press Ctrl+Q.");
+  });
+
   it("sends one notice when two closes overlap", async () => {
     const h = await harness("linux");
     await h.asset("icon-light.png");

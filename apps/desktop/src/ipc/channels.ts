@@ -202,6 +202,7 @@ export const CHANNELS = {
   scheduleHostChanged: "desktop:schedule-host-changed",
   chatDispatchNotices: "desktop:chat-dispatch-notices",
   agentRunState: "desktop:agent-run-state",
+  chatDispatchPaused: "desktop:chat-dispatch-paused",
   // Collection automations: main parses and writes automations.yaml.
   listCollectionAutomations: "desktop:list-collection-automations",
   switchCollectionAutomation: "desktop:switch-collection-automation",
