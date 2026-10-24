@@ -22,7 +22,7 @@ describe("agent launch profiles", () => {
   });
   it("allows workspace edits and chat replies while denying unattended prompts", () => {
     const profile = { tool: "claude", executable: "/usr/local/bin/claude" } as const;
-    expect(agentProfileArguments(profile)).toEqual(["-p", "--permission-prompts", "none", "--no-session-persistence", "--allowedTools", "Edit(/**)", "Bash(dohc chat reply:*)"]);
+    expect(agentProfileArguments(profile)).toEqual(["-p", "--permission-prompts", "none", "--no-session-persistence", "--allowedTools", "Edit(/**)", "Bash(dohc chat reply:*)", "--disallowedTools", "Edit(/.dohc/**)"]);
     expect(tokenizeRunnerCommand(configuredRunnerCommand({ command: "ignored", profile }))).toEqual([profile.executable, ...agentProfileArguments(profile)]);
   });
   it("rejects unsupported tools and relative executable paths", () => {
@@ -33,7 +33,8 @@ describe("agent launch profiles", () => {
   it("preserves the raw command and round-trips spaces, quotes and UNC paths", () => {
     expect(configuredRunnerCommand({ command: ' node "agent script.mjs" ' })).toBe('node "agent script.mjs"');
     for (const executable of ['\\\\server\\tools\\claude.exe', '/tools/a"b/claude', 'C:\\Program Files\\claude.exe']) {
-      expect(tokenizeRunnerCommand(configuredRunnerCommand({ command: "", profile: { tool: "claude", executable } }))[0]).toBe(executable);
+      const profile = { tool: "claude", executable } as const;
+      expect(tokenizeRunnerCommand(configuredRunnerCommand({ command: "", profile }))).toEqual([executable, ...agentProfileArguments(profile)]);
     }
   });
 });

@@ -60,7 +60,7 @@ function runCommand(command, body) {
 
 if (profileTool) {
   const expected = profileTool === "claude"
-    ? ["-p", "--permission-prompts", "none", "--no-session-persistence", "--allowedTools", "Edit(/**)", "Bash(dohc chat reply:*)"]
+    ? ["-p", "--permission-prompts", "none", "--no-session-persistence", "--allowedTools", "Edit(/**)", "Bash(dohc chat reply:*)", "--disallowedTools", "Edit(/.dohc/**)"]
     : ["exec", "--config", "approval_policy=never", "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-"];
   if (JSON.stringify(process.argv.slice(3)) !== JSON.stringify(expected)) {
     console.error("Unexpected profile arguments", process.argv.slice(3));
@@ -69,8 +69,11 @@ if (profileTool) {
   if (selfTestCommand) {
     runCommand(selfTestCommand);
   } else {
-    if (!prompt.includes(`dohc chat reply ${threadId} --as-agent - <<'DOHC_REPORT'`)) {
-      console.error("Expected a reply through stdin in the report contract");
+    const expectedReply = profileTool === "claude"
+      ? `dohc chat reply ${threadId} --as-agent - <<'DOHC_REPORT'`
+      : `dohc chat reply ${threadId} --as-agent "<report>"`;
+    if (!prompt.includes(expectedReply)) {
+      console.error("Unexpected reply form in the report contract");
       process.exit(2);
     }
     runCommand(`dohc chat reply ${threadId} --as-agent -`, '# Done\n\ndone: checked the exports\n');

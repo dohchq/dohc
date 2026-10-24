@@ -269,12 +269,8 @@ function signalExitCode(signal: NodeJS.Signals | null): number {
 }
 
 
-function buildRunnerPrompt(threadMarkdown: string, threadId: string): string {
-  return `${threadMarkdown.trimEnd()}
-
-## Report contract
-
-Work on the request represented by this thread. Report outcomes, not tool logs. Reply with Markdown on stdin using a quoted here-document:
+function buildRunnerPrompt(threadMarkdown: string, threadId: string, useBashHereDocument: boolean): string {
+  const replyInstruction = useBashHereDocument ? `Reply with Markdown on stdin using a quoted here-document:
 
 \`\`\`sh
 dohc chat reply ${threadId} --as-agent - <<'DOHC_REPORT'
@@ -282,7 +278,13 @@ dohc chat reply ${threadId} --as-agent - <<'DOHC_REPORT'
 DOHC_REPORT
 \`\`\`
 
-Choose a delimiter that does not appear on a line in your report. Keep the delimiter quoted to prevent shell expansion. On long tasks, post progress the way a teammate would. If blocked on the user, reply with \`--needs-decision\`. To ask them to pick, add \`--option "<choice>"\` once per choice; their answer arrives as the next message with the chosen option. Your final text is not shown anywhere; only messages you post through \`dohc chat\` are shown.`;
+Choose a delimiter that does not appear on a line in your report. Keep the delimiter quoted to prevent shell expansion.`
+    : `Reply in-thread with \`dohc chat reply ${threadId} --as-agent "<report>"\`.`;
+  return `${threadMarkdown.trimEnd()}
+
+## Report contract
+
+Work on the request represented by this thread. Report outcomes, not tool logs. ${replyInstruction} On long tasks, post progress the way a teammate would. If blocked on the user, reply with \`--needs-decision\`. To ask them to pick, add \`--option "<choice>"\` once per choice; their answer arrives as the next message with the chosen option. Your final text is not shown anywhere; only messages you post through \`dohc chat\` are shown.`;
 }
 
 export function createChatDispatchService(options: ChatDispatchServiceOptions) {
@@ -882,7 +884,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         logPath,
         command: configuredRunnerCommand(runner),
         profile: runner.profile,
-        prompt: buildRunnerPrompt(markdown, claim.run.threadId),
+        prompt: buildRunnerPrompt(markdown, claim.run.threadId, runner.profile?.tool === "claude"),
         assertMayStart,
       });
       const timeout = setTimeout(() => {
@@ -1654,6 +1656,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           title: SELF_TEST_THREAD_TITLE,
           body: SELF_TEST_OPENING,
         });
+        if (shuttingDown) return { ok: false, detail: "Agent dispatch is stopping." };
+        if (liveRuns.has(workspaceId) || runReservations.has(workspaceId) || selfTests.has(workspaceId) || options.runSlotOccupied?.(workspace) === true) {
+          return { ok: false, detail: "A runner became active before the self-test could start." };
+        }
         const commandToRun = `dohc chat reply ${threadId} --as-agent "${marker}"`;
         const prompt = `This is a dohc runner self-test. Run exactly this command and do not post another message:\n\n${commandToRun}`;
         await options.setRunAttribution(workspace, {

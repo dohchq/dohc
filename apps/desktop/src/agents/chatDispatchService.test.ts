@@ -1079,8 +1079,8 @@ describe("chatDispatchService", () => {
     const prompt = firstSpawn.process.stdinText;
     expect(prompt).toContain("# Launch review");
     expect(prompt).toContain("Audit the rollback plan.");
-    expect(prompt).toContain(`dohc chat reply ${first.threadId} --as-agent - <<'DOHC_REPORT'\n<report>\nDOHC_REPORT`);
-    expect(prompt).toContain("Keep the delimiter quoted to prevent shell expansion.");
+    expect(prompt).toContain(`dohc chat reply ${first.threadId} --as-agent "<report>"`);
+    expect(prompt).not.toContain("<<'DOHC_REPORT'");
     expect(prompt).toContain("Your final text is not shown anywhere");
     expect(firstSpawn.options).toMatchObject({
       cwd: fixture.root,
@@ -3285,6 +3285,37 @@ describe("chatDispatchService", () => {
       failureReason: "user-stop",
     });
     expect(fixture.errors).toContain(noticeError);
+  });
+
+  it.each([undefined, "claude", "codex"] as const)("uses a shell-appropriate reply form for the %s runner", async (tool) => {
+    const profile = tool ? { tool, executable: resolve(`test-${tool}.exe`) } : undefined;
+    const fixture = await createFixture({ runner: { command: "claude -p", profile } });
+    const thread = await createAgentThread(fixture, { body: "Reply." });
+    await activate(fixture);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    const prompt = fixture.spawnCalls[0]!.process.stdinText;
+    if (tool === "claude") {
+      expect(prompt).toContain(`dohc chat reply ${thread.threadId} --as-agent - <<'DOHC_REPORT'\n<report>\nDOHC_REPORT`);
+      expect(prompt).toContain("Keep the delimiter quoted to prevent shell expansion.");
+    } else {
+      expect(prompt).toContain(`dohc chat reply ${thread.threadId} --as-agent "<report>"`);
+      expect(prompt).not.toContain("<<'DOHC_REPORT'");
+    }
+  });
+
+  it.each(["shutdown", "occupied"])("does not start a self-test after %s during its thread write", async (reason) => {
+    const fixture = await createFixture();
+    const writing = deferred<void>();
+    const thread = deferred<string>();
+    fixture.serviceOptions.startSelfTestThread = async () => { writing.resolve(); return thread.promise; };
+    const result = fixture.service.runnerSelfTest(WORKSPACE_ID);
+    await writing.promise;
+    if (reason === "shutdown") await fixture.service.stop();
+    else fixture.serviceOptions.runSlotOccupied = () => true;
+    thread.resolve("test-thread");
+    await expect(result).resolves.toEqual({ ok: false, detail: reason === "shutdown" ? "Agent dispatch is stopping." : "A runner became active before the self-test could start." });
+    expect(fixture.spawnCalls).toEqual([]);
+    expect(fixture.attributions).toEqual([]);
   });
 
   it.each([undefined, "claude", "codex"] as const)("passes the spawn contract in a %s runner self-test", async (tool) => {

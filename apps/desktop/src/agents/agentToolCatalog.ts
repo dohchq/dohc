@@ -37,7 +37,7 @@ export const AGENT_TOOLS = [
 export function agentProfileArguments(profile: AgentLaunchProfile): string[] {
   // In CLI rules, / anchors at the primary working directory. Bare Edit matches every path.
   return profile.tool === "claude"
-    ? ["-p", "--permission-prompts", "none", "--no-session-persistence", "--allowedTools", "Edit(/**)", "Bash(dohc chat reply:*)"]
+    ? ["-p", "--permission-prompts", "none", "--no-session-persistence", "--allowedTools", "Edit(/**)", "Bash(dohc chat reply:*)", "--disallowedTools", "Edit(/.dohc/**)"]
     : ["exec", "--config", "approval_policy=never", "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-"];
 }
 
