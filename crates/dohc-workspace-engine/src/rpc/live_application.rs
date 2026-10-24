@@ -655,6 +655,14 @@ impl EngineService {
             }
             serial = Arc::clone(&host.open.session_ops).lock_owned() => serial,
         };
+        // The fence keeps the checkpoints of the binding it stops.
+        let permit = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("native restore fence (queued)"));
+            }
+            permit = self.reconstruction_permit() => permit,
+        };
         check_interruption()?;
         if !host.current(connection) || !Arc::ptr_eq(&self.open(Some(workspace))?, &host.open) {
             return Err(workspace_unavailable());
@@ -672,7 +680,7 @@ impl EngineService {
         let mut retirement = RetireOnCancellation(Some(host.clone()));
         let worker_host = host.clone();
         let operation = tokio::spawn(async move {
-            let _serial = serial;
+            let (_serial, _permit) = (serial, permit);
             let receipt = worker_host
                 .owner
                 .fence_restore_after_reconnect(
@@ -874,6 +882,15 @@ impl EngineService {
         if !host.current(connection) || !Arc::ptr_eq(&self.open(Some(&workspace))?, &host.open) {
             return Err(workspace_unavailable());
         }
+        // A registration that moves a document keeps the checkpoints of the
+        // binding it leaves.
+        let permit = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("live registration (queued)"));
+            }
+            permit = self.reconstruction_permit() => permit,
+        };
         // Re-registering an object retires its queued acknowledgements under the
         // same fence as output polling, before the replacement writer command.
         {
@@ -904,15 +921,21 @@ impl EngineService {
         }
         let object_id = params.binding.object_id.clone();
         let binding = params.binding.clone();
-        let handle = host
-            .owner
-            .register(
-                host.namespace.clone(),
-                host.coordinate.clone(),
-                params.binding,
-            )
-            .await
-            .map_err(map_runtime)?;
+        let worker_host = host.clone();
+        let handle = tokio::spawn(async move {
+            let _permit = permit;
+            worker_host
+                .owner
+                .register(
+                    worker_host.namespace.clone(),
+                    worker_host.coordinate.clone(),
+                    params.binding,
+                )
+                .await
+        })
+        .await
+        .map_err(|_| WireError::new(ErrorCode::Internal, "live-application-interrupted"))?
+        .map_err(map_runtime)?;
         let mut registry = lock(&self.live_applications);
         if !host.current(connection) || !Arc::ptr_eq(&self.open(Some(&workspace))?, &host.open) {
             return Err(workspace_unavailable());
@@ -2260,6 +2283,115 @@ mod tests {
         assert!(lock(&service.live_applications).registrations.is_empty());
         drop(serial);
         service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_registration_waits_while_another_workspaces_rebuild_holds_the_permit() {
+        let roots = [
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+        ];
+        let configuration = serde_json::from_value(json!({
+            "version": 1, "relayNamespace": "permit-test",
+            "host": {"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
+            "workspaces": [
+                {"root":roots[0].path(),"workspaceId":"first","maxRegistrations":4},
+                {"root":roots[1].path(),"workspaceId":"second","maxRegistrations":4}
+            ],
+            "ingress": {"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,"maxUploads":1,"uploadDeadlineMs":30_000},
+            "settlement": {"maxApplicationsPerSettlement":4}
+        })).unwrap();
+        let (service, owner, _ingress) = EngineService::configured_live_host(configuration)
+            .await
+            .unwrap();
+        let handle = |workspace_id: &str| {
+            lock(&service.handles)
+                .iter()
+                .find(|(_, open)| open.workspace_id == workspace_id)
+                .unwrap()
+                .0
+                .clone()
+        };
+        let (first, second) = (handle("first"), handle("second"));
+        let mut bindings = Vec::new();
+        for workspace in [&first, &second] {
+            let open = service.open(Some(workspace)).unwrap();
+            open.actor
+                .ensure_main_version(
+                    open.workspace_id.clone(),
+                    0,
+                    Arc::new(NoFaults),
+                    dohc_engine_runtime::CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            bindings.push(LiveObjectBinding {
+                workspace_id: open.workspace_id.clone(),
+                main_version_id: "main".into(),
+                object_id: "document".into(),
+                lineage_claim_id: hex_sha256(&fixture_baseline().0),
+                current_path: "document.md".into(),
+                selector_paths: vec!["document.md".into()],
+                restore_fence_generation: 0,
+            });
+        }
+        // The second workspace's fence takes the permit and waits for its writer.
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let actor = service.open(Some(&second)).unwrap().actor.clone();
+        let blocker = tokio::spawn(async move {
+            actor
+                .ensure_main_version(
+                    "blocking-workspace".into(),
+                    0,
+                    Arc::new(BlockWriter {
+                        started: Mutex::new(Some(started_tx)),
+                        release: Mutex::new(release_rx),
+                    }),
+                    dohc_engine_runtime::CancellationToken::new(),
+                )
+                .await
+        });
+        started_rx.await.unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let mut fencing = Box::pin(service.call(
+            ctx.clone(),
+            fence_request(&second, &bindings[1], "permit-test"),
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(fencing.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(service.reconstructions.available_permits(), 0);
+        let mut registering = tokio::spawn({
+            let (service, workspace) = (service.clone(), first.clone());
+            let binding = bindings[0].clone();
+            async move {
+                service
+                    .live_application_register(&ctx, Some(workspace), json!({"binding": binding}))
+                    .await
+            }
+        });
+        tokio::select! {
+            () = service.reconstruction_waits.notified() => {}
+            registered = &mut registering => {
+                panic!("a registration ran while another workspace's rebuild held the permit: {registered:?}")
+            }
+        }
+        assert!(!registering.is_finished());
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap().unwrap();
+        let _ = fencing.await;
+        registering
+            .await
+            .unwrap()
+            .expect("the registration runs once the rebuild ends");
+        assert_eq!(service.reconstructions.available_permits(), 1);
+        for workspace in [first, second] {
+            service.workspace_close(Some(workspace)).await.unwrap();
+        }
     }
 
     #[tokio::test]

@@ -1854,6 +1854,38 @@ fn a_recovery_copy_of_a_refused_seed_holds_every_accepted_edit_after_it() {
     assert_eq!(recorded(&f), second);
 }
 
+/// A recovery checkpoint waits only for a dependency still missing. A lasting
+/// conflict, as accepted history short of the applied cursor, is an error.
+#[test]
+fn only_a_missing_dependency_leaves_a_recovery_checkpoint_pending() {
+    let frozen = |on_seed: bool| {
+        let mut f = Fixture::new();
+        f.local_edit_before_adoption();
+        f.adopt().unwrap();
+        let outbox = seed_outbox(&f);
+        let other = Ydoc::wire();
+        let base = if on_seed { f.doc.encode_full_state() } else { f.cut.baseline_bytes.clone() };
+        other.apply(&base).unwrap();
+        assert!(matches!(
+            apply_recipient_edit(&mut f, &other, 1, "Recipient text"),
+            ApplicationResult::Applied(..)
+        ));
+        refuse_seed(&mut f, &outbox);
+        (f, outbox)
+    };
+    // An accepted edit made on the owner's seed: the accepted frames alone
+    // lack the seed it depends on.
+    let (mut f, outbox) = frozen(true);
+    let waiting = owner_outbox::prepare_recovery_checkpoint(&mut f.store, "workspace", &outbox);
+    assert!(matches!(waiting, Err(owner_outbox::OwnerOutboxError::AcceptedStateIncomplete)), "{waiting:?}");
+    let (mut f, outbox) = frozen(false);
+    f.store
+        .write_with(&NoFaults, |tx| tx.execute("DELETE FROM live_accepted_updates", []).map_err(write_sql))
+        .unwrap();
+    let refused = owner_outbox::prepare_recovery_checkpoint(&mut f.store, "workspace", &outbox);
+    assert!(matches!(refused, Err(owner_outbox::OwnerOutboxError::ParentMismatch)), "{refused:?}");
+}
+
 /// A read of `outbox`'s recovery checkpoint, built first by the writer
 /// whenever the read names an older one, as `ydoc.ownerOutbox.readPending` does.
 fn prepare_and_read_recovery(f: &mut Fixture, outbox: &str, page: usize) -> (serde_json::Value, Vec<u8>) {

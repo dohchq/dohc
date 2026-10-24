@@ -1675,7 +1675,7 @@ fn build_recovery_checkpoint_in(
         RECOVERY_RECONSTRUCTION,
     )
     .map_err(|error| match error {
-        crate::live_update_application::ApplicationError::Conflict => {
+        crate::live_update_application::ApplicationError::AcceptedStateIncomplete => {
             OwnerOutboxError::AcceptedStateIncomplete
         }
         _ => OwnerOutboxError::ParentMismatch,

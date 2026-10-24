@@ -533,6 +533,20 @@ fn validate_ydoc_path(path: &str) -> Result<(), WireError> {
 }
 
 impl EngineService {
+    /// The daemon's reconstruction permit. A rebuild takes it before its
+    /// writer command and moves it into a task that ends with that command,
+    /// so a caller that stops waiting never frees it early.
+    pub(super) async fn reconstruction_permit(&self) -> tokio::sync::OwnedSemaphorePermit {
+        #[cfg(test)]
+        if self.reconstructions.available_permits() == 0 {
+            self.reconstruction_waits.notify_one();
+        }
+        Arc::clone(&self.reconstructions)
+            .acquire_owned()
+            .await
+            .expect("the reconstruction permit is never closed")
+    }
+
     async fn ydoc_editor_draft(
         &self,
         open: &Arc<OpenWorkspace>,
@@ -906,15 +920,22 @@ impl EngineService {
                 return first.map_err(map_owner_outbox);
             }
             // A frozen lineage's recovery checkpoint is built on the writer, once per applied cursor.
-            open.actor
-                .owner_ydoc_outbox_prepare_recovery_checkpoint(
-                    open.workspace_id.clone(),
-                    params.outbox_id.clone(),
-                    token,
-                )
-                .await
-                .map_err(map_runtime)?
-                .map_err(map_owner_outbox)?;
+            let permit = self.reconstruction_permit().await;
+            let (actor, workspace_id, outbox_id) = (
+                open.actor.clone(),
+                open.workspace_id.clone(),
+                params.outbox_id.clone(),
+            );
+            tokio::spawn(async move {
+                let _permit = permit;
+                actor
+                    .owner_ydoc_outbox_prepare_recovery_checkpoint(workspace_id, outbox_id, token)
+                    .await
+            })
+            .await
+            .map_err(|_| WireError::new(ErrorCode::Internal, "owner-outbox-worker-failed"))?
+            .map_err(map_runtime)?
+            .map_err(map_owner_outbox)?;
             match read_page(open, params.cursor, params.outbox_id).await? {
                 // Another acceptance moved the cursor meanwhile; the reader starts over.
                 Err(dohc_engine_collab::OwnerOutboxError::RecoveryCheckpointOutdated) => {

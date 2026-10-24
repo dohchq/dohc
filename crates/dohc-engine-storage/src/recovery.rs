@@ -144,6 +144,9 @@ thread_local! {
     /// Runs, in tests, once the source's WAL was looked for and before the source opens.
     static AFTER_WAL_CHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         std::cell::RefCell::new(None);
+    /// Answered, in tests, by the source's first read in place of reading.
+    static FIRST_READ_FAULT: std::cell::RefCell<Option<rusqlite::Error>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Open the store at `source` for recovery. `accept` checks its contents
@@ -189,13 +192,14 @@ fn prepare(
         conn: Some(open_source(source, cancelled.clone())?),
         created: CreatedWal::default(),
     };
-    let ledger = crate::schema::classify_existing(held.conn());
-    // Any answer but a busy store means the first read took the store
-    // exclusively, so a WAL that was not there before is this connection's.
-    if !matches!(ledger, Err(StorageError::FileLocked)) && !had_wal {
+    // A first read that succeeded took the store exclusively, so a WAL that
+    // was not there before is this connection's. One that failed may have
+    // failed before the lock.
+    first_read(held.conn())?;
+    if !had_wal {
         held.created = CreatedWal(Some(wal));
     }
-    let ledger = ledger?;
+    let ledger = crate::schema::classify_existing(held.conn())?;
     let conn = held.conn();
     let passive = crate::schema::store_is_passive(conn)?;
     if !accept(conn).map_err(StorageError::corrupt)? {
@@ -303,6 +307,18 @@ fn open_source(path: &Path, cancelled: Arc<AtomicBool>) -> Result<Connection, St
     }
     conn.execute_batch("BEGIN").map_err(StorageError::corrupt)?;
     Ok(conn)
+}
+
+/// The source's first read. In WAL mode it takes the store exclusively before
+/// it opens or makes the WAL.
+fn first_read(conn: &Connection) -> Result<(), StorageError> {
+    #[cfg(test)]
+    if let Some(error) = FIRST_READ_FAULT.with(|fault| fault.borrow_mut().take()) {
+        return Err(StorageError::corrupt(error));
+    }
+    conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+        .map(drop)
+        .map_err(StorageError::corrupt)
 }
 
 /// Copy the snapshot `source` reads into `target`, checking `cancelled`
@@ -767,6 +783,46 @@ mod tests {
         );
         assert!(wal.exists());
         drop(holder);
+    }
+
+    /// A first read can fail before it takes the store, here with an I/O
+    /// error. The WAL another connection made after the source's WAL was
+    /// looked for then stays.
+    #[test]
+    fn a_failed_first_read_leaves_the_wal_another_connection_made() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("recovery-ioerr-wal").unwrap();
+        let store = scratch.path().join("store");
+        std::fs::create_dir(&store).unwrap();
+        let source = store.join("engine.db");
+        earlier_store(&source);
+        let wal = store.join("engine.db-wal");
+        assert!(!wal.exists());
+        AFTER_WAL_CHECK.with(|hook| {
+            let wal = wal.clone();
+            // Empty and open nowhere, so even Windows would let it be removed.
+            *hook.borrow_mut() = Some(Box::new(move || std::fs::write(&wal, b"").unwrap()));
+        });
+        FIRST_READ_FAULT.with(|fault| {
+            *fault.borrow_mut() = Some(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+                None,
+            ));
+        });
+        let refused = open(
+            &source,
+            &scratch.path().join("copy"),
+            &RealFreeSpace,
+            &Arc::default(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                refused,
+                RecoveryError::Storage(StorageError::StateCorrupt { .. })
+            ),
+            "{refused:?}"
+        );
+        assert!(wal.exists());
     }
 
     #[test]
