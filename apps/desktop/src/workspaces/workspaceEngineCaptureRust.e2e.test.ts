@@ -1667,8 +1667,7 @@ it.skipIf(engine.missing)("records a deferred outside write after the daemon res
   }
 }, 60_000);
 
-// Waits on #2478: baseline settlement refuses an outside write before the open note's links can be rewritten.
-it.skip("keeps an outside write when a rename rewrites the open note's links (#2463)", async () => {
+it.skipIf(engine.missing)("keeps an outside write when a rename rewrites the open note's links (#2463)", async () => {
   const opened = await openRealCapture("deferred-write-rename", { settleDebounceMs: 60_000 });
   const outside = "agent text [[old]]\n";
   try {
@@ -1689,15 +1688,20 @@ it.skip("keeps an outside write when a rename rewrites the open note's links (#2
       } finally { await engine.releaseCapture(hold.holdId); }
     });
     const rewritten = await opened.withEngine((engine) => engine.rewriteHistoryLinks({ workspaceId: opened.workspaceId, operationId, requestId: "rewrite-deferred" }));
-    expect(rewritten).toMatchObject({ documents: 1, complete: true });
-    expect(await readFile(join(opened.root, "note.md"), "utf8")).toBe(outside);
-    await vi.waitFor(async () => expect((await readdir(opened.root)).some((path) => path.includes(".conflict"))).toBe(true));
-    const conflicts = (await readdir(opened.root)).filter((path) => path.includes(".conflict"));
-    expect(await Promise.all(conflicts.map((path) => readFile(join(opened.root, path), "utf8")))).toContain("[[new]]\n");
-    const undone = await opened.withEngine((engine) => engine.undoHistoryOperation({ workspaceId: opened.workspaceId, operationId: operationId!, requestId: "undo-deferred" }));
-    expect(undone.notRestored).toContain("note.md");
+    expect(rewritten).toMatchObject({ documents: 0, complete: false, unchecked: ["note.md"] });
     expect(await readFile(join(opened.root, "note.md"), "utf8")).toBe(outside);
     await session.close().catch(() => undefined);
+    await vi.waitFor(async () => {
+      expect(await readFile(join(opened.root, "note.md"), "utf8")).toBe("agent text [[new]]\n");
+    }, { timeout: REAL_DAEMON_DEADLINE_MS });
+    const completed = await opened.withEngine((engine) => engine.rewriteHistoryLinks({ workspaceId: opened.workspaceId, operationId, requestId: "rewrite-deferred" }));
+    expect(completed).toMatchObject({ documents: 1, complete: true, unchecked: [] });
+    expect((await readdir(opened.root)).filter((path) => path.includes(".conflict"))).toEqual([]);
+    const undone = await opened.withEngine((engine) => engine.undoHistoryOperation({ workspaceId: opened.workspaceId, operationId: operationId!, requestId: "undo-deferred" }));
+    expect(undone.notRestored).not.toContain("note.md");
+    await vi.waitFor(async () => {
+      expect(await readFile(join(opened.root, "note.md"), "utf8")).toBe(outside);
+    }, { timeout: REAL_DAEMON_DEADLINE_MS });
     await vi.waitFor(async () => {
       const moments = await opened.capture.listMoments({ limit: 100 });
       const note = moments.moments.filter((moment) => moment.path === "note.md");

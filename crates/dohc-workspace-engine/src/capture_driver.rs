@@ -2506,13 +2506,16 @@ impl DriverEnv for RealEnv {
             return TickIo::RefreshRequired;
         }
         let files = layer.files.handle();
-        offer_unrecorded_after_release(
+        if offer_unrecorded_after_release(
             &self.leases,
             &self.workspace_id,
             &mut self.lease_releases_seen,
             &files,
         )
-        .await;
+        .await
+        {
+            self.actor.offer_released_link_rewrites(&self.workspace_id);
+        }
         let run = reconcile_if_dirty_bound(&self.root, &files, cancel.child_token()).await;
         if matches!(
             &run,
@@ -2524,7 +2527,7 @@ impl DriverEnv for RealEnv {
         {
             probe.pause_if_armed().await;
         }
-        match run {
+        let tick = match run {
             // Converged means at quiescence — except with a NON-EMPTY
             // quarantine: the controller
             // parks persistently failing paths on its own degraded-rescan
@@ -2599,7 +2602,11 @@ impl DriverEnv for RealEnv {
             }
             Err(FilesError::ActorUnavailable) => TickIo::ActorLost,
             Err(_) => TickIo::Failed,
-        }
+        };
+        self.actor
+            .retry_pending_link_rewrites(&self.workspace_id)
+            .await;
+        tick
     }
 
     async fn stop_layer(&mut self, layer: FilesLayer) {
@@ -3376,6 +3383,15 @@ async fn apply_bound_run_with_handle(
             }
         }
     }
+    if result.completed() {
+        let observed: Vec<_> = result
+            .applied_paths
+            .iter()
+            .chain(&result.not_owned_paths)
+            .cloned()
+            .collect();
+        actor.offer_captured_link_rewrites(workspace_id, &observed);
+    }
     if result.degraded {
         status.mark_degraded();
     }
@@ -3560,15 +3576,16 @@ async fn offer_unrecorded_after_release(
     workspace_id: &str,
     releases_seen: &mut u64,
     files: &FilesHandle,
-) {
+) -> bool {
     let releases = leases.release_generation(workspace_id);
     if releases == *releases_seen {
-        return;
+        return false;
     }
     *releases_seen = releases;
     if matches!(files.stats().await, Ok(stats) if stats.deferred > 0 || stats.quarantined > 0) {
         files.request_rescan();
     }
+    true
 }
 
 /// Resolve a prepared plan whose apply never ran: acknowledge with every op

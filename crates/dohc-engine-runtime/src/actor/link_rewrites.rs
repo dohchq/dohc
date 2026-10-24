@@ -19,7 +19,10 @@ use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
@@ -36,6 +39,51 @@ pub(super) struct RewriteState {
     publishers: Mutex<HashSet<(String, String)>>,
     deferred_placements: Mutex<HashSet<String>>,
     placement_failures: Mutex<HashMap<String, usize>>,
+    deferred: Mutex<HashMap<String, DeferredPass>>,
+}
+
+#[derive(Clone)]
+struct RewriteRequest {
+    workspace: String,
+    operation: String,
+    request: String,
+    author: Option<String>,
+    root: PathBuf,
+    leases: LeaseRegistry,
+    gates: [Arc<tokio::sync::Mutex<()>>; 2],
+    faults: Arc<dyn FaultInjector>,
+    documents: (
+        super::link_documents::DocumentIsOpen,
+        super::link_documents::DocumentResync,
+    ),
+    recorder: Arc<dyn super::materialization::SelfWriteRecorder>,
+}
+
+#[derive(Clone)]
+struct DeferredPass {
+    input: RewriteRequest,
+    version: String,
+    sources: HashMap<String, String>,
+    captured: HashSet<String>,
+    offered: bool,
+    unchecked: Vec<String>,
+    scanned: bool,
+}
+
+fn defer(plan: &Plan, request: &str, object: &str, path: &str, await_capture: bool) {
+    plan.deferred_sources.lock().unwrap().insert(object.into());
+    if let Some(pass) = plan.state.deferred.lock().unwrap().get_mut(request) {
+        pass.sources.insert(object.into(), path.into());
+        if await_capture {
+            pass.captured.remove(object);
+        }
+    }
+}
+
+fn reoffer(state: &RewriteState, request: &str) {
+    if let Some(pass) = state.deferred.lock().unwrap().get_mut(request) {
+        pass.offered = true;
+    }
 }
 pub(super) struct RewriteStop(Arc<RewriteState>, String);
 impl Drop for RewriteStop {
@@ -58,6 +106,8 @@ struct Plan {
     aliases: String,
     alias_revision: Mutex<Option<(i64, i64)>>,
     candidates: incoming::Candidates,
+    deferred_sources: Mutex<HashSet<String>>,
+    paused: Arc<AtomicBool>,
 }
 
 fn stem(path: &str) -> String {
@@ -122,6 +172,7 @@ fn valid(conn: &Connection, ws: &str, plan: &Plan, actor: bool) -> Result<bool, 
         .unwrap()
         .contains_key(&plan.operation)
     {
+        plan.paused.store(true, Ordering::Relaxed);
         return Ok(false);
     }
     let undo: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM history_undo_plans WHERE workspace_id=?1 AND operation_id=?2)",params![ws,plan.operation],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
@@ -236,12 +287,161 @@ impl ActorHandle {
         recorder: Arc<dyn super::materialization::SelfWriteRecorder>,
         token: CancellationToken,
     ) -> Result<Value, RuntimeError> {
+        self.rewrite_links(
+            RewriteRequest {
+                workspace,
+                operation,
+                request,
+                author,
+                root,
+                leases,
+                gates,
+                faults,
+                documents,
+                recorder,
+            },
+            token,
+            None,
+        )
+        .await
+    }
+
+    /// Offer only the paths whose outside text capture just committed.
+    pub fn offer_captured_link_rewrites(&self, workspace: &str, paths: &[String]) {
+        for pass in self.link_rewrites.deferred.lock().unwrap().values_mut() {
+            if pass.input.workspace != workspace {
+                continue;
+            }
+            let captured: Vec<_> = pass
+                .sources
+                .iter()
+                .filter(|(_, path)| paths.contains(path))
+                .map(|(object, _)| object.clone())
+                .collect();
+            pass.offered |= !captured.is_empty();
+            pass.captured.extend(captured);
+        }
+    }
+
+    /// A note may reopen between capture and retry. Its next lease release
+    /// must offer it again even though capture has no new bytes to record.
+    pub fn offer_released_link_rewrites(&self, workspace: &str) {
+        for pass in self.link_rewrites.deferred.lock().unwrap().values_mut() {
+            if pass.input.workspace == workspace {
+                pass.offered |= !pass.captured.is_empty();
+            }
+        }
+    }
+
+    /// Run offered work outside fences that already hold the session gate.
+    pub async fn retry_pending_link_rewrites(&self, workspace: &str) {
+        let requests: Vec<_> = self
+            .link_rewrites
+            .deferred
+            .lock()
+            .unwrap()
+            .values_mut()
+            .filter(|pass| pass.input.workspace == workspace)
+            .filter_map(|pass| {
+                if !pass.offered
+                    || self
+                        .link_rewrites
+                        .stops
+                        .lock()
+                        .unwrap()
+                        .contains_key(&pass.input.operation)
+                {
+                    return None;
+                }
+                pass.offered = false;
+                let selected: Vec<_> = pass
+                    .sources
+                    .iter()
+                    .filter(|(object, _)| pass.captured.contains(*object))
+                    .map(|(_, path)| path.clone())
+                    .collect();
+                (!selected.is_empty()).then(|| (pass.input.clone(), selected))
+            })
+            .collect();
+        for (input, selected) in requests {
+            let request = input.request.clone();
+            match self
+                .rewrite_links(input, CancellationToken::new(), Some(selected))
+                .await
+            {
+                Ok(_) => {}
+                Err(RuntimeError::Domain(DomainError::UndoRefused { .. })) => {
+                    self.link_rewrites.deferred.lock().unwrap().remove(&request);
+                }
+                Err(error) => eprintln!("engine: link rewrite awaits another capture: {error}"),
+            }
+        }
+    }
+
+    async fn rewrite_links(
+        &self,
+        input: RewriteRequest,
+        token: CancellationToken,
+        selected_paths: Option<Vec<String>>,
+    ) -> Result<Value, RuntimeError> {
+        let retained = input.clone();
+        let RewriteRequest {
+            workspace,
+            operation,
+            request,
+            author,
+            root,
+            leases,
+            gates,
+            faults,
+            documents,
+            recorder,
+        } = input;
         let session_ops = gates[1].clone();
         let (is_open, resync) = documents;
-        let _pass = tokio::select! {
-            () = token.cancelled() => return Err(RuntimeError::Cancelled),
-            guard = Arc::clone(&self.link_rewrites.gate).lock_owned() => guard,
+        let _pass = if selected_paths.is_some() {
+            match Arc::clone(&self.link_rewrites.gate).try_lock_owned() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    reoffer(&self.link_rewrites, &request);
+                    return Ok(Value::Null);
+                }
+            }
+        } else {
+            tokio::select! {
+                () = token.cancelled() => return Err(RuntimeError::Cancelled),
+                guard = Arc::clone(&self.link_rewrites.gate).lock_owned() => guard,
+            }
         };
+        if selected_paths.is_some()
+            && self
+                .link_rewrites
+                .stops
+                .lock()
+                .unwrap()
+                .contains_key(&operation)
+        {
+            reoffer(&self.link_rewrites, &request);
+            return Ok(Value::Null);
+        }
+        let mut retry = selected_paths.as_ref().and_then(|paths| {
+            let mut pass = self
+                .link_rewrites
+                .deferred
+                .lock()
+                .unwrap()
+                .get(&request)?
+                .clone();
+            pass.sources.retain(|object, path| {
+                paths.contains(path)
+                    && DocKey::new(&workspace, &pass.version, object)
+                        .is_ok_and(|key| !leases.is_held(&key))
+            });
+            (!pass.sources.is_empty()).then_some(pass)
+        });
+        if selected_paths.is_some() && retry.is_none() {
+            return Ok(Value::Null);
+        }
         let receipt = Arc::new(Receipt {
             key: request,
             binding: hex_sha256(json!([workspace, operation, author]).to_string().as_bytes()),
@@ -278,7 +478,10 @@ impl ActorHandle {
             .await?;
         let state = self.link_rewrites.clone();
         let held = self.location();
-        let (plan, mut result) = tokio::task::spawn_blocking(move || -> Result<_, RuntimeError> {
+        let selected = retry.clone();
+        let paused = Arc::new(AtomicBool::new(false));
+        let plan_paused = paused.clone();
+        let planned = tokio::task::spawn_blocking(move || -> Result<_, RuntimeError> {
             let mut store = HeldReader::open(held)?;
             store
                 .read_with(|conn| conn.execute_batch("BEGIN"))
@@ -292,6 +495,16 @@ impl ActorHandle {
             let version = VersionedTextStore::new(&mut store)
                 .get_active_version(&ws)?
                 .version_id;
+            if selected
+                .as_ref()
+                .is_some_and(|pass| pass.version != version)
+            {
+                return Err(DomainError::UndoRefused {
+                    path: op.clone(),
+                    reason: "version changed",
+                }
+                .into());
+            }
             let plan = store.read_with(|conn| -> Result<_, RuntimeError> {
                 let members = operation_moments_in(conn, &ws, &version, &op)?;
                 let renames: Vec<_> = members.iter().filter(|m| m.operation == "rename").collect();
@@ -312,7 +525,18 @@ impl ActorHandle {
                 }
                 let mut paths = Resolver::paths_for_version(conn, &ws, &version)?;
                 paths.sort();
-                let mut candidates = incoming::candidates(conn, &ws, &version, old, &["wikilink"])?;
+                let mut candidates = if let Some(selected) = &selected {
+                    incoming::Candidates {
+                        sources: selected
+                            .sources
+                            .iter()
+                            .map(|(object, path)| (object.clone(), path.clone()))
+                            .collect(),
+                        unchecked: Vec::new(),
+                    }
+                } else {
+                    incoming::candidates(conn, &ws, &version, old, &["wikilink"])?
+                };
                 let written: HashSet<_> = members.iter().map(|m| m.object_id.as_str()).collect();
                 candidates.sources.retain(|(object, path)| {
                     !written.contains(object.as_str()) && !path.starts_with("shared-with-me/")
@@ -337,6 +561,8 @@ impl ActorHandle {
                     alias_revision: Mutex::new(Some((i64::MIN, external))),
                     paths,
                     candidates,
+                    deferred_sources: Mutex::default(),
+                    paused: plan_paused,
                 };
                 if !valid(conn, &ws, &plan, false)? {
                     return Err(refuse().into());
@@ -348,7 +574,12 @@ impl ActorHandle {
             Ok((Some(plan), result))
         })
         .await
-        .map_err(|_| RuntimeError::ActorUnavailable)??;
+        .map_err(|_| RuntimeError::ActorUnavailable)?;
+        if selected_paths.is_some() && paused.load(Ordering::Relaxed) {
+            reoffer(&self.link_rewrites, &receipt.key);
+            return Ok(Value::Null);
+        }
+        let (plan, mut result) = planned?;
         let publication = Arc::new(Publication {
             workspace: workspace.clone(),
             operation: operation.clone(),
@@ -358,6 +589,11 @@ impl ActorHandle {
         });
         self.publish_link_rewrites(publication.clone());
         let Some(plan) = plan else {
+            self.link_rewrites
+                .deferred
+                .lock()
+                .unwrap()
+                .remove(&receipt.key);
             return Ok(result);
         };
         let mut reserve_locked_since = None;
@@ -404,7 +640,25 @@ impl ActorHandle {
         })
         .await
         .map_err(|_| RuntimeError::ActorUnavailable)?;
-        let mut unchecked = plan.candidates.unchecked.clone();
+        let mut unchecked = if let Some(selected) = &mut retry {
+            let paths: HashSet<_> = selected.sources.values().collect();
+            selected.unchecked.retain(|path| !paths.contains(path));
+            selected.unchecked.clone()
+        } else {
+            self.link_rewrites.deferred.lock().unwrap().insert(
+                receipt.key.clone(),
+                DeferredPass {
+                    input: retained,
+                    version: plan.version.clone(),
+                    sources: HashMap::new(),
+                    captured: HashSet::new(),
+                    offered: false,
+                    unchecked: Vec::new(),
+                    scanned: false,
+                },
+            );
+            plan.candidates.unchecked.clone()
+        };
         let mut pending: VecDeque<_> = plan.candidates.sources.clone().into();
         let mut stopped = false;
         let mut locked_since = None;
@@ -427,6 +681,9 @@ impl ActorHandle {
                 before.clone(),
                 after.clone(),
             );
+            let read_request = receipt.key.clone();
+            let read_leases = leases.clone();
+            let targeted = retry.is_some();
             let (remaining, sources, skipped, admitted, locked) = self
                 .run(move |store, cache| {
                     #[cfg(test)]
@@ -453,6 +710,19 @@ impl ActorHandle {
                         #[cfg(test)]
                         tests::source();
                         let key = DocKey::new(&ws, &p.version, &object)?;
+                        if targeted {
+                            let head =
+                                VersionedTextStore::new(store).read_text(&ws, &p.version, &path)?;
+                            if head.is_none_or(|head| head.object_id != object) {
+                                skipped.push(path);
+                                continue;
+                            }
+                            if read_leases.is_held(&key) {
+                                defer(&p, &read_request, &object, &path, false);
+                                skipped.push(path);
+                                continue;
+                            }
+                        }
                         let mut irrelevant = false;
                         let usable = if open(&key) {
                             match super::link_documents::baseline(
@@ -477,6 +747,10 @@ impl ActorHandle {
                                 },
                             ) {
                                 Ok(value) => value,
+                                Err(RuntimeError::Domain(DomainError::ConflictStaleTarget)) => {
+                                    defer(&p, &read_request, &object, &path, true);
+                                    false
+                                }
                                 Err(
                                     RuntimeError::Domain(DomainError::UndoRefused { .. })
                                     | RuntimeError::Sync(
@@ -633,6 +907,7 @@ impl ActorHandle {
                         refresh.push((object, source_path)); continue;
                     }
                     let next = json!({"documents":next_result["documents"].as_u64().unwrap_or(0)+1,"links":next_result["links"].as_u64().unwrap_or(0)+links as u64});
+                    let mut outside_changed = false;
                     let outcome = (|| -> Result<bool, RuntimeError> {
                     if turn_token.is_cancelled() {
                         return Err(RuntimeError::Cancelled);
@@ -706,8 +981,10 @@ impl ActorHandle {
                             return match super::link_documents::write(store, &input, &root, &key, edit,
                                 &head.hash, &|tx| r.save(tx, false, &next), f.as_ref()) {
                                 Ok(()) => { resync(&key); Ok(true) },
-                                Err(RuntimeError::Domain(DomainError::WritePreconditionFailed {..} |
-                                    DomainError::UndoRefused {..})) => Ok(false),
+                                Err(RuntimeError::Domain(DomainError::WritePreconditionFailed {..})) => {
+                                    outside_changed = true; Ok(false)
+                                },
+                                Err(RuntimeError::Domain(DomainError::UndoRefused {..})) => Ok(false),
                                 Err(error) => Err(error),
                             };
                         }
@@ -725,9 +1002,10 @@ impl ActorHandle {
                             &turn_token,
                         ) {
                             Ok(_) => Ok(true),
-                            Err(RuntimeError::Domain(DomainError::WritePreconditionFailed {
-                                ..
-                            }) | RuntimeError::Sync(dohc_engine_sync::SyncError::InvalidInput {
+                            Err(RuntimeError::Domain(DomainError::WritePreconditionFailed {..})) => {
+                                outside_changed = true; Ok(false)
+                            },
+                            Err(RuntimeError::Sync(dohc_engine_sync::SyncError::InvalidInput {
                                 reason: dohc_engine_storage::capture_file_holds::NOT_REPRESENTABLE,
                             })) => Ok(false),
                             Err(error) => Err(error),
@@ -743,6 +1021,7 @@ impl ActorHandle {
                         }
                         Err(error) => return Err(error),
                     };
+                    if outside_changed { defer(&p, &r.key, &object, &source_path, true); }
                     if committed { next_result = next; } else { skipped.push(source_path); }
                     if stopped || started.elapsed() >= Duration::from_millis(5) { break; }
                     }
@@ -775,15 +1054,37 @@ impl ActorHandle {
         }
         unchecked.sort();
         unchecked.dedup();
+        let scanned = retry.as_ref().map_or(!stopped, |pass| pass.scanned);
+        let selected_sources = retry.as_ref().map(|pass| pass.sources.clone());
+        let deferred_sources = plan.deferred_sources.lock().unwrap().clone();
+        let deferred = self
+            .link_rewrites
+            .deferred
+            .lock()
+            .unwrap()
+            .get(&receipt.key)
+            .is_some_and(|pass| {
+                pass.sources.keys().any(|object| {
+                    stopped
+                        || selected_sources
+                            .as_ref()
+                            .is_none_or(|selected| !selected.contains_key(object))
+                        || deferred_sources.contains(object)
+                })
+            });
         result["uncheckedCount"] = json!(unchecked.len());
-        result["complete"] = json!(unchecked.is_empty());
-        result["unchecked"] = json!(unchecked.into_iter().take(50).collect::<Vec<_>>());
+        result["complete"] = json!(scanned && unchecked.is_empty());
+        result["unchecked"] = json!(unchecked.iter().take(50).collect::<Vec<_>>());
         let reply = result.clone();
         let mut reply_locked_since = None;
         loop {
             #[cfg(test)]
             let reply_ws = workspace.clone();
             let (receipt, result, faults) = (receipt.clone(), result.clone(), faults.clone());
+            let state = self.link_rewrites.clone();
+            let full_unchecked = unchecked.clone();
+            let selected_sources = selected_sources.clone();
+            let deferred_sources = deferred_sources.clone();
             let serial = tokio::select! {
                 () = token.cancelled() => return Err(RuntimeError::Cancelled),
                 guard = session_ops.clone().lock_owned() => guard,
@@ -793,7 +1094,28 @@ impl ActorHandle {
                     let _admission = serial;
                     #[cfg(test)]
                     let _turn = tests::Turn::start(&reply_ws, "reply");
-                    save(store, &receipt, !stopped, &result, faults.as_ref())?;
+                    save(
+                        store,
+                        &receipt,
+                        !stopped && scanned && !deferred,
+                        &result,
+                        faults.as_ref(),
+                    )?;
+                    let mut waiting = state.deferred.lock().unwrap();
+                    if !deferred {
+                        waiting.remove(&receipt.key);
+                    } else if let Some(pass) = waiting.get_mut(&receipt.key) {
+                        if let Some(selected) = selected_sources.filter(|_| !stopped) {
+                            pass.sources.retain(|object, _| {
+                                !selected.contains_key(object) || deferred_sources.contains(object)
+                            });
+                        }
+                        pass.captured
+                            .retain(|object| pass.sources.contains_key(object));
+                        pass.unchecked = full_unchecked;
+                        pass.scanned = scanned;
+                        pass.offered |= stopped;
+                    }
                     store
                         .read_with(|conn| {
                             conn.execute_batch(
