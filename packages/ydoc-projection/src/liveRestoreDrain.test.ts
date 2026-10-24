@@ -121,8 +121,8 @@ it.each(["journalCursor", "receiptDigest"] as const)("refuses a proposal that su
   } finally {f.close();}
 });
 
-it.each(["journalCursor", "receiptDigest"] as const)("refuses an admission that substitutes the fenced %s", field => {
-  const f = admittedRestoreFixture();
+it.each(["journalCursor", "receiptDigest"] as const)("refuses an admission that substitutes the fenced %s", async field => {
+  const f = await admittedRestoreFixture();
   try {
     const saved = f.raw.prepare("SELECT admission_json FROM sync_relay_live_restore_lifecycles").get()!;
     const receipt = parseRestoreAdmission(JSON.parse(String(saved.admission_json)));
