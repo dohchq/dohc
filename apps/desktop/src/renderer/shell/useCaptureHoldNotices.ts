@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef } from "react";
 import type { CaptureFileHold } from "../../ipc/bridgeContract";
+import { CAPTURE_HELD_WORDS } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { useRequestSequence } from "../useRequestSequence";
 import type { useShellError } from "./useShellError";
 
 export function captureHoldMessage(path: string): string {
-  return `dohc did not record the outside edit to "${path}". dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.`;
+  return `dohc did not record the outside edit to "${path}". ${CAPTURE_HELD_WORDS}`;
 }
 
 export function useCaptureHoldNotices(input: {
@@ -54,4 +55,5 @@ export function useCaptureHoldNotices(input: {
     if (input.heldFiles === undefined) return;
     publish(input.heldFiles);
   }, [input.workspaceId, input.heldFiles, requests, input.show]);
+  return retry;
 }

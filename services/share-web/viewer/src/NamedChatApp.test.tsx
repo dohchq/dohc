@@ -288,6 +288,25 @@ it("shows the account owner beside an agent's name", async () => {
   expect(container.querySelector(".chat-owner")?.textContent).toBe("Owned by Alice");
 });
 
+it("marks a link holder's post as a link holder, even under an account's name", async () => {
+  server({history: () => ({shareId, channelWireId, nextCursor: 10, olderCursor: null,
+    messages: [{...message(2, "Second", "Alice"), authorUserId: null, authorKind: "link"}, message(1, "First")]})});
+  await render(); await opened();
+  const [link, person] = [...container.querySelectorAll<HTMLElement>(".chat-message")].reverse();
+  expect(link?.dataset.authorKind).toBe("link");
+  expect(link?.querySelector(".chat-author")?.textContent).toBe("Alice");
+  expect(link?.querySelector('[role="img"]')?.getAttribute("aria-label")).toBe("Link holder");
+  expect(link?.querySelector(".chat-agent-mark")).toBeNull();
+  expect(person?.querySelector('[role="img"]')).toBeNull();
+});
+
+it("refuses a page whose link post names an account", async () => {
+  server({history: () => ({shareId, channelWireId, nextCursor: 10, olderCursor: null,
+    messages: [{...message(2, "Second", "Alice"), authorKind: "link"}]})});
+  await render(); await settle(() => text().includes("Messages didn't load."));
+  expect(container.querySelector(".chat-message")).toBeNull();
+});
+
 it("returns to sign-in when a post reports the account cookie is missing", async () => {
   server({post: () => jsonResponse({ok: false, error: "signed out", code: "signed_out"}, 401)});
   await render(); await opened(); await type("Draft"); await click("Send");

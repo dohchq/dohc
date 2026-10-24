@@ -26,8 +26,8 @@ export const CLI_JSON_SCHEMA_VERSION = 3;
 // Who runs a CLI command. The CLI never writes as an automation.
 const cliActorSchema = z.enum(["human", "agent"]);
 export type CliActor = z.infer<typeof cliActorSchema>;
-// Who wrote a message the CLI reads back.
-const cliAuthorKindSchema = z.enum(["human", "agent", "automation"]);
+// Who wrote a message the CLI reads back. Only the relay writes a link author.
+const cliAuthorKindSchema = z.enum(["human", "agent", "automation", "link"]);
 
 const requestBase = {
   token: z.string().regex(/^[a-f0-9]{64}$/),
@@ -383,9 +383,11 @@ const automationSwitchArgsSchema = z.object({ ...automationArgs, enabled: z.bool
   expectedContentHash: z.string().regex(/^[a-f0-9]{64}$/u), reformat: z.boolean(), submitId: requestIdSchema,
 }).strict();
 // `page` is the `next` of an earlier listing: the runs older than it.
-const automationRunsArgsSchema = z.object({ ...automationArgs, page: z.string().min(1).max(512).optional() }).strict();
+// `server` reads the runs of the workspace's self-hosted server instead of
+// this computer's.
+const automationRunsArgsSchema = z.object({ ...automationArgs, page: z.string().min(1).max(512).optional(), server: z.boolean().optional() }).strict();
 const automationRunArgsSchema = z
-  .object({ ...automationArgs, run: automationRunIdArg })
+  .object({ ...automationArgs, run: automationRunIdArg, server: z.boolean().optional() })
   .strict();
 // `startOver` confirms running an automation that changed since the run
 // failed, or a run whose progress is gone, from its first step.
@@ -1269,6 +1271,9 @@ const automationRunFields = {
   // The chain depth cap stopped it before it ran.
   chainStopped: z.boolean(),
   undone: z.boolean(),
+  // The server lost the copy it ran in, and may not have sent its changes
+  // from updatedAtMs on. Nothing can run or undo it again.
+  unsentChangesLost: z.literal(true).optional(),
 };
 const automationRunsResultSchema = z.discriminatedUnion("ok", [
   z
@@ -1285,7 +1290,7 @@ const automationRunResultSchema = z.discriminatedUnion("ok", [
   z
     .object({
       ok: z.literal(true),
-      run: z
+      run: z.union([z
         .object({
           ...automationRunFields,
           findMs: z.number().nonnegative().optional(),
@@ -1308,6 +1313,8 @@ const automationRunResultSchema = z.discriminatedUnion("ok", [
           startsOver: z.boolean(),
         })
         .strict(),
+      // A run the server ran, with what it changed there, oldest first.
+      z.object({ ...automationRunFields, server: z.literal(true), changes: z.array(automationRunChangeSchema) }).strict()]),
     })
     .strict(),
   rawFailureSchema,

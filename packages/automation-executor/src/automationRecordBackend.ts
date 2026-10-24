@@ -71,7 +71,7 @@ import { resolveAutomationInventory, type AutomationInventory } from "./automati
 import type { AutomationTarget } from "./automationTargets";
 
 export type RecordRunDependencies = Pick<CollectionAutomationRunDependencies,
-  "makeDurable" | "targets" | "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody" | "readCode" | "onUsageSuccess"
+  "makeDurable" | "targets" | "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody" | "readCode" | "onUsageSuccess" | "beforeEffect" | "onRunEnded"
 > & Partial<Pick<CollectionAutomationRunDependencies,
   "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "isIndexReading" | "checkReach" | "localPersonId" | "checkPresser" | "authorizeDataset" | "isButtonField"
 >> & Partial<Pick<DatasetAutomationRunDependencies, "withHost" | "cachedRoster">>;

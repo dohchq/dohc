@@ -340,6 +340,9 @@ export function createShareProposalsIpc<
   }
 
   const listShareProposalsHandler: Handlers["listShareProposals"] = async (_input, { operation }) => {
+    operation.assertCurrent();
+    assertShareProposalGranter(operation.workspace.shareView);
+    if (!operation.workspace.remote) return ListShareProposalsResult.parse({ proposals: [] });
     return withShareProposalGranterOperation(
       operation,
       async (operation) => {

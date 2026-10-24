@@ -1,4 +1,5 @@
 import { renderCliResult } from "./render";
+import { renderThreadMarkdown } from "./threadMarkdown";
 import { describe, expect, it } from "vitest";
 import {
   CLI_CAPABILITIES,
@@ -33,6 +34,28 @@ it("accepts only CLI and MCP counting labels, with an optional label on the stri
     expect(cliRequestSchema.safeParse({ ...request, door }).success).toBe(false);
   }
   expect(cliRequestSchema.safeParse({ ...request, usage: true }).success).toBe(false);
+});
+
+it("refuses a link author on every chat write, for the CLI and MCP doors alike, and reads one back", () => {
+  const writes = [
+    { verb: "post", args: { ...argsBase, group: "general", attachments: [], needsDecision: false, body: "Hi" } },
+    { verb: "reply", args: { ...argsBase, thread: "th_1", attachments: [], needsDecision: false, body: "Hi" } },
+  ];
+  for (const door of ["cli", "mcp"] as const) {
+    for (const write of writes) {
+      const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, door, ...write };
+      expect(cliRequestSchema.safeParse(request).success).toBe(true);
+      expect(cliRequestSchema.safeParse({ ...request, args: { ...write.args, actor: "link" } }).success).toBe(false);
+      expect(cliRequestSchema.safeParse({ ...request, args: { ...write.args, authorKind: "link" } }).success).toBe(false);
+    }
+  }
+  const shown = parseCliResult("show", {
+    thread: { id: "th_1", title: "Plan", group: { id: "ch_1", name: "General", slug: "general", kind: "group" }, commentCount: 0, openDecisionCount: 0 },
+    messages: [{ id: "msg_1", author: { kind: "link", displayName: "Guest" }, body: "Hi", createdAtMs: 0, attachments: [] }],
+    dispatch: { paused: null, lastRun: null },
+  });
+  expect(shown.messages[0]?.author.kind).toBe("link");
+  expect(renderThreadMarkdown(shown)).toContain("**Guest** · link holder · ");
 });
 
 it("rejects unused agent attribution on automation switches", () => {
@@ -346,6 +369,19 @@ describe("collection result schemas", () => {
     const timed = { ...run, findMs: 12, planMs: 0, writeMs: 30, writeCount: 2 };
     expect(parseCliResult("automationRun", { ok: true, run: timed })).toEqual({ ok: true, run: timed });
     expect(() => parseCliResult("automationRun", { ok: true, run: { ...timed, writeCount: -1 } })).toThrow();
+  });
+
+  it("parses a server's run, with what it changed and the mark of a lost copy, and renders its changes", () => {
+    const run = {
+      run: "atc_lost", state: "failed", error: "Your server lost its copy of this workspace and may not have sent this run's latest changes.",
+      createdAtMs: 1, updatedAtMs: 2, trigger: { kind: null, recordId: null, by: null, sharedAuthor: null, depth: 0 },
+      definitionChanged: false, neverStarted: false, chainStopped: false, undone: false, unsentChangesLost: true, server: true,
+      changes: [{ kind: "field", recordId: "a", path: "tasks/a.md", field: "Status", before: "Open", after: "Paid" }],
+    };
+    expect(parseCliResult("automationRun", { ok: true, run })).toEqual({ ok: true, run });
+    expect(renderCliResult("automationRun", parseCliResult("automationRun", { ok: true, run }))).toContain('set Status on tasks/a.md: "Open" -> "Paid"');
+    expect(() => parseCliResult("automationRun", { ok: true, run: { ...run, unsentChangesLost: false } })).toThrow();
+    expect(() => parseCliResult("automationRun", { ok: true, run: { ...run, steps: [] } })).toThrow();
   });
 
   it("refuses a result that does not match the verb", () => {

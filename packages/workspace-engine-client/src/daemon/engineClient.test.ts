@@ -65,7 +65,7 @@ it("streams a replica page's exact admitted metadata and binary spans beyond con
       admitted:{metadata,updateBytes:update},relayDatabaseNamespace:"relay",evidenceDigest:"b".repeat(64),journalCursor:9,authority:null,
       restore:{operationId:"restore",checkpointDigest:"c".repeat(64),checkpointBytes:checkpoint,proof:{
         proposalDigest:"d".repeat(64),candidateDigest:metadata.accepted.receipt.updateDigest,
-        preparation:{fence:{operation:{operationId:"restore",relayDatabaseNamespace:"relay",oldBinding:{...metadata.accepted.binding,restoreFenceGeneration:0},
+        preparation:{fence:{operation:{point:{journalCursor:0,receiptDigest:"e".repeat(64)},operationId:"restore",relayDatabaseNamespace:"relay",oldBinding:{...metadata.accepted.binding,restoreFenceGeneration:0},
           hostId:"host",newFence:1,origin:{kind:"bootstrap",id:"bootstrap"},terminal:null,appliedSequence:0},localHeadSequence:1,recordedAtMs:10},
           point:{journalCursor:0,receiptDigest:"e".repeat(64),markdownDigest:"f".repeat(64),projectionDigest:"a".repeat(64)}},
         nativeSourceManifestDigest:"b".repeat(64),admitted:metadata,checkpointDigest:"c".repeat(64),sourceRanges:[],recordedAtMs:10}}}]);

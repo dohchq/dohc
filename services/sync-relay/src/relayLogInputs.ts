@@ -23,6 +23,22 @@ export function namedShareOrigin(shareId: string, userId: string, originId: stri
   return `${SHARE_MEMBER_ORIGIN_PREFIX}${sha256Hex(JSON.stringify([shareId, userId, originId]))}`;
 }
 
+// A link holder's posts, one origin per link principal. Only the relay writes it.
+export const LINK_CHAT_ORIGIN_PREFIX = "relay:share-link:";
+
+export function linkChatOrigin(principalId: string): string {
+  return `${LINK_CHAT_ORIGIN_PREFIX}${principalId}`;
+}
+
+// A desktop stores a received share's op under `shared:<shareId>:<source>` and
+// checks a link post against its source, so no client may write from it.
+export const SHARED_REPLAY_ORIGIN_PREFIX = "shared:";
+
+// The IDs of a link post's message and new thread. Only the relay mints them,
+// so no client can take one first and drop the link post on every desktop.
+export const LINK_CHAT_MESSAGE_ID_PREFIX = "link-message:";
+export const LINK_CHAT_THREAD_ID_PREFIX = "link-thread:";
+
 // Clients can publish their agent and automation authors, or an exact
 // unattributed coverage marker. The marker claims no identity. The relay
 // alone mints human, public, named, and link attribution.
@@ -47,6 +63,12 @@ function assertUnreservedLogOrigin(originId: string, serviceHost: boolean): void
   }
   if (originId.startsWith(SHARE_MEMBER_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for named share writes");
+  }
+  if (originId.startsWith(LINK_CHAT_ORIGIN_PREFIX)) {
+    throw badRequest("originId is reserved for link posts");
+  }
+  if (originId.startsWith(SHARED_REPLAY_ORIGIN_PREFIX)) {
+    throw badRequest("originId is reserved for replayed share ops");
   }
   if (originId.startsWith(COLLECTION_CREATE_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for relay collection creates");
@@ -252,6 +274,12 @@ export function assertChatAuthorship(
     if (!opKind.startsWith("chat.")) continue;
     const policy = CHAT_OP_POLICY[opKind];
     if (!policy) throw relayError("unknown_chat_op"); // fail-closed: an unrecognized chat op.
+    // Only the relay names a link post's message and new thread.
+    const reserved = op.payload && typeof op.payload === "object" ? op.payload as Record<string, unknown> : {};
+    if ((opKind === "chat.message.append" && String(reserved.messageId).startsWith(LINK_CHAT_MESSAGE_ID_PREFIX)) ||
+        (opKind === "chat.thread.create" && String(reserved.threadId).startsWith(LINK_CHAT_THREAD_ID_PREFIX))) {
+      throw relayError("authorship_mismatch");
+    }
     if (policy.kind === "structural") continue;
     const payload = op.payload;
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
@@ -260,6 +288,11 @@ export function assertChatAuthorship(
       throw relayError("authorship_mismatch");
     }
     const bag = payload as Record<string, unknown>;
+    // Only the relay writes a link post, from the link holder's own session.
+    if (opKind === "chat.message.append" && (bag.authorKind === "link" ||
+        Object.hasOwn(bag, "linkGrantId") || Object.hasOwn(bag, "linkPrincipalId"))) {
+      throw relayError("authorship_mismatch");
+    }
     const claimed = bag[policy.field];
     if (claimed === undefined || claimed === null) {
       throw relayError("authorship_mismatch");

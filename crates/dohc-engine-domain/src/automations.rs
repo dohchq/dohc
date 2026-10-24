@@ -273,7 +273,7 @@ pub struct AutomationGroupMessage<'a> {
     pub message_id: &'a str,
     pub thread_id: &'a str,
     pub parent_message_id: Option<&'a str>,
-    /// The stored author kind: `human`, `agent`, or `automation`.
+    /// The stored author kind: `human`, `agent`, `automation`, or `link`.
     pub author_kind: &'a str,
     pub author_display_name: &'a str,
     pub author_owner_display_name: Option<&'a str>,
@@ -985,7 +985,9 @@ fn decide_group_message(
     message: &AutomationGroupMessage<'_>,
 ) -> Result<GroupDecision, DomainError> {
     let text = message.body.trim_start_matches(is_js_trim_ws);
-    if message.created_at_ms < watch.since_ms
+    // A link holder's post starts no automation.
+    if message.author_kind == crate::ChatActorKind::Link.as_str()
+        || message.created_at_ms < watch.since_ms
         || watch
             .starts_with
             .is_some_and(|prefix| !text.starts_with(prefix))

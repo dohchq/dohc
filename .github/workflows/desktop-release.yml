@@ -2,9 +2,8 @@ name: Desktop Release
 # The scheduled nightly job finds its run by the commit it requested.
 run-name: Desktop Release ${{ inputs.channel }}${{ inputs.dry_run && ' dry run' || '' }}${{ inputs.commit && format(' for {0}', inputs.commit) || '' }}
 
-# Releases start only by dispatch. The scheduled nightly runs on the
-# self-hosted runners. Until the repository is public, runners=github is only
-# for the trial dry runs Ice approved. This workflow builds Windows and Linux.
+# Releases start only by dispatch and build Windows and Linux on pinned
+# GitHub-hosted images. The scheduled nightly dispatches the same workflow.
 # The release owner adds the macOS files to the published release with
 # `pnpm release:macos` on a Mac (docs/engineering/desktop-release.md).
 on:
@@ -36,14 +35,6 @@ on:
         required: true
         default: true
         type: boolean
-      runners:
-        description: Where every job runs. github is only for approved trial dry runs.
-        required: false
-        default: self-hosted
-        type: choice
-        options:
-          - self-hosted
-          - github
       commit:
         description: Build only if main is at this commit. The scheduled nightly job sets it.
         required: false
@@ -62,10 +53,7 @@ jobs:
   preflight:
     name: Preflight
     if: github.ref == 'refs/heads/main'
-    runs-on: ${{ inputs.runners == 'github' && (inputs.platforms == 'linux' && 'ubuntu-24.04' || 'windows-2025') || fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
-    # On the Windows release PC, the steps before the desktop tests took 29
-    # minutes, and those tests had not finished 12 minutes later. On Linux
-    # the whole job takes about 16 minutes.
+    runs-on: ${{ inputs.platforms == 'linux' && 'ubuntu-24.04' || 'windows-2025' }}
     timeout-minutes: 90
     outputs:
       release_channel: ${{ steps.release.outputs.release_channel }}
@@ -90,36 +78,11 @@ jobs:
             exit 1
           fi
 
-      # Until the repository is public, GitHub's runners only run trial dry runs.
-      - name: Refuse a publish on GitHub's runners
-        if: inputs.runners == 'github' && !inputs.dry_run
-        shell: bash
-        run: |
-          echo "::error::runners=github runs only dry runs until the repository is public. Nothing builds."
-          exit 1
-
-      # A desktop build on Linux leaves the staged Markdown reader folder
-      # read-only, so checkout could not clean this runner's workspace.
-      - name: Let checkout remove an earlier build's reader folder
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          reader="${GITHUB_WORKSPACE}/apps/desktop/resources/engine-reader"
-          if [[ -d "$reader" ]]; then chmod -R u+w "$reader"; fi
-
-      # Deleting node_modules takes the Windows runner over 15 minutes, and
-      # only this workflow uses that runner. There a job keeps node_modules
-      # and the Rust target folder, and removes every other untracked file.
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
-          clean: ${{ runner.os != 'Windows' }}
-
-      - name: Remove leftover files but keep node_modules and target
-        if: runner.os == 'Windows'
-        run: git clean -ffdx --exclude=node_modules --exclude=target
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -134,7 +97,6 @@ jobs:
       # GitHub's images carry only the newest stable Rust, and the build checks
       # rust-toolchain.toml's version without installing it.
       - name: Rust toolchain
-        if: inputs.runners == 'github'
         shell: bash
         run: |
           set -euo pipefail
@@ -144,7 +106,7 @@ jobs:
       # GitHub's Windows image sets TEMP to a short 8.3 path (RUNNER~1), and
       # tests compare it with the long path dohc resolves it to.
       - name: Use the runner's temp folder
-        if: inputs.runners == 'github' && runner.os == 'Windows'
+        if: runner.os == 'Windows'
         shell: bash
         run: |
           echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
@@ -160,7 +122,6 @@ jobs:
           DISPATCH_CHANNEL: ${{ inputs.channel }}
           DISPATCH_VERSION: ${{ inputs.version }}
           DISPATCH_PLATFORMS: ${{ inputs.platforms }}
-          DISPATCH_RUNNERS: ${{ inputs.runners || 'self-hosted' }}
         run: |
           set -euo pipefail
           version_arg=()
@@ -172,7 +133,6 @@ jobs:
           node scripts/resolve-desktop-release.mjs \
             --channel "$DISPATCH_CHANNEL" \
             --platforms "$DISPATCH_PLATFORMS" \
-            --runners "$DISPATCH_RUNNERS" \
             "${version_arg[@]}" \
             --date "$nightly_date" \
             --run-number "$GITHUB_RUN_NUMBER" \
@@ -202,9 +162,7 @@ jobs:
 
       # The desktop package's unit and script tests run through the PR gate's
       # runner, with its rules. A test that fails runs once more, and a test
-      # that fails both tries must pass when its file runs alone. On the
-      # shared Windows PC, a third of the gate's desktop runs in the week to
-      # 2026-10-21 needed that retry.
+      # that fails both tries must pass when its file runs alone.
       - name: Desktop tests
         env:
           DOHC_REQUIRE_ENGINE_E2E: "1"
@@ -218,32 +176,15 @@ jobs:
   unused-version:
     name: Check release publication
     needs: preflight
-    runs-on: ${{ inputs.runners == 'github' && (inputs.platforms == 'linux' && 'ubuntu-24.04' || 'windows-2025') || fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: write
     steps:
-      # A desktop build on Linux leaves the staged Markdown reader folder
-      # read-only, so checkout could not clean this runner's workspace.
-      - name: Let checkout remove an earlier build's reader folder
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          reader="${GITHUB_WORKSPACE}/apps/desktop/resources/engine-reader"
-          if [[ -d "$reader" ]]; then chmod -R u+w "$reader"; fi
-
-      # Deleting node_modules takes the Windows runner over 15 minutes, and
-      # only this workflow uses that runner. There a job keeps node_modules
-      # and the Rust target folder, and removes every other untracked file.
       - name: Checkout release scripts
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
-          clean: ${{ runner.os != 'Windows' }}
-
-      - name: Remove leftover files but keep node_modules and target
-        if: runner.os == 'Windows'
-        run: git clean -ffdx --exclude=node_modules --exclude=target
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -303,38 +244,16 @@ jobs:
       - unused-version
     environment: desktop-release
     runs-on: ${{ matrix.runner }}
-    # A Windows build compiles the release engine. Preparing the test engine
-    # from an empty target folder took 12 minutes on the Windows release PC.
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      # On the self-hosted runners, Windows and WSL share the same PC for this
-      # selection. GitHub's runners are separate machines.
-      max-parallel: ${{ inputs.platforms == 'windows-linux' && inputs.runners != 'github' && 1 || 4 }}
       matrix:
         include: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     steps:
-      # A desktop build on Linux leaves the staged Markdown reader folder
-      # read-only, so checkout could not clean this runner's workspace.
-      - name: Let checkout remove an earlier build's reader folder
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          reader="${GITHUB_WORKSPACE}/apps/desktop/resources/engine-reader"
-          if [[ -d "$reader" ]]; then chmod -R u+w "$reader"; fi
-
-      # Deleting node_modules takes the Windows runner over 15 minutes, and
-      # only this workflow uses that runner. There a job keeps node_modules
-      # and the Rust target folder, and removes every other untracked file.
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
-          clean: ${{ runner.os != 'Windows' }}
-
-      - name: Remove leftover files but keep node_modules and target
-        if: runner.os == 'Windows'
-        run: git clean -ffdx --exclude=node_modules --exclude=target
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -350,7 +269,6 @@ jobs:
       # GitHub's images carry only the newest stable Rust, and the build checks
       # rust-toolchain.toml's version without installing it.
       - name: Rust toolchain
-        if: inputs.runners == 'github'
         shell: bash
         run: |
           set -euo pipefail
@@ -360,7 +278,7 @@ jobs:
       # GitHub's Windows image sets TEMP to a short 8.3 path (RUNNER~1), and
       # tests compare it with the long path dohc resolves it to.
       - name: Use the runner's temp folder
-        if: inputs.runners == 'github' && runner.os == 'Windows'
+        if: runner.os == 'Windows'
         shell: bash
         run: |
           echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
@@ -437,8 +355,7 @@ jobs:
 
           echo "require=$require" >> "$GITHUB_OUTPUT"
 
-      # Each platform's signing secrets reach only its own target's job.
-      # Linux receives none.
+      # Only Windows steps receive signing secrets.
       - name: Package smoke
         env:
           DOHC_REQUIRE_SIGNING: ${{ steps.signing.outputs.require }}
@@ -448,7 +365,6 @@ jobs:
       - name: Package desktop
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
           DOHC_REQUIRE_SIGNING: ${{ steps.signing.outputs.require }}
           WIN_CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && matrix.os == 'Windows' && secrets.WIN_CSC_LINK || '' }}
           WIN_CSC_KEY_PASSWORD: ${{ needs.preflight.outputs.dry_run != 'true' && matrix.os == 'Windows' && secrets.WIN_CSC_KEY_PASSWORD || '' }}
@@ -544,33 +460,16 @@ jobs:
       - preflight
       - build
     if: ${{ needs.preflight.outputs.dry_run != 'true' }}
-    runs-on: ${{ inputs.runners == 'github' && (inputs.platforms == 'linux' && 'ubuntu-24.04' || 'windows-2025') || fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       # Required for creating GitHub releases via softprops/action-gh-release.
       contents: write
     steps:
-      # A desktop build on Linux leaves the staged Markdown reader folder
-      # read-only, so checkout could not clean this runner's workspace.
-      - name: Let checkout remove an earlier build's reader folder
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          reader="${GITHUB_WORKSPACE}/apps/desktop/resources/engine-reader"
-          if [[ -d "$reader" ]]; then chmod -R u+w "$reader"; fi
-
-      # Deleting node_modules takes the Windows runner over 15 minutes, and
-      # only this workflow uses that runner. There a job keeps node_modules
-      # and the Rust target folder, and removes every other untracked file.
       - name: Checkout release scripts
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
-          clean: ${{ runner.os != 'Windows' }}
-
-      - name: Remove leftover files but keep node_modules and target
-        if: runner.os == 'Windows'
-        run: git clean -ffdx --exclude=node_modules --exclude=target
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4

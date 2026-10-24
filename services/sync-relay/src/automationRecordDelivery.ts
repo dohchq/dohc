@@ -56,11 +56,12 @@ export function automationRecordDelivery(options: {
     }
   }
 
-  async function drain(binding: LiveObjectBinding, signal: AbortSignal, knownOutboxId?: string): Promise<void> {
+  /** Delivers the record's queued updates. False when it found no outbox to deliver them from. */
+  async function drain(binding: LiveObjectBinding, signal: AbortSignal, knownOutboxId?: string): Promise<boolean> {
     let outboxId = knownOutboxId;
     if (!outboxId) {
       const preparation = await replica.client.ownerYDocPrepareEnrollment(request(), target(binding), signal);
-      if (preparation.status !== "observed" || preparation.draft.outboxId === null) return;
+      if (preparation.status !== "observed" || preparation.draft.outboxId === null) return false;
       outboxId = preparation.draft.outboxId;
     }
     const outbox = new OwnerYDocOutbox({sendRequest: input => replica.client.sendRequest(input, signal)}, replica.workspace);
@@ -130,7 +131,7 @@ export function automationRecordDelivery(options: {
     try {
       for (let count = 0; count < 128; count++) {
         const result = await drainer.drainOnce();
-        if (result === "empty" || result === "frozen") return;
+        if (result === "empty" || result === "frozen") return true;
         if (result === "retry") throw new AutomationRunWait("The shared file update is waiting for acceptance. Try again.", "busy");
       }
       throw new Error("The shared file still has updates waiting for acceptance. Try again.");

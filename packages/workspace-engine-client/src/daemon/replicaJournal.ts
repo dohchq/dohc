@@ -6,6 +6,7 @@ export interface ReplicaRestoreAdmission {
   readonly preparation: {
     readonly fence: {
       readonly operation: {
+        readonly point: {readonly journalCursor: number; readonly receiptDigest: string};
         readonly operationId: string; readonly relayDatabaseNamespace: string;
         readonly oldBinding: LiveObjectBinding; readonly hostId: string; readonly newFence: number;
         readonly origin: {readonly kind: "bootstrap" | "owner"; readonly id: string};

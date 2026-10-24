@@ -11,6 +11,8 @@ import type { DaemonErrorCode } from "@dohc/workspace-engine-client";
 // sentence stands alone. Copy details still carry the error as it arrived.
 type Words = string | null;
 
+export const APP_COMPILER_TIMEOUT_WORDS = "The app took too long to build. Remove files the app does not use, then try again.";
+
 const UPDATING = "dohc is still reading this workspace's files. Try again when it finishes.";
 const NOT_READ = "dohc has not read this file yet. Try again when it has.";
 const TOO_LARGE = "It is too large.";
@@ -41,9 +43,10 @@ export const VOLUME_SHARES_NEW_FILES_WORDS =
 /**
  * The engine's refusal to open a workspace whose `.dohc`, engine folder, a
  * store file in it, or this computer's `.dohc/local` is a link, the wrong
- * kind of item, another user's, or on a disk dohc can't check. The message
- * names the reason, then the path from the workspace's root: one of the
- * paths below, and nothing else.
+ * kind of item, another user's, on a disk or system dohc can't check, or, on
+ * Windows, has permissions dohc can't use. The message names the reason,
+ * then the path from the workspace's root: one of the paths below, and
+ * nothing else.
  */
 const ENGINE_FOLDER_NOT_PRIVATE =
   /^engine-folder-not-private: ([a-z-]+) (\.dohc(?:\/engine(?:\/engine\.db(?:-wal|-shm|-journal)?)?|\/local)?)$/;
@@ -55,6 +58,8 @@ const NOT_PRIVATE_WORDS = new Map<string, readonly [fact: string, fix: string]>(
   ["not-file", ["is not a file", "Rename or move it, then try again."]],
   ["other-owner", ["belongs to another user", "Make it yours again, then try again."]],
   ["unchecked-volume", ["is on a disk dohc can't check", "Move the workspace to a disk formatted as APFS, then try again."]],
+  ["not-changeable", ["has permissions dohc can't use", "Give your account full control of this folder and everything in it, then try again."]],
+  ["unchecked-system", ["is on a system where dohc can't check it", "Run dohc where it can read its own /proc/self/fd, then try again."]],
 ]);
 // What `sudo` makes in a folder is another user's too, so a folder's fix
 // covers everything in it.
@@ -156,6 +161,7 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
   EngineClientError: { "*": null },
   DaemonProtocolError: { "*": null },
   DaemonClientCapabilityError: { "*": null },
+  AppCompilerTimeoutError: { "*": APP_COMPILER_TIMEOUT_WORDS },
   CompilerProcessError: {
     exit: "The app's code did not build.",
     timeout: "Building the app took too long. Try again.",
@@ -251,9 +257,13 @@ function wireName(error: Error, code: string): string {
 export function ipcWireError(error: unknown): unknown {
   if (!(error instanceof Error)) return error;
   const code = codeOf(error);
-  if (code === null) return error;
-  const wire = new Error(error.message, { cause: error });
-  wire.name = wireName(error, code);
+  // Electron sends only toString(). Keep safe compiler facts in Copy details,
+  // while readError maps this name back to the unchanged sentence above.
+  const details: unknown = error.name === "AppCompilerTimeoutError"
+    ? Reflect.get(error, "details") : undefined;
+  if (code === null && typeof details !== "string") return error;
+  const wire = new Error(`${error.message}${typeof details === "string" ? `\n${details}` : ""}`, { cause: error });
+  wire.name = code === null ? error.name : wireName(error, code);
   return wire;
 }
 
@@ -446,8 +456,12 @@ export function outsideVersionWaitingMessage(path: string): string {
   return `dohc could not open the new version of "${path}". History has not recorded it yet.`;
 }
 
+// Capture holds every refused outside edit with one reason, so these words
+// name each form it refuses. Restoring the file's earlier bytes lets capture record it again.
+export const CAPTURE_HELD_WORDS = "dohc cannot take in this file's Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Restore the file's exact contents from before that edit. For nested lists, make the edit in dohc after the file opens again.";
+
 export function captureHeldLiveMessage(path: string): string {
-  return `dohc cannot open "${path}" for live editing. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.`;
+  return `dohc cannot open "${path}" for live editing. ${CAPTURE_HELD_WORDS}`;
 }
 
 /** Access and connection failures can hide a changed grant behind an IPC error. */

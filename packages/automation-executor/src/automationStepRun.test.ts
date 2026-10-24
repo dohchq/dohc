@@ -31,7 +31,7 @@ automations:
     save: async (state: StoredRun) => { log.push(`save:${state.outcome?.state ?? "open"}:${state.durableEffects}`); saves.push(structuredClone(state)); },
     appendEffect: async () => { log.push("appendEffect"); },
   } as unknown as AutomationRunStore;
-  const dependencies: Pick<CollectionAutomationRunDependencies, "makeDurable" | "store" | "nowMs" | "evaluator" | "chat" | "recipientVerdicts" | "readCode" | "onUsageSuccess"> = {
+  const dependencies: Pick<CollectionAutomationRunDependencies, "makeDurable" | "store" | "nowMs" | "evaluator" | "chat" | "recipientVerdicts" | "readCode" | "onUsageSuccess" | "beforeEffect" | "onRunEnded"> = {
     store, nowMs: () => 2,
     makeDurable: async () => { log.push("makeDurable"); if (barrierFails) throw Error("unavailable"); },
     evaluator: { evaluate: async () => { throw Error("saved steps must not evaluate"); }, runCode: async () => { throw Error("saved steps must not evaluate"); } },
@@ -49,9 +49,9 @@ automations:
   };
   const context: RunContext = { automation, claim, message: null, person: null, chat: null, nowMs: 1, key: { claimId: "claim", hash: "key" } };
   const stopped = new AbortController();
-  const execute = (roster: Exclude<ReachRoster, { kind: "unknown" }> = { kind: "owner", ownerUserId: null, grants: [] }) => runSteps(dependencies, backend, { automation, collection: { path: "Tasks", name: "Tasks" },
+  const execute = (roster: Exclude<ReachRoster, { kind: "unknown" }> = { kind: "owner", ownerUserId: null, grants: [] }, saved = true) => runSteps(dependencies, backend, { automation, collection: { path: "Tasks", name: "Tasks" },
     roster, signal: new AbortController().signal, stopped: stopped.signal,
-    claimRun: 1, engineClaimId: "claim" }, context, run, true, { prepareMs: 0, runMs: 0 });
+    claimRun: 1, engineClaimId: "claim" }, context, run, saved, { prepareMs: 0, runMs: 0 });
   return { run, log, modes, saves, backend, dependencies, stopped, execute,
     value: () => value, engineWrites: () => engineWrites,
     loseWrites: () => { value = 0; keys.clear(); }, failBarrier: (failed: boolean) => { barrierFails = failed; } };
@@ -302,6 +302,45 @@ describe("engine durability before run outcomes", () => {
     f.backend.apply = async () => ({ outcome: { kind: "failed", error: "partial", timedOut: false } });
     await f.execute();
     expect(f.log).toEqual(["makeDurable", "save:failed:0"]);
+  });
+});
+
+describe("what a run tells its host before it changes anything and when it ends", () => {
+  const hooked = (f: ReturnType<typeof fixture>) => {
+    f.dependencies.beforeEffect = (_run, effect) => { f.log.push(`before:${effect.kind}`); };
+    f.dependencies.onRunEnded = (run) => { f.log.push(`ended:${run.outcome?.state}`); };
+  };
+
+  it("tells before a fresh run's first effect, after saving its step with the run", async () => {
+    const f = fixture();
+    hooked(f);
+    const [step] = f.run.steps;
+    f.run.steps = [];
+    f.backend.step = (async () => ({ step: structuredClone(step!) })) as StepBackend["step"];
+    f.dependencies.store.appendStep = async () => { f.log.push("appendStep"); };
+    await expect(f.execute(undefined, false)).resolves.toEqual({ kind: "done" });
+    expect(f.log).toEqual(["save:open:0", "before:set", "apply:0:fresh", "write", "appendEffect", "makeDurable", "save:done:1", "ended:done"]);
+  });
+
+  it("ends a resumed run only at its final save, not at the saves of its progress", async () => {
+    const f = fixture(51), apply = f.backend.apply;
+    hooked(f);
+    f.run.outcome = { state: "failed", error: "refused", run: 1, step: 0 };
+    f.run.finishedAtMs = 1;
+    let now = 0;
+    f.dependencies.nowMs = () => now;
+    f.backend.apply = async (...args) => { now += 50; return apply(...args); };
+    await expect(f.execute()).resolves.toEqual({ kind: "done" });
+    expect(f.log.filter(entry => entry.startsWith("save") || entry.startsWith("ended"))).toEqual(["save:failed:50", "save:done:51", "ended:done"]);
+    expect(f.log.filter(entry => entry === "before:set")).toHaveLength(51);
+  });
+
+  it("does not end a run that waits", async () => {
+    const f = fixture(), apply = f.backend.apply;
+    hooked(f);
+    f.backend.apply = async (...args) => { const result = await apply(...args); f.stopped.abort(); return result; };
+    await expect(f.execute()).resolves.toEqual({ kind: "wait", reason: "stopped" });
+    expect(f.log.slice(-2)).toEqual(["makeDurable", "save:open:1"]);
   });
 });
 

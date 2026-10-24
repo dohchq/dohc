@@ -32,6 +32,7 @@
 .chat-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; margin: 0 0 2px; }
 .chat-author { font-weight: 600; overflow-wrap: anywhere; }
 .chat-agent-mark { align-self: center; width: 10px; height: 10px; border-radius: 3px; background: var(--named-accent); }
+.chat-link-mark { align-self: center; width: 12px; height: 12px; color: #6d6e67; }
 .chat-owner, .chat-meta time { color: #6d6e67; font: 11px/1.5 ui-monospace, monospace; }
 .chat-body.markdown { max-width: none; margin: 0; overflow-wrap: anywhere; font: 14px/1.55 ui-sans-serif, system-ui, sans-serif; }
 .chat-body > * { margin: 0 0 6px; }
@@ -73,6 +74,14 @@
 .chat-read-only { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
 .chat-read-only p { margin: 0; color: var(--named-muted); }
 .chat-read-only textarea { display: block; width: 100%; margin-top: 8px; }
+
+/* A share link's Group channel, in the link viewer's side column. */
+.comments-panel.link-channel { display: flex; flex-direction: column; min-height: 0; max-height: calc(100vh - 116px); padding: 0; position: sticky; top: 0; }
+.link-channel > h2 { flex: none; padding: 20px 20px 8px; }
+.link-channel > .chat-state { padding-inline: 20px; }
+.link-channel-name { display: grid; gap: 4px; margin-bottom: 8px; font-size: 12px; }
+.link-channel-name input { border: 1px solid #bdb8ad; border-radius: 8px; padding: 6px 10px; background: #fffdf8; color: var(--named-ink); font: inherit; }
+.link-channel-name p { margin: 0; color: var(--named-muted); }
 
 @media (max-width: 720px) {
   .named-chat > header { padding: 10px 16px; }

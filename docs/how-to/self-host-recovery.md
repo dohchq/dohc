@@ -48,7 +48,14 @@ If the server starts with empty host data and keeps its relay data, it rebuilds 
 The server loses this work with the host data:
 
 - Run history, and Undo for runs on the server.
-- Changes from automation runs that the server had not yet sent to the relay.
+- Changes from automation runs that the server may not have sent to the relay.
+  The relay records each run before the run changes the server's copy.
+  It keeps that record until a sync that began after the run ended succeeds and the server has delivered every shared file update it queued.
+  After the rebuild, each run that still has a record shows as failed in its automation's run history for 30 days.
+  Try again does not run these runs.
+  If the rebuilt server already ran one of them again, run history shows how that run went.
+  The owner also gets one Notice for each automation with such runs, with how many runs it has.
+  Some of these changes may have reached the relay, so check the records those runs changed.
 - Button presses that the server accepted but had not finished.
   Each of these presses ends instead of running again.
   A press may have made some of its changes, so check them before pressing again.

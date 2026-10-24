@@ -5,14 +5,25 @@ edition = "2024"
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "Safe Linux read-lease probe for retained materialization originals."
+description = "Safe Linux read-lease probe for retained materialization originals, a folder kept private and held open, and a SQLite VFS that reaches a held folder by its descriptor."
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 signal-hook-registry = "1.4"
+rustix = { version = "1.1", features = ["fs", "process"] }
+# The VFS that opens a store through a held folder delegates to the bundled
+# SQLite's own `unix` VFS.
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+[features]
+# Lets tests in other crates stand in for /proc/self/fd.
+test-support = []
 
 [lints.rust]
 unsafe_code = "deny"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
+
+[dev-dependencies]
+dohc-test-scratch = { path = "../dohc-test-scratch" }

@@ -5,6 +5,18 @@
 export const UPDATE_CHANNELS = ["latest", "nightly"] as const;
 export type UpdateChannel = (typeof UPDATE_CHANNELS)[number];
 
+// Main hands the build's channel to every preload as a process argument, so
+// the renderer reads it as a constant, like the platform.
+const RELEASE_CHANNEL_ARGUMENT = "--dohc-release-channel=";
+
+export function releaseChannelPreloadArguments(channel: UpdateChannel): string[] {
+  return [`${RELEASE_CHANNEL_ARGUMENT}${channel}`];
+}
+
+export function releaseChannelFromArgv(argv: readonly string[]): UpdateChannel {
+  return argv.includes(`${RELEASE_CHANNEL_ARGUMENT}nightly`) ? "nightly" : "latest";
+}
+
 export type UpdateState =
   | { status: "idle"; message: string }
   | { status: "checking"; message: string }

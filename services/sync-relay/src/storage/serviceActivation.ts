@@ -6,13 +6,13 @@ import { isDeepStrictEqual } from "node:util";
 import type { NativeOwnerActivation, NativeOwnerActivationSource } from "@dohc/workspace-engine-client/daemon";
 import { parseLiveDocumentKey, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import type { createLiveMarkdownRegistrationValidator, createLiveMarkdownJournalValidator } from "../../../../packages/ydoc-projection/src/liveDocumentValidation";
 import type { StorageContext } from "./context";
 import type { LiveHostConnectionCoordinate } from "./types";
 import { attachLiveJournalHistory, requireLiveJournalHistory, type LiveJournalHistoryAuthority } from "./liveJournalHistory";
 import { currentLiveDocumentBinding, registerOrdinaryActivationBaselineInTransaction } from "./liveDocumentAuthority";
-import {verifyOrdinaryActivationCut,type OrdinaryActivationBounds} from "./ordinaryActivationSource";
-export {ServiceActivationStaleCut} from "./ordinaryActivationSource";
+import {readOrdinaryActivationHistory,verifyOrdinaryActivationCut,ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooLarge,
+  type OrdinaryActivationBounds,type OrdinaryActivationValidator} from "./ordinaryActivationSource";
+export {ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooLarge} from "./ordinaryActivationSource";
 import { assertWorkspaceQuota } from "./workspaces";
 import { SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
 import { readServiceActivation, serviceActivationAccess, type ServiceActivationAccess } from "./serviceActivationAccess";
@@ -146,11 +146,13 @@ export class ServiceActivationStore {
     });
   }
 
-  prepare(input: {
+  /**
+   * Retains a capture as the document's live baseline. Its validation runs in a live validation
+   * process before the transaction opens; the transaction refuses it as stale if the history changed.
+   */
+  async prepare(input: {
     capture: NativeOwnerActivation; host: LiveHostConnectionCoordinate; shareId: string; registeredAtMs: number; guard(): void;
-    validateBaseline: ReturnType<typeof createLiveMarkdownRegistrationValidator>;
-    validateJournal: ReturnType<typeof createLiveMarkdownJournalValidator>;
-    bounds: OrdinaryActivationBounds;
+    validate: OrdinaryActivationValidator; bounds: OrdinaryActivationBounds; signal?: AbortSignal;
   }) {
     input.guard(); requireLiveJournalHistory(this.storage, this.history);
     for(const limit of Object.values(input.bounds))if(!Number.isSafeInteger(limit)||limit<1)throw new Error("Invalid ordinary activation read budget.");
@@ -165,30 +167,43 @@ export class ServiceActivationStore {
         digest(fullState) !== source.fullStateDigest || digest(baselineBytes) !== source.lineageClaimId) {
       throw new Error("Native activation identity differs.");
     }
-    const base = input.validateBaseline({document,currentPath:source.currentPath,checkpoint:baselineBytes});
-    if (base.kind !== "accepted") {
-      throw new Error("Native activation does not match the ordinary source.");
-    }
     const sourceJson = JSON.stringify(source);
-    return this.storage.tx(() => {
-      input.guard(); requireLiveJournalHistory(this.storage, this.history);
-      const prior = readServiceActivation(this.storage, document);
+    const owner = () => {
       const share = this.storage.getShare(input.shareId);
       if (!share || share.workspaceId !== document.workspaceId || !this.storage.workspaceIsOwnedBy(document.workspaceId, share.granterUserId)) {
         throw new Error("Service activation owner is unavailable.");
       }
+      return share;
+    };
+    const history = this.storage.readTx(() => {
+      input.guard(); requireLiveJournalHistory(this.storage, this.history);
+      const prior = readServiceActivation(this.storage, document);
+      owner();
+      return prior ? undefined : readOrdinaryActivationHistory(this.storage, {source, document, baselineBytes, fullState, bounds: input.bounds});
+    });
+    const validation = await input.validate({document, currentPath: source.currentPath, baselineBytes,
+      ...(history ? {cut: {source, fullState, history, maxBytesPerDrain: input.bounds.maxBytesPerDrain}} : {})}, input.signal);
+    if (validation.kind === "retry") throw new ServiceActivationBusy();
+    if (validation.kind === "capacity-refused") throw new ServiceActivationTooLarge();
+    if (validation.kind !== "accepted") throw new Error(validation.message);
+    const base = validation.baseline;
+    return this.storage.tx(() => {
+      input.guard(); requireLiveJournalHistory(this.storage, this.history);
+      const prior = readServiceActivation(this.storage, document);
+      const share = owner();
       if (prior) {
         if (prior.activation_id !== activationId || prior.relay_database_namespace !== this.history.namespace ||
             prior.source_json !== sourceJson || prior.state_digest !== source.fullStateDigest ||
             prior.owner_user_id !== share.granterUserId || prior.share_id !== share.shareId) throw new Error("Service activation already has another retained source.");
         return {document, replayed: true, completed: prior.completion_json !== null};
       }
-      const ordinaryCut=verifyOrdinaryActivationCut(this.storage,{source,document,baselineBytes,fullState,baseline:base.evidence,
-        validateJournal:input.validateJournal,validateRegistration:input.validateBaseline,bounds:input.bounds});
+      // The retained activation the read found has since gone, so nothing validated this history.
+      if (!history) throw new ServiceActivationStaleCut();
+      const ordinaryCut=verifyOrdinaryActivationCut(this.storage,{source,document,baselineBytes,fullState,baseline:base,history,bounds:input.bounds});
       if (!registerLiveHostInTransaction(this.storage, {...input.host,updatedAtMs:input.registeredAtMs,guard:input.guard}).ok) throw new Error("Service activation host is unavailable.");
       const registration = registerOrdinaryActivationBaselineInTransaction(this.storage,{host:input.host,registeredAtMs:input.registeredAtMs,baselineBytes,
-        evidence:{version:1,document,currentPath:source.currentPath,checkpoint:{updateDigest:source.lineageClaimId,ranges:base.evidence.checkpoint.ranges},
-          projectedMarkdownSha256:base.evidence.projectedMarkdownSha256,projectedMarkdownByteLength:base.evidence.projectedMarkdownByteLength}},ordinaryCut);
+        evidence:{version:1,document,currentPath:source.currentPath,checkpoint:{updateDigest:source.lineageClaimId,ranges:base.checkpoint.ranges},
+          projectedMarkdownSha256:base.projectedMarkdownSha256,projectedMarkdownByteLength:base.projectedMarkdownByteLength}},ordinaryCut);
       if (registration.kind !== "registered" || registration.replayed) throw new Error("Service activation requires a new live baseline.");
       const binding = currentLiveDocumentBinding(this.storage,{document,actor:{kind:"owner",userId:share.granterUserId,shareId:share.shareId}});
       if (binding.kind !== "current" || !isDeepStrictEqual(binding.host,input.host)) throw new Error("Service activation selector is unavailable.");

@@ -414,6 +414,10 @@ export interface ChatMessageAppendPayload {
   // Local CLI writes are replicated so every device can exclude them from
   // agent dispatch. Absent preserves the pre-CLI wire shape.
   origin?: "cli";
+  // A link message's link, present only with `authorKind: "link"`. Such a
+  // message carries no `authorUserId`, `authorOwnerDisplayName` or `origin`.
+  linkGrantId?: string;
+  linkPrincipalId?: string;
   body: string;
   createdAtMs: number;
 }
@@ -697,11 +701,15 @@ export type ChatChannelKind = "channel" | "dm" | "agent";
 export type ChatChannelType = "posts" | "chat" | "both";
 
 // An automation posts only through the automation executor, which names
-// itself with `ChatMessageAutomationInput`. Only people and agents react.
+// itself with `ChatMessageAutomationInput`. A link holder posts only through
+// the relay, which names the link grant and link principal; nothing on this
+// computer writes a link author. Only people and agents react.
 type ChatActor =
   | { kind: "human"; displayName: string }
   | { kind: "agent"; displayName: string }
-  | { kind: "automation"; displayName: string };
+  | { kind: "automation"; displayName: string }
+  | { kind: "link"; displayName: string; grantId: string; principalId: string };
+type ChatWriteActor = Exclude<ChatActor, { kind: "link" }>;
 
 // The automation executor's claim on a message it writes. Stays on this computer.
 export interface ChatMessageAutomationInput {
@@ -1053,7 +1061,7 @@ export interface LinkedChatStore {
     automation?: ChatMessageAutomationInput;
     title?: string;
     lane?: ChatThreadLane;
-    author: ChatActor;
+    author: ChatWriteActor;
     // WS-MU-C0: the sender's OPAQUE relay user id (Better Auth user id). Caller
     // supplies it only when signed in; the journaled message.append then carries
     // it for relay verification. Omit for solo (byte-identical to today).
@@ -1106,7 +1114,7 @@ export interface LinkedChatStore {
     messageId?: ChatMessageId;
     idempotencyKey?: string;
     automation?: ChatMessageAutomationInput;
-    author: ChatActor;
+    author: ChatWriteActor;
     // WS-MU-C0: the sender's OPAQUE relay user id (Better Auth user id). Caller
     // supplies it only when signed in; the journaled message.append then carries
     // it for relay verification. Omit for solo (byte-identical to today).
@@ -1467,6 +1475,7 @@ export type SecretFileStoreErrorCode =
   | "invalid-version"
   | "invalid-workspace"
   | "key-corrupt"
+  | "key-install-unsupported"
   | "moment-not-found"
   | "not-secret-path"
   | "state-corrupt";

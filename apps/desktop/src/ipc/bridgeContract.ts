@@ -115,7 +115,7 @@ import {
   SEARCH_EVENT_MAX_PREVIEW_CHARS,
   WORKBENCH_MENU_COMMANDS,
 } from "./channels";
-import { UPDATE_CHANNELS, UPDATE_STATUSES } from "../updates/updateMachine";
+import { UPDATE_CHANNELS, UPDATE_STATUSES, type UpdateChannel } from "../updates/updateMachine";
 import type { chatOperations } from "./chatOperations";
 import type { settingsOperations } from "./settingsOperations";
 import type { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations, relayShareOperations } from "./shareOperations";
@@ -1885,8 +1885,9 @@ export const ChatFileReferenceInput = z.object({
 export type ChatFileReferenceInput = z.infer<typeof ChatFileReferenceInput>;
 
 // Messages and their authors as the renderer shows them. Only the automation
-// executor in main writes an automation's message; the renderer never sends one.
-const CHAT_MESSAGE_AUTHOR_KIND = z.enum(["human", "agent", "automation"]);
+// executor in main writes an automation's message, and only the relay writes a
+// link holder's; the renderer never sends either.
+const CHAT_MESSAGE_AUTHOR_KIND = z.enum(["human", "agent", "automation", "link"]);
 // Which automation wrote a message, when it ran on this computer, and
 // where its Collection is now: null once this computer no longer has it.
 const CHAT_MESSAGE_AUTOMATION = z.object({
@@ -7124,6 +7125,9 @@ export interface DohcDesktopBridge
   // renderer shows the debug panel on it; every dev channel is separately
   // gated in main, so this is a hint, not authority.
   devTools: boolean;
+  // Constant: this build's release channel, which main reads from the app
+  // version. The titlebar marks a nightly as an alpha.
+  releaseChannel: UpdateChannel;
   // Constant: the e2e switch that lets sign-in use a plain http server on
   // this machine. The address field checks with it; main decides again.
   insecureLoopbackServersForTests: boolean;

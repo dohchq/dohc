@@ -48,6 +48,17 @@ describe("Titlebar", () => {
     expect(status.textContent).toBe("Agent running");
   });
 
+  it("marks a nightly build as an alpha, and no other build", () => {
+    vi.stubGlobal("dohcDesktop", { platform: "win32", releaseChannel: "nightly" });
+    render(<Titlebar workspace={workspace} workspaces={[workspace]} />);
+    expect(screen.getByTestId("titlebar-alpha").textContent).toBe("Alpha");
+    cleanup();
+
+    vi.stubGlobal("dohcDesktop", { platform: "win32", releaseChannel: "latest" });
+    render(<Titlebar workspace={workspace} workspaces={[workspace]} />);
+    expect(screen.queryByTestId("titlebar-alpha")).toBeNull();
+  });
+
   it("shows the macOS quick-open shortcut on macOS", () => {
     vi.stubGlobal("dohcDesktop", { platform: "darwin" });
 

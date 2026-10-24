@@ -33,6 +33,10 @@ libc = "0.2"
 # Creates the key file without the ACL entries its folder gives new files.
 dohc-macos-files = { path = "../dohc-macos-files" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Tells a key folder reached through a held descriptor from one reached by name.
+dohc-linux-files = { path = "../dohc-linux-files" }
+
 [dev-dependencies]
 dohc-test-scratch = { path = "../dohc-test-scratch" }
 # Base64 alphabet checks in tests only; production base64 is hand-rolled in
