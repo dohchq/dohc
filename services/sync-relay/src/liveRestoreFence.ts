@@ -1,8 +1,9 @@
 import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { parseHostControlIdentifier } from "@dohc/live-session-contract/host-control";
-import { parseLiveUpdateIdentifier, parseLiveUpdateReceipt, type LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
+import { parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseLiveUpdateReceipt, type LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
 
 export interface NativeRestoreFence {
+  point: {journalCursor: number; receiptDigest: string};
   operationId: string;
   relayDatabaseNamespace: string;
   oldBinding: LiveObjectBinding;
@@ -29,11 +30,12 @@ function integer(value: unknown): number {
   return value;
 }
 export function parseNativeRestoreFence(value: unknown): NativeRestoreFence {
-  const row = record(value, ["operationId", "relayDatabaseNamespace", "oldBinding", "hostId", "newFence", "origin", "terminal", "appliedSequence"]);
+  const row = record(value, ["point", "operationId", "relayDatabaseNamespace", "oldBinding", "hostId", "newFence", "origin", "terminal", "appliedSequence"]);
   const oldBinding = parseLiveObjectBinding(row.oldBinding), newFence = integer(row.newFence), origin = record(row.origin, ["kind", "id"]);
   if (oldBinding.restoreFenceGeneration === Number.MAX_SAFE_INTEGER || newFence !== oldBinding.restoreFenceGeneration + 1 ||
     (origin.kind !== "bootstrap" && origin.kind !== "owner")) throw new TypeError("Invalid native restore fence.");
-  return {operationId: parseLiveUpdateIdentifier(row.operationId), relayDatabaseNamespace: parseLiveUpdateIdentifier(row.relayDatabaseNamespace),
+  const point = record(row.point, ["journalCursor", "receiptDigest"]);
+  return {point: {journalCursor: integer(point.journalCursor), receiptDigest: parseLiveUpdateDigest(point.receiptDigest)}, operationId: parseLiveUpdateIdentifier(row.operationId), relayDatabaseNamespace: parseLiveUpdateIdentifier(row.relayDatabaseNamespace),
     oldBinding, hostId: parseHostControlIdentifier(row.hostId), newFence,
     origin: {kind: origin.kind, id: parseLiveUpdateIdentifier(origin.id)},
     terminal: row.terminal === null ? null : parseLiveUpdateReceipt(row.terminal), appliedSequence: integer(row.appliedSequence)};

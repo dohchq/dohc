@@ -177,7 +177,7 @@ impl ReaderResolver {
             .map(|_| ())
     }
 
-    fn check_snapshot(
+    pub(crate) fn check_snapshot(
         &self,
         conn: &Connection,
         key: &DocKey,
