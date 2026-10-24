@@ -114,12 +114,14 @@ it("includes a draft saved after the initial dismiss scan in the reply", async (
   const draft = {path: "a.txt", objectId: "object", contentKind: "plaintext" as const, text: "seen", update: new Uint8Array([0, 0])};
   await preserveLiveDraft(directory, "workspace", draft);
   const seen = (await listLiveDraftRecovery(directory, "workspace"))[0]!;
+  // Establish ordering without comparing a fractional file time with Date.now().
+  await utimes(join(directory, `${seen.recordId}.json`), new Date(0), new Date(0));
   const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
   vi.mocked(rm).mockImplementationOnce(async (path, options) => {
     await actual.rm(path, options);
     await preserveLiveDraft(directory, "workspace", {...draft, text: "saved during dismiss"});
   });
-  await expect(removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(draft.update), Date.now(), "a.txt", seen.recordId))
+  await expect(removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(draft.update), 1000, "a.txt", seen.recordId))
     .resolves.toEqual([expect.objectContaining({text: "saved during dismiss"})]);
 });
 
@@ -239,7 +241,8 @@ it("stops blocking a path after its recovery is discarded and preserves other dr
   const draft = {path: "a.md", objectId: "object", remoteWorkspaceId: "owner", update: new Uint8Array([0, 0])};
   await preserveLiveDraft(directory, "workspace", draft);
   await preserveLiveDraft(directory, "other", draft);
-  await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(draft.update), Date.now(), "a.md");
+  for (const name of await readdir(directory)) await utimes(join(directory, name), new Date(0), new Date(0));
+  await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(draft.update), 1000, "a.md");
   expect(await hasRetainedLiveDraft(directory, "workspace", "a.md", "object")).toBe(false);
   expect(await hasRetainedLiveDraft(directory, "other", "a.md", "object")).toBe(true);
 });
