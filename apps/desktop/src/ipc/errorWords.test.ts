@@ -1,3 +1,9 @@
+import { installWorkspaceDataKey, SECRET_KEY_RELATIVE_PATH } from "../workspaces/workspaceDataKey";
+import { mkdir } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { atomicCreateFile } from "../atomicReplaceFile";
+import { createTestScratch } from "../workspaces/testTemp";
+import { ipcErrorMessage } from "../renderer/ipcError";
 import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 import { ServerCollectionsUnavailableError } from "../workspaces/remoteDataset";
 import { ReservedWorkspaceIdError } from "@dohc/workspace-core";
@@ -6,7 +12,7 @@ import { readFileSync } from "node:fs";
 import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
 import { DatasetReopenWaitError } from "@dohc/app-backend-runtime/supervisor";
 import { DaemonRefusalError, type DaemonErrorCode } from "@dohc/workspace-engine-client";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CompilerProcessError } from "../workspaces/compilerProcessSupervisor";
 import { WorkspaceManifestError } from "../workspaces/createWorkspaceFolder";
 import { LiveDocumentMutationError, RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
@@ -30,6 +36,11 @@ import {
   withErrorWords,
 } from "./errorWords";
 
+vi.mock("../atomicReplaceFile", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../atomicReplaceFile")>();
+  return { ...actual, atomicCreateFile: vi.fn(actual.atomicCreateFile) };
+});
+
 it("explains the held-file live-open refusal after Electron serializes it", () => {
   const error = new Error("Error invoking remote method 'desktop:engine-ydoc-open': DaemonRefusalError [CONFLICT]: capture-file-held: notes/held.md");
   expect(readError(error).words).toBe('dohc cannot open "notes/held.md" for live editing. dohc cannot take in this file\'s Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Restore the file\'s exact contents from before that edit. For nested lists, make the edit in dohc after the file opens again.');
@@ -52,6 +63,22 @@ const engineCodes = [
 ].map((match) => match[1]!);
 
 describe("error words", () => {
+  it.each([
+    ["desktop:cloud-enable-sync", "dohc could not enable sync for this workspace."],
+    ["desktop:cloud-join-workspace", "Couldn't join the workspace."],
+  ])("keeps the key-install refusal unchanged across %s", async (channel, prefix) => {
+    const root = await createTestScratch("dohc-key-ipc-words-");
+    await mkdir(dirname(join(root, SECRET_KEY_RELATIVE_PATH)), { recursive: true });
+    vi.mocked(atomicCreateFile).mockRejectedValueOnce(
+      Object.assign(new Error("link failed"), { code: "ENOTSUP", syscall: "link" }),
+    );
+    const failure = await installWorkspaceDataKey(root, Buffer.alloc(32, 7)).catch(error => error);
+    const sentence = "This drive can't store the workspace's secret key safely. Move the workspace to an NTFS, APFS or ext4 drive, then try again.";
+    const received = acrossIpc(failure, channel);
+    expect(readError(received).words).toBe(sentence);
+    expect(ipcErrorMessage(received, prefix)).toBe(sentence);
+  });
+
   it.each([
     ["chat-mention-access-changed", "Chat access changed. Try again."],
     ["chat-mention-version-changed", "It changed while dohc was working on it. Try again."],

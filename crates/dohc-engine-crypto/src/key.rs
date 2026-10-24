@@ -264,8 +264,10 @@ fn verify_key_dir(engine_dir: &std::path::Path) -> Result<(), CryptoError> {
 /// orphaned ciphertext would strand it silently; the capture layer checks the
 /// encrypted store first and fails closed instead (TS parity:
 /// `loadSecretDataKey` checks protected rows before its create branch).
-/// A drive without hard links, such as exFAT or FAT32, gets the key by a
-/// rename instead (`publish_by_rename`).
+/// Off Windows, a drive without hard links, such as exFAT or FAT32, gets the
+/// key by a rename instead (`publish_by_rename`) when it keeps the key
+/// private. Windows can't make the renamed name durable, so it still refuses
+/// those drives.
 pub fn create_key_file(engine_dir: &std::path::Path) -> Result<SecretDataKey, CryptoError> {
     create_key_file_with(engine_dir, |temp, path| std::fs::hard_link(temp, path))
 }
@@ -306,6 +308,7 @@ fn create_key_file_with(
         return Err(CryptoError::KeyFileMalformed);
     }
     let publication = match link(&temp, &path) {
+        #[cfg(unix)]
         Err(err) if hard_links_unsupported(&err) => publish_by_rename(&temp, &path),
         published => published,
     };
@@ -341,8 +344,14 @@ fn create_new_key_file(path: &std::path::Path) -> std::io::Result<std::fs::File>
 /// file claims the name, so a key already there stays, and the rename
 /// replaces only that claim. A reader finds the empty claim, which fails
 /// closed for that try, or the whole flushed key. A crash between the two
-/// leaves the empty claim.
+/// leaves the empty claim. A drive that lets other users read the key gets
+/// none, since `load_key_file` would refuse it there.
+#[cfg(unix)]
 fn publish_by_rename(temp: &std::path::Path, path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if std::fs::symlink_metadata(temp)?.permissions().mode() & 0o077 != 0 {
+        return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
+    }
     drop(create_new_key_file(path)?);
     std::fs::rename(temp, path).inspect_err(|_| {
         // An empty claim holds nothing a reader could use, so it can go.
@@ -360,11 +369,6 @@ fn hard_links_unsupported(err: &std::io::Error) -> bool {
         || err.raw_os_error().is_some_and(|code| {
             code == libc::EPERM || code == libc::ENOTSUP || code == libc::EOPNOTSUPP
         })
-}
-
-#[cfg(windows)]
-fn hard_links_unsupported(err: &std::io::Error) -> bool {
-    err.kind() == std::io::ErrorKind::Unsupported || matches!(err.raw_os_error(), Some(1 | 50))
 }
 
 /// The error for a key file that could not be created.
@@ -752,25 +756,38 @@ mod tests {
     }
 
     /// A hard link on exFAT or FAT32.
+    #[cfg(unix)]
     fn no_hard_links(_: &std::path::Path, _: &std::path::Path) -> std::io::Result<()> {
         Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_drive_without_hard_links_creates_the_key_at_its_name() {
         let dir = dohc_test_scratch::ScratchDir::new_named("key-no-links").unwrap();
         let key = create_key_file_with(&dir, no_hard_links).unwrap();
         assert_eq!(load_key_file(&dir).unwrap(), Some(key));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let path = dir.join(SECRET_KEY_FILE_NAME);
-            let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600);
-        }
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(SECRET_KEY_FILE_NAME);
+        let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_drive_that_shows_the_key_to_other_users_gets_none() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = dohc_test_scratch::ScratchDir::new_named("key-no-links-public").unwrap();
+        let minted = create_key_file_with(&dir, |temp, path| {
+            std::fs::set_permissions(temp, std::fs::Permissions::from_mode(0o644))?;
+            no_hard_links(temp, path)
+        });
+        assert!(matches!(minted, Err(CryptoError::KeyFileMalformed)));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn a_drive_without_hard_links_keeps_the_published_key() {
         let dir = dohc_test_scratch::ScratchDir::new_named("key-no-links-winner").unwrap();
@@ -782,6 +799,7 @@ mod tests {
 
     /// A minter there can fail a try while another writes the key, but no
     /// two minters ever return different keys.
+    #[cfg(unix)]
     #[test]
     fn concurrent_minters_without_hard_links_return_only_the_published_key() {
         let dir = dohc_test_scratch::ScratchDir::new_named("key-no-links-race").unwrap();
@@ -810,14 +828,17 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_rename_replaces_only_its_own_claim() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = dohc_test_scratch::ScratchDir::new_named("key-claim").unwrap();
         let path = dir.join(SECRET_KEY_FILE_NAME);
         let temp = dir.join("pending-key");
         let winner = SecretDataKey::from_bytes(&[2; SECRET_KEY_BYTES]).unwrap();
         std::fs::write(&path, winner.to_key_file()).unwrap();
         std::fs::write(&temp, "candidate").unwrap();
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600)).unwrap();
         let claimed = publish_by_rename(&temp, &path);
         assert_eq!(
             claimed.unwrap_err().kind(),
@@ -834,11 +855,17 @@ mod tests {
         assert!(!temp.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_failed_rename_leaves_no_claim() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = dohc_test_scratch::ScratchDir::new_named("key-claim-failure").unwrap();
         let path = dir.join(SECRET_KEY_FILE_NAME);
-        assert!(publish_by_rename(&dir.join("missing"), &path).is_err());
+        // A folder can't be renamed over the claimed file.
+        let temp = dir.join("pending-key");
+        std::fs::create_dir(&temp).unwrap();
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(publish_by_rename(&temp, &path).is_err());
         assert!(!path.exists());
     }
 

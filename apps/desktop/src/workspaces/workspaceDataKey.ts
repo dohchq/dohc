@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { chmod, lstat, realpath, readFile } from "node:fs/promises";
+import { chmod, link, lstat, open, readFile, realpath, rename, rm, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { atomicCreateFile } from "../atomicReplaceFile";
 import type { SecretFileStoreErrorCode } from "@dohc/workspace-contracts/engine";
@@ -20,9 +20,9 @@ export class SecretFileStoreError extends Error {
   }
 }
 
-// exFAT and FAT32 have no hard links, so the key is published there by an
-// empty claim and a rename over it, which still never replaces a key.
-function hardLinksUnsupported({ code, syscall }: NodeJS.ErrnoException): boolean {
+function hardLinksUnsupported(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const { code, syscall } = error as NodeJS.ErrnoException;
   // libuv maps Windows ERROR_INVALID_FUNCTION (1) to EISDIR and ERROR_NOT_SUPPORTED (50) to ENOTSUP.
   // Off Windows, match materialize.rs::hard_links_unsupported; Windows EPERM remains a permissions failure.
   return syscall === "link" && (
@@ -31,6 +31,28 @@ function hardLinksUnsupported({ code, syscall }: NodeJS.ErrnoException): boolean
       ? code === "EISDIR"
       : code === "EPERM" || code === "EOPNOTSUPP")
   );
+}
+
+// exFAT and FAT32 have no hard links. Off Windows, an empty file claims the
+// key's name there and the flushed copy is renamed over it, so the key still
+// appears whole or not at all and never replaces another. Windows can't make
+// the renamed name durable, and the engine refuses a key other users can
+// read, so those drives are still refused.
+async function publishKey(temporary: string, destination: string): Promise<void> {
+  try {
+    return await link(temporary, destination);
+  } catch (error) {
+    if (process.platform === "win32" || !hardLinksUnsupported(error)) throw error;
+    if (((await lstat(temporary)).mode & 0o077) !== 0) throw error;
+  }
+  await (await open(destination, "wx", 0o600)).close();
+  try {
+    await rename(temporary, destination);
+  } catch (error) {
+    // An empty claim holds no key, so it can go.
+    if ((await stat(destination).catch(() => null))?.size === 0) await rm(destination, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 function keyFilePath(rootDir: string): string {
@@ -136,7 +158,7 @@ export async function loadSecretDataKey(
   const payload = `${SECRET_KEY_FILE_PREFIX}${key.toString("base64")}\n`;
   let created: boolean;
   try {
-    created = await atomicCreateFile(path, payload, 0o600, { renameAfter: hardLinksUnsupported });
+    created = await atomicCreateFile(path, payload, 0o600, { link: publishKey });
   } catch {
     throw new SecretFileStoreError(
       "key-corrupt",
@@ -177,8 +199,14 @@ export async function installWorkspaceDataKey(
   const payload = `${SECRET_KEY_FILE_PREFIX}${key.toString("base64")}\n`;
   let created: boolean;
   try {
-    created = await atomicCreateFile(path, payload, 0o600, { renameAfter: hardLinksUnsupported });
-  } catch {
+    created = await atomicCreateFile(path, payload, 0o600, { link: publishKey });
+  } catch (error) {
+    if (hardLinksUnsupported(error)) {
+      throw new SecretFileStoreError(
+        "key-install-unsupported",
+        "This drive can't store the workspace's secret key safely. Move the workspace to an NTFS, APFS or ext4 drive, then try again.",
+      );
+    }
     throw new SecretFileStoreError(
       "key-corrupt",
       "The workspace secret key file could not be installed.",

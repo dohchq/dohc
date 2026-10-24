@@ -1,4 +1,4 @@
-import { link, open, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { link, open, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { atomicCreateFile } from "./atomicReplaceFile";
@@ -96,11 +96,11 @@ describe("durable create-once publication", () => {
     expect(await readdir(root)).toEqual([]);
   });
 
-  it.each(["ENOTSUP", "EACCES", "EIO"])("falls back to a claim and rename after %s, keeping a racing winner", async (code) => {
+  it.each(["ENOTSUP", "EACCES", "EIO"])("allows an exclusive-write fallback after %s, preserving a racing winner", async (code) => {
     const root = await createTestScratch("dohc-create-once-");
     const path = join(root, "record");
     expect(await atomicCreateFile(path, "loser", 0o666, {
-      renameAfter: () => true,
+      allowDirectWrite: true,
       link: async () => {
         await writeFile(path, "winner");
         throw Object.assign(new Error(code), { code });
@@ -110,42 +110,38 @@ describe("durable create-once publication", () => {
     expect(await readdir(root)).toEqual(["record"]);
   });
 
-  it("a failed rename removes its empty claim and allows a retry", async () => {
+  it.each(["write", "sync"] as const)("a failed fallback %s removes its new entry and allows a retry", async (phase) => {
     const root = await createTestScratch("dohc-create-once-");
     const path = join(root, "record.json");
     const payload = '{"version":1}\n';
-    const failure = Object.assign(new Error("rename"), { code: "EIO" });
+    const failure = Object.assign(new Error(phase), { code: phase === "write" ? "ENOSPC" : "EIO" });
     let fail = true;
     const dependencies = {
-      renameAfter: () => true,
+      allowDirectWrite: true,
       link: async () => { throw Object.assign(new Error("unsupported"), { code: "ENOTSUP" }); },
-      rename: async (source: string, destination: string) => {
-        if (fail) throw failure;
-        await rename(source, destination);
+      open: async (name: string, flags: string, mode?: number) => {
+        const handle = await open(name, flags, mode);
+        if (name !== path) return handle;
+        return {
+          writeFile: async (data: string) => {
+            if (fail && phase === "write") { await handle.writeFile("{"); throw failure; }
+            await handle.writeFile(data);
+          },
+          sync: async () => {
+            if (fail && phase === "sync") throw failure;
+            await handle.sync();
+          },
+          close: () => handle.close(),
+        };
       },
     };
     await expect(atomicCreateFile(path, payload, 0o666, dependencies)).rejects.toBe(failure);
+    await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" });
     expect(await readdir(root)).toEqual([]);
     fail = false;
     expect(await atomicCreateFile(path, payload, 0o666, dependencies)).toBe(true);
     expect(await readFile(path, "utf8")).toBe(payload);
     expect(await readdir(root)).toEqual(["record.json"]);
-  });
-
-  it("a failed rename keeps a claim that holds bytes", async () => {
-    const root = await createTestScratch("dohc-create-once-");
-    const path = join(root, "record");
-    const failure = Object.assign(new Error("rename"), { code: "EIO" });
-    await expect(atomicCreateFile(path, "loser", 0o666, {
-      renameAfter: () => true,
-      link: async () => { throw Object.assign(new Error("unsupported"), { code: "ENOTSUP" }); },
-      rename: async () => {
-        await writeFile(path, "winner");
-        throw failure;
-      },
-    })).rejects.toBe(failure);
-    expect(await readFile(path, "utf8")).toBe("winner");
-    expect(await readdir(root)).toEqual(["record"]);
   });
 
   it("still flushes the folder when removing a published key's temporary file fails", async () => {

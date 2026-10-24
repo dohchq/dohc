@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { renameSync, unlinkSync } from "node:fs";
-import { link, open, rename, rm, stat } from "node:fs/promises";
+import { link, open, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 
 const WINDOWS_RENAME_RETRY_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
@@ -155,10 +155,8 @@ export async function atomicReplaceFile(
 
 /**
  * Create without replacing an existing entry. True means this creator won.
- * Hard links publish complete, flushed bytes. After a link error that
- * `renameAfter` accepts, an empty file claims the name and the flushed copy
- * is renamed over it, so a reader finds nothing or every byte. A failed
- * rename removes the empty claim; a crash before it can leave the claim.
+ * Hard links publish complete, flushed bytes. Failed direct writes remove
+ * their new entry; a crash during a direct write can still leave it cut off.
  * Node cannot open directories for fsync on Windows.
  */
 export async function atomicCreateFile(
@@ -169,14 +167,12 @@ export async function atomicCreateFile(
     open: openFile = open,
     link: publish = link,
     rm: remove = rm,
-    renameAfter = () => false,
-    rename: replace = rename,
-    wait,
+    allowDirectWrite = false,
     platform = process.platform,
-  }: DurableFileOperations & {
+  }: Pick<DurableFileOperations, "open" | "platform"> & {
     link?: (source: string, destination: string) => Promise<void>;
     rm?: typeof rm;
-    renameAfter?: (error: NodeJS.ErrnoException) => boolean;
+    allowDirectWrite?: boolean;
   } = {},
 ): Promise<boolean> {
   const temporary = `${destination}.tmp-${process.pid}-${randomUUID()}`;
@@ -198,23 +194,19 @@ export async function atomicCreateFile(
       if ((error as NodeJS.ErrnoException).code === "EEXIST") {
         created = false;
       } else {
-        if (!renameAfter(error as NodeJS.ErrnoException)) throw error;
-        let claim;
+        if (!allowDirectWrite) throw error;
+        let handle;
         try {
-          claim = await openFile(destination, "wx", mode);
+          handle = await openFile(destination, "wx", mode);
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
           created = false;
         }
-        if (claim) {
+        if (handle) {
           try {
-            await claim.close();
-            await renameWithRetry(temporary, destination, { rename: replace, wait, platform });
+            await writeAndFlush(handle);
           } catch (error) {
-            // An empty claim holds nothing a reader could use, so it can go.
-            if ((await stat(destination).catch(() => null))?.size === 0) {
-              await remove(destination, { force: true }).catch(() => undefined);
-            }
+            await remove(destination, { force: true }).catch(() => undefined);
             throw error;
           }
         }
