@@ -462,6 +462,7 @@ describe("CLI socket server", () => {
       localUserDisplayName: () => "Sam",
       agentRunDepth: (workspaceId) => workspaceId === WORKSPACE_ID ? agentRunDepth : 0,
       dispatchedAgentRun: (workspaceId) => workspaceId === WORKSPACE_ID && dispatchedRun,
+      agentRunWorkspace: () => undefined,
       async onWrite() {
         calls.writes += 1;
       },
@@ -2678,6 +2679,20 @@ describe("CLI socket server", () => {
     const own = await post({ actor: "human", title: "Mine", body: "My own post." });
     const [mine] = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${own.threadId.slice("th_".length)}` });
     expect(mine?.author.kind).toBe("human");
+  });
+
+  it("attributes a live run's reply to the agent and refuses its nested writable workspace", async () => {
+    const posted = await post({ actor: "human", title: "Test", body: "Check." });
+    serverOptions.agentRunWorkspace = (runId) => runId === "run_live" ? WORKSPACE_ID : undefined;
+    const args = { cwd: workspaceRoot, actor: "human", thread: posted.threadId, body: "Done.", attachments: [], needsDecision: false, runId: "run_live" } as const;
+    await invoke("reply", { ...args, attachments: [] });
+    expect((await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${posted.threadId.slice(3)}` })).at(-1)?.author.kind).toBe("agent");
+    const nestedRoot = join(workspaceRoot, "notes");
+    await mkdir(nestedRoot);
+    serverOptions.listWorkspaces = () => [registryWorkspace, { workspaceId: "nested", rootPath: nestedRoot }];
+    const opened = calls.openWorkspace;
+    await expect(invoke("reply", { ...args, cwd: nestedRoot, attachments: [] })).rejects.toThrow("Agent runs cannot write in another workspace.");
+    expect(calls.openWorkspace).toBe(opened);
   });
 
   it("records a named MCP client's file write and reply in a dispatched run as one agent", async () => {

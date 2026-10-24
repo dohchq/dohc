@@ -2743,6 +2743,9 @@ const activity = {
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.dispatchedAgentRun(lease.state.activity),
     ),
+  agentRunWorkspace: (runId: string) => workspaceAuthorities.workspaceIds().find((workspaceId) =>
+    withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.agentRun(lease.state.activity)?.agentRunId === runId),
+  ),
   engineCaptureFor: (workspaceId: string, expectedRootPath?: string) => {
     if (!findWorkspace(workspaceId)) return null;
     return withWorkspaceActivityState(workspaceId, (lease) =>
@@ -3552,6 +3555,15 @@ const chatDispatchService = createChatDispatchService({
   listOpenWorkspaces: openDispatchWorkspaces,
   listSyncWorkspaces: syncDispatchWorkspaces,
   chatStoreFor: linkedChatStoreFor,
+  startSelfTestThread: (workspace, input) => withWorkspaceAttachmentAsync(workspace, async (lease) => {
+    const started = await chatWrites.startThread({ workspaceId: workspace.workspaceId, store: linkedChatStoreFor(lease) }, {
+      ...input,
+      // CLI origin keeps this person's test message from starting an agent run.
+      writer: { via: "cli", actor: "human" },
+      resolveAttachments: async () => [],
+    });
+    return started.thread.id;
+  }),
   dispatchStoreFor: (workspace) =>
     agentDispatchStoreHandleFor(workspace).store,
   readRunnerSettings: async () =>
