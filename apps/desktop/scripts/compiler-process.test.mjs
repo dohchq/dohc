@@ -4,13 +4,22 @@ import { mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/prom
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runOwnedCompilerProcess } from '../src/workspaces/compilerProcessSupervisor.ts';
-import { compileClosedAppInProcess } from '../src/workspaces/closedAppCompilerProcess.ts';
+import { runOwnedCompilerProcess as superviseCompilerProcess } from '../src/workspaces/compilerProcessSupervisor.ts';
+import { compileClosedAppInProcess as compileClosedApp } from '../src/workspaces/closedAppCompilerProcess.ts';
 import { stageAppCompiler } from './stage-app-compiler.mjs';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
+
+function reportCompilerFailure(running){
+  // assert.rejects' property comparison omits custom error fields. Observe
+  // rejection immediately, including while a fixture waits for readiness.
+  void running.catch(error=>{if(error.details)process.stderr.write(`${error.name}: ${error.message} ${error.details}\n`);});
+  return running;
+}
+const runOwnedCompilerProcess=(...args)=>reportCompilerFailure(superviseCompilerProcess(...args));
+const compileClosedAppInProcess=(...args)=>reportCompilerFailure(compileClosedApp(...args));
 
 // The compile deadline counts from the owner's spawn. Beside other work, one
 // Windows owner and worker took 17.6 s to answer, so the deadline is 20 s,
@@ -117,12 +126,15 @@ for(const mode of ['cancel','timeout','normal-exit'])test(`${mode} closes owned 
     if(mode==='timeout'){
       assert.match(error.details,/Last stage: /);assert.match(error.details,/elapsed=\d+ms/);assert.match(error.details,/stderr tail: /);
       if(process.platform==='win32')for(const stage of ['PowerShell running','Add-Type done','job assigned','admitted','worker spawned'])assert.match(error.details,new RegExp(`${stage}=\\d+ms`));
-      t.diagnostic(error.details);
     }
     return true;
   });
-  const identities=await waitForMarker(context);await proceed(context);if(mode==='cancel')controller.abort();await outcome;
-  for(const pid of [owner,identities.worker,identities.descendant])assert.equal(await exited(pid),true,`process ${pid} exited`);
+  void outcome.catch(()=>{});
+  try{
+    const identities=await waitForMarker(context);await proceed(context);if(mode==='cancel')controller.abort();await outcome;
+    for(const pid of [owner,identities.worker,identities.descendant])assert.equal(await exited(pid),true,`process ${pid} exited`);
+  }catch(error){await outcome;throw error;}
+  finally{controller.abort();await outcome.catch(()=>{});}
 });
 test('aggregate memory covers two sub-limit native allocations',owned,async t=>{
   const {runtime}=await fixture(t,`import{spawn}from'node:child_process';globalThis.held=Buffer.alloc(160*1024*1024,1);const child=spawn(process.execPath,['-e','try{globalThis.held=Buffer.alloc(160*1024*1024,1);setInterval(()=>{},1000)}catch{process.exit(42)}'],{windowsHide:true,stdio:'inherit'});child.once('exit',code=>process.exit(code??1));`);
