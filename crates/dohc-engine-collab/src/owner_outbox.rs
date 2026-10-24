@@ -1103,12 +1103,58 @@ pub fn read_pending(
     })
 }
 
+/// The workspace identity a hosted store was created for: its replication
+/// epoch and stream identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedStoreIdentity {
+    pub replication_epoch: String,
+    pub stream_identity: String,
+}
+
+impl HostedStoreIdentity {
+    /// Whether the store holds this identity for `workspace_id`, with a hosted replica.
+    pub fn held_in(&self, conn: &Connection, workspace_id: &str) -> rusqlite::Result<bool> {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sync_identity i JOIN hosted_replicas h \
+             ON h.workspace_id=i.workspace_id WHERE i.workspace_id=?1 \
+             AND i.replication_epoch=?2 AND i.stream_identity=?3)",
+            params![workspace_id, self.replication_epoch, self.stream_identity],
+            |row| row.get(0),
+        )
+    }
+}
+
 /// A page is provisional until the client has verified every complete part.
 /// Each transaction binds its metadata and bounded blob slice to one snapshot;
 /// no transaction or hydrated queue is retained between requests.
 pub fn read_pending_page(
     store: &EngineStore,
     workspace_id: &str,
+    outbox_id: &str,
+    cursor: Option<OwnerOutboxReadCursor>,
+    max_bytes: usize,
+) -> Result<OwnerOutboxPageResult, OwnerOutboxError> {
+    read_page(store, workspace_id, None, outbox_id, cursor, max_bytes)
+}
+
+/// [`read_pending_page`] of a hosted store opened by its workspace identity.
+/// Each page's transaction checks that the store still holds `identity`, and
+/// the snapshot includes it, so a cursor of another store's queue reads as changed.
+pub fn read_pending_hosted_page(
+    store: &EngineStore,
+    workspace_id: &str,
+    identity: &HostedStoreIdentity,
+    outbox_id: &str,
+    cursor: Option<OwnerOutboxReadCursor>,
+    max_bytes: usize,
+) -> Result<OwnerOutboxPageResult, OwnerOutboxError> {
+    read_page(store, workspace_id, Some(identity), outbox_id, cursor, max_bytes)
+}
+
+fn read_page(
+    store: &EngineStore,
+    workspace_id: &str,
+    identity: Option<&HostedStoreIdentity>,
     outbox_id: &str,
     cursor: Option<OwnerOutboxReadCursor>,
     max_bytes: usize,
@@ -1133,6 +1179,11 @@ pub fn read_pending_page(
     }
     store.read_with(|conn| {
         let tx = conn.unchecked_transaction().map_err(read_sql)?;
+        if let Some(identity) = identity {
+            if !identity.held_in(&tx, workspace_id).map_err(read_sql)? {
+                return Err(OwnerOutboxError::WorkspaceMismatch);
+            }
+        }
         let parent = read_parent(&tx, outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
         require_workspace(workspace_id, &parent.binding.workspace_id)?;
         if parent.base_blob_digest != parent.base_update_digest {
@@ -1155,7 +1206,14 @@ pub fn read_pending_page(
             "observedBinding": parent.observed_binding,
             "retryDeliveryId": parent.retry_delivery_id,
         });
-        let snapshot = hex_sha256(&page_json(&header)?);
+        let snapshot = hex_sha256(&page_json(&match identity {
+            None => header.clone(),
+            Some(identity) => serde_json::json!([
+                &header,
+                identity.replication_epoch,
+                identity.stream_identity
+            ]),
+        })?);
         if cursor.as_ref().is_some_and(|cursor| cursor.snapshot != snapshot) {
             return Ok(OwnerOutboxPageResult::ReadChanged);
         }

@@ -640,6 +640,7 @@ export interface SyncRelayStorage {
   confirmServiceKeptEditsCopy(input: {workspaceId: string; outboxId: string; generation: number; checkpointDigest: string | null}): boolean;
   observeServiceKeptEditsCheckpoint(queue: import("./serviceKeptEdits").ServiceKeptEditsQueue, frozenCheckpoint: string | null): void;
   serviceKeptEditsHeld(document: {workspaceId: string; objectId: string}, identity: import("./serviceKeptEdits").ServiceKeptEditsIdentity): boolean;
+  serviceKeptEditsStoreHeld(workspaceId: string, identity: import("./serviceKeptEdits").ServiceKeptEditsIdentity): boolean;
   scanServiceHostCandidateShares(after?: import("./serviceHostEnrollment").ServiceHostCandidateCursor, workspaceId?: string): import("./serviceHostEnrollment").ServiceHostCandidatePage;
   checkServiceHostDocuments(input: {workspaceId: string; ownerUserId: string; shareId: string; paths: readonly string[]}): void;
   setServiceHostEnrollmentEnabled(input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput): import("./serviceHostEnrollment").ServiceHostEnrollment | null;

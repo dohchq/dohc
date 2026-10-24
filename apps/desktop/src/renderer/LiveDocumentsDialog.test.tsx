@@ -1099,14 +1099,19 @@ describe("LiveDocumentsDialog", () => {
       expect(actions("docs/b.md")).toEqual(["Stop live editing", "Save recovery copy"]);
     });
 
-    it("says the server cannot read edits it kept in an earlier copy of the workspace, and offers no recovery copy", async () => {
+    it("says the server kept edits in an earlier copy of the workspace, and offers a recovery copy of them but never Try again", async () => {
       const h = harness();
-      h.load.mockResolvedValue(page([row("docs/a.md", { quarantine: "unreachable", storedOn: "server" })]));
+      h.load.mockResolvedValue(page([row("docs/a.md", { quarantine: "paused", earlier: true, storedOn: "server" }),
+        row("docs/b.md", { quarantine: "copied", earlier: true, storedOn: "server" })]));
       render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
       const kept = await screen.findByTestId("live-document-row-docs/a.md");
       expect(within(kept).getByText("Kept on the server")).toBeTruthy();
-      expect(kept.textContent).toContain("It kept them in an earlier copy of this workspace, which it can't read now. Contact the server's operator.");
-      expect(actions("docs/a.md")).toEqual(["Stop live editing"]);
+      expect(kept.textContent).toContain("It kept them in an earlier copy of this workspace. Save a recovery copy to get them back.");
+      expect(actions("docs/a.md")).toEqual(["Stop live editing", "Save recovery copy"]);
+      const copied = screen.getByTestId("live-document-row-docs/b.md");
+      expect(within(copied).getByText("Paused")).toBeTruthy();
+      expect(copied.textContent).toContain("A recovery copy of them is saved, so the server may now release them.");
+      expect(actions("docs/b.md")).toEqual(["Stop live editing", "Save recovery copy"]);
     });
 
     it("offers Try again and a recovery copy for edits a Stop took but could not write", async () => {

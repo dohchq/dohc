@@ -456,6 +456,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   serviceKeptEditsHeld(document: {workspaceId: string; objectId: string}, identity: serviceKeptEditsStorage.ServiceKeptEditsIdentity) {
     return serviceKeptEditsStorage.serviceKeptEditsHeld(this, document, identity);
   }
+  serviceKeptEditsStoreHeld(workspaceId: string, identity: serviceKeptEditsStorage.ServiceKeptEditsIdentity) {
+    return serviceKeptEditsStorage.serviceKeptEditsStoreHeld(this, workspaceId, identity);
+  }
   scanServiceHostCandidateShares(after?: serviceHostEnrollmentStorage.ServiceHostCandidateCursor, workspaceId?: string) {
     return serviceHostEnrollmentStorage.scanServiceHostCandidateShares(this, after, workspaceId);
   }

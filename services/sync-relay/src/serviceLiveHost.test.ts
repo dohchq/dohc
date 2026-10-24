@@ -549,8 +549,14 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   const seeded = (queue: KeptOutbox | null | undefined): queue is KeptOutbox => queue?.binding !== undefined && queue.state === "quarantined" &&
     queue.appendKey.startsWith("owner-adoption:") &&
     (engine.generation === undefined || engine.generation === (queue.binding as {restoreFenceGeneration: number}).restoreFenceGeneration);
-  const keptPage = (request: {id: number; params: Record<string, unknown>}) => {
-    const {params} = request, queue = outboxOf(request);
+  // Earlier stores open read-only for recovery, by workspace, at most one each as the engine allows.
+  // Each serves its own queue, whose head's append key names its root.
+  const recoveryStores = new Map<string, {root: string; handle: string}>();
+  let recoveryOpens = 0;
+  // `loseOpen` loses the next open's answer after the engine opened the store; `failClose` fails the next close before it closes.
+  const recoveryFaults: {loseOpen?: boolean; failClose?: Error} = {};
+  const keptPage = (request: {id: number; params: Record<string, unknown>}, queue = outboxOf(request)) => {
+    const {params} = request;
     const header = {outboxId: params.outboxId, binding: queue.binding, baseUpdateDigest: (queue.binding as {lineageClaimId: string}).lineageClaimId,
       baseByteLength: 1, state: queue.state, pendingBytes: 1, pendingEntryCount: 1, nextSequence: 2, oldestEntryAtMs: 1, quarantineReason: "invalid-update",
       observedBinding: null, retryDeliveryId: queue.retryDeliveryId}, update = Buffer.from([7]);
@@ -631,7 +637,26 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
         case "liveApplication.fenceRestore": return reply({status: "pending", reason: "native-fence-pending"});
         case "ydoc.ownerOutbox.retry": outboxOf(request).retryDeliveryId = "refused"; return reply({retryDeliveryId: "refused"});
         case "ydoc.ownerOutbox.quarantine": {const queue = outboxOf(request); queue.state = "quarantined"; queue.retryDeliveryId = null; return reply({});}
-        case "ydoc.ownerOutbox.readPending": return reply(keptPage(request));
+        case "ydoc.ownerOutbox.readPending": {
+          if (!request.workspace?.startsWith("recovery-")) return reply(keptPage(request));
+          const open = [...recoveryStores.values()].find(store => store.handle === request.workspace);
+          if (!open) throw new EngineRequestError(request.id, {code: "WORKSPACE_UNAVAILABLE", message: "workspace handle is unavailable", retry: "no"} as never);
+          return reply(keptPage(request, {binding: keptOutbox.binding, state: "quarantined", retryDeliveryId: null, appendKey: open.root}));
+        }
+        case "liveApplication.openRecoveryStore": {
+          const {root, workspaceId} = request.params as {root: string; workspaceId: string}, open = recoveryStores.get(workspaceId);
+          if (open && open.root !== root) throw new EngineRequestError(request.id, {code: "CONFLICT", message: "a recovery store is already open for this workspace", retry: "no"} as never);
+          recoveryStores.set(workspaceId, open ?? {root, handle: `recovery-${++recoveryOpens}`});
+          if (recoveryFaults.loseOpen) {recoveryFaults.loseOpen = false; throw new Error("Open reply lost.");}
+          return reply({workspaceHandle: recoveryStores.get(workspaceId)!.handle});
+        }
+        case "liveApplication.closeRecoveryStore": {
+          const open = [...recoveryStores].find(([, store]) => store.handle === request.workspace), failure = recoveryFaults.failClose;
+          if (failure) {recoveryFaults.failClose = undefined; throw failure;}
+          if (!open) throw new EngineRequestError(request.id, {code: "WORKSPACE_UNAVAILABLE", message: "workspace handle is unavailable", retry: "no"} as never);
+          recoveryStores.delete(open[0]);
+          return reply({closed: true});
+        }
         case "sync.createHostedReplica":
           if (replies.create) throw replies.create === "diverged" ? divergence(request.id) : replies.create;
           return reply({hosted: true});
@@ -662,7 +687,8 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   cleanup.push(() => host.close());
   // The activation pass publishes readiness before it pushes the hosted replica.
   if (!options.empty) await pushed.promise;
-  return {f, raw, host, document, workspace, target, pushed, unloads, replies, settlement, membership, keptOutbox, keptOutboxes, engine, spawned: () => spawn.mock.calls.length, client: () => client,
+  return {f, raw, host, document, workspace, target, pushed, unloads, replies, settlement, membership, keptOutbox, keptOutboxes, engine, recoveryStores, recoveryFaults,
+    spawned: () => spawn.mock.calls.length, client: () => client,
     ownerRequests: () => ownerRequests,
     ownerCalls: () => client.sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string; params: unknown})
       .filter(request => request.method.startsWith("liveApplication.")).map(request => [request.method, request.params]),
@@ -1278,6 +1304,157 @@ it("lets a stopped document go under a rotated identity although its old store's
   expect(k.row()).toMatchObject({identity: k.identity, copied: false});
 });
 
+// Proves: after an identity change, refusals kept in the earlier store are
+// read there, through one read-only recovery handle, never through an
+// attachment. The handle stays while a refusal in its store has no copy and
+// closes after the last copy. Since the engine opens one per workspace, a read
+// of another earlier store closes the open handle first, and a read its
+// caller abandons closes its handle too.
+it("reads an earlier store's kept edits through one recovery handle, and closes it after the last copy", async () => {
+  const o = await enrolledServiceHost(), k = keptEdits(o);
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  await o.host.close();
+  o.stop();
+  k.other("second-outbox", false);
+  const older = {replicationEpoch: "epoch-0", streamIdentity: "stream-0"};
+  o.f.storage.recordServiceKeptEdits({identity: older, outboxId: "kept-outbox", binding: o.binding, reason: "invalid-update", headDeliveryId: "refused", refusalKey: "older", nowMs: 1});
+  expect(o.f.storage.rotateWorkspaceIdentity({workspaceId: "workspace", ownerUserId: "owner", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 10})).toBe("rotated");
+  const restarted = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
+  cleanup.push(() => restarted.close());
+  // The workspace is attached under its new identity, in its new store, and the stopped document leaves it.
+  const rotatedRoot = join(o.f.root, "workspace-rotated"); await mkdir(rotatedRoot);
+  await restarted.update({workspaces: [{...o.workspace, root: rotatedRoot,
+    hostedReplication: {...o.workspace.hostedReplication!, identity: {replicationEpoch: "epoch-2", streamIdentity: "stream-2"}}}], documents: [], departing: [o.sibling]});
+  await vi.waitFor(() => expect(restarted.drained("workspace")).toBe(true));
+  const [earlierRoot, olderRoot] = [join(o.f.root, "earlier-store"), join(o.f.root, "older-store")];
+  const row = (outboxId: string, identity = k.identity) => o.f.storage.readServiceKeptEdits({workspaceId: "workspace", identity, outboxId})!;
+  // The entry header of a queue, which names the store that served it.
+  const store = async (kept: ReturnType<typeof row>, root: string, signal?: AbortSignal) => {
+    const header = await restarted.readKeptEditsPage(kept, undefined, root, signal) as {kind: string; snapshot: string};
+    expect(header).toMatchObject({kind: "page", part: "header"});
+    const entry = await restarted.readKeptEditsPage(kept, {snapshot: header.snapshot, part: "entryHeader", sequence: 1, offset: 0}, root, signal) as {bytesBase64: string};
+    return (JSON.parse(Buffer.from(entry.bytesBase64, "base64").toString("utf8")) as {appendKey: string}).appendKey;
+  };
+  const reads = k.engine("ydoc.ownerOutbox.readPending").length;
+  expect(await store(row("kept-outbox"), earlierRoot)).toBe(earlierRoot);
+  expect(await store(row("second-outbox"), earlierRoot)).toBe(earlierRoot);
+  expect(k.engine("liveApplication.openRecoveryStore").map(request => request.params)).toEqual([{root: earlierRoot, workspaceId: "workspace", ...k.identity}]);
+  expect(k.engine("ydoc.ownerOutbox.readPending").slice(reads).map(request => request.workspace)).toEqual(["recovery-1", "recovery-1", "recovery-1", "recovery-1"]);
+  // A copy of one refusal keeps the handle while another in its store waits; the last closes it.
+  for (const outboxId of ["kept-outbox", "second-outbox"]) {
+    expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId, generation: row(outboxId).generation})).toBe(true);
+    await restarted.releaseKeptEditsStore(row(outboxId));
+    expect(k.engine("liveApplication.closeRecoveryStore").map(request => request.workspace)).toEqual(outboxId === "kept-outbox" ? [] : ["recovery-1"]);
+  }
+  expect(o.recoveryStores.size).toBe(0);
+  // Another earlier store opens its own handle once the first closed.
+  expect(await store(row("kept-outbox"), earlierRoot)).toBe(earlierRoot);
+  expect(await store(row("kept-outbox", older), olderRoot)).toBe(olderRoot);
+  expect(k.engine("liveApplication.closeRecoveryStore").map(request => request.workspace)).toEqual(["recovery-1", "recovery-2"]);
+  expect([...o.recoveryStores.values()]).toEqual([{root: olderRoot, handle: "recovery-3"}]);
+  // An abandoned read closes its handle.
+  const abandoned = new AbortController(), parked = o.park("ydoc.ownerOutbox.readPending");
+  const reading = restarted.readKeptEditsPage(row("kept-outbox", older), undefined, olderRoot, abandoned.signal).catch(() => undefined);
+  await parked.entered.promise;
+  abandoned.abort(); parked.release.resolve();
+  await reading;
+  expect(k.engine("liveApplication.closeRecoveryStore").map(request => request.workspace)).toEqual(["recovery-1", "recovery-2", "recovery-3"]);
+  expect(o.recoveryStores.size).toBe(0);
+  // Nothing went through the attached store.
+  expect(k.engine("ydoc.ownerOutbox.readPending").slice(reads).some(request => request.workspace === "attached-handle")).toBe(false);
+});
+
+// A host restarted after an identity change with no live document, so nothing
+// registers it, and the refusal kept in the earlier store. Passes run once a minute.
+async function rotatedServiceHost() {
+  const o = await enrolledServiceHost(), k = keptEdits(o);
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  await o.host.close();
+  o.stop();
+  expect(o.f.storage.rotateWorkspaceIdentity({workspaceId: "workspace", ownerUserId: "owner", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 10})).toBe("rotated");
+  (o.f.config as unknown as {activation: {pollIntervalMs: number}}).activation.pollIntervalMs = 60_000;
+  await o.f.save();
+  const restarted = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
+  cleanup.push(() => restarted.close());
+  const earlier = k.row()!, root = join(o.f.root, "earlier-store");
+  const closes = () => k.engine("liveApplication.closeRecoveryStore").map(request => request.workspace);
+  return {...o, k, restarted, earlier, root, closes,
+    /** The header page of a kept queue, read from the store at `store`. */
+    read: (kept = earlier, store = root) => restarted.readKeptEditsPage(kept, undefined, store)};
+}
+
+// Proves: after an identity change, with no live document left and the relay
+// restarted, its owner still reads the refusal kept in the earlier store,
+// although no live registration exists. A host whose control changed, as
+// when it is retired, reads nothing.
+it("reads an earlier store's kept edits on a restarted host with no live documents", async () => {
+  const r = await rotatedServiceHost();
+  expect(r.f.storage.getLiveHostControl()?.registeredConnectionId).not.toBe(r.restarted.coordinate.connectionId);
+  await expect(r.read()).resolves.toMatchObject({kind: "page", part: "header"});
+  expect(r.k.engine("liveApplication.openRecoveryStore").map(request => request.params)).toEqual([{root: r.root, workspaceId: "workspace", ...r.k.identity}]);
+  const control = r.f.storage.getLiveHostControl()!;
+  vi.spyOn(r.f.storage, "getLiveHostControl").mockReturnValue({...control, configuredHostId: "another-host"});
+  await expect(r.read()).rejects.toThrow("Hosted service preparation was retired.");
+});
+
+// Proves: an open whose answer was lost leaves no handle stranded. Before
+// another earlier store of the workspace opens, the relay opens the first
+// store again, which answers with the handle the lost open made, and closes it.
+it("closes the handle of a recovery open whose answer was lost before another store opens", async () => {
+  const r = await rotatedServiceHost(), older = {replicationEpoch: "epoch-0", streamIdentity: "stream-0"}, olderRoot = join(r.f.root, "older-store");
+  r.f.storage.recordServiceKeptEdits({identity: older, outboxId: "kept-outbox", binding: r.binding, reason: "invalid-update", headDeliveryId: "refused", refusalKey: "older", nowMs: 1});
+  r.recoveryFaults.loseOpen = true;
+  await expect(r.read()).rejects.toThrow("Open reply lost.");
+  expect([...r.recoveryStores.values()]).toEqual([{root: r.root, handle: "recovery-1"}]);
+  await expect(r.read(r.f.storage.readServiceKeptEdits({workspaceId: "workspace", identity: older, outboxId: "kept-outbox"})!, olderRoot))
+    .resolves.toMatchObject({kind: "page", part: "header"});
+  expect(r.closes()).toEqual(["recovery-1"]);
+  expect([...r.recoveryStores.values()]).toEqual([{root: olderRoot, handle: "recovery-2"}]);
+});
+
+// Proves: a handle closes after 60 s without a page read. A close that fails,
+// on release or once idle, keeps the handle and closes it after the next idle period.
+it("closes an idle recovery handle after 60 s, and keeps one whose close failed until a later close", async () => {
+  const r = await rotatedServiceHost();
+  vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+  cleanup.push(async () => {vi.useRealTimers();});
+  await r.read();
+  await vi.advanceTimersByTimeAsync(59_999);
+  // A page read starts the idle period again.
+  await r.read();
+  await vi.advanceTimersByTimeAsync(59_999);
+  expect(r.closes()).toEqual([]);
+  await vi.advanceTimersByTimeAsync(1);
+  await vi.waitFor(() => expect(r.recoveryStores.size).toBe(0));
+  expect(r.closes()).toEqual(["recovery-1"]);
+  // The last copy's release fails, and so does the idle close after it.
+  await r.read();
+  expect(r.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: r.earlier.generation})).toBe(true);
+  r.recoveryFaults.failClose = new Error("Close reply lost.");
+  await expect(r.restarted.releaseKeptEditsStore(r.earlier)).rejects.toThrow("Close reply lost.");
+  expect([...r.recoveryStores.values()]).toEqual([{root: r.root, handle: "recovery-2"}]);
+  r.recoveryFaults.failClose = new Error("Close reply lost.");
+  await vi.advanceTimersByTimeAsync(60_000);
+  await vi.waitFor(() => expect(r.closes()).toHaveLength(3));
+  expect(r.recoveryStores.size).toBe(1);
+  await vi.advanceTimersByTimeAsync(60_000);
+  await vi.waitFor(() => expect(r.recoveryStores.size).toBe(0));
+  expect(r.closes()).toEqual(["recovery-1", "recovery-2", "recovery-2", "recovery-2"]);
+});
+
+// Proves: deleting a workspace closes its recovery handle before anything
+// removes its stores, and a close that fails fails the deletion, so the store stays.
+it("closes a deleted workspace's recovery handle first, and fails the deletion while that close fails", async () => {
+  const r = await rotatedServiceHost();
+  await r.read();
+  r.recoveryFaults.failClose = new Error("Close reply lost.");
+  await expect(r.restarted.deleteWorkspaces(["workspace"])).rejects.toThrow("Close reply lost.");
+  expect(r.recoveryStores.size).toBe(1);
+  await r.restarted.deleteWorkspaces(["workspace"]);
+  expect(r.recoveryStores.size).toBe(0);
+  expect(r.closes()).toEqual(["recovery-1", "recovery-1"]);
+});
+
 // Proves: an edit the engine applied but whose reply, and every ACK read after
 // it, the relay lost before Stop settles. The departure reads the engine's
 // ACK on its own registration, records it as the relay's tip and settles
@@ -1428,7 +1605,7 @@ it("keeps a moved document's queue readable while a replacement holds its old pa
   const restarted = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
   cleanup.push(() => restarted.close());
   const replacement = {...o.sibling, objectId: "another-object"};
-  const readable = async () => expect(await restarted.readKeptEditsPage(k.row()!, undefined)).toMatchObject({kind: "page", part: "header"});
+  const readable = async () => expect(await restarted.readKeptEditsPage(k.row()!, undefined, o.workspace.root)).toMatchObject({kind: "page", part: "header"});
   await restarted.update({workspaces: [o.workspace], documents: [replacement], departing: [o.sibling]});
   await vi.waitFor(() => expect(errors).toHaveBeenCalledWith("Service activation pass failed.", expect.stringContaining("recovery copy")));
   expect(restarted.retains(o.sibling)).toBe(true);

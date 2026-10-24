@@ -1203,10 +1203,10 @@ const deleteRetainedCopiesResultSchema = z.discriminatedUnion("ok", [
 // (`storedOn`). `recovery` is paused while they wait for the owner, retrying
 // while Try again waits for the server, stopping while a Stop waits for it,
 // stopped-kept or not-written after a Stop kept them, cannot-write once only
-// a recovery copy can return them, copied once a recovery copy of edits the
-// server keeps is saved, maybe by another of the owner's computers, and
-// unreachable while the server keeps them in an earlier copy of the
-// workspace that it cannot read.
+// a recovery copy can return them, and copied once a recovery copy of edits
+// the server keeps is saved, maybe by another of the owner's computers.
+// `earlier` marks edits the server keeps in an earlier copy of the workspace,
+// copied or not, which only a recovery copy can reach.
 const keptEditsStoredOnSchema = z.enum(["this-computer", "server"]);
 const liveKeptEditsResultSchema = z.discriminatedUnion("ok", [
   z.object({
@@ -1216,7 +1216,8 @@ const liveKeptEditsResultSchema = z.discriminatedUnion("ok", [
       reason: z.string().min(1),
       storedOn: keptEditsStoredOnSchema,
       incident: keptEditsIncidentSchema,
-      recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write", "copied", "unreachable"]),
+      recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write", "copied"]),
+      earlier: z.literal(true).optional(),
     }).strict()),
   }).strict(),
   rawFailureSchema,

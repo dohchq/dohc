@@ -8,6 +8,7 @@ import {startSelfHostedLiveHost, deleteSelfHostedWorkspaceRoots} from "./selfHos
 import {createServiceHostEnrollmentRoutes} from "./serviceHostEnrollmentRoutes";
 import {fenceAccount, initializeAccountDeletion} from "./storage/accountDeletion";
 import type {ServiceHostedSet} from "./serviceLiveHost";
+import type {ServiceKeptEdits} from "./storage/serviceKeptEdits";
 import type {ServiceActivationBlock} from "./serviceActivationDriver";
 import {fixture as ticketFixture, binding, scope} from "./liveTickets.test-helper";
 import {createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
@@ -78,6 +79,8 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
   let failUpdate: Error | undefined, refusedPath: string | undefined, holdUpdate: {entered: ReturnType<typeof deferred>; release: ReturnType<typeof deferred>} | undefined;
   let running: {holds(document: Document): boolean; diverge(workspaceId: string, detached: boolean): void; attached: Map<string, string>} | undefined;
   const starts: Array<{config: Configuration; configPath: string; close: ReturnType<typeof vi.fn<() => Promise<void>>>; controller: AbortController}> = [];
+  // Each page read of a kept queue, with the store it names.
+  const keptReads: Array<{outboxId: string; store: string}> = [];
   let live = 0, peak = 0;
   const startHost = vi.fn(async ({configPath}: {configPath: string}) => {
     await options.beforeStart?.();
@@ -125,7 +128,8 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
     }};
     // Its replica had its chance to retire the document once it is attached and no longer hosts it.
     const pulledAfterDeparture = (document: Document) => attached.has(document.workspaceId) && !holds(document);
-    return {invalidated: controller.signal, close, update, deleteWorkspaces, retains, pulledAfterDeparture, drained, detachDrained, isDocumentReady, onEvent: () => () => undefined,
+    const readKeptEditsPage = async (kept: ServiceKeptEdits, _cursor: unknown, store: string) => {keptReads.push({outboxId: kept.outboxId, store}); return {kind: "page"};};
+    return {invalidated: controller.signal, close, update, deleteWorkspaces, retains, pulledAfterDeparture, drained, detachDrained, isDocumentReady, readKeptEditsPage, onEvent: () => () => undefined,
       blocked: (document: Document) => holds(document) ? blocked.get(document.objectId) : undefined,
       unblock: (document: Document) => holds(document) && blocked.delete(document.objectId),
       diverged: () => [...diverged].map(([workspaceId, root]) => ({workspaceId, root}))} as never;
@@ -172,7 +176,7 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
     initializeAccountDeletion(f.storage as StorageContext, "fence-key");
     return fenceAccount(f.storage as StorageContext, "fence-key", ownerUserId, `${ownerUserId}@dohc.test`).manifest!;
   };
-  return {...f, host, history, data, starts, startHost, input, add, share, moment, waitStarted, waitUpdate, waitPasses, onError, frameChanges, updates, pending, attachedAfter, enrollment, events, fence,
+  return {...f, host, history, data, starts, startHost, input, add, share, moment, waitStarted, waitUpdate, waitPasses, onError, frameChanges, updates, pending, attachedAfter, enrollment, events, fence, keptReads,
     refusal, peak: () => peak, failNextUpdate(error: Error) {failUpdate = error;},
     /** Refuses every update that wants the path. */
     refuseAttach(path: string | undefined) {refusedPath = path;},
@@ -240,6 +244,27 @@ it("becomes available after reconciling an empty deployment without starting a d
   expect(f.host.unavailable).toBe(true);
   await vi.waitFor(() => expect(f.host.unavailable).toBe(false), {timeout: 10_000});
   expect(f.startHost).not.toHaveBeenCalled();
+});
+
+// Proves: an owner's recovery read starts the daemon when none runs, as after
+// an identity change left only earlier stores. Reads at once start one daemon,
+// each reads the store its row's identity names, not the workspace's current
+// store, and later reconciliations keep that daemon.
+it("starts its daemon for a recovery read while it hosts nothing, and reads the store of the row's identity", async () => {
+  const f = await fixture({empty: true});
+  await vi.waitFor(() => expect(f.host.unavailable).toBe(false), {timeout: 10_000});
+  const identity = {replicationEpoch: "epoch", streamIdentity: "stream"};
+  f.storage.recordServiceKeptEdits({identity, outboxId: "outbox", binding, reason: "invalid-update", headDeliveryId: "delivery", refusalKey: "refusal", nowMs: 1});
+  expect(f.storage.rotateWorkspaceIdentity({workspaceId: scope.workspaceId, ownerUserId: "owner-1", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 20})).toBe("rotated");
+  const kept = f.storage.readServiceKeptEdits({workspaceId: scope.workspaceId, identity, outboxId: "outbox"})!;
+  expect(f.startHost).not.toHaveBeenCalled();
+  await expect(Promise.all([f.host.keptEdits.page(kept, undefined), f.host.keptEdits.page(kept, undefined)])).resolves.toEqual([{kind: "page"}, {kind: "page"}]);
+  expect(f.startHost).toHaveBeenCalledOnce();
+  expect(f.keptReads).toEqual([{outboxId: "outbox", store: join(f.data, storeName(scope.workspaceId))}, {outboxId: "outbox", store: join(f.data, storeName(scope.workspaceId))}]);
+  expect(f.keptReads[0]!.store).not.toBe(join(f.data, storeName(scope.workspaceId, "epoch-2", "stream-2")));
+  await f.waitPasses();
+  expect(f.startHost).toHaveBeenCalledOnce();
+  expect(f.starts[0]!.close).not.toHaveBeenCalled();
 });
 
 it("starts one empty daemon and attaches the first shared document's workspace to a hosted replica", async () => {

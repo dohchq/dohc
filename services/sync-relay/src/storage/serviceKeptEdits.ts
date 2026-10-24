@@ -7,7 +7,9 @@ import {parseWorkspaceId} from "../requestInputs";
 // Owner queues the service host keeps refused, one row per queue, so the owner
 // can see and recover them after the host unloads, retires or restarts. The
 // host's engine holds the bytes, in the store of the workspace identity the
-// row names. An outbox ID names a queue only within one store: a store of a
+// row names. That identity never changes and locates the store, so a row
+// still reaches its bytes after the workspace moves to a later identity.
+// An outbox ID names a queue only within one store: a store of a
 // later identity can hold another queue with the same ID, so the identity is
 // part of the key. Each refusal gets a new row whose `generation` the relay never
 // hands out again, so a recovery copy, a Try again or a confirmation names
@@ -238,4 +240,11 @@ export function observeServiceKeptEditsCheckpoint(storage: StorageContext, queue
 export function serviceKeptEditsHeld(storage: StorageContext, document: {workspaceId: string; objectId: string}, identity: ServiceKeptEditsIdentity): boolean {
   return storage.db.prepare(`SELECT 1 FROM ${SERVICE_KEPT_EDITS} WHERE workspace_id=? AND object_id=? AND replication_epoch=? AND stream_identity=? AND NOT (${COPIED})`)
     .get(document.workspaceId, document.objectId, identity.replicationEpoch, identity.streamIdentity) !== undefined;
+}
+
+/** Whether any refusal kept in the store of `identity` has no recovery copy, whatever its document. */
+export function serviceKeptEditsStoreHeld(storage: StorageContext, workspaceId: string, identity: ServiceKeptEditsIdentity): boolean {
+  storage.captureStanding();
+  return storage.db.prepare(`SELECT 1 FROM ${SERVICE_KEPT_EDITS} WHERE workspace_id=? AND replication_epoch=? AND stream_identity=? AND copied=0`)
+    .get(parseWorkspaceId(workspaceId), identity.replicationEpoch, identity.streamIdentity) !== undefined;
 }

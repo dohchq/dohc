@@ -269,16 +269,31 @@ describe("edits the server refused", () => {
     expect(bridge.retryOwnerLiveQuarantine).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId, objectId: "object-1", incident: "server:outbox:1"});
   });
 
-  // Edits the server keeps in an earlier copy of the workspace: neither Save nor Try again can reach them, so the notice offers neither.
-  it("says the server cannot read edits it kept in an earlier copy of the workspace, and offers neither Save nor Try again", async () => {
+  // Edits the server keeps in an earlier copy of the workspace: Try again cannot reach them, so the notice offers only Save,
+  // before and after a recovery copy of them is saved.
+  it("says the server kept edits in an earlier copy of the workspace, and offers Save but never Try again", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.getSyncStatus = vi.fn(async () => quarantined({...quarantine, storedOn: "server" as const, incident: "server:outbox:1", recovery: "unreachable"}));
+    const earlier = {...quarantine, storedOn: "server" as const, incident: "server:outbox:1", earlier: true as const};
+    let status = quarantined(earlier);
+    bridge.getSyncStatus = vi.fn(async () => status);
+    bridge.saveOwnerLiveRecoveryCopy = vi.fn(async () => {
+      status = quarantined({...earlier, recovery: "copied"});
+      return {copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "server" as const, keptEdits: "copied" as const};
+    });
     renderShell(bridge);
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(within(toast).getByText(TITLE)).toBeTruthy();
-    expect(within(toast).getByText("The server could not accept your edits. It kept them in an earlier copy of this workspace, which it can't read now. Contact the server's operator.")).toBeTruthy();
-    expect(within(toast).queryByRole("button", {name: "Save recovery copy"})).toBeNull();
+    expect(within(toast).getByText("The server could not accept your edits. It kept them in an earlier copy of this workspace. Save a recovery copy to get them back.")).toBeTruthy();
     expect(within(toast).queryByRole("button", {name: "Try again"})).toBeNull();
+    const user = userEvent.setup();
+    await user.click(within(toast).getByRole("button", {name: "Save recovery copy"}));
+    expect(bridge.saveOwnerLiveRecoveryCopy).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId, path: "notes/plan.md", incident: "server:outbox:1"});
+    act(() => bridge.emitWorkspaceActivity());
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const copied = await within(notices).findByText("The server could not accept your edits. A recovery copy of them is saved, so the server may now release them.");
+    expect(within(copied.closest("li")!).getByRole("button", {name: "Save recovery copy"})).toBeTruthy();
+    expect(within(copied.closest("li")!).queryByRole("button", {name: "Try again"})).toBeNull();
   });
 
   // The release committed, then settlement could not write the file.

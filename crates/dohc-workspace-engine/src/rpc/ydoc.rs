@@ -827,7 +827,19 @@ impl EngineService {
                 "owner-outbox-page-exceeds-wire-limit",
             ));
         }
-        let open = self.open(handle.as_ref())?;
+        // An earlier store open for recovery has no workspace actor; its handle
+        // names the store and its identity. The read's lease moves into the
+        // worker, so the store stays open for recovery until the worker ends,
+        // even once this request is cancelled. An earlier store is never
+        // written, so its pages are read as they are.
+        enum Source {
+            Recovery(crate::rpc::configured_live_host::RecoveryRead),
+            Current(Arc<OpenWorkspace>),
+        }
+        let source = match self.recovery_read(handle.as_ref()).transpose()? {
+            Some(read) => Source::Recovery(read),
+            None => Source::Current(self.open(handle.as_ref())?),
+        };
         let cancellation = OperationCancellation::new(ctx);
         let token = cancellation.token();
         let read_page = move |open: Arc<OpenWorkspace>, cursor: Option<_>, outbox_id: String| async move {
@@ -846,6 +858,31 @@ impl EngineService {
             .map_err(|_| WireError::new(ErrorCode::Internal, "owner-outbox-worker-failed"))
         };
         let read = async move {
+            let open = match source {
+                Source::Current(open) => open,
+                Source::Recovery(read) => {
+                    let (outbox_id, cursor) = (params.outbox_id, params.cursor);
+                    return tokio::task::spawn_blocking(move || {
+                        let store =
+                            dohc_engine_storage::EngineStore::open_read_only(&read.database_path)?;
+                        let page = dohc_engine_collab::read_pending_hosted_owner_outbox_page(
+                            &store,
+                            &read.workspace_id,
+                            &read.identity,
+                            &outbox_id,
+                            cursor,
+                            max_bytes,
+                        );
+                        // The lease ends only once the store is closed.
+                        drop(store);
+                        drop(read);
+                        page
+                    })
+                    .await
+                    .map_err(|_| WireError::new(ErrorCode::Internal, "owner-outbox-worker-failed"))?
+                    .map_err(map_owner_outbox);
+                }
+            };
             let first = read_page(
                 open.clone(),
                 params.cursor.clone(),

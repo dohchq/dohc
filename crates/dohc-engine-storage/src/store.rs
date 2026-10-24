@@ -239,6 +239,16 @@ impl EngineStore {
         })
     }
 
+    /// Whether every migration this build defines completed in the store. A
+    /// read-only open runs none, so this build's queries could misread a
+    /// store an older build last opened.
+    pub fn is_fully_migrated(&self) -> Result<bool, StorageError> {
+        crate::migration::all_migrations_complete(
+            &self.conn,
+            crate::migration::BASELINE_MIGRATIONS,
+        )
+    }
+
     /// Count this connection's SQLite work into `work` for as long as someone
     /// else holds it; `None` stops counting. The weak reference means the
     /// counter never outlives its owner, and a dead one costs one failed

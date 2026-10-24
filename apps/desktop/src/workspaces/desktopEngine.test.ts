@@ -1691,51 +1691,69 @@ describe("server owner peer lifecycle", () => {
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
   });
 
-  // Proves: a refusal the server answers changed or gone loses its cached row,
-  // and one it cannot reach reads as unreachable and offers neither Save nor Try again.
-  it("drops a server row the server answers changed, and marks one it cannot reach", async () => {
-    let answer: "changed" | "unreachable" = "changed";
+  // Proves: a refusal the server answers changed or gone loses its cached row.
+  // A Try again the server refuses because an earlier copy of the workspace
+  // keeps the edits leaves the row saveable, and a later Try again of that row
+  // is refused here without asking the server again.
+  it("drops a server row the server answers changed, and marks one whose edits an earlier copy keeps", async () => {
+    let answer: "changed" | "earlier" = "changed";
     const kept = [{objectId: "object", path: "notes/plan.md", outboxId: "server-outbox", reason: "invalid-update", generation: 1, store: "store", recovery: "paused"},
       {objectId: "object-2", path: "notes/other.md", outboxId: "server-outbox-2", reason: "invalid-update", generation: 2, store: "store", recovery: "paused"}];
-    const {f, credentials, workspace} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}], {kept: () => kept,
-      keptEdits: async () => {throw new ServerKeptEditsConflict(answer === "unreachable");}});
+    const keptEdits = vi.fn(async () => {throw new ServerKeptEditsConflict(answer === "earlier");});
+    const {f, credentials, workspace} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}], {kept: () => kept, keptEdits});
     ownerDeliveryMock.pass.mockResolvedValue("frozen");
     try {
       expect(await f.engine.start()).toBe(true);
       await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toHaveLength(2));
       await expect(f.engine.retryOwnerLiveQuarantine(await workspace(), "object", "server:server-outbox:1")).rejects.toThrow("This document changed.");
       expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{objectId: "object-2"}]);
-      answer = "unreachable";
-      await expect(f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "notes/other.md")).rejects.toThrow("earlier copy of this workspace");
-      expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{objectId: "object-2", recovery: "unreachable"}]);
-      await expect(f.engine.retryOwnerLiveQuarantine(await workspace(), "object-2", "server:server-outbox-2:2")).rejects.toThrow("earlier copy of this workspace");
+      answer = "earlier";
+      await expect(f.engine.retryOwnerLiveQuarantine(await workspace(), "object-2", "server:server-outbox-2:2")).rejects.toThrow("Save a recovery copy to get them back.");
+      expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{objectId: "object-2", recovery: "paused", earlier: true}]);
+      const asked = keptEdits.mock.calls.length;
+      await expect(f.engine.retryOwnerLiveQuarantine(await workspace(), "object-2", "server:server-outbox-2:2")).rejects.toThrow("Save a recovery copy to get them back.");
+      expect(keptEdits).toHaveBeenCalledTimes(asked);
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
   });
 
   // Proves: the server's rows of two copies of the workspace that share an
-  // outbox ID stay two rows, and saving the current copy's row confirms that
-  // row alone, leaving the earlier copy's row as it was.
-  it("keeps the server's rows of two copies apart when they share an outbox ID", async () => {
-    const pages = servedPages({...recoveryQueue(keptBinding).queue, outboxId: "server-outbox"});
+  // outbox ID stay two rows. Saving the earlier copy's row reads that copy's
+  // queue, writes its package and confirms that row alone, which then reads as
+  // copied and still earlier, so it offers no Try again; the current copy's
+  // row stays as it was until its own save.
+  it("saves the earlier copy's row of two copies that share an outbox ID from that copy, and confirms only that row", async () => {
+    const {both, first} = twoEditQueue(keptBinding);
+    const served = new Map([[1, servedPages({...both, outboxId: "server-outbox"})], [2, servedPages({...first, outboxId: "server-outbox"})]]);
     const row = {objectId: "object", path: "notes/plan.md", outboxId: "server-outbox", reason: "invalid-update"};
-    let kept = [{...row, generation: 1, store: "earlier", recovery: "unreachable"}, {...row, generation: 2, store: "current", recovery: "paused"}];
+    let kept = [{...row, generation: 1, store: "earlier", recovery: "paused", earlier: true}, {...row, generation: 2, store: "current", recovery: "paused"}];
     const actions: unknown[] = [];
     const {f, credentials, workspace} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}], {kept: () => kept,
       keptEdits: async input => {
-        if (input.action === "page") return {ok: true, page: pages(input.cursor)};
+        if (input.action === "page") return {ok: true, page: served.get(input.generation)!(input.cursor)};
         actions.push(input);
         kept = kept.map(candidate => candidate.generation === input.generation ? {...candidate, recovery: "copied"} : candidate);
         return {ok: true};
       }});
     ownerDeliveryMock.pass.mockResolvedValue("frozen");
+    const updates = async (packagePath: string) =>
+      (JSON.parse(await readFile(join(f.rows.get("owner")!.rootPath, packagePath), "utf8")) as {updates: unknown[]}).updates.length;
     try {
       expect(await f.engine.start()).toBe(true);
       await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([
-        {incident: "server:server-outbox:1", recovery: "unreachable"}, {incident: "server:server-outbox:2", recovery: "paused"}]));
-      expect(await f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "notes/plan.md", "server:server-outbox:2")).toMatchObject({keptEdits: "copied"});
-      expect(actions).toEqual([{action: "copied", outboxId: "server-outbox", generation: 2, checkpointDigest: expect.stringMatching(/^[0-9a-f]{64}$/)}]);
+        {incident: "server:server-outbox:1", recovery: "paused", earlier: true}, {incident: "server:server-outbox:2", recovery: "paused"}]));
+      const earlier = await f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "notes/plan.md", "server:server-outbox:1");
+      expect(earlier).toMatchObject({storedOn: "server", keptEdits: "copied"});
+      expect(await updates(earlier.packagePath)).toBe(2);
+      // MERGE-REVIEW (coordinator): round 6 makes `copied` carry the checkpoint digest the copy read; check what this earlier-store copy sends.
+      expect(actions).toEqual([{action: "copied", outboxId: "server-outbox", generation: 1, checkpointDigest: expect.anything()}]);
       expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([
-        {incident: "server:server-outbox:1", recovery: "unreachable"}, {incident: "server:server-outbox:2", recovery: "copied"}]);
+        {incident: "server:server-outbox:1", recovery: "copied", earlier: true}, {incident: "server:server-outbox:2", recovery: "paused"}]);
+      expect(f.engine.ownerLiveQuarantines("owner")[1]).not.toHaveProperty("earlier");
+      await expect(f.engine.retryOwnerLiveQuarantine(await workspace(), "object", "server:server-outbox:1")).rejects.toThrow("Save a recovery copy to get them back.");
+      expect(actions).toHaveLength(1);
+      const current = await f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "notes/plan.md", "server:server-outbox:2");
+      expect(await updates(current.packagePath)).toBe(1);
+      expect(actions).toEqual([{action: "copied", outboxId: "server-outbox", generation: 1}, {action: "copied", outboxId: "server-outbox", generation: 2}]);
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
   });
 
