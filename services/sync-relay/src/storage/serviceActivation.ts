@@ -13,7 +13,7 @@ import { attachLiveJournalHistory, requireLiveJournalHistory, type LiveJournalHi
 import { authorityInteger, currentLiveDocumentBinding, registerOrdinaryActivationBaselineInTransaction } from "./liveDocumentAuthority";
 import { initialAcceptedHistoryDigest } from "../liveAcceptedHistory";
 import { LIVE_DELIVERY_OWNERS } from "./liveCommittedDeliverySchema";
-import { restoreInProgress, SERVICE_HOST_ENROLLMENTS } from "./serviceHostEnrollment";
+import { forgetIdleServiceHostUploads, restoreInProgress, SERVICE_HOST_ENROLLMENTS } from "./serviceHostEnrollment";
 import type { RetirementKey } from "./serviceActivationRetirement";
 import {verifyOrdinaryActivationCut,type OrdinaryActivationBounds} from "./ordinaryActivationSource";
 export {ServiceActivationStaleCut} from "./ordinaryActivationSource";
@@ -215,6 +215,7 @@ export class ServiceActivationStore {
         .run(Math.max(nowMs, authorityInteger(row.retire_requested_at_ms)), boundaryJson, charge, namespace, key.activationId);
       const usage = this.storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge, document.workspaceId);
       if (retired.changes !== 1 || usage.changes !== 1) throw new Error("Service activation retirement is damaged.");
+      forgetIdleServiceHostUploads(this.storage, document.workspaceId);
       return {status: "retired", replayed: false};
     });
   }

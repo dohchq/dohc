@@ -10,7 +10,7 @@ import {canonicalLiveSelector, currentLiveDocumentMoment} from "./liveDocumentAu
 import {LIVE_RESTORE_OPERATIONS} from "./liveRestoreOperationSchema";
 import {assertWorkspaceQuota} from "./workspaces";
 import {forgetServiceHostUploads} from "./serviceHostUploads";
-import {OPEN_RETIREMENT, openServiceActivationRetirement, serviceActivationRetirementOpen} from "./serviceActivationRetirement";
+import {listServiceActivationRetirements, OPEN_RETIREMENT, openServiceActivationRetirement, serviceActivationRetirementOpen} from "./serviceActivationRetirement";
 import {SERVICE_ACTIVATIONS} from "./serviceActivationSchema";
 import {badRequest, notFound, relayError} from "../errors";
 
@@ -470,8 +470,8 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
     const retired = !enabled && (current.retired || ownerStop === "retire");
     storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop=?,enabled=?,retired=?,host_drained_at_ms=?,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
       .run(ownerStop, Number(enabled), Number(retired), input.enabled ? null : current.hostDrainedAtMs, Math.max(nowMs, current.updatedAtMs), workspaceId, current.objectId);
-    // Stop retires at once, so the release that clears upload proof never sees this row.
-    if (!currentServiceHostWorkspace(storage, workspaceId)) forgetServiceHostUploads(storage, workspaceId);
+    // Stop retires at once, so the release that clears upload proof never sees this row. The retirement it opened keeps that proof until it completes.
+    forgetIdleServiceHostUploads(storage, workspaceId);
     return {...read(storage, workspaceId, current.path)!, ...(acceptedCursor === undefined ? {} : {acceptedCursor})};
   });
 }
@@ -521,9 +521,19 @@ export function releaseServiceHostEnrollment(storage: StorageContext, input: {wo
     if (!current.retired && !uncovered && !(current.enabled && current.ownerStop)) return null;
     storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET enabled=0,retired=?,host_drained_at_ms=COALESCE(host_drained_at_ms,?),updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
       .run(Number(current.retired || uncovered || current.ownerStop === "retire"), nowMs, Math.max(nowMs, current.updatedAtMs), current.workspaceId, current.objectId);
-    if (!currentServiceHostWorkspace(storage, current.workspaceId)) forgetServiceHostUploads(storage, current.workspaceId);
+    forgetIdleServiceHostUploads(storage, current.workspaceId);
     return read(storage, current.workspaceId, current.path);
   });
+}
+
+/**
+ * Ends the host's upload proof once the workspace has no enabled enrollment
+ * and no document still settling, whose verified output may name those bytes.
+ */
+export function forgetIdleServiceHostUploads(storage: StorageContext, workspaceId: string): void {
+  if (!currentServiceHostWorkspace(storage, workspaceId) && !listServiceActivationRetirements(storage, workspaceId).length) {
+    forgetServiceHostUploads(storage, workspaceId);
+  }
 }
 
 /**

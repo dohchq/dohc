@@ -24,6 +24,10 @@ import {openServiceActivationRetirement,readServiceActivationRetirement} from '.
 import {allowsServiceActivation} from '../../../services/sync-relay/src/storage/serviceActivationAccess.js'
 import {readServiceActivationOrigin} from '../../../services/sync-relay/src/storage/serviceActivationOrigin.js'
 import {authorizeServiceHostReplication,deriveServiceHostBearer} from '../../../services/sync-relay/src/serviceHostCredential.js'
+import {createServiceHostReplication} from '../../../services/sync-relay/src/serviceHostReplication.js'
+import {SERVICE_HOST_ORIGIN_PREFIX} from '../../../services/sync-relay/src/relayLogInputs.js'
+import {canonicalVersionedAcceptedMetadata,initialAcceptedHistoryDigest} from '../../../services/sync-relay/src/liveAcceptedHistory.js'
+import {stableJsonStringify} from '../../../services/sync-relay/src/canonicalJson.js'
 
 const {DatabaseSync}=createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite')
 const hash=(bytes:Uint8Array)=>createHash('sha256').update(bytes).digest('hex')
@@ -630,7 +634,8 @@ function reopen(f:ReturnType<typeof fixture>,fence:number){
 }
 const ownerTip=(f:ReturnType<typeof fixture>)=>Number(f.raw.prepare('SELECT tip_cursor FROM sync_relay_live_delivery_owners').get()!.tip_cursor)
 // Admits an owner edit after the seed for the next drain to apply natively.
-function commitEdit(f:ReturnType<typeof fixture>){
+const commitEdit=(f:ReturnType<typeof fixture>)=>admitEdit(f).metadata.accepted.receipt
+function admitEdit(f:ReturnType<typeof fixture>){
   const current=f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor}),cut=f.storage.readLiveUpdateJournalCut({document:f.document})
   if(current.kind!=='current' || cut.kind!=='cut')throw new Error('Missing owner authority')
   const doc=new Y.Doc();Y.applyUpdate(doc,f.capture.fullState);const before=Y.encodeStateVector(doc)
@@ -641,7 +646,7 @@ function commitEdit(f:ReturnType<typeof fixture>){
   const committed=f.storage.commitLiveUpdateJournal({host,actor,expectedAuthority:current.authority,
     metadata:{deliveryId:'edit',updateDigest:hash(bytes),binding:current.binding},cutToken:cut.cut,validation,updateBytes:bytes,receivedAtMs:5})
   if(!committed.admitted)throw new Error(JSON.stringify(committed.result))
-  return committed.admitted.metadata.accepted.receipt
+  return committed.admitted
 }
 // Native replies for the resumed, adopted service owner. `park` holds the next
 // call to one method after it enters, until the test releases it.
@@ -1171,7 +1176,7 @@ it('stops fencing a document with an open retirement once the workspace identity
     f.raw.exec("UPDATE sync_relay_service_host_enrollments SET replication_epoch='next-epoch',stream_identity='next-stream',owner_stop=NULL,enabled=1,retired=0,host_drained_at_ms=NULL")
     expect(f.storage.serviceHostDocumentEnabled(f.document)).toBe(true)
     expect(f.storage.readServiceHostFeedScope('workspace')?.settling).toEqual(new Map())
-    // Only the old lineage's staleness refuses it now; a new activation registers a new lineage.
+    // Only the old lineage's staleness refuses it now. Re-enrolling, and a successor lineage after an identity change, aren't supported yet.
     expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor})).toEqual({kind:'refused',reason:'stale-document'})
   }finally{f.close()}
 })
@@ -1190,6 +1195,196 @@ it("returns the original F to a duplicate Stop after the document's current line
         baseline_projected_byte_length,'${'b'.repeat(64)}',baseline_bytes,'current','open',restore_fence_generation,20,NULL FROM sync_relay_live_documents`)
     expect(stopDocument(f,30)).toMatchObject({acceptedCursor:edit.journalCursor})
     expect(retirement(f.storage)).toEqual(recorded)
+  }finally{f.close()}
+})
+
+const HOST_ORIGIN=`${SERVICE_HOST_ORIGIN_PREFIX}native`
+type Row=[string,Record<string,unknown>]
+// The service host's feed once Stop opened the retirement: the owner applied
+// the seed, and the edit accepted after it, at F, waits for its application.
+async function retiringFeed(f:ReturnType<typeof fixture>){
+  enroll(f);completeActivation(f);const edit=admitEdit(f)
+  const bearer=deriveServiceHostBearer(f.storage.currentServiceHostWorkspace('workspace')!,credential)
+  const handle=createServiceHostReplication({storage:f.storage,prefix:'dohc-service-v1.',hostedFeed:true,
+    authorize:input=>authorizeServiceHostReplication(f.storage,{...credential,...input})})
+  stopDocument(f,10)
+  const request=(method:string,suffix:string,body?:BodyInit,type='application/json')=>handle(new Request(`https://relay.test/sync/workspace/hosted/${suffix}`,
+    {method,headers:{authorization:`Bearer ${bearer}`,...(body===undefined?{}:{'content-type':type})},...(body===undefined?{}:{body})}))
+  const push=async(rows:Row[],firstSeq:number)=>{
+    const response=await request('POST','log',JSON.stringify({replicationEpoch:'epoch',streamIdentity:'stream',originId:HOST_ORIGIN,
+      ops:rows.map(([opKind,payload],index)=>({originSeq:firstSeq+index,opKind,recordedAtMs:20,payload}))}))
+    return {status:response.status,body:await response.json() as Record<string,unknown>}
+  }
+  const upload=async(bytes:Uint8Array)=>{
+    const response=await request('PUT',`blobs/${hash(bytes)}`,new Uint8Array(bytes),'application/octet-stream')
+    expect(response.status).toBe(200)
+    return await response.json() as Record<string,unknown>
+  }
+  const coordinate=(originSeq:number)=>f.raw.prepare('SELECT op_kind,relay_admission FROM sync_relay_log WHERE origin_id=? AND origin_seq=?').get(HOST_ORIGIN,originSeq)
+  const receipt=edit.metadata.accepted.receipt
+  const editBytes=new Uint8Array(f.raw.prepare('SELECT update_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?').get(receipt.journalCursor)!.update_bytes as Uint8Array)
+  // Stands in for reconciliation recording that the retiring owner applied the edit.
+  const applyEdit=()=>f.raw.prepare('UPDATE sync_relay_live_delivery_owners SET tip_cursor=?,tip_receipt_json=?').run(receipt.journalCursor,JSON.stringify(receipt))
+  const ydocRow=(bytes:Uint8Array,changes:Record<string,unknown>={}):Row=>['ydoc.update',{versionId:'main',objectId:'object',path:'docs/a.md',contentKind:'richdoc',
+    isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(bytes),...changes}]
+  const refusals=(...rows:Array<[number,string,string]>)=>rows.map(([originSeq,opKind,reason])=>({originId:HOST_ORIGIN,originSeq,opKind,reason}))
+  return {edit,receipt,request,push,upload,coordinate,editBytes,applyEdit,ydocRow,refusals}
+}
+const departed=(opKind:string)=>({op_kind:opKind,relay_admission:'departed'})
+const markdownOf=(f:ReturnType<typeof fixture>,state:Uint8Array)=>{
+  const projected=validateBaseline({document:f.document,currentPath:'docs/a.md',checkpoint:state})
+  if(projected.kind!=='accepted')throw new Error(JSON.stringify(projected))
+  return new TextEncoder().encode(projected.evidence.projectedMarkdown)
+}
+
+// Proves: a retiring document's host may publish its baseline, its retained
+// source state and source moment, each as a departed row that moves no
+// projection; anything else of the same document is refused at its coordinate.
+it("admits only a retiring document's verified Y.Doc rows and source moment",async()=>{
+  const f=fixture();try{
+    const r=await retiringFeed(f)
+    const source=markdownOf(f,f.capture.fullState),stray=new TextEncoder().encode('unproved bytes')
+    expect(hash(source)).toBe(f.capture.source.sourceDigest)
+    for(const bytes of [f.capture.baselineBytes,f.capture.fullState,source,stray])await r.upload(bytes)
+    const moment=(changes:Record<string,unknown>={}):Row=>['moment.append',{versionId:'main',objectId:'object',momentId:f.capture.source.sourceMomentId,path:'docs/a.md',
+      operation:'write',payloadAfterPath:'docs/a.md',payloadAfterContentKind:'text',payloadAfterBlobSha256:hash(source),payloadAfterByteLength:source.length,...changes}]
+    const rows=[r.ydocRow(f.capture.baselineBytes,{isBaseState:true}),r.ydocRow(f.capture.fullState),moment(),
+      r.ydocRow(f.capture.fullState,{lineageClaimId:'b'.repeat(64)}),r.ydocRow(stray),r.ydocRow(f.capture.baselineBytes),moment({momentId:'another-moment'}),
+      moment({operation:'rename',path:'docs/b.md',payloadAfterPath:'docs/b.md',beforePath:'docs/a.md'}),moment({operation:'delete'}),moment({beforeObjectId:'other-object'})]
+    const answer=await r.push(rows,0)
+    expect(answer).toMatchObject({status:200,body:{inserted:10}})
+    expect(answer.body.refusals).toEqual(r.refusals([3,'ydoc.update','unproved-retirement-output'],[4,'ydoc.update','unproved-retirement-output'],
+      [5,'ydoc.update','unproved-retirement-output'],[6,'moment.append','unproved-retirement-output'],[7,'moment.append','outside-hosted-documents'],
+      [8,'moment.append','outside-hosted-documents'],[9,'moment.append','outside-hosted-documents']))
+    for(const originSeq of [0,1,2])expect(r.coordinate(originSeq)).toEqual(departed(rows[originSeq]![0]))
+    expect(f.raw.prepare('SELECT moment_id FROM sync_relay_object_moments WHERE moment_id=?').get(f.capture.source.sourceMomentId)).toBeUndefined()
+  }finally{f.close()}
+})
+
+// Proves: an application row and its authorless audit, in separate pushes,
+// retry until the retiring owner applied them, keeping their coordinates; then
+// publish as departed rows. Past F the same rows are refused.
+it('retries a retiring application until its owner applied it, confirms its authorless audit in a later push, and refuses both beyond F',async()=>{
+  const f=fixture();try{
+    const r=await retiringFeed(f)
+    await r.upload(r.editBytes)
+    const content=r.ydocRow(r.editBytes)
+    expect(await r.push([content],0)).toMatchObject({status:503,body:{code:'settlement_proof_budget'}})
+    expect(f.storage.maxOriginSeq('workspace',HOST_ORIGIN)).toBe(-1)
+    r.applyEdit()
+    expect(await r.push([content],0)).toMatchObject({status:200,body:{inserted:1}})
+    expect(r.coordinate(0)).toEqual(departed('ydoc.update'))
+    const row=f.raw.prepare('SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?').get(r.receipt.journalCursor)!
+    const record={kind:'application',relayDatabaseNamespace:'history',eventCount:Number(row.accepted_event_count),evidenceDigest:String(row.accepted_evidence_digest),
+      updateByteLength:r.editBytes.length,metadata:canonicalVersionedAcceptedMetadata(r.edit.metadata),sourceApplication:null,sourceRestore:null,
+      contentCoordinate:{originId:HOST_ORIGIN,originSeq:0}}
+    expect(record.metadata.authorSnapshot??[]).toEqual([])
+    const bytes=new TextEncoder().encode(JSON.stringify(record));await r.upload(bytes)
+    const audit:Row=['live.audit.application',{relayDatabaseNamespace:'history',mainVersionId:'main',objectId:'object',lineageClaimId:f.document.lineageClaimId,
+      eventCount:record.eventCount,updateBlobSha256:r.receipt.updateDigest,
+      manifest:{formatVersion:1,recordDigest:hash(bytes),byteLength:bytes.length,chunks:[{sha256:hash(bytes),byteLength:bytes.length}]}}]
+    expect(await r.push([audit],1)).toMatchObject({status:200,body:{inserted:1}})
+    expect(r.coordinate(1)).toEqual(departed('live.audit.application'))
+    // Before the owner applied it, the audit waits too.
+    f.raw.exec('UPDATE sync_relay_live_delivery_owners SET tip_cursor=tip_cursor-1')
+    expect(await r.push([audit],2)).toMatchObject({status:503})
+    r.applyEdit()
+    // The edit is past a lower F.
+    f.raw.exec('UPDATE sync_relay_service_activations SET retire_accepted_cursor=retire_accepted_cursor-1')
+    expect((await r.push([content,audit],2)).body).toMatchObject({inserted:2,refusals:r.refusals([2,'ydoc.update','unproved-retirement-output'],
+      [3,'live.audit.application','unproved-retirement-output'])})
+  }finally{f.close()}
+})
+
+// Proves: a settlement audit is proved on its own, before its moment arrives
+// in a later push; both wait for the owner's applied tip; an invalid record
+// proves nothing, as an audit or a moment.
+it('proves a retiring settlement audit before its later moment, and refuses an invalid settlement',async()=>{
+  const f=fixture();try{
+    const r=await retiringFeed(f)
+    const doc=new Y.Doc({gc:false});Y.applyUpdate(doc,f.capture.fullState);Y.applyUpdate(doc,r.editBytes)
+    const state=Y.encodeStateAsUpdate(doc);doc.destroy()
+    const markdown=markdownOf(f,state),before=markdownOf(f,f.capture.baselineBytes)
+    for(const bytes of [state,markdown,before])await r.upload(bytes)
+    const row=f.raw.prepare('SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?').get(r.receipt.journalCursor)!
+    const record={settlementId:'retiring-settlement',relayDatabaseNamespace:'history',binding:r.edit.metadata.accepted.binding,previousCursor:0,
+      terminalCursor:r.receipt.journalCursor,acceptedEventCount:Number(row.accepted_event_count),
+      acceptedIntervalDigest:hash(Buffer.from(JSON.stringify(['live-settlement-accepted-interval-v1',['history','workspace','main','object',f.document.lineageClaimId],
+        [0,0,initialAcceptedHistoryDigest('history',f.document)],[Number(row.accepted_event_count),r.receipt.journalCursor,row.accepted_evidence_digest]]))),
+      momentId:'retiring-settlement-moment',markdownDigest:hash(markdown),acceptedStateBlobSha256:hash(state)}
+    const reference=(value:typeof record)=>({formatVersion:1,recordDigest:hash(Buffer.from(stableJsonStringify(value))),record:value})
+    const audit=(value=record):Row=>['live.audit.settlement',reference(value)]
+    const moment=(value=record):Row=>['moment.append',{momentId:value.momentId,objectId:'object',versionId:'main',path:'docs/a.md',operation:'write',
+      payloadBeforePath:'docs/a.md',payloadAfterPath:'docs/a.md',payloadBeforeContentKind:'text',payloadAfterContentKind:'text',
+      payloadBeforeBlobSha256:hash(before),payloadAfterBlobSha256:hash(markdown),payloadAfterByteLength:markdown.length,recordedAtMs:20,settlementReference:reference(value)}]
+    expect(await r.push([audit()],0)).toMatchObject({status:503})
+    r.applyEdit()
+    const invalid={...record,acceptedEventCount:record.acceptedEventCount+1}
+    expect((await r.push([audit(invalid),moment(invalid)],0)).body).toMatchObject({inserted:2,refusals:r.refusals([0,'live.audit.settlement','unproved-retirement-output'],
+      [1,'moment.append','unproved-retirement-output'])})
+    expect(await r.push([audit()],2)).toMatchObject({status:200,body:{inserted:1}})
+    expect(r.coordinate(2)).toEqual(departed('live.audit.settlement'))
+    expect(await r.push([moment()],3)).toMatchObject({status:200,body:{inserted:1}})
+    expect(r.coordinate(3)).toEqual(departed('moment.append'))
+    expect(f.raw.prepare('SELECT settlement_id FROM sync_relay_live_settlement_bindings').all()).toEqual([{settlement_id:'retiring-settlement'}])
+    expect(f.raw.prepare('SELECT moment_id FROM sync_relay_object_moments WHERE moment_id=?').get(record.momentId)).toBeUndefined()
+  }finally{f.close()}
+})
+
+// Proves: the event-zero audit publishes with the root owner origin, its stamp,
+// the immutable baseline and a real base coordinate; a changed stamp or base
+// coordinate proves nothing.
+it("admits a retiring document's event-zero audit only with its root origin, stamp, baseline and base coordinate",async()=>{
+  const f=fixture();try{
+    const r=await retiringFeed(f)
+    await r.upload(f.capture.baselineBytes)
+    const owner=JSON.parse(String(f.raw.prepare('SELECT origin_json FROM sync_relay_live_delivery_owners').get()!.origin_json))
+    const {workspaceId,mainVersionId,objectId,lineageClaimId,currentPath,selectorPaths,restoreFenceGeneration}=owner.originalBinding
+    const binding={workspaceId,mainVersionId,objectId,lineageClaimId,currentPath,selectorPaths,restoreFenceGeneration}
+    const hostCoordinate={hostId:host.hostId,hostEpoch:1,instanceId:host.instanceId,connectionId:host.connectionId}
+    const source={adoptionId:owner.adoptionId,evidenceDigest:owner.originEvidenceDigest,sourceMomentId:owner.sourceMomentId,sourceDigest:owner.sourceDigest,
+      sourceByteLength:owner.sourceByteLength,baselineMomentRelaySequence:owner.baselineMomentRelaySequence,baselineRegisteredAtMs:owner.baselineRegisteredAtMs,
+      coverageDigest:'c'.repeat(64),coveredOutboxSequence:0,localYDocSequence:owner.expectedLocalSequence,terminalCursor:0,terminalReceipt:null,
+      hostCoordinate,maxPendingBytes:1_000_000,maxPendingAgeMs:60_000}
+    // The native stamp hashes SQLite's JSON array of the origin, with its binding, receipt and host as JSON strings.
+    const stamp=(value:typeof source)=>hash(Buffer.from(JSON.stringify([value.adoptionId,value.evidenceDigest,JSON.stringify(binding),value.sourceMomentId,
+      value.sourceDigest,value.sourceByteLength,value.baselineMomentRelaySequence,value.baselineRegisteredAtMs,value.coverageDigest,value.coveredOutboxSequence,
+      value.localYDocSequence,value.terminalCursor,JSON.stringify(value.terminalReceipt),JSON.stringify(value.hostCoordinate),value.maxPendingBytes,value.maxPendingAgeMs])))
+    const base=(changes:Record<string,unknown>={}):Row=>{
+      const record={relayDatabaseNamespace:'history',checkpoint:{eventCount:0,terminal:null,binding,stateDigest:f.document.lineageClaimId,
+        evidenceDigest:initialAcceptedHistoryDigest('history',f.document)},originStamp:stamp(source),origin:{kind:'owner',source},
+        baseByteLength:f.capture.baselineBytes.length,baseCoordinate:{originId:'origin',originSeq:1},...changes}
+      return ['live.audit.base',{formatVersion:1,recordDigest:hash(Buffer.from(JSON.stringify(record))),record}]
+    }
+    const answer=await r.push([base(),base({originStamp:stamp({...source,coveredOutboxSequence:1})}),base({baseCoordinate:{originId:'origin',originSeq:2}}),
+      base({baseByteLength:f.capture.baselineBytes.length+1})],0)
+    expect(answer.body).toMatchObject({inserted:4,refusals:r.refusals(...[1,2,3].map(seq=>[seq,'live.audit.base','unproved-retirement-output'] as [number,string,string]))})
+    expect(r.coordinate(0)).toEqual(departed('live.audit.base'))
+  }finally{f.close()}
+})
+
+// Proves: while its document settles, the host may ask after and upload bytes
+// its verified output names, without the settling document joining the blob
+// reach it may read; that upload proof outlasts the release of the stopped
+// last document and ends when the activation retires.
+it('lets a settling document upload and ask after its bytes without growing the readable blob reach, until its activation retires',async()=>{
+  const f=fixture();try{
+    const r=await retiringFeed(f)
+    const have=async(sha256:string)=>(await (await r.request('POST','blobs/have',JSON.stringify({sha256s:[sha256]}))).json())
+    const digest=f.document.lineageClaimId,uploads=()=>Number(f.raw.prepare('SELECT count(*) AS count FROM sync_relay_service_host_uploads').get()!.count)
+    expect(await have(digest)).toEqual({ok:true,missing:[digest]})
+    expect((await r.request('GET',`blobs/${digest}`)).status).toBe(404)
+    // The relay holds the owner's baseline bytes, but the host could not read them, so it learns nothing.
+    expect(await r.upload(f.capture.baselineBytes)).toMatchObject({alreadyHad:false})
+    expect(await have(digest)).toEqual({ok:true,missing:[]})
+    expect((await r.request('GET',`blobs/${hash(f.capture.fullState)}`)).status).toBe(404)
+    expect(f.storage.readServiceHostFeedScope('workspace')!.shared.size).toBe(0)
+    f.storage.releaseServiceHostEnrollment({workspaceId:'workspace',objectId:'object',nowMs:11})
+    expect(uploads()).toBe(1)
+    const open=retirement(f.storage)!
+    expect(f.store.completeRetirement({workspaceId:'workspace',key:keyOf(open),boundary:ownerBoundary(f),host,registeredAtMs:20,nowMs:20,guard(){}}))
+      .toEqual({status:'retired',replayed:false})
+    expect(uploads()).toBe(0)
   }finally{f.close()}
 })
 

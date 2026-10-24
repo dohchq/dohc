@@ -411,7 +411,8 @@ it("settles a moved or replaced document's work without taking back its old loca
 
 // Proves: Stop's retirement obligation takes its document out of the host's
 // reads and ordinary writes, and an early Resume does not bring it back. The
-// scope names the obligation, and a sibling stays readable and writable.
+// scope names the obligation, and a sibling stays readable and writable. The
+// retiring document's own write needs its bytes uploaded, and then a proof.
 it("keeps a retiring document out of hosted reads and writes while its sibling stays readable", async () => {
   const f = await fixture(); f.enroll("docs/b.md");
   const activationId = retainServiceActivation(f.raw, namespace, true);
@@ -424,9 +425,13 @@ it("keeps a retiring document out of hosted reads and writes while its sibling s
   expect([...current.settling]).toEqual([[binding.objectId, {relayDatabaseNamespace: namespace, activationId, workspaceId: ws, mainVersionId: "main",
     objectId: binding.objectId, lineageClaimId: binding.lineageClaimId, path: "docs/a.md", restoreFenceGeneration: 7, acceptedThrough: 0, requestedAtMs: 20}]]);
   expect(f.objects(await f.read())).toEqual(["workspace", "object-b"]);
-  expect(await (await f.push([["moment.append", write(binding.objectId, "docs/a.md", A, {momentId: "retiring"})],
-    ["moment.append", write("object-b", "docs/b.md", B, {momentId: "sibling"})]])).json())
-    .toMatchObject({inserted: 2, refusals: [{originSeq: 0, reason: "outside-hosted-documents"}]});
+  const writes = (): Array<[string, Record<string, unknown>]> => [["moment.append", write(binding.objectId, "docs/a.md", A, {momentId: "retiring"})],
+    ["moment.append", write("object-b", "docs/b.md", B, {momentId: "sibling"})]];
+  expect(await (await f.push(writes())).json()).toMatchObject({code: "blob_missing"});
+  expect(await f.blobStatus(A.sha256)).toBe(404);
+  await f.upload(A);
+  expect(await (await f.push(writes())).json())
+    .toMatchObject({inserted: 2, refusals: [{originSeq: 0, reason: "unproved-retirement-output"}]});
   // With every other document stopped, the scope still names the obligation.
   f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/b.md", ownerUserId: "owner-1", enabled: false, retire: true, nowMs: 30, guard() {}});
   f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled: false, retire: true, nowMs: 30, guard() {}});

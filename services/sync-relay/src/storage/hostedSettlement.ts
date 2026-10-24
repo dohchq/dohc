@@ -48,6 +48,8 @@ const where =
 const hash = (value: Uint8Array | string) =>
   createHash("sha256").update(value).digest("hex");
 class SettlementProofRefusal extends Error {}
+// A proof this push's budget could not finish. A larger budget may prove it.
+class SettlementProofExhausted extends SettlementProofRefusal {}
 function require(value: unknown): asserts value {
   if (!value) throw new SettlementProofRefusal("authorship-mismatch");
 }
@@ -109,6 +111,41 @@ type Prepared = {
   before: string;
 };
 const prepared = new WeakMap<SyncRelayLogInput, Prepared>();
+/** What a verified settlement record proves: its binding and accepted interval. */
+export interface SettlementProof {
+  readonly binding: LiveObjectBinding;
+  readonly namespace: string;
+  readonly previous: number;
+  readonly terminal: number;
+  readonly terminalDigest: string;
+}
+// Verified `live.audit.settlement` records, apart from any companion moment.
+const audits = new WeakMap<SyncRelayLogInput, SettlementProof & { payloadJson: string }>();
+const exhaustedProofs = new WeakSet<SyncRelayLogInput>();
+/**
+ * The settlement a moment or audit proved, "exhausted" when its push's budget
+ * ran out first, or null. Client `settlementAdmission` fields are never proof.
+ */
+export function preparedSettlement(op: SyncRelayLogInput): SettlementProof | "exhausted" | null {
+  if (exhaustedProofs.has(op)) return "exhausted";
+  if (op.opKind === "moment.append") return prepared.get(op) ?? null;
+  const audit = audits.get(op);
+  return audit && audit.payloadJson === op.payloadJson ? audit : null;
+}
+/** Whether the writer recorded the moment's proved settlement. */
+export function settlementCommitted(op: SyncRelayLogInput): boolean {
+  return op.settlementAdmission?.status === "accepted" && prepared.has(op);
+}
+/** Under the writer: the proof's terminal still ends the same accepted history in this relay's namespace. */
+export function settlementProofCurrent(storage: StorageContext, proof: SettlementProof): boolean {
+  try {
+    return liveJournalHistoryNamespace(storage) === proof.namespace &&
+      endpoint(storage, proof.binding, proof.namespace, proof.terminal).evidenceDigest === proof.terminalDigest;
+  } catch (error) {
+    if (error instanceof SettlementProofRefusal) return false;
+    throw error;
+  }
+}
 function withoutClientAuthors(payloadJson: string): string {
   const payload = bag(JSON.parse(payloadJson));
   if (!Object.hasOwn(payload, "authors")) return payloadJson;
@@ -322,6 +359,177 @@ function anchor(storage: StorageContext, p: Prepared, budget?: RestoreHistoryBud
     }) === p.baseBindingJson,
   );
 }
+type ProvedSettlement = Omit<Prepared, "before"> & {
+  markdownByteLength: number;
+  events: ReturnType<typeof readAcceptedHistoryInterval>;
+};
+/**
+ * Verifies a settlement record by the relay's journal, cut and the full state
+ * it names alone. `check` sees the parsed record before any history or state
+ * is read.
+ */
+async function proveSettlementRecord(
+  storage: StorageContext,
+  workspaceId: string,
+  reference: unknown,
+  budget: RestoreHistoryBudget,
+  batched: boolean,
+  signal: AbortSignal | undefined,
+  check: (record: Record<string, unknown>, binding: LiveObjectBinding) => void = () => {},
+): Promise<ProvedSettlement> {
+  const ref = bag(reference),
+    record = bag(ref.record);
+  const settlementId = settlementResponseIdentifier(record.settlementId);
+  require(
+    settlementId !== "unavailable" &&
+      ref.formatVersion === 1 &&
+      ref.recordDigest === hash(stableJsonStringify(record)),
+  );
+  let binding: LiveObjectBinding;
+  try {
+    binding = parseLiveObjectBinding(record.binding);
+  } catch {
+    throw new SettlementProofRefusal();
+  }
+  const document = binding;
+  const namespace = String(record.relayDatabaseNamespace);
+  require(
+    binding.workspaceId === workspaceId &&
+      namespace === liveJournalHistoryNamespace(storage),
+  );
+  check(record, binding);
+  const previous = integer(record.previousCursor),
+    terminal = integer(record.terminalCursor);
+  require(terminal > previous);
+  const selected = endpoint(storage, document, namespace, previous),
+    accepted = endpoint(storage, document, namespace, terminal);
+  require(
+    record.acceptedEventCount ===
+      accepted.eventCount - selected.eventCount &&
+      record.acceptedIntervalDigest ===
+        hash(
+          JSON.stringify([
+            "live-settlement-accepted-interval-v1",
+            [namespace, ...documentParams(document)],
+            [selected.eventCount, previous, selected.evidenceDigest],
+            [accepted.eventCount, terminal, accepted.evidenceDigest],
+          ]),
+        ),
+  );
+  let events: ReturnType<typeof readAcceptedHistoryInterval>;
+  try {
+    events = readAcceptedHistoryInterval(
+      storage,
+      { document, namespace, selected, accepted },
+      budget,
+    );
+  } catch (error) {
+    if (error instanceof Error && DAMAGED_HISTORY.includes(error.message))
+      throw new SettlementProofRefusal();
+    throw error;
+  }
+  const transitions = restoreChecks(
+    storage,
+    namespace,
+    binding,
+    events,
+    budget,
+  );
+  const cut = storage.db
+    .prepare(`SELECT * FROM ${SETTLEMENT_CUTS} WHERE journal_cursor=?`)
+    .get(terminal);
+  require(cut);
+  const stateBlob = digest(record.acceptedStateBlobSha256);
+  const header = storage.db
+    .prepare(
+      "SELECT byte_length FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?",
+    )
+    .get(workspaceId, stateBlob);
+  if (!header) throw relayError("blob_missing");
+  require(integer(header.byte_length) <= 20_971_520);
+  budget.chargeBytes(integer(header.byte_length));
+  const bytes = storage.getBlob(workspaceId, stateBlob);
+  require(bytes && hash(bytes) === stateBlob);
+  const normalized = await liveValidation.normalizeSettlement(
+    {
+      document: {
+        workspaceId: binding.workspaceId,
+        mainVersionId: binding.mainVersionId,
+        objectId: binding.objectId,
+        lineageClaimId: binding.lineageClaimId,
+      },
+      currentPath: binding.currentPath,
+      checkpoint: bytes,
+    },
+    signal,
+  );
+  if (normalized.kind === "retry") throw relayError("settlement_proof_budget");
+  if (normalized.kind === "refused" && normalized.reason === "capacity-refused") {
+    if (batched) throw relayError("settlement_proof_budget");
+    throw new SettlementProofExhausted();
+  }
+  require(
+    normalized.kind === "accepted" &&
+      normalized.evidence.stateUpdateSha256 === cut.state_sha256 &&
+      normalized.evidence.projectedMarkdownSha256 === cut.markdown_sha256 &&
+      record.markdownDigest === cut.markdown_sha256,
+  );
+  return {
+    ...transitions,
+    binding,
+    namespace,
+    previous,
+    terminal,
+    settlementId,
+    momentId: String(record.momentId),
+    recordDigest: String(ref.recordDigest),
+    state: String(cut.state_sha256),
+    markdown: String(cut.markdown_sha256),
+    terminalDigest: accepted.evidenceDigest,
+    markdownByteLength: integer(cut.markdown_byte_length),
+    events,
+  };
+}
+const DAMAGED_HISTORY = [
+  "Accepted journal history is damaged.",
+  "Retained restore evidence is damaged.",
+];
+/**
+ * Proves each `live.audit.settlement` record on its own; its companion moment
+ * may arrive in a later push. An unproved record keeps no proof.
+ */
+export async function prepareSettlementAudits(
+  storage: StorageContext,
+  input: { workspaceId: string; ops: SyncRelayLogInput[] },
+  budget = new RestoreHistoryBudget(
+    SETTLEMENT_PUSH_MAX_BYTES,
+    SETTLEMENT_PUSH_MAX_METADATA_EVENTS,
+  ),
+  signal?: AbortSignal,
+) {
+  for (const op of input.ops) {
+    if (op.opKind !== "live.audit.settlement") continue;
+    audits.delete(op);
+    exhaustedProofs.delete(op);
+    try {
+      const payload = bag(JSON.parse(op.payloadJson));
+      require(Object.keys(payload).sort().join() === "formatVersion,record,recordDigest");
+      const { binding, namespace, previous, terminal, terminalDigest } =
+        await proveSettlementRecord(storage, input.workspaceId, payload, budget, false, signal);
+      audits.set(op, { binding, namespace, previous, terminal, terminalDigest, payloadJson: op.payloadJson });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      if (error instanceof RestoreHistoryBudgetExceeded || error instanceof SettlementProofExhausted) {
+        exhaustedProofs.add(op);
+        continue;
+      }
+      if (
+        !(error instanceof SettlementProofRefusal) &&
+        !(error instanceof Error && DAMAGED_HISTORY.includes(error.message))
+      ) throw error;
+    }
+  }
+}
 export async function prepareHostedSettlements(
   storage: StorageContext,
   input: { workspaceId: string; originId: string; ops: SyncRelayLogInput[] },
@@ -360,133 +568,24 @@ export async function prepareHostedSettlements(
     let settlementId = "unavailable";
     try {
       require(!Object.hasOwn(payload, "authors"));
-      const ref = bag(payload.settlementReference),
-        record = bag(ref.record);
-      settlementId = settlementResponseIdentifier(record.settlementId);
-      require(
-        settlementId !== "unavailable" &&
-          ref.formatVersion === 1 &&
-          ref.recordDigest === hash(stableJsonStringify(record)),
-      );
-      let binding: LiveObjectBinding;
-      try {
-        binding = parseLiveObjectBinding(record.binding);
-      } catch {
-        throw new SettlementProofRefusal();
-      }
-      const document = binding;
-      const namespace = String(record.relayDatabaseNamespace);
-      require(
-        binding.workspaceId === input.workspaceId &&
-          namespace === liveJournalHistoryNamespace(storage),
-      );
-      require(
-        payload.momentId === record.momentId &&
-          payload.objectId === binding.objectId &&
-          payload.versionId === binding.mainVersionId &&
-          payload.operation === "write" &&
-          payload.path === binding.currentPath &&
-          payload.payloadAfterPath === binding.currentPath &&
-          payload.payloadBeforePath === binding.currentPath &&
-          payload.payloadAfterContentKind === "text" &&
-          payload.payloadBeforeContentKind === "text" &&
-          payload.payloadAfterBlobSha256 === record.markdownDigest,
-      );
-      const previous = integer(record.previousCursor),
-        terminal = integer(record.terminalCursor);
-      require(terminal > previous);
-      const selected = endpoint(storage, document, namespace, previous),
-        accepted = endpoint(storage, document, namespace, terminal);
-      require(
-        record.acceptedEventCount ===
-          accepted.eventCount - selected.eventCount &&
-          record.acceptedIntervalDigest ===
-            hash(
-              JSON.stringify([
-                "live-settlement-accepted-interval-v1",
-                [namespace, ...documentParams(document)],
-                [selected.eventCount, previous, selected.evidenceDigest],
-                [accepted.eventCount, terminal, accepted.evidenceDigest],
-              ]),
-            ),
-      );
-      let events: ReturnType<typeof readAcceptedHistoryInterval>;
-      try {
-        events = readAcceptedHistoryInterval(
-          storage,
-          { document, namespace, selected, accepted },
-          budget,
-        );
-      } catch (error) {
-        if (
-          error instanceof Error &&
-          (error.message === "Accepted journal history is damaged." ||
-            error.message === "Retained restore evidence is damaged.")
-        )
-          throw new SettlementProofRefusal();
-        throw error;
-      }
-      const transitions = restoreChecks(
-        storage,
-        namespace,
-        binding,
-        events,
-        budget,
-      );
-      const cut = storage.db
-        .prepare(`SELECT * FROM ${SETTLEMENT_CUTS} WHERE journal_cursor=?`)
-        .get(terminal);
-      require(cut);
-      const stateBlob = digest(record.acceptedStateBlobSha256);
-      const header = storage.db
-        .prepare(
-          "SELECT byte_length FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?",
-        )
-        .get(input.workspaceId, stateBlob);
-      if (!header) throw relayError("blob_missing");
-      require(integer(header.byte_length) <= 20_971_520);
-      budget.chargeBytes(integer(header.byte_length));
-      const bytes = storage.getBlob(input.workspaceId, stateBlob);
-      require(bytes && hash(bytes) === stateBlob);
-      const normalized = await liveValidation.normalizeSettlement(
-        {
-          document: {
-            workspaceId: binding.workspaceId,
-            mainVersionId: binding.mainVersionId,
-            objectId: binding.objectId,
-            lineageClaimId: binding.lineageClaimId,
-          },
-          currentPath: binding.currentPath,
-          checkpoint: bytes,
-        },
-        signal,
-      );
-      if (normalized.kind === "retry") throw relayError("settlement_proof_budget");
-      if (normalized.kind === "refused" && normalized.reason === "capacity-refused") {
-        if (input.ops.length > 1) throw relayError("settlement_proof_budget");
-        throw new SettlementProofRefusal();
-      }
-      require(
-        normalized.kind === "accepted" &&
-          normalized.evidence.stateUpdateSha256 === cut.state_sha256 &&
-          normalized.evidence.projectedMarkdownSha256 === cut.markdown_sha256 &&
-          record.markdownDigest === cut.markdown_sha256 &&
-          payload.payloadAfterByteLength === cut.markdown_byte_length,
-      );
-      const p: Prepared = {
-        ...transitions,
-        binding,
-        namespace,
-        previous,
-        terminal,
-        settlementId,
-        momentId: String(record.momentId),
-        recordDigest: String(ref.recordDigest),
-        state: String(cut.state_sha256),
-        markdown: String(cut.markdown_sha256),
-        terminalDigest: accepted.evidenceDigest,
-        before: String(payload.payloadBeforeBlobSha256),
-      };
+      settlementId = settlementResponseIdentifier(bag(bag(payload.settlementReference).record).settlementId);
+      const { events, ...proved } = await proveSettlementRecord(storage, input.workspaceId,
+        payload.settlementReference, budget, input.ops.length > 1, signal, (record, binding) => require(
+          payload.momentId === record.momentId &&
+            payload.objectId === binding.objectId &&
+            payload.versionId === binding.mainVersionId &&
+            payload.operation === "write" &&
+            payload.path === binding.currentPath &&
+            payload.payloadAfterPath === binding.currentPath &&
+            payload.payloadBeforePath === binding.currentPath &&
+            payload.payloadAfterContentKind === "text" &&
+            payload.payloadBeforeContentKind === "text" &&
+            payload.payloadAfterBlobSha256 === record.markdownDigest,
+        ));
+      require(payload.payloadAfterByteLength === proved.markdownByteLength);
+      const { markdownByteLength: _length, ...settled } = proved;
+      const p: Prepared = { ...settled, before: String(payload.payloadBeforeBlobSha256) };
+      const document = p.binding;
       const key = JSON.stringify(documentParams(document)),
         prior = provisional.get(key);
       if (prior && isDeepStrictEqual(prior.binding, p.initialBinding))
@@ -531,13 +630,11 @@ export async function prepareHostedSettlements(
       if (signal?.aborted) throw error;
       if (error instanceof RestoreHistoryBudgetExceeded && input.ops.length > 1)
         throw relayError("settlement_proof_budget");
+      if (error instanceof RestoreHistoryBudgetExceeded || error instanceof SettlementProofExhausted) exhaustedProofs.add(op);
       if (
         !(error instanceof SettlementProofRefusal) &&
         !(error instanceof RestoreHistoryBudgetExceeded) &&
-        !(error instanceof Error && [
-          "Accepted journal history is damaged.",
-          "Retained restore evidence is damaged.",
-        ].includes(error.message))
+        !(error instanceof Error && DAMAGED_HISTORY.includes(error.message))
       ) throw error;
       refuseSettlement(op, settlementId);
     }
