@@ -745,7 +745,8 @@ for (const scenario of ["success", "proof-failure", "package-failure", "reposito
   });
 }
 
-for (const {name, cancel = false, repoFail = false, packageFail = false, overlap = false, barrier = false, barrierCancel = false, scriptOverlap = false, scriptFail = false, scriptCancel = false} of [
+for (const {name, cancel = false, repoFail = false, packageFail = false, overlap = false, barrier = false, barrierCancel = false, scriptOverlap = false, scriptFail = false, scriptCancel = false, onlyDesktop = false} of [
+  {name:"desktop preflight finishes unit tests before starting isolated scripts",onlyDesktop:true},
   {name:"isolated scripts reuse the repository lane while packages continue, before runtime packaging",overlap:true,scriptOverlap:true},
   {name:"cancellation rejects queued packages before launching their commands",cancel:true,overlap:true},
   {name:"packaging waits for the external runtime reader",barrier:true},
@@ -756,7 +757,7 @@ for (const {name, cancel = false, repoFail = false, packageFail = false, overlap
   {name:"isolated script cancellation settles running packages and skips runtime packaging",overlap:true,scriptOverlap:true,scriptCancel:true},
 ]) test(name, () => {
   // The inventory's package without a test script is not scheduled.
-  const expectedPackages = ["@dohc/desktop", "@dohc/app-backend-runtime", "@dohc/new-package"];
+  const expectedPackages = onlyDesktop ? ["@dohc/desktop"] : ["@dohc/desktop", "@dohc/app-backend-runtime", "@dohc/new-package"];
   const root = mkdtempSync(join(tmpdir(), "dohc-js-schedule-"));
   const put = (path, data) => { mkdirSync(dirname(join(root, path)), {recursive:true}); writeFileSync(join(root, path), data); };
   try {
@@ -804,7 +805,8 @@ for (const {name, cancel = false, repoFail = false, packageFail = false, overlap
           {name:'@dohc/no-tests',path:resolve('packages/no-tests')}
         ])};
         if(args.includes('test:scripts:isolated')) {
-          assert.ok(existsSync('repository-complete'));
+          if(process.env.FIXTURE_ONLY_DESKTOP==='1')assert.ok(completed.has('test:@dohc/desktop'),'desktop unit tests finished before scripts start');
+          else assert.ok(existsSync('repository-complete'));
           writeFileSync('isolated-started','yes');
           if(process.env.FIXTURE_SCRIPT_FAIL==='1'){writeFileSync('isolated-finished','yes');throw Error('fixture isolated script failed');}
           if(process.env.FIXTURE_SCRIPT_CANCEL==='1'){writeFileSync('isolated-finished','yes');process.emit('SIGTERM');throw Error('fixture isolated script interrupted');}
@@ -815,6 +817,7 @@ for (const {name, cancel = false, repoFail = false, packageFail = false, overlap
           return {stdout:''};
         }
         if(args[2]==='run')writeFileSync('package-started','yes');
+        if(args.includes('test:unit') && process.env.FIXTURE_ONLY_DESKTOP==='1')await new Promise(setImmediate);
         // Hold the running packages until the repository fails, so the queued one must not start.
         if(args[2]==='run' && process.env.FIXTURE_REPO_FAIL==='1' && process.env.FIXTURE_PACKAGE_FAIL!=='1')await waitFor('repository-failed');
         if(args[1]==='@dohc/new-package' && process.env.FIXTURE_PACKAGE_FAIL==='1'){writeFileSync('package-failed','yes');throw Error('fixture package failed');}
@@ -832,7 +835,7 @@ for (const {name, cancel = false, repoFail = false, packageFail = false, overlap
       }
     `);
     // The standalone CLI runs every case except the packaging barrier, which needs a caller.
-    const args = !barrier ? ["scripts/verification/js-tests.mjs", "--output", "evidence"] : ["--input-type=module", "-e", `
+    const args = !barrier ? ["scripts/verification/js-tests.mjs", "--output", "evidence", ...onlyDesktop ? ["--package", "@dohc/desktop"] : []] : ["--input-type=module", "-e", `
       import {testWorkspace} from './scripts/verification/js-tests.mjs';
       import assert from 'node:assert/strict';
       import {readFileSync,writeFileSync} from 'node:fs';
@@ -850,7 +853,7 @@ for (const {name, cancel = false, repoFail = false, packageFail = false, overlap
     const result = spawnSync(process.execPath, args, {
       cwd:root, encoding:"utf8", timeout:20_000, env:{...process.env, FIXTURE_CANCEL:cancel ? "1" : "0", FIXTURE_REPO_FAIL:repoFail ? "1" : "0",
         FIXTURE_PACKAGE_FAIL:packageFail ? "1" : "0", FIXTURE_OVERLAP:overlap ? "1" : "0",
-        FIXTURE_SCRIPT_OVERLAP:scriptOverlap ? "1" : "0", FIXTURE_SCRIPT_FAIL:scriptFail ? "1" : "0", FIXTURE_SCRIPT_CANCEL:scriptCancel ? "1" : "0"},
+        FIXTURE_SCRIPT_OVERLAP:scriptOverlap ? "1" : "0", FIXTURE_SCRIPT_FAIL:scriptFail ? "1" : "0", FIXTURE_SCRIPT_CANCEL:scriptCancel ? "1" : "0", FIXTURE_ONLY_DESKTOP:onlyDesktop ? "1" : "0"},
     });
     assert.equal(result.error, undefined);
     const failed = repoFail || packageFail || scriptFail;
@@ -862,7 +865,7 @@ for (const {name, cancel = false, repoFail = false, packageFail = false, overlap
     if (overlap && !cancel) assert.ok(existsSync(join(root, "repository-saw-package")), "the repository lane must still be open when a package starts");
     if (scriptOverlap) assert.ok(existsSync(join(root,"package-saw-isolated")),"isolated scripts must start while package commands remain active");
     const commands = readFileSync(join(root,"commands.jsonl"),"utf8").trim().split("\n").map(JSON.parse);
-    assert.ok(commands.some(args => args[0] === "run" && args[1] === "test:repo"));
+    assert.equal(commands.some(args => args[0] === "run" && args[1] === "test:repo"), !onlyDesktop);
     assert.deepEqual(report.packages.map(pkg=>pkg.name).sort(),expectedPackages.toSorted());
     if (barrierCancel) {
       assert.match(report.error, /interrupted by SIGTERM/);
