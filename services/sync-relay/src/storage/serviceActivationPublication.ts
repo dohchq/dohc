@@ -126,11 +126,12 @@ function admit(storage: StorageContext, retirement: ServiceActivationRetirement,
         awaiting.add(op);
         return;
       }
-      // The exact source moment the activation retained, with only native moment fields.
-      require(op.settlementAdmission === undefined && Object.keys(payload).every(field => SOURCE_MOMENT_FIELDS.has(field)) &&
-        SOURCE_MOMENT_REQUIRED.every(field => Object.hasOwn(payload, field)) && payload.momentId === source.sourceMomentId &&
-        payload.payloadAfterBlobSha256 === source.sourceDigest && payload.payloadAfterByteLength === source.sourceByteLength &&
-        payload.payloadAfterContentKind === "text");
+      // The exact source moment the activation retained, as native writes it.
+      // Its authors, author context and attribution mark prove no authorship here.
+      require(op.settlementAdmission === undefined && NATIVE_MOMENT_FIELDS.every(field => Object.hasOwn(payload, field)) &&
+        payload.momentId === source.sourceMomentId && payload.payloadAfterBlobSha256 === source.sourceDigest &&
+        payload.payloadAfterByteLength === source.sourceByteLength && payload.payloadAfterContentKind === "text");
+      op.admittedAuthorSnapshot = undefined;
       return;
     }
     case "live.audit.application": {
@@ -153,15 +154,11 @@ function admit(storage: StorageContext, retirement: ServiceActivationRetirement,
   }
 }
 
-// Native `MomentAppendPayload` fields, apart from conflict effects and authors,
-// and those its deserialization requires. A source moment's before-image is
-// the host's own prior file, which the relay holds nothing to check against.
-const SOURCE_MOMENT_REQUIRED = ["momentId", "versionId", "objectId", "path", "recordedAtMs", "operation", "payloadAfterBlobSha256",
+// The `MomentAppendPayload` fields native deserialization requires. A source
+// moment's before-image is the host's own prior file, which the relay holds
+// nothing to check against.
+export const NATIVE_MOMENT_FIELDS: readonly string[] = ["momentId", "versionId", "objectId", "path", "recordedAtMs", "operation", "payloadAfterBlobSha256",
   "payloadAfterPath", "metadata", "beforePresent"];
-const SOURCE_MOMENT_FIELDS = new Set([...SOURCE_MOMENT_REQUIRED, "objectCreatedAtMs", "payloadBeforeBlobSha256", "payloadBeforePath",
-  "payloadBeforeContentKind", "payloadBeforeByteLength", "payloadAfterContentKind", "payloadAfterByteLength", "beforeObjectId",
-  "beforeVersionId", "beforePath", "beforeBlobSha256", "beforeContentKind", "beforeByteLength", "beforeUpdatedAtMs",
-  "beforeLatestMomentId", "beforeMetadata"]);
 
 function ordered(value: unknown, fields: readonly string[]): Record<string, unknown> {
   const record = asRecord(value);
