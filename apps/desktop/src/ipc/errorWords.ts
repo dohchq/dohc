@@ -258,9 +258,9 @@ function wireName(error: Error, code: string): string {
 }
 
 // A name that does not decode names no computer.
-function decodedComputer(wire: string | undefined): string | undefined {
-  if (wire === undefined) return undefined;
-  try { return decodeURIComponent(wire); } catch { return undefined; }
+function decodedComputer(wire: string | undefined): string | null {
+  if (wire === undefined) return null;
+  try { return decodeURIComponent(wire) || null; } catch { return null; }
 }
 
 /** Main's IPC boundary: keeps the error's code, wait and computer in the one string Electron sends. */
@@ -382,8 +382,12 @@ export function collectionsElsewhereWords(computer: { label: string; sameName: b
   return `${others ? "Other" : "These"} Collections are on ${where}. Open this workspace there to use them, or to move them to a server.`;
 }
 
-/** The computer that keeps the Collections this computer doesn't list, whether it lists others, and the sentence that says so. */
-export interface CollectionsElsewhere { computer: string; others: boolean; words: string }
+/**
+ * The computer that keeps the Collections this computer doesn't list, whether
+ * it lists others, and the sentence that says so. `computer` is null when the
+ * error that said so named none.
+ */
+export interface CollectionsElsewhere { computer: string | null; others: boolean; words: string }
 
 /**
  * The code of a Collections list this computer's server didn't give, where
@@ -395,23 +399,26 @@ export const SERVER_COLLECTIONS_UNAVAILABLE = "server-collections-unavailable";
  * main's words for that list: on the first line, where the workspace's
  * Collections are. After it, the server's error, which reads as it would alone.
  */
-export function readServerCollectionsUnavailable(error: unknown): { elsewhere: string; computer: string; failure: string } | null {
+export function readServerCollectionsUnavailable(error: unknown): { elsewhere: string; computer: string | null; failure: string } | null {
   const { name, code, computer, message } = parse(error);
-  if (name !== "ServerCollectionsUnavailableError" || code !== SERVER_COLLECTIONS_UNAVAILABLE || computer === undefined) return null;
+  if (name !== "ServerCollectionsUnavailableError" || code !== SERVER_COLLECTIONS_UNAVAILABLE) return null;
   const [elsewhere = "", ...failure] = message.split("\n");
   return elsewhere ? { elsewhere, computer, failure: failure.join("\n") } : null;
 }
 
-/** main's refusal to use a workspace's Collections here, with its words. Another computer's refusal names it. */
+/**
+ * main's refusal to use a workspace's Collections here, with its words.
+ * Another computer's refusal names it, or null when the error named none.
+ */
 export type CollectionsRefusalRead =
   | { kind: Exclude<CollectionsRefusalKind, "elsewhere">; words: string }
-  | { kind: "elsewhere"; words: string; computer: string };
+  | { kind: "elsewhere"; words: string; computer: string | null };
 
 export function readCollectionsRefusal(error: unknown): CollectionsRefusalRead | null {
   const { name, code, computer, message } = parse(error);
   if (name !== "CollectionsRefusalError" || !code?.startsWith(COLLECTIONS_REFUSAL_CODE) || !message) return null;
   const kind = COLLECTIONS_REFUSAL_KINDS.find((candidate) => code === `${COLLECTIONS_REFUSAL_CODE}${candidate}`);
-  if (kind === "elsewhere") return computer === undefined ? null : { kind, words: message, computer };
+  if (kind === "elsewhere") return { kind, words: message, computer };
   return kind === undefined ? null : { kind, words: message };
 }
 

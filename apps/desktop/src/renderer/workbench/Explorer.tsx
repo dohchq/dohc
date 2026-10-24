@@ -3,6 +3,7 @@ import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
 import { useFocusSurface } from "../ui/focusReturn";
 import { isComposingKey, isDeleteKey } from "../ui/keys";
 import { DangerButton, SecondaryButton, SectionLabel } from "../ui/controls";
+import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
 import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph } from "../ui/KindGlyph";
 import { basenameOf, dirnameOf } from "../path";
 import {
@@ -2041,16 +2042,39 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   );
 });
 
+// A Collections row's mark and words. Given a `detail`, the words take focus
+// and show it as a tooltip on hover or keyboard focus. The row that holds
+// this is the `@container` the tooltip's width keeps within, so the sidebar
+// never scrolls sideways to show it.
+function CollectionsNote({ icon: Icon, iconClassName, words, detail }: {
+  icon: typeof Laptop;
+  iconClassName: string;
+  words: string;
+  detail: string | null;
+}) {
+  const tooltip = useTooltip();
+  return (
+    <p {...tooltip.hoverProps} className="relative m-0 flex gap-1.5 text-[12px] text-muted">
+      <Icon size={12} strokeWidth={1.9} aria-hidden className={`mt-0.5 shrink-0 ${iconClassName}`} />
+      {detail === null ? <span className="wrap-anywhere">{words}</span> : <>
+        <span {...tooltip.focusProps} tabIndex={0} className="wrap-anywhere rounded">{words}</span>
+        {/* 18px: the tooltip's padding and border, around these words. */}
+        <Tooltip {...tooltip.tooltipProps}><span className="block max-w-[calc(100cqw-18px)]">{detail}</span></Tooltip>
+      </>}
+    </p>
+  );
+}
+
 // Below the Collections on this computer's server: the computer that keeps
 // the workspace's other Collections, where a move to a server starts. The
-// whole sentence is the row's tooltip.
+// whole sentence is the row's tooltip, or the row itself when main named no
+// computer.
 export function CollectionsElsewhereRow({ elsewhere, onKeep }: { elsewhere: CollectionsElsewhere; onKeep?: () => void }) {
+  const { computer, others, words } = elsewhere;
   return (
-    <div data-testid="collections-elsewhere" className="flex flex-col items-start gap-1.5 px-2 py-1">
-      <p title={elsewhere.words} className="m-0 flex gap-1.5 text-[12px] text-muted">
-        <Laptop size={12} strokeWidth={1.9} aria-hidden className="mt-0.5 shrink-0" />
-        <span className="wrap-anywhere">{`${elsewhere.others ? "Others on" : "On"} ${elsewhere.computer}`}</span>
-      </p>
+    <div data-testid="collections-elsewhere" className="@container flex flex-col items-start gap-1.5 px-2 py-1">
+      <CollectionsNote icon={Laptop} iconClassName="" words={computer === null ? words : `${others ? "Others on" : "On"} ${computer}`}
+        detail={computer === null ? null : words} />
       {onKeep && <SecondaryButton data-testid="collections-keep-here" onClick={() => onKeep()}>{USE_THIS_COMPUTER}</SecondaryButton>}
     </div>
   );
@@ -2058,21 +2082,20 @@ export function CollectionsElsewhereRow({ elsewhere, onKeep }: { elsewhere: Coll
 
 // The Collections section when this computer cannot use them: where they
 // are, or what went wrong, and the one step that helps. Where another
-// computer keeps them, the whole sentence is the row's tooltip.
+// computer keeps them, the whole sentence is the row's tooltip, or the row
+// itself when main named no computer.
 export function CollectionsRefusalRow({ refusal, onKeep, onRetry }: {
   refusal: CollectionsRefusalRead;
   onKeep?: () => void;
   onRetry?: () => void;
 }) {
   const held = refusal.kind === "unclaimed" || refusal.kind === "elsewhere";
-  const Icon = held ? Laptop : TriangleAlert;
-  const words = refusal.kind === "unclaimed" ? "Which computer keeps these Collections?" : refusal.kind === "elsewhere" ? `On ${refusal.computer}` : refusal.words;
+  const named = refusal.kind === "elsewhere" && refusal.computer !== null ? refusal.computer : null;
+  const words = refusal.kind === "unclaimed" ? "Which computer keeps these Collections?" : named !== null ? `On ${named}` : refusal.words;
   return (
-    <div role="status" data-testid="collections-refusal" className="flex flex-col items-start gap-1.5 px-2 py-1">
-      <p title={refusal.kind === "elsewhere" ? refusal.words : undefined} className="m-0 flex gap-1.5 text-[12px] text-muted">
-        <Icon size={12} strokeWidth={1.9} aria-hidden className={`mt-0.5 shrink-0 ${held ? "text-warning" : "text-danger"}`} />
-        <span className="wrap-anywhere">{words}</span>
-      </p>
+    <div role="status" data-testid="collections-refusal" className="@container flex flex-col items-start gap-1.5 px-2 py-1">
+      <CollectionsNote icon={held ? Laptop : TriangleAlert} iconClassName={held ? "text-warning" : "text-danger"} words={words}
+        detail={named === null ? null : refusal.words} />
       <div className="flex flex-wrap gap-1.5">
         {KEEPABLE_COLLECTIONS_REFUSALS.includes(refusal.kind) && onKeep && <SecondaryButton data-testid="collections-keep-here" onClick={() => onKeep()}>{USE_THIS_COMPUTER}</SecondaryButton>}
         {refusal.kind !== "unclaimed" && onRetry && <SecondaryButton onClick={() => onRetry()}>Try again</SecondaryButton>}

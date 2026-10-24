@@ -426,6 +426,11 @@ describe("error words", () => {
     // A name with spaces and brackets crosses whole.
     const studio = new CollectionsRefusalError({ kind: "elsewhere", computer: { installId: "install-studio", label: "Sam's Studio [2]" }, sameName: false });
     expect(readCollectionsRefusal(acrossIpc(studio, "desktop:dataset"))).toEqual({ kind: "elsewhere", words: studio.message, computer: "Sam's Studio [2]" });
+    // A refusal with no name, or one that doesn't decode, stays a refusal and names no computer.
+    for (const wire of ["", " [computer=%ZZ]"]) {
+      expect(readCollectionsRefusal(`Error invoking remote method 'desktop:dataset': CollectionsRefusalError [collections-elsewhere]${wire}: ${elsewhere.message}`))
+        .toEqual({ kind: "elsewhere", words: elsewhere.message, computer: null });
+    }
     expect(readCollectionsRefusal(acrossIpc(new CollectionsRefusalError({ kind: "unclaimed" }), "desktop:dataset"))).toEqual({
       kind: "unclaimed", words: new CollectionsRefusalError({ kind: "unclaimed" }).message,
     });
@@ -447,6 +452,10 @@ describe("error words", () => {
     }
     expect(readServerCollectionsUnavailable(acrossIpc(new ServerCollectionsUnavailableError(elsewhere, new Error()), "desktop:dataset")))
       .toEqual({ elsewhere: elsewhere.message, computer: "Laptop", failure: "" });
+    for (const wire of ["", " [computer=%ZZ]"]) {
+      expect(readServerCollectionsUnavailable(`ServerCollectionsUnavailableError [server-collections-unavailable]${wire}: ${elsewhere.message}\nTypeError: fetch failed`))
+        .toEqual({ elsewhere: elsewhere.message, computer: null, failure: "TypeError: fetch failed" });
+    }
     expect(readCollectionsRefusal(acrossIpc(failed, "desktop:dataset"))).toBeNull();
     // The same words from another error are not that list.
     expect(readServerCollectionsUnavailable(acrossIpc(new Error(failed.message), "desktop:dataset"))).toBeNull();
