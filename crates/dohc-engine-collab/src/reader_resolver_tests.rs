@@ -25,7 +25,7 @@ fn fixture() -> (Connection, DocKey, Ydoc, String, ReaderResolver) {
         blob_sha256 TEXT,latest_moment_id TEXT,path TEXT);
       CREATE TABLE blobs(sha256 TEXT,text TEXT,byte_length INTEGER);
       CREATE TABLE live_restore_fences(workspace_id TEXT,main_version_id TEXT,object_id TEXT,
-        new_generation INTEGER,resume_receipt_json TEXT);").unwrap();
+        new_generation INTEGER,resume_receipt_json TEXT,cancelled_json TEXT);").unwrap();
     let sha = crate::hex_sha256(source.as_bytes());
     conn.execute(
         "INSERT INTO blobs VALUES(?1,?2,?3)",
@@ -425,8 +425,9 @@ fn cache_hit_rechecks_snapshot_claim_path_and_restore_fences() {
         "UPDATE ydoc_docs SET lineage_claim_id='new-claim'",
         "UPDATE ydoc_docs SET lineage_epoch_tag='other-epoch'",
         "UPDATE snapshots SET latest_moment_id='new-moment'",
-        "INSERT INTO live_restore_fences VALUES('w','main','fixture',1,'{}')",
-        "INSERT INTO live_restore_fences VALUES('w','main','fixture',1,NULL)",
+        "INSERT INTO live_restore_fences VALUES('w','main','fixture',1,'{}',NULL)",
+        "INSERT INTO live_restore_fences VALUES('w','main','fixture',1,NULL,NULL)",
+        "INSERT INTO live_restore_fences VALUES('w','main','fixture',1,NULL,'{}')",
     ] {
         let (conn, key, doc, source, resolver) = fixture();
         prime(&conn, &key, &doc, &resolver);

@@ -2939,6 +2939,21 @@ CREATE TABLE live_restore_cancellations (
 ) STRICT;
 ";
 
+// A restore the relay cancelled after its fence committed here, before any
+// application: the fence row ends with the terminal binding and the accepted
+// endpoint it kept. A cancelled row holds no proposal, application or resume,
+// and is no longer its document's active restore. Generation reads find the
+// cancellation in the index, never past the row's restore proof.
+const V2_LIVE_RESTORE_FENCE_CANCELLED_DDL: &str = "
+ALTER TABLE live_restore_fences ADD COLUMN cancelled_json TEXT CHECK (cancelled_json IS NULL
+    OR (json_valid(cancelled_json) AND proposal_json IS NULL AND application_json IS NULL AND resume_receipt_json IS NULL));
+DROP INDEX live_restore_active;
+CREATE UNIQUE INDEX live_restore_active ON live_restore_fences(workspace_id,main_version_id,object_id)
+    WHERE resume_receipt_json IS NULL AND cancelled_json IS NULL;
+DROP INDEX live_restore_resumed;
+CREATE INDEX live_restore_resumed ON live_restore_fences(workspace_id,main_version_id,object_id,new_generation,relay_database_namespace,resume_receipt_json,cancelled_json);
+";
+
 /// The frozen, ordered list of migrations this build knows. No build may
 /// delete or rename the `v2-baseline` ledger row, because an older build
 /// recognizes a newer store only by that row and would otherwise offer
@@ -3400,6 +3415,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 69,
         id: "v2-live-restore-cancellations",
         sql: V2_LIVE_RESTORE_CANCELLATIONS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 70,
+        id: "v2-live-restore-fence-cancelled",
+        sql: V2_LIVE_RESTORE_FENCE_CANCELLED_DDL,
         sets_user_version: None,
     },
 ];
@@ -5246,6 +5267,10 @@ mod tests {
                 "v2-live-restore-cancellations",
                 "1fd5e4858fb45fe6019505d66fb448985893a94a770bf71c601bccc68f3f6b42",
             ),
+            (
+                "v2-live-restore-fence-cancelled",
+                "d5d54802fa99c451336062e012ad1d39e6ad10ad1b678ffe4ca8356402ab858a",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -6768,6 +6793,54 @@ mod tests {
             )
             .unwrap();
         assert_eq!(found, (1, "relay".to_owned()));
+    }
+
+    /// A fence that existed before the upgrade stays active. Once cancelled it
+    /// no longer is, so the document's next fence lands, and a cancelled row
+    /// never holds a restore proof.
+    #[test]
+    fn a_cancelled_restore_fence_is_no_longer_active() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-live-restore-fence-cancelled");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        let fence = |operation: &str, generation: i64| {
+            format!(
+                "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('ws','main','doc','relay','{operation}','{{\"oldBinding\":{{\"lineageClaimId\":\"l\"}},\"newFence\":{generation}}}','{{}}')"
+            )
+        };
+        conn.execute_batch(&format!(
+            "INSERT INTO versioned_workspaces VALUES ('ws','main'); {}",
+            fence("first", 1)
+        ))
+        .unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        assert!(
+            conn.execute_batch(&fence("second", 2)).is_err(),
+            "the first fence is still active"
+        );
+        let sha = crate::blob::put_binary_blob(&conn, b"proof").unwrap();
+        assert!(
+            conn.execute(
+                "UPDATE live_restore_fences SET cancelled_json='{}',proposal_json='{}',proposal_candidate_sha256=?1,proposal_frozen_sha256=?1,proposal_point_sha256=?1",
+                [&sha],
+            )
+            .is_err(),
+            "a cancelled row holds no proposal"
+        );
+        conn.execute("UPDATE live_restore_fences SET cancelled_json='{}'", [])
+            .unwrap();
+        conn.execute_batch(&fence("second", 2)).unwrap();
+        let found: (i64, String) = conn
+            .query_row(
+                "SELECT new_generation,cancelled_json FROM live_restore_fences INDEXED BY live_restore_resumed WHERE workspace_id='ws' AND main_version_id='main' AND object_id='doc' AND cancelled_json IS NOT NULL",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(found, (1, "{}".to_owned()));
     }
 
     #[test]

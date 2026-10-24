@@ -12,7 +12,7 @@ fn retirement_key(f: &Fixture, through: i64) -> RetirementKey {
         object_id: "object".into(),
         lineage_claim_id: f.binding.lineage_claim_id.clone(),
         activation_id: f.cut.adoption_id.clone(),
-        restore_fence_generation: 0,
+        restore_fence_generation: f.binding.restore_fence_generation,
         accepted_through: through,
     }
 }
@@ -1714,7 +1714,8 @@ fn cancellation(f: &Fixture, operation: &str) -> RestoreFenceCancellation {
         operation_id: operation.into(),
         object_id: f.binding.object_id.clone(),
         lineage_claim_id: f.binding.lineage_claim_id.clone(),
-        new_fence: 1,
+        host_id: "host".into(),
+        new_fence: f.binding.restore_fence_generation + 1,
     }
 }
 
@@ -1722,7 +1723,7 @@ fn cancel(
     f: &mut Fixture,
     input: &RestoreFenceCancellation,
 ) -> Result<RestoreFenceCancellationOutcome, ApplicationError> {
-    cancel_restore_fence(&mut f.store, "namespace", "workspace", input, 50, &NoFaults)
+    cancel_restore_fence(&mut f.store, "namespace", "workspace", "host", input, 50, &NoFaults)
 }
 
 /// The document's binding generation and availability in the namespace.
@@ -1781,36 +1782,57 @@ fn a_restore_fence_that_never_landed_is_cancelled_for_good() {
     assert_eq!(cancel(&mut f, &input).unwrap(), cancelled);
 }
 
-/// Sol's ruling, after native fencing: a cancellation racing a fence whose
-/// reply was lost answers that fence, at its generation and binding, and
-/// records nothing, until the restore is admitted. No other operation can
-/// claim that no fence landed for the fenced generation.
+/// Sol's ruling, option A: a cancellation racing a fence whose reply was
+/// lost ends that fence for good at its generation, with the fence's stopped
+/// binding and the accepted endpoint it froze. A duplicate answers the
+/// committed receipt; the fence's replay refuses; no other operation, key or
+/// host can claim the fenced generation. Once the restore is admitted,
+/// cancellation refuses.
 #[test]
-fn a_committed_restore_fence_answers_its_cancellation_until_admission() {
+fn a_committed_restore_fence_ends_in_its_terminal_cancellation_until_admission() {
     let mut f = Fixture::new();
     f.adopt().unwrap();
     // The fence commits; its reply never reaches the relay.
     let receipt = restore_fence(&mut f, "restore").unwrap();
     let input = cancellation(&f, "restore");
-    for _ in 0..2 {
-        assert_eq!(
-            cancel(&mut f, &input).unwrap(),
-            RestoreFenceCancellationOutcome::Fenced(receipt.clone())
-        );
-    }
-    assert_eq!(receipt.operation.new_fence, 1);
-    assert_eq!(bound(&f), (1, false));
-    assert_eq!(f.store.table_row_count("live_restore_cancellations").unwrap(), 0);
-    assert_eq!(restore_fence(&mut f, "restore").unwrap(), receipt, "the fence still replays");
     let mut lineage = input.clone();
     lineage.lineage_claim_id = "f".repeat(64);
     let mut later = input.clone();
     later.new_fence = 2;
-    for wrong in [lineage, later, cancellation(&f, "other")] {
+    let mut elsewhere = input.clone();
+    elsewhere.host_id = "elsewhere".into();
+    for wrong in [lineage, later, elsewhere, cancellation(&f, "other")] {
         assert!(matches!(cancel(&mut f, &wrong), Err(ApplicationError::Conflict)), "{wrong:?}");
     }
+    assert!(
+        matches!(
+            cancel_restore_fence(&mut f.store, "namespace", "workspace", "elsewhere", &input, 50, &NoFaults),
+            Err(ApplicationError::Conflict)
+        ),
+        "another host's engine"
+    );
+    let RestoreFenceCancellationOutcome::FenceCancelled(cancelled) = cancel(&mut f, &input).unwrap() else {
+        panic!("the committed fence ends in its cancellation");
+    };
+    let mut stopped = f.binding.clone();
+    stopped.restore_fence_generation = 1;
+    assert_eq!(cancelled.fence, receipt);
+    assert_eq!(cancelled.binding, stopped);
+    assert_eq!(cancelled.endpoint.terminal_receipt, f.cut.terminal_receipt);
+    assert_eq!(cancelled.endpoint.event_count, 0);
+    assert_eq!(
+        cancel(&mut f, &input).unwrap(),
+        RestoreFenceCancellationOutcome::FenceCancelled(cancelled.clone()),
+        "a duplicate answers the committed receipt"
+    );
+    assert_eq!(bound(&f), (1, false));
     assert_eq!(f.store.table_row_count("live_restore_cancellations").unwrap(), 0);
-    // Once the host admitted the restore, cancellation refuses.
+    assert!(matches!(restore_fence(&mut f, "restore"), Err(ApplicationError::Conflict)), "the fence never replays");
+    // Another restore's admission refuses cancellation.
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    restore_fence(&mut f, "restore").unwrap();
+    let input = cancellation(&f, "restore");
     let conn = rusqlite::Connection::open(f._scratch.join("engine.db")).unwrap();
     conn.execute_batch(
         "PRAGMA foreign_keys=OFF;

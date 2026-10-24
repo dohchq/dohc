@@ -45,6 +45,7 @@ mod tests {
     include!("released_protection_tests.rs");
     include!("rename_tests.rs");
     include!("retired_outbox_tests.rs");
+    include!("restore_cancel_tests.rs");
 
     /// What a held proof's memory peaks at, beside what it reserved.
     #[cfg(feature = "held-proof-memory")]
@@ -2354,9 +2355,10 @@ fn require_historical(
     Ok(())
 }
 
-/// The generations resumed restores of this document's lineage led from to
-/// the registration's, its own included. The walk counts every generation it
-/// visits and refuses past `max_events`.
+/// The generations resumed restores, or restores cancelled after their
+/// fences, of this document's lineage led from to the registration's, its
+/// own included. The walk counts every generation it visits and refuses past
+/// `max_events`.
 fn resumed_generations(
     conn: &Connection,
     held: &Registration,
@@ -2368,7 +2370,7 @@ fn resumed_generations(
             "WITH RECURSIVE resumed(generation) AS (SELECT ?6 UNION ALL
                SELECT f.old_generation FROM live_restore_fences f JOIN resumed r ON f.new_generation=r.generation
                WHERE f.relay_database_namespace=?1 AND f.workspace_id=?2 AND f.main_version_id=?3 AND f.object_id=?4
-                 AND f.lineage_claim_id=?5 AND f.resume_receipt_json IS NOT NULL LIMIT ?7)
+                 AND f.lineage_claim_id=?5 AND (f.resume_receipt_json IS NOT NULL OR f.cancelled_json IS NOT NULL) LIMIT ?7)
              SELECT generation FROM resumed",
         )
         .map_err(read_sql)?;
