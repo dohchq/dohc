@@ -46,6 +46,7 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   };
   /** Whether the Linux desktop shows tray icons. */
   linuxTrayShown(): Promise<boolean>;
+  hasWindow(): boolean;
 }) {
   const {
     app, process, Menu, nativeImage, nativeTheme, Tray,
@@ -171,8 +172,9 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   async function noticeRunningInBackground(): Promise<void> {
     if (process.platform !== "linux" || backgroundNotice) return;
     const trayShown = await dependencies.linuxTrayShown();
-    // A quit, or another close's notice, may have come during the check.
-    if (trayShown || backgroundNotice || dependencies.appLifecycle.isQuitting()) return;
+    // A quit, a reopened window, or another close's notice may have come
+    // during the check, which can take seconds on a slow session bus.
+    if (trayShown || backgroundNotice || dependencies.hasWindow() || dependencies.appLifecycle.isQuitting()) return;
     const schedules = dependencies.runningSchedules();
     const notice = new dependencies.Notification({
       title: "dohc is still running",

@@ -5185,6 +5185,7 @@ const { refreshDispatchTray, refreshTrayIcon, dispatchKeepsRunning, noticeRunnin
   ReturnType<typeof Menu.buildFromTemplate>
 >({
   app, process, Menu, nativeImage, nativeTheme, Tray, Notification, linuxTrayShown,
+  hasWindow: () => BrowserWindow.getAllWindows().length !== 0,
   moduleDirectory: import.meta.dirname,
   readCachedUserSettingsFile, stateDir, chatDispatchService, showOrCreateMainWindow,
   runningSchedules: () => automationScheduler.runningSchedules(),

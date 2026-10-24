@@ -73,9 +73,11 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
     on(event: "click", listener: () => void) { this.listeners.set(event, listener); return this; }
   }
   const linuxTrayShown = vi.fn(async () => false);
+  let windowOpen = false;
   const owner = createDesktopTray({
     app, process: runtime, moduleDirectory, Menu: { buildFromTemplate: buildMenu },
     nativeImage: { createFromPath: createImage }, nativeTheme: theme, Tray, Notification: Notice, linuxTrayShown,
+    hasWindow: () => windowOpen,
     readCachedUserSettingsFile: readSettings, stateDir: () => stateRoot,
     chatDispatchService: service, showOrCreateMainWindow: showWindow,
     runningSchedules: () => schedules,
@@ -88,6 +90,7 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
     asset: async (name: string) => { const path = join(iconRoot, name); await writeFile(path, "native image fixture"); return path; },
     setLifecycle: (value: { isQuitting(): boolean }) => { lifecycle = value; },
     setSchedules: (count: number) => { schedules = count; },
+    setWindowOpen: (open: boolean) => { windowOpen = open; },
     click: (index: number, checked = false) => {
       const item = created.at(-1)?.menu[index];
       if (!item?.click) throw new Error("Missing tray action");
@@ -204,6 +207,22 @@ describe("desktop tray owner", () => {
     const second = h.owner.noticeRunningInBackground();
     check.resolve(false);
     await Promise.all([first, second]);
+    expect(h.notices).toHaveLength(1);
+  });
+
+  it("keeps the notice for a later close when a window reopens during the check", async () => {
+    const h = await harness("linux");
+    await h.asset("icon-light.png");
+    await h.owner.refreshDispatchTray();
+    const check = deferred<boolean>();
+    h.linuxTrayShown.mockImplementationOnce(() => check.promise);
+    const notice = h.owner.noticeRunningInBackground();
+    h.setWindowOpen(true);
+    check.resolve(false);
+    await notice;
+    expect(h.notices, "dohc is open again").toHaveLength(0);
+    h.setWindowOpen(false);
+    await h.owner.noticeRunningInBackground();
     expect(h.notices).toHaveLength(1);
   });
 
