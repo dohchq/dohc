@@ -1159,7 +1159,7 @@ describe("LiveDocumentsDialog", () => {
       render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
       const kept = await screen.findByTestId("live-document-row-docs/a.md");
       expect(within(kept).getByText("Can't read edits")).toBeTruthy();
-      expect(kept.textContent).toContain("The server could not accept your edits. dohc kept them on this computer, but could not read them. Try again to read them.");
+      expect(kept.textContent).toContain("dohc kept edits on this computer but could not read them. Try again to read them.");
       expect(actions("docs/a.md")).toEqual(["Stop live editing", "Try again", "Save recovery copy"]);
       expect(within(kept).getByRole("button", { name: "Save recovery copy of docs/a.md" })).toHaveProperty("disabled", true);
       expect(screen.getByRole("button", { name: "Save recovery copy of docs/b.md" })).toHaveProperty("disabled", false);

@@ -231,7 +231,7 @@ function quarantineNote(row: LiveDocumentRow): string | null {
     case "cannot-write":
       return "When live editing stopped, dohc kept your unsent edits but can't finish writing them to your file. Save a recovery copy to get them back.";
     case "unreadable":
-      return "The server could not accept your edits. dohc kept them on this computer, but could not read them. Try again to read them.";
+      return "dohc kept edits on this computer but could not read them. Try again to read them.";
     default:
       return null;
   }

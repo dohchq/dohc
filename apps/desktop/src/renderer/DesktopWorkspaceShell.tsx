@@ -1852,7 +1852,7 @@ export function DesktopWorkspaceShell(props: {
           });
         };
         reportShellFailure({title:`Live editing paused for ${row.path}`,
-          message:"The server could not accept your edits. dohc kept them on this computer, but could not read them.",details,retry:read,action:open,identity});
+          message:"dohc kept edits on this computer but could not read them.",details,retry:read,action:open,identity});
         continue;
       }
       const save={label:"Save recovery copy",run:() => {void saveLiveRecoveryCopyRef.current(workspaceId,row.path,row.incident);},additional:[open]};

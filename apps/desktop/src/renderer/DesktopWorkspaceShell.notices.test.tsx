@@ -395,7 +395,7 @@ describe("edits the server refused", () => {
     renderShell(bridge);
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(within(toast).getByText(TITLE)).toBeTruthy();
-    expect(within(toast).getByText("The server could not accept your edits. dohc kept them on this computer, but could not read them.")).toBeTruthy();
+    expect(within(toast).getByText("dohc kept edits on this computer but could not read them.")).toBeTruthy();
     expect(within(toast).queryByRole("button", {name: "Save recovery copy"})).toBeNull();
     const user = userEvent.setup();
     await user.click(screen.getByTestId("notice-center-toggle"));
