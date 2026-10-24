@@ -1,6 +1,6 @@
 import {prepareHostedSettlements} from "../../../services/sync-relay/src/storage/hostedSettlement.js";
 import {appendValidatedLiveJournal, readReplicaLiveJournal, decodeJournalRow} from "../../../services/sync-relay/src/storage/liveUpdateJournal.js";
-import {verifyRestoreCheckpoint} from "../../../services/sync-relay/src/storage/liveRestoreCheckpoint.js";
+import {parseRestoreAdmission, verifyRestoreCheckpoint} from "../../../services/sync-relay/src/storage/liveRestoreCheckpoint.js";
 import {stableJsonStringify} from "../../../services/sync-relay/src/canonicalJson.js";
 import {initialAcceptedHistoryDigest} from "../../../services/sync-relay/src/liveAcceptedHistory.js";
 import {createLiveMarkdownRegistrationValidator} from "./liveDocumentValidation.js";
@@ -108,6 +108,28 @@ it("bounds restore proposal metadata and refuses corrupt native source manifests
     expect(() => parseNativeRestoreProposalReceipt(JSON.stringify({...f.proposal, surprise: true}), f.input)).toThrow();
     expect(() => parseNativeRestoreProposalReceipt(JSON.stringify({...f.proposal, nativeSourceManifestDigest: "f".repeat(64)}), f.input)).toThrow();
     expect(() => parseNativeRestoreProposalReceipt(JSON.stringify({...f.proposal, beforeStateVector: [256]}), f.input)).toThrow();
+  } finally {f.close();}
+});
+
+it.each(["journalCursor", "receiptDigest"] as const)("refuses a proposal that substitutes the fenced %s", field => {
+  const f = proposalSourcesFixture("bootstrap", "device");
+  try {
+    expect(() => parseNativeRestoreProposalReceipt(JSON.stringify(f.proposal), f.input)).not.toThrow();
+    const receipt = {...f.proposal, point: {...f.proposal.point,
+      [field]: field === "journalCursor" ? f.proposal.point.journalCursor + 1 : "f".repeat(64)}};
+    expect(() => parseNativeRestoreProposalReceipt(JSON.stringify(receipt), f.input)).toThrow();
+  } finally {f.close();}
+});
+
+it.each(["journalCursor", "receiptDigest"] as const)("refuses an admission that substitutes the fenced %s", field => {
+  const f = admittedRestoreFixture();
+  try {
+    const saved = f.raw.prepare("SELECT admission_json FROM sync_relay_live_restore_lifecycles").get()!;
+    const receipt = parseRestoreAdmission(JSON.parse(String(saved.admission_json)));
+    expect(() => parseRestoreAdmission(receipt)).not.toThrow();
+    if (field === "journalCursor") receipt.preparation.point.journalCursor++;
+    else receipt.preparation.point.receiptDigest = "f".repeat(64);
+    expect(() => parseRestoreAdmission(receipt)).toThrow();
   } finally {f.close();}
 });
 
@@ -1463,6 +1485,7 @@ it.each(["bootstrap", "owner"] as const)("records a funded native fence for %s a
     const before = f.journalRows().usage;
     const operation = readStopRestore(f.context, f.lookup)!;
     expect(operation.phase).toBe("old-cut-applied");
+    expect(f.receipt.operation.point).toEqual({journalCursor:operation.intent.restorePointCursor,receiptDigest:operation.intent.restorePointReceiptDigest});
     expect(operation.nativeReceipt).toBeNull();
     expect(f.store.acknowledgeStopRestoreFence(f.lookup, f.receipt)).toEqual(f.receipt);
     expect(f.journalRows().usage).toBe(before);
@@ -1494,6 +1517,9 @@ it.each(["service", "device"] as const)("requires the durable empty-cut origin b
 });
 
 const corruptNativeReceipts: [string, (receipt: NativeRestoreFenceReceipt) => void][] = [
+  ["selected cursor", r => {r.operation.point.journalCursor++;}],
+  ["selected receipt", r => {r.operation.point.receiptDigest = "f".repeat(64);}],
+  ["old receipt without selected point", r => {delete (r.operation as Partial<typeof r.operation>).point;}],
   ["operation ID", r => {r.operation.operationId = "other";}],
   ["namespace", r => {r.operation.relayDatabaseNamespace = "other";}],
   ["workspace", r => {r.operation.oldBinding = {...r.operation.oldBinding, workspaceId: "other"};}],

@@ -37,10 +37,10 @@ deployments from `main` alone, and both values must be environment secrets,
 never repository secrets. A merge to `main` deploys, so `main` must stay
 protected. `SITE_DEPLOY_ENABLED` turns deploys on and off; it protects nothing.
 
-Set `SITE_DEPLOY_ENABLED` only once this workflow runs on runners that start
-fresh for each job, such as GitHub's hosted runners. A persistent runner also
-runs pull requests' checks, and what they leave behind can reach the deploy
-job.
+Both jobs run on GitHub's hosted runners, which start fresh for each job, so
+nothing another workflow leaves on a runner reaches the deploy job. Keep them
+there: the self-hosted runner also runs pull requests' checks. Turn
+`SITE_DEPLOY_ENABLED` on when the repository goes public.
 
 To deploy by hand, run `pnpm --filter @dohc/site build`, then run
 `pnpm dlx wrangler@<version> deploy` from `apps/site` with the version the

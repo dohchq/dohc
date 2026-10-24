@@ -511,7 +511,7 @@ async function writeBody(request, waitMs) {
  * Serve the dashboard and its data on this host. Returns the server; `close()` stops it and its sampler.
  * `oneLane` refuses the lane switch: a Mac has one display, and Electron runs cannot share it.
  */
-export function startMonitor({ root, port = monitorPort, host = "127.0.0.1", log = () => {}, sampleEveryMs, writeWaitMs = 10_000,
+export function startMonitor({ root, port = monitorPort, host = "127.0.0.1", log = () => {}, now = Date.now, sampleEveryMs, writeWaitMs = 10_000,
   threadOf = threadDirectory(), slotRoot = verificationSlotRoot(), oneLane = process.platform === "darwin" }) {
   const finished = new Map();
   const history = historyReader(root);
@@ -522,7 +522,7 @@ export function startMonitor({ root, port = monitorPort, host = "127.0.0.1", log
   // Every open page polls; one snapshot serves them all for two seconds.
   const snapshot = () => {
     if (!cached || Date.now() - cached.at > 2000) {
-      const state = monitorState(root, { finished, history, threadOf, slots, lanes });
+      const state = monitorState(root, { now: now(), finished, history, threadOf, slots, lanes });
       cached = { at: Date.now(), state, body: JSON.stringify(state) };
     }
     return cached;

@@ -438,6 +438,11 @@ interface RootUtf16Snapshot {
 
 type DocUtf16Snapshot = ReadonlyMap<string, RootUtf16Snapshot>;
 
+function hasReplacementChars(snapshot: DocUtf16Snapshot): boolean {
+  for (const root of snapshot.values()) if (root.replacementCount > 0) return true;
+  return false;
+}
+
 function snapshotDocUtf16(doc: Y.Doc): DocUtf16Snapshot {
   const snapshot = new Map<string, RootUtf16Snapshot>();
   for (const [root, value] of doc.share) {
@@ -585,7 +590,9 @@ function assertTextEditIsValid(text: string, edit: YdocLocalTextEdit): void {
 interface LocalRecordCapture {
   readonly options: ApplyLocalUpdateOptions | undefined;
   readonly before: DocUtf16Snapshot;
-  readonly beforeState: Uint8Array;
+  // Only text that existed before the edit can be deleted by it, so with no
+  // U+FFFD before there is none to count and the state is not encoded.
+  readonly beforeState: Uint8Array | null;
   readonly seedUpdate: boolean;
   readonly originalUpdate?: Uint8Array;
   operation?: Promise<YdocRecordUpdateResult | undefined>;
@@ -1466,7 +1473,7 @@ export class YdocAdapterSession {
         this.doc,
         capture?.before ?? snapshotDocUtf16(this.doc),
         () =>
-          capture
+          capture?.beforeState
             ? deletedReplacementCounts(capture.beforeState, update)
             : new Map<string, number>(),
         capture?.seedUpdate ?? false,
@@ -1500,11 +1507,12 @@ export class YdocAdapterSession {
     originalUpdate?: Uint8Array,
   ): Promise<YdocRecordUpdateResult | undefined> {
     this.assertRecordable();
+    const before = snapshotDocUtf16(this.doc);
     const capture: LocalRecordCapture = {
       options: options === undefined ? undefined : structuredClone(options),
       originalUpdate,
-      before: snapshotDocUtf16(this.doc),
-      beforeState: Y.encodeStateAsUpdate(this.doc),
+      before,
+      beforeState: hasReplacementChars(before) ? Y.encodeStateAsUpdate(this.doc) : null,
       seedUpdate,
     };
     this.activeLocalRecordCapture = capture;

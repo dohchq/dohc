@@ -5,6 +5,7 @@ import { Check, PanelLeft, PanelRight, Search } from "lucide-react";
 import { type ReactNode, useId, useRef, useState } from "react";
 import type { WorkspaceSummary } from "../ipc/bridgeContract";
 import { TITLEBAR_HEIGHT_PX } from "./tokens";
+import { Pill } from "./ui/controls";
 import { useDismiss } from "./ui/useDismiss";
 import { useWindowFullScreen } from "./windowFullScreen";
 
@@ -123,6 +124,10 @@ export function Titlebar(props: {
           <DohcMark size={15} className="shrink-0" />
           {props.workspace ? null : <span className="text-[13px] font-semibold tracking-tight">dohc</span>}
         </span>
+        {/* Every nightly is an alpha, so the build says so beside the mark. */}
+        {window.dohcDesktop?.releaseChannel === "nightly" ? (
+          <span data-testid="titlebar-alpha" className="shrink-0"><Pill>Alpha</Pill></span>
+        ) : null}
 
         {props.workspace && props.workspaces && props.onSwitchWorkspace ? (
           <div

@@ -223,7 +223,7 @@ it("checks readiness before a retried move Undo asks History to finish restoring
   f.restoring(true); expect(await f.undo()).toMatchObject({ ok: true, tracked: { state: "restoring" } });
   expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce();
   f.restoring(false);
-  readLocalStateFrom({ currentBinding: () => ({ localStateReady: false }) });
+  readLocalStateFrom({ currentBinding: () => ({ localStateReady: false }), localStateOpenAt: async () => ({ current: () => true }) });
   expect(await f.undo()).toEqual({ ok: false,
     reason: "dohc did not undo the move because it can't keep this workspace's trash out of iCloud Drive. Restart dohc to try again." });
   expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce();

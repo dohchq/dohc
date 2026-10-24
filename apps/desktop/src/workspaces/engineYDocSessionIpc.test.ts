@@ -1963,12 +1963,29 @@ describe("engine Y.Doc IPC adapter", () => {
       workspaceId: "workspace-1",
       path: "notes/a.md",
       origin: agentOrigin,
+      assertEditable: async () => undefined,
       change: async (state: Uint8Array, { keepBlocks }: { keepBlocks: boolean }) => {
         keepBlocksSeen.push(keepBlocks);
         return documentEditUpdate(state, documentEdit, { keepBlocks });
       },
     });
     const append = edit({ replacement: "After." });
+
+    it("refuses a lossy note before it opens a session or changes the held one", async () => {
+      const session = editableSession();
+      const h = harness(session);
+      const refusal = new Error("dohc can't change notes/a.md without also changing parts it can't show.");
+      const refused = { ...append, assertEditable: vi.fn(async () => { throw refusal; }) };
+
+      await expect(h.ipc.editDocument(refused)).rejects.toBe(refusal);
+      expect(refused.assertEditable).toHaveBeenCalledWith("notes/a.md");
+      expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+
+      await h.ipc.open(new FakeSender(7), openPayload);
+      await expect(h.ipc.editDocument(refused)).rejects.toBe(refusal);
+      expect(session.applyLocalUpdate).not.toHaveBeenCalled();
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.");
+    });
 
     it("applies the edit through the editor that holds the document and shows it there", async () => {
       const sender = new FakeSender(7);
