@@ -1535,6 +1535,48 @@ describe("server owner peer lifecycle", () => {
     } finally {credentials.abort(); await f.close(); quarantineMock.read.mockReset(); quarantineMock.queue.mockReset();}
   });
 
+  // While the engine refuses to read a document's queue head, nothing could
+  // keep the edits a release takes, so the release refuses and Save reports
+  // the engine's refusal. The row stays, and Try again reads it again.
+  it("refuses a release and a save of a queue the engine cannot read, keeps its row, and reads it again on Try again", async () => {
+    const {f, credentials, binding, workspace} = await quarantinedOwner([]);
+    const refused = new EngineRequestError(1, {code: "INVALID_PARAMS", message: "owner-outbox-accepted-state-incomplete", retry: "no"});
+    const unreadable = {objectId: "object", path: "notes/plan.md", reason: refused.message, outboxId: "outbox", binding, headDeliveryId: null, recovery: "unreadable"};
+    let readable = false;
+    // As the reader answers: an unreadable row, unless the read is strict for that queue.
+    quarantineMock.read.mockImplementation(async (_client, _handle, options?: {strict?: (queue: LiveObjectBinding) => boolean}) => {
+      if (readable) return [{...unreadable, reason: "invalid-update", headDeliveryId: "delivery", recovery: "paused"}];
+      if (options?.strict?.(binding)) throw refused;
+      return [unreadable];
+    });
+    quarantineMock.queue.mockResolvedValue(recoveryQueue(binding).queue);
+    f.client.respond = async request => ({id: request.id, result: request.method === "ydoc.ownerStop.release"
+      ? {stops: [{...releasedStop, binding, materialized: false}]}
+      : request.method === "workspace.open" ? {workspace: "workspace-handle"} : request.method === "ydoc.ownerStop.list" ? {stops: []}
+        : request.method === "engine.ping" ? {ok: true} : null});
+    try {
+      expect(await f.engine.start()).toBe(true);
+      const owner = await workspace();
+      await f.engine.refreshOwnerLiveQuarantines(owner);
+      const row = {objectId: "object", path: "notes/plan.md", reason: "owner-outbox-accepted-state-incomplete", storedOn: "this-computer",
+        incident: "unreadable:outbox", recovery: "unreadable"};
+      expect(f.engine.ownerLiveQuarantines("owner")).toEqual([row]);
+      await expect(f.engine.releaseOwnerLiveStop(owner, binding, 0)).rejects.toBe(refused);
+      expect(f.client.requests.map(request => request.method)).not.toContain("ydoc.ownerStop.release");
+      expect(quarantineMock.queue).not.toHaveBeenCalled();
+      expect(f.unwritten).toEqual([]);
+      await expect(f.engine.saveOwnerLiveRecoveryCopy(owner, "notes/plan.md")).rejects.toBe(refused);
+      await expect(f.engine.saveOwnerLiveRecoveryCopy(owner, "notes/plan.md", row.incident)).rejects.toBe(refused);
+      // A failed strict read keeps the row, and Try again fails with the same refusal while it stands.
+      expect(f.engine.ownerLiveQuarantines("owner")).toEqual([row]);
+      await expect(f.engine.retryOwnerLiveQuarantine(owner, "object", row.incident)).rejects.toBe(refused);
+      readable = true;
+      await f.engine.retryOwnerLiveQuarantine(owner, "object", row.incident);
+      expect(quarantineMock.retry).not.toHaveBeenCalled();
+      expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{recovery: "paused", incident: "outbox:delivery:0"}]);
+    } finally {credentials.abort(); await f.close(); quarantineMock.read.mockReset(); quarantineMock.queue.mockReset();}
+  });
+
   // Nothing is left to protect, and the record would refuse every later Stop of the document.
   it("removes a record whose stored package is missing, and says so", async () => {
     const kept = await keptRelease();

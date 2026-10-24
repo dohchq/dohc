@@ -994,6 +994,11 @@ export function DesktopWorkspaceShell(props: {
   // kept edits the row's incident names. Set once the shell can open the copy it wrote.
   const saveLiveRecoveryCopyRef = useRef<(id: string, path: string, incident?: string) => Promise<void>>(async () => undefined);
   const saveLiveRecoveryCopyFromDialog = useCallback((id: string, path: string, incident?: string) => saveLiveRecoveryCopyRef.current(id, path, incident), []);
+  const readKeptEdits = useCallback(
+    (id: string, objectId: string, incident: string) =>
+      bridge().retryOwnerLiveQuarantine({ workspaceId: id, objectId, incident }),
+    [],
+  );
 
   const reportCloudStatusUnavailable = useCallback(
     (retry: () => void) => {
@@ -1838,6 +1843,18 @@ export function DesktopWorkspaceShell(props: {
       const onServer=row.storedOn==="server";
       const details:ReadonlyArray<ErrorDetailField>=[["File",row.path,row.path.length],["Kept on",onServer ? "The server" : "This computer"],["Reason",row.reason],["Incident",row.incident]];
       const open={label:"Open Live documents",run:() => openLiveDocuments(workspaceId,row.path)};
+      // The engine refused to read the queue: Try again reads it again. Save needs what it could not read.
+      if (row.recovery==="unreadable") {
+        const read=() => {
+          bridge().retryOwnerLiveQuarantine({workspaceId,objectId:row.objectId,incident:row.incident}).catch((error: unknown) => {
+            if (workspaceIdRef.current!==workspaceId || workspaceAdmission.superseded) return;
+            reportShellError(`dohc could not read the edits it kept for ${row.path}.`,error,read,undefined,identity);
+          });
+        };
+        reportShellFailure({title:`Live editing paused for ${row.path}`,
+          message:"The server could not accept your edits. dohc kept them on this computer, but could not read them.",details,retry:read,action:open,identity});
+        continue;
+      }
       const save={label:"Save recovery copy",run:() => {void saveLiveRecoveryCopyRef.current(workspaceId,row.path,row.incident);},additional:[open]};
       // A Stop runs again for this row's document: it finishes a waiting Stop, or writes the file a finished one could not.
       // Its editors close wherever the document is now, since a record keeps the path it had.
@@ -6634,6 +6651,7 @@ export function DesktopWorkspaceShell(props: {
           onError={reportLiveDocumentsError}
           onStopped={liveDocumentStopped}
           saveRecoveryCopy={saveLiveRecoveryCopyFromDialog}
+          readKeptEdits={readKeptEdits}
           {...(liveDocumentsReveal === null ? {} : { reveal: liveDocumentsReveal })}
           onClose={() => setLiveDocumentsWorkspaceId(null)}
         />

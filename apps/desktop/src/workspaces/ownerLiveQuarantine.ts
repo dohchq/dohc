@@ -121,9 +121,10 @@ const QUEUE_REFUSALS = new Set(["INVALID_PARAMS", "INTERNAL"]);
  * stopped-kept: the Stop finished but kept the queue. not-written: the Stop
  * took the edits into the document but could not write its file.
  * cannot-write: as not-written, but the engine no longer holds that release,
- * so only Save recovery copy remains.
+ * so only Save recovery copy remains. unreadable: the engine refused to read
+ * the queue's head, so only reading it again can act on it.
  */
-export type OwnerLiveRecovery = "paused" | "retrying" | "stopping" | "stopped-kept" | "not-written" | "cannot-write";
+export type OwnerLiveRecovery = "paused" | "retrying" | "stopping" | "stopped-kept" | "not-written" | "cannot-write" | "unreadable";
 
 /** One document whose owner edits the server refused for good, as this computer's engine keeps them. */
 export type OwnerLiveQuarantineRecord = {objectId: string; path: string; reason: string} & ({
@@ -132,7 +133,13 @@ export type OwnerLiveQuarantineRecord = {objectId: string; path: string; reason:
   /** The binding generation the queue was refused at, which a Try again names. */
   binding: LiveObjectBinding;
   headDeliveryId: string;
-  recovery: Exclude<OwnerLiveRecovery, "not-written" | "cannot-write">;
+  recovery: Exclude<OwnerLiveRecovery, "not-written" | "cannot-write" | "unreadable">;
+} | {
+  /** A refused queue whose head the engine refused to read; `reason` names that failure and `binding` is its draft's. */
+  outboxId: string;
+  binding: LiveObjectBinding;
+  headDeliveryId: null;
+  recovery: "unreadable";
 } | {
   /** A Stop took the edits into the document; its record keeps the release's binding and queue head when it could read them. */
   outboxId: null;
@@ -151,11 +158,17 @@ export type OwnerLiveHeadCache = Map<string, {key: string; facts: HeadFacts; sna
 export const sameGeneration = (a: LiveObjectBinding, b: LiveObjectBinding) =>
   a.lineageClaimId === b.lineageClaimId && a.restoreFenceGeneration === b.restoreFenceGeneration;
 
-/** Reads every refused owner queue in one workspace from the engine's durable state. */
+/**
+ * Reads every refused owner queue in one workspace from the engine's durable
+ * state. A queue whose head the engine refuses to read keeps an unreadable
+ * row, unless `strict` names it: an action that needs its head then fails
+ * with the engine's refusal.
+ */
 export async function readOwnerLiveQuarantines(client: EngineClient, workspace: string, options: {
   unwritten?: readonly UnwrittenRelease[]; heads?: OwnerLiveHeadCache; signal?: AbortSignal;
+  strict?: (binding: LiveObjectBinding) => boolean;
 } = {}): Promise<OwnerLiveQuarantineRecord[]> {
-  const {signal, heads} = options;
+  const {signal, heads, strict} = options;
   const request = () => ({id: 0, workspace, deadlineMs: 30_000});
   const outbox = new OwnerYDocOutbox({sendRequest: request => client.sendRequest(request, signal)}, workspace);
   const found: OwnerLiveQuarantineRecord[] = [];
@@ -184,13 +197,16 @@ export async function readOwnerLiveQuarantines(client: EngineClient, workspace: 
       for (const draft of page.drafts) {
         if (draft.state !== "quarantined" || draft.outboxId === null) continue;
         // The engine refusing one queue's head, as while an accepted update
-        // waits on a missing dependency, drops only that queue's row.
+        // waits on a missing dependency, leaves the other queues usable.
         const head = await readFacts({...draft, outboxId: draft.outboxId}).catch((error: unknown) => {
-          if (!(error instanceof EngineRequestError && QUEUE_REFUSALS.has(error.wireError?.code ?? ""))) throw error;
-          console.warn("Could not read a refused live document queue.", {outboxId: draft.outboxId, path: draft.binding.currentPath, reason: error.message});
-          return null;
+          if (!(error instanceof EngineRequestError && QUEUE_REFUSALS.has(error.wireError?.code ?? "")) || strict?.(draft.binding)) throw error;
+          return error.message.slice(0, 128) || "unknown";
         });
-        if (head === null) continue;
+        if (typeof head === "string") {
+          found.push({objectId: draft.binding.objectId, path: draft.binding.currentPath, reason: head,
+            outboxId: draft.outboxId, binding: draft.binding, headDeliveryId: null, recovery: "unreadable"});
+          continue;
+        }
         if (head.state !== "quarantined" || head.headDeliveryId === null || head.reason === null || BINDING_QUARANTINES.has(head.reason)) continue;
         const stop = stopFor(head.binding);
         found.push({objectId: draft.binding.objectId, path: draft.binding.currentPath, reason: head.reason,
@@ -212,8 +228,9 @@ export async function readOwnerLiveQuarantines(client: EngineClient, workspace: 
     };
     // While the queue a record came from remains, its row speaks for both. A
     // later queue, even under the same binding and head, holding other edits
-    // leaves the record its own row, and so does a record not read whole.
-    const queues = [...found];
+    // leaves the record its own row, and so does a record not read whole or
+    // whose queue's head the engine refused to read.
+    const queues = found.filter(row => row.recovery !== "unreadable");
     for (const release of options.unwritten ?? []) {
       const queue = release.binding === null || release.snapshot === null ? undefined
         : queues.find(row => row.objectId === release.objectId && row.headDeliveryId === release.headDeliveryId && sameBinding(row.binding, release.binding));

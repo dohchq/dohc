@@ -54,23 +54,40 @@ it("reads every refused queue from durable state, and leaves binding changes to 
   expect(listDrafts.mock.calls.map(call => call[1].after?.objectId ?? null)).toEqual([null, "live"]);
 });
 
-// The engine refusing one queue's head drops only its row; an engine that
-// cannot answer at all still fails the whole read.
-it("drops only the row of a queue whose head the engine refuses", async () => {
+// The engine refusing one queue's head leaves that queue an unreadable row,
+// naming the refusal, and the others usable; an engine that cannot answer at
+// all still fails the whole read. A queue a strict read names fails it too.
+it("keeps an unreadable row for a queue whose head the engine refuses, and fails a strict read of it", async () => {
   head("before", "invalid-update"); head("after", "invalid-update");
-  outboxes.heads.set("outbox-waiting", new EngineRequestError(1, {code: "INVALID_PARAMS", message: "owner-outbox-accepted-state-incomplete", retry: "no"}));
+  const waiting = new EngineRequestError(1, {code: "INVALID_PARAMS", message: "owner-outbox-accepted-state-incomplete", retry: "no"});
+  outboxes.heads.set("outbox-waiting", waiting);
   outboxes.heads.set("outbox-damaged", new EngineRequestError(1, {code: "INTERNAL", message: "owner-outbox-state-corrupt", retry: "no"}));
-  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
   const client = {sendRequest: vi.fn(), ownerYDocStopList: vi.fn(async () => []),
     ownerYDocListDrafts: vi.fn(async () => ({drafts: ["before", "waiting", "damaged", "after"].map(id => draft(id, "quarantined")), next: null}))} as unknown as EngineClient;
-  expect((await readOwnerLiveQuarantines(client, "handle")).map(row => row.objectId)).toEqual(["before", "after"]);
-  expect(warn).toHaveBeenCalledWith("Could not read a refused live document queue.",
-    {outboxId: "outbox-waiting", path: "waiting.md", reason: "owner-outbox-accepted-state-incomplete"});
-  expect(warn).toHaveBeenCalledTimes(2);
+  const unreadable = (objectId: string, reason: string) => ({...record(objectId, "unreadable"), reason, headDeliveryId: null});
+  const heads = new Map();
+  for (let pass = 0; pass < 2; pass++) expect(await readOwnerLiveQuarantines(client, "handle", {heads})).toEqual([record("before", "paused"),
+    unreadable("waiting", "owner-outbox-accepted-state-incomplete"), unreadable("damaged", "owner-outbox-state-corrupt"), record("after", "paused")]);
+  // Never cached: each read asks the engine again.
+  expect(heads.has("outbox-waiting")).toBe(false);
+  await expect(readOwnerLiveQuarantines(client, "handle", {strict: binding => binding.objectId === "waiting"})).rejects.toBe(waiting);
+  await expect(readOwnerLiveQuarantines(client, "handle", {strict: binding => binding.objectId === "before"})).resolves.toHaveLength(4);
   const unavailable = new EngineRequestError(1, {code: "WORKSPACE_UNAVAILABLE", message: "workspace unavailable", retry: "afterBackoff"});
   outboxes.heads.set("outbox-waiting", unavailable);
   await expect(readOwnerLiveQuarantines(client, "handle")).rejects.toBe(unavailable);
-  warn.mockRestore();
+  outboxes.heads.delete("outbox-waiting"); outboxes.heads.delete("outbox-damaged");
+});
+
+// Whether the record came from that queue is unknown, so it keeps its own row.
+it("keeps a record its own row beside an unreadable queue of the same document", async () => {
+  outboxes.heads.set("outbox-only", new EngineRequestError(1, {code: "INVALID_PARAMS", message: "owner-outbox-accepted-state-incomplete", retry: "no"}));
+  const client = {sendRequest: vi.fn(), ownerYDocStopList: vi.fn(async () => []),
+    ownerYDocListDrafts: vi.fn(async () => ({drafts: [draft("only", "quarantined")], next: null}))} as unknown as EngineClient;
+  const release = {workspaceId: "workspace", objectId: "only", path: "only.md", reason: "invalid-update", binding: binding("only"), headDeliveryId: null, snapshot: "1".repeat(64), retry: true};
+  expect(await readOwnerLiveQuarantines(client, "handle", {unwritten: [release]})).toEqual([
+    {...record("only", "unreadable"), reason: "owner-outbox-accepted-state-incomplete", headDeliveryId: null},
+    {objectId: "only", path: "only.md", reason: "invalid-update", outboxId: null, binding: binding("only"), headDeliveryId: null, recovery: "not-written"}]);
+  outboxes.heads.delete("outbox-only");
 });
 
 // A Stop that asked the server but has no confirmed retirement and release is

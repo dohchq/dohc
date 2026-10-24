@@ -49,6 +49,7 @@ function harness() {
     onClose: vi.fn(),
     onError: vi.fn((message: string, error: unknown, retry: () => boolean) => {}),
     saveRecoveryCopy: vi.fn(async (workspaceId: string, path: string, incident?: string) => {}),
+    readKeptEdits: vi.fn(async (workspaceId: string, objectId: string, incident: string) => {}),
   };
 }
 
@@ -1145,6 +1146,34 @@ describe("LiveDocumentsDialog", () => {
         expect(live.textContent).not.toContain("Stopped");
       }
       expect(actions("docs/b.md")).toEqual(["Stop live editing", "Save recovery copy"]);
+    });
+
+    // Save needs the queue head dohc could not read; Try again reads it again,
+    // and a refusal leaves the row as the last read proved it.
+    it("keeps a row for edits dohc could not read, with Try again and Save disabled, beside a usable one", async () => {
+      const h = harness();
+      const unreadable = row("docs/a.md", { quarantine: "unreadable", incident: "unreadable:outbox", objectId: "object-a" });
+      h.load.mockResolvedValue(page([unreadable, row("docs/b.md", { quarantine: "paused", incident: "outbox-b:delivery:0" })]));
+      const refused = new Error("owner-outbox-accepted-state-incomplete");
+      h.readKeptEdits.mockRejectedValueOnce(refused);
+      render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+      const kept = await screen.findByTestId("live-document-row-docs/a.md");
+      expect(within(kept).getByText("Can't read edits")).toBeTruthy();
+      expect(kept.textContent).toContain("The server could not accept your edits. dohc kept them on this computer, but could not read them. Try again to read them.");
+      expect(actions("docs/a.md")).toEqual(["Stop live editing", "Try again", "Save recovery copy"]);
+      expect(within(kept).getByRole("button", { name: "Save recovery copy of docs/a.md" })).toHaveProperty("disabled", true);
+      expect(screen.getByRole("button", { name: "Save recovery copy of docs/b.md" })).toHaveProperty("disabled", false);
+      const user = userEvent.setup();
+      await user.click(within(kept).getByRole("button", { name: "Try again to read your kept edits for docs/a.md" }));
+      await vi.waitFor(() => expect(h.onError).toHaveBeenCalledExactlyOnceWith("dohc could not read the edits it kept for docs/a.md.", refused, expect.any(Function)));
+      expect(h.readKeptEdits).toHaveBeenCalledExactlyOnceWith("ws", "object-a", "unreadable:outbox");
+      expect(screen.getByTestId("live-document-row-docs/a.md")).toBeTruthy();
+      // Read: the list reads again and shows the queue as it is now.
+      h.load.mockResolvedValue(page([{ ...unreadable, quarantine: "paused", incident: "outbox:delivery:0" }]));
+      act(() => { expect(h.onError.mock.calls[0]![2]()).toBe(true); });
+      await vi.waitFor(() => expect(within(screen.getByTestId("live-document-row-docs/a.md")).getByText("Paused")).toBeTruthy());
+      expect(h.readKeptEdits).toHaveBeenCalledTimes(2);
+      expect(screen.getByRole("button", { name: "Save recovery copy of docs/a.md" })).toHaveProperty("disabled", false);
     });
 
     it("disables a row's Save recovery copy while its save runs", async () => {

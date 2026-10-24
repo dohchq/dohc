@@ -186,8 +186,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   const ownerQuarantineHeads = new Map<string, OwnerLiveHeadCache>();
   const releaseIncident = (row: Pick<UnwrittenRelease, "objectId" | "binding">) =>
     row.binding ? `release:${row.binding.lineageClaimId}:${row.binding.restoreFenceGeneration}` : `release:${row.objectId}`;
-  const quarantineIncident = (row: OwnerLiveQuarantineRecord) => row.outboxId !== null
-    ? `${row.outboxId}:${row.headDeliveryId}:${ownerQuarantineAttempts.get(row.outboxId) ?? 0}` : releaseIncident(row);
+  const quarantineIncident = (row: OwnerLiveQuarantineRecord) => row.recovery === "unreadable" ? `unreadable:${row.outboxId}`
+    : row.outboxId !== null ? `${row.outboxId}:${row.headDeliveryId}:${ownerQuarantineAttempts.get(row.outboxId) ?? 0}` : releaseIncident(row);
   // Refused queues the server keeps for documents it hosts, as each pass last
   // read them from the server's live document list.
   const serverQuarantines = new Map<string, ServerKeptEdits[]>();
@@ -223,13 +223,15 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     });
   }
   // Returns its own rows, which the caller can trust even when a later read owns the cache.
-  async function readOwnerQuarantinesInto(workspaceId: string, client: EngineClient, workspaceHandle: string): Promise<OwnerLiveQuarantineRecord[]> {
+  // A queue `strict` names must be read, or the read fails and the cache keeps the last answer.
+  async function readOwnerQuarantinesInto(workspaceId: string, client: EngineClient, workspaceHandle: string,
+    strict?: (binding: LiveObjectBinding) => boolean): Promise<OwnerLiveQuarantineRecord[]> {
     const read = (ownerQuarantineReads.get(workspaceId) ?? 0) + 1;
     ownerQuarantineReads.set(workspaceId, read);
     const heads = ownerQuarantineHeads.get(workspaceId) ?? new Map();
     ownerQuarantineHeads.set(workspaceId, heads);
     const rows = await readOwnerLiveQuarantines(client, workspaceHandle,
-      {heads, unwritten: await dependencies.ownerLiveReleases.list(workspaceId)});
+      {heads, unwritten: await dependencies.ownerLiveReleases.list(workspaceId), ...(strict ? {strict} : {})});
     // A later read owns the answer.
     if (ownerQuarantineReads.get(workspaceId) !== read) return rows;
     const before = JSON.stringify(ownerQuarantines.get(workspaceId) ?? []);
@@ -245,9 +247,11 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
    */
   async function releaseOwnerLiveStop(workspaceId: string, client: EngineClient, workspaceHandle: string,
     binding: LiveObjectBinding, acceptedCursor: number, signal?: AbortSignal) {
-    // Only the queue of the generation this release takes.
-    const kept = (await readOwnerQuarantinesInto(workspaceId, client, workspaceHandle))
+    // Only the queue of the generation this release takes. If the engine refuses
+    // to read this document's queue head, the release fails: nothing would keep its edits.
+    const kept = (await readOwnerQuarantinesInto(workspaceId, client, workspaceHandle, queue => queue.objectId === binding.objectId))
       .find(row => row.objectId === binding.objectId && row.outboxId !== null && sameGeneration(row.binding, binding));
+    if (kept?.recovery === "unreadable") throw new Error(`dohc could not read the edits it kept for ${kept.path}.`);
     let keptSnapshot: string | undefined;
     if (kept?.outboxId) {
       const release = {workspaceId, objectId: binding.objectId, path: kept.path, reason: kept.reason, binding, headDeliveryId: kept.headDeliveryId, retry: true};
@@ -823,6 +827,13 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         ownerDelivery?.retry?.(workspace.workspaceId);
         return;
       }
+      // Try again for a queue whose head the engine refused to read reads it
+      // again, and fails with the engine's refusal while it still refuses.
+      if (incident.startsWith("unreadable:")) {
+        await withEngineClient(workspace, (client, handle) =>
+          readOwnerQuarantinesInto(workspace.workspaceId, client, handle, queue => queue.objectId === objectId));
+        return;
+      }
       await withEngineClient(workspace, async (client, handle) => {
         // Read again, so a Try again never names a queue that already changed.
         const row = (await readOwnerQuarantinesInto(workspace.workspaceId, client, handle)).find(candidate => candidate.objectId === objectId);
@@ -915,7 +926,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
           if (!record) throw changed();
           return {record};
         }
-        const row = (await readOwnerLiveQuarantines(client, handle)).find(candidate => candidate.path === path && candidate.outboxId !== null &&
+        // A queue at this path whose head the engine refuses to read fails the save with that refusal.
+        const row = (await readOwnerLiveQuarantines(client, handle, {strict: queue => queue.currentPath === path})).find(candidate => candidate.path === path && candidate.outboxId !== null &&
           (named === undefined || quarantineIncident(candidate) === incident));
         if (named === "queue" && !row) throw changed();
         // Without a row, a record goes first, unless its package holds exactly this queue's edits, which the queue still holds.

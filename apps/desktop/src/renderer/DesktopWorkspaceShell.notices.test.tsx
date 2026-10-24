@@ -381,6 +381,43 @@ describe("edits the server refused", () => {
     await waitFor(() => expect(screen.queryByText("Edits not written to notes/plan.md")).toBeNull());
   });
 
+  // The engine refused to read the queue. The row names the document and the
+  // refusal, offers no Save, and its Try again reads the queue again; while the
+  // engine still refuses, the refusal replaces the row.
+  it("keeps a queue dohc could not read in a row with the refusal, and Try again reads it again", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const unreadable = {...quarantine, reason: "owner-outbox-accepted-state-incomplete", incident: "unreadable:outbox", recovery: "unreadable" as const};
+    let status = quarantined(unreadable);
+    bridge.getSyncStatus = vi.fn(async () => status);
+    bridge.retryOwnerLiveQuarantine = vi.fn()
+      .mockRejectedValueOnce(new Error("owner-outbox-accepted-state-incomplete"))
+      .mockImplementationOnce(async () => {status = quarantined(quarantine);});
+    renderShell(bridge);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(within(toast).getByText(TITLE)).toBeTruthy();
+    expect(within(toast).getByText("The server could not accept your edits. dohc kept them on this computer, but could not read them.")).toBeTruthy();
+    expect(within(toast).queryByRole("button", {name: "Save recovery copy"})).toBeNull();
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    const row = (await within(notices).findByText(TITLE)).closest("li")!;
+    expect(within(row).getByRole("button", {name: "Copy error details"})).toBeTruthy();
+    await user.click(within(row).getByRole("button", {name: "Try again"}));
+    expect(bridge.retryOwnerLiveQuarantine).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId, objectId: "object-1", incident: "unreadable:outbox"});
+    const FAILED = "dohc could not read the edits it kept for notes/plan.md.";
+    const failed = (await screen.findByText(FAILED)).closest<HTMLElement>("[data-testid='workspace-shell-error']")!;
+    await user.click(within(failed).getByRole("button", {name: "Try again"}));
+    await waitFor(() => expect(bridge.retryOwnerLiveQuarantine).toHaveBeenCalledTimes(2));
+    // Read: the queue's own notice replaces the failure, with Save.
+    act(() => bridge.emitWorkspaceActivity());
+    const paused = (await screen.findByText(BODY)).closest<HTMLElement>("[data-testid='workspace-shell-error']")!;
+    expect(within(paused).getByRole("button", {name: "Save recovery copy"})).toBeTruthy();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const rows = await screen.findByTestId("notice-center");
+    expect(within(rows).getAllByText(TITLE)).toHaveLength(1);
+    expect(within(rows).queryByText(FAILED)).toBeNull();
+  });
+
   // A Stop recorded on this computer whose server call failed: it waits, it is not stopped.
   it("files a waiting Stop quietly with Try again, and replaces it once background recovery finishes", async () => {
     const bridge = makeBridge(Promise.resolve(null));
