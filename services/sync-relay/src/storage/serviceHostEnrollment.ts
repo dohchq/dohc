@@ -10,7 +10,7 @@ import {canonicalLiveSelector, currentLiveDocumentMoment} from "./liveDocumentAu
 import {LIVE_RESTORE_OPERATIONS} from "./liveRestoreOperationSchema";
 import {assertWorkspaceQuota} from "./workspaces";
 import {forgetServiceHostUploads} from "./serviceHostUploads";
-import {readServiceActivationRetirement, retireServiceActivation} from "./serviceActivationRetirement";
+import {retireServiceActivation, serviceActivationRetirementPending} from "./serviceActivationRetirement";
 import {badRequest, notFound, relayError} from "../errors";
 
 export const SERVICE_HOST_ENROLLMENTS = "sync_relay_service_host_enrollments";
@@ -515,7 +515,7 @@ export function releaseServiceHostEnrollment(storage: StorageContext, input: {wo
  * its activation fences it whatever the enrollment says.
  */
 export function serviceHostDocumentEnabled(storage: StorageContext, document: {workspaceId: string; objectId: string}): boolean {
-  if (readServiceActivationRetirement(storage, document)) return false;
+  if (serviceActivationRetirementPending(storage, document)) return false;
   const value = storage.db.prepare(`SELECT e.enabled,e.retired,e.owner_stop,e.owner_user_id,e.path,e.share_id,e.replication_epoch,e.stream_identity,
     w.owner_user_id AS current_owner,w.replication_epoch AS current_epoch,w.stream_identity AS current_stream
     FROM ${SERVICE_HOST_ENROLLMENTS} e JOIN sync_relay_workspaces w USING(workspace_id)

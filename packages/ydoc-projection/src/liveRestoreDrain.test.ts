@@ -21,6 +21,7 @@ import type {NativeRestoreFenceReceipt} from "../../../services/sync-relay/src/l
 import { openSyncRelayStorage } from "../../../services/sync-relay/src/storage.js";
 import {parseNativeRestoreProposalReceipt, encodeNativeRestoreProposal, decodeNativeRestoreProposal, nativeSourceAgentDeclaration} from "../../../services/sync-relay/src/liveRestoreProposal.js";
 import {initializeLiveRestoreOperationSchema} from "../../../services/sync-relay/src/storage/liveRestoreOperationSchema.js";
+import {readServiceActivationRetirement} from "../../../services/sync-relay/src/storage/serviceActivationRetirement.js";
 import {validateLiveRestoreProposal} from "./liveRestoreProof.js";
 import * as restoreProof from "./liveRestoreProof.js";
 import {createLiveMarkdownJournalValidator} from "./liveDocumentValidation.js";
@@ -36,8 +37,9 @@ const jsonHash = (value: unknown) => hash(Buffer.from(JSON.stringify(value)));
 const ownerOriginDigest = ({binding, cut: c}: Pick<OwnerCutCapture, "binding" | "cut">) => jsonHash([binding,
   c.relayDatabaseNamespace, c.sourceMomentId, c.sourceDigest, c.sourceByteLength, c.baselineMomentRelaySequence,
   c.baselineRegisteredAtMs, c.expectedLocalSequence, c.events.map(event => canonicalVersionedAcceptedMetadata(event.metadata))]);
-function proposalSourcesFixture(kind: "bootstrap" | "owner", mode: "service" | "device", acceptedNative = false, selectedPoint = false, authorBand = 0) {
-  const f = readyNativeFence(kind, mode, authorBand || (acceptedNative ? "native" : true), selectedPoint);
+function proposalSourcesFixture(kind: "bootstrap" | "owner", mode: "service" | "device", acceptedNative = false, selectedPoint = false, authorBand = 0,
+  beforeFence?: Parameters<typeof readyNativeFence>[4]) {
+  const f = readyNativeFence(kind, mode, authorBand || (acceptedNative ? "native" : true), selectedPoint, beforeFence);
   f.store.acknowledgeStopRestoreFence(f.lookup, f.receipt);
   const input = {...f.lookup, maxBytes: authorBand ? 10_000_000 : 1_000_000, maxEvents: authorBand ? 1000 : 10};
   const selectedHistory = f.store.captureStopRestorePoint(input).proof;
@@ -121,8 +123,9 @@ function pendingSource(binding: NativeRestoreFenceReceipt["operation"]["oldBindi
     byteLength: bytes.byteLength, createdAtMs: 100, source, acceptedReceipt: null};
 }
 
-function contentProposalFixture(kind: "bootstrap" | "owner" = "owner", mode: "service" | "device" = "device", pending: boolean | "deleted" = false, acceptedNative = false, selectedPoint = false, authorBand = 0) {
-  return buildContentProposal(proposalSourcesFixture(kind, mode, acceptedNative, selectedPoint, authorBand), pending);
+function contentProposalFixture(kind: "bootstrap" | "owner" = "owner", mode: "service" | "device" = "device", pending: boolean | "deleted" = false, acceptedNative = false, selectedPoint = false, authorBand = 0,
+  beforeFence?: Parameters<typeof readyNativeFence>[4]) {
+  return buildContentProposal(proposalSourcesFixture(kind, mode, acceptedNative, selectedPoint, authorBand, beforeFence), pending);
 }
 function buildContentProposal<F extends Pick<ReturnType<typeof proposalSourcesFixture>, "store" | "input" | "document" | "receipt" | "proposal" | "close"> & {acceptedNative?: AcceptedNative}>(f: F, pending: boolean | "deleted" = false) {
   const point = new Y.Doc({gc: false}), head = new Y.Doc({gc: false});
@@ -985,7 +988,8 @@ function seedOwnerApplicationPrefix(f: ReturnType<typeof fixture>, terminal: Ret
   expect(f.context.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-? WHERE workspace_id=? AND usage_bytes>=?")
     .run(refund, f.document.workspaceId, refund).changes).toBe(1);
 }
-function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device", events: boolean | "native" | number = false, selectedPoint = false) {
+function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device", events: boolean | "native" | number = false, selectedPoint = false,
+  beforeFence?: (f: ReturnType<typeof fixture>) => void) {
   const f = fixture(kind, mode);
   if (kind === "owner") f.adopt();
   let acceptedNative: AcceptedNative | undefined;
@@ -1054,6 +1058,7 @@ function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device
     f.intent.restorePointCursor = receipts[0]!.journalCursor;
     f.intent.restorePointReceiptDigest = receipts[0]!.updateDigest;
   }
+  beforeFence?.(f);
   f.fence();
   const capture = f.open();
   if (kind === "bootstrap") {
@@ -1469,6 +1474,66 @@ it.each([["bootstrap","service"],["bootstrap","device"],["owner","device"]] as c
     }
     expect(before).not.toEqual(after);
   }finally{f.close();}
+});
+
+const hostedActivationId = `ordinary-activation-${"d".repeat(64)}`;
+// Enrolls the fixture document on the service host through `shareId`, which
+// another Edit grant covers unless it is the restore's own share, and records
+// its adopted activation. Stored activation metadata is enough here.
+function hostRestoredDocument(f: ReturnType<typeof fixture>, shareId: string) {
+  if (shareId !== f.intent.shareId) f.write(db => {
+    db.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,'owner',?,0)")
+      .run(shareId, f.document.workspaceId, JSON.stringify({paths: ["docs"], versionId: null}));
+    db.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+      VALUES (?,?,'user','collaborator',NULL,'edit',1,'active',0,NULL,NULL)`).run(`${shareId}-grant`, shareId);
+  });
+  f.storage.claimWorkspaceIdentity({workspaceId: f.document.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
+  f.storage.enrollServiceHostDocument({workspaceId: f.document.workspaceId, path: "docs/a.md", shareId, ownerUserId: "owner", nowMs: 30, guard() {}});
+  f.write(db => db.prepare(`INSERT INTO sync_relay_service_activations VALUES ('restore-test',?,?,'main',?,?,'{}','{}',?,x'0000','owner',?,'{}',1)`)
+    .run(hostedActivationId, f.document.workspaceId, f.document.objectId, f.document.lineageClaimId, f.document.lineageClaimId, shareId));
+}
+
+// Proves: a retirement recorded while a restore is unfinished, by the
+// restore's own revocation of the last Edit grant or by Pause, keeps live
+// admission fenced, and once the restore resumes it names the restored
+// generation and the restore's own journal cursor, the key the engine accepts
+// then. No other restore of the document begins while it is pending.
+it.each(["revocation", "pause"] as const)("carries a retirement recorded during a restore to the restored generation: %s", cause => {
+  const f = contentProposalFixture("bootstrap", "service", false, false, false, 0,
+    hosted => hostRestoredDocument(hosted, cause === "revocation" ? hosted.intent.shareId : "other"));
+  try {
+    const retirement = () => readServiceActivationRetirement(f.context, f.document);
+    const recorded = {relayDatabaseNamespace: "restore-test", activationId: hostedActivationId, ...f.document};
+    if (cause === "pause") {
+      expect(retirement()).toBeNull();
+      f.storage.setServiceHostEnrollmentEnabled({workspaceId: f.document.workspaceId, path: "docs/a.md", ownerUserId: "owner", enabled: false, nowMs: 60, guard() {}});
+    }
+    // Recorded where the fence stood: before the restore advanced it, or after.
+    expect(retirement()).toEqual({...recorded, restoreFenceGeneration: cause === "revocation" ? 1 : 2, acceptedThrough: 2});
+    const proposed = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+    const admitted = f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201);
+    const application = {fence: admitted.preparation.fence, candidateDigest: admitted.candidateDigest, nativeSourceManifestDigest: admitted.nativeSourceManifestDigest,
+      admitted: admitted.admitted, localHeadSequence: admitted.preparation.fence.localHeadSequence + 1,
+      hostCoordinate: {hostId: f.input.host.hostId, hostEpoch: f.input.host.hostEpoch, instanceId: f.input.host.instanceId, connectionId: f.input.host.connectionId}, recordedAtMs: 202};
+    f.store.acknowledgeStopRestoreReplacement(f.input, application);
+    const settlement = {settlementId: "restore-settlement", previousCursor: 0, terminalCursor: admitted.admitted.accepted.receipt.journalCursor,
+      applicationCount: 3, localYDocSequence: application.localHeadSequence, momentId: "restore-moment", markdownDigest: admitted.preparation.point.markdownDigest,
+      materialized: true, collectionReconcileRequired: false};
+    expect(f.store.acknowledgeStopRestoreSettlement(f.input, settlement).phase).toBe("settled");
+    expect(f.store.acknowledgeStopRestoreResume(f.input, {relayDatabaseNamespace: admitted.preparation.fence.operation.relayDatabaseNamespace,
+      operationId: f.input.operationId, binding: admitted.admitted.accepted.binding, applicationReceipt: admitted.admitted.accepted.receipt,
+      settlementId: settlement.settlementId, momentId: settlement.momentId, markdownDigest: settlement.markdownDigest,
+      localHeadSequence: application.localHeadSequence, recordedAtMs: 204}).phase).toBe("resumed");
+    expect(retirement()).toEqual({...recorded, restoreFenceGeneration: 2, acceptedThrough: admitted.admitted.accepted.receipt.journalCursor});
+    expect(f.storage.serviceHostDocumentEnabled(f.document)).toBe(false);
+    f.write(db => db.prepare("UPDATE sync_relay_share_grants SET status='active',generation=6,revoked_at_ms=NULL WHERE grant_id=?").run(f.intent.grantId));
+    expect(() => f.storage.readStopRestorePlan({operationId: "after-retirement", ownerUserId: "owner", document: f.document, shareId: f.intent.shareId,
+      grantId: f.intent.grantId, restorePointCursor: 0, restorePointReceiptDigest: f.intent.restorePointReceiptDigest, maxOutputBytes: 1_000_000}))
+      .toThrow("conflicts with current authority");
+    expect(() => beginStopRestore(f.context, {...f.intent, operationId: "after-retirement", expectedFence: 2, expectedGrantGeneration: 6}, 300))
+      .toThrow("conflicts with current authority");
+    expect(retirement()).toEqual({...recorded, restoreFenceGeneration: 2, acceptedThrough: admitted.admitted.accepted.receipt.journalCursor});
+  } finally {f.close();}
 });
 
 it("starts a fresh restore author window at the 960-identity checkpoint band", () => {

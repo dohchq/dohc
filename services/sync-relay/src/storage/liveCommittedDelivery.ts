@@ -3,6 +3,7 @@ import {nativeSourceAuthorMatches} from "./liveNativeSourceAuthors";
 import {parseNativeRestoreApplicationReceipt,parseNativeRestoreSettlementReceipt,parseNativeRestoreResumeReceipt,type RestoreLifecycle,type NativeRestoreApplicationReceipt,type NativeRestoreSettlementReceipt,type NativeRestoreResumeReceipt} from "../liveRestoreLifecycle";
 import type { ServiceActivationAccess } from "./serviceActivationAccess";
 import {readServiceActivationOrigin} from "./serviceActivationOrigin";
+import {carryServiceActivationRetirement} from "./serviceActivationRetirement";
 import {readRestoreAdmission,verifyRestoreCheckpoint,restoreDigest,type RestoreAdmission,type RestoreSourceRange} from "./liveRestoreCheckpoint";
 import {retainedRestoreLifecycle,validateRestoreLifecycle,requireResumedBinding} from "./liveRestoreLifecycleStorage";
 import { randomUUID, createHash } from "node:crypto";
@@ -1545,6 +1546,7 @@ export class LiveCommittedDeliveryStore {
       if (stage==="resume") {
         integrity(this.#storage.db.prepare(`UPDATE sync_relay_live_documents SET admission_state='open' WHERE ${WHERE_DOCUMENT} AND restore_fence_generation=? AND admission_state='closed' AND lineage_state='current'`)
           .run(...documentParams(saved.operation.intent.document),saved.operation.newFence).changes===1);
+        carryServiceActivationRetirement(this.#storage,saved.operation.intent.document,saved.operation.newFence!);
       }
       requireRestoreLifecycleBudget(this.#storage.db,this.#history.namespace,input.operationId,input.workspaceId,input.maxBytes);
       return structuredClone(lifecycle);

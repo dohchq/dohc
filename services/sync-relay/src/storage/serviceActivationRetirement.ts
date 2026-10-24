@@ -7,7 +7,9 @@ import {SERVICE_ACTIVATIONS} from "./serviceActivationSchema";
 // activation as the engine retires it, and admission stays fenced while it is
 // recorded: Resume, a new share or a restored grant leaves it in place. An
 // authority-reducing change must always commit, so it charges no quota; one
-// activation holds at most one.
+// activation holds at most one. No restore of the document begins while it is
+// recorded, and a restore unfinished when it is recorded carries it to the
+// restored generation as it resumes.
 export const SERVICE_ACTIVATION_RETIREMENTS = "sync_relay_service_activation_retirements";
 const MIGRATION = "service-activation-retirements-v1";
 const SQL = `CREATE TABLE ${SERVICE_ACTIVATION_RETIREMENTS} (
@@ -70,6 +72,29 @@ export function readServiceActivationRetirement(storage: StorageContext, documen
   return value ? retirement(value) : null;
 }
 
+/** Whether a retirement of the document's activation is pending. */
+export function serviceActivationRetirementPending(storage: StorageContext, document: {workspaceId: string; objectId: string}): boolean {
+  return storage.db.prepare(`SELECT EXISTS(SELECT 1 FROM ${SERVICE_ACTIVATION_RETIREMENTS} WHERE workspace_id=? AND main_version_id='main' AND object_id=?) AS pending`)
+    .get(document.workspaceId, document.objectId)!.pending === 1;
+}
+
+// The lineage's last journal cursor: what its live admission accepted through.
+function acceptedThrough(storage: StorageContext, document: {workspaceId: string; objectId: string; lineageClaimId: string}): number {
+  return integer(storage.db.prepare(`SELECT COALESCE(MAX(journal_cursor),0) AS cursor FROM sync_relay_live_update_journal
+    WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=?`).get(document.workspaceId, document.objectId, document.lineageClaimId)!.cursor);
+}
+
+/**
+ * Inside the transaction a restore resumes in, carries the pending retirement
+ * of its lineage to the restored generation and the restore's own journal
+ * cursor, which is the lineage's last, so the engine accepts its key.
+ */
+export function carryServiceActivationRetirement(storage: StorageContext, document: {workspaceId: string; objectId: string; lineageClaimId: string}, restoreFenceGeneration: number): void {
+  storage.db.prepare(`UPDATE ${SERVICE_ACTIVATION_RETIREMENTS} SET restore_fence_generation=?,accepted_through=?
+    WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=?`)
+    .run(integer(restoreFenceGeneration), acceptedThrough(storage, document), document.workspaceId, document.objectId, document.lineageClaimId);
+}
+
 /**
  * Records, inside the caller's transaction, the retirement of the activation
  * of the document's current lineage, keyed as the engine retires it. A
@@ -80,12 +105,11 @@ export function retireServiceActivation(storage: StorageContext, document: {work
     JOIN sync_relay_live_documents d USING(workspace_id,main_version_id,object_id,lineage_claim_id)
     WHERE a.workspace_id=? AND a.main_version_id='main' AND a.object_id=? AND d.lineage_state='current'`).get(document.workspaceId, document.objectId);
   if (!activation) return null;
-  const accepted = storage.db.prepare(`SELECT MAX(journal_cursor) AS cursor FROM sync_relay_live_update_journal
-    WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=?`).get(document.workspaceId, document.objectId, activation.lineage_claim_id);
+  const lineageClaimId = String(activation.lineage_claim_id);
   storage.db.prepare(`INSERT OR IGNORE INTO ${SERVICE_ACTIVATION_RETIREMENTS}(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
     restore_fence_generation,accepted_through) VALUES (?,?,?,'main',?,?,?,?)`)
-    .run(activation.relay_database_namespace, activation.activation_id, document.workspaceId, document.objectId, activation.lineage_claim_id,
-      integer(activation.restore_fence_generation), integer(accepted?.cursor ?? 0));
+    .run(activation.relay_database_namespace, activation.activation_id, document.workspaceId, document.objectId, lineageClaimId,
+      integer(activation.restore_fence_generation), acceptedThrough(storage, {...document, lineageClaimId}));
   const recorded = storage.db.prepare(`SELECT * FROM ${SERVICE_ACTIVATION_RETIREMENTS} WHERE relay_database_namespace=? AND activation_id=?`)
     .get(activation.relay_database_namespace, activation.activation_id);
   if (!recorded) throw new Error("Service activation retirement is damaged.");

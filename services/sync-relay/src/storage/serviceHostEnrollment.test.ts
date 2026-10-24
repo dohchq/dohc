@@ -4,6 +4,7 @@ import {openSyncRelayStorage} from "../storage";
 import {authorizeServiceHostReplication, deriveServiceHostBearer, serviceHostReplicationRoute} from "../serviceHostCredential";
 import {serviceHostDocumentEnabled, SERVICE_HOST_ENROLLMENTS, SERVICE_HOST_MAX_WORKSPACES} from "./serviceHostEnrollment";
 import {readServiceActivationRetirement, SERVICE_ACTIVATION_RETIREMENTS} from "./serviceActivationRetirement";
+import {fenceAccount, initializeAccountDeletion} from "./accountDeletion";
 import type {StorageContext} from "./context";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -536,11 +537,11 @@ async function activated() {
   const owner = () => f.storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: "owner-1", shareId: scope.shareId}}).kind;
   const retirement = () => readServiceActivationRetirement(f.storage as StorageContext, binding);
   const retirements = () => f.raw.prepare(`SELECT count(*) AS count FROM ${SERVICE_ACTIVATION_RETIREMENTS}`).get()!.count;
-  const share = (shareId: string, grantId: string, access = "edit") => {
+  const share = (shareId: string, grantId: string, access = "edit", userId = "reader-2") => {
     f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,'owner-1',?,0)")
       .run(shareId, scope.workspaceId, JSON.stringify({paths: ["docs"], versionId: null}));
     f.raw.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
-      VALUES (?,?,'user','reader-2',NULL,?,1,'active',0,NULL,NULL)`).run(grantId, shareId, access);
+      VALUES (?,?,'user',?,NULL,?,1,'active',0,NULL,NULL)`).run(grantId, shareId, userId, access);
   };
   return {...f, owner, retirement, retirements, share};
 }
@@ -607,6 +608,26 @@ it("keeps a revoked document's retirement pending when it is shared again before
   expect(f.storage.revokeShare("replacement", 32)).toBe(true);
   expect(f.storage.revokeShare(scope.shareId, 33)).toBe(true);
   expect(f.retirement()).toEqual(recorded); expect(f.retirements()).toBe(1);
+});
+
+// Proves: deleting a collaborator's account records the retirement its
+// revocations cause, in the same transaction. Another person's Edit grant
+// keeps the activation; once the last one ends, sharing Edit with someone
+// else leaves the retirement pending and admission fenced.
+it("retires the activation when deleting a collaborator's account ends the last Edit grant", async () => {
+  const f = await activated();
+  initializeAccountDeletion(f.storage as StorageContext, "fence-key");
+  const deleteAccount = (userId: string) => fenceAccount(f.storage as StorageContext, "fence-key", userId, `${userId}@dohc.test`);
+  f.share("overlap", "overlap-edit");
+  deleteAccount(scope.userId);
+  expect(f.retirement()).toBeNull();
+  expect(f.owner()).toBe("current");
+  deleteAccount("reader-2");
+  expect(f.retirement()).toEqual(recorded);
+  expect(f.owner()).toBe("refused");
+  f.share("replacement", "replacement-edit", "edit", "reader-3");
+  expect(f.retirement()).toEqual(recorded); expect(f.retirements()).toBe(1);
+  expect(f.owner()).toBe("refused");
 });
 
 it("candidate scanning advances past a full page of noncanonical shares", async () => {

@@ -2,6 +2,7 @@ import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import {requireResumedBinding,retainedRestoreLifecycle} from "./liveRestoreLifecycleStorage";
 import {readServiceActivationOrigin} from "./serviceActivationOrigin";
 import {readServiceActivation} from "./serviceActivationAccess";
+import {serviceActivationRetirementPending} from "./serviceActivationRetirement";
 import {SERVICE_HOST_ENROLLMENTS} from "./serviceHostEnrollment";
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
@@ -114,6 +115,11 @@ function owner(storage: StorageContext, workspaceId: string, ownerUserId: string
 // and service restore continues only a completed one.
 function requireNoPendingActivation(storage: StorageContext, document: LiveDocumentKey): void {
   if (readServiceActivation(storage, document)?.completion_json === null) refuse();
+}
+// A fence would move the generation a pending retirement names, so the engine
+// could never release it.
+function requireNoPendingRetirement(storage: StorageContext, document: LiveDocumentKey): void {
+  if (serviceActivationRetirementPending(storage, document)) refuse();
 }
 function requireUnretiredEnrollment(storage: StorageContext, document: LiveDocumentKey): void {
   // Enrollments are main-only and keyed by workspace/object, even after a path moves.
@@ -232,6 +238,7 @@ export function readStopRestorePlan(storage: StorageContext, input: StopRestoreP
     if (!row) refuse();
     requireUnretiredEnrollment(storage, document);
     requireNoPendingActivation(storage, document);
+    requireNoPendingRetirement(storage, document);
     const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
     const selector = storedSelector && effectiveShareSelector(storedSelector, grant.access);
     if (!selector || !isLiveEditShareSelector(selector) || !canonicalLiveSelector(share, selector) ||
@@ -285,6 +292,7 @@ export function beginStopRestore(storage: StorageContext, input: StopRestoreInte
       Number(document.baseline_moment_relay_seq) <= storage.getEpochLogFloor(intent.document.workspaceId) ||
       !currentLiveDocumentMoment(storage, intent.document, String(document.current_path))) refuse();
     requireNoPendingActivation(storage, intent.document);
+    requireNoPendingRetirement(storage, intent.document);
     const existing = storage.db.prepare(`SELECT 1 FROM ${table} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND phase<>'resumed'`).get(...key(intent.document).slice(0, 3));
     if (existing) refuse();
     const previous=storage.db.prepare(`SELECT operation_id,new_fence,lineage_claim_id,phase FROM ${table} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? ORDER BY new_fence DESC LIMIT 1`)
