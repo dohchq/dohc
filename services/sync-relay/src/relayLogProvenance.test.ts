@@ -59,17 +59,16 @@ describe("client log provenance", () => {
       expect(() => assertClientLogProvenance(`${prefix}grant`, [])).toThrow();
     }
   });
-  it("refuses an owner device or recipient that writes as a replayed link origin", async () => {
+  it.each(["owner", "recipient"] as const)("refuses an %s that writes as a replayed link origin", async user => {
     const storage = await testStorage();
     const handler = testHandler(storage);
     await claimWorkspace(handler, "owner", "workspace");
     const share = await createShare(handler, "owner", "workspace", {recipientUserId: "recipient", paths: ["poll"], access: "edit"});
     const body = {originId: "shared:x:relay:share-link:p", ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: 1, payload: {}}]};
-    for (const [user, url] of [["owner", "/sync/workspace/log"], ["recipient", `/sync/shares/${share}/log`]] as const) {
-      const response = await handler(request(user, url, jsonBody(body)));
-      expect(response.status).toBe(400);
-      expect(await response.json()).toMatchObject({code: "bad_request"});
-    }
+    const url = user === "owner" ? "/sync/workspace/log" : `/sync/shares/${share}/log`;
+    const response = await handler(request(user, url, jsonBody(body)));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({code: "bad_request"});
     expect(storage.fetchLogPage({workspaceId: "workspace", sinceRelaySeq: 0, limit: 100}).rows).toEqual([]);
   });
   it("lets only the service host's feed write from its reserved origins", () => {

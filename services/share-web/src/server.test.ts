@@ -1509,6 +1509,7 @@ describe("share-web relay call", () => {
     { relay: 409, status: 404 },
     { relay: 413, status: 404 },
     { relay: 429, status: 404 },
+    { relay: "429, proxy page", status: 404 },
     { relay: 500, status: 503 },
     { relay: 502, status: 503 },
     { relay: "503, oversized body", status: 503 },
@@ -1520,7 +1521,9 @@ describe("share-web relay call", () => {
   it.each(routes)("maps every relay answer for $name through one refusal map", async (target) => {
     for (const listed of outcomes) {
       const lost = listed.relay === "network error" || (buffered.has(target.name) && unreadable.has(listed.relay));
-      const outcome = lost && retryable(target.name) ? { ...listed, status: 503 } : listed;
+      // A 429 without a refusal is a busy relay or proxy, not a verdict on the link.
+      const busy = listed.relay === 429 || listed.relay === "429, proxy page";
+      const outcome = (lost || busy) && retryable(target.name) ? { ...listed, status: 503 } : listed;
       const state = await linkSession(async () => {
         switch (outcome.relay) {
           case "network error":
@@ -1529,6 +1532,8 @@ describe("share-web relay call", () => {
             return Response.json({ ok: true, code: HANDOFF_CODE, expiresAtMs: 301_000 });
           case 204:
             return new Response(null, { status: 204 });
+          case "429, proxy page":
+            return new Response("<h1>Too Many Requests</h1>", { status: 429, headers: { "content-type": "text/html" } });
           case "401, oversized body":
             return new Response(new Uint8Array(2 * 1024 * 1024 + 1), { status: 401 });
           case "503, oversized body":
@@ -1664,7 +1669,8 @@ describe("share-web relay call", () => {
 
     const answer = await pending;
     expect(answer.status).toBe(
-      supersededStatus[target.name] ?? (target.settle === "answers" ? 200 : retryable(target.name) ? 503 : 404),
+      // A failure after the session ended has no session left to try again with.
+      supersededStatus[target.name] ?? (target.settle === "answers" ? 200 : 404),
     );
     expect(answer.headers.has("set-cookie")).toBe(false);
     await answer.body?.cancel();
@@ -1723,6 +1729,54 @@ describe("share-web relay call", () => {
     gated = true;
     revoked = true;
     expect((await renewWhileHeld(follow())).map((answer) => answer.status)).toEqual([404]);
+  });
+
+  it.each([
+    { name: "metadata", path: "/api/view/meta" },
+    { name: "file list", path: "/api/view/current" },
+    { name: "file content", path: `/api/view/blob/${"e".repeat(64)}` },
+  ])("answers a $name read its session's renewal overtook as retryable", async ({ path }) => {
+    let now = 1_000, capabilityByte = 1;
+    const first = Buffer.alloc(32, 1).toString("base64url");
+    const held: Array<() => void> = [];
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      publicHosts: new Set([HOST]),
+      nowMs: () => now,
+      newProfileSecret: () => PROFILE_ALPHA,
+      fetchRelay: async (relayRequest) => {
+        const pathname = new URL(relayRequest.url).pathname;
+        if (pathname === "/sync/link-exchange" || pathname === "/sync/link-refresh") {
+          return Response.json({ ok: true, grantId: "grant-renewal",
+            capabilityToken: Buffer.alloc(32, capabilityByte++).toString("base64url"), capabilityExpiresAtMs: now + 900_000 });
+        }
+        // The relay refuses the capability the renewal replaced.
+        if (relayRequest.headers.get("authorization") === `LinkCapability ${first}`) {
+          await new Promise<void>((resolve) => held.push(resolve));
+          return new Response(null, { status: 404 });
+        }
+        return Response.json({ ok: true, access: "edit" });
+      },
+    });
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const { session } = (await exchanged.json()) as { session: string };
+    const headers = { cookie: cookieHeader(cookiePair(exchanged), profileCookiePair(exchanged)), "x-dohc-link-session": session };
+
+    const overtaken = handler(request(path, { headers }));
+    await vi.waitFor(() => expect(held).toHaveLength(1));
+    now += 600_001;
+    const renewing = await handler(request(path, { headers }));
+    expect(renewing.status).toBe(200);
+    await renewing.body?.cancel();
+    held[0]!();
+
+    const answer = await overtaken;
+    expect(answer.status).toBe(503);
+    expect(await answer.json()).toEqual(linkRefusalBody("link_unavailable"));
+    // The session outlived the refusal, so trying again reads under the renewed capability.
+    const retried = await handler(request(path, { headers }));
+    expect(retried.status).toBe(200);
+    await retried.body?.cancel();
   });
 });
 
@@ -2103,6 +2157,50 @@ describe("share-web protected discussion proxy", () => {
       expect(alphaActivityCalls).toBe(25);
     } finally {
       for (const resolve of heldResolvers) resolve(Response.json(publicBody));
+      await Promise.all(held);
+    }
+  });
+
+  it("opens an edit link's files while its grant's holds are full", async () => {
+    let tokenId = 90;
+    const heldResolvers: Array<(response: Response) => void> = [];
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey: "discussion-relay-key",
+      publicHosts: new Set([HOST]),
+      nowMs: () => 1_000,
+      newSessionToken: () => Buffer.alloc(32, tokenId++).toString("base64url"),
+      newProfileSecret: () => PROFILE_ALPHA,
+      fetchRelay: async (relayRequest) => {
+        const url = new URL(relayRequest.url);
+        if (url.pathname === "/sync/link-exchange") {
+          return Response.json({ ok: true, grantId: "grant-first-load", capabilityToken: CAP_ALPHA_1, capabilityExpiresAtMs: 901_000 });
+        }
+        if (url.searchParams.get("hold") === "0") return Response.json(publicLog);
+        return await new Promise<Response>((resolve) => heldResolvers.push(resolve));
+      },
+    });
+    const alphaSessions = await Promise.all(
+      Array.from({ length: 4 }, (_, index) => discussionSession(
+        handler, index % 2 === 0 ? SECRET_ALPHA : SECRET_ALPHA_ROTATED,
+      )),
+    );
+    const held = alphaSessions.slice(0, 3).flatMap((state) =>
+      Array.from({ length: 8 }, () =>
+        handler(request(logPath, { headers: sessionHeaders(state.session, state.cookies) })),
+      ),
+    );
+    await vi.waitFor(() => expect(heldResolvers).toHaveLength(24));
+    const headers = sessionHeaders(alphaSessions[3]!.session, alphaSessions[3]!.cookies);
+
+    try {
+      expect((await handler(request(logPath, { headers }))).status).toBe(503);
+      // The first load holds nothing, so it takes no hold slot.
+      const firstLoad = await handler(request("/api/view/log?since=0&hold=0&limit=500&current=true", { headers }));
+      expect(firstLoad.status).toBe(200);
+      expect(await firstLoad.json()).toEqual(publicLog);
+    } finally {
+      for (const resolve of heldResolvers) resolve(Response.json(publicLog));
       await Promise.all(held);
     }
   });
@@ -3777,7 +3875,8 @@ describe("share-web protected discussion proxy", () => {
       status: 403,
       body: { ok: false, state: "blocked", activityRevision: 11 },
     });
-    const genericStatuses = [404, 404, 404, 404, 404, 404, 404, 404, 404, 404, 404, 503];
+    // A 429 without a refusal is busy, so the append tries again.
+    const genericStatuses = [404, 404, 404, 404, 404, 404, 404, 404, 404, 503, 404, 503];
     for (const [index, status] of genericStatuses.entries()) {
       const response = responses[index + 3]!;
       expect({ status: response.status, body: await response.text() }).toEqual({

@@ -1218,8 +1218,9 @@ export function createShareWebApplication({
     };
     // A renewal replaces the capability without ending the grant, so a
     // retryable call it superseded tries again instead of ending the link.
-    const superseded = (): Response | null => {
-      if (!call.ifSessionChanged || current()) return null;
+    // A renewal can overtake any call, so a failed retryable one always checks.
+    const superseded = (failed = false): Response | null => {
+      if (!(call.ifSessionChanged || (failed && call.retryable)) || current()) return null;
       const renewed = call.retryable &&
         sessions.get(browser.discriminator, browser.token, nowMs())?.grantId === browser.session.grantId;
       return renewed ? jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}) : refused();
@@ -1259,13 +1260,13 @@ export function createShareWebApplication({
         if (call.path === "/sync/link/share") {
           sessions.deleteIfCapability(browser.discriminator, browser.token, capabilityToken);
         }
-        const stale = superseded();
+        const stale = superseded(true);
         await relayResponse.body?.cancel().catch(() => undefined);
         return stale ?? refused();
       }
       if (relayResponse.status >= 500) {
         await relayResponse.body?.cancel().catch(() => undefined);
-        return superseded() ?? answer(jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}));
+        return superseded(true) ?? answer(jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}));
       }
       if (call.buffered) relayResponse = await completeRelayResponse(relayResponse);
       const stale = superseded();
@@ -1288,9 +1289,11 @@ export function createShareWebApplication({
         if (translated) return answer(translated);
       }
       await relayResponse.body?.cancel().catch(() => undefined);
-      return answer(refused());
+      // A proxy's busy answer carries no refusal, so a retryable call tries again.
+      return answer(call.retryable && relayResponse.status === 429
+        ? jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}) : refused());
     } catch {
-      return superseded() ?? answer(call.retryable
+      return superseded(true) ?? answer(call.retryable
         ? jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}) : refused());
     } finally {
       bounded.dispose();
@@ -1750,9 +1753,9 @@ export function createShareWebApplication({
         return await callRelay(request, authenticated, {
           path: logRelayPath(request),
           holdMs: Number(hold),
-          limiter: activityHoldLimiter,
           ifSessionChanged: true,
           retryable: true,
+          ...(Number(hold) > 0 ? { limiter: activityHoldLimiter } : {}),
         });
       }
       const sha = pathname.slice("/api/view/blob/".length);

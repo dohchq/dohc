@@ -530,7 +530,7 @@ function scrubFragment(): void {
 }
 
 // The link's secret leaves the address bar at once, but stays in `pending`
-// until its exchange succeeds, so Try again can repeat the exchange.
+// until its exchange succeeds or is refused, so Try again can repeat the exchange.
 async function establishSession(pending: { secret: string | null }, signal?: AbortSignal): Promise<string> {
   const fragment = location.hash.slice(1);
   if (/^[A-Za-z0-9_-]{43}$/u.test(fragment)) pending.secret = fragment;
@@ -552,7 +552,11 @@ async function establishSession(pending: { secret: string | null }, signal?: Abo
     );
     if (location.hash) scrubFragment();
     const response = await exchange;
-    if (!response.ok) throw (await versionMismatch(response)) ?? new Error("refused");
+    if (!response.ok) {
+      // A 429 is retried above, so any 4xx here is a refusal.
+      if (response.status >= 400 && response.status < 500) pending.secret = null;
+      throw (await versionMismatch(response)) ?? new Error("refused");
+    }
     const body = (await response.json()) as { session?: unknown };
     if (typeof body.session !== "string" || !/^[A-Za-z0-9_-]{12}$/u.test(body.session)) {
       throw new Error("refused");
