@@ -81,6 +81,44 @@ struct Fixture {
 }
 const OP: &str = "dohc-operation:rename";
 const BODY: &str = "[[old#part|label]] [[./old.md]] [old](old.md)";
+async fn retry_undo<T, F>(ws: &str, mut operation: impl FnMut() -> F) -> Result<T, RuntimeError>
+where
+    F: std::future::Future<Output = Result<T, RuntimeError>>,
+{
+    let policy: Value = serde_json::from_str(include_str!(
+        "../../../../packages/workspace-engine-client/src/daemon/storeBusyRetry.json"
+    ))
+    .unwrap();
+    let budget = Duration::from_millis(policy["engineStoreBusyRetryMs"].as_u64().unwrap());
+    let mut deadline = None;
+    let mut backoff = Duration::from_millis(5);
+    let mut attempts = Vec::new();
+    loop {
+        let start = Instant::now();
+        let result = operation().await;
+        attempts.push(start.elapsed().as_nanos());
+        let retries = attempts.len() - 1;
+        eprintln!("LINK_UNDO_RETRIES request={ws}-undo retries={retries} attempt_ns={attempts:?}");
+        match result {
+            result @ (Err(RuntimeError::Storage(StorageError::FileLocked))
+            | Err(RuntimeError::Collab(dohc_engine_collab::CollabError::Storage(
+                StorageError::FileLocked,
+            )))) => {
+                let deadline = *deadline.get_or_insert_with(|| Instant::now() + budget);
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return result;
+                }
+                tokio::time::sleep(backoff.min(remaining)).await;
+                if Instant::now() >= deadline {
+                    return result;
+                }
+                backoff = (backoff * 2).min(Duration::from_millis(200));
+            }
+            result => return result,
+        }
+    }
+}
 fn write(ws: &str, object: &str, path: &str, body: &str, moment: &str) -> WriteText {
     WriteText {
         workspace_id: ws.into(),
@@ -262,6 +300,11 @@ impl Fixture {
                 CancellationToken::new(),
             )
             .await
+    }
+    async fn undo_with_busy_retry(
+        &self,
+    ) -> Result<super::super::history_operations::HistoryUndoResult, RuntimeError> {
+        retry_undo(&self.ws, || self.undo()).await
     }
     async fn publish(&self) {
         let _capture = self.capture.clone().lock_owned().await;
@@ -588,7 +631,7 @@ async fn an_unrepresentable_closed_source_does_not_stop_the_link_pass() {
             .all(|moment| moment.object_id != "source-0001")
     );
     f.publish().await;
-    let undone = f.undo().await.unwrap();
+    let undone = f.undo_with_busy_retry().await.unwrap();
     assert_eq!(undone.moments.len(), 3);
     assert!(
         undone
@@ -708,7 +751,7 @@ async fn inverse_keeps_later_typing_label_edits_and_new_matching_links() {
         ),
     )
     .await;
-    let result = f.undo().await.unwrap();
+    let result = f.undo_with_busy_retry().await.unwrap();
     assert_eq!(result.moments.len(), 2);
     assert_eq!(
         f.text("source-0000.md").await,
@@ -736,7 +779,7 @@ async fn inverse_keeps_later_typing_label_edits_and_new_matching_links() {
         })
         .await
         .unwrap();
-    assert!(f.undo().await.unwrap().deduped);
+    assert!(f.undo_with_busy_retry().await.unwrap().deduped);
     f.close().await;
 }
 
@@ -903,7 +946,7 @@ async fn moved_sources_undo_at_the_current_path_and_removed_sources_refuse() {
                 f.root.join("moved-source.md"),
             )
             .unwrap();
-            f.undo().await.unwrap();
+            f.undo_with_busy_retry().await.unwrap();
             assert_eq!(f.text("moved-source.md").await, BODY);
         }
         f.close().await;
@@ -960,7 +1003,7 @@ async fn multi_rename_unknown_peer_and_undone_operations_refuse() {
     for scenario in ["folder", "peer", "undone", "unknown"] {
         let f = Fixture::new(1, 1);
         if scenario == "undone" {
-            f.undo().await.unwrap();
+            f.undo_with_busy_retry().await.unwrap();
         }
         if scenario == "folder" {
             let ws = f.ws.clone();
@@ -1168,7 +1211,7 @@ async fn crash_during_undo(nth: usize, budget: std::time::Duration) {
         })
         .await
         .unwrap();
-    let replay = f.undo().await.unwrap();
+    let replay = f.undo_with_busy_retry().await.unwrap();
     assert!(!replay.deduped);
     assert_eq!(replay.moments.len(), 3);
     for i in 0..3 {
@@ -1479,7 +1522,7 @@ async fn two_thousand_sources_resume_yield_and_undo_in_turns() {
         (waits, positions, gaps, retry_evidence)
     });
     let undo_start = Instant::now();
-    let undo = f.undo().await.unwrap();
+    let undo = f.undo_with_busy_retry().await.unwrap();
     assert_eq!(undo.moments.len(), 2001);
     assert!(undo.not_restored.is_empty());
     let undo_ns = undo_start.elapsed().as_nanos();
@@ -1544,7 +1587,7 @@ async fn undo_stops_remaining_forward_turns_before_taking_its_snapshot() {
     }));
     let (forward, undone) = tokio::join!(f.pass("stop-for-undo", Arc::new(NoFaults)), async {
         reached.notified().await;
-        let undo = f.undo();
+        let undo = f.undo_with_busy_retry();
         tokio::pin!(undo);
         std::future::poll_fn(|cx| {
             assert!(std::future::Future::poll(undo.as_mut(), cx).is_pending());
@@ -1736,7 +1779,7 @@ async fn pending_rewrites_cancel_in_the_inverse_transaction_and_external_edits_s
             );
             assert!(f.root.join("new.md").is_file());
         } else {
-            let undone = f.undo().await.unwrap();
+            let undone = f.undo_with_busy_retry().await.unwrap();
             assert_eq!(undone.moments.len(), 3);
             assert!(undone.not_restored.is_empty());
             f.actor.run(|store,_| {
@@ -1875,7 +1918,7 @@ async fn same_millisecond_pending_edit_chain_cancels_without_false_conflicts() {
             .len(),
         2
     );
-    let result = f.undo().await.unwrap();
+    let result = f.undo_with_busy_retry().await.unwrap();
     assert!(result.not_restored.is_empty());
     assert_eq!(
         f.text("source-0000.md").await,
@@ -1919,12 +1962,12 @@ async fn exhausted_diff_skips_only_that_member_and_records_the_refusal() {
         .replace(&"a".repeat(8192), &"c".repeat(8192))
         .replace(&"b".repeat(8192), &"d".repeat(8192));
     f.edit("source-0000", "source-0000.md", &head).await;
-    let result = f.undo().await.unwrap();
+    let result = f.undo_with_busy_retry().await.unwrap();
     assert_eq!(result.not_restored, vec!["source-0000.md"]);
     assert_eq!(result.moments.len(), 1, "the target rename still restores");
     assert_eq!(f.text("source-0000.md").await, head);
     assert_eq!(
-        f.undo().await.unwrap().not_restored,
+        f.undo_with_busy_retry().await.unwrap().not_restored,
         result.not_restored,
         "replay keeps the durable refusal"
     );
