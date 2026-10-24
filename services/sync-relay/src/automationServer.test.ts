@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import type { ScheduledAutomation, CollectionAutomationsOptions, DatasetAutomationHost, CollectionAutomationHold } from "@dohc/automation-executor/collection-automations";
+import type { StoredRun, StoredStep } from "@dohc/automation-executor/automation-run-store";
 import { AUTOMATION_SERVER_MAX_WORKSPACES } from "@dohc/workspace-contracts/relay";
 import type {RelayButtonInspection} from "@dohc/workspace-contracts/relay";
 import {SHARED_BUTTON_DENIED, SHARED_BUTTON_HELD, SHARED_BUTTON_MOVED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_UNCHECKED} from "@dohc/automation-executor/button-presser";
@@ -170,6 +171,8 @@ async function server(storage: SyncRelayStorage, h: Pick<ReturnType<typeof testH
   inspection?: RelayButtonInspection;
   recordDelivery?: AutomationServerOptions["recordDelivery"];
   root?: string;
+  /** Where the copy keeps its run history; a test that saves runs gives a real folder. */
+  metadataDir?: string;
   startReplicas?: typeof startAutomationReplicas;
 } = {}) {
   const marks = input.marks ?? new Map();
@@ -220,7 +223,7 @@ async function server(storage: SyncRelayStorage, h: Pick<ReturnType<typeof testH
       const signal = new AbortController().signal;
       open.set(WORKSPACE, {
         workspaceId: WORKSPACE, ownerUserId: OWNER, incarnation: input.incarnation ?? 1, startedAtMs: input.startedAtMs ?? at(7),
-        root: "unused", metadataDir: "unused", client: input.client ?? {} as unknown as EngineClient, workspace: "handle", signal,
+        root: "unused", metadataDir: input.metadataDir ?? "unused", client: input.client ?? {} as unknown as EngineClient, workspace: "handle", signal,
         nextRequestId: () => 1, sync, withRecordWork: work => work(), get pulledHead() { return pulledHead; },
       });
       hooks!.onChanged?.(WORKSPACE);
@@ -1175,6 +1178,78 @@ describe("the owner's routes to the server's runs", () => {
     inspectDatabase(storagePath(storage)).prepare("UPDATE sync_relay_workspaces SET owner_user_id = 'someone-else' WHERE workspace_id = ?").run(WORKSPACE);
     expect(await call(OWNER, "undo", { automationId: PRESSED, claimId: "claim-1", deletes: null })).toEqual(none);
     expect(fake.asked).toEqual([]);
+  });
+
+  it("shows the owner which runs a copy lost with the server's host data had not sent", async () => {
+    clock = at(8);
+    const storage = await testStorage();
+    let serverRuns: ServerRuns | undefined;
+    const h = testHandler(storage, { nowMs: () => clock, automationServer: { label: "My dohc server" }, serverRuns: () => serverRuns });
+    await claimWorkspace(h, OWNER, WORKSPACE);
+    storage.claimWorkspaceIdentity({ workspaceId: WORKSPACE, replicationEpoch: "epoch-1", streamIdentity: "stream-1" });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    // The server runs this workspace's automations.
+    await h(request(OWNER, `/sync/${WORKSPACE}/automation-host/check-in`, jsonBody({ installId: "laptop", label: "Laptop", claim: true })));
+    const call = async (action: string, body?: Record<string, unknown>) => {
+      const response = await h(request(OWNER, `/sync/${WORKSPACE}/automation-server/${action}`, body ? jsonBody(body) : {}));
+      return { status: response.status, body: await json(response) };
+    };
+    // Each copy's metadata folder, as the replicas module makes it.
+    const homes = [await mkdtemp(join(tmpdir(), "dohc-lost-runs-")), await mkdtemp(join(tmpdir(), "dohc-lost-runs-"))];
+    cleanup.push(async () => { for (const home of homes) await rm(home, { recursive: true, force: true }); });
+    const storedRun = (claimId: string): StoredRun => ({
+      version: 13, durableEffects: 0, claimId, automationId: PRESSED, definitionHash: "hash-pay", keySeed: `seed-${claimId}`,
+      startedAtMs: clock, finishedAtMs: null, steps: [], applied: [], created: [], replans: [], undoRequests: [], undoCalls: [],
+      undoCovers: [], readableFields: null, collections: [{ collectionId: "Tasks", path: "Tasks" }], rules: null, superseded: false,
+      undo: null, undoKept: [], settled: false, outcome: null,
+    });
+    const setField: StoredStep = { ordinal: 0, effects: [{ kind: "set", target: { recordId: "record", collectionPath: "Tasks", path: "Tasks/a.md" },
+      fields: [{ field: "Status", before: "Open", after: "Paid" }] }] };
+    const notify = (run: string): StoredStep => ({ ordinal: 0, effects: [{ kind: "notice", name: "Tell", notice: { noticeId: `n-${run}`,
+      kind: "automation-notify", title: "Paid", body: "Paid", target: { path: "Tasks/a.md", automation: PRESSED, run }, recipientUserId: OWNER } }] });
+
+    const first = await server(storage, h, { metadataDir: homes[0] });
+    serverRuns = first.run.runs;
+    const { store } = (await first.openReplica()).options;
+    // One run ends and a sync sends its changes. One sends only a notice,
+    // which the relay holds itself. One is still changing the copy.
+    const sent = storedRun("claim-sent"), notified = storedRun("claim-notified"), unsent = storedRun("claim-unsent");
+    for (const run of [sent, notified, unsent]) await store.save(run);
+    await store.appendStep(sent, setField);
+    await store.appendStep(notified, notify("claim-notified"));
+    clock = at(8, 5);
+    await store.appendStep(unsent, setField);
+    await store.save({ ...sent, finishedAtMs: clock, outcome: { state: "done" } });
+    // The run's end is on record now, and the sync it started confirms it.
+    await vi.waitFor(() => expect(storage.endedAutomationServerRuns({ workspaceId: WORKSPACE, incarnation: 1 })).toEqual([]));
+
+    // The server starts again with empty host data: a new copy, with no run history.
+    await first.run.close();
+    clock = at(9);
+    const second = await server(storage, h, { incarnation: 2, metadataDir: homes[1] });
+    serverRuns = second.run.runs;
+    await second.openReplica();
+    const lostRun = { claimId: "claim-unsent", state: "failed", createdAtMs: at(8), updatedAtMs: at(8, 5), writes: [], unsentChangesLost: true,
+      error: "Your server lost its copy of this workspace before sending this run's latest changes. Check the records it changed." };
+    await vi.waitFor(() => expect(notices(storage, OWNER)).toEqual([expect.objectContaining({
+      kind: "automation-failed", title: 'Automation "Pay" lost changes', body: lostRun.error,
+      target: { automation: PRESSED, run: "claim-unsent", path: "Tasks/automations.yaml" },
+    })]));
+    // Run history, as the owner's computers and agents read it, lists the lost run after this copy's own.
+    const listed = await call(`runs?automationId=${encodeURIComponent(PRESSED)}`);
+    expect(listed).toMatchObject({ status: 200, body: { runs: [{ claimId: "claim-1" }, lostRun], next: null } });
+    expect(listed.body.runs).toHaveLength(2);
+    expect(await call(`runs?automationId=${encodeURIComponent(PRESSED)}&claimId=claim-unsent`)).toMatchObject({ status: 200, body: { run: lostRun } });
+    expect(await call("retry", { automationId: PRESSED, claimId: "claim-unsent", startOver: false })).toMatchObject({ status: 200,
+      body: { status: "refused", reason: "Your server lost this run's history with its copy of the workspace, so it will not run this again." } });
+
+    // Opening the copy again tells the owner nothing new.
+    await second.run.close();
+    const third = await server(storage, h, { incarnation: 2, metadataDir: homes[1] });
+    serverRuns = third.run.runs;
+    await third.openReplica();
+    expect(await call(`runs?automationId=${encodeURIComponent(PRESSED)}&claimId=claim-unsent`)).toMatchObject({ body: { run: lostRun } });
+    expect(notices(storage, OWNER)).toHaveLength(1);
   });
 
   it("refuses what the server would not run", async () => {

@@ -710,6 +710,11 @@ export interface CollectionAutomationRun {
   /** A person undid what it changed. */
   undone: boolean;
   undoUnfinished: boolean;
+  /**
+   * The server lost the copy it ran in before sending its changes from
+   * `updatedAtMs` on. Nothing can run or undo it, since its run history is gone.
+   */
+  unsentChangesLost?: true;
 }
 
 /** One run with what each of its steps changed, for reading a single run. */
