@@ -118,7 +118,7 @@ const COPY_EFFECTS: ReadonlySet<string> = new Set(["set", "add", "message"]);
 // A page of run history lists this many of an automation's runs a lost copy may not have sent.
 const LOST_RUNS_PAGE = 50;
 // The `before` of a page of those runs, after the copy's own runs end.
-const LOST_RUNS_CURSOR = /^lost:(\d{1,16}):(\d{1,16}):(.+)$/su;
+const LOST_RUNS_CURSOR = /^lost:(\d{1,16}):(.+)$/su;
 const LOST_CHANGES_NOTICE_PREFIX = "server-lost-changes:";
 const LOST_CHANGES_ERROR = "Your server lost its copy of this workspace and may not have sent this run's latest changes. Check the records it changed.";
 const LOST_CHANGES_RETRY = "Your server lost this run's history with its copy of the workspace, so it will not run this again.";
@@ -1230,7 +1230,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     const last = shown.at(-1);
     const runs: CollectionAutomationRun[] = [];
     for (const run of shown) if (!await ws.executor.hasRun(automationId, run.claimId)) runs.push(lostRunRow(run));
-    return { runs, next: lost.length > LOST_RUNS_PAGE && last ? `lost:${last.startedAtMs}:${last.incarnation}:${last.claimId}` : null };
+    return { runs, next: lost.length > LOST_RUNS_PAGE && last ? `lost:${last.startedAtMs}:${last.claimId}` : null };
   }
   const lostRun = (scope: OwnerScope, automationId: string, claimId: string) =>
     storage.lostAutomationServerRuns({ workspaceId: scope.workspaceId, automationId, claimId, nowMs: nowMs(), limit: 1 })[0];
@@ -1239,7 +1239,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     // They are older than any run of this copy, so they follow its last page.
     list: (scope, automationId, before) => withCopy(scope, async (ws) => {
       const lostAfter = before === undefined ? null : LOST_RUNS_CURSOR.exec(before);
-      if (lostAfter) return await lostRunsPage(ws, scope, automationId, { startedAtMs: Number(lostAfter[1]), incarnation: Number(lostAfter[2]), claimId: lostAfter[3]! });
+      if (lostAfter) return await lostRunsPage(ws, scope, automationId, { startedAtMs: Number(lostAfter[1]), claimId: lostAfter[2]! });
       const page = await ws.executor.runs(automationId, before);
       const listed = page.runs.map((run) => withLoss(run, lostRun(scope, automationId, run.claimId)));
       if (page.next !== null) return { runs: listed, next: page.next };
@@ -1257,7 +1257,8 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       if (!allWantedWorkspaces().includes(scope.workspaceId)) {
         return { status: "refused", reason: "Your server no longer runs this workspace's automations, so it will not run this again." };
       }
-      if (lostRun(scope, input.automationId, input.claimId) !== undefined && await ws.executor.listedRun(input.automationId, input.claimId) === null) {
+      const lost = lostRun(scope, input.automationId, input.claimId);
+      if (lost !== undefined && hasLost(await ws.executor.listedRun(input.automationId, input.claimId), lost)) {
         return { status: "refused", reason: LOST_CHANGES_RETRY };
       }
       return await ws.executor.retry(input);
@@ -1351,8 +1352,12 @@ function lostRunRow(lost: LostAutomationServerRun): CollectionAutomationRun {
 
 /** A run as run history lists it, failed if a lost copy may not have sent its changes. */
 function withLoss<Run extends CollectionAutomationRun>(run: Run, lost: LostAutomationServerRun | undefined): Run {
-  return lost === undefined ? run
-    : { ...run, state: "failed", error: LOST_CHANGES_ERROR, updatedAtMs: lost.unsentSinceMs, unsentChangesLost: true };
+  return hasLost(run, lost) ? { ...run, state: "failed", error: LOST_CHANGES_ERROR, updatedAtMs: lost.unsentSinceMs, unsentChangesLost: true } : run;
+}
+
+/** Whether the loss still holds for the run: this copy doesn't list it, or it hasn't run again since. */
+function hasLost(run: CollectionAutomationRun | null, lost: LostAutomationServerRun | undefined): lost is LostAutomationServerRun {
+  return lost !== undefined && (run === null || run.updatedAtMs <= lost.lostAtMs);
 }
 
 /** Whether an earlier copy of the workspace was given the release at this generation, so took it. */

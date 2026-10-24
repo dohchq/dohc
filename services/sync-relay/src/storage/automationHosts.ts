@@ -188,18 +188,15 @@ export interface AutomationServerRun {
   claimId: string;
 }
 
-/** One run whose changes a lost copy may not have sent. */
+/** One run whose changes the copies that lost it may not have sent. */
 export interface LostAutomationServerRun {
-  incarnation: number;
-  automationId: string;
   claimId: string;
-  automationName: string | null;
-  collectionPath: string | null;
+  /** When it first started in a copy that lost it. */
   startedAtMs: number;
   /** Its changes from this time on may not have reached the relay. */
   unsentSinceMs: number;
+  /** When the last copy that lost it was replaced. */
   lostAtMs: number;
-  reported: boolean;
 }
 
 /** Before a run's first change to the copy since the relay last had all of them. */
@@ -271,26 +268,28 @@ export function markAutomationServerRunsLost(storage: StorageContext, input: { w
 }
 
 /** Where a page of lost runs ends: the next page lists the runs after this one. */
-export type LostAutomationServerRunCursor = Pick<LostAutomationServerRun, "startedAtMs" | "incarnation" | "claimId">;
+export type LostAutomationServerRunCursor = Pick<LostAutomationServerRun, "startedAtMs" | "claimId">;
 
-/** Runs whose changes a lost copy may not have sent, newest first: one automation's, or one claim's. */
+/**
+ * Runs whose changes a lost copy may not have sent, newest first: one
+ * automation's, or one claim's. A claim lost in several copies is one run.
+ */
 export function lostAutomationServerRuns(storage: StorageContext, input: {
   workspaceId: string; nowMs: number; limit: number; automationId: string; claimId?: string; after?: LostAutomationServerRunCursor;
 }): LostAutomationServerRun[] {
   const after = input.after ?? null;
   return storage.db.prepare(
-    `SELECT * FROM sync_relay_automation_server_unsent_runs
+    `SELECT claim_id, min(started_at_ms) AS first_started_at_ms, min(unsent_since_ms) AS first_unsent_since_ms, max(lost_at_ms) AS last_lost_at_ms
+     FROM sync_relay_automation_server_unsent_runs
      WHERE workspace_id = ? AND lost_at_ms > ? AND automation_id = ? AND (? IS NULL OR claim_id = ?)
-       AND (? IS NULL OR (started_at_ms, incarnation, claim_id) < (?, ?, ?))
-     ORDER BY started_at_ms DESC, incarnation DESC, claim_id DESC LIMIT ?`,
+     GROUP BY claim_id
+     HAVING ? IS NULL OR (min(started_at_ms), claim_id) < (?, ?)
+     ORDER BY min(started_at_ms) DESC, claim_id DESC LIMIT ?`,
   ).all(input.workspaceId, input.nowMs - AUTOMATION_SERVER_LOST_RUN_KEEP_MS, input.automationId, input.claimId ?? null, input.claimId ?? null,
-    after === null ? null : 1, after?.startedAtMs ?? null, after?.incarnation ?? null, after?.claimId ?? null, input.limit)
+    after === null ? null : 1, after?.startedAtMs ?? null, after?.claimId ?? null, input.limit)
     .map((row) => ({
-      incarnation: Number(row.incarnation), automationId: String(row.automation_id), claimId: String(row.claim_id),
-      automationName: row.automation_name === null ? null : String(row.automation_name),
-      collectionPath: row.collection_path === null ? null : String(row.collection_path),
-      startedAtMs: Number(row.started_at_ms), unsentSinceMs: Number(row.unsent_since_ms), lostAtMs: Number(row.lost_at_ms),
-      reported: row.reported === 1,
+      claimId: String(row.claim_id), startedAtMs: Number(row.first_started_at_ms),
+      unsentSinceMs: Number(row.first_unsent_since_ms), lostAtMs: Number(row.last_lost_at_ms),
     }));
 }
 

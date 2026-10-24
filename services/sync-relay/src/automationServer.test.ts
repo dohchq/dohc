@@ -1467,6 +1467,78 @@ describe("the owner's routes to the server's runs", () => {
       expect(await call(runsOf("&claimId=claim-dataset"))).toMatchObject({ status: 200, body: { run: { claimId: "claim-dataset", ...lostRun } } });
       expect(await call(runsOf("&claimId=claim-new"))).toMatchObject({ status: 200, body: { run: { claimId: "claim-new", state: "done" } } });
     });
+
+    it("shows a dataset claim run again since the loss as it ran, and tries again only that one", async () => {
+      const { storage, call, start } = await copies();
+      const changing = (claimId: string) => storage.recordAutomationServerRunChanging({ workspaceId: WORKSPACE, incarnation: 1,
+        automationId: PRESSED, claimId, automationName: "Pay", collectionPath: "Tasks", startedAtMs: at(8), nowMs: at(8, 5) });
+      // The first copy changed two dataset claims it never sent. The relay
+      // keeps both; the rebuilt copy ran one again, and it failed.
+      changing("claim-kept");
+      changing("claim-again");
+      clock = at(9);
+      const { fake } = await start(2);
+      const row = (claimId: string, updatedAtMs: number): CollectionAutomationRun => ({ claimId, state: "failed", error: "The record is locked.",
+        createdAtMs: at(8), updatedAtMs, trigger: { kind: "changed", recordId: "record", by: "human", depth: 0, sharedAuthor: null }, writes: [],
+        definitionChanged: false, neverStarted: false, chainStopped: false, undoUnfinished: false, undone: false });
+      const kept = [row("claim-again", at(9, 30)), row("claim-kept", at(8, 10))];
+      fake.executor.runs = async () => ({ runs: kept, next: null });
+      fake.executor.listedRun = async (_automationId, claimId) => kept.find((run) => run.claimId === claimId) ?? null;
+      fake.executor.hasRun = async (_automationId, claimId) => kept.some((run) => run.claimId === claimId);
+      const retry = vi.spyOn(fake.executor, "retry");
+
+      const lostRun = { state: "failed", error: LOST_ERROR, updatedAtMs: at(8, 5), unsentChangesLost: true };
+      const listed = await call(runsOf());
+      expect(listed).toMatchObject({ status: 200, body: { runs: [kept[0], { claimId: "claim-kept", ...lostRun }], next: null } });
+      expect((listed.body.runs as CollectionAutomationRun[])[0]!.unsentChangesLost).toBeUndefined();
+      const read = await call(runsOf("&claimId=claim-again"));
+      expect(read).toMatchObject({ status: 200, body: { run: kept[0] } });
+      expect((read.body.run as CollectionAutomationRun).unsentChangesLost).toBeUndefined();
+      expect(await call(runsOf("&claimId=claim-kept"))).toMatchObject({ status: 200, body: { run: { claimId: "claim-kept", ...lostRun } } });
+
+      expect(await call("retry", { automationId: PRESSED, claimId: "claim-kept", startOver: false })).toMatchObject({ status: 200,
+        body: { status: "refused", reason: "Your server lost this run's history with its copy of the workspace, so it will not run this again." } });
+      expect(retry).not.toHaveBeenCalled();
+      expect(await call("retry", { automationId: PRESSED, claimId: "claim-again", startOver: false }))
+        .toMatchObject({ status: 200, body: { status: "queued" } });
+      expect(retry).toHaveBeenCalledExactlyOnceWith({ automationId: PRESSED, claimId: "claim-again", startOver: false });
+    });
+
+    it.each([
+      ["on one page", 0],
+      ["on different pages", 60],
+    ])("lists a run two lost copies may not have sent once, with its records %s", async (_where, between) => {
+      const { storage, call, start } = await copies();
+      const changing = (incarnation: number, claimId: string, startedAtMs: number) => storage.recordAutomationServerRunChanging({ workspaceId: WORKSPACE,
+        incarnation, automationId: PRESSED, claimId, automationName: "Pay", collectionPath: "Tasks", startedAtMs, nowMs: startedAtMs });
+      // The first copy changed a dataset claim, and other runs after it, and never sent them.
+      changing(1, "claim-twice", at(8));
+      const others = Array.from({ length: between }, (_, n) => `claim-${String(n).padStart(3, "0")}`);
+      others.forEach((claimId, n) => changing(1, claimId, at(8) + n + 1));
+      clock = at(9);
+      const second = await start(2);
+      // The rebuilt copy ran the claim again, then lost its host data too, and
+      // the copy after it no longer keeps the claim.
+      changing(2, "claim-twice", at(9, 30));
+      await second.run.close();
+      clock = at(10);
+      await start(3);
+
+      const listed: string[] = [];
+      let before: string | null = null;
+      do {
+        const page = await call(runsOf(before === null ? "" : `&before=${encodeURIComponent(before)}`));
+        expect(page.status).toBe(200);
+        const body = page.body as { runs: Array<{ claimId: string }>; next: string | null };
+        listed.push(...body.runs.map((run) => run.claimId));
+        before = body.next;
+      } while (before !== null);
+      expect(listed).toEqual(["claim-1", ...[...others].reverse(), "claim-twice"]);
+      const lostRun = { claimId: "claim-twice", state: "failed", createdAtMs: at(8), updatedAtMs: at(8), unsentChangesLost: true, error: LOST_ERROR };
+      expect(await call(runsOf("&claimId=claim-twice"))).toMatchObject({ status: 200, body: { run: lostRun } });
+      expect(await call("retry", { automationId: PRESSED, claimId: "claim-twice", startOver: false })).toMatchObject({ status: 200,
+        body: { status: "refused", reason: "Your server lost this run's history with its copy of the workspace, so it will not run this again." } });
+    });
   });
 
   it("refuses what the server would not run", async () => {

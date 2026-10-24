@@ -52,6 +52,8 @@ The server loses this work with the host data:
   The relay records each run before the run changes the server's copy.
   It keeps that record until a sync that began after the run ended succeeds and the server has delivered every shared file update it queued.
   After the rebuild, each run that still has a record shows as failed in its automation's run history for 30 days.
+  Try again does not run these runs.
+  If the rebuilt server already ran one of them again, run history shows how that run went.
   The owner also gets one Notice for each automation with such runs, with how many runs it has.
   Some of these changes may have reached the relay, so check the records those runs changed.
 - Button presses that the server accepted but had not finished.
