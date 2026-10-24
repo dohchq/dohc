@@ -1078,28 +1078,27 @@ async fn write_blob_egress<W: AsyncWrite + Unpin>(
         let expired = |deadline: Option<std::time::Instant>| {
             deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline)
         };
-        let error = if expired(egress.deadline)
-            || guard.is_some_and(|guard| expired(guard.deadline()))
-        {
-            WireError::new(
-                ErrorCode::DeadlineExceeded,
-                "versionedBinary.readBlob egress deadline elapsed",
-            )
-        } else if egress.cancel.is_cancelled()
-            || guard.is_some_and(|guard| guard.cancel_signal().is_cancelled())
-        {
-            WireError::new(
-                ErrorCode::Cancelled,
-                "versionedBinary.readBlob egress cancelled",
-            )
-        } else if guard.is_some_and(|guard| !guard.is_current()) {
-            return Err(io::Error::new(
-                io::ErrorKind::ConnectionAborted,
-                "native restore output retired",
-            ));
-        } else {
-            return Ok(None);
-        };
+        let error =
+            if expired(egress.deadline) || guard.is_some_and(|guard| expired(guard.deadline())) {
+                WireError::new(
+                    ErrorCode::DeadlineExceeded,
+                    "versionedBinary.readBlob egress deadline elapsed",
+                )
+            } else if egress.cancel.is_cancelled()
+                || guard.is_some_and(|guard| guard.cancel_signal().is_cancelled())
+            {
+                WireError::new(
+                    ErrorCode::Cancelled,
+                    "versionedBinary.readBlob egress cancelled",
+                )
+            } else if guard.is_some_and(|guard| !guard.is_current()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "native restore output retired",
+                ));
+            } else {
+                return Ok(None);
+            };
         Ok(Some(Envelope::Error(ErrorEnvelope {
             id: Some(request_id),
             error,
@@ -1861,7 +1860,11 @@ mod tests {
         }
         // As the live host's read guard.
         fn withheld_error(&self) -> Option<WireError> {
-            if self.read_connection.as_ref().is_none_or(CancelSignal::is_cancelled) {
+            if self
+                .read_connection
+                .as_ref()
+                .is_none_or(CancelSignal::is_cancelled)
+            {
                 return None;
             }
             if self.retired.is_cancelled() {
@@ -2388,7 +2391,10 @@ mod tests {
                 matches!(decode_control(&payload, &limits).unwrap(), Envelope::BlobStart(start) if start.request_id == 9)
             );
             if interruption == ErrorCode::WorkspaceUnavailable {
-                assert_eq!(written.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+                assert_eq!(
+                    written.unwrap_err().kind(),
+                    io::ErrorKind::ConnectionAborted
+                );
                 assert!(
                     decoder.next_frame().unwrap().is_none(),
                     "partial frame must not be followed by another envelope"
@@ -2551,6 +2557,9 @@ mod tests {
                 deadline,
                 waited_in_time: None,
             };
+            // The timeout polls the writer when it fires, so only ending well
+            // before it shows the deadline woke the blob.
+            let started = std::time::Instant::now();
             tokio::time::timeout(
                 Duration::from_secs(10),
                 write_output(&mut output, &mut rx, &limits, active.clone()),
@@ -2558,8 +2567,20 @@ mod tests {
             .await
             .expect("the deadline wakes the waiting blob")
             .expect("an expired blob leaves the connection writing");
-            assert_eq!(output.waited_in_time, Some(true), "{read}: the first byte waited");
-            assert!(dropped.load(Ordering::SeqCst), "{read}: the reservations went");
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "{read}: the deadline woke it, after {:?}",
+                started.elapsed()
+            );
+            assert_eq!(
+                output.waited_in_time,
+                Some(true),
+                "{read}: the first byte waited"
+            );
+            assert!(
+                dropped.load(Ordering::SeqCst),
+                "{read}: the reservations went"
+            );
             assert!(lock(&active).is_empty());
             let mut decoder = FrameDecoder::new(limits.clone());
             decoder.push(&output.output);
@@ -3253,7 +3274,8 @@ mod tests {
             let deadline = (interruption == ErrorCode::DeadlineExceeded)
                 .then(|| std::time::Instant::now() + Duration::from_secs(1));
             // As large as a held answer gets, far more than a pipe holds.
-            let details = serde_json::json!({ "status": "current", "padding": "x".repeat(200 * 1024) });
+            let details =
+                serde_json::json!({ "status": "current", "padding": "x".repeat(200 * 1024) });
             let (tx, mut rx) = tokio::sync::mpsc::channel(2);
             tx.send(OutputItem::Guarded {
                 response: WireResponse {
@@ -3299,7 +3321,10 @@ mod tests {
             let mut decoder = FrameDecoder::new(limits.clone());
             decoder.push(&transcript);
             if interruption == ErrorCode::WorkspaceUnavailable {
-                assert_eq!(written.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+                assert_eq!(
+                    written.unwrap_err().kind(),
+                    io::ErrorKind::ConnectionAborted
+                );
                 assert!(
                     decoder.next_frame().unwrap().is_none(),
                     "partial frame must not be followed by another envelope"

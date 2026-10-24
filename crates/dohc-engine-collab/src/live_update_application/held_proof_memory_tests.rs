@@ -13,33 +13,39 @@
 // it, its snapshot and then each journal row after it one by one, and then
 // every contribution applied. With S the stored bytes loading reads and Σb
 // the contributions', it reports the kept state per stored byte over S + Σb,
-// what the factor 24 reserves for, and what the contributions added per
+// what the factor 22 reserves for, and what the contributions added per
 // byte of Σb on its own. The rest of the peak is reported as the
 // projection's. A measurement counts only once its preservation is complete,
 // with the Markdown the case expects and every contribution merged.
 //
 // Two stages the projection's peak hides are measured on their own as well.
-// The index of the ranges the merged state deleted is built on that state,
-// and what it holds is reported against what `Deletes::growth` reserves:
-// the deleting cases, the 2,000-client one above all, calibrate the 256 B
-// per client and 64 B per range. And the lineage is loaded again and each
-// contribution applied as the merge applies it: the most the heap held
-// over the loaded state is reported against what the merge reserves beside
-// it then, and the largest rise of one application over the heap before it
-// against its 13·b + 2·M.
+// The index of the ranges the merged state deleted is built from empty on
+// that state, under a profiler that sees only it, and what it holds once
+// built and the most it held while it grew are reported against what
+// `Deletes::growth` reserves: the deleting cases, the 2,000-client ones
+// above all, calibrate the 256 B per client and 64 B per range. And the
+// lineage is loaded again and each contribution applied as the merge
+// applies it, the index grown with it: the most the heap held over the
+// loaded state is reported against what the merge reserves beside it then,
+// and the largest rise of one application over the heap before it against
+// 35·b + 2·M and the index's growth, what it reserves to apply and to keep.
+// That profiler starts after the load, so what the heap still held at the
+// end is reported too: well above the contributions' growth and the index,
+// a reallocation of loaded state was counted whole and the rises read high.
 //
 // Calibrate against the measured peak, not the reserved one: at the
-// projection's peak the proof reserves the state it kept, 28·M for the
+// projection's peak the proof reserves the state it kept, 17·M for the
 // projection and `retained_bytes()` for the preservation, and the
-// projection's 28·M already counts the merged full state and Markdown the
+// projection's 17·M already counts the merged full state and Markdown the
 // preservation keeps, so about M and the Markdown are reserved twice.
 //
 // The cases: plaintext and rich documents of 1, 5 and 10 MiB of content;
-// documents of 1 and 5 MiB rewritten from exact Markdown source the
+// documents of 1 and 3 MiB rewritten from exact Markdown source the
 // projection writes otherwise, whose preservation rebuilds and reprojects
 // that source; one typed a keystroke at a time by interleaved clients, with
-// backspaces, merged with an edit and a removal of what they typed; one whose
-// deletions span 2,000 clients, merged with an edit and a removal; one with
+// backspaces, merged with an edit and a removal of what they typed; two whose
+// deletions span 2,000 clients, over 64 KiB and over 4 KiB of content, where
+// the clients outweigh the content, merged with an edit and a removal; one with
 // heavy history; a snapshot with many journal rows after it; holds of 10,000
 // and 50,000 small contributions; and a real released hold of 50,000 stored
 // entries, measured through the whole inspection. Only that last case reads a
@@ -179,11 +185,10 @@ fn rewritten(content: usize, revisions: usize) -> Ydoc {
 }
 
 /// Exact Markdown source of about `content` bytes that the projection writes
-/// otherwise: a setext heading and a list marked with `*`, which it writes
-/// with `#` and `-`.
+/// otherwise: a list marked with `*`, which it writes with `-`.
 fn lexical_source(content: usize) -> String {
     let mut rng = Rng(3);
-    let mut source = String::from("A plan someone wrote\n====================\n\n");
+    let mut source = String::from("# A plan someone wrote\n\n");
     while source.len() < content {
         source.push_str("* ");
         source.push_str(&block(&mut rng, 120));
@@ -230,6 +235,27 @@ fn lineage(base: &Ydoc, kind: ContentKind, rows: &[Vec<u8>], updates: &[Vec<u8>]
     let key = DocKey::new("workspace", "main", "object").unwrap();
     VersionedTextStore::new(&mut store)
         .ensure_main_version("workspace", "main", 0, &NoFaults)
+        .unwrap();
+    // The document's file, which its lineage's base claims. The proof never
+    // reads it, and the largest cases pass the limit a file's text has.
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "object".into(),
+                path: "plan.md".into(),
+                text: "A plan.".into(),
+                moment_id: "file".into(),
+                metadata_origin: "user".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1,
+                request_id: None,
+            },
+            &NoFaults,
+        )
         .unwrap();
     durable::claim_base(&mut store, &key, kind, &base.encode_full_state(), &NoFaults, 2).unwrap();
     store
@@ -331,9 +357,17 @@ fn kept_state(store: &EngineStore, key: &DocKey, claim: &str, updates: &[Vec<u8>
         state.apply(update).expect("each contribution applies");
     }
     let merged = heap();
-    let (index, index_reserved) = released_protection::deletion_index_bytes(&state, heap);
-    drop(state);
     drop(profiler);
+    // Under a profiler of its own, which sees nothing else: the old table
+    // of clients is held beside the new one while it doubles.
+    let (index, index_reserved) = released_protection::deletion_index_bytes(&state, |build| {
+        let profiler = dhat::Profiler::builder().testing().build();
+        build();
+        let built = dhat::HeapStats::get();
+        drop(profiler);
+        Index { held: built.curr_bytes as u64, peak: built.max_bytes as u64 }
+    });
+    drop(state);
 
     let state = load();
     // M, the encoded bytes the merge holds: the full state, then each
@@ -346,22 +380,43 @@ fn kept_state(store: &EngineStore, key: &DocKey, claim: &str, updates: &[Vec<u8>
     for update in updates {
         let bytes = update.len() as u64;
         merging += bytes;
-        growing += 24 * bytes;
-        // 13·b + 2·M, as `preservation.rs` reserves applying.
-        let allowance = 13 * bytes + 2 * merging;
-        reserved = reserved.max(growing + allowance);
         let before = heap();
-        applications.apply(&state, update);
+        let indexed = applications.apply(&state, update);
         let rise = (dhat::HeapStats::get().max_bytes as u64).saturating_sub(before);
+        // 22·b for what it adds to the state, and the index's growth, kept;
+        // 13·b + 2·M, as `preservation.rs` reserves applying.
+        growing += 22 * bytes + indexed;
+        reserved = reserved.max(growing + 13 * bytes + 2 * merging);
+        // Its rise counts what it adds to the state and the index too.
+        let allowance = 35 * bytes + 2 * merging + indexed;
         if u128::from(rise) * u128::from(worst.allowance) > u128::from(worst.rise) * u128::from(allowance) {
             worst = Applying { rise, allowance };
         }
     }
     let applying_peak = dhat::HeapStats::get().max_bytes as u64;
+    let applying_retained = heap();
     drop(applications);
     drop(state);
     drop(profiler);
-    Kept { stored, loaded, merged, index, index_reserved, applying_peak, applying_reserved: reserved, worst }
+    Kept {
+        stored,
+        loaded,
+        merged,
+        index,
+        index_reserved,
+        applying_peak,
+        applying_reserved: reserved,
+        applying_retained,
+        worst,
+    }
+}
+
+/// What the index of the ranges the merged state deleted held once built,
+/// and the most it held while it was built.
+#[derive(Clone, Copy)]
+struct Index {
+    held: u64,
+    peak: u64,
 }
 
 /// What [`kept_state`] measured.
@@ -372,13 +427,19 @@ struct Kept {
     merged: u64,
     /// What the index of the ranges the merged state deleted holds, and
     /// what the merge reserves for it.
-    index: u64,
+    index: Index,
     index_reserved: u64,
     /// The most the heap held over the loaded state while the updates
     /// applied, and the most the merge reserves beside that state while
-    /// they do: 24·b for each so far, and 13·b + 2·M for the one applying.
+    /// they do: 22·b for each so far and the index's growth, and 13·b + 2·M
+    /// for the one applying.
     applying_peak: u64,
     applying_reserved: u64,
+    /// What the heap held over the loaded state once every update applied
+    /// that way. Well above the contributions' growth and the index means a
+    /// reallocation of state loaded before the profiler started was counted
+    /// whole, so the rises read high.
+    applying_retained: u64,
     /// The application whose rise is largest against what it reserves.
     worst: Applying,
 }
@@ -386,7 +447,8 @@ struct Kept {
 /// What applying one update held: the most the heap held once it applied
 /// over what it held before, which counts what it adds to the state and
 /// any earlier application's higher peak, so it never reads low, against
-/// 13·b + 2·M.
+/// 35·b + 2·M and the index's growth: its 13·b + 2·M, and the 22·b and the
+/// growth the merge keeps.
 #[derive(Clone, Copy)]
 struct Applying {
     rise: u64,
@@ -422,8 +484,17 @@ struct Measured<'a> {
 
 fn report(measured: &Measured<'_>) {
     let ratio = |bytes: u64, of: u64| bytes as f64 / of.max(1) as f64;
-    let Kept { stored, loaded, merged: kept, index, index_reserved, applying_peak, applying_reserved, worst } =
-        measured.kept;
+    let Kept {
+        stored,
+        loaded,
+        merged: kept,
+        index,
+        index_reserved,
+        applying_peak,
+        applying_reserved,
+        applying_retained,
+        worst,
+    } = measured.kept;
     let contributed = measured.merged as u64;
     let growth = kept.saturating_sub(loaded);
     let projection = measured.peak.saturating_sub(kept);
@@ -445,12 +516,15 @@ fn report(measured: &Measured<'_>) {
             "applyingPeakBytes": applying_peak,
             "applyingReservedBytes": applying_reserved,
             "applyingPeakPerReserved": ratio(applying_peak, applying_reserved),
+            "applyingRetainedBytes": applying_retained,
             "applyingRiseBytes": worst.rise,
             "applyingAllowanceBytes": worst.allowance,
             "applyingRisePerAllowance": ratio(worst.rise, worst.allowance),
-            "deletionIndexBytes": index,
+            "deletionIndexBytes": index.held,
+            "deletionIndexPeakBytes": index.peak,
             "deletionIndexReservedBytes": index_reserved,
-            "deletionIndexPerReserved": ratio(index, index_reserved),
+            "deletionIndexPerReserved": ratio(index.held, index_reserved),
+            "deletionIndexPeakPerReserved": ratio(index.peak, index_reserved),
             "measuredPeakBytes": measured.peak,
             "projectionBytes": projection,
             "projectionPerMergedByte": ratio(projection, measured.full_state as u64 + contributed),
@@ -638,8 +712,9 @@ fn measure_held_proof_peak_heap() {
             measure(&format!("{shape}, {} MiB", size / mib), &stored, &edit, &edited);
         }
     }
-    // Exact source past 10 MiB is never kept.
-    for size in [mib, 5 * mib] {
+    // Rewriting from exact source sends an update about five times the
+    // source, and an update stays within 20 MiB.
+    for size in [mib, 3 * mib] {
         let (state, edit, source) = reprojected(size);
         let stored = lineage(&state, ContentKind::Richdoc, &[], &edit);
         measure(
@@ -658,10 +733,17 @@ fn measure_held_proof_peak_heap() {
         &edits,
         &edited,
     );
-    let sparse = sparse_deletions(64 * 1024, 2_000);
-    let edits = edit_and_removal(&sparse);
-    let stored = lineage(&sparse, ContentKind::Richdoc, &[], &edits);
-    measure("64 KiB with deletions by 2,000 clients, then an edit and a removal", &stored, &edits, &edited);
+    for content in [64, 4] {
+        let sparse = sparse_deletions(content * 1024, 2_000);
+        let edits = edit_and_removal(&sparse);
+        let stored = lineage(&sparse, ContentKind::Richdoc, &[], &edits);
+        measure(
+            &format!("{content} KiB with deletions by 2,000 clients, then an edit and a removal"),
+            &stored,
+            &edits,
+            &edited,
+        );
+    }
     let history = rewritten(256 * 1024, 32);
     let edit = one_edit(&history, ContentKind::Richdoc);
     let stored = lineage(&history, ContentKind::Richdoc, &[], &edit);

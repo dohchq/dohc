@@ -2027,11 +2027,13 @@ impl ActorHandle {
         let freshness = proof.freshness().clone();
         let release = self
             .run(move |store, _cache| {
-                dohc_engine_sync::check_held_freshness(store, &freshness).map_err(RuntimeError::from)
+                dohc_engine_sync::check_held_freshness(store, &freshness)
+                    .map_err(RuntimeError::from)
             })
             .await?;
         let released = proof.released(release);
-        Ok(released.map(|inspection| dohc_engine_sync::HeldAnswer::new(inspection, Arc::clone(&proved))))
+        Ok(released
+            .map(|inspection| dohc_engine_sync::HeldAnswer::new(inspection, Arc::clone(&proved))))
     }
 
     pub async fn dismiss_sync_refusal(

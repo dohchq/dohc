@@ -65,10 +65,7 @@ async fn paused_inspection(w: &RetainedWindow) -> (Resume, tokio::task::JoinHand
 }
 
 /// What the read answers once its proof goes on.
-async fn released(
-    resume: Resume,
-    request: tokio::task::JoinHandle<Answer>,
-) -> Option<HeldAnswer> {
+async fn released(resume: Resume, request: tokio::task::JoinHandle<Answer>) -> Option<HeldAnswer> {
     drop(resume);
     request.await.unwrap().unwrap()
 }
@@ -167,7 +164,10 @@ fn changed_with_keys(w: &RetainedWindow, sql: &str) -> usize {
 /// binding, stay as they were.
 fn empty_appends(w: &mut RetainedWindow) {
     let empty = hex_sha256(EMPTY_UPDATE);
-    changed(w, &format!("INSERT OR IGNORE INTO binary_blobs VALUES ('{empty}',2,X'0000')"));
+    changed(
+        w,
+        &format!("INSERT OR IGNORE INTO binary_blobs VALUES ('{empty}',2,X'0000')"),
+    );
     for _ in 0..2 {
         let appended = changed(
             w,
@@ -178,7 +178,10 @@ fn empty_appends(w: &mut RetainedWindow) {
             ),
         );
         assert_eq!(appended, 1);
-        changed(w, "UPDATE ydoc_docs SET head_update_seq=head_update_seq+1 WHERE object_id='object'");
+        changed(
+            w,
+            "UPDATE ydoc_docs SET head_update_seq=head_update_seq+1 WHERE object_id='object'",
+        );
     }
     rebound(w);
 }
@@ -207,9 +210,12 @@ async fn an_answer_whose_proof_inputs_moved_is_stale_and_keeps_nothing() {
     /// fencing it.
     fn fence(w: &RetainedWindow, resumed: bool) -> usize {
         let resume = if resumed {
-            format!("'{{}}','{{}}','{{}}','restore-delivery','{{}}','settlement','{}'", "a".repeat(64))
+            format!(
+                "'{{}}','{{}}','restore-delivery','{{}}','settlement','{}'",
+                "a".repeat(64)
+            )
         } else {
-            "NULL,NULL,NULL,NULL,NULL,NULL,NULL".to_owned()
+            "NULL,NULL,NULL,NULL,NULL,NULL".to_owned()
         };
         changed(
             w,
@@ -233,7 +239,10 @@ async fn an_answer_whose_proof_inputs_moved_is_stale_and_keeps_nothing() {
     /// The empty appends, the inner one gone again.
     fn one_missing(w: &mut RetainedWindow) {
         empty_appends(w);
-        assert_eq!(changed(w, &format!("DELETE FROM ydoc_updates WHERE {INNER_ROW}")), 1);
+        assert_eq!(
+            changed(w, &format!("DELETE FROM ydoc_updates WHERE {INNER_ROW}")),
+            1
+        );
     }
     /// What the latest snapshot's `column` holds.
     fn latest_snapshot(w: &RetainedWindow, column: &str) -> String {
@@ -268,165 +277,310 @@ async fn an_answer_whose_proof_inputs_moved_is_stale_and_keeps_nothing() {
     // Each case: its name, the work the window retains, what it writes
     // before the proof, the change, and whether that moves the generation.
     let cases: [(&str, Retained, Option<Prepare>, Change, bool); 33] = [
-        ("draft authorship", Retained::Carried, Some(drafted), |w| {
-            changed(
-                w,
-                "UPDATE owner_ydoc_outbox_entries SET person_edit=1-COALESCE(person_edit,0)
+        (
+            "draft authorship",
+            Retained::Carried,
+            Some(drafted),
+            |w| {
+                changed(
+                    w,
+                    "UPDATE owner_ydoc_outbox_entries SET person_edit=1-COALESCE(person_edit,0)
                  WHERE delivery_id='outbox-only'",
-            )
-        }, true),
-        ("native author", Retained::Carried, None, |w| {
-            changed(
-                w,
-                &format!(
-                    "UPDATE ydoc_updates SET actor_origin_id='another-device'
+                )
+            },
+            true,
+        ),
+        (
+            "native author",
+            Retained::Carried,
+            None,
+            |w| {
+                changed(
+                    w,
+                    &format!(
+                        "UPDATE ydoc_updates SET actor_origin_id='another-device'
                      WHERE workspace_id='workspace' AND version_id='main' AND object_id='object'
                        AND seq IN (SELECT json_extract(native_source_json,'$.nativeSequence')
                          FROM owner_ydoc_outbox_entries WHERE update_digest='{}')",
-                    w.retained_digest
-                ),
-            )
-        }, true),
-        ("seed capture", Retained::Seed, None, |w| {
-            changed(
+                        w.retained_digest
+                    ),
+                )
+            },
+            true,
+        ),
+        (
+            "seed capture",
+            Retained::Seed,
+            None,
+            |w| {
+                changed(
                 w,
                 "UPDATE ydoc_owner_activation_sources SET source_moment_id=source_moment_id||'-moved'
                  WHERE object_id='object'",
             )
-        }, true),
-        ("contribution bytes", Retained::Carried, Some(drafted), |w| {
-            changed(
+            },
+            true,
+        ),
+        (
+            "contribution bytes",
+            Retained::Carried,
+            Some(drafted),
+            |w| {
+                changed(
                 w,
                 "DELETE FROM binary_blobs WHERE sha256=
                    (SELECT update_digest FROM owner_ydoc_outbox_entries WHERE delivery_id='outbox-only')",
             )
-        }, true),
-        ("engine identity", Retained::Carried, None, |w| {
-            changed(
-                w,
-                "UPDATE engine_ownership SET engine_uuid='another-engine' WHERE rowid_guard=1",
-            )
-        }, false),
-        ("hold binding", Retained::Carried, None, |w| {
-            changed(
-                w,
-                &format!(
-                    "UPDATE hosted_documents SET released_hold_binding_digest='{}' WHERE object_id='object'",
-                    "f".repeat(64)
-                ),
-            )
-        }, false),
-        ("hold reason", Retained::Carried, None, |w| {
-            changed(
-                w,
-                "UPDATE hosted_documents SET held_reason='hosted-backfill-work-waiting' WHERE object_id='object'",
-            )
-        }, false),
-        ("hold path", Retained::Carried, None, |w| {
-            changed(
-                w,
-                "UPDATE hosted_documents SET path='notes/elsewhere.md' WHERE object_id='object'",
-            )
-        }, false),
-        ("hold continuation", Retained::Carried, None, |w| {
-            changed(
-                w,
-                "UPDATE hosted_documents SET released_hold_continuation='dependency-drain'
+            },
+            true,
+        ),
+        (
+            "engine identity",
+            Retained::Carried,
+            None,
+            |w| {
+                changed(
+                    w,
+                    "UPDATE engine_ownership SET engine_uuid='another-engine' WHERE rowid_guard=1",
+                )
+            },
+            false,
+        ),
+        (
+            "hold binding",
+            Retained::Carried,
+            None,
+            |w| {
+                changed(
+                    w,
+                    &format!(
+                        "UPDATE hosted_documents SET released_hold_binding_digest='{}' WHERE object_id='object'",
+                        "f".repeat(64)
+                    ),
+                )
+            },
+            false,
+        ),
+        (
+            "hold reason",
+            Retained::Carried,
+            None,
+            |w| {
+                changed(
+                    w,
+                    "UPDATE hosted_documents SET held_reason='hosted-backfill-work-waiting' WHERE object_id='object'",
+                )
+            },
+            false,
+        ),
+        (
+            "hold path",
+            Retained::Carried,
+            None,
+            |w| {
+                changed(
+                    w,
+                    "UPDATE hosted_documents SET path='notes/elsewhere.md' WHERE object_id='object'",
+                )
+            },
+            false,
+        ),
+        (
+            "hold continuation",
+            Retained::Carried,
+            None,
+            |w| {
+                changed(
+                    w,
+                    "UPDATE hosted_documents SET released_hold_continuation='dependency-drain'
                  WHERE object_id='object'",
-            )
-        }, false),
-        ("hold stale flag", Retained::Carried, None, |w| {
-            changed(
-                w,
-                "UPDATE hosted_documents SET released_hold_binding_stale=1 WHERE object_id='object'",
-            )
-        }, false),
-        ("path", Retained::Carried, None, |w| {
-            changed(
-                w,
-                "UPDATE path_aliases SET path='notes/renamed.md' WHERE object_id='object'",
-            )
-        }, false),
-        ("restore generation", Retained::Carried, None, |w| fence(w, true), false),
-        ("restore fence", Retained::Carried, None, |w| fence(w, false), false),
-        ("lineage head", Retained::Carried, None, |w| {
-            changed(
-                w,
-                "UPDATE ydoc_docs SET head_update_seq=head_update_seq+1 WHERE object_id='object'",
-            )
-        }, false),
-        ("head kind", Retained::Carried, None, |w| {
-            changed(
-                w,
-                "UPDATE ydoc_docs SET content_kind='plaintext' WHERE object_id='object'",
-            )
-        }, false),
+                )
+            },
+            false,
+        ),
+        (
+            "hold stale flag",
+            Retained::Carried,
+            None,
+            |w| {
+                changed(
+                    w,
+                    "UPDATE hosted_documents SET released_hold_binding_stale=1 WHERE object_id='object'",
+                )
+            },
+            false,
+        ),
+        (
+            "path",
+            Retained::Carried,
+            None,
+            |w| {
+                changed(
+                    w,
+                    "UPDATE path_aliases SET path='notes/renamed.md' WHERE object_id='object'",
+                )
+            },
+            false,
+        ),
+        (
+            "restore generation",
+            Retained::Carried,
+            None,
+            |w| fence(w, true),
+            false,
+        ),
+        (
+            "restore fence",
+            Retained::Carried,
+            None,
+            |w| fence(w, false),
+            false,
+        ),
+        (
+            "lineage head",
+            Retained::Carried,
+            None,
+            |w| {
+                changed(
+                    w,
+                    "UPDATE ydoc_docs SET head_update_seq=head_update_seq+1 WHERE object_id='object'",
+                )
+            },
+            false,
+        ),
+        (
+            "head kind",
+            Retained::Carried,
+            None,
+            |w| {
+                changed(
+                    w,
+                    "UPDATE ydoc_docs SET content_kind='plaintext' WHERE object_id='object'",
+                )
+            },
+            false,
+        ),
         // One below the compaction point, which no entry names.
-        ("head compaction", Retained::Carried, None, |w| {
-            changed(
-                w,
-                "UPDATE ydoc_docs SET head_snapshot_seq=head_snapshot_seq-1 WHERE object_id='object'",
-            )
-        }, false),
+        (
+            "head compaction",
+            Retained::Carried,
+            None,
+            |w| {
+                changed(
+                    w,
+                    "UPDATE ydoc_docs SET head_snapshot_seq=head_snapshot_seq-1 WHERE object_id='object'",
+                )
+            },
+            false,
+        ),
         // Only the proof's own read of the latest snapshot sees this.
-        ("head snapshot added", Retained::Carried, None, |w| {
-            changed(
-                w,
-                &format!(
-                    "INSERT INTO ydoc_snapshots({SNAPSHOT_COLUMNS})
+        (
+            "head snapshot added",
+            Retained::Carried,
+            None,
+            |w| {
+                changed(
+                    w,
+                    &format!(
+                        "INSERT INTO ydoc_snapshots({SNAPSHOT_COLUMNS})
                      SELECT workspace_id,version_id,object_id,up_to_seq+1,snapshot_blob_sha256,
                        state_vector_blob_sha256,0
                      FROM ydoc_snapshots WHERE {LATEST_SNAPSHOT}"
-                ),
-            )
-        }, false),
-        ("head snapshot replaced", Retained::Carried, None, |w| {
-            changed(
-                w,
-                &format!(
-                    "UPDATE ydoc_snapshots SET snapshot_blob_sha256='{}' WHERE {LATEST_SNAPSHOT}",
-                    "e".repeat(64)
-                ),
-            )
-        }, true),
+                    ),
+                )
+            },
+            false,
+        ),
+        (
+            "head snapshot replaced",
+            Retained::Carried,
+            None,
+            |w| {
+                changed(
+                    w,
+                    &format!(
+                        "UPDATE ydoc_snapshots SET snapshot_blob_sha256='{}' WHERE {LATEST_SNAPSHOT}",
+                        "e".repeat(64)
+                    ),
+                )
+            },
+            true,
+        ),
         // Sol's r2c-3c-3 finding 2: rebound, its bytes damaged while nothing
         // names them, and rebound back.
-        ("head snapshot rebound and back", Retained::Carried, None, |w| {
-            let original = latest_snapshot(w, "snapshot_blob_sha256");
-            let rebind = |digest: &str| {
-                format!("UPDATE ydoc_snapshots SET snapshot_blob_sha256='{digest}' WHERE {LATEST_SNAPSHOT}")
-            };
-            changed(w, &rebind("e".repeat(64).as_str()))
-                + changed(
-                    w,
-                    &format!("UPDATE binary_blobs SET bytes=X'00',byte_length=1 WHERE sha256='{original}'"),
-                )
-                + changed(w, &rebind(original.as_str()))
-        }, true),
-        ("folded, then the snapshot removed", Retained::Carried, Some(empty_appends), folded_then_removed, true),
+        (
+            "head snapshot rebound and back",
+            Retained::Carried,
+            None,
+            |w| {
+                let original = latest_snapshot(w, "snapshot_blob_sha256");
+                let rebind = |digest: &str| {
+                    format!(
+                        "UPDATE ydoc_snapshots SET snapshot_blob_sha256='{digest}' WHERE {LATEST_SNAPSHOT}"
+                    )
+                };
+                changed(w, &rebind("e".repeat(64).as_str()))
+                    + changed(
+                        w,
+                        &format!(
+                            "UPDATE binary_blobs SET bytes=X'00',byte_length=1 WHERE sha256='{original}'"
+                        ),
+                    )
+                    + changed(w, &rebind(original.as_str()))
+            },
+            true,
+        ),
+        (
+            "folded, then the snapshot removed",
+            Retained::Carried,
+            Some(empty_appends),
+            folded_then_removed,
+            true,
+        ),
         // Opus's r2c-3c-3 finding 1: the latest snapshot removed and
         // reseeded to identical coordinates.
-        ("head snapshot reseeded", Retained::Carried, None, |w| {
-            let row = latest_snapshot(
-                w,
-                "printf('(%Q,%Q,%Q,%d,%Q,%Q,%d)',workspace_id,version_id,object_id,up_to_seq,
+        (
+            "head snapshot reseeded",
+            Retained::Carried,
+            None,
+            |w| {
+                let row = latest_snapshot(
+                    w,
+                    "printf('(%Q,%Q,%Q,%d,%Q,%Q,%d)',workspace_id,version_id,object_id,up_to_seq,
                    snapshot_blob_sha256,state_vector_blob_sha256,recorded_at_ms)",
-            );
-            changed(w, &format!("DELETE FROM ydoc_snapshots WHERE {LATEST_SNAPSHOT}"))
-                + changed(w, &format!("INSERT INTO ydoc_snapshots({SNAPSHOT_COLUMNS}) VALUES {row}"))
-        }, true),
-        ("head snapshot bytes", Retained::Carried, None, |w| {
-            changed(
-                w,
-                "UPDATE binary_blobs SET bytes=X'00',byte_length=1 WHERE sha256=
+                );
+                changed(
+                    w,
+                    &format!("DELETE FROM ydoc_snapshots WHERE {LATEST_SNAPSHOT}"),
+                ) + changed(
+                    w,
+                    &format!("INSERT INTO ydoc_snapshots({SNAPSHOT_COLUMNS}) VALUES {row}"),
+                )
+            },
+            true,
+        ),
+        (
+            "head snapshot bytes",
+            Retained::Carried,
+            None,
+            |w| {
+                changed(
+                    w,
+                    "UPDATE binary_blobs SET bytes=X'00',byte_length=1 WHERE sha256=
                    (SELECT snapshot_blob_sha256 FROM ydoc_snapshots WHERE object_id='object'
                     ORDER BY up_to_seq DESC LIMIT 1)",
-            )
-        }, true),
+                )
+            },
+            true,
+        ),
         // A row past the head, which the head's coordinates do not name but
         // its state loads.
-        ("journal row past the head", Retained::Carried, None, |w| {
-            changed(
+        (
+            "journal row past the head",
+            Retained::Carried,
+            None,
+            |w| {
+                changed(
                 w,
                 &format!(
                     "INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms)
@@ -435,21 +589,37 @@ async fn an_answer_whose_proof_inputs_moved_is_stale_and_keeps_nothing() {
                     hex_sha256(EMPTY_UPDATE)
                 ),
             )
-        }, false),
-        ("journal row removed", Retained::Carried, Some(empty_appends), |w| {
-            changed(w, &format!("DELETE FROM ydoc_updates WHERE {INNER_ROW}"))
-        }, true),
-        ("journal row rewritten", Retained::Carried, Some(empty_appends), |w| {
-            changed(
-                w,
-                &format!(
-                    "UPDATE ydoc_updates SET update_blob_sha256='{}' WHERE {INNER_ROW}",
-                    "d".repeat(64)
-                ),
-            )
-        }, true),
-        ("journal row restored", Retained::Carried, Some(one_missing), |w| {
-            changed(
+            },
+            false,
+        ),
+        (
+            "journal row removed",
+            Retained::Carried,
+            Some(empty_appends),
+            |w| changed(w, &format!("DELETE FROM ydoc_updates WHERE {INNER_ROW}")),
+            true,
+        ),
+        (
+            "journal row rewritten",
+            Retained::Carried,
+            Some(empty_appends),
+            |w| {
+                changed(
+                    w,
+                    &format!(
+                        "UPDATE ydoc_updates SET update_blob_sha256='{}' WHERE {INNER_ROW}",
+                        "d".repeat(64)
+                    ),
+                )
+            },
+            true,
+        ),
+        (
+            "journal row restored",
+            Retained::Carried,
+            Some(one_missing),
+            |w| {
+                changed(
                 w,
                 &format!(
                     "INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms)
@@ -458,61 +628,105 @@ async fn an_answer_whose_proof_inputs_moved_is_stale_and_keeps_nothing() {
                     hex_sha256(EMPTY_UPDATE)
                 ),
             )
-        }, true),
-        ("journal row bytes", Retained::Carried, Some(empty_appends), |w| {
-            changed(
-                w,
-                &format!(
-                    "UPDATE binary_blobs SET bytes=X'01',byte_length=1 WHERE sha256='{}'",
-                    hex_sha256(EMPTY_UPDATE)
-                ),
-            )
-        }, true),
-        ("workspace main version", Retained::Carried, None, |w| {
-            changed(
-                w,
-                "UPDATE versioned_workspaces SET main_version_id='elsewhere'
+            },
+            true,
+        ),
+        (
+            "journal row bytes",
+            Retained::Carried,
+            Some(empty_appends),
+            |w| {
+                changed(
+                    w,
+                    &format!(
+                        "UPDATE binary_blobs SET bytes=X'01',byte_length=1 WHERE sha256='{}'",
+                        hex_sha256(EMPTY_UPDATE)
+                    ),
+                )
+            },
+            true,
+        ),
+        (
+            "workspace main version",
+            Retained::Carried,
+            None,
+            |w| {
+                changed(
+                    w,
+                    "UPDATE versioned_workspaces SET main_version_id='elsewhere'
                  WHERE workspace_id='workspace'",
-            )
-        }, false),
-        ("workspace removed", Retained::Carried, None, |w| {
-            changed(
-                w,
-                "DELETE FROM versioned_workspaces WHERE workspace_id='workspace'",
-            )
-        }, false),
-        ("feed stream", Retained::Carried, None, |w| {
-            changed(
-                w,
-                "UPDATE sync_identity SET stream_identity='moved' WHERE workspace_id='workspace'",
-            )
-        }, false),
-        ("feed epoch", Retained::Carried, None, |w| {
-            changed(
-                w,
-                "UPDATE sync_identity SET replication_epoch='moved' WHERE workspace_id='workspace'",
-            )
-        }, false),
+                )
+            },
+            false,
+        ),
+        (
+            "workspace removed",
+            Retained::Carried,
+            None,
+            |w| {
+                changed(
+                    w,
+                    "DELETE FROM versioned_workspaces WHERE workspace_id='workspace'",
+                )
+            },
+            false,
+        ),
+        (
+            "feed stream",
+            Retained::Carried,
+            None,
+            |w| {
+                changed(
+                    w,
+                    "UPDATE sync_identity SET stream_identity='moved' WHERE workspace_id='workspace'",
+                )
+            },
+            false,
+        ),
+        (
+            "feed epoch",
+            Retained::Carried,
+            None,
+            |w| {
+                changed(
+                    w,
+                    "UPDATE sync_identity SET replication_epoch='moved' WHERE workspace_id='workspace'",
+                )
+            },
+            false,
+        ),
         // The replica and its documents move scope together, so the hold
         // reads as it did, but in another scope.
-        ("scope generation", Retained::Carried, None, |w| {
-            changed(
-                w,
-                "UPDATE hosted_replicas SET scope_generation=scope_generation+1
+        (
+            "scope generation",
+            Retained::Carried,
+            None,
+            |w| {
+                changed(
+                    w,
+                    "UPDATE hosted_replicas SET scope_generation=scope_generation+1
                  WHERE workspace_id='workspace'",
-            ) + changed(
-                w,
-                "UPDATE hosted_documents SET scope_generation=scope_generation+1
+                ) + changed(
+                    w,
+                    "UPDATE hosted_documents SET scope_generation=scope_generation+1
                  WHERE workspace_id='workspace'",
-            )
-        }, false),
-        ("replica scope", Retained::Carried, None, |w| {
-            changed(
-                w,
-                "UPDATE hosted_replicas SET scope_generation=scope_generation+1
+                )
+            },
+            false,
+        ),
+        (
+            "replica scope",
+            Retained::Carried,
+            None,
+            |w| {
+                changed(
+                    w,
+                    "UPDATE hosted_replicas SET scope_generation=scope_generation+1
                  WHERE workspace_id='workspace'",
-            )
-        }, false),
+                )
+            },
+            false,
+        ),
     ];
     for (case, retained, prepare, change, moves) in cases {
         let (mut w, desktop, _client) = held_for_a_queued_fold_of(retained).await;
@@ -520,11 +734,19 @@ async fn an_answer_whose_proof_inputs_moved_is_stale_and_keeps_nothing() {
             prepare(&mut w);
         }
         let before = inspected_window(&w.store);
-        assert_eq!(before.status, HeldBindingStatus::Current, "{case}: current before");
+        assert_eq!(
+            before.status,
+            HeldBindingStatus::Current,
+            "{case}: current before"
+        );
         let (resume, request) = paused_inspection(&w).await;
         let proved = generation(&w);
         assert!(change(&w) > 0, "{case}: the change wrote nothing");
-        assert_eq!(generation(&w) > proved, moves, "{case}: whether the generation moved");
+        assert_eq!(
+            generation(&w) > proved,
+            moves,
+            "{case}: whether the generation moved"
+        );
         let answer = released(resume, request).await;
         if matches!(case, "hold reason" | "replica scope") {
             assert_eq!(answer, None, "{case}: nothing held");
@@ -558,10 +780,17 @@ async fn an_archived_answer_whose_archive_moved_is_stale() {
     ] {
         let (mut w, desktop, client, queued, archive) = archived_window(2).await;
         let first = committed_pass(&mut w.store, &client);
-        assert!(holds_archived(first.held.get("object"), &w.lineage, &archive, &queued[0]), "{case}: {first:?}");
+        assert!(
+            holds_archived(first.held.get("object"), &w.lineage, &archive, &queued[0]),
+            "{case}: {first:?}"
+        );
         let bytes = w.store.get_binary_blob(&archive).unwrap().unwrap();
-        let hex = bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
-        let damage = format!("UPDATE binary_blobs SET bytes=X'00',byte_length=1 WHERE sha256='{archive}'");
+        let hex = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let damage =
+            format!("UPDATE binary_blobs SET bytes=X'00',byte_length=1 WHERE sha256='{archive}'");
         let repair = format!(
             "UPDATE binary_blobs SET bytes=X'{hex}',byte_length={} WHERE sha256='{archive}'",
             bytes.len()
@@ -575,13 +804,20 @@ async fn an_archived_answer_whose_archive_moved_is_stale() {
         match case {
             "archive repaired" => assert_eq!(changed(&w, &damage), 1),
             "archive restored" => assert_eq!(
-                changed(&w, &format!("DELETE FROM binary_blobs WHERE sha256='{archive}'")),
+                changed(
+                    &w,
+                    &format!("DELETE FROM binary_blobs WHERE sha256='{archive}'")
+                ),
                 1
             ),
             _ => {}
         }
         let before = inspected_window(&w.store);
-        assert_eq!(before.status, HeldBindingStatus::Current, "{case}: current before");
+        assert_eq!(
+            before.status,
+            HeldBindingStatus::Current,
+            "{case}: current before"
+        );
         let (resume, request) = paused_inspection(&w).await;
         let proved = generation(&w);
         match case {
@@ -601,7 +837,10 @@ async fn an_archived_answer_whose_archive_moved_is_stale() {
             "archive restored" => assert_eq!(
                 changed_with_keys(
                     &w,
-                    &format!("INSERT INTO binary_blobs VALUES ('{archive}',{},X'{hex}')", bytes.len()),
+                    &format!(
+                        "INSERT INTO binary_blobs VALUES ('{archive}',{},X'{hex}')",
+                        bytes.len()
+                    ),
                 ),
                 1
             ),
@@ -612,7 +851,11 @@ async fn an_archived_answer_whose_archive_moved_is_stale() {
             }
         }
         let moved = case != "archive kind";
-        assert_eq!(generation(&w) > proved, moved, "{case}: whether the generation moved");
+        assert_eq!(
+            generation(&w) > proved,
+            moved,
+            "{case}: whether the generation moved"
+        );
         let answer = released(resume, request).await.expect("held");
         assert_eq!(answer.status, HeldBindingStatus::Stale, "{case}");
         assert_eq!(answer.preservation, None, "{case}: no preservation");
@@ -701,7 +944,9 @@ async fn a_binding_changed_under_its_digest_is_refused() {
         )
         .expect_err("the binding changes only with its digest");
     assert!(
-        refused.to_string().contains("a released hold binding changes with its digest"),
+        refused
+            .to_string()
+            .contains("a released hold binding changes with its digest"),
         "{refused}"
     );
     drop(raw);
@@ -736,7 +981,11 @@ fn hold_revision(w: &RetainedWindow) -> i64 {
 async fn a_binding_changed_back_to_its_digest_is_stale() {
     for case in ["rewritten twice", "moved and back", "removed and restored"] {
         let (w, desktop, _client) = held_for_a_queued_fold().await;
-        assert_eq!(inspected_window(&w.store).status, HeldBindingStatus::Current, "{case}");
+        assert_eq!(
+            inspected_window(&w.store).status,
+            HeldBindingStatus::Current,
+            "{case}"
+        );
         let (resume, request) = paused_inspection(&w).await;
         let proved: String = w
             .store
@@ -772,7 +1021,9 @@ async fn a_binding_changed_back_to_its_digest_is_stale() {
                 for (from, to) in [("object", "elsewhere"), ("elsewhere", "object")] {
                     let moved = changed(
                         &w,
-                        &format!("UPDATE hosted_documents SET object_id='{to}' WHERE object_id='{from}'"),
+                        &format!(
+                            "UPDATE hosted_documents SET object_id='{to}' WHERE object_id='{from}'"
+                        ),
                     );
                     assert_eq!(moved, 1, "to {to}");
                 }
@@ -823,7 +1074,10 @@ async fn a_binding_naming_another_document_is_stale() {
     let other = dohc_engine_sync::inspect_held_document(&w.store, "workspace", "other")
         .unwrap()
         .expect("the copy is held");
-    assert_eq!(other.document.binding_digest, window.document.binding_digest);
+    assert_eq!(
+        other.document.binding_digest,
+        window.document.binding_digest
+    );
     assert_eq!(other.status, HeldBindingStatus::Stale);
     assert_eq!((&other.preservation, &other.contributions), (&None, &None));
     assert_eq!(inspected_window(&w.store), window);
@@ -922,7 +1176,11 @@ async fn the_writer_releases_a_proof_with_bounded_reads_alone() {
     let proof = prove(&w.store);
     w.store = EngineStore::open(&engine_db_path(&w.root).unwrap(), 0).unwrap();
     let reopened = release(&w.store, proof);
-    assert_eq!(reopened.status, HeldBindingStatus::Stale, "a proof of an earlier open");
+    assert_eq!(
+        reopened.status,
+        HeldBindingStatus::Stale,
+        "a proof of an earlier open"
+    );
     assert_eq!(release(&w.store, prove(&w.store)), answer);
     desktop.close().await;
     w.close().await;
@@ -941,8 +1199,15 @@ async fn identical_callers_share_one_proof_and_one_leaving_stops_only_its_wait()
     let last = inspection(&w, &CancellationToken::new());
     reached("three callers wait", proofs.callers("workspace", 3)).await;
     leaving.cancel();
-    assert!(matches!(answered(early).await, Err(RuntimeError::Cancelled)));
-    assert_eq!(proofs.open_readers(), 1, "the others still wait for the proof");
+    assert!(matches!(
+        answered(early).await,
+        Err(RuntimeError::Cancelled)
+    ));
+    assert_eq!(
+        proofs.open_readers(),
+        1,
+        "the others still wait for the proof"
+    );
     drop(resume);
     let first = answered(first).await.unwrap().expect("held");
     let last = answered(last).await.unwrap().expect("held");
@@ -980,16 +1245,35 @@ async fn the_last_caller_leaving_stops_a_running_proof() {
         proofs.pause_proofs_at_check(stage.0, nth);
         let token = CancellationToken::new();
         let request = inspection(&w, &token);
-        reached(&format!("{stage:?}: the proof holds there"), proofs.paused_proof()).await;
+        reached(
+            &format!("{stage:?}: the proof holds there"),
+            proofs.paused_proof(),
+        )
+        .await;
         let passed = proofs.checks_passed();
         token.cancel();
         let left = answered(request).await;
-        assert!(matches!(left, Err(RuntimeError::Cancelled)), "{stage:?}: {left:?}");
-        assert_eq!(proofs.open_readers(), 0, "{stage:?}: its reader closed first");
-        assert_eq!(proofs.checks_passed(), passed, "{stage:?}: it went no further");
+        assert!(
+            matches!(left, Err(RuntimeError::Cancelled)),
+            "{stage:?}: {left:?}"
+        );
+        assert_eq!(
+            proofs.open_readers(),
+            0,
+            "{stage:?}: its reader closed first"
+        );
+        assert_eq!(
+            proofs.checks_passed(),
+            passed,
+            "{stage:?}: it went no further"
+        );
         proofs.resume_proofs();
         let next = answered(inspection(&w, &CancellationToken::new())).await;
-        assert_eq!(next.unwrap().expect("held").status, HeldBindingStatus::Current, "{stage:?}");
+        assert_eq!(
+            next.unwrap().expect("held").status,
+            HeldBindingStatus::Current,
+            "{stage:?}"
+        );
     }
     assert_eq!(proofs.proofs_admitted(), 2 * stages.len() as u64);
     drop(resume);
@@ -1009,10 +1293,16 @@ async fn a_proof_stops_inside_a_statement_once_its_caller_leaves() {
     let request = inspection(&w, &token);
     reached("the proof runs its statement", proofs.stalled_proof()).await;
     token.cancel();
-    assert!(matches!(answered(request).await, Err(RuntimeError::Cancelled)));
+    assert!(matches!(
+        answered(request).await,
+        Err(RuntimeError::Cancelled)
+    ));
     assert_eq!(proofs.open_readers(), 0, "its reader closed");
     let next = answered(inspection(&w, &CancellationToken::new())).await;
-    assert_eq!(next.unwrap().expect("held").status, HeldBindingStatus::Current);
+    assert_eq!(
+        next.unwrap().expect("held").status,
+        HeldBindingStatus::Current
+    );
     desktop.close().await;
     w.close().await;
 }
@@ -1030,12 +1320,19 @@ async fn a_different_request_for_a_workspace_with_a_running_proof_is_busy() {
     for _ in 1..MAX_PROOF_WAITERS {
         callers.push(inspection(&w, &CancellationToken::new()));
     }
-    reached("every caller joined", proofs.callers("workspace", MAX_PROOF_WAITERS)).await;
+    reached(
+        "every caller joined",
+        proofs.callers("workspace", MAX_PROOF_WAITERS),
+    )
+    .await;
     let refuse = || {
         tokio::time::timeout(
             Duration::from_secs(30),
-            w.actor
-                .held_document("workspace".into(), "object".into(), CancellationToken::new()),
+            w.actor.held_document(
+                "workspace".into(),
+                "object".into(),
+                CancellationToken::new(),
+            ),
         )
     };
     let full = refuse().await.expect("refused at once");
@@ -1044,13 +1341,19 @@ async fn a_different_request_for_a_workspace_with_a_running_proof_is_busy() {
                WHERE object_id='object'";
     assert_eq!(changed(&w, sql), 1);
     let other = refuse().await.expect("refused at once");
-    assert!(matches!(other, Err(RuntimeError::HeldReadBusy)), "{other:?}");
+    assert!(
+        matches!(other, Err(RuntimeError::HeldReadBusy)),
+        "{other:?}"
+    );
     drop(resume);
     for caller in callers {
         let answer = answered(caller).await.unwrap().expect("held");
         assert_eq!(answer.status, HeldBindingStatus::Stale, "its hold moved");
     }
-    assert!(matches!(answered(inspection(&w, &CancellationToken::new())).await, Ok(Some(_))));
+    assert!(matches!(
+        answered(inspection(&w, &CancellationToken::new())).await,
+        Ok(Some(_))
+    ));
     assert_eq!(proofs.proofs_admitted(), 2);
     desktop.close().await;
     w.close().await;
@@ -1086,11 +1389,20 @@ async fn closing_the_store_stops_a_running_proof_and_waits_for_its_reader() {
     // The test's own writer goes first, so only the proof holds the store.
     drop(store);
     owner.close().await.unwrap();
-    supervisor.close_all().expect("close returns once the reader closed");
-    assert_eq!(proofs.open_readers(), 0, "close returned after the reader closed");
+    supervisor
+        .close_all()
+        .expect("close returns once the reader closed");
+    assert_eq!(
+        proofs.open_readers(),
+        0,
+        "close returned after the reader closed"
+    );
     release.join().unwrap();
     let closed = answered(request).await;
-    assert!(matches!(closed, Err(RuntimeError::ActorUnavailable)), "{closed:?}");
+    assert!(
+        matches!(closed, Err(RuntimeError::ActorUnavailable)),
+        "{closed:?}"
+    );
     let db = engine_db_path(&root).unwrap();
     for suffix in ["", "-wal"] {
         let mut from = db.clone().into_os_string();
@@ -1136,7 +1448,10 @@ async fn closing_with_a_reader_past_the_bound_fails() {
     owner.close().await.unwrap();
     let db = engine_db_path(&root).unwrap();
     let closed = supervisor.close_all();
-    assert!(matches!(closed, Err(RuntimeError::StoreInUse)), "{closed:?}");
+    assert!(
+        matches!(closed, Err(RuntimeError::StoreInUse)),
+        "{closed:?}"
+    );
     assert!(!proofs.drained(), "the reader is still open");
     for (what, refused) in [
         ("closed again", supervisor.close(&db).map(drop)),
@@ -1144,12 +1459,18 @@ async fn closing_with_a_reader_past_the_bound_fails() {
         ("reopened", supervisor.open(&db, 2).map(drop)),
         ("restarted", supervisor.restart(&db, 2).map(drop)),
     ] {
-        assert!(matches!(refused, Err(RuntimeError::StoreInUse)), "{what}: {refused:?}");
+        assert!(
+            matches!(refused, Err(RuntimeError::StoreInUse)),
+            "{what}: {refused:?}"
+        );
     }
     assert_eq!(supervisor.actor_count(), 0, "no successor started");
     drop(resume);
     let answered = answered(request).await;
-    assert!(matches!(answered, Err(RuntimeError::ActorUnavailable)), "{answered:?}");
+    assert!(
+        matches!(answered, Err(RuntimeError::ActorUnavailable)),
+        "{answered:?}"
+    );
     proofs.wait_for_drained();
     assert!(!supervisor.close(&db).unwrap(), "nothing left to close");
     supervisor.close_all().unwrap();
@@ -1176,7 +1497,10 @@ async fn a_dead_actors_reader_keeps_its_store_fenced() {
     let request = inspection(&w, &CancellationToken::new());
     reached("the proof validates", proofs.paused_proof()).await;
     let died = w.actor.on_connection(|_| panic!("the worker dies")).await;
-    assert!(matches!(died, Err(RuntimeError::ActorUnavailable)), "{died:?}");
+    assert!(
+        matches!(died, Err(RuntimeError::ActorUnavailable)),
+        "{died:?}"
+    );
     reached("the worker exits", w.actor.worker_exited()).await;
     let RetainedWindow {
         owner,
@@ -1189,17 +1513,26 @@ async fn a_dead_actors_reader_keeps_its_store_fenced() {
     // Its worker is gone, so closing the owner reaches no actor; the owner
     // still retires its token as it drops.
     let closed = owner.close().await;
-    assert!(matches!(closed, Err(RuntimeError::ActorUnavailable)), "{closed:?}");
+    assert!(
+        matches!(closed, Err(RuntimeError::ActorUnavailable)),
+        "{closed:?}"
+    );
     let db = engine_db_path(&root).unwrap();
     for what in ["evicting the dead actor", "while it drains"] {
         let refused = supervisor.open(&db, 2).map(drop);
-        assert!(matches!(refused, Err(RuntimeError::StoreInUse)), "{what}: {refused:?}");
+        assert!(
+            matches!(refused, Err(RuntimeError::StoreInUse)),
+            "{what}: {refused:?}"
+        );
         assert_eq!(supervisor.actor_count(), 0, "{what}: no successor started");
     }
     assert!(!proofs.drained(), "the reader is still open");
     drop(resume);
     let answered = answered(request).await;
-    assert!(matches!(answered, Err(RuntimeError::ActorUnavailable)), "{answered:?}");
+    assert!(
+        matches!(answered, Err(RuntimeError::ActorUnavailable)),
+        "{answered:?}"
+    );
     proofs.wait_for_drained();
     let reopened = supervisor.open(&db, 3).unwrap();
     assert!(reopened.created_actor, "the drained store opens again");
@@ -1249,16 +1582,29 @@ async fn a_reader_opening_past_the_close_bound_keeps_its_store() {
     owner.close().await.unwrap();
     let db = engine_db_path(&root).unwrap();
     let closed = supervisor.close_all();
-    assert!(matches!(closed, Err(RuntimeError::StoreInUse)), "{closed:?}");
+    assert!(
+        matches!(closed, Err(RuntimeError::StoreInUse)),
+        "{closed:?}"
+    );
     let answered = answered(request).await;
-    assert!(matches!(answered, Err(RuntimeError::ActorUnavailable)), "{answered:?}");
+    assert!(
+        matches!(answered, Err(RuntimeError::ActorUnavailable)),
+        "{answered:?}"
+    );
     drop(actor);
-    assert!(location.upgrade().is_some(), "the reader let its store's folder go");
+    assert!(
+        location.upgrade().is_some(),
+        "the reader let its store's folder go"
+    );
     let other = ScratchDir::new().unwrap();
     let other_db = engine_db_path(&other).unwrap();
     let second = supervisor.open(&other_db, 2).unwrap();
     assert_ne!(file(&other_db), file(&db));
-    assert_eq!(file(&held), file(&db), "the reader's path names the first store");
+    assert_eq!(
+        file(&held),
+        file(&db),
+        "the reader's path names the first store"
+    );
     drop(resume);
     proofs.wait_for_drained();
     drop(second);
@@ -1285,20 +1631,36 @@ async fn a_proof_gives_way_when_the_wal_presses_and_writes_keep_succeeding() {
     let mut writes = 0;
     while !proofs.wal_pressed("workspace") {
         assert!(writes < 1_000, "the WAL never pressed");
-        w.actor.write_for_test(WRITE).await.expect("every write succeeds");
+        w.actor
+            .write_for_test(WRITE)
+            .await
+            .expect("every write succeeds");
         writes += 1;
     }
     let refused = w
         .actor
-        .held_document("elsewhere".into(), "object".into(), CancellationToken::new())
+        .held_document(
+            "elsewhere".into(),
+            "object".into(),
+            CancellationToken::new(),
+        )
         .await;
-    assert!(matches!(refused, Err(RuntimeError::HeldReadBusy)), "{refused:?}");
+    assert!(
+        matches!(refused, Err(RuntimeError::HeldReadBusy)),
+        "{refused:?}"
+    );
     drop(resume);
     let gave_way = answered(request).await;
-    assert!(matches!(gave_way, Err(RuntimeError::HeldReadBusy)), "{gave_way:?}");
+    assert!(
+        matches!(gave_way, Err(RuntimeError::HeldReadBusy)),
+        "{gave_way:?}"
+    );
     assert_eq!(proofs.open_readers(), 0, "its reader closed");
     for _ in 0..2 * writes {
-        w.actor.write_for_test(WRITE).await.expect("writes go on succeeding");
+        w.actor
+            .write_for_test(WRITE)
+            .await
+            .expect("writes go on succeeding");
     }
     desktop.close().await;
     w.close().await;
@@ -1323,12 +1685,18 @@ async fn an_idle_store_proves_again_after_a_proof_gave_way() {
     let mut writes = 0;
     while !proofs.wal_pressed("workspace") {
         assert!(writes < 1_000, "the WAL never pressed");
-        w.actor.write_for_test(WRITE).await.expect("every write succeeds");
+        w.actor
+            .write_for_test(WRITE)
+            .await
+            .expect("every write succeeds");
         writes += 1;
     }
     drop(resume);
     let gave_way = answered(request).await;
-    assert!(matches!(gave_way, Err(RuntimeError::HeldReadBusy)), "{gave_way:?}");
+    assert!(
+        matches!(gave_way, Err(RuntimeError::HeldReadBusy)),
+        "{gave_way:?}"
+    );
     let mut asked = 0;
     let answer = loop {
         let completed = w.actor.checkpoints_completed_for_test().await.unwrap();
@@ -1344,7 +1712,10 @@ async fn an_idle_store_proves_again_after_a_proof_gave_way() {
             answer => break answer,
         }
     };
-    assert_eq!(answer.unwrap().expect("held").status, HeldBindingStatus::Current);
+    assert_eq!(
+        answer.unwrap().expect("held").status,
+        HeldBindingStatus::Current
+    );
     desktop.close().await;
     w.close().await;
 }
@@ -1361,7 +1732,8 @@ async fn an_artifact_past_its_cap_leaves_the_preservation_answering() {
         .await
         .unwrap()
         .expect("held");
-    let Some(dohc_engine_sync::HeldContributions::Artifact(artifact)) = &within.contributions else {
+    let Some(dohc_engine_sync::HeldContributions::Artifact(artifact)) = &within.contributions
+    else {
         panic!("an artifact within its cap: {:?}", within.contributions)
     };
     let merged = artifact.merged.clone();
@@ -1372,8 +1744,14 @@ async fn an_artifact_past_its_cap_leaves_the_preservation_answering() {
         .expect("held");
     assert_eq!(past.status, HeldBindingStatus::Current);
     assert!(past.preservation.is_some());
-    assert_eq!(past.preservation, within.preservation, "the preservation, Markdown included");
-    assert_eq!(past.contributions, Some(dohc_engine_sync::HeldContributions::TooLarge { merged }));
+    assert_eq!(
+        past.preservation, within.preservation,
+        "the preservation, Markdown included"
+    );
+    assert_eq!(
+        past.contributions,
+        Some(dohc_engine_sync::HeldContributions::TooLarge { merged })
+    );
     desktop.close().await;
     w.close().await;
 }
@@ -1390,11 +1768,17 @@ async fn a_proof_past_its_deadline_answers_busy() {
     let request = inspection(&w, &CancellationToken::new());
     reached("the proof runs its statement", proofs.stalled_proof()).await;
     let expired = answered(request).await;
-    assert!(matches!(expired, Err(RuntimeError::HeldReadBusy)), "{expired:?}");
+    assert!(
+        matches!(expired, Err(RuntimeError::HeldReadBusy)),
+        "{expired:?}"
+    );
     assert_eq!(proofs.open_readers(), 0, "its reader closed");
     proofs.set_proof_deadline(dohc_engine_collab::live_update_application::HELD_PROOF_DEADLINE);
     let next = answered(inspection(&w, &CancellationToken::new())).await;
-    assert_eq!(next.unwrap().expect("held").status, HeldBindingStatus::Current);
+    assert_eq!(
+        next.unwrap().expect("held").status,
+        HeldBindingStatus::Current
+    );
     desktop.close().await;
     w.close().await;
 }

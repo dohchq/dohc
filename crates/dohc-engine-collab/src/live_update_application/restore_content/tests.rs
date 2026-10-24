@@ -3695,7 +3695,7 @@ fn prove(f: &Fixture, reader: ProofReader, remaining: &mut usize) -> Result<(), 
 /// smaller budget refuses before reading it; enough budget reaches the damage.
 #[test]
 fn publication_proof_charges_each_raw_row_before_reading_it() {
-    use ProofReader::{Accepted, Predecessor};
+    use self::ProofReader::{Accepted, Predecessor};
     let pad = "replace(hex(zeroblob(1000000)),'00','x')";
     let cases = [
         // Registration, before anything else is read.

@@ -267,7 +267,10 @@ fn buffer_bytes(binding: &ReleasedLineageBinding, preservation: &Preservation) -
             .map(|tail| {
                 tail.namespace.len()
                     + tail.activation_id.len()
-                    + tail.release.as_ref().map_or(0, |release| release.path.len())
+                    + tail
+                        .release
+                        .as_ref()
+                        .map_or(0, |release| release.path.len())
                     + match &tail.coverage {
                         RetainedCoverage::Unproven(unproven) => unproven.digest.len(),
                         RetainedCoverage::Invalid => 0,
@@ -286,7 +289,12 @@ fn buffer_bytes(binding: &ReleasedLineageBinding, preservation: &Preservation) -
                 .map(RetainedContribution::text_bytes)
                 .chain([namespace.len()])
         })
-        .chain(preservation.merged.iter().map(RetainedContribution::text_bytes))
+        .chain(
+            preservation
+                .merged
+                .iter()
+                .map(RetainedContribution::text_bytes),
+        )
         .max()
         .unwrap_or(0);
     [head, tail, value]
@@ -963,7 +971,8 @@ mod tests {
         };
         for vector in vectors["artifacts"].as_array().unwrap() {
             let name = &vector["name"];
-            let parsed: Value = serde_json::from_str(vector["canonical"].as_str().unwrap()).unwrap();
+            let parsed: Value =
+                serde_json::from_str(vector["canonical"].as_str().unwrap()).unwrap();
             let binding = ReleasedLineageBinding::from_json(&parsed["binding"]).unwrap();
             let preservation = Preservation {
                 status: PreservationStatus::Complete,
@@ -972,7 +981,12 @@ mod tests {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .map(|tail| (tail["namespace"].as_str().unwrap().to_owned(), listed(&tail["contributions"])))
+                    .map(|tail| {
+                        (
+                            tail["namespace"].as_str().unwrap().to_owned(),
+                            listed(&tail["contributions"]),
+                        )
+                    })
                     .collect(),
                 merged: listed(&parsed["mergedContributionIds"]),
                 preserved: None,
@@ -980,7 +994,11 @@ mod tests {
             let artifact = ContributionArtifact::of(&binding, &preservation, Stop::NEVER)
                 .unwrap()
                 .expect("within its cap");
-            assert_eq!(std::str::from_utf8(&artifact.bytes).unwrap(), vector["canonical"], "{name}");
+            assert_eq!(
+                std::str::from_utf8(&artifact.bytes).unwrap(),
+                vector["canonical"],
+                "{name}"
+            );
             assert_eq!(artifact.sha256, vector["sha256"], "{name}");
             assert_eq!(
                 serde_json::json!({"count": artifact.merged.count, "digest": artifact.merged.digest}),
@@ -1227,37 +1245,66 @@ mod tests {
     #[test]
     fn parsed_values_read_back_only_in_their_exact_shape() {
         let binding = listed();
-        assert_eq!(ReleasedLineageBinding::from_json(&binding.to_json()), Some(binding.clone()));
+        assert_eq!(
+            ReleasedLineageBinding::from_json(&binding.to_json()),
+            Some(binding.clone())
+        );
         let mut extra = binding.to_json();
         extra["extra"] = Value::Bool(true);
         assert_eq!(ReleasedLineageBinding::from_json(&extra), None);
         let mut dropped = binding.to_json();
-        dropped["incoming"].as_object_mut().unwrap().remove("relayNamespace");
+        dropped["incoming"]
+            .as_object_mut()
+            .unwrap()
+            .remove("relayNamespace");
         assert_eq!(ReleasedLineageBinding::from_json(&dropped), None);
         for contribution in carried_and_outbox() {
             let value = contribution.to_json();
-            assert_eq!(RetainedContribution::from_json(&value), Some(contribution.clone()));
+            assert_eq!(
+                RetainedContribution::from_json(&value),
+                Some(contribution.clone())
+            );
             let coordinate = match contribution {
                 RetainedContribution::Carried { .. } => "journalCursor",
                 RetainedContribution::Outbox { .. } => "sequence",
             };
             let author = value["authors"][0].clone();
-            let refused: [(&str, &dyn Fn(&mut Value)); 13] = [
+            type Refusal<'a> = (&'a str, &'a dyn Fn(&mut Value));
+            let refused: [Refusal<'_>; 13] = [
                 ("another key", &|value| value["extra"] = Value::Bool(true)),
-                ("another kind", &|value| value["kind"] = Value::String("other".into())),
+                ("another kind", &|value| {
+                    value["kind"] = Value::String("other".into())
+                }),
                 ("no authors", &|value| {
                     value.as_object_mut().unwrap().remove("authors");
                 }),
-                ("a coordinate of 0", &|value| value[coordinate] = Value::from(0)),
-                ("a fractional coordinate", &|value| value[coordinate] = Value::from(1.5)),
-                ("an uppercase digest", &|value| value["updateDigest"] = Value::String("C".repeat(64))),
-                ("a short digest", &|value| value["updateDigest"] = Value::String("c".repeat(63))),
-                ("no author", &|value| value["authors"] = serde_json::json!([])),
-                ("two authors", &|value| value["authors"] = Value::Array(vec![author.clone(), author.clone()])),
-                ("an author with another key", &|value| value["authors"][0]["note"] = Value::from(1)),
-                ("an unknown author kind", &|value| value["authors"] = serde_json::json!([{"kind": "public"}])),
+                ("a coordinate of 0", &|value| {
+                    value[coordinate] = Value::from(0)
+                }),
+                ("a fractional coordinate", &|value| {
+                    value[coordinate] = Value::from(1.5)
+                }),
+                ("an uppercase digest", &|value| {
+                    value["updateDigest"] = Value::String("C".repeat(64))
+                }),
+                ("a short digest", &|value| {
+                    value["updateDigest"] = Value::String("c".repeat(63))
+                }),
+                ("no author", &|value| {
+                    value["authors"] = serde_json::json!([])
+                }),
+                ("two authors", &|value| {
+                    value["authors"] = Value::Array(vec![author.clone(), author.clone()])
+                }),
+                ("an author with another key", &|value| {
+                    value["authors"][0]["note"] = Value::from(1)
+                }),
+                ("an unknown author kind", &|value| {
+                    value["authors"] = serde_json::json!([{"kind": "public"}])
+                }),
                 ("an agent at an explicit depth of 0", &|value| {
-                    value["authors"] = serde_json::json!([{"kind": "agent", "agentId": "a", "depth": 0}])
+                    value["authors"] =
+                        serde_json::json!([{"kind": "agent", "agentId": "a", "depth": 0}])
                 }),
                 ("an author with a control character", &|value| {
                     value["authors"] = serde_json::json!([{"kind": "agent", "agentId": "a\u{1}"}])
@@ -1270,12 +1317,16 @@ mod tests {
             }
         }
         assert_eq!(
-            RetainedAuthors::from_json(&serde_json::json!([{"kind": "automation", "automationId": "sort"}])),
+            RetainedAuthors::from_json(
+                &serde_json::json!([{"kind": "automation", "automationId": "sort"}])
+            ),
             None,
             "an automation names its depth"
         );
         assert_eq!(
-            RetainedAuthors::from_json(&serde_json::json!([{"kind": "human", "humanId": "local-person"}])),
+            RetainedAuthors::from_json(
+                &serde_json::json!([{"kind": "human", "humanId": "local-person"}])
+            ),
             RetainedAuthors::credited(
                 Some("local-person"),
                 Some(&dohc_engine_domain::ChangeAttribution {
@@ -1301,7 +1352,12 @@ mod tests {
             let digest = ReleasedLineageBinding::canonical_digest(canonical);
             assert_eq!(digest, hex_sha256(&encoded), "{}", vector["name"]);
             assert_eq!(digest, binding.digest(), "{}", vector["name"]);
-            assert_eq!(digest, vector["digest"].as_str().unwrap(), "{}", vector["name"]);
+            assert_eq!(
+                digest,
+                vector["digest"].as_str().unwrap(),
+                "{}",
+                vector["name"]
+            );
         }
     }
 
@@ -1352,7 +1408,9 @@ mod tests {
 
     /// How many tails `piece`, one [`write_binding`] wrote, encodes.
     fn tails_in(piece: &str) -> usize {
-        usize::from(piece.starts_with("{\"activationId\"") || piece.starts_with(",{\"activationId\""))
+        usize::from(
+            piece.starts_with("{\"activationId\"") || piece.starts_with(",{\"activationId\""),
+        )
     }
 
     /// [`write_binding`] with nothing to stop it.
@@ -1379,14 +1437,20 @@ mod tests {
     fn a_bindings_tails_encode_one_at_a_time_and_stop_partway() {
         let mut invalid = listed();
         invalid.tails = Arc::new(ProtectedTails::Invalid);
-        for binding in [listed(), many_tails(3 * ARTIFACT_CHECK_EVERY), many_tails(0), invalid] {
+        for binding in [
+            listed(),
+            many_tails(3 * ARTIFACT_CHECK_EVERY),
+            many_tails(0),
+            invalid,
+        ] {
             let mut one_pass = String::new();
             write_canonical(&binding.to_json(), &mut one_pass);
             assert_eq!(written(&binding), one_pass);
         }
 
         let scratch = dohc_test_scratch::ScratchDir::new().unwrap();
-        let store = dohc_engine_storage::EngineStore::open(&scratch.path().join("engine.db"), 1).unwrap();
+        let store =
+            dohc_engine_storage::EngineStore::open(&scratch.path().join("engine.db"), 1).unwrap();
         let proofs: HeldProofs<(), u32> = HeldProofs::new(HeldProofLimit::default());
         let started = || match proofs.admit(&store, "workspace", ()).unwrap() {
             HeldProofAdmission::Started(run, wait) => (run, wait),
@@ -1411,7 +1475,10 @@ mod tests {
             tails = count;
             (0, 0)
         });
-        assert!(matches!(encoded, Err(ApplicationError::Cancelled)), "{encoded:?}");
+        assert!(
+            matches!(encoded, Err(ApplicationError::Cancelled)),
+            "{encoded:?}"
+        );
         assert_eq!(tails, 0, "a stopped proof encodes no tail");
 
         proofs.pause_proofs_at_check(ProofStage::Encoding, 2);
@@ -1434,8 +1501,14 @@ mod tests {
         proofs.wait_for_paused_proof();
         drop(wait);
         let (encoded, tails) = encoding.join().unwrap();
-        assert!(matches!(encoded, Err(ApplicationError::Cancelled)), "{encoded:?}");
-        assert_eq!(tails, ARTIFACT_CHECK_EVERY, "it stopped at its second check");
+        assert!(
+            matches!(encoded, Err(ApplicationError::Cancelled)),
+            "{encoded:?}"
+        );
+        assert_eq!(
+            tails, ARTIFACT_CHECK_EVERY,
+            "it stopped at its second check"
+        );
     }
 
     /// Sol's r2c-3c-4 finding 2: an artifact refuses before it would pass
@@ -1454,7 +1527,10 @@ mod tests {
             }
             assert!(text.text.capacity() <= 10_000, "{}", text.text.capacity());
         };
-        assert!(matches!(refused, ApplicationError::ConfiguredByteBudgetExceeded), "{refused:?}");
+        assert!(
+            matches!(refused, ApplicationError::ConfiguredByteBudgetExceeded),
+            "{refused:?}"
+        );
         assert!(text.over);
         assert_eq!((pushed, text.len()), (10, 9_990));
         assert!(text.text.capacity() <= 10_000);
@@ -1470,21 +1546,37 @@ mod tests {
         let whole = ContributionArtifact::of(&binding, &preservation, Stop::NEVER)
             .unwrap()
             .expect("within its cap");
-        let at_cap = ContributionArtifact::within(&binding, &preservation, Stop::NEVER, whole.bytes.len());
-        assert_eq!(at_cap.ok().flatten().as_ref(), Some(&whole), "exactly at its cap");
-        let past = ContributionArtifact::within(&binding, &preservation, Stop::NEVER, whole.bytes.len() - 1);
+        let at_cap =
+            ContributionArtifact::within(&binding, &preservation, Stop::NEVER, whole.bytes.len());
+        assert_eq!(
+            at_cap.ok().flatten().as_ref(),
+            Some(&whole),
+            "exactly at its cap"
+        );
+        let past = ContributionArtifact::within(
+            &binding,
+            &preservation,
+            Stop::NEVER,
+            whole.bytes.len() - 1,
+        );
         assert!(matches!(past, Ok(None)), "{past:?}");
 
         let scratch = dohc_test_scratch::ScratchDir::new().unwrap();
-        let store = dohc_engine_storage::EngineStore::open(&scratch.path().join("engine.db"), 1).unwrap();
+        let store =
+            dohc_engine_storage::EngineStore::open(&scratch.path().join("engine.db"), 1).unwrap();
         let proofs: HeldProofs<(), u32> = HeldProofs::new(HeldProofLimit::default());
         proofs.set_artifact_cap(whole.bytes.len() - 1);
-        let HeldProofAdmission::Started(run, _wait) = proofs.admit(&store, "workspace", ()).unwrap() else {
+        let HeldProofAdmission::Started(run, _wait) =
+            proofs.admit(&store, "workspace", ()).unwrap()
+        else {
             panic!("a free workspace starts its proof")
         };
         let mut encoded = None;
         run.prove(|job| {
-            encoded = Some((ContributionArtifact::of(&binding, &preservation, job.stop()), job.stopped()));
+            encoded = Some((
+                ContributionArtifact::of(&binding, &preservation, job.stop()),
+                job.stopped(),
+            ));
             (0, 0)
         });
         let (encoded, stopped) = encoded.expect("the proof ran");
@@ -1511,35 +1603,56 @@ mod tests {
             .unwrap()
             .expect("within its cap");
         let floor = artifact_floor(&preservation);
-        assert!(floor < whole.bytes.len(), "{floor} against {}", whole.bytes.len());
+        assert!(
+            floor < whole.bytes.len(),
+            "{floor} against {}",
+            whole.bytes.len()
+        );
 
         let scratch = dohc_test_scratch::ScratchDir::new().unwrap();
-        let store = dohc_engine_storage::EngineStore::open(&scratch.path().join("engine.db"), 1).unwrap();
+        let store =
+            dohc_engine_storage::EngineStore::open(&scratch.path().join("engine.db"), 1).unwrap();
         // What the artifact answers under `cap`, how many checks it passed,
         // and the most its proof reserved.
         let encoded = |cap: usize| {
             let limit = HeldProofLimit::new(1, 1 << 30, 0);
             let proofs: HeldProofs<(), ()> = HeldProofs::new(limit.clone());
             proofs.set_artifact_cap(cap);
-            let HeldProofAdmission::Started(run, _wait) = proofs.admit(&store, "workspace", ()).unwrap() else {
+            let HeldProofAdmission::Started(run, _wait) =
+                proofs.admit(&store, "workspace", ()).unwrap()
+            else {
                 panic!("a free workspace starts its proof")
             };
             let mut answer = None;
             run.prove(|job| {
-                answer = Some(ContributionArtifact::of(&binding, &preservation, job.stop()));
+                answer = Some(ContributionArtifact::of(
+                    &binding,
+                    &preservation,
+                    job.stop(),
+                ));
                 ((), 0)
             });
-            (answer.expect("the proof ran"), proofs.checks_passed(), limit.peak_reserved_bytes())
+            (
+                answer.expect("the proof ran"),
+                proofs.checks_passed(),
+                limit.peak_reserved_bytes(),
+            )
         };
         let (answer, checks, peak) = encoded(floor - 1);
         assert!(matches!(answer, Ok(None)), "{answer:?}");
         assert_eq!((checks, peak), (0, 0), "nothing encoded or reserved");
         let (answer, checks, peak) = encoded(floor);
         assert!(matches!(answer, Ok(None)), "{answer:?}");
-        assert!(checks > 0 && peak > 0, "encoded until it passed: {checks} checks, {peak} bytes");
+        assert!(
+            checks > 0 && peak > 0,
+            "encoded until it passed: {checks} checks, {peak} bytes"
+        );
 
         let streamed = UnprovenCommitment::of_merged(&preservation.merged, Stop::NEVER).unwrap();
         assert_eq!(streamed, whole.merged);
-        assert_eq!(UnprovenCommitment::of_listed(&preservation.merged), whole.merged);
+        assert_eq!(
+            UnprovenCommitment::of_listed(&preservation.merged),
+            whole.merged
+        );
     }
 }

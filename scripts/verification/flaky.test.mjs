@@ -115,6 +115,9 @@ test("each failed test maps to the command that reruns it alone, and a test with
     `node tools/rust-engine-program/run-rust-profile.mjs rerun -- --filter-expr "binary_id(=dohc-engine-sync) & test(=tests::file_export_lane::lane_delete)"`);
   assert.equal(command("rust", "dohc-engine-runtime::owner_publication accepted_prefix_settles"),
     `node tools/rust-engine-program/run-rust-profile.mjs rerun -- --filter-expr "binary_id(=dohc-engine-runtime::owner_publication) & test(=accepted_prefix_settles)"`);
+  // A reader regression reruns through the gate's reader phase, which stages the reader and selects ignored tests.
+  assert.equal(command("rust", "dohc-engine-collab live_update_application::adoption::tests::a_reader_built_lineage_adopts_its_successor"),
+    "node tools/rust-engine-program/reader-tests.mjs");
   for (const [step, test] of [["repository", "times out under load"], ["self-host-native", "src/a.test.ts › proof"], ["rust", "dohc-engine-sync"],
     ["@dohc/desktop", "C:\\w\\a.test.ts › absolute"], ["@dohc/desktop", null], [null, "src/a.test.ts › a"]]) assert.equal(command(step, test), null, `${step}: ${test}`);
   // A lane receipt is read back from disk, so a row can be anything.

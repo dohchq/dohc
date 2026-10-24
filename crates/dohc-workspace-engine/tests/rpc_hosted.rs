@@ -53,7 +53,7 @@ async fn a_departed_reader_hold_does_not_stop_native_parking_or_the_hosted_pass(
     relay.share("doc-z", "z.txt");
     let relay = FakeRelay::start(relay);
     let scratch = ScratchDir::new().unwrap();
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let transport = InProcessTransport::new(Arc::new(hosted_service()));
     let handle = open_workspace(&transport, &scratch, &relay).await;
     let mut host = Host {
         transport,

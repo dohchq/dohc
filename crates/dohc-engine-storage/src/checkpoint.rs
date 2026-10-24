@@ -1183,7 +1183,10 @@ mod tests {
         let mut n = 0;
         while !pressure.raised() {
             let (log, _) = s.read_with(frames).unwrap();
-            assert!(log < MAX_PENDING_WAL_FRAMES, "raised before writes are refused");
+            assert!(
+                log < MAX_PENDING_WAL_FRAMES,
+                "raised before writes are refused"
+            );
             write(&mut s, n, 64 * 1024);
             n += 1;
         }
@@ -1230,7 +1233,10 @@ mod tests {
         }
         assert!(!pressure.raised());
         let (log, backfilled) = s.read_with(frames).unwrap();
-        assert!(log < HELD_READER_WAL_FRAMES || log == backfilled, "{log} against {backfilled}");
+        assert!(
+            log < HELD_READER_WAL_FRAMES || log == backfilled,
+            "{log} against {backfilled}"
+        );
     }
 
     #[test]

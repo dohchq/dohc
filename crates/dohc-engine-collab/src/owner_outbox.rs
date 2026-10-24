@@ -1806,7 +1806,10 @@ pub(crate) fn entry_credit(
     Ok(if let Some(declared) = automation {
         (Some(declared.automation_id), Some(declared.attribution))
     } else if let Some(declared) = agent {
-        (Some(declared.agent_id.clone()), Some(declared.attribution()))
+        (
+            Some(declared.agent_id.clone()),
+            Some(declared.attribution()),
+        )
     } else if person {
         (
             Some("local-person".into()),

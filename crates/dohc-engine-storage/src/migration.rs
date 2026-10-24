@@ -3748,8 +3748,9 @@ WHEN EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE terminal_blob_digest=N
   OR EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE update_digest=NEW.sha256) BEGIN
     UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
         (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
-           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.terminal_blob_digest=NEW.sha256
-         UNION SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.terminal_blob_digest=NEW.sha256);
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
            JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.update_digest=NEW.sha256);
 END;
 CREATE TRIGGER released_tail_blob_update AFTER UPDATE OF sha256,byte_length,bytes ON binary_blobs
@@ -3757,8 +3758,9 @@ WHEN EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE terminal_blob_digest I
   OR EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE update_digest IN (OLD.sha256,NEW.sha256)) BEGIN
     UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
         (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
-           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.terminal_blob_digest IN (OLD.sha256,NEW.sha256)
-         UNION SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.terminal_blob_digest IN (OLD.sha256,NEW.sha256));
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
            JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.update_digest IN (OLD.sha256,NEW.sha256));
 END;
 CREATE TRIGGER released_tail_blob_delete AFTER DELETE ON binary_blobs
@@ -3766,8 +3768,9 @@ WHEN EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE terminal_blob_digest=O
   OR EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries WHERE update_digest=OLD.sha256) BEGIN
     UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
         (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
-           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.terminal_blob_digest=OLD.sha256
-         UNION SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
+           JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.terminal_blob_digest=OLD.sha256);
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
            JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.update_digest=OLD.sha256);
 END;
 DROP INDEX idx_ydoc_updates_doc_blob;
@@ -3798,10 +3801,12 @@ WHEN EXISTS(SELECT 1 FROM ydoc_updates WHERE update_blob_sha256 IN (OLD.sha256,N
   OR EXISTS(SELECT 1 FROM ydoc_snapshots WHERE snapshot_blob_sha256 IN (OLD.sha256,NEW.sha256))
   OR EXISTS(SELECT 1 FROM ydoc_inactive_lineages WHERE full_state_blob_sha256 IN (OLD.sha256,NEW.sha256)) BEGIN
     UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
-        (SELECT workspace_id,version_id,object_id FROM ydoc_updates WHERE update_blob_sha256 IN (OLD.sha256,NEW.sha256)
-         UNION SELECT workspace_id,version_id,object_id FROM ydoc_snapshots
-           WHERE snapshot_blob_sha256 IN (OLD.sha256,NEW.sha256)
-         UNION SELECT workspace_id,version_id,object_id FROM ydoc_inactive_lineages
+        (SELECT workspace_id,version_id,object_id FROM ydoc_updates WHERE update_blob_sha256 IN (OLD.sha256,NEW.sha256));
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (SELECT workspace_id,version_id,object_id FROM ydoc_snapshots
+           WHERE snapshot_blob_sha256 IN (OLD.sha256,NEW.sha256));
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (SELECT workspace_id,version_id,object_id FROM ydoc_inactive_lineages
            WHERE full_state_blob_sha256 IN (OLD.sha256,NEW.sha256));
 END;
 CREATE TRIGGER released_tail_state_blob_insert AFTER INSERT ON binary_blobs
@@ -3809,9 +3814,11 @@ WHEN EXISTS(SELECT 1 FROM ydoc_updates WHERE update_blob_sha256=NEW.sha256)
   OR EXISTS(SELECT 1 FROM ydoc_snapshots WHERE snapshot_blob_sha256=NEW.sha256)
   OR EXISTS(SELECT 1 FROM ydoc_inactive_lineages WHERE full_state_blob_sha256=NEW.sha256) BEGIN
     UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
-        (SELECT workspace_id,version_id,object_id FROM ydoc_updates WHERE update_blob_sha256=NEW.sha256
-         UNION SELECT workspace_id,version_id,object_id FROM ydoc_snapshots WHERE snapshot_blob_sha256=NEW.sha256
-         UNION SELECT workspace_id,version_id,object_id FROM ydoc_inactive_lineages
+        (SELECT workspace_id,version_id,object_id FROM ydoc_updates WHERE update_blob_sha256=NEW.sha256);
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (SELECT workspace_id,version_id,object_id FROM ydoc_snapshots WHERE snapshot_blob_sha256=NEW.sha256);
+    UPDATE released_tail_generations SET generation=generation+1 WHERE (workspace_id,version_id,object_id) IN
+        (SELECT workspace_id,version_id,object_id FROM ydoc_inactive_lineages
            WHERE full_state_blob_sha256=NEW.sha256);
 END;
 CREATE TRIGGER released_tail_snapshot_update
@@ -5210,7 +5217,7 @@ mod tests {
             ),
             (
                 "v2-live-owner-activations",
-                "3cd8aabfe2ef82e606dd174dd956e46f8e112b3f7bc7f8e1ffd8bbb242679dd2",
+                "ab7c083adc62cd7ceb164fda18d23f473673bf6c024c091742e292d84683cd5b",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -6442,7 +6449,8 @@ mod tests {
                    '{copy}','{moment}','notes/plan (retained).md','0','{{}}',1)"
             )
         };
-        conn.execute(&insert(0, "copy", "moment", "ws", &text), []).unwrap();
+        conn.execute(&insert(0, "copy", "moment", "ws", &text), [])
+            .unwrap();
         for valid in [
             "UPDATE released_hold_copy_decisions SET accepted_recovery_origin_id='owner', \
              accepted_recovery_origin_seq=0,accepted_recovery_relay_seq=7",
@@ -6454,7 +6462,8 @@ mod tests {
             conn.execute(valid, []).unwrap();
         }
         // Another attempt at the same binding names other copy identities.
-        conn.execute(&insert(1, "copy-1", "moment-1", "ws", &text), []).unwrap();
+        conn.execute(&insert(1, "copy-1", "moment-1", "ws", &text), [])
+            .unwrap();
         let unstored = "d".repeat(64);
         for invalid in [
             // The same attempt, or another attempt reusing a copy identity.
@@ -6492,15 +6501,25 @@ mod tests {
             assert!(conn.execute(invalid, []).is_err(), "{invalid}");
         }
         assert!(
-            conn.execute(&format!("DELETE FROM blobs WHERE sha256='{text}'"), []).is_err(),
+            conn.execute(&format!("DELETE FROM blobs WHERE sha256='{text}'"), [])
+                .is_err(),
             "a decision pins its copy's text"
         );
-        conn.execute("DELETE FROM versioned_workspaces WHERE workspace_id='ws'", []).unwrap();
+        conn.execute(
+            "DELETE FROM versioned_workspaces WHERE workspace_id='ws'",
+            [],
+        )
+        .unwrap();
         let left: i64 = conn
-            .query_row("SELECT COUNT(*) FROM released_hold_copy_decisions", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM released_hold_copy_decisions",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(left, 0, "decisions leave with their workspace");
-        conn.execute(&format!("DELETE FROM blobs WHERE sha256='{text}'"), []).unwrap();
+        conn.execute(&format!("DELETE FROM blobs WHERE sha256='{text}'"), [])
+            .unwrap();
     }
 
     /// A released-lineage hold carries its binding with its digest, and its
@@ -9411,7 +9430,9 @@ mod tests {
             )
         };
         let snapshot = |seq: i64| {
-            format!("INSERT INTO ydoc_snapshots VALUES ('ws','main','a',{seq},'snapshot','vector',0)")
+            format!(
+                "INSERT INTO ydoc_snapshots VALUES ('ws','main','a',{seq},'snapshot','vector',0)"
+            )
         };
         // Rows up to `a`'s latest snapshot, 4, are folded: inspection never
         // loads them.
@@ -9433,16 +9454,25 @@ mod tests {
         step(&journal(10), &[]);
         step("DELETE FROM ydoc_updates WHERE seq=9", &["a"]);
         step(&journal(9), &["a"]);
-        step("UPDATE ydoc_updates SET update_blob_sha256='other' WHERE seq=9", &["a"]);
+        step(
+            "UPDATE ydoc_updates SET update_blob_sha256='other' WHERE seq=9",
+            &["a"],
+        );
         step("UPDATE ydoc_updates SET recorded_at_ms=2 WHERE seq=9", &[]);
         step(&snapshot(9), &[]);
-        step("DELETE FROM ydoc_updates WHERE object_id='a' AND seq<=9", &[]);
+        step(
+            "DELETE FROM ydoc_updates WHERE object_id='a' AND seq<=9",
+            &[],
+        );
         // Removing the latest snapshot once it folded rows moves `a`, so the
         // folded rows cannot change unseen and the snapshot come back; so
         // does moving it back or changing its digest. Pruning a snapshot a
         // later one supersedes, or a compaction rewriting the latest as it
         // was, moves nothing.
-        step("DELETE FROM ydoc_snapshots WHERE object_id='a' AND up_to_seq=9", &["a"]);
+        step(
+            "DELETE FROM ydoc_snapshots WHERE object_id='a' AND up_to_seq=9",
+            &["a"],
+        );
         step(&snapshot(9), &[]);
         step(
             "DELETE FROM ydoc_snapshots WHERE object_id='a' AND up_to_seq>0 AND up_to_seq<9",
@@ -9454,24 +9484,54 @@ mod tests {
                snapshot_blob_sha256=excluded.snapshot_blob_sha256,recorded_at_ms=excluded.recorded_at_ms",
             &[],
         );
-        step("UPDATE ydoc_snapshots SET up_to_seq=8 WHERE object_id='a' AND up_to_seq=9", &["a"]);
-        step("UPDATE ydoc_snapshots SET up_to_seq=9 WHERE object_id='a' AND up_to_seq=8", &["a"]);
-        step("UPDATE ydoc_snapshots SET snapshot_blob_sha256='other' WHERE object_id='a'", &["a"]);
-        step("UPDATE ydoc_snapshots SET snapshot_blob_sha256='snapshot' WHERE object_id='a'", &["a"]);
-        step("UPDATE ydoc_snapshots SET object_id='b' WHERE object_id='a'", &["a", "b"]);
-        step("UPDATE ydoc_snapshots SET object_id='a' WHERE object_id='b'", &["a", "b"]);
+        step(
+            "UPDATE ydoc_snapshots SET up_to_seq=8 WHERE object_id='a' AND up_to_seq=9",
+            &["a"],
+        );
+        step(
+            "UPDATE ydoc_snapshots SET up_to_seq=9 WHERE object_id='a' AND up_to_seq=8",
+            &["a"],
+        );
+        step(
+            "UPDATE ydoc_snapshots SET snapshot_blob_sha256='other' WHERE object_id='a'",
+            &["a"],
+        );
+        step(
+            "UPDATE ydoc_snapshots SET snapshot_blob_sha256='snapshot' WHERE object_id='a'",
+            &["a"],
+        );
+        step(
+            "UPDATE ydoc_snapshots SET object_id='b' WHERE object_id='a'",
+            &["a", "b"],
+        );
+        step(
+            "UPDATE ydoc_snapshots SET object_id='a' WHERE object_id='b'",
+            &["a", "b"],
+        );
         // A blob a journal row or snapshot names, missing from a damaged
         // store, moves its document once restored.
         step("INSERT INTO binary_blobs VALUES ('update',1,X'00')", &["a"]);
-        step("INSERT INTO binary_blobs VALUES ('snapshot',1,X'00')", &["a"]);
+        step(
+            "INSERT INTO binary_blobs VALUES ('snapshot',1,X'00')",
+            &["a"],
+        );
         step("INSERT INTO binary_blobs VALUES ('archive',1,X'00')", &[]);
-        step("UPDATE binary_blobs SET bytes=X'01' WHERE sha256='update'", &["a"]);
-        step("UPDATE binary_blobs SET bytes=X'01' WHERE sha256='snapshot'", &["a"]);
+        step(
+            "UPDATE binary_blobs SET bytes=X'01' WHERE sha256='update'",
+            &["a"],
+        );
+        step(
+            "UPDATE binary_blobs SET bytes=X'01' WHERE sha256='snapshot'",
+            &["a"],
+        );
         let archive = "INSERT INTO ydoc_inactive_lineages(workspace_id,version_id,object_id,lineage_claim_id,
                disposition,content_kind,full_state_blob_sha256,state_vector_blob_sha256,recorded_at_ms,updated_at_ms)
              VALUES ('ws','main','b','archived','superseded-predecessor','richdoc','archive','vector',0,0)";
         step(archive, &[]);
-        step("UPDATE binary_blobs SET byte_length=2 WHERE sha256='archive'", &["b"]);
+        step(
+            "UPDATE binary_blobs SET byte_length=2 WHERE sha256='archive'",
+            &["b"],
+        );
         // An archive moves its document as it goes or its key or digest
         // changes, so neither can change and change back unseen; its kind
         // and bookkeeping, which the proof compares or never reads, move
@@ -9496,11 +9556,17 @@ mod tests {
             "UPDATE ydoc_inactive_lineages SET object_id='b' WHERE lineage_claim_id='archived'",
             &["a", "b"],
         );
-        step("DELETE FROM ydoc_inactive_lineages WHERE lineage_claim_id='archived'", &["b"]);
+        step(
+            "DELETE FROM ydoc_inactive_lineages WHERE lineage_claim_id='archived'",
+            &["b"],
+        );
         step(archive, &[]);
         conn.execute_batch("DELETE FROM binary_blobs WHERE sha256='archive'")
             .unwrap();
-        step("INSERT INTO binary_blobs VALUES ('archive',1,X'00')", &["b"]);
+        step(
+            "INSERT INTO binary_blobs VALUES ('archive',1,X'00')",
+            &["b"],
+        );
         step("DELETE FROM ydoc_updates WHERE seq=10", &["a"]);
         step(
             "UPDATE ydoc_docs SET head_update_seq=9,updated_at_ms=1,path='a.md' WHERE object_id='a'",
@@ -9571,7 +9637,10 @@ mod tests {
             &["b"],
         );
         step("INSERT INTO binary_blobs VALUES ('merged',1,X'00')", &["b"]);
-        step("UPDATE binary_blobs SET bytes=X'01' WHERE sha256='merged'", &["b"]);
+        step(
+            "UPDATE binary_blobs SET bytes=X'01' WHERE sha256='merged'",
+            &["b"],
+        );
         step("DELETE FROM binary_blobs WHERE sha256='merged'", &["b"]);
     }
 
@@ -9598,6 +9667,8 @@ mod tests {
     fn every_change_to_a_holds_binding_advances_its_revision() {
         let dir = tempdir();
         let conn = released_tail_store(&dir);
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main')")
+            .unwrap();
         let objects = ["a", "b"];
         let generations = objects.map(|object| released_tail_generation(&conn, object));
         let step = |sql: &str, advanced: &[&str]| {
@@ -9639,14 +9710,23 @@ mod tests {
                released_hold_binding_stale=1,path='moved.md',scope_generation=1 WHERE object_id='a'",
             &[],
         );
-        step("UPDATE hosted_documents SET object_id='b' WHERE object_id='a'", &["a", "b"]);
-        step("UPDATE hosted_documents SET object_id='a' WHERE object_id='b'", &["a", "b"]);
+        step(
+            "UPDATE hosted_documents SET object_id='b' WHERE object_id='a'",
+            &["a", "b"],
+        );
+        step(
+            "UPDATE hosted_documents SET object_id='a' WHERE object_id='b'",
+            &["a", "b"],
+        );
         conn.execute_batch(
             "CREATE TEMP TABLE kept_hold AS SELECT * FROM hosted_documents WHERE object_id='a'",
         )
         .unwrap();
         step("DELETE FROM hosted_documents WHERE object_id='a'", &["a"]);
-        step("INSERT INTO hosted_documents SELECT * FROM temp.kept_hold", &["a"]);
+        step(
+            "INSERT INTO hosted_documents SELECT * FROM temp.kept_hold",
+            &["a"],
+        );
         step(
             "UPDATE hosted_documents SET state='ready',held_reason=NULL,released_hold_continuation=NULL,
                released_hold_binding_stale=0,released_hold_binding_json=NULL,released_hold_binding_digest=NULL
@@ -9679,7 +9759,9 @@ mod tests {
             "a hold whose revision is at its bound cannot arrive"
         );
         let held: i64 = conn
-            .query_row("SELECT COUNT(*) FROM hosted_documents", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM hosted_documents", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(held, 0);
     }
@@ -9821,12 +9903,13 @@ mod tests {
         let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
         let bound = statement.parameter_count();
         let params = ["digest", "other"];
-        let plan = statement
-            .query_map(rusqlite::params_from_iter(&params[..bound]), |row| row.get::<_, String>(3))
+        statement
+            .query_map(rusqlite::params_from_iter(&params[..bound]), |row| {
+                row.get::<_, String>(3)
+            })
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        plan
+            .unwrap()
     }
 
     /// Opus's r2c-3c-1 finding 5 and r2c-3c-3 finding 2: a trigger that
@@ -9871,7 +9954,8 @@ mod tests {
         // Row `n` has a row past it, so it is inner. `b`'s latest snapshot
         // is the last one grown.
         let writes = |n: i64| {
-            let row = format!("workspace_id='ws' AND version_id='main' AND object_id='a' AND seq={n}");
+            let row =
+                format!("workspace_id='ws' AND version_id='main' AND object_id='a' AND seq={n}");
             let b = "workspace_id='ws' AND version_id='main' AND object_id='b'";
             [
                 format!("INSERT INTO binary_blobs VALUES ('merged-{n}',1,X'00')"),
@@ -9899,7 +9983,8 @@ mod tests {
             ]
         };
         let moved = || {
-            released_tail_generation(&conn, "a").unwrap() + released_tail_generation(&conn, "b").unwrap()
+            released_tail_generation(&conn, "a").unwrap()
+                + released_tail_generation(&conn, "b").unwrap()
         };
         grow(1, 3);
         let short = writes(1).map(|write| {
@@ -9917,33 +10002,35 @@ mod tests {
             );
         }
 
+        // One statement for each source of a blob's documents: SQLite scans
+        // the generations for a key `IN` a union of them.
         let generations = "UPDATE released_tail_generations SET generation=generation+1 \
             WHERE (workspace_id,version_id,object_id) IN";
-        for sql in [
-            format!(
-                "{generations} (SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
-                   JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.terminal_blob_digest=?1
-                 UNION SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e
-                   JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE e.update_digest=?1)"
-            ),
-            format!(
-                "{generations} (SELECT workspace_id,version_id,object_id FROM ydoc_updates
-                   WHERE update_blob_sha256 IN (?1,?2)
-                 UNION SELECT workspace_id,version_id,object_id FROM ydoc_snapshots
-                   WHERE snapshot_blob_sha256 IN (?1,?2)
-                 UNION SELECT workspace_id,version_id,object_id FROM ydoc_inactive_lineages
-                   WHERE full_state_blob_sha256 IN (?1,?2))"
-            ),
-            format!(
-                "{generations} (SELECT workspace_id,version_id,object_id FROM ydoc_updates WHERE update_blob_sha256=?1
-                 UNION SELECT workspace_id,version_id,object_id FROM ydoc_snapshots WHERE snapshot_blob_sha256=?1
-                 UNION SELECT workspace_id,version_id,object_id FROM ydoc_inactive_lineages
-                   WHERE full_state_blob_sha256=?1)"
-            ),
-        ] {
+        let outbox = "SELECT o.workspace_id,o.main_version_id,o.object_id FROM owner_ydoc_outbox_entries e \
+            JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE";
+        let mut sources = Vec::new();
+        for digest in ["=?1", " IN (?1,?2)"] {
+            sources.extend([
+                format!("{outbox} e.terminal_blob_digest{digest}"),
+                format!("{outbox} e.update_digest{digest}"),
+                format!("SELECT workspace_id,version_id,object_id FROM ydoc_updates WHERE update_blob_sha256{digest}"),
+                format!(
+                    "SELECT workspace_id,version_id,object_id FROM ydoc_snapshots WHERE snapshot_blob_sha256{digest}"
+                ),
+                format!(
+                    "SELECT workspace_id,version_id,object_id FROM ydoc_inactive_lineages \
+                     WHERE full_state_blob_sha256{digest}"
+                ),
+            ]);
+        }
+        for sql in sources
+            .iter()
+            .map(|source| format!("{generations} ({source})"))
+        {
             let plan = query_plan(&conn, &sql);
             assert!(
-                plan.iter().any(|detail| detail.starts_with("SEARCH released_tail_generations")),
+                plan.iter()
+                    .any(|detail| detail.starts_with("SEARCH released_tail_generations")),
                 "{sql}: {plan:#?}"
             );
             assert!(

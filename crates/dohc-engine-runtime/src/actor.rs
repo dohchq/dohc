@@ -85,8 +85,8 @@ pub use crate::links::LinkDrainMetrics;
 use crate::links::{DrainWorker, SharedMetrics};
 use dohc_engine_collab::WriterDocCache;
 use dohc_engine_collab::live_update_application::{HeldProofLimit, ReleasedTails};
-use dohc_engine_sync::HeldProofs;
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError};
+use dohc_engine_sync::HeldProofs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
@@ -615,7 +615,9 @@ impl WorkspaceActor {
         self.link_resolvers.lock().unwrap().close();
         let joined = worker.join();
         if !drained {
-            eprintln!("engine: a held document read still has its workspace database open after close");
+            eprintln!(
+                "engine: a held document read still has its workspace database open after close"
+            );
             return Err(RuntimeError::StoreInUse);
         }
         match joined {

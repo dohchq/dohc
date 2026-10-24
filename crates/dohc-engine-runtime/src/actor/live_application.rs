@@ -2032,6 +2032,7 @@ mod tests {
             1,
             0,
             None,
+            Default::default(),
         )
         .unwrap();
         let mut actor_handle = actor.handle();
@@ -2101,10 +2102,15 @@ mod tests {
                         expected_local_sequence: 0,
                         events: vec![],
                         terminal_receipt: None,
+                        retained_prefix: None,
                         outbox_limits: dohc_engine_collab::OwnerOutboxLimits {
                             max_pending_bytes: 1_000_000,
                             max_pending_age_ms: 100_000,
                         },
+                        reconstruction:
+                            dohc_engine_collab::live_update_application::NativeHistoryReconstruction {
+                                working_reserve_bytes: 8 * 1024 * 1024,
+                            },
                     },
                     1_000_000,
                     100,

@@ -15,9 +15,9 @@
 
 use crate::actor::{ActorHandle, WorkspaceActor};
 use crate::error::RuntimeError;
+use crate::identity::EngineDbIdentity;
 use dohc_engine_collab::live_update_application::HeldProofLimit;
 use dohc_engine_sync::HeldProofs;
-use crate::identity::EngineDbIdentity;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
@@ -946,9 +946,10 @@ mod tests {
         std::fs::create_dir(engine).unwrap();
         let path = prepared.path.clone();
         let identity = crate::identity::EngineDbIdentity::resolve_or_create(&path).unwrap();
-        let actor = crate::actor::WorkspaceActor::spawn(path, identity, 1, 0, None)
-            .unwrap()
-            .holding(Some(prepared));
+        let actor =
+            crate::actor::WorkspaceActor::spawn(path, identity, 1, 0, None, Default::default())
+                .unwrap()
+                .holding(Some(prepared));
         assert_eq!(std::fs::read_dir(engine).unwrap().count(), 0);
         for file in ["engine.db", "engine.db-wal", "engine.db-shm"] {
             assert!(moved.join(file).exists(), "{file}");

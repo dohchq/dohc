@@ -9,10 +9,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::mem::size_of;
 
 /// The most memory a Y.Doc holds for each byte of the encoded state and
-/// updates applied to it, its items, branches and indexes included: an
-/// estimate, conservative for text, that measuring a proof's peak keeps
-/// honest.
-const YDOC_BYTES_PER_ENCODED_BYTE: u64 = 24;
+/// updates applied to it, its items, branches and indexes included. The
+/// held-proof profile measured at most 17.5, for small paragraphs applied
+/// one at a time; this keeps a quarter more.
+const YDOC_BYTES_PER_ENCODED_BYTE: u64 = 22;
 
 /// What loading a lineage holds for each stored byte beside the state it
 /// builds: the blob it applies, and the full-state encoding its digest
@@ -46,8 +46,10 @@ const DELETED_CLIENT_BYTES: u64 = 256;
 
 /// What projecting the merged state holds for each encoded byte: the
 /// document checking its Markdown source rebuilds, the projection, that
-/// source and the merged full state.
-const PROJECTION_BYTES_PER_ENCODED_BYTE: u64 = YDOC_BYTES_PER_ENCODED_BYTE + 4;
+/// source and the merged full state. The held-proof profile measured at most
+/// 13.4, for 50,000 small contributions, and 5.6 rebuilding exact source;
+/// this keeps a quarter more.
+const PROJECTION_BYTES_PER_ENCODED_BYTE: u64 = 17;
 
 /// What [`inspect_held`] found for a binding.
 #[derive(Debug)]
@@ -175,7 +177,10 @@ impl Preservation {
                 .iter()
                 .map(|found| {
                     found.namespace.as_ref().map_or(0, String::capacity)
-                        + found.contribution.as_ref().map_or(0, ContributionLocator::text_bytes)
+                        + found
+                            .contribution
+                            .as_ref()
+                            .map_or(0, ContributionLocator::text_bytes)
                 })
                 .sum::<usize>();
         let listed = |contributions: &Vec<RetainedContribution>| {
@@ -300,12 +305,12 @@ impl RetainedContribution {
 /// moment needs, not the sum of its stages. With S the stored bytes of the
 /// lineage's state in R rows, the largest L, B its full state, b each
 /// contribution's bytes, M = B + Σb, the window's lists W and each tail's
-/// kept work K, it keeps 24·(S + Σb) for the state, W + ΣK, each merged or
+/// kept work K, it keeps 22·(S + Σb) for the state, W + ΣK, each merged or
 /// waiting contribution's text and place, and the ranges the merged state
 /// deleted with each of their clients, and reserves beside that at most the
 /// largest of: loading the state, 2·S + L + 128·R; validating one tail, as
 /// `window_work` reserves it; applying one contribution, 13·b + 2·M; and
-/// projecting, 28·M, with what the preservation keeps, which stays reserved
+/// projecting, 17·M, with what the preservation keeps, which stays reserved
 /// as its result's.
 pub fn inspect_held(
     conn: &Connection,
@@ -384,7 +389,11 @@ pub fn inspect_held(
         )),
     }
     let Some(state) = state else {
-        findings.push(finding(PreservationReason::ContradictoryEvidence, None, None));
+        findings.push(finding(
+            PreservationReason::ContradictoryEvidence,
+            None,
+            None,
+        ));
         return kept(concluded(findings, readable, Vec::new(), None), stop)
             .map(HeldInspection::Current);
     };
@@ -533,8 +542,10 @@ fn finding(
 /// text, and its place with room for the findings to double, the old list
 /// and the new held at once as they do.
 fn finding_bytes(namespace: &str, contribution: &RetainedContribution) -> u64 {
-    u64::try_from(namespace.len() + contribution.text_bytes() + 3 * size_of::<PreservationFinding>())
-        .unwrap_or(u64::MAX)
+    u64::try_from(
+        namespace.len() + contribution.text_bytes() + 3 * size_of::<PreservationFinding>(),
+    )
+    .unwrap_or(u64::MAX)
 }
 
 /// What [`lineage_state`] found of a lineage.
@@ -669,7 +680,11 @@ impl Integration {
             .insertions(true)
             .iter()
             .filter_map(|(client, ranges)| {
-                ranges.iter().map(|range| range.end).max().map(|end| (*client, end))
+                ranges
+                    .iter()
+                    .map(|range| range.end)
+                    .max()
+                    .map(|end| (*client, end))
             })
             .collect();
         Some(Self {
@@ -692,7 +707,9 @@ impl Integration {
     /// first gap in a client's clocks, so it covers every insertion that ends
     /// at or before it.
     fn within(&self, vector: &yrs::StateVector, deleted: &Deletes, pending: &Deletes) -> bool {
-        self.ends.iter().all(|(client, end)| *end <= vector.get(client))
+        self.ends
+            .iter()
+            .all(|(client, end)| *end <= vector.get(client))
             && self.deletes.iter().all(|(client, ranges)| {
                 ranges.iter().all(|range| {
                     deleted.covers(*client, range.start, range.end)
@@ -759,10 +776,7 @@ impl Deletes {
         }
         let ranges = self.0.entry(client).or_default();
         // Every range it overlaps or touches joins it.
-        loop {
-            let Some((&from, &to)) = ranges.range(..=end).next_back() else {
-                break;
-            };
+        while let Some((&from, &to)) = ranges.range(..=end).next_back() {
             if to < start {
                 break;
             }
@@ -794,51 +808,66 @@ impl Deletes {
     }
 }
 
-/// What the index of the ranges `state` deleted holds once built, read as
-/// `heap`'s current bytes before and after, beside what [`Deletes::growth`]
-/// reserves for it: for measuring the index.
+/// The index of the ranges `state` deleted, built from empty one range at a
+/// time as the merge grows it, beside what [`Deletes::growth`] reserves for
+/// it. The set it reads is read first; `measure` runs the build, and reads
+/// the heap while the index is still held. For measuring the index.
 #[cfg(all(test, feature = "held-proof-memory"))]
-pub(crate) fn deletion_index_bytes(state: &Ydoc, heap: impl Fn() -> u64) -> (u64, u64) {
+pub(crate) fn deletion_index_bytes<T>(
+    state: &Ydoc,
+    measure: impl FnOnce(&mut dyn FnMut()) -> T,
+) -> (T, u64) {
     let set = state.delete_set();
     let mut index = Deletes::default();
     let reserved = index.growth(&set);
-    let before = heap();
-    index.extend(&set);
-    (heap().saturating_sub(before), reserved)
+    let measured = measure(&mut || index.extend(&set));
+    drop(index);
+    (measured, reserved)
 }
 
 /// What [`preserve`] keeps between its applications beside what it reserves
-/// as kept: whether a contribution deleted yet, and the state's vector and
-/// pending deletions read once the last one applied. For measuring what
-/// applying one contribution holds.
+/// as kept: the index of what the state deleted, once a contribution
+/// deleted, and the state's vector and pending deletions read once the last
+/// one applied. For measuring what applying one contribution holds.
 #[cfg(all(test, feature = "held-proof-memory"))]
 #[derive(Default)]
 pub(crate) struct Applications {
-    deleting: bool,
+    deleted: Option<Deletes>,
     seen: Option<(yrs::StateVector, Deletes)>,
 }
 
 #[cfg(all(test, feature = "held-proof-memory"))]
 impl Applications {
     /// Apply `update` to `state` as [`preserve`] applies a contribution: its
-    /// bytes as they load, what it integrates, the state's deletions the
-    /// first time one deletes, and the state's vector and pending deletions
-    /// read before and once it applied. The index of what the state deleted
-    /// is measured on its own, by [`deletion_index_bytes`].
-    pub(crate) fn apply(&mut self, state: &Ydoc, update: &[u8]) {
+    /// bytes as they load, what it integrates, the index of what the state
+    /// deleted, built the first time one deletes and grown since by what
+    /// each application deletes, and the state's vector and pending
+    /// deletions read before and once it applied. Returns what the index's
+    /// growth reserves, which the merge keeps.
+    pub(crate) fn apply(&mut self, state: &Ydoc, update: &[u8]) -> u64 {
         let bytes = update.to_vec();
         let integration = Integration::of(&bytes).expect("an update");
-        if integration.deleted_ranges() > 0 && !self.deleting {
-            self.deleting = true;
-            drop(state.delete_set());
+        let mut grown = 0;
+        if integration.deleted_ranges() > 0 && self.deleted.is_none() {
+            let set = state.delete_set();
+            let mut deleted = Deletes::default();
+            grown += deleted.growth(&set);
+            deleted.extend(&set);
+            self.deleted = Some(deleted);
         }
         if self.seen.is_none() {
             self.seen = Some((state.state_vector(), Deletes::pending(state)));
         }
         state
-            .apply_seeing_deletions(&bytes, |_| {})
+            .apply_seeing_deletions(&bytes, |actual| {
+                if let Some(deleted) = &mut self.deleted {
+                    grown += deleted.growth(actual);
+                    deleted.extend(actual);
+                }
+            })
             .expect("each contribution applies");
         self.seen = Some((state.state_vector(), Deletes::pending(state)));
+        grown
     }
 }
 
@@ -1176,7 +1205,11 @@ mod tests {
     }
 
     fn reasons(preservation: &Preservation) -> Vec<PreservationReason> {
-        preservation.findings.iter().map(|found| found.reason).collect()
+        preservation
+            .findings
+            .iter()
+            .map(|found| found.reason)
+            .collect()
     }
 
     /// Plan r3, containment: work the canonical state already holds merges
@@ -1191,19 +1224,40 @@ mod tests {
         integrated.apply(&third).unwrap();
         let contained = preserved(&integrated, vec![outbox(1, &third)], &stored(&[&third]));
         assert_eq!(contained.status, PreservationStatus::Complete);
-        assert!(contained.merged.is_empty(), "already integrated: {:?}", contained.merged);
+        assert!(
+            contained.merged.is_empty(),
+            "already integrated: {:?}",
+            contained.merged
+        );
         // Work the state already held is still covered, with its authors,
         // for the copy to credit.
-        assert_eq!(contained.covered, [("namespace".to_owned(), vec![outbox(1, &third)])]);
+        assert_eq!(
+            contained.covered,
+            [("namespace".to_owned(), vec![outbox(1, &third)])]
+        );
 
-        let outbox_only = preserved(&integrated, vec![outbox(1, &third), outbox(2, &first)], &stored(&[&third, &first]));
+        let outbox_only = preserved(
+            &integrated,
+            vec![outbox(1, &third), outbox(2, &first)],
+            &stored(&[&third, &first]),
+        );
         assert_eq!(outbox_only.status, PreservationStatus::Complete);
         assert_eq!(outbox_only.merged, vec![outbox(2, &first)]);
-        let kept = outbox_only.preserved.expect("a complete preservation keeps its state");
-        assert!(kept.markdown.contains("First") && kept.markdown.contains("Third"), "{}", kept.markdown);
+        let kept = outbox_only
+            .preserved
+            .expect("a complete preservation keeps its state");
+        assert!(
+            kept.markdown.contains("First") && kept.markdown.contains("Third"),
+            "{}",
+            kept.markdown
+        );
         let pinned = Ydoc::wire();
         pinned.apply(&kept.full_state).unwrap();
-        assert!(pinned.project(ContentKind::Richdoc).unwrap().content.contains("First"));
+        assert!(pinned
+            .project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .contains("First"));
     }
 
     /// Plan r3: an earlier contribution may wait on a later one, and both
@@ -1214,17 +1268,39 @@ mod tests {
         let (canonical, first, second, _) = edits();
         let both = stored(&[&first, &second]);
         // `second` comes first in canonical order and waits for `first`.
-        let satisfied = preserved(&canonical, vec![outbox(1, &second), outbox(2, &first)], &both);
-        assert_eq!(satisfied.status, PreservationStatus::Complete, "{:?}", satisfied.findings);
-        assert_eq!(satisfied.merged, vec![outbox(1, &second), outbox(2, &first)]);
+        let satisfied = preserved(
+            &canonical,
+            vec![outbox(1, &second), outbox(2, &first)],
+            &both,
+        );
+        assert_eq!(
+            satisfied.status,
+            PreservationStatus::Complete,
+            "{:?}",
+            satisfied.findings
+        );
+        assert_eq!(
+            satisfied.merged,
+            vec![outbox(1, &second), outbox(2, &first)]
+        );
         let markdown = satisfied.preserved.unwrap().markdown;
-        assert!(markdown.contains("First") && markdown.contains("Second"), "{markdown}");
+        assert!(
+            markdown.contains("First") && markdown.contains("Second"),
+            "{markdown}"
+        );
 
         let unresolved = preserved(&canonical, vec![outbox(1, &second)], &both);
         assert_eq!(unresolved.status, PreservationStatus::PendingDependencies);
-        assert_eq!(reasons(&unresolved), [PreservationReason::PendingContributionDependencies]);
+        assert_eq!(
+            reasons(&unresolved),
+            [PreservationReason::PendingContributionDependencies]
+        );
         assert_eq!(unresolved.preserved, None);
-        assert!(unresolved.merged.is_empty(), "nothing integrated: {:?}", unresolved.merged);
+        assert!(
+            unresolved.merged.is_empty(),
+            "nothing integrated: {:?}",
+            unresolved.merged
+        );
     }
 
     /// Sol's r2a finding 2: A waits for B, and B integrates both, while C
@@ -1242,17 +1318,35 @@ mod tests {
         let (a, b, c) = (outbox(1, &second), outbox(2, &first), outbox(3, &orphan));
         let accounted = preserved(&canonical, vec![a.clone(), b.clone(), c.clone()], &all);
         assert_eq!(accounted.status, PreservationStatus::PendingDependencies);
-        assert_eq!(reasons(&accounted), [PreservationReason::PendingContributionDependencies]);
-        assert_eq!(accounted.merged, vec![a.clone(), b.clone()], "C stays unmerged");
+        assert_eq!(
+            reasons(&accounted),
+            [PreservationReason::PendingContributionDependencies]
+        );
+        assert_eq!(
+            accounted.merged,
+            vec![a.clone(), b.clone()],
+            "C stays unmerged"
+        );
         assert_eq!(accounted.preserved, None);
 
         // Sol's r2c-3c-11 finding 2: B carries what A waits for together with
         // C, so B stays partly held while A is wholly held, and A counts.
         let carried = crate::merge_updates(&[first.clone(), orphan.clone()]).unwrap();
         let both = outbox(2, &carried);
-        let partial = preserved(&canonical, vec![a.clone(), both], &stored(&[&second, &carried]));
-        assert_eq!(reasons(&partial), [PreservationReason::PendingContributionDependencies]);
-        assert_eq!(partial.merged, vec![a.clone()], "A counts while B waits on C's dependency");
+        let partial = preserved(
+            &canonical,
+            vec![a.clone(), both],
+            &stored(&[&second, &carried]),
+        );
+        assert_eq!(
+            reasons(&partial),
+            [PreservationReason::PendingContributionDependencies]
+        );
+        assert_eq!(
+            partial.merged,
+            vec![a.clone()],
+            "A counts while B waits on C's dependency"
+        );
 
         let again = RetainedContribution::Outbox {
             outbox_id: "other".into(),
@@ -1261,7 +1355,11 @@ mod tests {
             update_digest: hex_sha256(&second),
             authors: RetainedAuthors::credited(None, None).unwrap(),
         };
-        let repeated = preserved(&canonical, vec![a.clone(), again.clone(), b.clone(), c], &all);
+        let repeated = preserved(
+            &canonical,
+            vec![a.clone(), again.clone(), b.clone(), c],
+            &all,
+        );
         assert_eq!(repeated.merged, {
             let mut merged = vec![a, again, b];
             merged.sort();
@@ -1275,7 +1373,8 @@ mod tests {
     /// integrates it, then the second edit parked on it, then fails on the
     /// parked update. The first edit applies last, so the second counts as
     /// merged only because waiting work is reconsidered after a failed
-    /// application too.
+    /// application too. It relies on yrs's retry integrating client 1,000's
+    /// blocks before client 1's: its picker takes the highest client first.
     #[test]
     fn a_failed_last_application_still_credits_the_waiting_work_it_completed() {
         let canonical = Ydoc::with_client_id(500);
@@ -1297,16 +1396,32 @@ mod tests {
             0x00, // empty delete set
         ];
         let all = stored(&[&second, &misparented, &first]);
-        let work = vec![outbox(1, &second), outbox(2, &misparented), outbox(3, &first)];
+        let work = vec![
+            outbox(1, &second),
+            outbox(2, &misparented),
+            outbox(3, &first),
+        ];
         let failed = preserved(&canonical, work, &all);
         assert_eq!(
             failed.findings,
             [
-                finding(PreservationReason::MalformedUpdate, Some("namespace"), Some(&outbox(3, &first))),
-                finding(PreservationReason::PendingContributionDependencies, None, None),
+                finding(
+                    PreservationReason::MalformedUpdate,
+                    Some("namespace"),
+                    Some(&outbox(3, &first))
+                ),
+                finding(
+                    PreservationReason::PendingContributionDependencies,
+                    None,
+                    None
+                ),
             ]
         );
-        assert_eq!(failed.merged, [outbox(1, &second)], "the first edit completed the second before it failed");
+        assert_eq!(
+            failed.merged,
+            [outbox(1, &second)],
+            "the first edit completed the second before it failed"
+        );
     }
 
     /// Opus's r2c-3c-10 finding 2: whether a contribution added anything is
@@ -1330,24 +1445,56 @@ mod tests {
         removed.apply(&canonical.encode_full_state()).unwrap();
         removed.apply(&removal).unwrap();
         let held = preserved_from(loaded(removed), vec![outbox(1, &removal)], &all);
-        assert_eq!(held.status, PreservationStatus::Complete, "{:?}", held.findings);
+        assert_eq!(
+            held.status,
+            PreservationStatus::Complete,
+            "{:?}",
+            held.findings
+        );
         assert!(held.merged.is_empty(), "already deleted: {:?}", held.merged);
 
         let new = preserved(&canonical, vec![outbox(1, &removal)], &all);
-        assert_eq!(new.status, PreservationStatus::Complete, "{:?}", new.findings);
+        assert_eq!(
+            new.status,
+            PreservationStatus::Complete,
+            "{:?}",
+            new.findings
+        );
         assert_eq!(new.merged, [outbox(1, &removal)]);
         let markdown = new.preserved.unwrap().markdown;
-        assert!(markdown.contains("Kept") && !markdown.contains("Removed"), "{markdown}");
+        assert!(
+            markdown.contains("Kept") && !markdown.contains("Removed"),
+            "{markdown}"
+        );
 
-        let later = preserved(&canonical, vec![outbox(1, &retracted), outbox(2, &added)], &all);
-        assert_eq!(later.status, PreservationStatus::Complete, "{:?}", later.findings);
+        let later = preserved(
+            &canonical,
+            vec![outbox(1, &retracted), outbox(2, &added)],
+            &all,
+        );
+        assert_eq!(
+            later.status,
+            PreservationStatus::Complete,
+            "{:?}",
+            later.findings
+        );
         assert_eq!(later.merged, [outbox(1, &retracted), outbox(2, &added)]);
         let markdown = later.preserved.unwrap().markdown;
-        assert!(markdown.contains("Kept") && !markdown.contains("Added"), "{markdown}");
+        assert!(
+            markdown.contains("Kept") && !markdown.contains("Added"),
+            "{markdown}"
+        );
 
         let unresolved = preserved(&canonical, vec![outbox(1, &retracted)], &all);
-        assert_eq!(reasons(&unresolved), [PreservationReason::PendingContributionDependencies]);
-        assert!(unresolved.merged.is_empty(), "its items never arrived: {:?}", unresolved.merged);
+        assert_eq!(
+            reasons(&unresolved),
+            [PreservationReason::PendingContributionDependencies]
+        );
+        assert!(
+            unresolved.merged.is_empty(),
+            "its items never arrived: {:?}",
+            unresolved.merged
+        );
     }
 
     /// Sol's r2c-3c-11 finding 1: what the merge holds deleted is what its
@@ -1366,14 +1513,38 @@ mod tests {
         let removal = remover.richdoc_remove_block(1);
         let typist = Ydoc::wire();
         typist.apply(&canonical.encode_full_state()).unwrap();
-        let typed = typist.richdoc_insert_text(1, 0, "Typed ").expect("the paragraph holds text");
+        let typed = typist
+            .richdoc_insert_text(1, 0, "Typed ")
+            .expect("the paragraph holds text");
         let retracted = typist.richdoc_remove_block(1);
         let all = stored(&[&removal, &typed, &retracted]);
-        let merge = preserved(&canonical, vec![outbox(1, &removal), outbox(2, &typed), outbox(3, &retracted)], &all);
-        assert_eq!(merge.status, PreservationStatus::Complete, "{:?}", merge.findings);
-        assert_eq!(merge.merged, [outbox(1, &removal), outbox(2, &typed)], "the repeated removal adds nothing");
+        let merge = preserved(
+            &canonical,
+            vec![
+                outbox(1, &removal),
+                outbox(2, &typed),
+                outbox(3, &retracted),
+            ],
+            &all,
+        );
+        assert_eq!(
+            merge.status,
+            PreservationStatus::Complete,
+            "{:?}",
+            merge.findings
+        );
+        assert_eq!(
+            merge.merged,
+            [outbox(1, &removal), outbox(2, &typed)],
+            "the repeated removal adds nothing"
+        );
         let markdown = merge.preserved.unwrap().markdown;
-        assert!(markdown.contains("Kept") && !markdown.contains("Typed") && !markdown.contains("Removed"), "{markdown}");
+        assert!(
+            markdown.contains("Kept")
+                && !markdown.contains("Typed")
+                && !markdown.contains("Removed"),
+            "{markdown}"
+        );
     }
 
     /// Opus's r2c-3c-11 finding 3: yrs integrates an edit that depends on
@@ -1388,10 +1559,20 @@ mod tests {
         let writer = Ydoc::wire();
         writer.apply(&canonical.encode_full_state()).unwrap();
         let _never_sent = writer.richdoc_append_paragraph("Never sent");
-        let later = writer.richdoc_insert_text(0, 0, "Later ").expect("the paragraph holds text");
+        let later = writer
+            .richdoc_insert_text(0, 0, "Later ")
+            .expect("the paragraph holds text");
         let gap = preserved(&canonical, vec![outbox(1, &later)], &stored(&[&later]));
-        assert_eq!(gap.status, PreservationStatus::PendingDependencies, "{:?}", gap.findings);
-        assert_eq!(reasons(&gap), [PreservationReason::PendingContributionDependencies]);
+        assert_eq!(
+            gap.status,
+            PreservationStatus::PendingDependencies,
+            "{:?}",
+            gap.findings
+        );
+        assert_eq!(
+            reasons(&gap),
+            [PreservationReason::PendingContributionDependencies]
+        );
         assert!(gap.merged.is_empty(), "not wholly held: {:?}", gap.merged);
         assert_eq!(gap.preserved, None);
     }
@@ -1407,7 +1588,10 @@ mod tests {
         assert!(parked.has_pending_dependencies());
         let pending = preserved_from(loaded(parked), vec![outbox(1, &first)], &stored(&[&first]));
         assert_eq!(pending.status, PreservationStatus::PendingDependencies);
-        assert_eq!(reasons(&pending), [PreservationReason::PendingHeadDependencies]);
+        assert_eq!(
+            reasons(&pending),
+            [PreservationReason::PendingHeadDependencies]
+        );
         assert_eq!(pending.preserved, None);
     }
 
@@ -1417,9 +1601,20 @@ mod tests {
     #[test]
     fn missing_mismatched_or_malformed_bytes_never_preserve() {
         let (canonical, first, _, third) = edits();
-        let missing = preserved(&canonical, vec![outbox(1, &first), outbox(2, &third)], &stored(&[&third]));
+        let missing = preserved(
+            &canonical,
+            vec![outbox(1, &first), outbox(2, &third)],
+            &stored(&[&third]),
+        );
         assert_eq!(missing.status, PreservationStatus::MissingEvidence);
-        assert_eq!(missing.findings, [finding(PreservationReason::SourceMissing, Some("namespace"), Some(&outbox(1, &first)))]);
+        assert_eq!(
+            missing.findings,
+            [finding(
+                PreservationReason::SourceMissing,
+                Some("namespace"),
+                Some(&outbox(1, &first))
+            )]
+        );
         assert_eq!(missing.preserved, None);
 
         let mut swapped = stored(&[&third]);
@@ -1504,24 +1699,29 @@ mod tests {
                 let before = index.growth(&state.delete_set());
                 index.extend(&state.delete_set());
                 let mut applied = 0;
-                state.apply_seeing_deletions(&added, |actual| applied = index.growth(actual)).unwrap();
+                state
+                    .apply_seeing_deletions(&added, |actual| applied = index.growth(actual))
+                    .unwrap();
                 before + applied
             }
         };
-        let applying =
-            bytes * (APPLYING_BYTES_PER_UPDATE_BYTE + INTEGRATION_BYTES_PER_UPDATE_BYTE) + 2 * (full + bytes);
+        let applying = bytes * (APPLYING_BYTES_PER_UPDATE_BYTE + INTEGRATION_BYTES_PER_UPDATE_BYTE)
+            + 2 * (full + bytes);
         let copy = outbox(1, &added).kept_bytes();
         let projection = (full + bytes) * PROJECTION_BYTES_PER_ENCODED_BYTE;
         assert!(projection > applying);
         let directory = dohc_test_scratch::ScratchDir::new().unwrap();
-        let store = dohc_engine_storage::EngineStore::open(&directory.path().join("engine.db"), 1).unwrap();
+        let store =
+            dohc_engine_storage::EngineStore::open(&directory.path().join("engine.db"), 1).unwrap();
         // What the merge answers within `capacity`, whether its proof
         // stopped, how many contributions it loaded, how many checks it
         // passed, and the most it reserved at once.
         let merged = |capacity: u64| {
             let limit = HeldProofLimit::new(1, capacity, 0);
             let proofs: HeldProofs<(), ()> = HeldProofs::new(limit.clone());
-            let HeldProofAdmission::Started(run, _wait) = proofs.admit(&store, "workspace", ()).unwrap() else {
+            let HeldProofAdmission::Started(run, _wait) =
+                proofs.admit(&store, "workspace", ()).unwrap()
+            else {
                 panic!("a free workspace starts its proof")
             };
             let (mut answer, mut loads) = (None, 0);
@@ -1534,19 +1734,30 @@ mod tests {
                     |digest| Ok(stored.get(digest).map_or(0, |bytes| bytes.len() as u64)),
                     |digest| {
                         loads += 1;
-                        Ok(stored.get(digest).map_or(Source::Missing, |bytes| Source::Bytes(bytes.clone())))
+                        Ok(stored
+                            .get(digest)
+                            .map_or(Source::Missing, |bytes| Source::Bytes(bytes.clone())))
                     },
                 );
                 answer = Some((preserved, job.stopped()));
                 ((), 0)
             });
             let (preserved, stopped) = answer.expect("the proof ran");
-            (preserved, stopped, loads, proofs.checks_passed(), limit.peak_reserved_bytes())
+            (
+                preserved,
+                stopped,
+                loads,
+                proofs.checks_passed(),
+                limit.peak_reserved_bytes(),
+            )
         };
 
         let (preserved, stopped, loads, checks, peak) = merged(1 << 30);
         let preserved = preserved.expect("room for all of it");
-        assert_eq!((preserved.status, stopped, loads, checks), (PreservationStatus::Complete, None, 1, 6));
+        assert_eq!(
+            (preserved.status, stopped, loads, checks),
+            (PreservationStatus::Complete, None, 1, 6)
+        );
         assert_eq!(preserved.merged, [outbox(1, &added)]);
         let retained = preserved.retained_bytes() as u64;
         // What the merge holds until it ends.
@@ -1562,12 +1773,23 @@ mod tests {
             (growth + applying - 1, "its application", (0, 2)),
             (held + applying - 1, "the merged list's copy", (1, 3)),
             (held + projection - 1, "the projection", (1, 3)),
-            (held + projection + retained - 1, "what the preservation keeps", (1, 6)),
+            (
+                held + projection + retained - 1,
+                "what the preservation keeps",
+                (1, 6),
+            ),
         ] {
             let (preserved, stopped, loads, checks, _) = merged(room);
-            assert!(matches!(preserved, Err(ApplicationError::Cancelled)), "{what}: {preserved:?}");
+            assert!(
+                matches!(preserved, Err(ApplicationError::Cancelled)),
+                "{what}: {preserved:?}"
+            );
             assert_eq!(stopped, Some(ProofStop::TooLarge), "{what}");
-            assert_eq!((loads, checks), (loaded, passed), "{what}: refused before it was allocated");
+            assert_eq!(
+                (loads, checks),
+                (loaded, passed),
+                "{what}: refused before it was allocated"
+            );
         }
     }
 
@@ -1589,7 +1811,8 @@ mod tests {
     fn fifty_thousand_contributions_prove_alone_under_the_default_limit() {
         use dohc_engine_domain::VersionedTextStore;
         let directory = dohc_test_scratch::ScratchDir::new().unwrap();
-        let mut store = dohc_engine_storage::EngineStore::open(&directory.path().join("engine.db"), 1).unwrap();
+        let mut store =
+            dohc_engine_storage::EngineStore::open(&directory.path().join("engine.db"), 1).unwrap();
         let key = DocKey::new("workspace", "main", "object").unwrap();
         VersionedTextStore::new(&mut store)
             .ensure_main_version("workspace", "main", 0, &dohc_engine_storage::NoFaults)
@@ -1598,8 +1821,30 @@ mod tests {
         let _ = canonical.richdoc_append_paragraph("Kept");
         for session in 0..2_000 {
             let other = Ydoc::with_client_id(1_000 + session);
-            canonical.apply(&other.richdoc_append_paragraph(&format!("Session {session}"))).unwrap();
+            canonical
+                .apply(&other.richdoc_append_paragraph(&format!("Session {session}")))
+                .unwrap();
         }
+        // The document's file, which its lineage's base claims.
+        VersionedTextStore::new(&mut store)
+            .write_text(
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "workspace".into(),
+                    version_id: "main".into(),
+                    object_id: "object".into(),
+                    path: "plan.md".into(),
+                    text: canonical.project(ContentKind::Richdoc).unwrap().content,
+                    moment_id: "file".into(),
+                    metadata_origin: "user".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1,
+                    request_id: None,
+                },
+                &dohc_engine_storage::NoFaults,
+            )
+            .unwrap();
         durable::claim_base(
             &mut store,
             &key,
@@ -1665,7 +1910,9 @@ mod tests {
             tails: Arc::new(ProtectedTails::Listed(vec![tail])),
         };
         let proofs: HeldProofs<(), ()> = HeldProofs::new(HeldProofLimit::default());
-        let HeldProofAdmission::Started(run, _wait) = proofs.admit(&store, "workspace", ()).unwrap() else {
+        let HeldProofAdmission::Started(run, _wait) =
+            proofs.admit(&store, "workspace", ()).unwrap()
+        else {
             panic!("a free workspace starts its proof")
         };
         let mut answer = None;
@@ -1685,9 +1932,17 @@ mod tests {
         let elapsed = started.elapsed();
         println!("FIFTY_THOUSAND_MERGE_WALL_MS {}", elapsed.as_millis());
         let (preserved, artifact, stopped) = answer.expect("the proof ran");
-        assert_eq!(stopped, None, "it fits alone within {HELD_PROOF_DEADLINE:?}: it took {elapsed:?}");
+        assert_eq!(
+            stopped, None,
+            "it fits alone within {HELD_PROOF_DEADLINE:?}: it took {elapsed:?}"
+        );
         let preserved = preserved.unwrap();
-        assert_eq!(preserved.status, PreservationStatus::Complete, "{:?}", preserved.findings);
+        assert_eq!(
+            preserved.status,
+            PreservationStatus::Complete,
+            "{:?}",
+            preserved.findings
+        );
         assert_eq!(preserved.merged, covered, "every one merged");
         let markdown = &preserved.preserved.as_ref().expect("its Markdown").markdown;
         assert!(markdown.contains("Item 0") && markdown.contains("Item 49999"));
@@ -1695,20 +1950,15 @@ mod tests {
         assert_eq!(artifact.merged, UnprovenCommitment::of_listed(&covered));
     }
 
-    /// Sol's r2c-3c-12 finding 1 and Opus's finding 4: waiting work is
-    /// reconsidered once, after every contribution applied, not after each.
-    /// 50,000 delivery identities name one update whose dependency never
-    /// arrives, so each waits, and under the default limit and deadline the
-    /// merge still ends pending, well inside the deadline; its wall time is
-    /// printed. Reconsidering after each application would check about 1.25
-    /// billion times. It runs in release, where its deadline is the
-    /// production one.
-    #[test]
-    #[cfg_attr(debug_assertions, ignore = "release deadline pin")]
-    fn fifty_thousand_identities_of_one_orphan_wait_well_inside_the_deadline() {
+    /// `count` delivery identities naming one update whose dependency never
+    /// arrives, merged in one proof under the default limit and deadline:
+    /// what it found, whether it stopped, how many checks it passed and its
+    /// wall time. The merge checks once before it starts, twice for each
+    /// contribution, and once for each waiting one it reconsiders.
+    fn orphans(count: i64) -> (Preservation, Option<ProofStop>, u64, std::time::Duration) {
         let (canonical, _, second, _) = edits();
         let stored = stored(&[&second]);
-        let work: Vec<_> = (0..50_000)
+        let work: Vec<_> = (0..count)
             .map(|index| RetainedContribution::Outbox {
                 outbox_id: "outbox".into(),
                 sequence: index + 1,
@@ -1718,9 +1968,12 @@ mod tests {
             })
             .collect();
         let directory = dohc_test_scratch::ScratchDir::new().unwrap();
-        let store = dohc_engine_storage::EngineStore::open(&directory.path().join("engine.db"), 1).unwrap();
+        let store =
+            dohc_engine_storage::EngineStore::open(&directory.path().join("engine.db"), 1).unwrap();
         let proofs: HeldProofs<(), ()> = HeldProofs::new(HeldProofLimit::default());
-        let HeldProofAdmission::Started(run, _wait) = proofs.admit(&store, "workspace", ()).unwrap() else {
+        let HeldProofAdmission::Started(run, _wait) =
+            proofs.admit(&store, "workspace", ()).unwrap()
+        else {
             panic!("a free workspace starts its proof")
         };
         let mut answer = None;
@@ -1732,19 +1985,70 @@ mod tests {
                 vec![("namespace".to_owned(), work)],
                 job.stop(),
                 |digest| Ok(stored.get(digest).map_or(0, |bytes| bytes.len() as u64)),
-                |digest| Ok(stored.get(digest).map_or(Source::Missing, |bytes| Source::Bytes(bytes.clone()))),
+                |digest| {
+                    Ok(stored
+                        .get(digest)
+                        .map_or(Source::Missing, |bytes| Source::Bytes(bytes.clone())))
+                },
             );
             answer = Some((preserved, job.stopped()));
             ((), 0)
         });
         let elapsed = started.elapsed();
-        println!("ORPHAN_IDENTITIES_MERGE_WALL_MS {}", elapsed.as_millis());
         let (preserved, stopped) = answer.expect("the proof ran");
-        assert_eq!(stopped, None, "it fits alone within {HELD_PROOF_DEADLINE:?}: it took {elapsed:?}");
-        let preserved = preserved.unwrap();
-        assert_eq!(reasons(&preserved), [PreservationReason::PendingContributionDependencies]);
-        assert!(preserved.merged.is_empty(), "nothing integrated: {:?}", preserved.merged.len());
-        assert!(elapsed * 4 < HELD_PROOF_DEADLINE, "well inside {HELD_PROOF_DEADLINE:?}: it took {elapsed:?}");
+        (preserved.unwrap(), stopped, proofs.checks_passed(), elapsed)
+    }
+
+    /// Sol's r2c-3c-12 finding 1 and Opus's finding 4: waiting work is
+    /// reconsidered once, after every contribution applied, not after each.
+    /// 2,000 delivery identities name one update whose dependency never
+    /// arrives, so each waits; the merge ends pending, having checked each
+    /// waiting one once. Reconsidering after each application would check
+    /// about two million times.
+    #[test]
+    fn identities_of_one_orphan_are_each_reconsidered_once() {
+        let (preserved, stopped, checks, _) = orphans(2_000);
+        assert_eq!(stopped, None);
+        assert_eq!(
+            reasons(&preserved),
+            [PreservationReason::PendingContributionDependencies]
+        );
+        assert!(
+            preserved.merged.is_empty(),
+            "nothing integrated: {:?}",
+            preserved.merged.len()
+        );
+        assert_eq!(checks, 1 + 3 * 2_000);
+    }
+
+    /// The same at 50,000 identities, under the default limit and deadline:
+    /// the merge still ends pending, well inside the deadline; its wall time
+    /// is printed. Reconsidering after each application would check about
+    /// 1.25 billion times. It runs in release, where its deadline is the
+    /// production one.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "release deadline pin")]
+    fn fifty_thousand_identities_of_one_orphan_wait_well_inside_the_deadline() {
+        let (preserved, stopped, checks, elapsed) = orphans(50_000);
+        println!("ORPHAN_IDENTITIES_MERGE_WALL_MS {}", elapsed.as_millis());
+        assert_eq!(
+            stopped, None,
+            "it fits alone within {HELD_PROOF_DEADLINE:?}: it took {elapsed:?}"
+        );
+        assert_eq!(
+            reasons(&preserved),
+            [PreservationReason::PendingContributionDependencies]
+        );
+        assert!(
+            preserved.merged.is_empty(),
+            "nothing integrated: {:?}",
+            preserved.merged.len()
+        );
+        assert_eq!(checks, 1 + 3 * 50_000);
+        assert!(
+            elapsed * 4 < HELD_PROOF_DEADLINE,
+            "well inside {HELD_PROOF_DEADLINE:?}: it took {elapsed:?}"
+        );
     }
 
     /// Findings the caller brings, such as a tail whose evidence does not
@@ -1754,7 +2058,11 @@ mod tests {
         let (canonical, first, _, _) = edits();
         let invalid = preserve(
             copied(&canonical),
-            vec![finding(PreservationReason::ContradictoryEvidence, Some("other"), None)],
+            vec![finding(
+                PreservationReason::ContradictoryEvidence,
+                Some("other"),
+                None,
+            )],
             vec![("namespace".to_owned(), vec![outbox(1, &first)])],
             Stop::NEVER,
             |_| Ok(0),
@@ -1762,7 +2070,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(invalid.status, PreservationStatus::InvalidEvidence);
-        assert_eq!(reasons(&invalid), [PreservationReason::ContradictoryEvidence, PreservationReason::SourceMissing]);
+        assert_eq!(
+            reasons(&invalid),
+            [
+                PreservationReason::ContradictoryEvidence,
+                PreservationReason::SourceMissing
+            ]
+        );
         assert_eq!(invalid.preserved, None);
     }
 }

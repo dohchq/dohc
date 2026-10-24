@@ -235,10 +235,16 @@ impl Halt {
     fn stopped(&self) -> Option<ProofStop> {
         if self.reason().is_none() {
             if self.reading.load(Ordering::Relaxed)
-                && self.pressure.as_ref().is_some_and(|pressure| pressure.raised())
+                && self
+                    .pressure
+                    .as_ref()
+                    .is_some_and(|pressure| pressure.raised())
             {
                 self.stop(ProofStop::Preempted);
-            } else if self.deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            } else if self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
                 self.stop(ProofStop::Deadline);
             }
         }
@@ -296,7 +302,11 @@ impl Budget {
 
 impl Default for HeldProofLimit {
     fn default() -> Self {
-        Self::new(MAX_RUNNING_PROOFS, PROOF_MEMORY_BYTES, PROOF_RESERVATION_BYTES)
+        Self::new(
+            MAX_RUNNING_PROOFS,
+            PROOF_MEMORY_BYTES,
+            PROOF_RESERVATION_BYTES,
+        )
     }
 }
 
@@ -763,11 +773,7 @@ impl<K, T> HeldProofRun<K, T> {
 
     /// Free the proof's place in its workspace, answer its callers, then
     /// free its place in the daemon's limit.
-    fn end(
-        &mut self,
-        proof: &Arc<Proof<K, T>>,
-        result: Option<Result<(T, u64), HeldProofError>>,
-    ) {
+    fn end(&mut self, proof: &Arc<Proof<K, T>>, result: Option<Result<(T, u64), HeldProofError>>) {
         {
             let mut state = lock(&self.proofs.state);
             if state
@@ -786,7 +792,12 @@ impl<K, T> HeldProofRun<K, T> {
                 .as_ref()
                 .map(|permit| permit.charge(retained))
                 .transpose()
-                .map(|charge| Arc::new(Charged { value, _charge: charge })),
+                .map(|charge| {
+                    Arc::new(Charged {
+                        value,
+                        _charge: charge,
+                    })
+                }),
             (Some(Err(panicked)), None) => Err(panicked),
             (_, Some(stop)) => Err(stop.error()),
             (None, None) => Err(HeldProofError::Closed),
@@ -985,11 +996,8 @@ impl HeldProofJob {
         conn.busy_timeout(READER_BUSY_TIMEOUT)
             .map_err(open_failure)?;
         let halt = Arc::clone(&self.halt);
-        conn.progress_handler(
-            READER_STEP_OPS,
-            Some(move || halt.stopped().is_some()),
-        )
-        .map_err(open_failure)?;
+        conn.progress_handler(READER_STEP_OPS, Some(move || halt.stopped().is_some()))
+            .map_err(open_failure)?;
         if self.halt.stopped().is_some() {
             return Err(ApplicationError::Cancelled);
         }
@@ -1181,7 +1189,9 @@ impl Work<'_> {
         let Some(memory) = self.stop.memory() else {
             return Ok(());
         };
-        memory.work(bytes).map_err(|reason| self.stop.refuse(reason))?;
+        memory
+            .work(bytes)
+            .map_err(|reason| self.stop.refuse(reason))?;
         self.bytes = self.bytes.saturating_add(bytes);
         Ok(())
     }
@@ -1683,7 +1693,14 @@ impl<K, T> HeldProofs<K, T> {
         lock(&self.0.state)
             .running
             .get(workspace_id)
-            .and_then(|proof| proof.job.halt.pressure.as_ref().map(|pressure| pressure.raised()))
+            .and_then(|proof| {
+                proof
+                    .job
+                    .halt
+                    .pressure
+                    .as_ref()
+                    .map(|pressure| pressure.raised())
+            })
             .unwrap_or(false)
     }
 
@@ -1777,7 +1794,12 @@ mod tests {
         block_on(wait).map(|answer| **answer)
     }
 
-    fn admit(proofs: &Held, store: &EngineStore, workspace: &str, key: &'static str) -> HeldProofAdmission<&'static str, u32> {
+    fn admit(
+        proofs: &Held,
+        store: &EngineStore,
+        workspace: &str,
+        key: &'static str,
+    ) -> HeldProofAdmission<&'static str, u32> {
         proofs.admit(store, workspace, key).unwrap()
     }
 
@@ -1819,9 +1841,27 @@ mod tests {
             .map(|_| joined(&proofs, &store, "key"))
             .collect();
         assert!(proofs.refuses("workspace"), "full, refused before reading");
-        assert!(matches!(admit(&proofs, &store, "workspace", "key"), HeldProofAdmission::Busy), "bounded");
-        assert!(matches!(admit(&proofs, &store, "workspace", "other"), HeldProofAdmission::Busy), "another request");
-        assert!(matches!(admit(&proofs, &store, "elsewhere", "other"), HeldProofAdmission::Started(..)), "another workspace");
+        assert!(
+            matches!(
+                admit(&proofs, &store, "workspace", "key"),
+                HeldProofAdmission::Busy
+            ),
+            "bounded"
+        );
+        assert!(
+            matches!(
+                admit(&proofs, &store, "workspace", "other"),
+                HeldProofAdmission::Busy
+            ),
+            "another request"
+        );
+        assert!(
+            matches!(
+                admit(&proofs, &store, "elsewhere", "other"),
+                HeldProofAdmission::Started(..)
+            ),
+            "another workspace"
+        );
         drop(others.pop());
         run.prove(|job| {
             assert!(job.stopped().is_none(), "one caller leaving stops nothing");
@@ -1832,7 +1872,13 @@ mod tests {
             assert_eq!(answer(other), Ok(7));
         }
         assert_eq!(proofs.proofs_admitted(), 2, "the shared proof ran once");
-        assert!(matches!(admit(&proofs, &store, "workspace", "other"), HeldProofAdmission::Started(..)), "an ended proof frees its workspace");
+        assert!(
+            matches!(
+                admit(&proofs, &store, "workspace", "other"),
+                HeldProofAdmission::Started(..)
+            ),
+            "an ended proof frees its workspace"
+        );
     }
 
     /// Ruling B, item 6: the last caller to leave stops the running proof,
@@ -1852,15 +1898,31 @@ mod tests {
         drop(first);
         let passed = proofs.checks_passed();
         let stopped = second.leave();
-        assert!(proofs.refuses("workspace"), "stopping, refused before reading");
-        assert!(matches!(admit(&proofs, &store, "workspace", "key"), HeldProofAdmission::Busy), "a stopping proof takes no caller");
+        assert!(
+            proofs.refuses("workspace"),
+            "stopping, refused before reading"
+        );
+        assert!(
+            matches!(
+                admit(&proofs, &store, "workspace", "key"),
+                HeldProofAdmission::Busy
+            ),
+            "a stopping proof takes no caller"
+        );
         assert_eq!(proofs.open_readers(), 1, "its reader is still open");
         proofs.resume_proofs();
         block_on(stopped);
-        assert_eq!(proofs.open_readers(), 0, "the stop completes once the proof ends");
+        assert_eq!(
+            proofs.open_readers(),
+            0,
+            "the stop completes once the proof ends"
+        );
         assert_eq!(proofs.checks_passed(), passed, "the proof went no further");
         worker.join().unwrap();
-        assert!(matches!(admit(&proofs, &store, "workspace", "key"), HeldProofAdmission::Started(..)));
+        assert!(matches!(
+            admit(&proofs, &store, "workspace", "key"),
+            HeldProofAdmission::Started(..)
+        ));
     }
 
     /// Sol's and Opus's r2c-3c-2 finding 2: joining and the last caller's
@@ -1876,7 +1938,13 @@ mod tests {
         let (run, last) = started(&proofs, &store, "key");
         let leaving = std::thread::spawn(move || drop(last));
         proofs.wait_for_leaving();
-        assert!(matches!(admit(&proofs, &store, "workspace", "key"), HeldProofAdmission::Busy), "after the last caller left");
+        assert!(
+            matches!(
+                admit(&proofs, &store, "workspace", "key"),
+                HeldProofAdmission::Busy
+            ),
+            "after the last caller left"
+        );
         proofs.resume_proofs();
         leaving.join().unwrap();
         run.prove(|_| panic!("a stopped proof runs nothing"));
@@ -1904,7 +1972,13 @@ mod tests {
         let (run, wait) = started(&proofs, &store, "key");
         drop(run);
         assert_eq!(answer(wait), Err(HeldProofError::Closed));
-        assert!(matches!(admit(&proofs, &store, "workspace", "other"), HeldProofAdmission::Started(..)), "the workspace is free");
+        assert!(
+            matches!(
+                admit(&proofs, &store, "workspace", "other"),
+                HeldProofAdmission::Started(..)
+            ),
+            "the workspace is free"
+        );
         assert_eq!(limit.reserved_bytes(), 0, "nothing stays reserved");
     }
 
@@ -1927,9 +2001,16 @@ mod tests {
         });
         proofs.set_close_bound(Duration::from_secs(30));
         assert!(proofs.close(), "the reader closed in time");
-        assert_eq!(proofs.open_readers(), 0, "close returned after the reader closed");
+        assert_eq!(
+            proofs.open_readers(),
+            0,
+            "close returned after the reader closed"
+        );
         assert_eq!(answer(wait), Err(HeldProofError::Closed));
-        assert!(matches!(admit(&proofs, &store, "workspace", "key"), HeldProofAdmission::Closed));
+        assert!(matches!(
+            admit(&proofs, &store, "workspace", "key"),
+            HeldProofAdmission::Closed
+        ));
         release.join().unwrap();
         worker.join().unwrap();
 
@@ -1984,7 +2065,11 @@ mod tests {
         assert!(proofs.close(), "no reader is open");
         proofs.resume_proofs();
         worker.join().unwrap();
-        assert_eq!(proofs.readers_opened(), 0, "no reader opened after close began");
+        assert_eq!(
+            proofs.readers_opened(),
+            0,
+            "no reader opened after close began"
+        );
     }
 
     /// Sol's r2c-3c-5 finding 2: a workspace runs one distinct proof until
@@ -2009,22 +2094,40 @@ mod tests {
         });
         proofs.wait_for_paused_proof();
         assert_eq!(proofs.open_readers(), 0, "its reader closed");
-        assert!(!proofs.refuses("workspace"), "an identical request may join");
-        assert!(matches!(admit(&proofs, &store, "workspace", "other"), HeldProofAdmission::Busy), "a different request");
+        assert!(
+            !proofs.refuses("workspace"),
+            "an identical request may join"
+        );
+        assert!(
+            matches!(
+                admit(&proofs, &store, "workspace", "other"),
+                HeldProofAdmission::Busy
+            ),
+            "a different request"
+        );
         let second = joined(&proofs, &store, "key");
         proofs.resume_proofs();
         worker.join().unwrap();
         assert_eq!(answer(first), Ok(1), "the proof still answers");
         assert_eq!(answer(second), Ok(1), "and so does its joiner");
         assert_eq!(proofs.proofs_admitted(), 1, "one distinct proof");
-        assert!(matches!(admit(&proofs, &store, "workspace", "other"), HeldProofAdmission::Started(..)), "an ended proof frees its workspace");
+        assert!(
+            matches!(
+                admit(&proofs, &store, "workspace", "other"),
+                HeldProofAdmission::Started(..)
+            ),
+            "an ended proof frees its workspace"
+        );
 
         let (run, wait) = started(&proofs, &store, "key");
         proofs.pause_proofs_at(ProofStage::Encoding);
         let worker = std::thread::spawn(move || {
             run.prove(|job| {
                 drop(job.reader().unwrap());
-                (u32::from(job.stop().check(ProofStage::Encoding).is_err()), 0)
+                (
+                    u32::from(job.stop().check(ProofStage::Encoding).is_err()),
+                    0,
+                )
             });
         });
         proofs.wait_for_paused_proof();
@@ -2042,7 +2145,13 @@ mod tests {
         let proofs = proofs();
         proofs.set_proof_deadline(Duration::ZERO);
         let (run, first) = started(&proofs, &store, "key");
-        assert!(matches!(admit(&proofs, &store, "workspace", "key"), HeldProofAdmission::Busy), "a stopping proof takes no caller");
+        assert!(
+            matches!(
+                admit(&proofs, &store, "workspace", "key"),
+                HeldProofAdmission::Busy
+            ),
+            "a stopping proof takes no caller"
+        );
         merging(run).join().unwrap();
         assert_eq!(answer(first), Err(HeldProofError::Busy));
     }
@@ -2064,15 +2173,34 @@ mod tests {
             _ => panic!("a second proof runs beside the first"),
         };
         assert!(two.refuses("third"), "refused before reading");
-        assert!(matches!(admit(&two, &other, "third", "key"), HeldProofAdmission::Busy), "a third proof");
+        assert!(
+            matches!(
+                admit(&two, &other, "third", "key"),
+                HeldProofAdmission::Busy
+            ),
+            "a third proof"
+        );
         run.prove(|_| (7, 100));
         let kept = block_on(kept).unwrap();
         assert_eq!(**kept, 7);
         assert_eq!(limit.reserved_bytes(), 200, "the result keeps its charge");
-        assert!(matches!(admit(&one, &store, "workspace", "key"), HeldProofAdmission::Busy), "no memory for a third");
+        assert!(
+            matches!(
+                admit(&one, &store, "workspace", "key"),
+                HeldProofAdmission::Busy
+            ),
+            "no memory for a third"
+        );
         drop(kept);
-        assert_eq!(limit.reserved_bytes(), 100, "freed once its last holder dropped it");
-        assert!(matches!(admit(&one, &store, "workspace", "key"), HeldProofAdmission::Started(..)));
+        assert_eq!(
+            limit.reserved_bytes(),
+            100,
+            "freed once its last holder dropped it"
+        );
+        assert!(matches!(
+            admit(&one, &store, "workspace", "key"),
+            HeldProofAdmission::Started(..)
+        ));
         drop(second);
         assert_eq!(limit.reserved_bytes(), 0);
     }
@@ -2088,7 +2216,10 @@ mod tests {
             .reader()
             .and_then(|mut reader| job.snapshot(&mut reader).map(|_| ()));
         assert!(
-            matches!(failed, Err(ApplicationError::Storage(StorageError::FileLocked))),
+            matches!(
+                failed,
+                Err(ApplicationError::Storage(StorageError::FileLocked))
+            ),
             "{failed:?}"
         );
     }
@@ -2111,12 +2242,19 @@ mod tests {
         proofs.set_close_bound(Duration::from_millis(50));
         let began = Instant::now();
         assert!(!proofs.close(), "the opening reader counts as open");
-        assert!(began.elapsed() < Duration::from_secs(5), "close kept to its bound");
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "close kept to its bound"
+        );
         assert!(!proofs.drained());
         proofs.resume_proofs();
         worker.join().unwrap();
         assert!(proofs.drained(), "drained once the opening reader gave up");
-        assert_eq!(proofs.readers_opened(), 0, "no reader stayed open after close began");
+        assert_eq!(
+            proofs.readers_opened(),
+            0,
+            "no reader stayed open after close began"
+        );
     }
 
     /// Sol's r2c-3c-4 finding 2 and Opus's finding 4: what a daemon's proofs
@@ -2140,28 +2278,51 @@ mod tests {
         run.prove(|job| {
             assert!(job.stop().reserve(100).is_ok(), "within its reservation");
             let refused = job.stop().reserve(1);
-            assert!(matches!(refused, Err(ApplicationError::Cancelled)), "beside another proof");
+            assert!(
+                matches!(refused, Err(ApplicationError::Cancelled)),
+                "beside another proof"
+            );
             assert_eq!(job.stopped(), Some(ProofStop::Memory));
             (7, 0)
         });
         assert_eq!(answer(wait), Err(HeldProofError::Busy));
-        assert_eq!(limit.reserved_bytes(), 100, "only the other proof's reservation");
+        assert_eq!(
+            limit.reserved_bytes(),
+            100,
+            "only the other proof's reservation"
+        );
 
         let (run, wait) = started(&one, &store, "key");
         run.prove(|_| (7, 150));
-        assert_eq!(answer(wait), Err(HeldProofError::Busy), "a result past its reservation, beside another proof");
+        assert_eq!(
+            answer(wait),
+            Err(HeldProofError::Busy),
+            "a result past its reservation, beside another proof"
+        );
         assert_eq!(limit.reserved_bytes(), 100);
 
         drop((beside, beside_wait));
         assert_eq!(limit.reserved_bytes(), 0);
         let (run, wait) = started(&one, &store, "key");
         run.prove(|job| {
-            job.stop().reserve(150).expect("alone, it takes more within capacity");
+            job.stop()
+                .reserve(150)
+                .expect("alone, it takes more within capacity");
             (7, 150)
         });
         let kept = block_on(wait).unwrap();
-        assert_eq!(limit.reserved_bytes(), 150, "the result keeps what it reserved");
-        assert!(matches!(admit(&two, &other, "elsewhere", "key"), HeldProofAdmission::Busy), "no room beside it for a reservation");
+        assert_eq!(
+            limit.reserved_bytes(),
+            150,
+            "the result keeps what it reserved"
+        );
+        assert!(
+            matches!(
+                admit(&two, &other, "elsewhere", "key"),
+                HeldProofAdmission::Busy
+            ),
+            "no room beside it for a reservation"
+        );
         drop(kept);
         assert_eq!(limit.reserved_bytes(), 0);
 
@@ -2174,7 +2335,11 @@ mod tests {
         assert_eq!(answer(wait), Err(HeldProofError::TooLarge));
         let (run, wait) = started(&one, &store, "key");
         run.prove(|_| (7, 201));
-        assert_eq!(answer(wait), Err(HeldProofError::TooLarge), "a result larger than the whole memory");
+        assert_eq!(
+            answer(wait),
+            Err(HeldProofError::TooLarge),
+            "a result larger than the whole memory"
+        );
         assert_eq!(limit.reserved_bytes(), 0, "nothing stays reserved");
     }
 }

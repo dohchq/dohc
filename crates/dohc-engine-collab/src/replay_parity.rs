@@ -2026,7 +2026,7 @@ pub(crate) fn reader_metadata_only(checkpoint: &[u8], delta: &[u8]) -> Result<bo
             let Some(b) = block(candidate, id).or_else(|| block(base, id)) else {
                 return false;
             };
-            if b.kind != BlockKind::Item {
+            if !matches!(b.kind, BlockKind::Item(_)) {
                 return false;
             }
             if let Some(ParentDescriptor::Root(root)) = &b.parent {

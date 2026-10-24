@@ -343,15 +343,17 @@ pub fn release_in_tx(
                 return Err(OwnerOutboxError::Corrupt);
             }
             let source = native
-                .map(|json| -> Result<OwnerOutboxNativeSource, OwnerOutboxError> {
-                    let source: OwnerOutboxSource =
-                        serde_json::from_str(&json).map_err(|_| OwnerOutboxError::Corrupt)?;
-                    let source = source.native().cloned().ok_or(OwnerOutboxError::Corrupt)?;
-                    if source.binding != *binding || source.update_digest != digest {
-                        return Err(OwnerOutboxError::Corrupt);
-                    }
-                    Ok(source)
-                })
+                .map(
+                    |json| -> Result<OwnerOutboxNativeSource, OwnerOutboxError> {
+                        let source: OwnerOutboxSource =
+                            serde_json::from_str(&json).map_err(|_| OwnerOutboxError::Corrupt)?;
+                        let source = source.native().cloned().ok_or(OwnerOutboxError::Corrupt)?;
+                        if source.binding != *binding || source.update_digest != digest {
+                            return Err(OwnerOutboxError::Corrupt);
+                        }
+                        Ok(source)
+                    },
+                )
                 .transpose()?;
             let credit = super::entry_credit(source.as_ref(), agent, automation, person)?;
             credited.push((credit, bytes));

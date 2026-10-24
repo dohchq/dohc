@@ -94,7 +94,7 @@ async fn edited_scene_missing_asset_keeps_the_live_unload_error() {
     let actor = supervisor.open(&db, 4).unwrap().actor;
     let owner = actor.live_application_owner("ws".into()).await.unwrap();
     let result = owner
-        .unload("drawing".into(), vec![key], scratch.path().into(), 5)
+        .unload("drawing".into(), None, vec![key], scratch.path().into(), 5)
         .await;
     supervisor.close(&db).unwrap();
     assert_missing_asset_error(result);

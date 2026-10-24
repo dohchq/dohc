@@ -86,13 +86,19 @@ fn over_budget() -> WireError {
 
 pub(super) fn object_id(value: &str) -> Result<(), WireError> {
     if value.is_empty() || value.len() > MAX_OBJECT_ID_BYTES {
-        return Err(WireError::new(ErrorCode::InvalidParams, "invalid object ID"));
+        return Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "invalid object ID",
+        ));
     }
     Ok(())
 }
 
 fn not_hosted() -> WireError {
-    WireError::new(ErrorCode::InvalidParams, "workspace is not a hosted replica")
+    WireError::new(
+        ErrorCode::InvalidParams,
+        "workspace is not a hosted replica",
+    )
 }
 
 impl EngineService {
@@ -381,7 +387,10 @@ fn inspection_outline(inspected: &HeldDocumentInspection) -> (Value, bool) {
                 .as_ref()
                 .map(|preserved| preserved.markdown.as_str());
             let outside = markdown.map_or(0, json_string_encoded_len) > MAX_INBAND_CONTENT_BYTES;
-            (preservation_outline(preservation, contributions, !outside), outside)
+            (
+                preservation_outline(preservation, contributions, !outside),
+                outside,
+            )
         }
         _ => (Value::Null, false),
     };
@@ -504,7 +513,10 @@ mod tests {
         let one = |workspace_id: &str| json!({"workspaceId": workspace_id, "objectId": "object"});
         let code = |result: Result<Value, WireError>| result.unwrap_err().code;
         let inspected = |result: Result<ServiceResponse, WireError>| {
-            result.map(|answer| answer.response.result).unwrap_err().code
+            result
+                .map(|answer| answer.response.result)
+                .unwrap_err()
+                .code
         };
 
         // The host's own connection reaches the store: this one is no hosted
@@ -513,12 +525,21 @@ mod tests {
             .sync_held_documents(&ctx, Some(attached_handle.clone()), list("attached"), 1)
             .await
             .unwrap_err();
-        assert_eq!((reached.code, reached.message.as_str()), (ErrorCode::InvalidParams, "workspace is not a hosted replica"));
+        assert_eq!(
+            (reached.code, reached.message.as_str()),
+            (
+                ErrorCode::InvalidParams,
+                "workspace is not a hosted replica"
+            )
+        );
         let nothing = service
             .sync_held_document(&ctx, Some(attached_handle.clone()), one("attached"), 2)
             .await
             .unwrap();
-        assert!(nothing.response.result.is_null() && nothing.blob_egress.is_none(), "{nothing:?}");
+        assert!(
+            nothing.response.result.is_null() && nothing.blob_egress.is_none(),
+            "{nothing:?}"
+        );
         // Nothing held streams nothing, whichever stream is asked for.
         let mut reader = RequestContext::unbounded();
         reader.connection = Some(owner.handle());
@@ -529,24 +550,41 @@ mod tests {
                 .sync_held_document(&reader, Some(attached_handle.clone()), params, 2)
                 .await
                 .unwrap();
-            assert!(streamed.response.result.is_null() && streamed.blob_egress.is_none(), "{stream}");
+            assert!(
+                streamed.response.result.is_null() && streamed.blob_egress.is_none(),
+                "{stream}"
+            );
         }
         // Its answer lapses with the host, as each queued output does.
-        let answered = nothing.output_guard.expect("the live host guards its answer");
+        let answered = nothing
+            .output_guard
+            .expect("the live host guards its answer");
         assert!(answered.is_current());
         // Another workspace's ID, a workspace the host did not attach, and a
         // handle that names nothing.
         assert_eq!(
-            code(service.sync_held_documents(&ctx, Some(attached_handle.clone()), list("private"), 1).await),
+            code(
+                service
+                    .sync_held_documents(&ctx, Some(attached_handle.clone()), list("private"), 1)
+                    .await
+            ),
             ErrorCode::InvalidParams
         );
         for foreign in [private_handle.clone(), WorkspaceHandle("foreign".into())] {
             assert_eq!(
-                code(service.sync_held_documents(&ctx, Some(foreign.clone()), list("private"), 1).await),
+                code(
+                    service
+                        .sync_held_documents(&ctx, Some(foreign.clone()), list("private"), 1)
+                        .await
+                ),
                 ErrorCode::WorkspaceUnavailable
             );
             assert_eq!(
-                inspected(service.sync_held_document(&ctx, Some(foreign), one("private"), 3).await),
+                inspected(
+                    service
+                        .sync_held_document(&ctx, Some(foreign), one("private"), 3)
+                        .await
+                ),
                 ErrorCode::WorkspaceUnavailable
             );
         }
@@ -555,24 +593,61 @@ mod tests {
         let mut stranger = RequestContext::unbounded();
         stranger.connection = Some(other.handle());
         assert_eq!(
-            code(service.sync_held_documents(&stranger, Some(attached_handle.clone()), list("attached"), 1).await),
+            code(
+                service
+                    .sync_held_documents(
+                        &stranger,
+                        Some(attached_handle.clone()),
+                        list("attached"),
+                        1
+                    )
+                    .await
+            ),
             ErrorCode::SessionExpired
         );
         assert_eq!(
-            inspected(service.sync_held_document(&stranger, Some(attached_handle.clone()), one("attached"), 4).await),
+            inspected(
+                service
+                    .sync_held_document(
+                        &stranger,
+                        Some(attached_handle.clone()),
+                        one("attached"),
+                        4
+                    )
+                    .await
+            ),
             ErrorCode::SessionExpired
         );
         assert_eq!(
-            code(service.sync_held_documents(&RequestContext::unbounded(), Some(attached_handle.clone()), list("attached"), 1).await),
+            code(
+                service
+                    .sync_held_documents(
+                        &RequestContext::unbounded(),
+                        Some(attached_handle.clone()),
+                        list("attached"),
+                        1
+                    )
+                    .await
+            ),
             ErrorCode::SessionExpired
         );
         owner.retire();
-        assert!(!answered.is_current(), "a retired host's answer is withheld");
+        assert!(
+            !answered.is_current(),
+            "a retired host's answer is withheld"
+        );
         assert_eq!(
-            code(service.sync_held_documents(&ctx, Some(attached_handle.clone()), list("attached"), 1).await),
+            code(
+                service
+                    .sync_held_documents(&ctx, Some(attached_handle.clone()), list("attached"), 1)
+                    .await
+            ),
             ErrorCode::SessionExpired
         );
-        service.workspace_close(Some(attached_handle)).await.unwrap();
+        service
+            .workspace_close(Some(attached_handle))
+            .await
+            .unwrap();
         service.workspace_close(Some(private_handle)).await.unwrap();
     }
 
@@ -582,7 +657,10 @@ mod tests {
         root: &dohc_engine_testkit::ScratchDir,
     ) -> (
         Arc<EngineService>,
-        (ConnectionOwner, crate::live_application_ingress::LiveApplicationIngress),
+        (
+            ConnectionOwner,
+            crate::live_application_ingress::LiveApplicationIngress,
+        ),
         RequestContext,
         WorkspaceHandle,
     ) {
@@ -670,7 +748,7 @@ mod tests {
             drop(exhausted);
             assert_eq!(waiting.await.unwrap_err().code, refused, "detach: {detach}");
             if !detach {
-                service.workspace_close(Some(handle)).await.unwrap();
+                service.workspace_close(Some(handle.clone())).await.unwrap();
             }
         }
     }
@@ -706,10 +784,18 @@ mod tests {
         )
         .await;
         proofs.resume_proofs();
-        let refused = listed.expect("discovery answers while the proof holds").unwrap_err();
-        assert_eq!(refused.message, "workspace is not a hosted replica", "it reached the actor");
+        let refused = listed
+            .expect("discovery answers while the proof holds")
+            .unwrap_err();
+        assert_eq!(
+            refused.message, "workspace is not a hosted replica",
+            "it reached the actor"
+        );
         let answered = inspecting.await.unwrap();
-        assert!(answered.response.result.is_null(), "nothing is held: {answered:?}");
+        assert!(
+            answered.response.result.is_null(),
+            "nothing is held: {answered:?}"
+        );
         service.workspace_close(Some(handle)).await.unwrap();
     }
 
@@ -744,7 +830,10 @@ mod tests {
                 panic!("the second caller answered before it joined: {:?}", answered.map(|answer| answer.response.result));
             }
         }
-        let expired = expiring.await.map(|answer| answer.response.result).unwrap_err();
+        let expired = expiring
+            .await
+            .map(|answer| answer.response.result)
+            .unwrap_err();
         assert_eq!(expired.code, ErrorCode::DeadlineExceeded, "{expired:?}");
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(
@@ -753,7 +842,10 @@ mod tests {
         );
         proofs.resume_proofs();
         let answered = waiting.await.unwrap();
-        assert!(answered.response.result.is_null(), "nothing is held: {answered:?}");
+        assert!(
+            answered.response.result.is_null(),
+            "nothing is held: {answered:?}"
+        );
         service.workspace_close(Some(handle)).await.unwrap();
     }
 
@@ -768,7 +860,10 @@ mod tests {
             json!({"workspaceId": "w", "limit": 1, "afterObjectId": ""}),
             json!({"workspaceId": "w", "limit": 1, "extra": true}),
         ] {
-            let refused = service.sync_held_documents(&ctx, None, params.clone(), 1).await.unwrap_err();
+            let refused = service
+                .sync_held_documents(&ctx, None, params.clone(), 1)
+                .await
+                .unwrap_err();
             assert_eq!(refused.code, ErrorCode::InvalidParams, "{params}");
         }
         // Either stream needs a connection that reads blobs, and nothing else
@@ -873,11 +968,20 @@ mod tests {
     #[test]
     fn discovery_pages_by_bytes_and_always_progresses() {
         let mut all: Vec<_> = (0..40)
-            .map(|index| held(&format!("object-{index:02}"), &format!("docs/{index}.md"), ProtectedTails::Invalid))
+            .map(|index| {
+                held(
+                    &format!("object-{index:02}"),
+                    &format!("docs/{index}.md"),
+                    ProtectedTails::Invalid,
+                )
+            })
             .collect();
         // Escaping multiplies this path sixfold.
         all[17].path = "\u{1}".repeat(500);
-        let alone = response_encoded_bytes(7, &json!({"documents": [held_json(&all[17])], "hasMore": false}));
+        let alone = response_encoded_bytes(
+            7,
+            &json!({"documents": [held_json(&all[17])], "hasMore": false}),
+        );
         let one = serialized_len(&held_json(&all[0]));
         // Room for that summary alone, and not beside any other.
         let budget = alone + one / 2;
@@ -886,7 +990,11 @@ mod tests {
             // What the store answers: up to its largest page after the cursor.
             let rest: Vec<_> = all
                 .iter()
-                .filter(|document| after.as_deref().is_none_or(|after| document.object_id.as_str() > after))
+                .filter(|document| {
+                    after
+                        .as_deref()
+                        .is_none_or(|after| document.object_id.as_str() > after)
+                })
                 .cloned()
                 .collect();
             let page = HeldDocumentsPage {
@@ -909,18 +1017,30 @@ mod tests {
                 pages.push(documents);
                 break;
             }
-            assert!(!documents.is_empty(), "a page that claims more lists something");
+            assert!(
+                !documents.is_empty(),
+                "a page that claims more lists something"
+            );
             after = documents.last().cloned();
             listed.extend(documents.iter().cloned());
             pages.push(documents);
         }
-        let ids: Vec<_> = all.iter().map(|document| document.object_id.clone()).collect();
+        let ids: Vec<_> = all
+            .iter()
+            .map(|document| document.object_id.clone())
+            .collect();
         assert_eq!(listed, ids);
         assert!(pages.contains(&vec!["object-17".to_owned()]), "{pages:?}");
         assert!(pages.len() > 3, "the budget ended pages: {pages:?}");
 
-        let lone = HeldDocumentsPage { documents: vec![all[17].clone()], has_more: true };
-        assert_eq!(discovery_page(7, &lone, alone - 1).unwrap_err().message, "state-corrupt");
+        let lone = HeldDocumentsPage {
+            documents: vec![all[17].clone()],
+            has_more: true,
+        };
+        assert_eq!(
+            discovery_page(7, &lone, alone - 1).unwrap_err().message,
+            "state-corrupt"
+        );
     }
 
     /// Sol's ruling B, item 3: however many findings there are, each reason
@@ -939,11 +1059,23 @@ mod tests {
             .rev()
             .map(|index| {
                 let namespace = if index % 2 == 0 { "relay-b" } else { "relay-a" };
-                located(PreservationReason::SourceMissing, Some(namespace), Some(index))
+                located(
+                    PreservationReason::SourceMissing,
+                    Some(namespace),
+                    Some(index),
+                )
             })
             .collect();
-        findings.push(located(PreservationReason::MalformedAuthorship, Some("relay-c"), Some(1)));
-        findings.push(located(PreservationReason::PendingContributionDependencies, None, None));
+        findings.push(located(
+            PreservationReason::MalformedAuthorship,
+            Some("relay-c"),
+            Some(1),
+        ));
+        findings.push(located(
+            PreservationReason::PendingContributionDependencies,
+            None,
+            None,
+        ));
         let inspected = inspection(
             &binding("object", "docs/object.md", ProtectedTails::Invalid),
             Preservation {
@@ -959,33 +1091,54 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|reason| (
-                    reason["reason"].as_str().unwrap().to_owned(),
-                    reason["status"].as_str().unwrap().to_owned(),
-                    reason["total"].as_u64().unwrap(),
-                    reason["omitted"].as_u64().unwrap(),
-                    reason["examples"].as_array().unwrap().len(),
-                ))
+                .map(|reason| {
+                    (
+                        reason["reason"].as_str().unwrap().to_owned(),
+                        reason["status"].as_str().unwrap().to_owned(),
+                        reason["total"].as_u64().unwrap(),
+                        reason["omitted"].as_u64().unwrap(),
+                        reason["examples"].as_array().unwrap().len(),
+                    )
+                })
                 .collect()
         };
         let row = |reason: &str, status: &str, total: u64, omitted: u64, examples: usize| {
-            (reason.to_owned(), status.to_owned(), total, omitted, examples)
+            (
+                reason.to_owned(),
+                status.to_owned(),
+                total,
+                omitted,
+                examples,
+            )
         };
 
-        let (answer, outside) = inspection_answer(7, &inspected, HELD_RESPONSE_BYTE_BUDGET).unwrap();
+        let (answer, outside) =
+            inspection_answer(7, &inspected, HELD_RESPONSE_BYTE_BUDGET).unwrap();
         assert!(!outside);
         assert!(response_encoded_bytes(7, &answer) <= HELD_RESPONSE_BYTE_BUDGET);
         assert_eq!(answer["preservation"]["status"], "invalid-evidence");
-        assert_eq!(summary(&answer), [
-            row("source-missing", "missing-evidence", 50_000, 49_992, 8),
-            row("pending-contribution-dependencies", "pending-dependencies", 1, 0, 1),
-            row("malformed-authorship", "invalid-evidence", 1, 0, 1),
-        ]);
+        assert_eq!(
+            summary(&answer),
+            [
+                row("source-missing", "missing-evidence", 50_000, 49_992, 8),
+                row(
+                    "pending-contribution-dependencies",
+                    "pending-dependencies",
+                    1,
+                    0,
+                    1
+                ),
+                row("malformed-authorship", "invalid-evidence", 1, 0, 1),
+            ]
+        );
         // relay-a's work sorts first, by sequence.
         let expected: Vec<_> = (0..8)
             .map(|nth| json!({"namespace": "relay-a", "contribution": contribution(2 * nth + 1).locator().to_json()}))
             .collect();
-        assert_eq!(answer["preservation"]["reasons"][0]["examples"], json!(expected));
+        assert_eq!(
+            answer["preservation"]["reasons"][0]["examples"],
+            json!(expected)
+        );
 
         // Room for the totals and two examples: the first reason's, and the
         // worst reason keeps its total, its status and the preservation's.
@@ -995,17 +1148,29 @@ mod tests {
         let (answer, _) = inspection_answer(7, &inspected, budget).unwrap();
         assert!(response_encoded_bytes(7, &answer) <= budget);
         assert_eq!(answer["preservation"]["status"], "invalid-evidence");
-        assert_eq!(summary(&answer), [
-            row("source-missing", "missing-evidence", 50_000, 49_998, 2),
-            row("pending-contribution-dependencies", "pending-dependencies", 1, 1, 0),
-            row("malformed-authorship", "invalid-evidence", 1, 1, 0),
-        ]);
+        assert_eq!(
+            summary(&answer),
+            [
+                row("source-missing", "missing-evidence", 50_000, 49_998, 2),
+                row(
+                    "pending-contribution-dependencies",
+                    "pending-dependencies",
+                    1,
+                    1,
+                    0
+                ),
+                row("malformed-authorship", "invalid-evidence", 1, 1, 0),
+            ]
+        );
         // Room for the totals alone lists no example.
-        let (answer, _) = inspection_answer(7, &inspected, response_encoded_bytes(7, &outline)).unwrap();
+        let (answer, _) =
+            inspection_answer(7, &inspected, response_encoded_bytes(7, &outline)).unwrap();
         assert_eq!(answer, outline);
         assert_eq!(answer["preservation"]["status"], "invalid-evidence");
         assert_eq!(
-            inspection_answer(7, &inspected, response_encoded_bytes(7, &outline) - 1).unwrap_err().message,
+            inspection_answer(7, &inspected, response_encoded_bytes(7, &outline) - 1)
+                .unwrap_err()
+                .message,
             "state-corrupt"
         );
     }
@@ -1023,7 +1188,11 @@ mod tests {
             release: None,
             coverage: RetainedCoverage::Unproven(committed.clone()),
         };
-        let bound = binding("object", "docs/object.md", ProtectedTails::Listed(vec![tail]));
+        let bound = binding(
+            "object",
+            "docs/object.md",
+            ProtectedTails::Listed(vec![tail]),
+        );
         let inspected = inspection(
             &bound,
             Preservation {
@@ -1037,23 +1206,44 @@ mod tests {
                 }),
             },
         );
-        let (answer, outside) = inspection_answer(7, &inspected, HELD_RESPONSE_BYTE_BUDGET).unwrap();
+        let (answer, outside) =
+            inspection_answer(7, &inspected, HELD_RESPONSE_BYTE_BUDGET).unwrap();
         assert!(response_encoded_bytes(7, &answer) <= HELD_RESPONSE_BYTE_BUDGET);
         assert!(outside, "the text streams");
-        let artifact = inspected.contributions.as_ref().and_then(HeldContributions::artifact).unwrap();
+        let artifact = inspected
+            .contributions
+            .as_ref()
+            .and_then(HeldContributions::artifact)
+            .unwrap();
         let preservation = &answer["preservation"];
         assert_eq!(preservation["markdown"], Value::Null);
-        assert_eq!(preservation["contributionsSha256"], dohc_engine_storage::hex_sha256(&artifact.bytes));
-        assert_eq!(preservation["contributionsByteLength"], artifact.bytes.len());
+        assert_eq!(
+            preservation["contributionsSha256"],
+            dohc_engine_storage::hex_sha256(&artifact.bytes)
+        );
+        assert_eq!(
+            preservation["contributionsByteLength"],
+            artifact.bytes.len()
+        );
         // Every contribution merged: the merged list commits as the tail does.
-        assert_eq!(preservation["mergedContributions"], json!({"count": 50_000, "digest": committed.digest}));
-        assert!(artifact.bytes.len() <= BLOB_EGRESS_BYTE_BUDGET, "{} bytes stream", artifact.bytes.len());
+        assert_eq!(
+            preservation["mergedContributions"],
+            json!({"count": 50_000, "digest": committed.digest})
+        );
+        assert!(
+            artifact.bytes.len() <= BLOB_EGRESS_BYTE_BUDGET,
+            "{} bytes stream",
+            artifact.bytes.len()
+        );
 
         let listed: Value = serde_json::from_slice(&artifact.bytes).unwrap();
         let every: Vec<_> = covered.iter().map(RetainedContribution::to_json).collect();
         assert_eq!(listed["version"], 1);
         assert_eq!(listed["binding"], bound.to_json());
-        assert_eq!(listed["coveredContributions"], json!([{"namespace": "relay", "contributions": every}]));
+        assert_eq!(
+            listed["coveredContributions"],
+            json!([{"namespace": "relay", "contributions": every}])
+        );
         let read: Vec<_> = listed["mergedContributionIds"]
             .as_array()
             .unwrap()
@@ -1062,7 +1252,9 @@ mod tests {
             .collect();
         assert_eq!(read, covered, "every identity, with its authors");
         assert_eq!(
-            ReleasedLineageBinding::from_json(&listed["binding"]).unwrap().digest(),
+            ReleasedLineageBinding::from_json(&listed["binding"])
+                .unwrap()
+                .digest(),
             answer["bindingDigest"]
         );
     }
@@ -1089,9 +1281,19 @@ mod tests {
         let mut empty = b"dohc:released-tail-contributions:v2\0".to_vec();
         empty.extend_from_slice(b"[]");
         let merged = &answer["preservation"]["mergedContributions"];
-        assert_eq!(*merged, json!({"count": 0, "digest": dohc_engine_storage::hex_sha256(&empty)}));
-        assert_ne!(merged["digest"], answer["preservation"]["contributionsSha256"]);
-        let artifact = inspected.contributions.as_ref().and_then(HeldContributions::artifact).unwrap();
+        assert_eq!(
+            *merged,
+            json!({"count": 0, "digest": dohc_engine_storage::hex_sha256(&empty)})
+        );
+        assert_ne!(
+            merged["digest"],
+            answer["preservation"]["contributionsSha256"]
+        );
+        let artifact = inspected
+            .contributions
+            .as_ref()
+            .and_then(HeldContributions::artifact)
+            .unwrap();
         let listed: Value = serde_json::from_slice(&artifact.bytes).unwrap();
         assert_eq!(listed["coveredContributions"], json!([]));
         assert_eq!(listed["mergedContributionIds"], json!([]));
@@ -1122,24 +1324,36 @@ mod tests {
                     full_state: Vec::new(),
                 }),
             }),
-            contributions: Some(HeldContributions::TooLarge { merged: committed.clone() }),
+            contributions: Some(HeldContributions::TooLarge {
+                merged: committed.clone(),
+            }),
         };
-        let (answer, outside) = inspection_answer(7, &inspected, HELD_RESPONSE_BYTE_BUDGET).unwrap();
+        let (answer, outside) =
+            inspection_answer(7, &inspected, HELD_RESPONSE_BYTE_BUDGET).unwrap();
         assert!(outside, "the text streams");
         let preservation = &answer["preservation"];
         assert_eq!(answer["status"], "current");
         assert_eq!(preservation["status"], "complete");
         assert_eq!(preservation["contributionsTooLarge"], true);
-        assert_eq!(preservation["mergedContributions"], json!({"count": 3, "digest": committed.digest}));
+        assert_eq!(
+            preservation["mergedContributions"],
+            json!({"count": 3, "digest": committed.digest})
+        );
         for absent in ["contributionsSha256", "contributionsByteLength"] {
             assert_eq!(preservation[absent], Value::Null, "{absent}");
         }
-        assert_eq!(preservation["markdownSha256"], dohc_engine_storage::hex_sha256(markdown.as_bytes()));
+        assert_eq!(
+            preservation["markdownSha256"],
+            dohc_engine_storage::hex_sha256(markdown.as_bytes())
+        );
         assert_eq!(preservation["markdownByteLength"], markdown.len());
         assert_eq!(
             streamed(&inspected, Some(HeldStream::Markdown), outside),
             Some(markdown.as_bytes())
         );
-        assert_eq!(streamed(&inspected, Some(HeldStream::Contributions), outside), None);
+        assert_eq!(
+            streamed(&inspected, Some(HeldStream::Contributions), outside),
+            None
+        );
     }
 }

@@ -32,6 +32,7 @@ fn relay_max(current_max_origin_seq: i64) -> Result<RelayIoResponse, RelayError>
     Ok(RelayIoResponse::Push(PushResponse {
         settlement_refusals: Vec::new(),
         hosted_refusals: Vec::new(),
+        redundant_recoveries: Vec::new(),
         accepted: 0,
         inserted: 0,
         skipped: 0,

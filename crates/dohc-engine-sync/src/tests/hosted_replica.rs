@@ -4331,6 +4331,7 @@ fn a_rename_freed_later_in_its_pass_leaves_the_document_ready() {
             &mut store,
             &mut WriterDocCache::new(),
             "ws",
+            "relay",
             &NoFaults,
             &LiveSession("doc-b"),
         )
@@ -6753,7 +6754,8 @@ fn a_held_proofs_work_on_the_writer_stays_the_same_however_many_namespaces_it_ho
     };
     let (_scratch, _path, mut store) = hosted_store();
     host_document(&mut store, "doc");
-    let proofs = HeldProofs::new(dohc_engine_collab::live_update_application::HeldProofLimit::default());
+    let proofs =
+        HeldProofs::new(dohc_engine_collab::live_update_application::HeldProofLimit::default());
     let steps = |store: &EngineStore, run: &mut dyn FnMut()| {
         let counted = std::sync::Arc::new(AtomicUsize::new(0));
         let counter = std::sync::Arc::clone(&counted);
@@ -6770,7 +6772,11 @@ fn a_held_proofs_work_on_the_writer_stays_the_same_however_many_namespaces_it_ho
             .unwrap();
         let decodes = binding_decodes_on_this_thread();
         run();
-        assert_eq!(binding_decodes_on_this_thread(), decodes, "the writer decodes no binding");
+        assert_eq!(
+            binding_decodes_on_this_thread(),
+            decodes,
+            "the writer decodes no binding"
+        );
         store
             .read_with(|conn| conn.progress_handler(0, None::<fn() -> bool>))
             .unwrap();
@@ -6790,7 +6796,12 @@ fn a_held_proofs_work_on_the_writer_stays_the_same_however_many_namespaces_it_ho
         ));
         let held = store
             .write_with(&NoFaults, |tx| {
-                crate::hosted::hold_released_in_tx(tx, &binding, ReleasedHoldContinuation::Frozen, false)
+                crate::hosted::hold_released_in_tx(
+                    tx,
+                    &binding,
+                    ReleasedHoldContinuation::Frozen,
+                    false,
+                )
             })
             .unwrap();
         assert!(matches!(held, TxnOutcome::Committed(true)), "{namespaces}");
@@ -6820,7 +6831,10 @@ fn a_held_proofs_work_on_the_writer_stays_the_same_however_many_namespaces_it_ho
     let one = work(1);
     let many = work(2_000);
     for ((what, one), many) in ["admitted", "released", "moved"].iter().zip(one).zip(many) {
-        assert!(many < one + 50, "{what}: {one} steps over one namespace, {many} over 2,000");
+        assert!(
+            many < one + 50,
+            "{what}: {one} steps over one namespace, {many} over 2,000"
+        );
     }
 }
 
@@ -6839,7 +6853,12 @@ fn a_proof_reserves_its_binding_before_it_decodes_it() {
     let binding = released_binding("doc", "doc.md", 1);
     let held = store
         .write_with(&NoFaults, |tx| {
-            crate::hosted::hold_released_in_tx(tx, &binding, ReleasedHoldContinuation::Frozen, false)
+            crate::hosted::hold_released_in_tx(
+                tx,
+                &binding,
+                ReleasedHoldContinuation::Frozen,
+                false,
+            )
         })
         .unwrap();
     assert!(matches!(held, TxnOutcome::Committed(true)), "{held:?}");

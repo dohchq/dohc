@@ -550,7 +550,7 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                let conn = rusqlite::Connection::open(&open.db_path).unwrap();
+                let conn = rusqlite::Connection::open(open.actor.database_path()).unwrap();
                 conn.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
                 for activation in ["retiring", "other"] {
                     conn.execute(
@@ -650,7 +650,7 @@ mod tests {
         let key = DocKey::new("workspace", "main", "document").unwrap();
         let lineage = dohc_engine_storage::hex_sha256(b"lineage");
         {
-            let conn = rusqlite::Connection::open(&open.db_path).unwrap();
+            let conn = rusqlite::Connection::open(open.actor.database_path()).unwrap();
             conn.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
             for activation in ["tagged", "requested"] {
                 conn.execute(
@@ -716,7 +716,7 @@ mod tests {
             )
         };
         let sources = || -> Vec<String> {
-            let conn = rusqlite::Connection::open(&open.db_path).unwrap();
+            let conn = rusqlite::Connection::open(open.actor.database_path()).unwrap();
             conn.prepare(
                 "SELECT activation_id FROM ydoc_owner_activation_sources ORDER BY activation_id",
             )

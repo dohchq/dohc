@@ -62,6 +62,7 @@ pub use blob::{
     get_binary_blob, has_binary_blob, hex, hex_sha256, put_binary_blob, put_binary_blob_verified,
     put_binary_blob_with_sha,
 };
+pub use checkpoint::{HeldReader, WalPressure};
 pub use diagnostics::{CorruptionKind, DiagnosticBundle, classify};
 pub use error::StorageError;
 pub use faults::{FaultAction, FaultInjector, FaultPoint, NoFaults};
@@ -86,5 +87,4 @@ pub use materialize::{
     upsert_projection_job,
 };
 pub use remote_changes::{count_remote_change_in_tx, remote_changes_applied_in};
-pub use checkpoint::{HeldReader, WalPressure};
 pub use store::{EngineStore, TxnOutcome};

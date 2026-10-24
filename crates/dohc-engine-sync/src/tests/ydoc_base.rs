@@ -5312,10 +5312,9 @@ fn ingress_drain_reports_its_sibling(stopped_first: bool) {
                     "SELECT object_id,path FROM snapshots \
                      WHERE path<>?1 AND path LIKE 'notes/arbitrated%' ORDER BY path",
                 )?;
-                let rows = statement
+                statement
                     .query_map([HEAD], |row| Ok((row.get(0)?, row.get(1)?)))?
-                    .collect::<Result<Vec<_>, _>>();
-                rows
+                    .collect::<Result<Vec<_>, _>>()
             })
             .expect("siblings")
     };
@@ -5399,8 +5398,8 @@ fn ingress_drain_reports_its_sibling(stopped_first: bool) {
     );
     assert_eq!(claimed.extras.conflicts_opened, 0);
     let mut second = None;
-    let again = crate::drain_report::claim(&mut engine, "ws", &mut second, &NoFaults)
-        .expect("claim again");
+    let again =
+        crate::drain_report::claim(&mut engine, "ws", &mut second, &NoFaults).expect("claim again");
     assert_eq!(changed_paths_of(&again.extras.changes), expected);
     engine
         .write_with(&NoFaults, |tx| {
