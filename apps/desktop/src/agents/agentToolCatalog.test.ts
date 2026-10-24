@@ -20,8 +20,10 @@ describe("agent launch profiles", () => {
     expect(tokenizeRunnerCommand(configuredRunnerCommand({ command: "ignored", profile }))).toEqual([profile.executable, ...agentProfileArguments(profile)]);
     expect(RunnerSettings.parse({ command: "", profile, enabled: true, timeoutMinutes: 30 }).profile).toEqual(profile);
   });
-  it("keeps Claude's configured permissions and denies unattended prompts", () => {
-    expect(agentProfileArguments({ tool: "claude", executable: "/usr/local/bin/claude" })).toEqual(["-p", "--permission-prompts", "none", "--no-session-persistence"]);
+  it("allows workspace edits and chat replies while denying unattended prompts", () => {
+    const profile = { tool: "claude", executable: "/usr/local/bin/claude" } as const;
+    expect(agentProfileArguments(profile)).toEqual(["-p", "--permission-prompts", "none", "--no-session-persistence", "--allowedTools", "Edit(/**)", "Bash(dohc chat reply:*)"]);
+    expect(tokenizeRunnerCommand(configuredRunnerCommand({ command: "ignored", profile }))).toEqual([profile.executable, ...agentProfileArguments(profile)]);
   });
   it("rejects unsupported tools and relative executable paths", () => {
     for (const profile of [{ tool: "cursor", executable: "/bin/agent" }, { tool: "codex", executable: "./codex" }, { tool: "claude", executable: "C:\\claude\n.exe" }]) {

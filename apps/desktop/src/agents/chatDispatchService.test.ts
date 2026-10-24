@@ -590,6 +590,10 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       storeResolves.chat += 1;
       return chat;
     },
+    startSelfTestThread: async (place, input) => (await chat.startChannelThread({
+      workspaceId: place.workspaceId, ...input,
+      authorActorKey: null, author: { kind: "human", displayName: "Sam" }, origin: "cli",
+    })).thread.id,
     dispatchStoreFor: () => {
       storeResolves.dispatch += 1;
       return serviceDispatch;
@@ -1075,7 +1079,8 @@ describe("chatDispatchService", () => {
     const prompt = firstSpawn.process.stdinText;
     expect(prompt).toContain("# Launch review");
     expect(prompt).toContain("Audit the rollback plan.");
-    expect(prompt).toContain(`dohc chat reply ${first.threadId} --as-agent`);
+    expect(prompt).toContain(`dohc chat reply ${first.threadId} --as-agent - <<'DOHC_REPORT'\n<report>\nDOHC_REPORT`);
+    expect(prompt).toContain("Keep the delimiter quoted to prevent shell expansion.");
     expect(prompt).toContain("Your final text is not shown anywhere");
     expect(firstSpawn.options).toMatchObject({
       cwd: fixture.root,
@@ -1523,7 +1528,7 @@ describe("chatDispatchService", () => {
 
     const call = fixture.spawnCalls[0]!;
     const prompt = call.process.stdinText ?? "";
-    expect(prompt).toContain(`--as-agent "`);
+    expect(prompt).toContain(`--option "<choice>"`);
     expect(prompt).toContain("Ship the release notes.");
     // Nothing carrying a quote may reach the command line, because that is
     // exactly what cmd.exe cannot represent.
@@ -3296,7 +3301,8 @@ describe("chatDispatchService", () => {
     });
     expect(fixture.spawnCalls).toHaveLength(1);
     const call = fixture.spawnCalls[0]!;
-    expect(call.options.env.DOHC_CHAT_THREAD).toBeUndefined();
+    const threadId = call.options.env.DOHC_CHAT_THREAD!;
+    expect(threadId).toEqual(expect.any(String));
     const runId = call.options.env.DOHC_RUN_ID;
     if (!runId) throw new Error("Expected self-test attribution.");
     if (profile) {
@@ -3307,22 +3313,22 @@ describe("chatDispatchService", () => {
     const marker = `dohc-runner-self-test:${runId}`;
     const agentChannel = await fixture.chat.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
     expect(call.process.stdinText).toContain(
-      `dohc chat post ${agentChannel.id} --as-agent --title "dohc runner self-test" "${marker}"`,
+      `dohc chat reply ${threadId} --as-agent "${marker}"`,
     );
     expect(runId).toBe("run_self_test_self_test_id_1");
     expect(fixture.attributions.at(-1)?.run).toEqual({ agentId: UNNAMED_AGENT_ID, agentRunId: runId, depth: 0, dispatch: "self-test" });
 
-    expect(await fixture.chat.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: agentChannel.id })).toEqual([]);
-    const started = await fixture.chat.startChannelThread({
+    expect(await fixture.chat.listMessages({ workspaceId: WORKSPACE_ID, threadId })).toEqual([
+      expect.objectContaining({ author: expect.objectContaining({ kind: "human" }), body: "Reply here to check the agent connection." }),
+    ]);
+    await fixture.chat.sendMessage({
       authorActorKey: null,
       workspaceId: WORKSPACE_ID,
-      channelId: agentChannel.id,
-      title: "dohc runner self-test",
+      threadId,
       author: { kind: "agent", displayName: "Sam" },
       origin: "cli",
       body: marker,
     });
-    const threadId = started.thread.id;
     call.process.emitExit(0);
 
     await expect(resultPromise).resolves.toEqual({
@@ -3414,12 +3420,10 @@ describe("chatDispatchService", () => {
       expect(fixture.spawnCalls[0]!.process.stdinText).toEqual(expect.any(String));
     });
     const call = fixture.spawnCalls[0]!;
-    const agentChannel = await fixture.chat.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
-    await fixture.chat.startChannelThread({
+    await fixture.chat.sendMessage({
       authorActorKey: null,
       workspaceId: WORKSPACE_ID,
-      channelId: agentChannel.id,
-      title: "dohc runner self-test",
+      threadId: call.options.env.DOHC_CHAT_THREAD!,
       author: { kind: "agent", displayName: "Sam" },
       origin: "cli",
       body: `dohc-runner-self-test:${call.options.env.DOHC_RUN_ID}`,
