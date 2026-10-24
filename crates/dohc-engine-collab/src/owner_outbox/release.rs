@@ -428,7 +428,7 @@ pub fn release_in_tx(
     )
     .map_err(collab)?;
     for id in current {
-        let mut stmt=tx.prepare("SELECT base_blob_digest FROM owner_ydoc_outboxes WHERE outbox_id=?1 UNION SELECT update_blob_digest FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND update_blob_digest IS NOT NULL UNION SELECT terminal_blob_digest FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND terminal_blob_digest IS NOT NULL").map_err(read_sql)?;
+        let mut stmt=tx.prepare("SELECT base_blob_digest FROM owner_ydoc_outboxes WHERE outbox_id=?1 UNION SELECT recovery_checkpoint_digest FROM owner_ydoc_outboxes WHERE outbox_id=?1 AND recovery_checkpoint_digest IS NOT NULL UNION SELECT update_blob_digest FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND update_blob_digest IS NOT NULL UNION SELECT terminal_blob_digest FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND terminal_blob_digest IS NOT NULL").map_err(read_sql)?;
         for r in stmt
             .query_map([&id], |r| r.get::<_, String>(0))
             .map_err(read_sql)?

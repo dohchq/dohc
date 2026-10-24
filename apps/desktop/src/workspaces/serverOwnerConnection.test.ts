@@ -41,9 +41,10 @@ it("sends the owner's kept-edits actions to the owner route, and reads the list 
   const signal = new AbortController().signal;
   await session.documents(signal);
   f.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ok: true})));
-  expect(await session.keptEdits({action: "copied", outboxId: "outbox", generation: 2}, signal)).toEqual({ok: true});
+  const checkpointDigest = "c".repeat(64);
+  expect(await session.keptEdits({action: "copied", outboxId: "outbox", generation: 2, checkpointDigest}, signal)).toEqual({ok: true});
   expect(f.fetch).toHaveBeenLastCalledWith("https://relay.test/sync/workspace/live-host/kept-edits", expect.objectContaining({method: "POST",
-    headers: {authorization: "Bearer secret", "content-type": "application/json"}, body: JSON.stringify({action: "copied", outboxId: "outbox", generation: 2}), redirect: "error"}));
+    headers: {authorization: "Bearer secret", "content-type": "application/json"}, body: JSON.stringify({action: "copied", outboxId: "outbox", generation: 2, checkpointDigest}), redirect: "error"}));
   await session.documents(signal);
   expect(f.fetch).toHaveBeenCalledTimes(3);
   // A refusal that changed or is gone, and one the server cannot reach, answer as such; any other conflict keeps the server's words.

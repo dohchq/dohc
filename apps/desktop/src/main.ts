@@ -6594,6 +6594,11 @@ function registerIpcHandlers(): void {
     ownerLiveQuarantines: workspace => desktopEngine.ownerLiveQuarantines(workspace.workspaceId),
     unwrittenOwnerLiveReleases: workspace => desktopEngine.unwrittenOwnerLiveReleases(workspace.workspaceId),
     retryOwnerLiveRelease: (workspace,objectId) => desktopEngine.retryOwnerLiveRelease(workspace,objectId),
+    listOwnerLiveStops: workspace => requireEngineSessions().run(workspace, async session => {
+      const client = desktopEngine.daemon?.currentClient();
+      if (!(client instanceof EngineClient)) throw new Error("dohc could not read live editing. Restart dohc and try again.");
+      return client.ownerYDocStopList({id:0,workspace:session.workspace,deadlineMs:30_000});
+    }),
   };
   const agentOwnerLiveDocuments = createOwnerLiveDocumentActions<DesktopWorkspaceOperation["workspace"], DesktopWorkspaceOperation>(ownerLiveDocumentDependencies);
   ownerLiveStopAgainForCli = (operation, kept) => agentOwnerLiveDocuments.stop(
@@ -6610,11 +6615,6 @@ function registerIpcHandlers(): void {
     relayShareJson,
     relayShareErrorCopy,
     relayShareDiscussionActivityPolls,
-    listOwnerLiveStops: workspace => requireEngineSessions().run(workspace, async session => {
-      const client = desktopEngine.daemon?.currentClient();
-      if (!(client instanceof EngineClient)) throw new Error("dohc could not read live editing. Restart dohc and try again.");
-      return client.ownerYDocStopList({id:0,workspace:session.workspace,deadlineMs:30_000});
-    }),
     retryOwnerLiveQuarantine: (workspace,objectId,incident) => desktopEngine.retryOwnerLiveQuarantine(workspace,objectId,incident),
     saveOwnerLiveRecoveryCopy: (workspace,path,incident) => desktopEngine.saveOwnerLiveRecoveryCopy(workspace,path,incident),
     sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); invalidateHistoryLabels(workspaceId); shareRosters.sharesChanged(workspaceId); },

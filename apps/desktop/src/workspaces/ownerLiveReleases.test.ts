@@ -97,7 +97,11 @@ it("keeps a record the engine no longer holds, without Try again, and no later r
   const file = join(await createTestScratch("dohc-unwritten-ended-"), "owner-live-releases.json");
   const releases = createUnwrittenReleases(() => file);
   await releases.put(release("plan"), "first package");
-  // The same release of the same queue, put again before it commits, replaces its own package.
+  // The same edits put again before the release commits keep their package: a
+  // later read of them may carry an older checkpoint, or none. The record follows the later put.
+  await releases.put({...release("plan"), path: "renamed.md"}, "same release");
+  expect(await releases.recovery("owner", "plan")).toBe("first package");
+  expect((await releases.list("owner")).map(row => row.path)).toEqual(["renamed.md"]);
   await releases.put(release("plan"), "same release");
   await releases.endRetry("owner", "plan", binding("plan"));
   const reopened = createUnwrittenReleases(() => file);
@@ -106,7 +110,7 @@ it("keeps a record the engine no longer holds, without Try again, and no later r
   await expect(reopened.put({...release("plan"), binding: binding("plan", 1)}, "later package")).rejects.toThrow("Save a recovery copy of plan.md first.");
   // Only Save ends it: a release of the same binding that wrote the file does not.
   await reopened.written("owner", "plan", {binding: binding("plan"), snapshot: release("plan").snapshot});
-  expect(await reopened.recovery("owner", "plan")).toBe("same release");
+  expect(await reopened.recovery("owner", "plan")).toBe("first package");
   expect(await reopened.list("owner")).toEqual([{...release("plan"), retry: false}]);
 });
 
@@ -147,7 +151,7 @@ it("digests a queue's refused edits, not when it was read nor what the server ac
     update, byteLength: 3, createdAtMs: sequence});
   const queue = {outboxId: "outbox", binding: binding("plan"), baseUpdateDigest: "b".repeat(64), baseUpdate: update, state: "quarantined" as const,
     pendingBytes: 6, oldestEntryAtMs: 1, quarantineReason: "invalid-update", observedBinding: null, retryDeliveryId: null,
-    entries: [entry(1), entry(2)], checkpoint: new Uint8Array([9])};
+    entries: [entry(1), entry(2)], checkpoint: new Uint8Array([9]), checkpointDigest: "9".repeat(64)};
   const snapshot = recoverySnapshot(queue);
   expect(snapshot).toMatch(/^[0-9a-f]{64}$/);
   expect(recoverySnapshot({...queue, oldestEntryAtMs: 5, retryDeliveryId: "outbox:1:digest", quarantineReason: "capacity-refused"})).toBe(snapshot);

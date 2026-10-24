@@ -447,8 +447,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   endServiceKeptEditsRetry(queue: serviceKeptEditsStorage.ServiceKeptEditsQueue) {
     return serviceKeptEditsStorage.endServiceKeptEditsRetry(this, queue);
   }
-  confirmServiceKeptEditsCopy(input: {workspaceId: string; outboxId: string; generation: number}) {
+  confirmServiceKeptEditsCopy(input: {workspaceId: string; outboxId: string; generation: number; checkpointDigest: string | null}) {
     return serviceKeptEditsStorage.confirmServiceKeptEditsCopy(this, input);
+  }
+  observeServiceKeptEditsCheckpoint(queue: serviceKeptEditsStorage.ServiceKeptEditsQueue, frozenCheckpoint: string | null) {
+    return serviceKeptEditsStorage.observeServiceKeptEditsCheckpoint(this, queue, frozenCheckpoint);
   }
   serviceKeptEditsHeld(document: {workspaceId: string; objectId: string}, identity: serviceKeptEditsStorage.ServiceKeptEditsIdentity) {
     return serviceKeptEditsStorage.serviceKeptEditsHeld(this, document, identity);

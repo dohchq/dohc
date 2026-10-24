@@ -852,11 +852,17 @@ fn a_refused_queue_reads_its_accepted_checkpoint_as_its_own_part() {
             )
         })
         .unwrap();
-    let read = |cursor: Option<OwnerOutboxReadCursor>, budget: usize| {
-        match read_pending_page(&store, "workspace", &outbox_id, cursor, budget).unwrap() {
-            OwnerOutboxPageResult::Page(page) => page,
-            OwnerOutboxPageResult::ReadChanged => panic!("unchanged snapshot"),
-        }
+    let read = |cursor: Option<OwnerOutboxReadCursor>, budget: usize| match read_pending_page(
+        &store,
+        "workspace",
+        &outbox_id,
+        cursor,
+        budget,
+    )
+    .unwrap()
+    {
+        OwnerOutboxPageResult::Page(page) => page,
+        OwnerOutboxPageResult::ReadChanged => panic!("unchanged snapshot"),
     };
     let header = read(None, 4096);
     let raw: serde_json::Value = serde_json::from_slice(&header.bytes).unwrap();
@@ -915,8 +921,11 @@ fn a_checkpoint_that_changes_between_pages_changes_the_read() {
         .write_with(&NoFaults, |tx| {
             let digest = hex_sha256(&shorter);
             put_binary_blob_with_sha(tx, &shorter, &digest)?;
-            tx.execute("UPDATE ydoc_owner_bindings SET checkpoint_digest=?1", [&digest])
-                .map_err(write_sql)?;
+            tx.execute(
+                "UPDATE ydoc_owner_bindings SET checkpoint_digest=?1",
+                [&digest],
+            )
+            .map_err(write_sql)?;
             Ok::<_, OwnerOutboxError>(())
         })
         .unwrap();
@@ -966,9 +975,11 @@ fn a_queue_of_an_earlier_restore_generation_reads_its_own_checkpoint_never_its_s
     };
     let own: String = store
         .read_with(|conn| {
-            conn.query_row("SELECT checkpoint_digest FROM ydoc_owner_bindings", [], |r| {
-                r.get(0)
-            })
+            conn.query_row(
+                "SELECT checkpoint_digest FROM ydoc_owner_bindings",
+                [],
+                |r| r.get(0),
+            )
         })
         .unwrap();
     assert_eq!(header(&store).1["checkpointDigest"], serde_json::json!(own));
@@ -977,7 +988,10 @@ fn a_queue_of_an_earlier_restore_generation_reads_its_own_checkpoint_never_its_s
     enroll(&mut store, &input, &observed.limits).unwrap();
     // The older queue still waits and keeps the checkpoint it builds on; the successor's need not hold it.
     let (snapshot, raw) = header(&store);
-    assert_eq!(raw["binding"], serde_json::to_value(&observed.binding).unwrap());
+    assert_eq!(
+        raw["binding"],
+        serde_json::to_value(&observed.binding).unwrap()
+    );
     assert!(raw["pendingEntryCount"].as_i64().unwrap() >= 1);
     assert_eq!(raw["checkpointDigest"], serde_json::json!(own));
     assert_ne!(own, hex_sha256(&host));
@@ -1051,11 +1065,17 @@ fn work_on_an_accepted_prefix_rebuilds_from_its_queue_alone_after_a_generation_a
     let restored = successor_input(&store, &next_generation(&observed), bounded(&host).unwrap());
     enroll(&mut store, &restored, &observed.limits).unwrap();
     // Read every part as a recovery copy does: the queue, then its checkpoint.
-    let read = |cursor: Option<OwnerOutboxReadCursor>| {
-        match read_pending_page(&store, "workspace", &outbox_id, cursor, 4096).unwrap() {
-            OwnerOutboxPageResult::Page(page) => page,
-            OwnerOutboxPageResult::ReadChanged => panic!("nothing changed during the read"),
-        }
+    let read = |cursor: Option<OwnerOutboxReadCursor>| match read_pending_page(
+        &store,
+        "workspace",
+        &outbox_id,
+        cursor,
+        4096,
+    )
+    .unwrap()
+    {
+        OwnerOutboxPageResult::Page(page) => page,
+        OwnerOutboxPageResult::ReadChanged => panic!("nothing changed during the read"),
     };
     let header = read(None);
     let snapshot = header.cursor.snapshot.clone();
@@ -1078,7 +1098,10 @@ fn work_on_an_accepted_prefix_rebuilds_from_its_queue_alone_after_a_generation_a
             .map(|(_, bytes)| bytes.clone())
             .unwrap()
     };
-    let (base, update) = (part(OwnerOutboxReadPart::Base), part(OwnerOutboxReadPart::Update));
+    let (base, update) = (
+        part(OwnerOutboxReadPart::Base),
+        part(OwnerOutboxReadPart::Update),
+    );
     assert_eq!(update, dependent);
     let mut kept = Vec::new();
     let mut cursor = Some(OwnerOutboxReadCursor {
@@ -1104,7 +1127,10 @@ fn work_on_an_accepted_prefix_rebuilds_from_its_queue_alone_after_a_generation_a
     rebuilt.apply(&kept).unwrap();
     rebuilt.apply(&update).unwrap();
     assert!(!rebuilt.has_pending_dependencies());
-    let text = rebuilt.project(crate::ContentKind::Richdoc).unwrap().content;
+    let text = rebuilt
+        .project(crate::ContentKind::Richdoc)
+        .unwrap()
+        .content;
     assert!(text.contains("accepted prefix") && text.contains("unsent on the accepted prefix"));
     assert!(!text.contains("restored on the host"));
 }
@@ -1165,9 +1191,11 @@ fn an_already_refused_queue_keeps_its_refusal_and_checkpoint_across_a_generation
     .unwrap();
     let own: String = store
         .read_with(|conn| {
-            conn.query_row("SELECT checkpoint_digest FROM ydoc_owner_bindings", [], |r| {
-                r.get(0)
-            })
+            conn.query_row(
+                "SELECT checkpoint_digest FROM ydoc_owner_bindings",
+                [],
+                |r| r.get(0),
+            )
         })
         .unwrap();
     let host = Ydoc::wire();
@@ -1188,11 +1216,17 @@ fn an_already_refused_queue_keeps_its_refusal_and_checkpoint_across_a_generation
         (state.as_str(), reason.as_deref(), kept.as_deref()),
         ("quarantined", Some("invalid-update"), Some(own.as_str()))
     );
-    let read = |cursor: Option<OwnerOutboxReadCursor>| {
-        match read_pending_page(&store, "workspace", &outbox_id, cursor, 4096).unwrap() {
-            OwnerOutboxPageResult::Page(page) => page,
-            OwnerOutboxPageResult::ReadChanged => panic!("nothing changed during the read"),
-        }
+    let read = |cursor: Option<OwnerOutboxReadCursor>| match read_pending_page(
+        &store,
+        "workspace",
+        &outbox_id,
+        cursor,
+        4096,
+    )
+    .unwrap()
+    {
+        OwnerOutboxPageResult::Page(page) => page,
+        OwnerOutboxPageResult::ReadChanged => panic!("nothing changed during the read"),
     };
     let header = read(None);
     let raw: serde_json::Value = serde_json::from_slice(&header.bytes).unwrap();
@@ -1216,7 +1250,10 @@ fn an_already_refused_queue_keeps_its_refusal_and_checkpoint_across_a_generation
             .map(|(_, bytes)| bytes.clone())
             .unwrap()
     };
-    let (base, update) = (part(OwnerOutboxReadPart::Base), part(OwnerOutboxReadPart::Update));
+    let (base, update) = (
+        part(OwnerOutboxReadPart::Base),
+        part(OwnerOutboxReadPart::Update),
+    );
     assert_eq!(update, refused);
     let mut kept = Vec::new();
     let mut cursor = Some(OwnerOutboxReadCursor {
@@ -1236,7 +1273,10 @@ fn an_already_refused_queue_keeps_its_refusal_and_checkpoint_across_a_generation
     rebuilt.apply(&kept).unwrap();
     rebuilt.apply(&update).unwrap();
     assert!(!rebuilt.has_pending_dependencies());
-    let text = rebuilt.project(crate::ContentKind::Richdoc).unwrap().content;
+    let text = rebuilt
+        .project(crate::ContentKind::Richdoc)
+        .unwrap()
+        .content;
     assert!(text.contains("accepted prefix") && text.contains("refused on the accepted prefix"));
     assert!(!text.contains("restored on the host"));
 }
@@ -1289,9 +1329,24 @@ fn an_already_refused_queue_keeps_native_work_past_its_checkpoint_across_a_gener
     let native = Ydoc::wire();
     native.apply(&checkpoint).unwrap();
     let delta = native.richdoc_append_paragraph("native past the checkpoint");
+    // An owner binding refuses ordinary writes, so this lands as frames do,
+    // and the binding follows the native head as a draft append moves it.
     store
         .write_with(&NoFaults, |tx| {
-            crate::record_update_in_tx(tx, &key, &delta, None, None, 21)
+            crate::durable::record_authorized_update_in_tx(
+                tx, &key, &delta, false, None, None, false, 21,
+            )
+            .map_err(collab)?;
+            let head = crate::read_marker_in(tx, &key)
+                .map_err(collab)?
+                .unwrap()
+                .head_update_seq;
+            tx.execute(
+                "UPDATE ydoc_owner_bindings SET native_head_sequence=?1",
+                [head],
+            )
+            .map_err(write_sql)?;
+            Ok::<_, OwnerOutboxError>(())
         })
         .unwrap();
     let local = store
@@ -1857,7 +1912,11 @@ fn stop_preserves_old_generation_work_and_start_can_enroll_again() {
         panic!("the finished Stop was not cleared")
     };
     assert_eq!(
-        (cleared.state.as_str(), cleared.retirement_owed, cleared.binding.as_ref()),
+        (
+            cleared.state.as_str(),
+            cleared.retirement_owed,
+            cleared.binding.as_ref()
+        ),
         ("released", false, Some(&next))
     );
     assert!(matches!(

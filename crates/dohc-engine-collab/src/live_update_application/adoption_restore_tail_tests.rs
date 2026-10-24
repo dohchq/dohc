@@ -1513,20 +1513,11 @@ fn native_restore_keeps_enrolled_owner_drafts_as_truthful_sources() {
     }
 }
 
-#[test]
-fn a_queue_frozen_at_a_refused_seed_lets_its_document_leave_with_later_accepted_work() {
-    let mut f = Fixture::new();
-    f.local_edit_before_adoption();
-    f.adopt().unwrap();
-    let outbox: String = f
-        .store
-        .read_with(|conn| conn.query_row("SELECT outbox_id FROM owner_ydoc_outboxes", [], |r| r.get(0)))
-        .unwrap();
-    // Another person's edit the relay accepted after the adoption, on the accepted base without the seed.
-    let other = Ydoc::wire();
-    other.apply(&f.cut.baseline_bytes).unwrap();
+/// Another person's edit on `other`, which the relay accepted at `cursor`
+/// after the adoption, applied as committed.
+fn apply_recipient_edit(f: &mut Fixture, other: &Ydoc, cursor: i64, text: &str) -> ApplicationResult {
     let before = other.state_vector();
-    let bytes = other.richdoc_append_paragraph("Recipient text");
+    let bytes = other.richdoc_append_paragraph(text);
     let mut first_seen: Vec<_> = other
         .state_vector()
         .iter()
@@ -1544,9 +1535,13 @@ fn a_queue_frozen_at_a_refused_seed_lets_its_document_leave_with_later_accepted_
         metadata: AdmittedLiveUpdateMetadata {
             accepted: RelayAcceptedLiveUpdate {
                 receipt: LiveUpdateReceipt {
-                    delivery_id: "recipient-edit".into(),
+                    delivery_id: if cursor == 1 {
+                        "recipient-edit".into()
+                    } else {
+                        format!("recipient-edit-{cursor}")
+                    },
                     update_digest: hex_sha256(&bytes),
-                    journal_cursor: 1,
+                    journal_cursor: cursor,
                     accepting_host_epoch: 1,
                 },
                 binding: f.binding.clone(),
@@ -1555,7 +1550,7 @@ fn a_queue_frozen_at_a_refused_seed_lets_its_document_leave_with_later_accepted_
                     grant_id: "grant".into(),
                     grant_generation: 1,
                 },
-                received_at_ms: 1,
+                received_at_ms: cursor,
             },
             first_seen,
             canonical_version: Some(2),
@@ -1568,17 +1563,50 @@ fn a_queue_frozen_at_a_refused_seed_lets_its_document_leave_with_later_accepted_
         },
         update_bytes: bytes,
     };
+    apply_committed(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &f.handle,
+        event,
+        &NoFaults,
+        100_000_000,
+        |_, _, _, _| Ok(()),
+    )
+    .unwrap()
+}
+
+/// The adopted fixture's one queue, holding the owner's adoption seed.
+fn seed_outbox(f: &Fixture) -> String {
+    f.store
+        .read_with(|conn| conn.query_row("SELECT outbox_id FROM owner_ydoc_outboxes", [], |r| r.get(0)))
+        .unwrap()
+}
+
+fn refuse_seed(f: &mut Fixture, outbox: &str) {
+    owner_outbox::quarantine(
+        &mut f.store,
+        "workspace",
+        owner_outbox::OwnerOutboxQuarantineInput {
+            outbox_id: outbox.to_owned(),
+            reason: "invalid-update".into(),
+            observed_binding: None,
+        },
+        8,
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_queue_frozen_at_a_refused_seed_lets_its_document_leave_with_later_accepted_work() {
+    let mut f = Fixture::new();
+    f.local_edit_before_adoption();
+    f.adopt().unwrap();
+    let outbox = seed_outbox(&f);
+    // Another person's edit the relay accepted after the adoption, on the accepted base without the seed.
+    let other = Ydoc::wire();
+    other.apply(&f.cut.baseline_bytes).unwrap();
     assert!(matches!(
-        apply_committed(
-            &mut f.store,
-            &mut WriterDocCache::new(),
-            &f.handle,
-            event,
-            &NoFaults,
-            100_000_000,
-            |_, _, _, _| Ok(())
-        )
-        .unwrap(),
+        apply_recipient_edit(&mut f, &other, 1, "Recipient text"),
         ApplicationResult::Applied(..)
     ));
     let pending = |f: &Fixture| {
@@ -1597,17 +1625,7 @@ fn a_queue_frozen_at_a_refused_seed_lets_its_document_leave_with_later_accepted_
         pending(&f),
         (Some(UnloadPending::Delivery), Some(UnloadPending::Delivery), false)
     );
-    owner_outbox::quarantine(
-        &mut f.store,
-        "workspace",
-        owner_outbox::OwnerOutboxQuarantineInput {
-            outbox_id: outbox.clone(),
-            reason: "invalid-update".into(),
-            observed_binding: None,
-        },
-        8,
-    )
-    .unwrap();
+    refuse_seed(&mut f, &outbox);
     // Refused for good, the seed keeps the recipient's edit from settling, and
     // nothing holds the document: the store keeps the edit and the queue.
     assert_eq!(pending(&f), (None, None, true));
@@ -1664,6 +1682,163 @@ fn a_queue_frozen_at_a_refused_seed_lets_its_document_leave_with_later_accepted_
         pending(&f),
         (Some(UnloadPending::Settlement), Some(UnloadPending::Settlement), false)
     );
+}
+
+/// The header and the checkpoint a recovery read of `outbox` names, paged in
+/// `page` bytes. None once a part changed under it.
+fn read_recovery_checkpoint(
+    f: &Fixture,
+    outbox: &str,
+    page: usize,
+) -> Option<(serde_json::Value, Vec<u8>)> {
+    let read = |cursor| {
+        owner_outbox::read_pending_page(&f.store, "workspace", outbox, cursor, page)
+            .unwrap_or_else(|error| panic!("recovery read failed: {error}"))
+    };
+    let mut header = Vec::new();
+    let mut cursor = None;
+    loop {
+        let owner_outbox::OwnerOutboxPageResult::Page(part) = read(cursor) else {
+            return None;
+        };
+        header.extend(part.bytes);
+        match part.next_cursor {
+            Some(next) if next.part == owner_outbox::OwnerOutboxReadPart::Header => cursor = Some(next),
+            next => {
+                cursor = next;
+                break;
+            }
+        }
+    }
+    let header: serde_json::Value = serde_json::from_slice(&header).unwrap();
+    let mut checkpoint = Vec::new();
+    let mut cursor = Some(owner_outbox::OwnerOutboxReadCursor {
+        snapshot: cursor.unwrap().snapshot,
+        part: owner_outbox::OwnerOutboxReadPart::Checkpoint,
+        sequence: 0,
+        offset: 0,
+    });
+    while let Some(at) = cursor {
+        let owner_outbox::OwnerOutboxPageResult::Page(part) = read(Some(at)) else {
+            return None;
+        };
+        assert_eq!(Some(part.digest.as_str()), header["checkpointDigest"].as_str());
+        checkpoint.extend(part.bytes);
+        cursor = part.next_cursor;
+    }
+    assert_eq!(Some(hex_sha256(&checkpoint).as_str()), header["checkpointDigest"].as_str());
+    Some((header, checkpoint))
+}
+
+fn checkpoint_text(bytes: &[u8]) -> String {
+    let doc = Ydoc::wire();
+    doc.apply(bytes).unwrap();
+    doc.project(ContentKind::Richdoc).unwrap().content
+}
+
+#[test]
+fn a_recovery_copy_of_a_refused_seed_holds_every_accepted_edit_after_it() {
+    let mut f = Fixture::new();
+    f.local_edit_before_adoption();
+    f.adopt().unwrap();
+    let outbox = seed_outbox(&f);
+    let other = Ydoc::wire();
+    other.apply(&f.cut.baseline_bytes).unwrap();
+    assert!(matches!(
+        apply_recipient_edit(&mut f, &other, 1, "Recipient text"),
+        ApplicationResult::Applied(..)
+    ));
+    refuse_seed(&mut f, &outbox);
+    let prepare = |f: &mut Fixture| owner_outbox::prepare_recovery_checkpoint(&mut f.store, "workspace", &outbox);
+    let recorded = |f: &Fixture| -> (Option<String>, Option<i64>) {
+        f.store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT recovery_checkpoint_digest,recovery_checkpoint_cursor FROM owner_ydoc_outboxes WHERE outbox_id=?1",
+                    [&outbox],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .unwrap()
+    };
+    // Only the writer builds it, so a read before then names nothing.
+    assert!(matches!(
+        owner_outbox::read_pending_page(&f.store, "workspace", &outbox, None, 4096),
+        Err(owner_outbox::OwnerOutboxError::RecoveryCheckpointOutdated)
+    ));
+    prepare(&mut f).unwrap();
+    let (header, checkpoint) = read_recovery_checkpoint(&f, &outbox, 16).unwrap();
+    // Accepted frames only: the recipient's edit, never the refused seed.
+    let text = checkpoint_text(&checkpoint);
+    assert!(text.contains("Recipient text"), "{text}");
+    assert!(!text.contains("edited before connecting"), "{text}");
+    assert_eq!(header["frozenAtRefusedSeed"], serde_json::json!(true));
+    assert!(checkpoint.len() > 16, "the checkpoint spans pages");
+    let first = recorded(&f);
+    assert_eq!(first.1, Some(1));
+    assert_eq!(first.0.as_deref(), header["checkpointDigest"].as_str());
+    // Building again at the same cursor keeps the same bytes.
+    prepare(&mut f).unwrap();
+    assert_eq!(recorded(&f), first);
+    // A further accepted edit moves the cursor: a read under way restarts,
+    // and the next build names new bytes holding both edits.
+    let header_cursor = owner_outbox::OwnerOutboxReadCursor {
+        snapshot: {
+            let owner_outbox::OwnerOutboxPageResult::Page(page) =
+                owner_outbox::read_pending_page(&f.store, "workspace", &outbox, None, 4096).unwrap()
+            else {
+                panic!("unchanged queue");
+            };
+            page.cursor.snapshot
+        },
+        part: owner_outbox::OwnerOutboxReadPart::Checkpoint,
+        sequence: 0,
+        offset: 0,
+    };
+    assert!(matches!(
+        apply_recipient_edit(&mut f, &other, 2, "Second recipient text"),
+        ApplicationResult::Applied(..)
+    ));
+    assert!(matches!(
+        owner_outbox::read_pending_page(&f.store, "workspace", &outbox, Some(header_cursor), 4096),
+        Ok(owner_outbox::OwnerOutboxPageResult::ReadChanged)
+    ));
+    assert!(matches!(
+        owner_outbox::read_pending_page(&f.store, "workspace", &outbox, None, 4096),
+        Err(owner_outbox::OwnerOutboxError::RecoveryCheckpointOutdated)
+    ));
+    prepare(&mut f).unwrap();
+    let (header, checkpoint) = read_recovery_checkpoint(&f, &outbox, 4096).unwrap();
+    let second = recorded(&f);
+    assert_eq!(second.1, Some(2));
+    assert_ne!(second.0, first.0);
+    assert_eq!(second.0.as_deref(), header["checkpointDigest"].as_str());
+    let text = checkpoint_text(&checkpoint);
+    assert!(text.contains("Recipient text") && text.contains("Second recipient text"), "{text}");
+    let replaced: i64 = f
+        .store
+        .read_with(|conn| {
+            conn.query_row("SELECT count(*) FROM binary_blobs WHERE sha256=?1", [first.0.as_deref().unwrap()], |r| r.get(0))
+        })
+        .unwrap();
+    assert_eq!(replaced, 0, "the older checkpoint's bytes go once nothing names them");
+    // An accepted update still waiting on a missing dependency refuses the copy.
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO ydoc_deferred_updates(workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms) \
+                 VALUES('workspace','main','object','recipient-origin',1,30)",
+                [],
+            )
+            .map_err(write_sql)
+        })
+        .unwrap();
+    assert!(matches!(
+        owner_outbox::read_pending_page(&f.store, "workspace", &outbox, None, 4096),
+        Err(owner_outbox::OwnerOutboxError::AcceptedStateIncomplete)
+    ));
+    assert!(matches!(prepare(&mut f), Err(owner_outbox::OwnerOutboxError::AcceptedStateIncomplete)));
+    assert_eq!(recorded(&f), second);
 }
 
 #[test]

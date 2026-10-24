@@ -87,8 +87,9 @@ it("lets only the workspace's owner see, read, try again and confirm a copy of e
   const first = refuse();
   const kept = {objectId: binding.objectId, path: binding.currentPath, outboxId: "outbox-1", reason: "invalid-update", store: expect.stringMatching(/^[0-9a-f]{32}$/)};
   const list = async () => ((await (await f.handle(f.request())).json()) as {keptEdits?: unknown}).keptEdits;
+  // A copy names the checkpoint it read: none here, as for a queue with no accepted state.
   const act = (action: string, generation: number, outboxId = "outbox-1", extra: Record<string, unknown> = {}) =>
-    f.handle(f.request("POST", {action, outboxId, generation, ...extra}, {}, "/kept-edits"));
+    f.handle(f.request("POST", {action, outboxId, generation, ...(action === "copied" ? {checkpointDigest: null} : {}), ...extra}, {}, "/kept-edits"));
   expect(await list()).toEqual([{...kept, generation: first, recovery: "paused"}]);
   // A recipient of the owner's shares, and the owner of another workspace, learn and reach nothing.
   for (const actor of [{workspaceId: scope.workspaceId, userId: "recipient"}, {workspaceId: "other-workspace", userId: "owner-1"}]) {
@@ -128,7 +129,18 @@ it("lets only the workspace's owner see, read, try again and confirm a copy of e
   const held = () => f.storage.serviceKeptEditsHeld({workspaceId: scope.workspaceId, objectId: binding.objectId}, identity);
   expect((await act("copied", first)).status).toBe(409);
   expect(held()).toBe(true);
-  expect(await (await act("copied", second)).json()).toEqual({ok: true});
+  // A confirmation names the checkpoint its copy read, and only that.
+  for (const shape of [{action: "copied", outboxId: "outbox-1", generation: second}, {action: "copied", outboxId: "outbox-1", generation: second, checkpointDigest: "x"},
+    {action: "retry", outboxId: "outbox-1", generation: second, checkpointDigest: null}]) {
+    expect((await f.handle(f.request("POST", shape, {}, "/kept-edits"))).status).toBe(400);
+  }
+  expect(held()).toBe(true);
+  // While the queue stays frozen at its seed, a copy of an older checkpoint holds the document, and one of the current checkpoint lets it go.
+  f.storage.observeServiceKeptEditsCheckpoint(queue("outbox-1"), "b".repeat(64));
+  expect(await (await act("copied", second, "outbox-1", {checkpointDigest: "a".repeat(64)})).json()).toEqual({ok: true});
+  expect(await list()).toEqual([{...kept, generation: second, recovery: "paused"}]);
+  expect(held()).toBe(true);
+  expect(await (await act("copied", second, "outbox-1", {checkpointDigest: "b".repeat(64)})).json()).toEqual({ok: true});
   expect(await list()).toEqual([{...kept, generation: second, recovery: "copied"}]);
   expect(held()).toBe(false);
   // Without live authority here, or once the refusal changed, Try again grants nothing.
@@ -164,7 +176,8 @@ it("lists edits kept in an earlier identity's store as unreachable and answers e
   // The owner tells the two stores apart without learning either identity.
   expect(listed[0]!.store).not.toBe(listed[1]!.store);
   for (const secret of ["old-epoch", "old-stream", "epoch", "stream"]) expect(JSON.stringify(listed)).not.toContain(secret);
-  const act = (action: string, generation: number) => f.handle(f.request("POST", {action, outboxId: "outbox-x", generation}, {}, "/kept-edits"));
+  const act = (action: string, generation: number) => f.handle(f.request("POST", {action, outboxId: "outbox-x", generation,
+    ...(action === "copied" ? {checkpointDigest: null} : {})}, {}, "/kept-edits"));
   for (const action of ["page", "retry", "copied"]) {
     const response = await act(action, earlier);
     expect(response.status).toBe(409);
@@ -184,7 +197,7 @@ it("routes the live host and its kept edits actions to the enrollment routes", a
   const f = await fixture();
   const generation = (f.storage.recordServiceKeptEdits({identity, outboxId: "outbox-1", binding, reason: "invalid-update", headDeliveryId: "delivery-1",
     refusalKey: "refusal-1", nowMs: 5}), f.storage.readServiceKeptEdits(queue("outbox-1"))!.generation);
-  const requests = [f.request(), f.request("POST", {action: "copied", outboxId: "outbox-1", generation}, {}, "/kept-edits")];
+  const requests = [f.request(), f.request("POST", {action: "copied", outboxId: "outbox-1", generation, checkpointDigest: null}, {}, "/kept-edits")];
   for (const request of requests) {
     expect(isServiceHostEnrollmentPath(new URL(request.url).pathname)).toBe(true);
     expect((await f.handle(request)).status).toBe(200);

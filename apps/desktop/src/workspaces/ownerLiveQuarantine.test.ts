@@ -115,12 +115,12 @@ it("shows a damaged record beside the queue it came from, even with that queue's
 });
 
 // A Stop's release failed, then the server accepted another edit, which moved
-// the queue's checkpoint. The next Stop's package replaces the first, and the
-// queue's row still speaks for the record of the same refused edits.
-it("keeps one release's record across a checkpoint advance: the next put replaces it, and the queue's row still hides it", async () => {
+// the queue's checkpoint. The next Stop's put keeps the first package of the
+// same refused edits, and the queue's row still speaks for their record.
+it("keeps one release's record and package across a checkpoint advance, and the queue's row still hides it", async () => {
   head("plan", "invalid-update");
   const queue = (checkpoint: number): OwnerYDocOutboxRecovery => ({outboxId: "outbox-plan", binding: binding("plan"), baseUpdateDigest: "b".repeat(64),
-    baseUpdate: new Uint8Array([0]), checkpoint: new Uint8Array([checkpoint]), state: "quarantined", pendingBytes: 1, oldestEntryAtMs: 1,
+    baseUpdate: new Uint8Array([0]), checkpoint: new Uint8Array([checkpoint]), checkpointDigest: String(checkpoint).repeat(64).slice(0, 64), state: "quarantined", pendingBytes: 1, oldestEntryAtMs: 1,
     quarantineReason: "invalid-update", observedBinding: null, retryDeliveryId: null,
     entries: [{sequence: 1, deliveryId: "delivery-plan", appendKey: "a", updateDigest: "d".repeat(64), update: new Uint8Array([1]), byteLength: 1, createdAtMs: 1}]});
   const release = (contents: OwnerYDocOutboxRecovery) => ({workspaceId: "workspace", objectId: "plan", path: "plan.md", reason: "invalid-update",
@@ -129,7 +129,7 @@ it("keeps one release's record across a checkpoint advance: the next put replace
   const releases = createUnwrittenReleases(() => join(scratch, "owner-live-releases.json"));
   await releases.put(release(queue(1)), "before the advance");
   await releases.put(release(queue(2)), "after the advance");
-  expect(await releases.recovery("workspace", "plan")).toBe("after the advance");
+  expect(await releases.recovery("workspace", "plan")).toBe("before the advance");
   outboxes.pending.set("outbox-plan", queue(2));
   const client = {sendRequest: vi.fn(), ownerYDocStopList: vi.fn(async () => [stop("plan", "requested")]),
     ownerYDocListDrafts: vi.fn(async () => ({drafts: [draft("plan", "quarantined")], next: null}))} as unknown as EngineClient;

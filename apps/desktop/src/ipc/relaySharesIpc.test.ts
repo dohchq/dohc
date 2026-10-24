@@ -220,7 +220,8 @@ describe("owner live document enrollment", () => {
   });
   // Document A stopped at old.md and moved to new.md; B now has old.md. The
   // server resumed A, so Resume clears A's Stop where A is now, never B's.
-  // When this computer no longer has the resumed document, it clears nothing.
+  // When this computer no longer has the resumed document, it clears that
+  // document's Stop as the engine holds it, or nothing when it holds none.
   it("clears the Stop of the document the server resumed, wherever it is now", async () => {
     const h=harness();
     h.liveDocument.mockImplementation(async (_workspace,target) => "path" in target ? (target.path==="old.md" ? {mainVersionId:"main",objectId:"b",currentPath:"old.md"} : null)
@@ -231,10 +232,18 @@ describe("owner live document enrollment", () => {
     h.request.mockResolvedValue({ok:true,path:"old.md",objectId:"gone",status:"preparing"});
     await h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel,{workspaceId,path:"old.md"});
     expect(h.ownerLiveStop).toHaveBeenCalledOnce();
+    // A Stop of the gone document, which a later pass would send again: Resume clears it by its own document.
+    const gone={mainVersionId:"main",objectId:"gone",currentPath:"deleted.md"};
+    h.localStops.mockResolvedValue([{state:"requested",binding:null,document:{mainVersionId:"main",objectId:"other",currentPath:"old.md"},retirementOwed:true,relayDatabaseNamespace:"relay"},
+      {state:"requested",binding:null,document:gone,retirementOwed:true,relayDatabaseNamespace:"relay"}]);
+    await h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel,{workspaceId,path:"old.md"});
+    expect(h.ownerLiveStop.mock.calls.at(-1)).toEqual([h.workspace,"clear","deleted.md",gone]);
+    expect(h.ownerLiveStop).toHaveBeenCalledTimes(2);
+    h.localStops.mockResolvedValue([]);
     // An answer that names no document clears nothing.
     h.request.mockResolvedValue({ok:true,path:"old.md",status:"preparing"});
     await expect(h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel,{workspaceId,path:"old.md"})).rejects.toThrow();
-    expect(h.ownerLiveStop).toHaveBeenCalledOnce();
+    expect(h.ownerLiveStop).toHaveBeenCalledTimes(2);
   });
   it("adds only deferred counts and editability to a stopped row",async () => {
     const h=harness();
@@ -461,12 +470,16 @@ describe("owner live document enrollment", () => {
       expect(h.request.mock.calls.map(call => JSON.parse(call[2]!.body as string))).toEqual([{path: "live.md", objectId: "object", retire: true}]);
       expect(h.ownerLiveStop).not.toHaveBeenCalled();
       expect(h.unwrittenOwnerLiveReleases).not.toHaveBeenCalled();
+      // Renamed on the server since the list was read, it is still that document, stopped.
+      h.request.mockResolvedValueOnce({...retired, path: "moved.md"});
+      await expect(stop({objectId: "object"})).resolves.toEqual({keptEdits: "kept"});
+      h.request.mockClear();
       // Without the server's identity, a path with no document names nothing to stop.
       await expect(stop({})).rejects.toThrow("This document changed.");
       // Nor does a row's identity stand for another document now at its path.
       h.liveDocument.mockResolvedValue({mainVersionId: "main", objectId: "other", currentPath: "live.md"});
       await expect(stop({objectId: "object"})).rejects.toThrow("This document changed.");
-      expect(h.request).toHaveBeenCalledOnce();
+      expect(h.request).not.toHaveBeenCalled();
       expect(h.ownerLiveStop).not.toHaveBeenCalled();
     });
 

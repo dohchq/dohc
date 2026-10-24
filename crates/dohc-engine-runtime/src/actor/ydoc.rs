@@ -14,8 +14,8 @@ use dohc_engine_collab::{
     OwnerOutboxAppendResult, OwnerOutboxError, OwnerOutboxQuarantineInput, OwnerOutboxRefusal,
     OwnerOutboxRetryInput, Projection, Regime, SceneAsset, WriterDocCache, Ydoc,
     acknowledge_owner_outbox, append_owner_outbox, encode_scene_asset_record,
-    encode_scene_asset_records, import_portable_scene, quarantine_owner_outbox,
-    record_owner_outbox_refusal, retry_owner_outbox,
+    encode_scene_asset_records, import_portable_scene, prepare_owner_outbox_recovery_checkpoint,
+    quarantine_owner_outbox, record_owner_outbox_refusal, retry_owner_outbox,
 };
 use dohc_engine_domain::{
     ChangeAttribution, DomainError, ProjectedWriteText, VersionedTextStore,
@@ -691,7 +691,33 @@ impl ActorHandle {
             if token.is_cancelled() {
                 Err(RuntimeError::Cancelled)
             } else {
-                Ok(record_owner_outbox_refusal(store, &workspace_id, input, refusal, now_ms))
+                Ok(record_owner_outbox_refusal(
+                    store,
+                    &workspace_id,
+                    input,
+                    refusal,
+                    now_ms,
+                ))
+            }
+        })
+        .await
+    }
+
+    pub async fn owner_ydoc_outbox_prepare_recovery_checkpoint(
+        &self,
+        workspace_id: String,
+        outbox_id: String,
+        token: CancellationToken,
+    ) -> Result<Result<(), OwnerOutboxError>, RuntimeError> {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                Ok(prepare_owner_outbox_recovery_checkpoint(
+                    store,
+                    &workspace_id,
+                    &outbox_id,
+                ))
             }
         })
         .await

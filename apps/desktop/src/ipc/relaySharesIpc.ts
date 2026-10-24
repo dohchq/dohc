@@ -115,6 +115,8 @@ export interface OwnerLiveDocumentActionDependencies<Workspace> {
   // Settles again a release that took refused edits but could not write the file. Undefined when no release
   // remains; "requested" when that release never committed, so its Stop still waits for one.
   retryOwnerLiveRelease(workspace: Workspace, objectId: string): Promise<OwnerLiveStop | "requested" | undefined>;
+  // This computer's Stops, as the engine holds them.
+  listOwnerLiveStops(workspace: Workspace): Promise<OwnerLiveStop[]>;
 }
 
 /** The kept edits a Stop again was asked for: its document, and whether its Stop waits or its release could not write the file. */
@@ -157,7 +159,8 @@ export function createOwnerLiveDocumentActions<
       let result: unknown;
       try {result=await liveHost(operation,"DELETE",{path:input.path,objectId:input.objectId,retire:true});}
       catch (error) {operation.assertCurrent();throw error;}
-      z.object({ok:z.literal(true),objectId:z.literal(input.objectId),path:z.literal(input.path),status:z.literal("retired"),
+      // The server names its document's current path, which a rename there may have changed.
+      z.object({ok:z.literal(true),objectId:z.literal(input.objectId),path:z.string().min(1),status:z.literal("retired"),
         acceptedCursor:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).parse(result);
       return {keptEdits:dependencies.ownerLiveQuarantines(operation.workspace).some(row => row.objectId===input.objectId) ? "kept" : "none"};
     });
@@ -233,7 +236,8 @@ export function createOwnerLiveDocumentActions<
   /**
    * Resume clears the Stop of the document the server resumed, wherever this
    * computer has it now: another document that took its old path keeps its
-   * own Stop. One this computer no longer has keeps nothing here to clear.
+   * own Stop. For one this computer no longer has, it clears that document's
+   * Stop as the engine holds it, so no later pass stops it again.
    */
   const resume = async (input: {workspaceId: string; path: string}, operation: Operation): Promise<void> => {
     operation.assertCurrent();assertOriginalWorkspace(operation.workspace);
@@ -244,7 +248,8 @@ export function createOwnerLiveDocumentActions<
       const response=z.object({ok:z.literal(true),objectId:OwnerLiveDocument.shape.objectId,path:z.literal(input.path),
         status:z.enum(["ready","preparing","unavailable"])}).parse(result);
       if (response.status==="unavailable") throw new Error("This document could not resume live editing. Refresh the list and try again.");
-      const document=await dependencies.liveDocument(operation.workspace,{objectId:response.objectId});
+      const document=await dependencies.liveDocument(operation.workspace,{objectId:response.objectId}) ??
+        (await dependencies.listOwnerLiveStops(operation.workspace)).find(stop => stop.document.objectId===response.objectId)?.document;
       operation.assertCurrent();
       if (document) await dependencies.ownerLiveStop(operation.workspace,"clear",document.currentPath,document);
       operation.assertCurrent();
@@ -274,7 +279,6 @@ export function createRelaySharesIpcHandlers<
     ReturnType<typeof createPresencePollRegistry>,
     "begin" | "cancel"
   >;
-  listOwnerLiveStops(workspace: Workspace): Promise<OwnerLiveStop[]>;
   retryOwnerLiveQuarantine(workspace: Workspace, objectId: string, incident: string): Promise<void>;
   saveOwnerLiveRecoveryCopy(workspace: Workspace, path: string, incident?: string): Promise<SaveOwnerLiveRecoveryCopyResult>;
   // A grant changed on the relay. Null when the change names no workspace.

@@ -1345,7 +1345,11 @@ mod tests {
         // the relay checks the owner's standing before it asks.
         let other = ConnectionOwner::authenticated();
         ctx.connection = Some(other.handle());
-        for method in ["sync.pull", "ydoc.ownerOutbox.readPending", "ydoc.ownerOutbox.retry"] {
+        for method in [
+            "sync.pull",
+            "ydoc.ownerOutbox.readPending",
+            "ydoc.ownerOutbox.retry",
+        ] {
             request.method = method.into();
             assert_eq!(
                 service

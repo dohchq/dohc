@@ -16,7 +16,7 @@ it("keeps a server-held refusal and its copy across a relay restart, and refuses
   const first = f.storage.readServiceKeptEdits(queue("outbox-1"))!.generation;
   expect(f.storage.serviceKeptEditsHeld(document, identity)).toBe(true);
   expect(() => f.storage.recordServiceKeptEdits({identity, outboxId: "outbox-1", binding, reason: "invented", headDeliveryId: "delivery-1", refusalKey: "refusal-2", nowMs: 5})).toThrow();
-  expect(f.storage.confirmServiceKeptEditsCopy({workspaceId: scope.workspaceId, outboxId: "outbox-1", generation: first})).toBe(true);
+  expect(f.storage.confirmServiceKeptEditsCopy({workspaceId: scope.workspaceId, outboxId: "outbox-1", generation: first, checkpointDigest: null})).toBe(true);
   // The same refusal recorded again, as when its quarantine is written again, changes nothing.
   refuse("refusal-1");
   expect(f.storage.serviceKeptEditsHeld(document, identity)).toBe(false);
@@ -47,7 +47,7 @@ it("never reuses a refusal's token for a later refusal of the same queue", async
   f.storage.forgetServiceKeptEdits(queue("outbox-1"));
   const later = refuse("refusal-2");
   expect(later).not.toBe(read);
-  expect(f.storage.confirmServiceKeptEditsCopy({workspaceId: scope.workspaceId, outboxId: "outbox-1", generation: read})).toBe(false);
+  expect(f.storage.confirmServiceKeptEditsCopy({workspaceId: scope.workspaceId, outboxId: "outbox-1", generation: read, checkpointDigest: null})).toBe(false);
   expect(f.storage.markServiceKeptEditsRetrying({workspaceId: scope.workspaceId, outboxId: "outbox-1", generation: read})).toBe(false);
   expect(f.storage.serviceKeptEditsHeld(document, identity)).toBe(true);
   // A Try again is marked once per refusal, and the host can end it.
@@ -85,7 +85,7 @@ it("keeps one row per store for queues that share an outbox ID", async () => {
   // Copying the later store's row leaves the old one uncopied; a Try again of it ends only its own.
   expect(f.storage.markServiceKeptEditsRetrying({workspaceId: scope.workspaceId, outboxId: "outbox-x", generation: old.generation})).toBe(true);
   f.storage.endServiceKeptEditsRetry(queue("outbox-x", rotated));
-  expect(f.storage.confirmServiceKeptEditsCopy({workspaceId: scope.workspaceId, outboxId: "outbox-x", generation: current.generation})).toBe(true);
+  expect(f.storage.confirmServiceKeptEditsCopy({workspaceId: scope.workspaceId, outboxId: "outbox-x", generation: current.generation, checkpointDigest: null})).toBe(true);
   expect(f.storage.readServiceKeptEdits(queue("outbox-x"))).toMatchObject({copied: false, retrying: true});
   f.storage.endServiceKeptEditsRetry(queue("outbox-x"));
   // Forgetting the later store's queue, as when it delivers again, keeps the old row.
@@ -124,8 +124,47 @@ it("pages every row of a workspace and of a document, and releases a document's 
   // An uncopied row stays, even once its document left.
   f.storage.releaseServiceKeptEdits(document);
   expect(f.storage.readServiceKeptEdits(queue("outbox-0"))).toEqual(own);
-  f.storage.confirmServiceKeptEditsCopy({workspaceId: scope.workspaceId, outboxId: "outbox-0", generation: own.generation});
+  f.storage.confirmServiceKeptEditsCopy({workspaceId: scope.workspaceId, outboxId: "outbox-0", generation: own.generation, checkpointDigest: null});
   f.storage.releaseServiceKeptEdits(document);
   expect(f.storage.readServiceKeptEdits(queue("outbox-0"))).toBeNull();
   expect(f.storage.readServiceKeptEdits(queue("outbox-1"))).toMatchObject({copied: false});
+});
+
+// Proves: while a queue stays frozen at its owner's adoption seed, a copy
+// counts only for the checkpoint a copy reads now. A copy confirmed before a
+// later accepted edit holds the document and keeps its row until a copy of
+// the newer checkpoint; a copy made after the edit lets it go at once.
+it("releases a frozen seed's row only for a copy of the checkpoint the host saw last", async () => {
+  const f = await ticketFixture(); cleanups.push(f.close);
+  const [older, newer] = ["a", "b"].map(digit => digit.repeat(64)) as [string, string];
+  const refuse = (outboxId: string) => {
+    f.storage.recordServiceKeptEdits({identity, outboxId, binding, reason: "invalid-update", headDeliveryId: "delivery-1", refusalKey: `${outboxId}-refusal`, nowMs: 5});
+    return f.storage.readServiceKeptEdits(queue(outboxId))!.generation;
+  };
+  const copy = (outboxId: string, generation: number, checkpointDigest: string | null) =>
+    f.storage.confirmServiceKeptEditsCopy({workspaceId: scope.workspaceId, outboxId, generation, checkpointDigest});
+  // Copy, then a later accepted edit: the host now sees the newer checkpoint.
+  const before = refuse("copied-first");
+  expect(copy("copied-first", before, older)).toBe(true);
+  expect(f.storage.serviceKeptEditsHeld(document, identity)).toBe(false);
+  f.storage.observeServiceKeptEditsCheckpoint(queue("copied-first"), newer);
+  expect(f.storage.readServiceKeptEdits(queue("copied-first"))).toMatchObject({copied: false});
+  expect(f.storage.serviceKeptEditsHeld(document, identity)).toBe(true);
+  f.storage.releaseServiceKeptEdits(document);
+  expect(f.storage.readServiceKeptEdits(queue("copied-first"))).not.toBeNull();
+  // A copy of no checkpoint never stands in for one.
+  expect(copy("copied-first", before, null)).toBe(true);
+  f.storage.releaseServiceKeptEdits(document);
+  expect(f.storage.readServiceKeptEdits(queue("copied-first"))).toMatchObject({copied: false});
+  expect(copy("copied-first", before, newer)).toBe(true);
+  expect(f.storage.serviceKeptEditsHeld(document, identity)).toBe(false);
+  // An edit, then a copy that holds it.
+  const after = refuse("edited-first");
+  f.storage.observeServiceKeptEditsCheckpoint(queue("edited-first"), newer);
+  expect(f.storage.serviceKeptEditsHeld(document, identity)).toBe(true);
+  expect(copy("edited-first", after, newer)).toBe(true);
+  expect(f.storage.serviceKeptEditsHeld(document, identity)).toBe(false);
+  f.storage.releaseServiceKeptEdits(document);
+  expect(f.storage.serviceKeptEditsOf(document)).toEqual({keptEdits: [], nextCursor: null});
+  expect(() => copy("edited-first", after, "x")).toThrow("Invalid kept edits checkpoint.");
 });

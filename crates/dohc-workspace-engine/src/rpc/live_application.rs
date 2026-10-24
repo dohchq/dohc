@@ -253,10 +253,13 @@ fn require_caller_deadline(request: &Request) -> Result<(), WireError> {
     Ok(())
 }
 
+/// The binding's queue: its ID, pending bytes, state and granted Try again.
+type OwnerOutboxRow = (String, i64, String, Option<String>);
+
 fn read_owner_outbox(
     conn: &rusqlite::Connection,
     binding: &LiveObjectBinding,
-) -> Result<Option<(String, i64, String, Option<String>)>, dohc_engine_storage::StorageError> {
+) -> Result<Option<OwnerOutboxRow>, dohc_engine_storage::StorageError> {
     use rusqlite::OptionalExtension;
     conn.query_row(
         "SELECT outbox_id,pending_bytes,state,retry_delivery_id FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5",

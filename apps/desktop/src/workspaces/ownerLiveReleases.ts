@@ -29,7 +29,8 @@ export interface UnwrittenReleases {
   list(workspaceId: string): Promise<UnwrittenRelease[]>;
   /**
    * Writes the queue's recovery package, then the record. Refuses while the
-   * document keeps a record of another release or other edits, so its package stays.
+   * document keeps a record of another release or other edits, so its package
+   * stays. A record of these same edits keeps the package it already has.
    */
   put(release: UnwrittenRelease & {binding: LiveObjectBinding; headDeliveryId: string; snapshot: string}, recovery: string): Promise<void>;
   /** The recovery package saved before the release. */
@@ -150,6 +151,8 @@ export function createUnwrittenReleases(filePath: () => string): UnwrittenReleas
       async current => {
         const earlier = keptEarlierRelease(current, release);
         if (earlier) throw keptEarlierError(earlier.path);
+        // The package already saved for these edits stays: another read of them may carry an older checkpoint, or none.
+        if (current.some(row => isRecord(row, release.workspaceId, release.objectId) && sameRelease(row, release))) return;
         await atomicWriteFile(recoveryPath(release.workspaceId, release.objectId), recovery);
       }),
     async recovery(workspaceId, objectId) {

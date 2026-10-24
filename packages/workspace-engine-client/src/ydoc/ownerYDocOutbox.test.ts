@@ -260,6 +260,7 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     const snapshot = "a".repeat(64);
     const parts = [
       { part: "header", sequence: 0, bytes: Buffer.from(JSON.stringify({
+        frozenAtRefusedSeed: false, checkpointDigest: null,
         ...header, baseByteLength: base.length, pendingEntryCount: entries.length,
         nextSequence: Math.max(0, ...entries.map((entry) => entry.sequence)) + 1,
         firstEntryCursor: entries[0] ? {snapshot,part: "entryHeader",sequence: entries[0].sequence,offset: 0} : null,
@@ -482,12 +483,14 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     const recovering = cursorReader([...pages(bound, 5), ...checkpointPages(checkpoint)]);
     const recovery = await recovering.client.readRecovery("outbox-1");
     expect(recovery.checkpoint).toEqual(new Uint8Array(checkpoint));
+    // A confirmation of this copy names what it read.
+    expect(recovery.checkpointDigest).toBe(sha(checkpoint));
     expect(recovery.entries[0]?.update).toEqual(new Uint8Array([2, 3, 4]));
     expect(recovering.parts.slice(-2)).toEqual(["checkpoint", "checkpoint"]);
     expect(recovering.parts.indexOf("checkpoint")).toBeGreaterThan(recovering.parts.lastIndexOf("update"));
     const withoutBinding = {...pendingResult(), checkpointDigest: null};
     const unbound = cursorReader(pages(withoutBinding, 5));
-    expect((await unbound.client.readRecovery("outbox-1")).checkpoint).toBeNull();
+    expect(await unbound.client.readRecovery("outbox-1")).toMatchObject({checkpoint: null, checkpointDigest: null});
     expect(unbound.parts).not.toContain("checkpoint");
     // Delivery never reads it.
     const delivering = cursorReader([...pages(bound, 5), ...checkpointPages(checkpoint)]);
@@ -569,6 +572,20 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     expect(head.entry).toMatchObject({sequence: 3,update: new Uint8Array([2,3,4])});
     expect(head).not.toHaveProperty("baseUpdate");
     expect(run.requests.map(request => (request.params as {cursor?: {part: string}}).cursor?.part ?? "header")).toEqual(["header","entryHeader","update"]);
+  });
+
+  it("reports whether a delivery head is a seed frozen at its generation, with the checkpoint a copy reads, and refuses a header without them", async () => {
+    const frozen = {...pendingResult(), state: "quarantined", quarantineReason: "invalid-update", frozenAtRefusedSeed: true, checkpointDigest: "c".repeat(64)};
+    frozen.binding.lineageClaimId = frozen.baseUpdateDigest;
+    expect(await deliveryReader(pages(frozen, 4096), frozen.binding).read()).toMatchObject({frozenAtRefusedSeed: true, checkpointDigest: "c".repeat(64)});
+    // A plain read of the queue carries neither.
+    const plain = await read(frozen);
+    expect(plain).not.toHaveProperty("frozenAtRefusedSeed");
+    expect(plain).not.toHaveProperty("checkpointDigest");
+    for (const damage of [{frozenAtRefusedSeed: "yes"}, {checkpointDigest: "c"}]) {
+      const damaged = {...frozen, ...damage};
+      await expect(deliveryReader(pages(damaged, 4096), damaged.binding).read()).rejects.toThrow();
+    }
   });
 
   it.each(["binding","base-digest","base-length","cursor-snapshot","cursor-sequence","missing-cursor","update-hash","changed"])(

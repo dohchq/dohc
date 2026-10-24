@@ -16,6 +16,9 @@ import {parseWorkspaceId} from "../requestInputs";
 // service host's engine refuses that method. The generation counts across
 // the relay, so the gap between two of an owner's rows tells them how many
 // refusals other workspaces had meanwhile; that count is all it reveals.
+// A copy names the accepted checkpoint it read. While the queue stays frozen
+// at its owner's adoption seed, the host records the checkpoint a copy reads
+// now, and a copy of an older one no longer counts.
 export const SERVICE_KEPT_EDITS = "sync_relay_service_kept_edits";
 const MIGRATION = "service-kept-edits-v1";
 const SQL = `CREATE TABLE ${SERVICE_KEPT_EDITS} (
@@ -31,6 +34,8 @@ const SQL = `CREATE TABLE ${SERVICE_KEPT_EDITS} (
   refusal_key TEXT NOT NULL,
   retrying INTEGER NOT NULL CHECK (retrying IN (0,1)),
   copied INTEGER NOT NULL CHECK (copied IN (0,1)),
+  copied_checkpoint TEXT CHECK (copied_checkpoint IS NULL OR (copied=1 AND length(copied_checkpoint)=64)),
+  frozen_checkpoint TEXT CHECK (frozen_checkpoint IS NULL OR length(frozen_checkpoint)=64),
   recorded_at_ms INTEGER NOT NULL CHECK (recorded_at_ms >= 0),
   UNIQUE (workspace_id, replication_epoch, stream_identity, outbox_id),
   FOREIGN KEY (workspace_id) REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
@@ -49,7 +54,10 @@ export interface ServiceKeptEditsQueue {readonly workspaceId: string; readonly i
 export const sameKeptEditsIdentity = (a: ServiceKeptEditsIdentity, b: {replicationEpoch: string | null; streamIdentity: string | null} | null | undefined) =>
   !!b && a.replicationEpoch === b.replicationEpoch && a.streamIdentity === b.streamIdentity;
 
-/** One refused service-held queue. `copied` is whether the owner confirmed a recovery copy of this refusal. */
+/**
+ * One refused service-held queue. `copied` is whether the owner confirmed a
+ * recovery copy of this refusal that holds the checkpoint a copy reads now.
+ */
 export interface ServiceKeptEdits {
   readonly workspaceId: string;
   readonly identity: ServiceKeptEditsIdentity;
@@ -93,8 +101,11 @@ function row(value: Record<string, unknown>): ServiceKeptEdits {
     streamIdentity: parseLiveUpdateIdentifier(value.stream_identity, "stream identity")});
   return Object.freeze({workspaceId, identity, outboxId: parseLiveUpdateIdentifier(value.outbox_id, "outbox ID"), objectId, binding,
     reason: value.reason as ServiceKeptEditsReason, headDeliveryId: parseLiveUpdateIdentifier(value.head_delivery_id, "delivery ID"),
-    generation, retrying: value.retrying === 1, copied: value.copied === 1});
+    generation, retrying: value.retrying === 1, copied: value.copied === 1 && (value.frozen_checkpoint === null || value.copied_checkpoint === value.frozen_checkpoint)});
 }
+// The rows whose copy holds what a copy reads now.
+const COPIED = "copied=1 AND (frozen_checkpoint IS NULL OR copied_checkpoint IS frozen_checkpoint)";
+const isDigest = (value: string | null) => value === null || /^[0-9a-f]{64}$/.test(value);
 
 const QUEUE = "workspace_id=? AND replication_epoch=? AND stream_identity=? AND outbox_id=?";
 const queueKey = (queue: ServiceKeptEditsQueue) => [parseWorkspaceId(queue.workspaceId), parseLiveUpdateIdentifier(queue.identity.replicationEpoch, "replication epoch"),
@@ -134,7 +145,7 @@ export function releaseServiceKeptEdits(storage: StorageContext, document: {work
   const workspaceId = parseWorkspaceId(document.workspaceId), standing = storage.captureStanding();
   storage.tx(() => {
     standing();
-    storage.db.prepare(`DELETE FROM ${SERVICE_KEPT_EDITS} WHERE workspace_id=? AND object_id=? AND copied=1`).run(workspaceId, document.objectId);
+    storage.db.prepare(`DELETE FROM ${SERVICE_KEPT_EDITS} WHERE workspace_id=? AND object_id=? AND ${COPIED}`).run(workspaceId, document.objectId);
   });
 }
 
@@ -192,13 +203,30 @@ export function endServiceKeptEditsRetry(storage: StorageContext, queue: Service
   });
 }
 
-/** Records the owner's durable recovery copy of this refusal. Returns false once the queue changed. */
-export function confirmServiceKeptEditsCopy(storage: StorageContext, input: {workspaceId: string; outboxId: string; generation: number}): boolean {
+/**
+ * Records the owner's durable recovery copy of this refusal, with the
+ * checkpoint it read. Returns false once the queue changed.
+ */
+export function confirmServiceKeptEditsCopy(storage: StorageContext, input: {workspaceId: string; outboxId: string; generation: number; checkpointDigest: string | null}): boolean {
+  if (!isDigest(input.checkpointDigest)) throw new Error("Invalid kept edits checkpoint.");
   const standing = storage.captureStanding();
   return storage.tx(() => {
     standing();
-    return storage.db.prepare(`UPDATE ${SERVICE_KEPT_EDITS} SET copied=1 WHERE workspace_id=? AND outbox_id=? AND generation=?`)
-      .run(parseWorkspaceId(input.workspaceId), input.outboxId, input.generation).changes === 1;
+    return storage.db.prepare(`UPDATE ${SERVICE_KEPT_EDITS} SET copied=1,copied_checkpoint=? WHERE workspace_id=? AND outbox_id=? AND generation=?`)
+      .run(input.checkpointDigest, parseWorkspaceId(input.workspaceId), input.outboxId, input.generation).changes === 1;
+  });
+}
+
+/**
+ * Records the checkpoint a recovery copy of this queue reads now while it
+ * stays frozen at its owner's adoption seed, or null once it does not.
+ */
+export function observeServiceKeptEditsCheckpoint(storage: StorageContext, queue: ServiceKeptEditsQueue, frozenCheckpoint: string | null): void {
+  if (!isDigest(frozenCheckpoint)) throw new Error("Invalid kept edits checkpoint.");
+  const key = queueKey(queue), standing = storage.captureStanding();
+  storage.tx(() => {
+    standing();
+    storage.db.prepare(`UPDATE ${SERVICE_KEPT_EDITS} SET frozen_checkpoint=? WHERE ${QUEUE}`).run(frozenCheckpoint, ...key);
   });
 }
 
@@ -208,6 +236,6 @@ export function confirmServiceKeptEditsCopy(storage: StorageContext, input: {wor
  * another identity's store never holds it, since no attachment reaches it.
  */
 export function serviceKeptEditsHeld(storage: StorageContext, document: {workspaceId: string; objectId: string}, identity: ServiceKeptEditsIdentity): boolean {
-  return storage.db.prepare(`SELECT 1 FROM ${SERVICE_KEPT_EDITS} WHERE workspace_id=? AND object_id=? AND replication_epoch=? AND stream_identity=? AND copied=0`)
+  return storage.db.prepare(`SELECT 1 FROM ${SERVICE_KEPT_EDITS} WHERE workspace_id=? AND object_id=? AND replication_epoch=? AND stream_identity=? AND NOT (${COPIED})`)
     .get(document.workspaceId, document.objectId, identity.replicationEpoch, identity.streamIdentity) !== undefined;
 }

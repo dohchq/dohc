@@ -247,7 +247,8 @@ it('cuts a complete checkpoint when the owner outbox introduces the 960th identi
         bytes = Buffer.from(JSON.stringify({outboxId: 'outbox', binding, baseUpdateDigest: binding.lineageClaimId,
           baseByteLength: f.input.baselineBytes.byteLength, state: 'active', pendingBytes, pendingEntryCount: pending.length,
           nextSequence: 3, oldestEntryAtMs: pending[0]?.createdAtMs ?? null, quarantineReason: null, observedBinding: null, retryDeliveryId: null,
-          firstEntryCursor: pending[0] ? cursor(snapshot, 'entryHeader', pending[0].sequence) : null}))
+          firstEntryCursor: pending[0] ? cursor(snapshot, 'entryHeader', pending[0].sequence) : null,
+          frozenAtRefusedSeed: false, checkpointDigest: null}))
         nextCursor = cursor(snapshot, 'base')
       } else if (at.part === 'entryHeader') {
         bytes = Buffer.from(JSON.stringify(pending.find(entry => entry.sequence === at.sequence)))

@@ -2180,21 +2180,15 @@ mod tests {
             std::slice::from_ref(&head_receipt),
         )
         .unwrap();
-        let resumed =
-            super::super::read_pending(&store, "workspace", &head.outbox_id).unwrap();
+        let resumed = super::super::read_pending(&store, "workspace", &head.outbox_id).unwrap();
         assert_eq!(resumed.state, super::super::OwnerOutboxState::Active);
         assert_eq!(resumed.quarantine_reason, None);
         assert_eq!(resumed.retry_delivery_id, None);
         assert_eq!(resumed.entries.len(), 1);
         feed(&mut store, &observed, 6, suffix_delta);
         assert!(applied(&store, &suffix_receipt).unwrap());
-        super::super::acknowledge(
-            &mut store,
-            "workspace",
-            &head.outbox_id,
-            &[suffix_receipt],
-        )
-        .unwrap();
+        super::super::acknowledge(&mut store, "workspace", &head.outbox_id, &[suffix_receipt])
+            .unwrap();
         assert_eq!(
             super::super::read_pending(&store, "workspace", &head.outbox_id)
                 .unwrap()

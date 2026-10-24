@@ -516,8 +516,10 @@ export async function startServiceLiveHost(options: {
     // that attempt. The queue keeps its bytes. A refusal whose quarantine never
     // reached the engine is quarantined now, and a row whose queue delivered
     // again, or that the engine no longer holds, is forgotten. Resolves to
-    // whether the queue stays frozen at its owner's adoption seed, which no
-    // settlement may pass.
+    // the engine's answer whether the queue stays frozen at its owner's
+    // adoption seed at its document's current restore generation, which no
+    // settlement may pass. A frozen queue's row records the checkpoint a
+    // recovery copy reads now, which its copy must hold.
     const endKeptRetry = async (kept: ServiceKeptEdits, outbox: OwnerYDocOutbox) => {
       let head;
       try {head = await outbox.readDeliveryHead(kept.outboxId, kept.binding);}
@@ -529,13 +531,17 @@ export async function startServiceLiveHost(options: {
       const quarantined = head.state === "quarantined";
       if (quarantined ? head.retryDeliveryId !== null : !kept.retrying && head.entry?.deliveryId === kept.headDeliveryId) {
         await outbox.quarantine({outboxId: kept.outboxId, reason: kept.reason});
+        // An ended grant can freeze the queue at its seed; only the engine can say.
+        head = await outbox.readDeliveryHead(kept.outboxId, kept.binding);
       } else if (!quarantined) {storage.forgetServiceKeptEdits(kept); return false;}
       if (kept.retrying) storage.endServiceKeptEditsRetry(kept);
-      return head.entry?.appendKey.startsWith("owner-adoption:") === true;
+      storage.observeServiceKeptEditsCheckpoint(kept, head.frozenAtRefusedSeed ? head.checkpointDigest : null);
+      return head.frozenAtRefusedSeed;
     };
     // Runs `endKeptRetry` on every queue of the document in its attached store,
     // page by page, so each gets its turn. Takes no turn of its document's work
-    // when `inTurn` is set. Resolves to the lineages whose queue stays frozen at the seed.
+    // when `inTurn` is set. Resolves to the lineages whose queue stays frozen at the seed
+    // at the current restore generation; an earlier generation's seed freezes nothing.
     const endKeptRetries = async (row: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal, inTurn: boolean) => {
       const attached = attachments.get(row.target.workspaceId), seeded = new Set<string>();
       if (!attached) return seeded;

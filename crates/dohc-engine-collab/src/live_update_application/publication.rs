@@ -12,14 +12,46 @@ pub(crate) fn read_native_accepted_in(
     };
     let result = native_accepted(conn, key, &mut budget);
     *remaining = budget.remaining;
-    result
+    result.map(|read| read.map(|(held, _, doc)| (held.binding, held.namespace, doc)))
+}
+
+/// The same accepted state, with the binding it was applied under and the
+/// last applied cursor it runs through. An applied update still waiting on a
+/// missing dependency refuses the read as a conflict.
+pub(crate) fn read_native_accepted_cut_in(
+    conn: &Connection,
+    key: &DocKey,
+    remaining: &mut usize,
+) -> Result<Option<(LiveObjectBinding, i64, crate::Ydoc)>, ApplicationError> {
+    let mut budget = Budget {
+        remaining: *remaining,
+    };
+    let result = native_accepted(conn, key, &mut budget);
+    *remaining = budget.remaining;
+    result.map(|read| read.map(|(held, through, doc)| (held.binding, through, doc)))
+}
+
+/// The binding of the document's application registration and its last
+/// applied cursor, without rebuilding any state.
+pub(crate) fn read_native_applied_cursor_in(
+    conn: &Connection,
+    key: &DocKey,
+) -> Result<Option<(LiveObjectBinding, i64)>, ApplicationError> {
+    let mut budget = Budget {
+        remaining: usize::MAX,
+    };
+    let Some(held) = registration_in(conn, key, &mut budget)? else {
+        return Ok(None);
+    };
+    let through = settlement::latest_receipt(conn, &held)?.map_or(0, |r| r.journal_cursor);
+    Ok(Some((held.binding, through)))
 }
 
 fn native_accepted(
     conn: &Connection,
     key: &DocKey,
     budget: &mut Budget,
-) -> Result<Option<(LiveObjectBinding, String, crate::Ydoc)>, ApplicationError> {
+) -> Result<Option<(Registration, i64, crate::Ydoc)>, ApplicationError> {
     let Some(held) = registration_in(conn, key, budget)? else {
         return Ok(None);
     };
@@ -34,7 +66,7 @@ fn native_accepted(
         accepted_history::CHECKPOINT_EVENTS as usize,
         accepted_history::HistoryPurpose::Native,
     )?;
-    Ok(Some((held.binding, held.namespace, history.doc)))
+    Ok(Some((held, through, history.doc)))
 }
 
 /// The accepted head that the restore producing this exact binding replaced,

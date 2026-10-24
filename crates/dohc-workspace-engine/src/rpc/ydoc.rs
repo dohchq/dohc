@@ -829,21 +829,52 @@ impl EngineService {
         }
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let read = async move {
+        let token = cancellation.token();
+        let read_page = move |open: Arc<OpenWorkspace>, cursor: Option<_>, outbox_id: String| async move {
             tokio::task::spawn_blocking(move || {
                 let store =
                     dohc_engine_storage::EngineStore::open_read_only(open.actor.database_path())?;
                 dohc_engine_collab::read_pending_owner_outbox_page(
                     &store,
                     &open.workspace_id,
-                    &params.outbox_id,
-                    params.cursor,
+                    &outbox_id,
+                    cursor,
                     max_bytes,
                 )
             })
             .await
-            .map_err(|_| WireError::new(ErrorCode::Internal, "owner-outbox-worker-failed"))?
-            .map_err(map_owner_outbox)
+            .map_err(|_| WireError::new(ErrorCode::Internal, "owner-outbox-worker-failed"))
+        };
+        let read = async move {
+            let first = read_page(
+                open.clone(),
+                params.cursor.clone(),
+                params.outbox_id.clone(),
+            )
+            .await?;
+            if !matches!(
+                first,
+                Err(dohc_engine_collab::OwnerOutboxError::RecoveryCheckpointOutdated)
+            ) {
+                return first.map_err(map_owner_outbox);
+            }
+            // A frozen lineage's recovery checkpoint is built on the writer, once per applied cursor.
+            open.actor
+                .owner_ydoc_outbox_prepare_recovery_checkpoint(
+                    open.workspace_id.clone(),
+                    params.outbox_id.clone(),
+                    token,
+                )
+                .await
+                .map_err(map_runtime)?
+                .map_err(map_owner_outbox)?;
+            match read_page(open, params.cursor, params.outbox_id).await? {
+                // Another acceptance moved the cursor meanwhile; the reader starts over.
+                Err(dohc_engine_collab::OwnerOutboxError::RecoveryCheckpointOutdated) => {
+                    Ok(dohc_engine_collab::OwnerOutboxPageResult::ReadChanged)
+                }
+                page => page.map_err(map_owner_outbox),
+            }
         };
         let pending = tokio::select! {
             biased;

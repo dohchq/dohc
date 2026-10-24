@@ -441,16 +441,14 @@ fn advance_generation_in_tx(
     if local_bytes != bounded_blob(tx, &previous.checkpoint_digest)? {
         let append_key = format!("owner-restore-fenced:{}", input.captured.local_state_digest);
         match find_parent_for_binding(tx, old)? {
-            Some(parent) if parent.state != OwnerOutboxState::Active => {
-                super::retain_fenced_in_tx(
-                    tx,
-                    &parent,
-                    previous.revision,
-                    &append_key,
-                    &local_bytes,
-                    now_ms,
-                )?
-            }
+            Some(parent) if parent.state != OwnerOutboxState::Active => super::retain_fenced_in_tx(
+                tx,
+                &parent,
+                previous.revision,
+                &append_key,
+                &local_bytes,
+                now_ms,
+            )?,
             _ => {
                 super::draft::append_draft_in_tx(
                     tx,

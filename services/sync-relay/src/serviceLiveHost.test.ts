@@ -14,12 +14,12 @@ import {createNamedFrameChanges} from "./liveHostChanges.js";
 import {captureOwnerLiveFrameHost} from "./namedLiveFrameHost.js";
 import type {LiveHostConnectionCoordinate} from "./storage.js";
 import {ServiceActivationDriver} from "./serviceActivationDriver.js";
-import {SERVICE_KEPT_EDITS_PAGE} from "./storage/serviceKeptEdits.js";
+import {SERVICE_KEPT_EDITS_PAGE, type ServiceKeptEdits} from "./storage/serviceKeptEdits.js";
 import {liveEditors} from "./liveEditors.js";
 import { OwnerCommittedDelivery } from "./ownerCommittedDelivery.js";
 import type { NativeOwnerActivation } from "@dohc/workspace-engine-client/daemon";
 import { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import { markdownToYDoc } from "../../../packages/ydoc-projection/src/import-export.js";
+import { markdownToYDoc, yDocToMarkdown } from "../../../packages/ydoc-projection/src/import-export.js";
 import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
 
 const spawn = vi.hoisted(() => vi.fn());
@@ -534,15 +534,21 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   // A refused queue the engine keeps, with one entry, as the host's own connection reads it.
   // A granted Try again keeps the document's unload pending, as the engine does.
   // Its head's append key tells an adoption seed from later work. Other queues the test adds keep their own state; the engine
-  // answers one it no longer holds as not found.
-  type KeptOutbox = {binding: unknown; state: string; retryDeliveryId: string | null; appendKey: string};
+  // answers one it no longer holds as not found. `checkpoint` is the accepted state a recovery copy reads.
+  type KeptOutbox = {binding: unknown; state: string; retryDeliveryId: string | null; appendKey: string; checkpoint?: Buffer};
   const keptOutbox: KeptOutbox = {binding: undefined, state: "quarantined", retryDeliveryId: null, appendKey: "append-1"};
   const keptOutboxes = new Map<string, KeptOutbox | null>();
+  // The restore generation the document's application binding has, once a restore moved it past its queues'.
+  const engine: {generation?: number} = {};
   const outboxOf = (request: {id: number; params: Record<string, unknown>}) => {
     const found = keptOutboxes.get(String(request.params.outboxId));
     if (found === null) throw new EngineRequestError(request.id, {code: "INVALID_PARAMS", message: "owner-outbox-not-found", retry: "no"} as never);
     return found ?? keptOutbox;
   };
+  // A queue holding its owner's refused adoption seed at the document's current restore generation, which no settlement passes.
+  const seeded = (queue: KeptOutbox | null | undefined): queue is KeptOutbox => queue?.binding !== undefined && queue.state === "quarantined" &&
+    queue.appendKey.startsWith("owner-adoption:") &&
+    (engine.generation === undefined || engine.generation === (queue.binding as {restoreFenceGeneration: number}).restoreFenceGeneration);
   const keptPage = (request: {id: number; params: Record<string, unknown>}) => {
     const {params} = request, queue = outboxOf(request);
     const header = {outboxId: params.outboxId, binding: queue.binding, baseUpdateDigest: (queue.binding as {lineageClaimId: string}).lineageClaimId,
@@ -551,14 +557,18 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
     const snapshot = sha256(Buffer.from(JSON.stringify(header))), cursor = (part: string, sequence = 0) => ({snapshot, part, sequence, offset: 0});
     const requested = (params.cursor as ReturnType<typeof cursor> | undefined) ?? cursor("header");
     if (requested.snapshot !== snapshot) return {kind: "readChanged"};
-    const [bytes, nextCursor] = requested.part === "header" ? [Buffer.from(JSON.stringify({...header, firstEntryCursor: cursor("entryHeader", 1)})), cursor("base")] as const
+    // Outside the snapshot, as the engine's: the frozen answer and the checkpoint a copy reads now.
+    const live = {firstEntryCursor: cursor("entryHeader", 1), frozenAtRefusedSeed: seeded(queue) && queue.retryDeliveryId === null,
+      checkpointDigest: queue.checkpoint ? sha256(queue.checkpoint) : null};
+    if (requested.part === "checkpoint" && !queue.checkpoint) return {kind: "readChanged"};
+    const [bytes, nextCursor] = requested.part === "header" ? [Buffer.from(JSON.stringify({...header, ...live})), cursor("base")] as const
+      : requested.part === "checkpoint" ? [queue.checkpoint!, null] as const
       : requested.part === "entryHeader" ? [Buffer.from(JSON.stringify({sequence: 1, appendKey: queue.appendKey, deliveryId: "refused", updateDigest: sha256(update),
         byteLength: 1, createdAtMs: 1})), cursor("update", 1)] as const : [update, null] as const;
     return {kind: "page", ...requested, totalBytes: bytes.length, digest: sha256(bytes), bytesBase64: bytes.toString("base64"), nextCursor};
   };
-  // A queue frozen at its owner's adoption seed, as the engine refuses to settle past it.
-  const seedFrozen = () => [keptOutbox, ...keptOutboxes.values()].some(queue => queue?.binding !== undefined && queue.state === "quarantined" &&
-    queue.appendKey.startsWith("owner-adoption:"));
+  // As the engine refuses to settle past a seed frozen at the current generation.
+  const seedFrozen = () => [keptOutbox, ...keptOutboxes.values()].some(seeded);
   let ownerRequests = 0, client!: ReturnType<typeof clientFrom>["client"] & {captureOwnerActivation: ReturnType<typeof vi.fn>;
     sendLiveApplication: ReturnType<typeof vi.fn>; readLiveApplicationAck: ReturnType<typeof vi.fn>};
   // The engine's reason for refusing native capture, as for a document with an open sync conflict.
@@ -652,7 +662,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   cleanup.push(() => host.close());
   // The activation pass publishes readiness before it pushes the hosted replica.
   if (!options.empty) await pushed.promise;
-  return {f, raw, host, document, workspace, target, pushed, unloads, replies, settlement, membership, keptOutbox, keptOutboxes, spawned: () => spawn.mock.calls.length, client: () => client,
+  return {f, raw, host, document, workspace, target, pushed, unloads, replies, settlement, membership, keptOutbox, keptOutboxes, engine, spawned: () => spawn.mock.calls.length, client: () => client,
     ownerRequests: () => ownerRequests,
     ownerCalls: () => client.sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string; params: unknown})
       .filter(request => request.method.startsWith("liveApplication.")).map(request => [request.method, request.params]),
@@ -1028,7 +1038,8 @@ function keptEdits(o: Awaited<ReturnType<typeof enrolledServiceHost>>) {
   const other = (outboxId: string, copied = true) => {
     o.keptOutboxes.set(outboxId, {binding: o.binding, state: "quarantined", retryDeliveryId: null, appendKey: "append-1"});
     o.f.storage.recordServiceKeptEdits({identity, outboxId, binding: o.binding, reason: "invalid-update", headDeliveryId: "refused", refusalKey: `${outboxId}-refusal`, nowMs: 1});
-    if (copied) o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId, generation: o.f.storage.readServiceKeptEdits(queue(outboxId))!.generation});
+    if (copied) o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId, generation: o.f.storage.readServiceKeptEdits(queue(outboxId))!.generation,
+      checkpointDigest: null});
   };
   // A queue of the attached store.
   const queue = (outboxId: string) => ({workspaceId: "workspace", identity, outboxId});
@@ -1065,7 +1076,7 @@ it("ends a Try again Stop left outstanding, and keeps the stopped document until
   expect(o.calls(sent)).toEqual(departure);
   expect(o.host.retains(o.sibling)).toBe(true);
   expect(o.host.drained("workspace")).toBe(false);
-  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation})).toBe(true);
+  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation, checkpointDigest: null})).toBe(true);
   await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
   expect(o.host.retains(o.sibling)).toBe(false);
   expect(k.row()).toBeNull();
@@ -1150,10 +1161,80 @@ it("lets a document refused at its adoption seed depart with later accepted work
   expect(k.row()).toMatchObject({retrying: false, copied: false});
   // No registration or settlement, so nothing to publish: the one unload is all the departure asked of the engine.
   expect(o.calls(sent)).toEqual(["liveApplication.unloadDocument"]);
-  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation})).toBe(true);
+  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation, checkpointDigest: null})).toBe(true);
   await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
   expect(k.row()).toBeNull();
   expect(o.calls(sent).every(method => method === "liveApplication.unloadDocument")).toBe(true);
+});
+
+// The accepted state a recovery copy reads, as the engine pages it through the host.
+async function keptCheckpoint(host: Awaited<ReturnType<typeof enrolledServiceHost>>["host"], kept: ServiceKeptEdits) {
+  type Page = {kind: string; snapshot: string; bytesBase64: string};
+  const header = await host.readKeptEditsPage(kept, undefined) as Page;
+  const named = JSON.parse(Buffer.from(header.bytesBase64, "base64").toString("utf8")) as {checkpointDigest: string | null};
+  const page = await host.readKeptEditsPage(kept, {snapshot: header.snapshot, part: "checkpoint", sequence: 0, offset: 0}) as Page;
+  const bytes = Buffer.from(page.bytesBase64, "base64");
+  expect(sha256(bytes)).toBe(named.checkpointDigest);
+  const doc = new Y.Doc();
+  Y.applyUpdate(doc, bytes);
+  const text = yDocToMarkdown(doc);
+  doc.destroy();
+  return {digest: named.checkpointDigest!, text};
+}
+const acceptedState = (text: string) => {
+  const doc = markdownToYDoc(text), bytes = Buffer.from(Y.encodeStateAsUpdate(doc));
+  doc.destroy();
+  return bytes;
+};
+
+// Proves: a document whose queue stays frozen at its owner's adoption seed
+// leaves only with a copy of the accepted state its departure sees. A copy
+// confirmed before a recipient's later accepted edit holds the document after
+// Stop. A copy read after the edit rebuilds it from its checkpoint, and its
+// confirmation lets the document go.
+it("keeps a frozen seed's stopped document until its owner copies the accepted state with the later edit", async () => {
+  const o = await enrolledServiceHost(), k = keptEdits(o);
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  o.keptOutbox.appendKey = "owner-adoption:seed";
+  o.keptOutbox.checkpoint = acceptedState("Original");
+  const early = await keptCheckpoint(o.host, k.row()!);
+  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation, checkpointDigest: early.digest})).toBe(true);
+  // A recipient's edit the relay accepts after that copy: the engine's recovery checkpoint now holds it.
+  o.acceptEdit("recipient");
+  await o.host.drain(o.document);
+  o.keptOutbox.checkpoint = acceptedState("Original\n\nRecipient text");
+  o.stop();
+  await o.depart();
+  await vi.waitFor(() => expect(errors).toHaveBeenCalledWith("Service activation pass failed.", expect.stringContaining("recovery copy")));
+  expect(k.row()).toMatchObject({copied: false});
+  await o.nextPull();
+  expect(o.host.drained("workspace")).toBe(false);
+  // Read after the edit, the copy holds it.
+  const late = await keptCheckpoint(o.host, k.row()!);
+  expect(late.text).toContain("Recipient text");
+  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation, checkpointDigest: late.digest})).toBe(true);
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  expect(k.row()).toBeNull();
+});
+
+// Proves: a seed refused at an earlier restore generation freezes nothing of
+// a later one. Once the document's binding moved to the next generation, as
+// after a restore, the departure settles that generation's accepted work,
+// publishes it and unloads, and the copied earlier queue lets the document go.
+it("settles a later restore generation's accepted work although an earlier generation's seed stays refused", async () => {
+  const o = await enrolledServiceHost(), k = keptEdits(o);
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.keptOutbox.appendKey = "owner-adoption:seed";
+  o.engine.generation = o.binding.restoreFenceGeneration + 1;
+  o.acceptEdit("next-generation");
+  await o.host.drain(o.document);
+  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation, checkpointDigest: null})).toBe(true);
+  o.stop();
+  const sent = o.ownerCalls().length;
+  await o.depart();
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  expect(o.calls(sent)).toEqual(departure);
+  expect(k.row()).toBeNull();
 });
 
 // Proves: the departure reaches every queue of the document, not only the
@@ -1326,7 +1407,7 @@ it("keeps a document that moved while no daemon ran until its owner copies the e
   await vi.waitFor(() => expect(errors).toHaveBeenCalledWith("Service activation pass failed.", expect.stringContaining("recovery copy")));
   expect(restarted.retains(o.sibling)).toBe(true);
   expect(restarted.drained("workspace")).toBe(false);
-  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation})).toBe(true);
+  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation, checkpointDigest: null})).toBe(true);
   await vi.waitFor(() => expect(restarted.drained("workspace")).toBe(true));
   expect(restarted.retains(o.sibling)).toBe(false);
   expect(k.row()).toBeNull();
@@ -1359,7 +1440,7 @@ it("keeps a moved document's queue readable while a replacement holds its old pa
   expect(restarted.retains(o.sibling)).toBe(true);
   expect(restarted.drained("workspace")).toBe(false);
   await readable();
-  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation})).toBe(true);
+  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation, checkpointDigest: null})).toBe(true);
   await vi.waitFor(() => expect(restarted.retains(o.sibling)).toBe(false));
   expect(k.row()).toBeNull();
 });

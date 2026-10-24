@@ -76,6 +76,8 @@ export interface OwnerYDocNativeSource {
 export interface OwnerYDocOutboxRecovery extends OwnerYDocOutboxPending {
   /** The lineage's accepted checkpoint; null once this computer holds no binding for it. */
   readonly checkpoint: Uint8Array | null;
+  /** The digest of `checkpoint`, which a confirmation of this copy names. */
+  readonly checkpointDigest: string | null;
 }
 
 export interface OwnerYDocOutboxPending {
@@ -97,7 +99,16 @@ export interface OwnerYDocOutboxHead extends Omit<OwnerYDocOutboxPending, "entri
   readonly entry: OwnerYDocOutboxEntry | null;
 }
 
-export type OwnerYDocOutboxDeliveryHead = Omit<OwnerYDocOutboxHead, "baseUpdate">;
+export type OwnerYDocOutboxDeliveryHead = Omit<OwnerYDocOutboxHead, "baseUpdate"> & {
+  /**
+   * Whether the queue holds its lineage's refused adoption seed, with no Try
+   * again granted, at the restore generation its document still has. No
+   * settlement may pass that seed.
+   */
+  readonly frozenAtRefusedSeed: boolean;
+  /** The checkpoint a recovery copy of the queue reads now. */
+  readonly checkpointDigest: string | null;
+};
 
 export class OwnerYDocOutboxReadChangedError extends Error {
   constructor() {
@@ -301,8 +312,8 @@ export class OwnerYDocOutbox {
 
   /** Reads the whole queue, then the accepted checkpoint it builds on, which may have advanced since. */
   async readRecovery(outboxId: string): Promise<OwnerYDocOutboxRecovery> {
-    const {checkpoint, ...pending} = await this.readSnapshot(outboxId, false, undefined, true);
-    return {...pending, checkpoint: checkpoint ?? null};
+    const {checkpoint, checkpointDigest, ...pending} = await this.readSnapshot(outboxId, false, undefined, true);
+    return {...pending, checkpoint: checkpoint ?? null, checkpointDigest: checkpoint === undefined ? null : checkpointDigest};
   }
 
   /** Reads the complete base and first pending update, with queue-wide admission metadata. */
@@ -318,9 +329,9 @@ export class OwnerYDocOutbox {
   }
 
   private readSnapshot(outboxId: string, headOnly: boolean): Promise<OwnerYDocOutboxPending>;
-  private readSnapshot(outboxId: string, headOnly: false, deliveryBinding: undefined, withCheckpoint: true): Promise<OwnerYDocOutboxPending & {checkpoint?: Uint8Array}>;
-  private readSnapshot(outboxId: string, headOnly: boolean, deliveryBinding: LiveObjectBinding): Promise<Omit<OwnerYDocOutboxPending, "baseUpdate">>;
-  private async readSnapshot(outboxId: string, headOnly: boolean, deliveryBinding?: LiveObjectBinding, withCheckpoint = false): Promise<Omit<OwnerYDocOutboxPending, "baseUpdate"> & {baseUpdate?: Uint8Array; checkpoint?: Uint8Array}> {
+  private readSnapshot(outboxId: string, headOnly: false, deliveryBinding: undefined, withCheckpoint: true): Promise<OwnerYDocOutboxPending & {checkpoint?: Uint8Array; checkpointDigest: string | null}>;
+  private readSnapshot(outboxId: string, headOnly: boolean, deliveryBinding: LiveObjectBinding): Promise<Omit<OwnerYDocOutboxPending, "baseUpdate"> & {frozenAtRefusedSeed: boolean; checkpointDigest: string | null}>;
+  private async readSnapshot(outboxId: string, headOnly: boolean, deliveryBinding?: LiveObjectBinding, withCheckpoint = false): Promise<Omit<OwnerYDocOutboxPending, "baseUpdate"> & {baseUpdate?: Uint8Array; checkpoint?: Uint8Array; checkpointDigest?: string | null; frozenAtRefusedSeed?: boolean}> {
     this.assertLive();
     let next: ReadCursor | null | undefined;
     let snapshot: string | undefined;
@@ -463,14 +474,18 @@ export class OwnerYDocOutbox {
     // Read after the entries, so it covers every entry accepted before them.
     // Only this queue's own binding has one, and its bytes must match the header's digest.
     let checkpoint: Uint8Array | undefined;
-    const checkpointDigest = !withCheckpoint || raw.checkpointDigest === null ? null : digestField(raw, "checkpointDigest");
-    if (checkpointDigest !== null) {
+    const named = withCheckpoint || deliveryBinding !== undefined;
+    const checkpointDigest = !named || raw.checkpointDigest === null ? null : digestField(raw, "checkpointDigest");
+    if (withCheckpoint && checkpointDigest !== null) {
       next = {snapshot: snapshot!, part: "checkpoint", sequence: 0, offset: 0};
       checkpoint = await readPart("checkpoint", 0, undefined, checkpointDigest);
     }
+    if (deliveryBinding !== undefined && typeof raw.frozenAtRefusedSeed !== "boolean") throw new TypeError("frozenAtRefusedSeed must be a boolean.");
     const observed = raw.observedBinding;
     return {
       ...(checkpoint === undefined ? {} : {checkpoint}),
+      ...(named ? {checkpointDigest} : {}),
+      ...(deliveryBinding === undefined ? {} : {frozenAtRefusedSeed: raw.frozenAtRefusedSeed as boolean}),
       outboxId: stringField(raw, "outboxId"),
       binding,
       baseUpdateDigest,

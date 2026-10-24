@@ -49,7 +49,7 @@ function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclara
     const entry = entries.find(row => row.sequence === current.sequence);
     let bytes: Buffer, following: ReturnType<typeof cursor> | null;
     if (current.part === "header") {
-      bytes = Buffer.from(JSON.stringify({outboxId: "outbox",binding,baseUpdateDigest: sha(base),baseByteLength: base.length,state: state.value,pendingBytes: entries.length,pendingEntryCount: entries.length,nextSequence: 8,oldestEntryAtMs: entries[0]?.createdAtMs ?? null,quarantineReason: quarantine.reason,observedBinding: null,retryDeliveryId: state.retryDeliveryId,firstEntryCursor}));
+      bytes = Buffer.from(JSON.stringify({outboxId: "outbox",binding,baseUpdateDigest: sha(base),baseByteLength: base.length,state: state.value,pendingBytes: entries.length,pendingEntryCount: entries.length,nextSequence: 8,oldestEntryAtMs: entries[0]?.createdAtMs ?? null,quarantineReason: quarantine.reason,observedBinding: null,retryDeliveryId: state.retryDeliveryId,firstEntryCursor,frozenAtRefusedSeed: false,checkpointDigest: null}));
       following = cursor(snapshot,"base");
     } else if (current.part === "base") {bytes = base; following = firstEntryCursor;}
     else if (current.part === "entryHeader") {bytes = Buffer.from(JSON.stringify(entry)); following = cursor(snapshot,"update",current.sequence);}

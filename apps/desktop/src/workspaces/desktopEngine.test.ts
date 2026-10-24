@@ -26,6 +26,7 @@ import { createHash } from "node:crypto";
 import { readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { readServerKeptEditsQueue, ServerKeptEditsConflict, type OwnerLiveQuarantineRecord } from "./ownerLiveQuarantine";
+import { liveRecoveryUpdates, parseLiveRecoveryPackage } from "./ownerLiveRecoveryCopy";
 import * as Y from "yjs";
 import type { LiveObjectBinding } from "@dohc/workspace-engine-client";
 
@@ -214,14 +215,16 @@ async function quarantinedOwner(documents: {path: string; objectId: string}[],
 
 const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 /** A refused queue read with its checkpoint: the server accepted the first edit, then refused the one that builds on it. */
-function recoveryQueue(binding: LiveObjectBinding) {
+// `accepted` is a recipient's accepted edit the checkpoint holds.
+function recoveryQueue(binding: LiveObjectBinding, accepted?: string) {
   const doc = new Y.Doc(); doc.getMap("frontmatter").set("title", "Plan");
   const baseUpdate = Y.encodeStateAsUpdate(doc);
   doc.getMap("frontmatter").set("status", "accepted");
+  if (accepted !== undefined) doc.getMap("frontmatter").set("note", accepted);
   const checkpoint = Y.encodeStateAsUpdate(doc), before = Y.encodeStateVector(doc);
   doc.getMap("frontmatter").set("status", "kept");
   const update = Y.encodeStateAsUpdate(doc, before); doc.destroy();
-  return {update, queue: {outboxId: "outbox", binding, baseUpdate, baseUpdateDigest: digest(baseUpdate), checkpoint, state: "quarantined" as const,
+  return {update, queue: {outboxId: "outbox", binding, baseUpdate, baseUpdateDigest: digest(baseUpdate), checkpoint, checkpointDigest: digest(checkpoint), state: "quarantined" as const,
     pendingBytes: update.byteLength, oldestEntryAtMs: 1, quarantineReason: "capacity-refused", observedBinding: null, retryDeliveryId: null,
     entries: [{sequence: 2, appendKey: "append", deliveryId: "delivery", updateDigest: digest(update), update, byteLength: update.byteLength, createdAtMs: 1}]}};
 }
@@ -237,7 +240,8 @@ function servedPages(queue: OwnerYDocOutboxRecovery, chunk = 3) {
   const header = {outboxId: queue.outboxId, binding: queue.binding, baseUpdateDigest: queue.baseUpdateDigest, baseByteLength: queue.baseUpdate.byteLength,
     state: queue.state, pendingBytes: queue.pendingBytes, pendingEntryCount: queue.entries.length, nextSequence: (queue.entries.at(-1)?.sequence ?? 0) + 1,
     oldestEntryAtMs: queue.oldestEntryAtMs, quarantineReason: queue.quarantineReason, observedBinding: queue.observedBinding, retryDeliveryId: queue.retryDeliveryId,
-    firstEntryCursor: first ? cursor("entryHeader", first.sequence) : null, checkpointDigest: queue.checkpoint ? digest(queue.checkpoint) : null};
+    firstEntryCursor: first ? cursor("entryHeader", first.sequence) : null, checkpointDigest: queue.checkpoint ? digest(queue.checkpoint) : null,
+    frozenAtRefusedSeed: false};
   const parts = new Map<string, {bytes: Uint8Array; next: ReturnType<typeof cursor> | null}>([
     ["header:0", {bytes: Buffer.from(JSON.stringify(header)), next: cursor("base")}], ["base:0", {bytes: queue.baseUpdate, next: header.firstEntryCursor}]]);
   queue.entries.forEach(({update, ...entry}, index) => {
@@ -1586,8 +1590,9 @@ describe("server owner peer lifecycle", () => {
   // only then tells the server, and Try again names the server's refusal.
   it("saves edits the server keeps from the server's queue, then confirms the copy, and tries them again on the server", async () => {
     let kept = [{objectId: "object", path: "notes/plan.md", outboxId: "server-outbox", reason: "invalid-update", generation: 1, store: "store", recovery: "paused"}];
-    const requests: {action: string; outboxId: string; generation: number}[] = [];
-    const pages = servedPages({...recoveryQueue(keptBinding).queue, outboxId: "server-outbox"});
+    const requests: {action: string; outboxId: string; generation: number; checkpointDigest?: string | null}[] = [];
+    const served = {...recoveryQueue(keptBinding, "Recipient text").queue, outboxId: "server-outbox"};
+    const pages = servedPages(served);
     const {f, credentials, workspace} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}], {kept: () => kept,
       keptEdits: async input => {
         if (input.action === "page") {
@@ -1606,10 +1611,17 @@ describe("server owner peer lifecycle", () => {
       const saved = await f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "notes/plan.md");
       expect(saved).toEqual({copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "server", keptEdits: "copied"});
       const root = f.rows.get("owner")!.rootPath;
-      expect(JSON.parse(await readFile(join(root, saved.packagePath), "utf8"))).toMatchObject({storedOn: "server", outboxId: "server-outbox"});
-      expect(await readFile(join(root, saved.copyPath!), "utf8")).toContain("kept");
-      // The copy was on disk before the server heard of it.
-      expect(requests).toEqual([{action: "page", outboxId: "server-outbox", generation: 1}, {action: "copied", outboxId: "server-outbox", generation: 1}]);
+      const stored = await readFile(join(root, saved.packagePath), "utf8");
+      expect(JSON.parse(stored)).toMatchObject({storedOn: "server", outboxId: "server-outbox", checkpoint: {sha256: served.checkpointDigest}});
+      // The package rebuilds the recipient's accepted edit and the kept one.
+      const rebuilt = new Y.Doc();
+      for (const part of liveRecoveryUpdates(parseLiveRecoveryPackage(stored))) Y.applyUpdate(rebuilt, part);
+      expect(rebuilt.getMap("frontmatter").toJSON()).toMatchObject({note: "Recipient text", status: "kept"});
+      rebuilt.destroy();
+      expect(await readFile(join(root, saved.copyPath!), "utf8")).toContain("Recipient text");
+      // The copy was on disk before the server heard of it, and the server hears which checkpoint it holds.
+      expect(requests).toEqual([{action: "page", outboxId: "server-outbox", generation: 1},
+        {action: "copied", outboxId: "server-outbox", generation: 1, checkpointDigest: served.checkpointDigest}]);
       expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{storedOn: "server", recovery: "copied"}]);
       // The engine on this computer was never asked for the server's queue.
       expect(quarantineMock.queue).not.toHaveBeenCalled();
@@ -1721,7 +1733,7 @@ describe("server owner peer lifecycle", () => {
       await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([
         {incident: "server:server-outbox:1", recovery: "unreachable"}, {incident: "server:server-outbox:2", recovery: "paused"}]));
       expect(await f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "notes/plan.md", "server:server-outbox:2")).toMatchObject({keptEdits: "copied"});
-      expect(actions).toEqual([{action: "copied", outboxId: "server-outbox", generation: 2}]);
+      expect(actions).toEqual([{action: "copied", outboxId: "server-outbox", generation: 2, checkpointDigest: expect.stringMatching(/^[0-9a-f]{64}$/)}]);
       expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([
         {incident: "server:server-outbox:1", recovery: "unreachable"}, {incident: "server:server-outbox:2", recovery: "copied"}]);
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}

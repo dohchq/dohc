@@ -3451,7 +3451,10 @@ async fn stop_try_again_answers_only_for_its_own_kept_edits() {
     assert_eq!(release_snapshot(&f), before);
     let released = kept(Some(0), &newer).await.unwrap().unwrap();
     assert_eq!(released[0].kept_snapshot.as_deref(), Some(newer.as_str()));
-    assert_eq!(kept(None, &newer).await.unwrap().unwrap()[0].state, "released");
+    assert_eq!(
+        kept(None, &newer).await.unwrap().unwrap()[0].state,
+        "released"
+    );
     assert!(matches!(
         kept(None, &older).await.unwrap(),
         Err(dohc_engine_collab::OwnerOutboxError::StopConflict)

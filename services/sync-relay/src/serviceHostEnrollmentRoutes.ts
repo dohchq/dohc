@@ -102,19 +102,23 @@ const isPageCursor = (value: unknown) => !!value && typeof value === "object" &&
   typeof (value as Record<string, unknown>).part === "string" && Number.isSafeInteger((value as Record<string, unknown>).sequence) &&
   Number.isSafeInteger((value as Record<string, unknown>).offset);
 
+const isCheckpointDigest = (value: unknown) => value === null || (typeof value === "string" && /^[0-9a-f]{64}$/.test(value));
+
 /**
  * The owner's actions on a refused queue the server keeps. `page` returns one
  * bounded engine page of it for a recovery copy, after the previous page's
  * `cursor`; `retry` is Try again, and `copied` records that a durable
- * recovery copy of this refusal exists, after which the server may let the
- * document go. Each names the refusal it saw.
+ * recovery copy of this refusal exists, with the `checkpointDigest` its
+ * header named, after which the server may let the document go once that is
+ * still what a copy reads. Each names the refusal it saw.
  */
 async function keptEditsAction(storage: SyncRelayStorage, host: KeptEditsHost, workspaceId: string, input: Record<string, unknown>,
   guard: () => void, signal: AbortSignal) {
   const keys = Object.keys(input).sort().join();
-  if ((keys !== "action,generation,outboxId" && !(keys === "action,cursor,generation,outboxId" && input.action === "page" && isPageCursor(input.cursor))) ||
-    !["page", "retry", "copied"].includes(String(input.action)) ||
-    typeof input.outboxId !== "string" || !Number.isSafeInteger(input.generation)) throw badRequest("A kept edits action, queue and refusal are required.");
+  const shaped = input.action === "page" ? keys === "action,generation,outboxId" || (keys === "action,cursor,generation,outboxId" && isPageCursor(input.cursor))
+    : input.action === "copied" ? keys === "action,checkpointDigest,generation,outboxId" && isCheckpointDigest(input.checkpointDigest)
+    : input.action === "retry" && keys === "action,generation,outboxId";
+  if (!shaped || typeof input.outboxId !== "string" || !Number.isSafeInteger(input.generation)) throw badRequest("A kept edits action, queue and refusal are required.");
   // A generation names one row, whatever store holds its queue.
   const refusal = {workspaceId, outboxId: input.outboxId, generation: Number(input.generation)}, kept = storage.readServiceKeptEditsRefusal(refusal);
   if (!kept) throw new KeptEditsConflict("kept-edits-changed");
@@ -125,7 +129,8 @@ async function keptEditsAction(storage: SyncRelayStorage, host: KeptEditsHost, w
     return {ok: true, page};
   }
   if (input.action === "copied") {
-    if (!storage.confirmServiceKeptEditsCopy({workspaceId, outboxId: kept.outboxId, generation: kept.generation})) throw new KeptEditsConflict("kept-edits-changed");
+    if (!storage.confirmServiceKeptEditsCopy({workspaceId, outboxId: kept.outboxId, generation: kept.generation,
+      checkpointDigest: input.checkpointDigest as string | null})) throw new KeptEditsConflict("kept-edits-changed");
     host.reconcile();
     return {ok: true};
   }

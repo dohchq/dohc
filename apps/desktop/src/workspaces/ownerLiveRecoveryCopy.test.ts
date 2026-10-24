@@ -35,7 +35,8 @@ function queue(count: number, accepted = 0, attribution: (sequence: number) => P
       byteLength: update.byteLength, createdAtMs: 1_000 + sequence, ...attribution(sequence)});
   }
   const markdown = yDocToMarkdown(doc); doc.destroy();
-  return {markdown, recovery: {outboxId: "outbox", binding, baseUpdateDigest: sha256(baseUpdate), baseUpdate, checkpoint, state: "quarantined",
+  return {markdown, recovery: {outboxId: "outbox", binding, baseUpdateDigest: sha256(baseUpdate), baseUpdate, checkpoint,
+    checkpointDigest: checkpoint === null ? null : sha256(checkpoint), state: "quarantined",
     pendingBytes: entries.reduce((sum, entry) => sum + entry.byteLength, 0), oldestEntryAtMs: 1_001, entries, quarantineReason: "capacity-refused",
     observedBinding: null, retryDeliveryId: null}};
 }

@@ -59,11 +59,13 @@ export interface ServerOwnerDelivery {
     /**
      * The owner's page read, Try again or confirmed copy of edits the server
      * keeps, by the refusal the owner saw. A page read continues after the
-     * previous page's `cursor`. Throws ServerKeptEditsConflict when the server
-     * answers that the refusal changed, or that it cannot reach its edits now.
+     * previous page's `cursor`, and a confirmed copy names the checkpoint it
+     * read. Throws ServerKeptEditsConflict when the server answers that the
+     * refusal changed, or that it cannot reach its edits now.
      */
     keptEdits(input: {action: "page"; outboxId: string; generation: number; cursor?: JsonValue} |
-      {action: "retry" | "copied"; outboxId: string; generation: number}, signal: AbortSignal): Promise<unknown>;
+      {action: "retry"; outboxId: string; generation: number} |
+      {action: "copied"; outboxId: string; generation: number; checkpointDigest: string | null}, signal: AbortSignal): Promise<unknown>;
     /** A later page of the edits the server keeps, after the cursor the previous page named. */
     keptEditsPage(after: number, signal: AbortSignal): Promise<unknown>;
   } | null>;
@@ -941,8 +943,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         const files = await recovery.saveLiveRecoveryCopy(recovery.liveRecoveryPackage(queue, {path: held.path, reason: held.reason, storedOn: "server"}),
           writes, dependencies.documentProjection);
         try {
+          // The checkpoint this copy holds: a later accepted edit makes the server ask for another.
           await serverKeptEditsAction(workspace.workspaceId, held, () => withServerSession(workspace.workspaceId, (session, signal) =>
-            session.keptEdits({action: "copied", outboxId: held.outboxId, generation: held.generation}, signal)));
+            session.keptEdits({action: "copied", outboxId: held.outboxId, generation: held.generation, checkpointDigest: queue.checkpointDigest}, signal)));
           setServerQuarantines(workspace.workspaceId, serverQuarantinesOf(workspace.workspaceId)
             .map((row): ServerKeptEdits => row.generation === held.generation ? {...row, recovery: "copied"} : row));
         } catch (error) {

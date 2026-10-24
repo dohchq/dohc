@@ -51,7 +51,8 @@ it("replays a real journal admission and retains the owner entry until native ap
           bytes = Buffer.from(JSON.stringify({outboxId: "outbox",binding,baseUpdateDigest: binding.lineageClaimId,
             baseByteLength: f.input.baselineBytes.byteLength,state: pending ? "sealed" : "active",pendingBytes: pending ? update.byteLength : 0,
             pendingEntryCount: pending ? 1 : 0,nextSequence: 2,oldestEntryAtMs: pending ? 10 : null,
-            quarantineReason: null,observedBinding: null,retryDeliveryId: null,firstEntryCursor: pending ? cursor("entryHeader",1) : null}));
+            quarantineReason: null,observedBinding: null,retryDeliveryId: null,firstEntryCursor: pending ? cursor("entryHeader",1) : null,
+            frozenAtRefusedSeed: false,checkpointDigest: null}));
           nextCursor = cursor("base");
         } else if (current.part === "entryHeader") {
           expect(pending).toBe(true); bytes = Buffer.from(JSON.stringify(entry)); nextCursor = cursor("update",1);

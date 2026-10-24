@@ -3384,12 +3384,18 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     // pending head keeps its key, so writing any of them again changes nothing.
     // A queue still waiting when a later restore generation replaces its
     // accepted checkpoint keeps that checkpoint, which its edits may build on.
+    // A queue frozen at its lineage's refused adoption seed records the
+    // recovery checkpoint built from its accepted frames, and the applied
+    // cursor it runs through.
     Migration {
         ordinal: 69,
         id: "v2-owner-outbox-retry",
         sql: "ALTER TABLE owner_ydoc_outboxes ADD COLUMN retry_delivery_id TEXT \
               CHECK (retry_delivery_id IS NULL OR (state = 'quarantined' AND length(retry_delivery_id) > 0)); \
               ALTER TABLE owner_ydoc_outboxes ADD COLUMN kept_checkpoint_digest TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT; \
+              ALTER TABLE owner_ydoc_outboxes ADD COLUMN recovery_checkpoint_digest TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT; \
+              ALTER TABLE owner_ydoc_outboxes ADD COLUMN recovery_checkpoint_cursor INTEGER \
+              CHECK ((recovery_checkpoint_cursor IS NULL) = (recovery_checkpoint_digest IS NULL) AND (recovery_checkpoint_cursor IS NULL OR recovery_checkpoint_cursor >= 0)); \
               CREATE TABLE owner_ydoc_outbox_refusals ( \
               outbox_id TEXT NOT NULL REFERENCES owner_ydoc_outboxes(outbox_id) ON DELETE CASCADE, \
               delivery_id TEXT NOT NULL CHECK (length(delivery_id) > 0), \
@@ -4478,7 +4484,7 @@ mod tests {
             ),
             (
                 "v2-owner-outbox-retry",
-                "6297a5c253c0080fc95450855893ee303184937d82bf3f62ab5afed0c39e5ada",
+                "2ac9352889cc37f605b39b3e39fff5fe5611721fd7cdf369c4187a5d72e3aaeb",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
