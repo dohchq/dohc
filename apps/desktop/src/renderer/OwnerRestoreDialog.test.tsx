@@ -83,6 +83,23 @@ it("requires separate stop and content confirmations and names every affected re
   expect(f.restored).toHaveBeenCalledTimes(1); expect(f.release).toHaveBeenCalledTimes(1);
   expect(f.changed).toHaveBeenCalledTimes(2);
 });
+// A finish that replies after the dialog closed still says the restore
+// changed, so the shell lists again.
+it("reports a finish that replies after the dialog closed", async () => {
+  const f = fixture(), original = f.call.getMockImplementation()!, finish = deferred<void>();
+  f.call.mockImplementation(async input => {
+    if (input.action === "confirm") await finish.promise;
+    return original(input);
+  });
+  const view = render(<OwnerRestoreDialog {...f.props} />); await openStop();
+  fireEvent.click(screen.getByRole("button", {name: "Stop access"}));
+  fireEvent.click(await screen.findByRole("button", {name: "Restore file"}));
+  await vi.waitFor(() => expect(f.call.mock.calls.some(([i]) => i.action === "confirm")).toBe(true));
+  view.unmount();
+  await act(async () => finish.resolve());
+  expect(f.changed).toHaveBeenCalledTimes(2);
+  expect(f.restored).not.toHaveBeenCalled();
+});
 // The relay refuses to start a restore while live editing of the file is still
 // stopping. Nothing changed, so the shell reports why and the choice stays.
 it.each(["plan", "begin"] as const)("reports a refused %s through the shell and keeps the choice on screen", async action => {

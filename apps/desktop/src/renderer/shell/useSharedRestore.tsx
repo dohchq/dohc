@@ -39,8 +39,9 @@ const ROW: Record<UnfinishedRestoreStage, { title: string; message: (path: strin
 // owner's synced workspace keeps a row that opens it, read from the relay
 // when the workspace opens, each time the dialog closes, and after a Decline
 // from a row. A restore that begins, is declined, or finishes drops the
-// listings already on their way. Every Try again opens the dialog for the
-// workspace and file it named, or does nothing in another workspace.
+// listings already on their way, and lists again if its dialog has closed.
+// Every Try again opens the dialog for the workspace and file it named, or
+// does nothing in another workspace.
 export function useSharedRestore(input: {
   workspaceId: string;
   enabled: boolean;
@@ -55,15 +56,24 @@ export function useSharedRestore(input: {
   const latest = useRef(input);
   latest.current = input;
   const [target, setTarget] = useState<Target | null>(null);
+  // The dialog on screen, so a change it reports after closing lists again.
+  const showing = useRef<Target | null>(null);
   // Files whose unfinished restore has a row from this shell.
   const filed = useRef(new Set<string>());
   const listing = useRef(0);
+  // Files whose Decline failed, by the listing count then. A listing begun
+  // earlier leaves their row alone.
+  const unanswered = useRef(new Map<string, number>());
 
   const restores = useMemo(() => {
     let attempts = 0;
+    const show = (next: Target | null) => {
+      showing.current = next;
+      setTarget(next);
+    };
     const open = (path: string, from: From = {}) => {
       attempts += 1;
-      setTarget({ workspaceId: latest.current.workspaceId, path, from, attempt: attempts });
+      show({ workspaceId: latest.current.workspaceId, path, from, attempt: attempts });
     };
     // A row's step for the workspace it was filed in. In another one it
     // answers false, so the row stays.
@@ -111,6 +121,9 @@ export function useSharedRestore(input: {
         void refresh();
       } catch (error) {
         if (latest.current.workspaceId !== workspaceId) return;
+        // The Decline may have gone through, so no listing read before it can
+        // file this restore as it was.
+        unanswered.current.set(restore.path, listing.current);
         // The dialog shows where the restore stands and what is left to do.
         latest.current.reportRestoreError(`dohc could not decline the restore of ${restore.path}.`, error,
           inWorkspace(() => open(restore.path, { operationId: restore.operationId })), sharedRestoreIdentity(restore.path), restore.path);
@@ -134,6 +147,7 @@ export function useSharedRestore(input: {
       const { workspaceId, enabled } = latest.current;
       if (!enabled) return;
       const live = () => token === listing.current && latest.current.workspaceId === workspaceId;
+      const held = (path: string) => (unanswered.current.get(path) ?? 0) >= token;
       const listed = new Set<string>();
       let after: string | undefined, complete = false, unreadable = 0;
       try {
@@ -142,7 +156,7 @@ export function useSharedRestore(input: {
           if (!live()) return;
           for (const restore of result.restores) {
             listed.add(restore.path);
-            file(restore);
+            if (!held(restore.path)) file(restore);
           }
           unreadable += result.unreadable;
           if (result.nextCursor === null) complete = true;
@@ -161,15 +175,22 @@ export function useSharedRestore(input: {
         return;
       }
       latest.current.clearIdentity(sharedRestoreListingIdentity);
-      for (const path of [...filed.current]) if (!listed.has(path)) settle(path);
+      for (const path of [...filed.current]) if (!listed.has(path) && !held(path)) settle(path);
     };
-    return { open, inWorkspace, settle, file, invalidate, refresh };
+    // While its dialog is open, closing it lists again. A change it reports
+    // after closing lists now, in the workspace it was made in.
+    const changed = (from: Target) => {
+      if (showing.current === from) invalidate();
+      else if (latest.current.workspaceId === from.workspaceId) void refresh();
+    };
+    return { show, open, inWorkspace, settle, file, refresh, changed };
   }, []);
 
   useEffect(() => {
     filed.current = new Set();
-    setTarget(null);
-  }, [input.workspaceId]);
+    unanswered.current = new Map();
+    restores.show(null);
+  }, [input.workspaceId, restores]);
   useEffect(() => {
     if (input.enabled) void restores.refresh();
   }, [input.enabled, input.workspaceId, restores]);
@@ -182,7 +203,7 @@ export function useSharedRestore(input: {
       path={shown.path}
       {...(shown.from.operationId === undefined ? {} : { operationId: shown.from.operationId })}
       onClose={(operation: OwnerRestoreStatus | null) => {
-        setTarget(null);
+        restores.show(null);
         if (operation) restores.file({ operationId: operation.operationId, path: shown.path, phase: operation.phase });
         void restores.refresh();
       }}
@@ -192,7 +213,7 @@ export function useSharedRestore(input: {
         latest.current.onRestored();
       }}
       onSettled={() => restores.settle(shown.path)}
-      onChanged={restores.invalidate}
+      onChanged={() => restores.changed(shown)}
       onError={(fallback, error) => {
         // Try again opens the change and its dialog again, wherever the
         // person has gone since.

@@ -111,7 +111,7 @@ export function OwnerRestoreDialog({workspaceId, path, operationId, onClose, onB
   onError(fallback: string, error: unknown): void;
   /** A start went through, so an earlier refusal no longer holds. */
   onSettled(): void;
-  /** The restore began, was declined, or finished. */
+  /** The restore began, was declined, or finished, even after the dialog closed. */
   onChanged(): void;
 }) {
   const [state, setState] = useState<State>({kind: "loading"}), [busy, setBusy] = useState(false);
@@ -208,10 +208,12 @@ export function OwnerRestoreDialog({workspaceId, path, operationId, onClose, onB
     try {
       if (!current(token)) return;
       const result = await bridge().ownerRestore({workspaceId, action: "confirm", operationId: saved.operationId, proposalDigest});
+      const finished = result.result.kind === "resumed" && result.status.phase === "resumed" && result.result.proposalDigest === proposalDigest;
+      if (finished) onChanged();
       if (!current(token)) return;
       operation.current = result.status;
-      if (result.result.kind === "resumed" && result.status.phase === "resumed" && result.result.proposalDigest === proposalDigest) {
-        setState({kind: "complete"}); onChanged(); onRestored();
+      if (finished) {
+        setState({kind: "complete"}); onRestored();
       } else setState({kind: "pending", message: result.result.kind !== "resumed" && result.result.cause === "quota" ? QUOTA_MESSAGE
         : result.result.kind === "review-required" ? "The restore needs a new review. Retry to review it again."
         : STAGE_MESSAGES.finishing});
