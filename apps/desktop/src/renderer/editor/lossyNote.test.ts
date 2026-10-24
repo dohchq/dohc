@@ -9,6 +9,7 @@ import { checkLossyNote, knownLossyNoteVerdict, useBoundNoteCheck } from "./loss
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 it("gives up on a check past its deadline, and remembers no verdict", async () => {
@@ -31,6 +32,31 @@ it("gives up on a check past its deadline, and remembers no verdict", async () =
 it("remembers an answered verdict by content hash", async () => {
   await expect(checkLossyNote("f".repeat(64), "<details>\n\nHidden.\n</details>\n")).resolves.toBe(true);
   expect(knownLossyNoteVerdict("f".repeat(64))).toBe(true);
+});
+
+it("remembers verdicts across a restart of a built app, for the same checker only", async () => {
+  vi.stubEnv("DEV", false);
+  try {
+    // A restart is a new window: a fresh module that reads storage again.
+    await expect(checkLossyNote("a".repeat(64), "<details>\n\nHidden.\n</details>\n")).resolves.toBe(true);
+    await expect(checkLossyNote("b".repeat(64), "# Note\n")).resolves.toBe(false);
+    vi.resetModules();
+    const restarted = await import("./lossyNote");
+    expect(restarted.knownLossyNoteVerdict("a".repeat(64))).toBe(true);
+    expect(restarted.knownLossyNoteVerdict("b".repeat(64))).toBe(false);
+
+    const stored = JSON.parse(localStorage.getItem("dohc.lossyNoteVerdicts") ?? "null") as { checker: string };
+    localStorage.setItem("dohc.lossyNoteVerdicts", JSON.stringify({ ...stored, checker: `${stored.checker}-other` }));
+    vi.resetModules();
+    expect((await import("./lossyNote")).knownLossyNoteVerdict("a".repeat(64))).toBeUndefined();
+  } finally {
+    localStorage.removeItem("dohc.lossyNoteVerdicts");
+  }
+});
+
+it("keeps verdicts out of storage on a dev server", async () => {
+  await expect(checkLossyNote("c".repeat(64), "# Note\n")).resolves.toBe(false);
+  expect(localStorage.getItem("dohc.lossyNoteVerdicts")).toBeNull();
 });
 
 describe("useBoundNoteCheck", () => {

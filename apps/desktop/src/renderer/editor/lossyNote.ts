@@ -1,18 +1,22 @@
 import {useEffect, useRef, useState} from 'react';
 import * as Y from 'yjs';
+import checker from './lossyNote.worker.ts?worker&url';
 
 // A lossy note is one dohc would change in meaning by saving it from the
 // editor (CONTEXT.md). The check parses the whole note, so it runs in a
-// worker, never on the UI thread. Verdicts stay in this window's memory by
-// the file's content hash, so reopening unchanged bytes is free. Nothing is
-// written to disk.
+// worker, never on the UI thread. Verdicts are kept by the file's content
+// hash, so reopening unchanged bytes is free. This profile's storage keeps
+// them across restarts, so a restart doesn't wait for the worker either.
+// The built checker's URL changes with its code, so a build that checks
+// differently starts with none. A dev server's URL doesn't, so it stores none.
 
 const VERDICT_LIMIT = 256;
 const IDLE_MS = 30_000;
 // A 2 MB note takes a few seconds. A check that runs past this stops the
 // worker, and its note opens read-only until a later read checks it again.
 const DEADLINE_MS = 30_000;
-const verdicts = new Map<string, boolean>();
+const STORED_VERDICTS = 'dohc.lossyNoteVerdicts';
+const verdicts = storedVerdicts();
 const checks = new Map<string, Promise<boolean>>();
 type Answer = {lossy: boolean; witnessKeepsMeaning?: boolean};
 const requests = new Map<number, {resolve: (answer: Answer) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>}>();
@@ -22,6 +26,32 @@ const keepingWitnesses = new Set<string>();
 let worker: Worker | null = null;
 let idleTimer: ReturnType<typeof setTimeout> | undefined;
 let nextId = 0;
+
+function storedVerdicts(): Map<string, boolean> {
+  if (import.meta.env.DEV) return new Map();
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(STORED_VERDICTS) ?? 'null');
+    if (typeof stored !== 'object' || stored === null) return new Map();
+    const {checker: storedChecker, verdicts: entries} = stored as Record<string, unknown>;
+    if (storedChecker !== checker || !Array.isArray(entries)) return new Map();
+    return new Map(entries.filter((entry): entry is [string, boolean] =>
+      Array.isArray(entry) && typeof entry[0] === 'string' && typeof entry[1] === 'boolean').slice(-VERDICT_LIMIT));
+  } catch {
+    return new Map();
+  }
+}
+
+function remember(contentHash: string, lossy: boolean): void {
+  verdicts.delete(contentHash);
+  verdicts.set(contentHash, lossy);
+  if (verdicts.size > VERDICT_LIMIT) verdicts.delete(verdicts.keys().next().value!);
+  if (import.meta.env.DEV) return;
+  try {
+    localStorage.setItem(STORED_VERDICTS, JSON.stringify({checker, verdicts: [...verdicts]}));
+  } catch {
+    // The verdict stays in this window's memory.
+  }
+}
 
 function stop(error: Error): void {
   clearTimeout(idleTimer);
@@ -44,7 +74,7 @@ function idle(): void {
 }
 
 function startWorker(): Worker {
-  const started = new Worker(new URL('./lossyNote.worker.ts', import.meta.url), {type: 'module'});
+  const started = new Worker(checker, {type: 'module'});
   started.onerror = () => {if (worker === started) stop(new Error('The note check stopped.'));};
   started.onmessage = ({data}: MessageEvent<{id: number; lossy?: boolean; witnessKeepsMeaning?: boolean; error?: string}>) => {
     if (worker !== started) return;
@@ -96,9 +126,7 @@ export function checkLossyNote(contentHash: string, markdown: string): Promise<b
   const running = checks.get(contentHash);
   if (running) return running;
   const check = ask({markdown}).then(({lossy}) => {
-    verdicts.delete(contentHash);
-    verdicts.set(contentHash, lossy);
-    if (verdicts.size > VERDICT_LIMIT) verdicts.delete(verdicts.keys().next().value!);
+    remember(contentHash, lossy);
     return lossy;
   }).finally(() => {
     checks.delete(contentHash);
