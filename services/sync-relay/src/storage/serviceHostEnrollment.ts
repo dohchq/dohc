@@ -7,7 +7,7 @@ import {validateUserWritePath} from "@dohc/workspace-core";
 import {effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson} from "../shareFilter";
 import {parseWorkspaceId} from "../requestInputs";
 import {canonicalLiveSelector, currentLiveDocumentMoment} from "./liveDocumentAuthority";
-import {LIVE_RESTORE_OPERATIONS} from "./liveRestoreOperationSchema";
+import {LIVE_RESTORE_OPERATIONS, UNFINISHED_RESTORE} from "./liveRestoreOperationSchema";
 import {assertWorkspaceQuota} from "./workspaces";
 import {forgetServiceHostUploads} from "./serviceHostUploads";
 import {retireServiceActivation, serviceActivationRetirementPending} from "./serviceActivationRetirement";
@@ -410,7 +410,7 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
     if (!current || current.ownerUserId !== input.ownerUserId || !storage.workspaceIsOwnedBy(workspaceId, input.ownerUserId)) return null;
     let acceptedCursor: number | undefined;
     if (input.retire) {
-      if (storage.db.prepare(`SELECT 1 FROM ${LIVE_RESTORE_OPERATIONS} WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND phase<>'resumed'`)
+      if (storage.db.prepare(`SELECT 1 FROM ${LIVE_RESTORE_OPERATIONS} WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND ${UNFINISHED_RESTORE}`)
         .get(workspaceId, current.objectId)) throw relayError("restore-in-progress", "Stop live editing is waiting. You can keep editing.");
       if (input.restoreFenceGeneration !== undefined && (!Number.isSafeInteger(input.restoreFenceGeneration) || input.restoreFenceGeneration < 0)) throw badRequest("Invalid restore generation.");
       const document=storage.db.prepare("SELECT restore_fence_generation FROM sync_relay_live_documents WHERE workspace_id=? AND object_id=? AND main_version_id='main' AND lineage_state='current'").get(workspaceId,current.objectId);

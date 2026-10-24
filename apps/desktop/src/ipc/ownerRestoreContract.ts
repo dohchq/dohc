@@ -10,7 +10,8 @@ function parsed<T>(parse: (input: unknown) => T) {
 }
 const document = parsed(parseLiveDocumentKey), binding = parsed(parseLiveObjectBinding), receipt = parsed(parseLiveUpdateReceipt);
 const authority = parsed(parseServerDerivedLiveUpdateAuthority);
-export const OwnerRestorePhase = z.enum(["authority-invalidated", "fenced", "old-cut-applied", "native-fenced", "relay-admitted", "native-applied", "settled", "resumed"]);
+export const OwnerRestorePhase = z.enum(["authority-invalidated", "fenced", "old-cut-applied", "native-fenced", "relay-admitted", "native-applied", "settled", "resumed", "declined"]);
+export type OwnerRestorePhase = z.infer<typeof OwnerRestorePhase>;
 export const OwnerRestoreIntent = z.object({
   deliveryKind: z.enum(["bootstrap", "owner"]), operationId: id, document, shareId: id, grantId: id,
   expectedGrantGeneration: integer.min(1), expectedDependentGrantIds: z.array(id), expectedFence: integer.min(1),
@@ -36,6 +37,12 @@ export const OwnerRestoreOptions = z.object({document, path: z.string(),
   nextBeforeCursor: integer.nullable(), nextGrantCursor: OwnerRestoreGrantCursor.nullable(), pendingOperation: z.object({operationId: id, phase: OwnerRestorePhase, proposalDigest: digest.nullable()}).nullable(),
 });
 export const OwnerRestorePlan = z.object({intent: OwnerRestoreIntent, path: z.string(), recipients: z.array(OwnerRestoreRecipient)});
+export const OwnerUnfinishedRestores = z.object({
+  restores: z.array(z.object({operationId: id, path: z.string().min(1).max(4096), phase: OwnerRestorePhase, proposalDigest: digest.nullable()})
+    .refine(restore => restore.phase !== "resumed" && restore.phase !== "declined", "The restore has finished.")).max(50),
+  nextCursor: id.nullable(),
+});
+export type OwnerUnfinishedRestores = z.infer<typeof OwnerUnfinishedRestores>;
 const priorCut = z.object({operationId: id, proposalDigest: digest, restoreJournalCursor: integer,
   selectedEventCount: integer, acceptedEventCount: integer, selectedTerminal: receipt.nullable(), frozenTerminal: receipt.nullable()});
 export const OwnerRestoreReview = z.object({
@@ -64,16 +71,20 @@ export const OwnerRestoreRequest = z.discriminatedUnion("action", [
   z.object({...scope, action: z.literal("options"), path: z.string().min(1).max(4096), beforeCursor: integer.min(1).optional(), grantCursor: OwnerRestoreGrantCursor.optional()}).strict(),
   z.object({...scope, action: z.literal("plan"), document, shareId: id, grantId: id, restorePointCursor: integer, restorePointReceiptDigest: digest}).strict(),
   z.object({...scope, action: z.literal("begin"), intent: OwnerRestoreIntent}).strict(),
-  z.object({...scope, action: z.enum(["status", "prepare", "review"]), operationId: id}).strict(),
+  z.object({...scope, action: z.literal("unfinished"), after: id.optional()}).strict(),
+  z.object({...scope, action: z.enum(["status", "prepare", "review", "decline"]), operationId: id}).strict(),
   z.object({...scope, action: z.literal("confirm"), operationId: id, proposalDigest: digest}).strict(),
 ]);
 export type OwnerRestoreRequest = z.infer<typeof OwnerRestoreRequest>;
-const pending = z.object({kind: z.enum(["pending", "review-required"])});
+// A full workspace on the server is the one cause the relay names.
+const pending = z.object({kind: z.enum(["pending", "review-required"]), cause: z.literal("quota").optional()});
 export const OwnerRestoreActionResponse = {
   options: OwnerRestoreOptions,
   plan: OwnerRestorePlan,
   begin: OwnerRestoreStatus,
   status: OwnerRestoreStatus,
+  decline: OwnerRestoreStatus,
+  unfinished: OwnerUnfinishedRestores,
   prepare: z.object({status: OwnerRestoreStatus, result: z.union([pending,
     z.object({kind: z.literal("prepared"), proposalDigest: digest, candidateDigest: digest, recordedAtMs: integer, replayed: z.boolean()})])}),
   review: z.object({status: OwnerRestoreStatus, result: z.union([OwnerRestoreReview, pending, z.null()])}),

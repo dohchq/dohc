@@ -5,6 +5,7 @@ import type {StorageContext} from "../../../services/sync-relay/src/storage/cont
 import {testHandler} from "../../../services/sync-relay/src/testing/index.js";
 import type {OwnerRestoreHost} from "../../../services/sync-relay/src/ownerRestoreRoutes.js";
 import {retireServiceActivation} from "../../../services/sync-relay/src/storage/serviceActivationRetirement.js";
+import {SyncRelayQuotaExceededError} from "../../../services/sync-relay/src/storage/errors.js";
 
 afterEach(cleanupLiveDeliveryFixtures);
 function fixture() {
@@ -48,15 +49,70 @@ it("previews exact access without mutating it, then stops access without replaci
   } finally {f.close();}
 });
 
-it.each(["plan", "begin", "status", "prepare", "review", "confirm"])("refuses a recipient at the %s boundary", async action => {
+it.each(["plan", "begin", "status", "prepare", "review", "confirm", "decline", "unfinished"])("refuses a recipient at the %s boundary", async action => {
   const f = fixture();
   try {
     const plan = await f.plan(); await f.request("", {intent: plan.intent});
-    const suffix = action === "plan" ? "/plan" : action === "begin" ? "" : action === "status" ? "/restore" : `/restore/${action}`;
-    const body = action === "status" ? undefined : action === "plan" ? f.planInput : action === "begin" ? {intent: plan.intent}
+    const suffix = action === "plan" ? "/plan" : action === "begin" ? "" : action === "status" ? "/restore" : action === "unfinished" ? "/unfinished" : `/restore/${action}`;
+    const body = action === "status" || action === "unfinished" ? undefined : action === "plan" ? f.planInput : action === "begin" ? {intent: plan.intent}
       : action === "confirm" ? {proposalDigest: "a".repeat(64)} : {};
     expect((await f.request(suffix, body, "reader")).status).toBe(404);
     expect(f.host.prepareRestore).not.toHaveBeenCalled(); expect(f.host.reviewRestore).not.toHaveBeenCalled(); expect(f.host.confirmRestore).not.toHaveBeenCalled();
+    expect(f.storage.readStopRestore({workspaceId: "workspace", ownerUserId: "owner", operationId: "restore"})?.phase).toBe("authority-invalidated");
+  } finally {f.close();}
+});
+
+// Proves: the owner finds each unfinished restore of the workspace, can end
+// one before its fence without the host, and access stays stopped. A
+// declined restore is no longer listed and no later step reopens it.
+it("lists an unfinished restore and declines it before its fence", async () => {
+  const f = fixture();
+  try {
+    const plan = await f.plan(); await f.request("", {intent: plan.intent});
+    expect(await (await f.request("/unfinished")).json()).toEqual({restores: [{operationId: "restore", path: plan.path,
+      phase: "authority-invalidated", proposalDigest: null}], nextCursor: null});
+    const declined = await f.request("/restore/decline", {});
+    expect(declined.status).toBe(200);
+    expect(await declined.json()).toMatchObject({operationId: "restore", phase: "declined"});
+    expect(f.storage.getShareGrant("grant")).toMatchObject({status: "revoked", generation: 5});
+    expect(await (await f.request("/unfinished")).json()).toEqual({restores: [], nextCursor: null});
+    const prepared = await f.request("/restore/prepare", {});
+    expect(prepared.status).toBe(409);
+    expect(await prepared.json()).toMatchObject({status: {phase: "declined"}, result: {kind: "pending"}});
+    expect(f.host.prepareRestore).not.toHaveBeenCalled();
+    expect(f.rows().documents[0]).toMatchObject({admission_state: "open", restore_fence_generation: 1});
+  } finally {f.close();}
+});
+
+// Proves: once live editing of the file stopped for the restore, Decline says
+// why it is refused and changes nothing.
+it("refuses Decline after the fence with a conflict that says why", async () => {
+  const f = fixture();
+  try {
+    const plan = await f.plan(); await f.request("", {intent: plan.intent});
+    expect((await f.request("/restore/prepare", {})).status).toBe(409);
+    const before = f.rows();
+    const declined = await f.request("/restore/decline", {});
+    expect(declined.status).toBe(409);
+    expect(await declined.json()).toEqual({ok: false, code: "conflict",
+      error: "Live editing of this file stopped for the restore, so it can no longer be declined. Retry to finish it."});
+    expect(f.rows()).toEqual(before);
+    expect(await (await f.request("/unfinished")).json()).toMatchObject({restores: [{operationId: "restore", phase: "fenced"}]});
+  } finally {f.close();}
+});
+
+// Proves: a full workspace is the one cause a waiting restore names, at
+// preparation and at admission.
+it("names a full workspace when preparation or admission runs out of quota", async () => {
+  const f = fixture();
+  try {
+    const plan = await f.plan(); await f.request("", {intent: plan.intent});
+    const full = new SyncRelayQuotaExceededError("workspace storage quota exceeded");
+    vi.mocked(f.host.prepareRestore).mockRejectedValueOnce(full);
+    vi.mocked(f.host.confirmRestore).mockRejectedValueOnce(full);
+    expect(await (await f.request("/restore/prepare", {})).json()).toMatchObject({result: {kind: "pending", cause: "quota"}});
+    expect(await (await f.request("/restore/confirm", {proposalDigest: "a".repeat(64)})).json()).toMatchObject({result: {kind: "review-required", cause: "quota"}});
+    expect(await (await f.request("/restore/prepare", {})).json()).toEqual({status: expect.anything(), result: {kind: "pending"}});
   } finally {f.close();}
 });
 

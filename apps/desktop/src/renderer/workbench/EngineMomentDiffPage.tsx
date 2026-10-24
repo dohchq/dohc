@@ -6,7 +6,6 @@ import { bridge } from "../bridge";
 import { HistoryHiddenState, HistoryUntrackedState } from "./HistoryPolicyStates";
 import { momentDiffSides } from "./momentDiffSides";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
-import {OwnerRestoreDialog} from "../OwnerRestoreDialog";
 import type { StopTarget } from "../StopAndRestoreDialog";
 import { CopyButton } from "../ui/CopyButton";
 import {
@@ -87,6 +86,7 @@ export function EngineMomentDiffPage({
   onReopenRestore,
   restoreRequested,
   onRestoreRequestTaken,
+  onOpenSharedRestore,
   steps,
   onOpenMoment,
 }: {
@@ -119,6 +119,9 @@ export function EngineMomentDiffPage({
   onReopenRestore: (momentId: string, path: string) => void;
   restoreRequested: boolean;
   onRestoreRequestTaken: () => void;
+  // Opens the shell's Restore shared file for this change's file. The shell
+  // owns the dialog and its Notices rows, so they outlive this page.
+  onOpenSharedRestore: (momentId: string, path: string) => void;
   // The older and newer change to this file in the loaded History, which
   // the page opens in its place with its arrows or [ and ].
   steps?: MomentSteps | undefined;
@@ -147,9 +150,6 @@ export function EngineMomentDiffPage({
     | { status: "restored"; restored: "text" | "deleted"; message: string }
   >({ status: "idle" });
   const [confirmRestoreOpen, setConfirmRestoreOpen] = useState(false);
-  const [sharedRestoreOpen, setSharedRestoreOpen] = useState(false);
-  // Try again on a refused shared restore opens the dialog afresh.
-  const [sharedRestoreAttempt, setSharedRestoreAttempt] = useState(0);
   // The forward restore moment to undo against; null = nothing to undo.
   const [undoMomentId, setUndoMomentId] = useState<string | null>(null);
   const pageRef = useRef<HTMLElement | null>(null);
@@ -191,7 +191,6 @@ export function EngineMomentDiffPage({
           // The tab no longer names the file, so it shows only that a change exists.
           onPathResolved(momentId, null);
           setConfirmRestoreOpen(false);
-          setSharedRestoreOpen(false);
           setState(result.status === "untracked" ? { status: "untracked" } : { status: "hidden", result });
           return;
         }
@@ -227,7 +226,6 @@ export function EngineMomentDiffPage({
   useEffect(() => {
     setRestoreState({ status: "idle" });
     setConfirmRestoreOpen(false);
-    setSharedRestoreOpen(false);
     setUndoMomentId(null);
   }, [tabPath]);
   // A step reads the next change in this page's place, which drops focus
@@ -560,7 +558,7 @@ export function EngineMomentDiffPage({
         </button>
         {!isProtected && moment.contentKind !== "binary" && moment.path.toLowerCase().endsWith(".md") && <button
           type="button" data-testid="engine-diff-shared-restore" disabled={restoreBusy}
-          onClick={() => setSharedRestoreOpen(true)}
+          onClick={() => onOpenSharedRestore(moment.id, moment.path)}
           className="h-7 rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
         >Restore shared file…</button>}
         {stopTarget ? <button
@@ -660,15 +658,6 @@ export function EngineMomentDiffPage({
           </>
         )}
       </div>
-      {sharedRestoreOpen && <OwnerRestoreDialog key={`${workspaceId}:${moment.path}:${sharedRestoreAttempt}`} workspaceId={workspaceId} path={moment.path}
-        onClose={() => setSharedRestoreOpen(false)} onBeforeRestore={onBeforeRestore} onRestored={onRestored}
-        onError={(fallback, error) => {
-          const token = liveToken.current;
-          onError(fallback, error, () => {
-            if (token !== liveToken.current) return;
-            setSharedRestoreAttempt(attempt => attempt + 1); setSharedRestoreOpen(true);
-          }, `shared-restore:${moment.path}`, moment.path);
-        }} />}
       {confirmRestoreOpen ? (
         <ConfirmDialog
           title="Restore this file?"

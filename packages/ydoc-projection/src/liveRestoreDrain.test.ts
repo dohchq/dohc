@@ -14,13 +14,13 @@ import { policy, hash, cleanupLiveDeliveryFixtures } from "./liveCommittedDelive
 import {resolveLiveRestorePoint} from "./liveRestorePoint.js";
 import {markdownToYDoc, yDocToMarkdown} from "./import-export.js";
 import { createLiveJournalHistoryAuthority } from "../../../services/sync-relay/src/storage/liveJournalHistory.js";
-import { beginStopRestore, advanceStopRestoreFence, readStopRestore } from "../../../services/sync-relay/src/storage/liveRestoreOperation.js";
+import { beginStopRestore, advanceStopRestoreFence, declineStopRestore, readStopRestore } from "../../../services/sync-relay/src/storage/liveRestoreOperation.js";
 import type { StorageContext } from "../../../services/sync-relay/src/storage/context.js";
 import type { StopRestoreCutCapture, OwnerCutCapture } from "../../../services/sync-relay/src/storage/liveCommittedDelivery.js";
 import type {NativeRestoreFenceReceipt} from "../../../services/sync-relay/src/liveRestoreFence.js";
 import { openSyncRelayStorage } from "../../../services/sync-relay/src/storage.js";
 import {parseNativeRestoreProposalReceipt, encodeNativeRestoreProposal, decodeNativeRestoreProposal, nativeSourceAgentDeclaration} from "../../../services/sync-relay/src/liveRestoreProposal.js";
-import {initializeLiveRestoreOperationSchema} from "../../../services/sync-relay/src/storage/liveRestoreOperationSchema.js";
+import {initializeLiveRestoreOperationSchema, LIVE_RESTORE_ACTIVE_V1_SQL, LIVE_RESTORE_OPERATIONS_V1_SQL} from "../../../services/sync-relay/src/storage/liveRestoreOperationSchema.js";
 import {readServiceActivationRetirement} from "../../../services/sync-relay/src/storage/serviceActivationRetirement.js";
 import {fenceAccount, initializeAccountDeletion, purgeAccountRows} from "../../../services/sync-relay/src/storage/accountDeletion.js";
 import {validateLiveRestoreProposal} from "./liveRestoreProof.js";
@@ -1534,6 +1534,61 @@ it.each(["revocation", "pause"] as const)("carries a retirement recorded during 
     expect(() => beginStopRestore(f.context, {...f.intent, operationId: "after-retirement", expectedFence: 2, expectedGrantGeneration: 6}, 300))
       .toThrow("Live editing is still stopping.");
     expect(retirement()).toEqual({...recorded, restoreFenceGeneration: 2, acceptedThrough: admitted.admitted.accepted.receipt.journalCursor});
+  } finally {f.close();}
+});
+
+// Proves: a restore declined before its fence leaves the retirement its
+// revocation recorded at the pre-restore key, since the generation never
+// moved, and the declined restore blocks nothing the retirement does not.
+it("keeps a retirement's pre-restore key when its restore is declined", () => {
+  const f = fixture("bootstrap", "service");
+  try {
+    hostRestoredDocument(f, f.intent.shareId);
+    f.add("before-restore");
+    const acceptedThrough = Number(f.raw.prepare("SELECT MAX(journal_cursor) AS cursor FROM sync_relay_live_update_journal").get()!.cursor);
+    beginStopRestore(f.context, f.intent, 40);
+    const recorded = {relayDatabaseNamespace: "restore-test", activationId: hostedActivationId, ...f.document, restoreFenceGeneration: 1, acceptedThrough};
+    expect(readServiceActivationRetirement(f.context, f.document)).toEqual(recorded);
+    expect(declineStopRestore(f.context, f.lookup, 45).phase).toBe("declined");
+    expect(readServiceActivationRetirement(f.context, f.document)).toEqual(recorded);
+    expect(f.raw.prepare("SELECT restore_fence_generation,admission_state FROM sync_relay_live_documents").get()).toEqual({restore_fence_generation: 1, admission_state: "open"});
+    expect(f.storage.serviceHostDocumentEnabled(f.document)).toBe(false);
+    f.write(db => db.prepare("UPDATE sync_relay_share_grants SET status='active',generation=6,revoked_at_ms=NULL WHERE grant_id=?").run(f.intent.grantId));
+    expect(() => beginStopRestore(f.context, {...f.intent, operationId: "after-decline", expectedGrantGeneration: 6}, 50))
+      .toThrow("Live editing is still stopping.");
+  } finally {f.close();}
+});
+
+// Proves: a store from before the declined phase opens with every restore
+// row, lifecycle, proposal, source range and journal reference as it was,
+// though foreign keys stay on while its tables move.
+it("migrates a store from before the declined phase without changing its restore rows", () => {
+  const f = admittedRestoreFixture("owner", true);
+  try {
+    f.complete();
+    // One connection throughout, as the relay has: another one may read a table through its old layout.
+    const db = f.context.db;
+    const rows = (table: string) => db.prepare(`SELECT * FROM ${table} ORDER BY 1,2`).all();
+    const snapshot = () => ({operations: rows("sync_relay_live_restore_operations"), proposals: rows(proposalTable),
+      lifecycles: rows("sync_relay_live_restore_lifecycles"), sources: rows("sync_relay_live_restore_source_ranges"),
+      journal: db.prepare("SELECT journal_cursor,restore_operation_id FROM sync_relay_live_update_journal ORDER BY journal_cursor").all()});
+    const before = snapshot();
+    expect(before.lifecycles).toHaveLength(1);
+    expect(before.sources.length).toBeGreaterThan(0);
+    expect(before.journal.some(row => row.restore_operation_id === "restore")).toBe(true);
+    // Lay the operation table out as the earlier build left it.
+    const columns = db.prepare("SELECT name FROM pragma_table_info('sync_relay_live_restore_operations') WHERE name<>'declined_at_ms' ORDER BY cid").all().map(row => row.name).join(",");
+    db.exec("PRAGMA foreign_keys=OFF"); db.exec("PRAGMA legacy_alter_table=ON");
+    db.exec(`BEGIN; ALTER TABLE sync_relay_live_restore_operations RENAME TO restore_operations_v2; ${LIVE_RESTORE_OPERATIONS_V1_SQL};
+      INSERT INTO sync_relay_live_restore_operations(${columns}) SELECT ${columns} FROM restore_operations_v2; DROP TABLE restore_operations_v2;
+      ${LIVE_RESTORE_ACTIVE_V1_SQL}; DELETE FROM sync_relay_migrations WHERE migration_id='live-restore-declined-v1'; COMMIT`);
+    db.exec("PRAGMA legacy_alter_table=OFF"); db.exec("PRAGMA foreign_keys=ON");
+    // The relay migrates inside its schema transaction, with foreign keys on.
+    db.exec("BEGIN IMMEDIATE"); initializeLiveRestoreOperationSchema(db); db.exec("COMMIT");
+    expect(snapshot()).toEqual(before);
+    expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id='live-restore-declined-v1'").get()).toBeTruthy();
+    expect(() => initializeLiveRestoreOperationSchema(db)).not.toThrow();
   } finally {f.close();}
 });
 

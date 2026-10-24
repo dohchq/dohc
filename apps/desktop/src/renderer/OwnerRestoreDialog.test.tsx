@@ -41,15 +41,18 @@ function fixture(pointCursor = 0) {
     if (input.action === "options") return options;
     if (input.action === "plan") return {intent, path: "notes.md", recipients};
     if (input.action === "begin" || input.action === "status") return status;
-    if (input.action === "prepare") return {status, result: {kind: "prepared", proposalDigest, candidateDigest: digest, recordedAtMs: 9, replayed: false}};
+    if (input.action === "prepare") {
+      status = {...status, phase: "native-fenced"};
+      return {status, result: {kind: "prepared", proposalDigest, candidateDigest: digest, recordedAtMs: 9, replayed: false}};
+    }
     if (input.action === "review") return {status, result: reviewFixture()};
     status = {...status, phase: "resumed", proposalDigest};
     return {status, result: {kind: "resumed", proposalDigest, receipt: {}}};
   });
   window.dohcDesktop = {ownerRestore: call} as unknown as typeof window.dohcDesktop;
-  const close = vi.fn(), restored = vi.fn(), release = vi.fn(), error = vi.fn();
-  const props = {workspaceId: "workspace", path: "notes.md", onClose: close, onRestored: restored, onBeforeRestore: vi.fn(async () => release), onError: error};
-  return {call, props, close, restored, release, error, options, intent, status: () => status};
+  const close = vi.fn(), restored = vi.fn(), release = vi.fn(), error = vi.fn(), settled = vi.fn();
+  const props = {workspaceId: "workspace", path: "notes.md", onClose: close, onRestored: restored, onBeforeRestore: vi.fn(async () => release), onError: error, onSettled: settled};
+  return {call, props, close, restored, release, error, settled, options, intent, status: () => status};
 }
 afterEach(() => {cleanup(); delete window.dohcDesktop;});
 async function openStop(point = "0") {
@@ -95,6 +98,92 @@ it.each(["plan", "begin"] as const)("reports a refused %s through the shell and 
   expect(screen.getByRole("button", {name: action === "plan" ? "Review affected access" : "Stop access"})).toHaveProperty("disabled", false);
   expect(screen.queryByRole("alert")).toBeNull();
   expect(f.call.mock.calls.some(([input]) => input.action === "prepare" || input.action === "review")).toBe(false);
+  // A plan that went through settled the earlier refusal; a refused begin settles nothing more.
+  expect(f.settled).toHaveBeenCalledTimes(action === "plan" ? 0 : 1);
+});
+// A later plan or begin that goes through settles the shell's row for an
+// earlier refusal, which no longer holds.
+it("settles an earlier refusal when the plan and the begin go through", async () => {
+  const f = fixture(); render(<OwnerRestoreDialog {...f.props} />); await openStop();
+  expect(f.settled).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole("button", {name: "Stop access"})); await screen.findByRole("button", {name: "Restore file"});
+  expect(f.settled).toHaveBeenCalledTimes(2);
+  expect(f.error).not.toHaveBeenCalled();
+});
+// Closing keeps an unfinished restore findable: the dialog hands the shell
+// the restore it knows of.
+it("closes with the unfinished restore it knows of", async () => {
+  const f = fixture(), original = f.call.getMockImplementation()!;
+  f.call.mockImplementation(input => input.action === "prepare"
+    ? Promise.resolve({status: {...f.status(), phase: "fenced"}, result: {kind: "pending"}}) : original(input));
+  render(<OwnerRestoreDialog {...f.props} />); await openStop();
+  fireEvent.click(screen.getByRole("button", {name: "Stop access"}));
+  await screen.findByText("dohc could not prepare the restore. Retry in a moment.");
+  fireEvent.click(screen.getByRole("button", {name: "Close"}));
+  expect(f.close).toHaveBeenCalledWith(expect.objectContaining({operationId: "restore", phase: "fenced"}));
+});
+// Preparation the relay cannot finish gives no cause beyond a full
+// workspace. A repeat says it repeated and what stays stopped meanwhile.
+it("says when preparation keeps failing, and when the workspace is full", async () => {
+  const f = fixture(), original = f.call.getMockImplementation()!;
+  let cause: "quota" | undefined;
+  f.call.mockImplementation(input => input.action === "prepare"
+    ? Promise.resolve({status: {...f.status(), phase: "fenced"}, result: {kind: "pending", ...(cause ? {cause} : {})}}) : original(input));
+  render(<OwnerRestoreDialog {...f.props} />); await openStop();
+  fireEvent.click(screen.getByRole("button", {name: "Stop access"}));
+  await screen.findByText("dohc could not prepare the restore. Retry in a moment.");
+  expect(screen.queryByRole("button", {name: "Decline restore"})).toBeNull();
+  fireEvent.click(screen.getByRole("button", {name: "Retry"}));
+  await screen.findByText("dohc could not prepare the restore again. Live editing of this file stays stopped until it finishes. Retry later.");
+  cause = "quota";
+  fireEvent.click(screen.getByRole("button", {name: "Retry"}));
+  await screen.findByText("This workspace has reached its limit on the server. Free some space, then retry the restore.");
+});
+it("names a full workspace when admission refuses the confirmed restore", async () => {
+  const f = fixture(), original = f.call.getMockImplementation()!;
+  f.call.mockImplementation(input => input.action === "confirm"
+    ? Promise.resolve({status: {...f.status(), phase: "native-fenced"}, result: {kind: "review-required", cause: "quota"}}) : original(input));
+  render(<OwnerRestoreDialog {...f.props} />); await openStop();
+  fireEvent.click(screen.getByRole("button", {name: "Stop access"})); await screen.findByRole("button", {name: "Restore file"});
+  fireEvent.click(screen.getByRole("button", {name: "Restore file"}));
+  await screen.findByText("This workspace has reached its limit on the server. Free some space, then retry the restore.");
+  expect(f.restored).not.toHaveBeenCalled();
+});
+// Before live editing of the file stops for it, the owner can decline a
+// restore. Access stays stopped and the file stays unchanged.
+it("declines a reopened restore before its fence", async () => {
+  const f = fixture(), original = f.call.getMockImplementation()!;
+  f.call.mockImplementation(input => input.action === "options" ? Promise.resolve({...f.options,
+    pendingOperation: {operationId: "restore", phase: "authority-invalidated", proposalDigest: null}})
+    : input.action === "decline" ? Promise.resolve({...f.status(), phase: "declined"}) : original(input));
+  render(<OwnerRestoreDialog {...f.props} />);
+  await screen.findByText("Access stopped for this restore. Review the restore, or decline it to keep the file unchanged.");
+  expect(screen.getByText("Access has stopped. Declining keeps the file unchanged, and access stays stopped.")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", {name: "Decline restore"}));
+  await screen.findByText("Restore declined");
+  expect(screen.getByText("The file stays unchanged. Access stays stopped. Share again when you want to give access.")).toBeTruthy();
+  expect(f.call).toHaveBeenCalledWith({workspaceId: "workspace", action: "decline", operationId: "restore"});
+  expect(f.call.mock.calls.some(([input]) => input.action === "prepare" || input.action === "confirm")).toBe(false);
+  fireEvent.click(screen.getByRole("button", {name: "Close"}));
+  expect(f.close).toHaveBeenCalledWith(expect.objectContaining({phase: "declined"}));
+});
+// Another window may have moved the restore past its fence. The refusal
+// shows, the dialog reads where the restore stands, and Decline goes.
+it("shows a refused decline and where the restore stands", async () => {
+  const f = fixture(), original = f.call.getMockImplementation()!;
+  let phase = "authority-invalidated";
+  f.call.mockImplementation(input => input.action === "options" ? Promise.resolve({...f.options,
+    pendingOperation: {operationId: "restore", phase: "authority-invalidated", proposalDigest: null}})
+    : input.action === "status" ? Promise.resolve({...f.status(), phase})
+    : input.action === "decline" ? Promise.reject(Error("Live editing of this file stopped for the restore, so it can no longer be declined. Retry to finish it."))
+    : original(input));
+  render(<OwnerRestoreDialog {...f.props} />);
+  const decline = await screen.findByRole("button", {name: "Decline restore"});
+  phase = "fenced";
+  fireEvent.click(decline);
+  await screen.findByText("Live editing of this file stopped for the restore, so it can no longer be declined. Retry to finish it.");
+  expect(screen.queryByRole("button", {name: "Decline restore"})).toBeNull();
+  expect(screen.getByRole("button", {name: "Retry"})).toBeTruthy();
 });
 it("marks the agent the owner's change declared beside the authenticated owner", async () => {
   const f = fixture(); render(<OwnerRestoreDialog {...f.props} />); await openStop();
@@ -166,8 +255,8 @@ it("reopens a stopped operation for review without first admitting content", asy
   f.call.mockImplementation(input => input.action === "options" ? Promise.resolve({...f.options,
     pendingOperation: {operationId: "restore", phase: "native-fenced", proposalDigest: null}}) : original(input));
   render(<OwnerRestoreDialog {...f.props} />);
-  await screen.findByText("Access stopped. Continue reviewing or finishing this restore.");
-  fireEvent.click(screen.getByRole("button", {name: "Retry"})); await screen.findByRole("button", {name: "Restore file"});
+  await screen.findByText("Access stopped for this restore. Review the restore, or decline it to keep the file unchanged.");
+  fireEvent.click(screen.getByRole("button", {name: "Review restore"})); await screen.findByRole("button", {name: "Restore file"});
   expect(f.call.mock.calls.some(([input]) => input.action === "begin" || input.action === "confirm")).toBe(false);
 });
 it.each([false, true])("reviews a saved proposal before confirming after reopen (review fails first: %s)", async failFirst => {
@@ -181,7 +270,8 @@ it.each([false, true])("reviews a saved proposal before confirming after reopen 
     return original(input);
   });
   render(<OwnerRestoreDialog {...f.props} />);
-  await screen.findByText("Access stopped. Continue reviewing or finishing this restore.");
+  await screen.findByText("The restore has not finished. Live editing of this file stays stopped until it does. Retry to continue it.");
+  expect(screen.queryByRole("button", {name: "Decline restore"})).toBeNull();
   fireEvent.click(screen.getByRole("button", {name: "Retry"}));
   if (failFirst) {
     await screen.findByText("Review unavailable.");
@@ -281,8 +371,8 @@ it("names the accepted restore point's author when a stopped restore reopens", a
       selectedPointReceivedAtMs: at, selectedPointAuthority: reader})};
   });
   render(<OwnerRestoreDialog {...f.props} />);
-  await screen.findByText("Access stopped. Continue reviewing or finishing this restore.");
-  fireEvent.click(screen.getByRole("button", {name: "Retry"})); await screen.findByRole("button", {name: "Restore file"});
+  await screen.findByText("Access stopped for this restore. Review the restore, or decline it to keep the file unchanged.");
+  fireEvent.click(screen.getByRole("button", {name: "Review restore"})); await screen.findByRole("button", {name: "Restore file"});
   expect(screen.getByText(/^Restore point:/).textContent).toBe(`Restore point: ${new Date(at).toLocaleString()} · reader@example.test`);
   expect(f.call.mock.calls.some(([input]) => input.action === "plan" || input.action === "begin")).toBe(false);
 });

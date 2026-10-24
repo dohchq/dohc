@@ -106,6 +106,7 @@ import { useScheduleHostNotice } from "./shell/useScheduleHostNotice";
 import { useCollectionCopiesLeftNotice } from "./shell/useCollectionCopiesLeftNotice";
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { useCaptureRecoveryNotices } from "./shell/useCaptureRecoveryNotices";
+import { useSharedRestore } from "./shell/useSharedRestore";
 import { useCaptureHoldNotices } from "./shell/useCaptureHoldNotices";
 import { ShellErrorReporter, useShellError } from "./shell/useShellError";
 import { useDocumentSaveNotices } from "./shell/useDocumentSaveNotices";
@@ -2898,6 +2899,17 @@ export function DesktopWorkspaceShell(props: {
     [openMomentDiffTab, workspaceId],
   );
   const takeRestoreRequest = useCallback(() => setRestoreRequest(null), []);
+  const sharedRestore = useSharedRestore({
+    workspaceId,
+    enabled: workspaceIsReady && !shareView && workspaceSynced,
+    onBeforeRestore: beginLineageOperation,
+    onRestored: onHistoryRestored,
+    openChange: openMomentDiffTab,
+    reportRestoreError,
+    reportShellFailure,
+    showSuccessNotice,
+    clearIdentity,
+  });
   const activateEditorTab = useCallback(
     (groupId: string, path: string) => {
       const current = wbRef.current;
@@ -5633,6 +5645,7 @@ export function DesktopWorkspaceShell(props: {
                     restoreRequest.momentId === groupTab.momentId
                   }
                   onRestoreRequestTaken={takeRestoreRequest}
+                  onOpenSharedRestore={(momentId, path) => sharedRestore.open(path, momentId)}
                   steps={groupTab.momentId === null ? undefined : momentSteps.get(groupTab.momentId)}
                   onOpenMoment={openMomentDiffTab}
                 />
@@ -6394,6 +6407,7 @@ export function DesktopWorkspaceShell(props: {
           onClose={() => setConflictReviewOpen(false)}
         />
       ) : null}
+      {sharedRestore.dialog}
       {stopAndRestore.session ? (
         <StopAndRestoreDialog
           key={stopAndRestore.session.key}

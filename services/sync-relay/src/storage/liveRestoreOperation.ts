@@ -17,7 +17,7 @@ import { relayError } from "../errors";
 import { revokeShareGrantInTransaction } from "./shares";
 import { readCurrentShareGrant } from "./currentShareGrant";
 import { assertWorkspaceQuota } from "./workspaces";
-import { LIVE_RESTORE_OPERATIONS as table } from "./liveRestoreOperationSchema";
+import { LIVE_RESTORE_OPERATIONS as table, UNFINISHED_RESTORE } from "./liveRestoreOperationSchema";
 import { effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson } from "../shareFilter";
 import { canonicalLiveSelector, currentLiveDocumentMoment, decodeLiveDocumentAuthorityStructure } from "./liveDocumentAuthority";
 import { requireLiveJournalHistory, liveJournalHistoryNamespace } from "./liveJournalHistory";
@@ -81,7 +81,7 @@ export type StopRestoreOperation = {
   terminal: LiveUpdateReceipt | null;
   applied: StopRestoreApplied | null;
   nativeReceipt: NativeRestoreFenceReceipt | null;
-  phase: "authority-invalidated" | "fenced" | "old-cut-applied" | "native-fenced" | "relay-admitted" | "native-applied" | "settled" | "resumed";
+  phase: "authority-invalidated" | "fenced" | "old-cut-applied" | "native-fenced" | "relay-admitted" | "native-applied" | "settled" | "resumed" | "declined";
   previousOperationId: string | null;
   oldFence: number;
   newFence: number | null;
@@ -89,6 +89,7 @@ export type StopRestoreOperation = {
   revokedGeneration: number;
   invalidatedAtMs: number;
   fencedAtMs: number | null;
+  declinedAtMs: number | null;
 };
 
 const integer = (value: number, minimum = 0, maximum = Number.MAX_SAFE_INTEGER): number => {
@@ -214,14 +215,15 @@ function read(storage: StorageContext, operationId: string, workspaceId: string)
     parseLiveUpdateIdentifier(applied.sourceId); integer(applied.localYDocSequence);
   }
   const nativeReceipt = row.native_receipt_json === null ? null : parseNativeRestoreFenceReceipt(JSON.parse(String(row.native_receipt_json)));
-  if (!["authority-invalidated","fenced","old-cut-applied"].includes(String(row.phase)) !== (nativeReceipt !== null)) refuse();
+  if (row.phase !== "declined" && !["authority-invalidated","fenced","old-cut-applied"].includes(String(row.phase)) !== (nativeReceipt !== null)) refuse();
   if (nativeReceipt && (!applied || !isDeepStrictEqual(nativeReceipt.operation, nativeRestoreFence(applied, Number(row.new_fence))))) refuse();
   return { intent, basis: savedBasis, terminal: terminal === null ? null : parseLiveUpdateReceipt(terminal), applied, nativeReceipt,
     previousOperationId:row.previous_operation_id===null?null:parseLiveUpdateIdentifier(row.previous_operation_id),
     phase: row.phase as StopRestoreOperation["phase"], oldFence: Number(row.old_fence),
     newFence: row.new_fence === null ? null : Number(row.new_fence), cutoverCursor: row.cutover_cursor === null ? null : Number(row.cutover_cursor),
     revokedGeneration: Number(row.revoked_generation), invalidatedAtMs: Number(row.invalidated_at_ms),
-    fencedAtMs: row.fenced_at_ms === null ? null : Number(row.fenced_at_ms) };
+    fencedAtMs: row.fenced_at_ms === null ? null : Number(row.fenced_at_ms),
+    declinedAtMs: row.declined_at_ms === null ? null : Number(row.declined_at_ms) };
 }
 
 export function nativeRestoreFence(applied: StopRestoreApplied, newFence: number): NativeRestoreFence {
@@ -300,9 +302,11 @@ export function beginStopRestore(storage: StorageContext, input: StopRestoreInte
       !currentLiveDocumentMoment(storage, intent.document, String(document.current_path))) refuse();
     requireNoPendingActivation(storage, intent.document);
     requireNoPendingRetirement(storage, intent.document);
-    const existing = storage.db.prepare(`SELECT 1 FROM ${table} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND phase<>'resumed'`).get(...key(intent.document).slice(0, 3));
+    const existing = storage.db.prepare(`SELECT 1 FROM ${table} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND ${UNFINISHED_RESTORE}`).get(...key(intent.document).slice(0, 3));
     if (existing) refuse();
-    const previous=storage.db.prepare(`SELECT operation_id,new_fence,lineage_claim_id,phase FROM ${table} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? ORDER BY new_fence DESC LIMIT 1`)
+    // The chain follows the fences restores advanced. One declined before its
+    // fence left the document's generation as it was.
+    const previous=storage.db.prepare(`SELECT operation_id,new_fence,lineage_claim_id,phase FROM ${table} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? AND new_fence IS NOT NULL ORDER BY new_fence DESC LIMIT 1`)
       .get(namespace,...key(intent.document).slice(0,3));
     if (previous && (previous.phase!=="resumed" || previous.new_fence!==intent.expectedFence || previous.lineage_claim_id!==intent.document.lineageClaimId)) refuse();
     const previousOperationId=previous?parseLiveUpdateIdentifier(previous.operation_id):null;
@@ -366,6 +370,7 @@ export function advanceStopRestoreFence(storage: StorageContext, input: { operat
     requireLiveJournalHistory(storage);
     const saved = read(storage, operationId, workspaceId);
     if (!saved) refuse();
+    if (saved.phase === "declined") throw relayError("conflict", "This restore was declined. Start a new restore to restore the file.");
     if (saved.phase !== "authority-invalidated") return saved;
     const { intent } = saved;
     if (at < saved.invalidatedAtMs || !stopRestoreRevocationHolds(storage, saved)) refuse();
@@ -382,9 +387,33 @@ export function advanceStopRestoreFence(storage: StorageContext, input: { operat
     const last = raw ? decodeJournalRow(storage.db,raw) : null;
     if (last) verifyJournalRow(last);
     const terminal = last?.admitted.metadata.accepted.receipt ?? null;
-    const advanced = storage.db.prepare(`UPDATE ${table} SET phase='fenced',new_fence=?,cutover_cursor=?,fenced_at_ms=?,terminal_json=? WHERE relay_database_namespace=? AND operation_id=?`)
+    const advanced = storage.db.prepare(`UPDATE ${table} SET phase='fenced',new_fence=?,cutover_cursor=?,fenced_at_ms=?,terminal_json=? WHERE relay_database_namespace=? AND operation_id=? AND phase='authority-invalidated'`)
       .run(saved.oldFence + 1, cutover, at, JSON.stringify(terminal),saved.basis.namespace, operationId);
     if (Number(advanced.changes) !== 1) refuse();
+    return read(storage, operationId, workspaceId)!;
+  });
+}
+
+/**
+ * Ends a restore before its fence, in the same serialized writer as the
+ * fence, so at most one of them takes the operation. Access stays revoked,
+ * and the document keeps its generation and its pending retirement's key.
+ */
+export function declineStopRestore(storage: StorageContext, input: StopRestoreLookup, now: number): StopRestoreOperation {
+  const operationId = parseLiveUpdateIdentifier(input.operationId), workspaceId = parseLiveUpdateIdentifier(input.workspaceId), userId = parseLiveUpdateIdentifier(input.ownerUserId), at = integer(now);
+  return storage.tx(() => {
+    owner(storage, workspaceId, userId);
+    requireLiveJournalHistory(storage);
+    const saved = read(storage, operationId, workspaceId);
+    if (!saved) refuse();
+    if (saved.phase === "declined") return saved;
+    if (saved.phase !== "authority-invalidated") {
+      throw relayError("conflict", "Live editing of this file stopped for the restore, so it can no longer be declined. Retry to finish it.");
+    }
+    if (at < saved.invalidatedAtMs) refuse();
+    const declined = storage.db.prepare(`UPDATE ${table} SET phase='declined',declined_at_ms=? WHERE relay_database_namespace=? AND operation_id=? AND phase='authority-invalidated'`)
+      .run(at, saved.basis.namespace, operationId);
+    if (Number(declined.changes) !== 1) refuse();
     return read(storage, operationId, workspaceId)!;
   });
 }
@@ -393,7 +422,7 @@ export function advanceStopRestoreFence(storage: StorageContext, input: { operat
 export function requireStopRestoreCut(storage: StorageContext, input: StopRestoreLookup, checkedBaseline?: Uint8Array): {operation: StopRestoreOperation; authority: StoredLiveDocumentAuthority} {
   owner(storage,input.workspaceId,input.ownerUserId);
   const operation = read(storage,input.operationId,input.workspaceId);
-  if (!operation || operation.phase === "authority-invalidated") refuse();
+  if (!operation || operation.phase === "authority-invalidated" || operation.phase === "declined") refuse();
   const current = authority(storage,operation.intent,checkedBaseline);
   if (!current.current || current.open || current.binding.restoreFenceGeneration !== operation.newFence) refuse();
   const historical = {...current,open: true,binding: {...current.binding,restoreFenceGeneration: operation.oldFence}};

@@ -9,7 +9,8 @@ import {SERVICE_ACTIVATIONS} from "./serviceActivationSchema";
 // authority-reducing change must always commit, so it charges no quota; one
 // activation holds at most one. No restore of the document begins while it is
 // recorded, and a restore unfinished when it is recorded carries it to the
-// restored generation as it resumes.
+// restored generation as it resumes. A restore declined before its fence
+// never moved the generation, so the retirement keeps its key.
 export const SERVICE_ACTIVATION_RETIREMENTS = "sync_relay_service_activation_retirements";
 const MIGRATION = "service-activation-retirements-v1";
 const SQL = `CREATE TABLE ${SERVICE_ACTIVATION_RETIREMENTS} (

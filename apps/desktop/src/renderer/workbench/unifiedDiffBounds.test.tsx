@@ -77,6 +77,7 @@ describe("history diff page", () => {
       onReopenRestore: noop,
       restoreRequested: false,
       onRestoreRequestTaken: noop,
+      onOpenSharedRestore: noop,
     };
     return render(<EngineMomentDiffPage {...props} />);
   }
@@ -107,6 +108,7 @@ describe("history diff page", () => {
         onReopenRestore={noop}
         restoreRequested={false}
         onRestoreRequestTaken={noop}
+        onOpenSharedRestore={noop}
       />,
     );
     await act(async () => {});
@@ -180,6 +182,7 @@ describe("history diff page", () => {
         onReopenRestore={noop}
         restoreRequested={false}
         onRestoreRequestTaken={noop}
+        onOpenSharedRestore={noop}
       />,
     );
     await screen.findByTestId("engine-diff-lines");

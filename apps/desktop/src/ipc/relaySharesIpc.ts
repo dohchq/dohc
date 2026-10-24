@@ -251,6 +251,8 @@ export function createRelaySharesIpcHandlers<
       } else if (input.action === "begin") {
         if (input.intent.document.workspaceId !== input.workspaceId) throw new Error("The restore belongs to another workspace.");
         path = prefix; body = {intent: input.intent};
+      } else if (input.action === "unfinished") {
+        path = `${prefix}/unfinished${input.after === undefined ? "" : `?after=${encodeURIComponent(input.after)}`}`; body = undefined;
       } else {
         path = `${prefix}/${encodeURIComponent(input.operationId)}${input.action === "status" ? "" : `/${input.action}`}`;
         body = input.action === "status" ? undefined : input.action === "confirm" ? {proposalDigest: input.proposalDigest} : {};

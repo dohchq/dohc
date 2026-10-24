@@ -74,7 +74,7 @@ import {parseNativeRestoreProposalReceipt, decodeNativeRestoreProposal, type Res
 import {validateLiveRestoreProposal, type OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/restore-proof";
 import {readRestoreReviewHistory} from "./liveRestoreReview";
 import {assertWorkspaceQuota} from "./workspaces";
-import { LIVE_RESTORE_OPERATIONS, LIVE_RESTORE_PROPOSALS, LIVE_RESTORE_LIFECYCLES,LIVE_RESTORE_SOURCE_RANGES } from "./liveRestoreOperationSchema";
+import { LIVE_RESTORE_OPERATIONS, LIVE_RESTORE_PROPOSALS, LIVE_RESTORE_LIFECYCLES,LIVE_RESTORE_SOURCE_RANGES, UNFINISHED_RESTORE } from "./liveRestoreOperationSchema";
 
 type RestoreProposalInput = StopRestoreLookup & {host: LiveHostConnectionCoordinate} & RestoreProofBudget;
 function lifecycleInput(input:RestoreProposalInput):RestoreProposalInput {
@@ -1400,7 +1400,7 @@ export class LiveCommittedDeliveryStore {
     integrity(stopRestoreRevocationHolds(this.#storage,operation));
     const tip=this.#storage.db.prepare(`SELECT journal_cursor FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} ORDER BY journal_cursor DESC LIMIT 1`).get(...documentParams(document));
     integrity(tip?.journal_cursor===lifecycle.admitted.accepted.receipt.journalCursor);
-    const active=this.#storage.db.prepare(`SELECT operation_id FROM ${LIVE_RESTORE_OPERATIONS} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND phase<>'resumed'`)
+    const active=this.#storage.db.prepare(`SELECT operation_id FROM ${LIVE_RESTORE_OPERATIONS} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND ${UNFINISHED_RESTORE}`)
       .get(document.workspaceId,document.mainVersionId,document.objectId);
     integrity(active?.operation_id===operation.intent.operationId);
   }

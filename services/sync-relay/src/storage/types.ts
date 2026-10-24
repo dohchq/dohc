@@ -3,7 +3,7 @@ import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-author
 import type { ServiceActivationAccess } from "./serviceActivationAccess";
 import type { ServiceActivationStore } from "./serviceActivation";
 import type { LiveCommittedDeliveryStore } from "./liveCommittedDelivery";
-import type {OwnerRestoreOptions, OwnerRestoreOptionsInput, OwnerRestoreStatus} from "./ownerRestoreOptions";
+import type {OwnerRestoreOptions, OwnerRestoreOptionsInput, OwnerRestoreStatus, OwnerUnfinishedRestores} from "./ownerRestoreOptions";
 import type { StopRestoreIntent, StopRestoreLookup, StopRestoreOperation, StopRestorePlan, StopRestorePlanInput } from "./liveRestoreOperation";
 import type { LiveJournalHistoryAuthority } from "./liveJournalHistory";
 import type {ReplicaLiveJournalRead, ReplicaLiveJournalPage} from "./liveUpdateJournal";
@@ -706,9 +706,11 @@ export interface SyncRelayStorage {
   readLinkAppPublicationBlob(input: import("./publications").LinkAppPublicationInput & {sha256: string; expectedAuthorityRevision: number}): import("./publications").LinkAppPublicationAuthority & {file: import("@dohc/security-contract/app-publication").AppPublicationCandidate["files"][number]; bytes: Uint8Array};
   readOwnerRestoreOptions(input: OwnerRestoreOptionsInput): OwnerRestoreOptions;
   readOwnerRestoreStatus(input: StopRestoreLookup): OwnerRestoreStatus;
+  readOwnerUnfinishedRestores(input: {workspaceId: string; ownerUserId: string; after?: string}): OwnerUnfinishedRestores;
   readStopRestorePlan(input: StopRestorePlanInput): StopRestorePlan;
   beginStopRestore(input: StopRestoreIntent, now: number): StopRestoreOperation;
   advanceStopRestoreFence(input: StopRestoreLookup, now: number): StopRestoreOperation;
+  declineStopRestore(input: StopRestoreLookup, now: number): StopRestoreOperation;
   readStopRestore(input: StopRestoreLookup): StopRestoreOperation | null;
   readonly unavailable: AbortSignal;
   captureStanding(): () => void;

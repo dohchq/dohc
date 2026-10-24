@@ -37,6 +37,7 @@ import { readRestoreAdmission } from "./liveRestoreCheckpoint";
 import {
   LIVE_RESTORE_LIFECYCLES,
   LIVE_RESTORE_OPERATIONS,
+  UNFINISHED_RESTORE,
 } from "./liveRestoreOperationSchema";
 import type { StorageContext } from "./context";
 import { liveContentAuthors } from "./liveAuthorWindow";
@@ -606,7 +607,7 @@ function commitPreparedHostedSettlement(
     );
     const active = storage.db
       .prepare(
-        `SELECT operation_id FROM ${LIVE_RESTORE_OPERATIONS} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND phase<>'resumed'`,
+        `SELECT operation_id FROM ${LIVE_RESTORE_OPERATIONS} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND ${UNFINISHED_RESTORE}`,
       )
       .get(...documentParams(p.binding));
     require(
