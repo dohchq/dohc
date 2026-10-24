@@ -13,7 +13,7 @@ export type LiveDocumentRow = {
   canResume: boolean;
   deferredStop?: {unsentEdits: number; editable: boolean};
   /** The server refused this document's edits for good, and dohc keeps them where `storedOn` says. */
-  quarantine?: "paused" | "retrying" | "stopping" | "stopped-kept" | "not-written" | "cannot-write" | "copied" | "unreachable";
+  quarantine?: "paused" | "retrying" | "stopping" | "stopped-kept" | "not-written" | "cannot-write" | "copied" | "earlier";
   storedOn?: "this-computer" | "server";
   /** Those kept edits' incident, so Save recovery copy saves what the row shows. */
   incident?: string;
@@ -158,7 +158,7 @@ function statusLabel(row: LiveDocumentRow): string {
   if (row.quarantine === "retrying") return "Trying again";
   if (row.quarantine === "stopping") return "Stopping";
   if (row.quarantine === "stopped-kept") return "Stopped";
-  if (row.quarantine === "unreachable") return "Kept on the server";
+  if (row.quarantine === "earlier") return "Kept on the server";
   // not-written and cannot-write keep an earlier Stop's edits; the session says whether the document is live now.
   if (row.reason === "document-unavailable") return "File moved or removed";
   if (row.reason === "workspace-changed") return "Workspace changed";
@@ -222,9 +222,8 @@ function quarantineNote(row: LiveDocumentRow): string | null {
       return "When live editing stopped, dohc kept your unsent edits but could not write them to your file. Save a recovery copy to get them back.";
     case "cannot-write":
       return "When live editing stopped, dohc kept your unsent edits but can't finish writing them to your file. Save a recovery copy to get them back.";
-    // Neither Save nor Try again can reach them, so the row offers neither.
-    case "unreachable":
-      return "The server could not accept your edits. It kept them in an earlier copy of this workspace, which it can't read now. Contact the server's operator.";
+    case "earlier":
+      return "The server could not accept your edits. It kept them in an earlier copy of this workspace. Save a recovery copy to get them back.";
     default:
       return null;
   }
@@ -661,7 +660,7 @@ export function LiveDocumentsDialog({
                     Try again
                   </SecondaryButton>
                 ) : null}
-                {row.quarantine !== undefined && row.quarantine !== "unreachable" && saveRecoveryCopy ? (
+                {row.quarantine !== undefined && saveRecoveryCopy ? (
                   <SecondaryButton
                     size="compact"
                     className="shrink-0"

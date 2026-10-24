@@ -1876,11 +1876,11 @@ export function DesktopWorkspaceShell(props: {
           message:"dohc is sending your kept edits to the server once more.",details,action:save,identity});
         continue;
       }
-      // Neither Save nor Try again can reach them, so the row offers only copy.
-      if (row.recovery==="unreachable") {
+      // Try again cannot reach an earlier copy of the workspace, so the row offers only Save.
+      if (row.recovery==="earlier") {
         reportShellFailure({title:`Live editing paused for ${row.path}`,
-          message:"The server could not accept your edits. It kept them in an earlier copy of this workspace, which it can't read now. Contact the server's operator.",
-          details,identity});
+          message:"The server could not accept your edits. It kept them in an earlier copy of this workspace. Save a recovery copy to get them back.",
+          details,action:save,identity});
         continue;
       }
       const retry=() => {

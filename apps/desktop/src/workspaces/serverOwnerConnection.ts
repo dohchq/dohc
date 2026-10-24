@@ -116,7 +116,7 @@ export function createServerOwnerConnection(options: {
           assertCurrent();
           if (response.status === 409) {
             const code = value && typeof value === "object" && "code" in value ? value.code : undefined;
-            if (code === "kept-edits-changed" || code === "kept-edits-unreachable") throw new ServerKeptEditsConflict(code === "kept-edits-unreachable");
+            if (code === "kept-edits-changed" || code === "kept-edits-earlier") throw new ServerKeptEditsConflict(code === "kept-edits-earlier");
             throw new Error(value && typeof value === "object" && "error" in value && typeof value.error === "string" ? value.error
               : "This document changed. Open Live documents to check it.");
           }

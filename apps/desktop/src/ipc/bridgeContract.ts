@@ -428,8 +428,8 @@ export const OwnerLiveQuarantine = z.object({
   // the edits into the document but could not write them to the file.
   // copied: the server keeps them, and a recovery copy is on this computer.
   // cannot-write: as not-written, but dohc can only save a recovery copy.
-  // unreachable: the server keeps them in an earlier copy of the workspace that it cannot read now.
-  recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write", "copied", "unreachable"]),
+  // earlier: the server keeps them in an earlier copy of the workspace, so dohc can only save a recovery copy.
+  recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write", "copied", "earlier"]),
 }).strict();
 export type OwnerLiveQuarantine = z.infer<typeof OwnerLiveQuarantine>;
 export const RetryOwnerLiveQuarantinePayload = WorkspaceIdPayload.extend({

@@ -639,6 +639,7 @@ export interface SyncRelayStorage {
   endServiceKeptEditsRetry(queue: import("./serviceKeptEdits").ServiceKeptEditsQueue): void;
   confirmServiceKeptEditsCopy(input: {workspaceId: string; outboxId: string; generation: number}): boolean;
   serviceKeptEditsHeld(document: {workspaceId: string; objectId: string}, identity: import("./serviceKeptEdits").ServiceKeptEditsIdentity): boolean;
+  serviceKeptEditsStoreHeld(workspaceId: string, identity: import("./serviceKeptEdits").ServiceKeptEditsIdentity): boolean;
   scanServiceHostCandidateShares(after?: import("./serviceHostEnrollment").ServiceHostCandidateCursor, workspaceId?: string): import("./serviceHostEnrollment").ServiceHostCandidatePage;
   checkServiceHostDocuments(input: {workspaceId: string; ownerUserId: string; shareId: string; paths: readonly string[]}): void;
   setServiceHostEnrollmentEnabled(input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput): import("./serviceHostEnrollment").ServiceHostEnrollment | null;

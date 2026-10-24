@@ -211,6 +211,10 @@ pub(crate) struct Discovery {
     settlement: Option<(usize, SettlementAdmission)>,
     restore: Option<crate::live_application_ingress::RestoreConfig>,
     adoption: Option<ConfiguredOwnerAdoption>,
+    /// Earlier stores open for their owner's recovery copy, at most one per
+    /// workspace. They stay out of `attached`, so a workspace's attached store
+    /// and its earlier store are open at once.
+    recovery: Mutex<Vec<RecoveryStore>>,
 }
 
 /// One attached workspace, in attach order. An entry whose handle has no live
@@ -220,6 +224,61 @@ struct AttachedWorkspace {
     root: PathBuf,
     handle: WorkspaceHandle,
     ordinary: bool,
+}
+
+/// An earlier store of a workspace, open read-only. It has no workspace actor:
+/// each page read opens the store read-only and closes it again.
+struct RecoveryStore {
+    workspace_id: String,
+    root: PathBuf,
+    handle: WorkspaceHandle,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RecoveryStoreParams {
+    root: PathBuf,
+    workspace_id: String,
+}
+
+/// Whether one root is the other or contains it.
+fn overlaps(a: &Path, b: &Path) -> bool {
+    a.starts_with(b) || b.starts_with(a)
+}
+
+/// Refuses a root that is not a store bound to it, or that holds versioned
+/// state of another workspace, as a read-only workspace open does.
+fn check_recovery_store(root: &Path, workspace_id: &str) -> Result<(), WireError> {
+    use rusqlite::OptionalExtension;
+    let unavailable = || invalid("recovery store unavailable");
+    let token = crate::root_binding::read_root_binding(root)
+        .map_err(|_| unavailable())?
+        .ok_or_else(unavailable)?;
+    let store = dohc_engine_storage::EngineStore::open_read_only(
+        &root.join(".dohc").join("engine").join("engine.db"),
+    )
+    .map_err(|_| unavailable())?;
+    let (bound, other) = store
+        .read_with(|conn| {
+            let bound: Option<String> = conn
+                .query_row(
+                    "SELECT token FROM shadow_clone WHERE rowid_guard = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let other: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM versioned_workspaces WHERE workspace_id <> ?1)",
+                rusqlite::params![workspace_id],
+                |row| row.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((bound, other))
+        })
+        .map_err(|_| unavailable())?;
+    if bound.as_deref() != Some(token.as_str()) || other {
+        return Err(invalid("recovery store belongs to another root or workspace"));
+    }
+    Ok(())
 }
 
 impl Discovery {
@@ -282,6 +341,7 @@ impl EngineService {
             sync,
             restore: config.restore,
             adoption: config.adoption,
+            recovery: Mutex::new(Vec::new()),
         });
         let mut result = Ok(());
         for workspace in config.workspaces {
@@ -382,6 +442,139 @@ impl EngineService {
         Ok(json!({"detached": true}))
     }
 
+    /// `liveApplication.openRecoveryStore`: open an earlier store of a
+    /// workspace read-only, so its owner can copy the edits the host kept
+    /// there. Nothing captures, relays, migrates, applies or settles in it,
+    /// and its handle answers only `ydoc.ownerOutbox.readPending`. A workspace
+    /// has at most one: opening its store again returns the same handle, and
+    /// any other store of it is refused. So is a root that is attached or
+    /// open for recovery, or that contains or sits inside one.
+    pub(super) async fn configured_open_recovery_store(
+        &self,
+        ctx: &RequestContext,
+        request: Request,
+    ) -> Result<Value, WireError> {
+        let discovery = self.configured_host_caller(ctx)?;
+        if request.workspace.is_some() {
+            return Err(invalid(
+                "liveApplication.openRecoveryStore takes no workspace",
+            ));
+        }
+        let params: RecoveryStoreParams = serde_json::from_value(request.params)
+            .map_err(|_| invalid("invalid recovery store"))?;
+        ApplicationOwner::new(params.workspace_id.clone())
+            .map_err(|_| invalid("invalid recovery store workspace identity"))?;
+        if !params.root.is_absolute() {
+            return Err(invalid("invalid recovery store"));
+        }
+        let root = std::fs::canonicalize(&params.root)
+            .map_err(|_| invalid("recovery store unavailable"))?;
+        if root.to_str().is_none() || !root.is_dir() {
+            return Err(invalid("recovery store unavailable"));
+        }
+        let _membership = discovery.membership.lock().await;
+        self.configured_host_caller(ctx)?;
+        {
+            let recovery = lock(&discovery.recovery);
+            if let Some(entry) = recovery
+                .iter()
+                .find(|entry| entry.workspace_id == params.workspace_id)
+            {
+                // The same store again, as after an open whose reply was lost, keeps its handle.
+                if entry.root == root {
+                    return Ok(json!({"workspaceHandle": entry.handle}));
+                }
+                return Err(WireError::new(
+                    ErrorCode::Conflict,
+                    "a recovery store is already open for this workspace",
+                ));
+            }
+            if recovery.iter().any(|entry| overlaps(&entry.root, &root))
+                || lock(&self.handles)
+                    .values()
+                    .any(|open| overlaps(&open.root, &root))
+            {
+                return Err(invalid("recovery store root is already open"));
+            }
+            if recovery.len() >= super::workspace::MAX_OPEN_HANDLES {
+                return Err(WireError::new(
+                    ErrorCode::Overloaded,
+                    "recovery store limit reached",
+                ));
+            }
+        }
+        let cancellation = super::request::OperationCancellation::new(ctx);
+        let (checked_root, workspace_id) = (root.clone(), params.workspace_id.clone());
+        let checking = tokio::task::spawn_blocking(move || {
+            check_recovery_store(&checked_root, &workspace_id)
+        });
+        tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("liveApplication.openRecoveryStore"));
+            }
+            checked = checking => checked
+                .map_err(|_| WireError::new(ErrorCode::Internal, "recovery store check failed"))??,
+        }
+        let sequence = self
+            .next_handle
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let handle = WorkspaceHandle(format!("ws-{sequence:016x}"));
+        lock(&discovery.recovery).push(RecoveryStore {
+            workspace_id: params.workspace_id,
+            root,
+            handle: handle.clone(),
+        });
+        Ok(json!({"workspaceHandle": handle}))
+    }
+
+    /// `liveApplication.closeRecoveryStore`: end a recovery handle. A page
+    /// read already running finishes on its own connection.
+    pub(super) fn configured_close_recovery_store(
+        &self,
+        ctx: &RequestContext,
+        request: Request,
+    ) -> Result<Value, WireError> {
+        let discovery = self.configured_host_caller(ctx)?;
+        if request
+            .params
+            .as_object()
+            .is_none_or(|params| !params.is_empty())
+        {
+            return Err(invalid(
+                "liveApplication.closeRecoveryStore requires empty params",
+            ));
+        }
+        let handle = request
+            .workspace
+            .ok_or_else(super::error::workspace_unavailable)?;
+        let mut recovery = lock(&discovery.recovery);
+        let open = recovery.len();
+        recovery.retain(|entry| entry.handle != handle);
+        if recovery.len() == open {
+            return Err(super::error::workspace_unavailable());
+        }
+        Ok(json!({"closed": true}))
+    }
+
+    /// The workspace and engine database of the earlier store open for
+    /// recovery under `handle`, if it is one.
+    pub(super) fn recovery_store(
+        &self,
+        handle: Option<&WorkspaceHandle>,
+    ) -> Option<(String, PathBuf)> {
+        let handle = handle?;
+        lock(&self.configured_live_host.get()?.recovery)
+            .iter()
+            .find(|entry| &entry.handle == handle)
+            .map(|entry| {
+                (
+                    entry.workspace_id.clone(),
+                    entry.root.join(".dohc").join("engine").join("engine.db"),
+                )
+            })
+    }
+
     /// Open, provision, and list one workspace. Callers serialize membership.
     async fn attach_configured_workspace(
         &self,
@@ -392,6 +585,12 @@ impl EngineService {
             .get()
             .ok_or_else(|| WireError::new(ErrorCode::Forbidden, "live host is not configured"))?;
         workspace.canonicalize()?;
+        if lock(&discovery.recovery)
+            .iter()
+            .any(|entry| overlaps(&entry.root, &workspace.root))
+        {
+            return Err(invalid("live host workspace root is open for recovery"));
+        }
         let unfinished = {
             let mut attached = lock(&discovery.attached);
             {
@@ -1248,6 +1447,287 @@ mod tests {
             .configured_detach_workspace(
                 &ctx,
                 host_request("liveApplication.detachWorkspace", Some(handle), json!({})),
+            )
+            .await
+            .unwrap();
+        assert!(lock(&service.handles).is_empty());
+    }
+
+    /// A queue of the shared binding with `update` as its one entry.
+    fn append(workspace_id: &str, update: &[u8]) -> Value {
+        use base64::Engine as _;
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../../../../packages/live-session-contract/src/liveObjectBinding.vectors.json"
+        ))
+        .unwrap();
+        let mut binding = vectors["accepted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == "canonical-binding")
+            .unwrap()["input"]
+            .clone();
+        binding["workspaceId"] = json!(workspace_id);
+        json!({
+            "binding": binding,
+            "baseUpdateBase64": base64::engine::general_purpose::STANDARD.encode(b"base"),
+            "appendKey": "recovery",
+            "updateBase64": base64::engine::general_purpose::STANDARD.encode(update),
+            "limits": {"maxPendingBytes": 1_000, "maxPendingAgeMs": 60_000}
+        })
+    }
+
+    /// The queued update bytes, read page by page through dispatch.
+    async fn queued(
+        service: &EngineService,
+        ctx: impl Fn() -> RequestContext,
+        handle: &WorkspaceHandle,
+        outbox_id: &str,
+    ) -> Result<Vec<u8>, WireError> {
+        use base64::Engine as _;
+        let (mut cursor, mut update) = (Value::Null, Vec::new());
+        for _ in 0..16 {
+            let page = service
+                .dispatch(
+                    ctx(),
+                    host_request(
+                        "ydoc.ownerOutbox.readPending",
+                        Some(handle.clone()),
+                        json!({"outboxId": outbox_id, "cursor": cursor}),
+                    ),
+                )
+                .await?
+                .response
+                .result;
+            assert_eq!(page["kind"], "page");
+            if page["part"] == "update" {
+                update.extend(
+                    base64::engine::general_purpose::STANDARD
+                        .decode(page["bytesBase64"].as_str().unwrap())
+                        .unwrap(),
+                );
+            }
+            cursor = page["nextCursor"].clone();
+            if cursor.is_null() {
+                return Ok(update);
+            }
+        }
+        panic!("the queue did not end");
+    }
+
+    #[tokio::test]
+    async fn an_earlier_store_opens_read_only_for_recovery_beside_the_attached_store() {
+        let earlier = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let current = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let (service, owner, _ingress) = EngineService::configured_live_host(config(&[]))
+            .await
+            .unwrap();
+        let ctx = || {
+            let mut ctx = RequestContext::unbounded();
+            ctx.connection = Some(owner.handle());
+            ctx
+        };
+        let attach = |root: &Path| {
+            host_request(
+                "liveApplication.attachWorkspace",
+                None,
+                json!({"root": root, "workspaceId": "workspace", "maxRegistrations": 4,
+                    "relay": {"baseUrl": "https://relay.invalid", "bearerToken": "owner"}}),
+            )
+        };
+        let recover = |root: &Path, id: &str| {
+            host_request(
+                "liveApplication.openRecoveryStore",
+                None,
+                json!({"root": root, "workspaceId": id}),
+            )
+        };
+        let handle_of = |value: Value| -> WorkspaceHandle {
+            serde_json::from_value(value["workspaceHandle"].clone()).unwrap()
+        };
+        // An identity change leaves the first store behind, and the second
+        // holds a queue with the same ID and other edits.
+        let mut outboxes = Vec::new();
+        let mut attached = Vec::new();
+        for (root, update) in [(earlier.path(), b"earlier"), (current.path(), b"current")] {
+            let handle = handle_of(
+                service
+                    .configured_attach_workspace(&ctx(), attach(root))
+                    .await
+                    .unwrap(),
+            );
+            let appended = service
+                .owner_ydoc_outbox_append(&ctx(), Some(handle.clone()), append("workspace", update))
+                .await
+                .unwrap();
+            outboxes.push(appended["outboxId"].as_str().unwrap().to_owned());
+            attached.push(handle);
+            if root == earlier.path() {
+                service
+                    .configured_detach_workspace(
+                        &ctx(),
+                        host_request(
+                            "liveApplication.detachWorkspace",
+                            Some(attached[0].clone()),
+                            json!({}),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        assert_eq!(outboxes[0], outboxes[1]);
+        let outbox = outboxes[0].as_str();
+        let recovery = handle_of(
+            service
+                .dispatch(ctx(), recover(earlier.path(), "workspace"))
+                .await
+                .unwrap()
+                .response
+                .result,
+        );
+        assert_eq!(
+            queued(&service, ctx, &recovery, outbox).await.unwrap(),
+            b"earlier"
+        );
+        assert_eq!(
+            queued(&service, ctx, &attached[1], outbox).await.unwrap(),
+            b"current"
+        );
+        // One recovery store per workspace, and none on a root already open.
+        assert_eq!(
+            handle_of(
+                service
+                    .dispatch(ctx(), recover(earlier.path(), "workspace"))
+                    .await
+                    .unwrap()
+                    .response
+                    .result,
+            ),
+            recovery
+        );
+        for (root, id, code) in [
+            (current.path(), "workspace", ErrorCode::Conflict),
+            (current.path(), "other", ErrorCode::InvalidParams),
+            (earlier.path(), "other", ErrorCode::InvalidParams),
+        ] {
+            assert_eq!(
+                service
+                    .dispatch(ctx(), recover(root, id))
+                    .await
+                    .unwrap_err()
+                    .code,
+                code,
+                "{id}"
+            );
+        }
+        assert_eq!(
+            service
+                .configured_attach_workspace(&ctx(), attach(earlier.path()))
+                .await
+                .unwrap_err()
+                .message,
+            "live host workspace root is open for recovery"
+        );
+        // The handle answers nothing but page reads, and only to the host's connection.
+        for method in [
+            "ydoc.ownerOutbox.retry",
+            "ydoc.ownerOutbox.quarantine",
+            "ydoc.ownerOutbox.acknowledge",
+            "liveApplication.detachWorkspace",
+            "versionedText.read",
+        ] {
+            assert_eq!(
+                service
+                    .dispatch(
+                        ctx(),
+                        host_request(method, Some(recovery.clone()), json!({"outboxId": outbox})),
+                    )
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Forbidden,
+                "{method}"
+            );
+        }
+        let stranger = ConnectionOwner::authenticated();
+        let foreign = || {
+            let mut ctx = RequestContext::unbounded();
+            ctx.connection = Some(stranger.handle());
+            ctx
+        };
+        assert_eq!(
+            queued(&service, foreign, &recovery, outbox)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Forbidden
+        );
+        assert_eq!(
+            service
+                .dispatch(foreign(), recover(earlier.path(), "other"))
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::SessionExpired
+        );
+        // Closed, the handle reads nothing; the store opens again with a new one.
+        let close = |handle: &WorkspaceHandle| {
+            host_request(
+                "liveApplication.closeRecoveryStore",
+                Some(handle.clone()),
+                json!({}),
+            )
+        };
+        assert_eq!(
+            service
+                .dispatch(ctx(), close(&recovery))
+                .await
+                .unwrap()
+                .response
+                .result,
+            json!({"closed": true})
+        );
+        assert!(queued(&service, ctx, &recovery, outbox).await.is_err());
+        assert_eq!(
+            service
+                .dispatch(ctx(), close(&recovery))
+                .await
+                .unwrap_err()
+                .code,
+            crate::rpc::error::workspace_unavailable().code
+        );
+        // A store of one workspace never opens as another's.
+        assert_eq!(
+            service
+                .dispatch(ctx(), recover(earlier.path(), "other"))
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidParams
+        );
+        let again = handle_of(
+            service
+                .dispatch(ctx(), recover(earlier.path(), "workspace"))
+                .await
+                .unwrap()
+                .response
+                .result,
+        );
+        assert_ne!(again, recovery);
+        assert_eq!(
+            queued(&service, ctx, &again, outbox).await.unwrap(),
+            b"earlier"
+        );
+        service.dispatch(ctx(), close(&again)).await.unwrap();
+        service
+            .configured_detach_workspace(
+                &ctx(),
+                host_request(
+                    "liveApplication.detachWorkspace",
+                    Some(attached[1].clone()),
+                    json!({}),
+                ),
             )
             .await
             .unwrap();

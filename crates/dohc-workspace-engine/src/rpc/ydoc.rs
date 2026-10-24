@@ -827,15 +827,24 @@ impl EngineService {
                 "owner-outbox-page-exceeds-wire-limit",
             ));
         }
-        let open = self.open(handle.as_ref())?;
+        // An earlier store open for recovery has no workspace actor; its handle names the store.
+        let (workspace_id, database_path) = match self.recovery_store(handle.as_ref()) {
+            Some(store) => store,
+            None => {
+                let open = self.open(handle.as_ref())?;
+                (
+                    open.workspace_id.clone(),
+                    open.actor.database_path().to_path_buf(),
+                )
+            }
+        };
         let cancellation = OperationCancellation::new(ctx);
         let read = async move {
             tokio::task::spawn_blocking(move || {
-                let store =
-                    dohc_engine_storage::EngineStore::open_read_only(open.actor.database_path())?;
+                let store = dohc_engine_storage::EngineStore::open_read_only(&database_path)?;
                 dohc_engine_collab::read_pending_owner_outbox_page(
                     &store,
-                    &open.workspace_id,
+                    &workspace_id,
                     &params.outbox_id,
                     params.cursor,
                     max_bytes,

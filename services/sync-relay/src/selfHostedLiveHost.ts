@@ -328,13 +328,20 @@ export async function startSelfHostedLiveHost(options: {
       if (unblocked) refused.delete(documentKey(document));
       return unblocked;
     },
-    /** The running daemon's page reads and Try again of refused queues it keeps for their owners. */
+    /**
+     * The running daemon's page reads and Try again of refused queues it keeps
+     * for their owners, and its release of an earlier store once the owner
+     * has a recovery copy of every refusal kept there. The row's workspace
+     * identity names the store that holds its queue, whatever identity the
+     * workspace has now.
+     */
     keptEdits: {
       page(kept: ServiceKeptEdits, cursor: JsonValue | undefined, signal?: AbortSignal) {
         if (!current) throw new Error("This server does not hold the workspace's live documents now.");
-        return current.readKeptEditsPage(kept, cursor, signal);
+        return current.readKeptEditsPage(kept, cursor, join(root, storeName({workspaceId: kept.workspaceId, ...kept.identity})), signal);
       },
       async retry(kept: ServiceKeptEdits, guard: () => void, signal?: AbortSignal) {return current ? current.retryKeptEdits(kept, guard, signal) : "unavailable" as const;},
+      async copied(kept: ServiceKeptEdits) {await current?.releaseKeptEditsStore(kept);},
     },
     get unavailable() {return signal.aborted || !initialReconciliationComplete || lastError !== undefined ||
       (selectedDocuments && (!current || current.invalidated.aborted));},

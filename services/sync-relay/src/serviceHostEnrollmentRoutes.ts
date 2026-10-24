@@ -79,22 +79,23 @@ export function serviceHostEnrollmentRefusals(storage: SyncRelayStorage, workspa
 
 /**
  * A refused queue the server keeps, as its owner sees it. One in the store of
- * an earlier workspace identity is `unreachable`: its bytes stay there, but
- * no attachment of the current identity can read them. `store` tells queues
- * of different stores apart that share an outbox ID, without naming either identity.
+ * an earlier workspace identity is `earlier`: its owner can save a recovery
+ * copy from that store, but nothing delivers it any more, so Try again cannot
+ * reach it. `store` tells queues of different stores apart that share an
+ * outbox ID, without naming either identity.
  */
 function keptView(row: ServiceKeptEdits, identity: {replicationEpoch: string | null; streamIdentity: string | null} | null) {
-  const reachable = sameKeptEditsIdentity(row.identity, identity);
+  const current = sameKeptEditsIdentity(row.identity, identity);
   return {objectId: row.objectId, path: row.binding.currentPath, outboxId: row.outboxId, reason: row.reason, generation: row.generation,
     store: createHash("sha256").update(JSON.stringify([row.identity.replicationEpoch, row.identity.streamIdentity])).digest("hex").slice(0, 32),
-    recovery: reachable && row.retrying ? "retrying" : row.copied ? "copied" : reachable ? "paused" : "unreachable"};
+    recovery: current && row.retrying ? "retrying" : row.copied ? "copied" : current ? "paused" : "earlier"};
 }
 
-/** A kept edits action that names a refusal the server no longer has, or cannot reach. Answered as 409 with its code. */
+/** A kept edits action that names a refusal the server no longer has, or a Try again of an earlier store's. Answered as 409 with its code. */
 class KeptEditsConflict extends Error {
-  constructor(readonly code: "kept-edits-changed" | "kept-edits-unreachable") {
+  constructor(readonly code: "kept-edits-changed" | "kept-edits-earlier") {
     super(code === "kept-edits-changed" ? "This document changed. Open Live documents to check it."
-      : "The server kept these edits in an earlier copy of this workspace, which it cannot read now.");
+      : "The server kept these edits in an earlier copy of this workspace. Save a recovery copy to get them back.");
   }
 }
 const isPageCursor = (value: unknown) => !!value && typeof value === "object" && !Array.isArray(value) &&
@@ -105,9 +106,10 @@ const isPageCursor = (value: unknown) => !!value && typeof value === "object" &&
 /**
  * The owner's actions on a refused queue the server keeps. `page` returns one
  * bounded engine page of it for a recovery copy, after the previous page's
- * `cursor`; `retry` is Try again, and `copied` records that a durable
- * recovery copy of this refusal exists, after which the server may let the
- * document go. Each names the refusal it saw.
+ * `cursor`, from whatever store holds it; `retry` is Try again, for a queue
+ * of the current store only; and `copied` records that a durable recovery
+ * copy of this refusal exists, after which the server may let the document,
+ * or the earlier store, go. Each names the refusal it saw.
  */
 async function keptEditsAction(storage: SyncRelayStorage, host: KeptEditsHost, workspaceId: string, input: Record<string, unknown>,
   guard: () => void, signal: AbortSignal) {
@@ -118,7 +120,6 @@ async function keptEditsAction(storage: SyncRelayStorage, host: KeptEditsHost, w
   // A generation names one row, whatever store holds its queue.
   const refusal = {workspaceId, outboxId: input.outboxId, generation: Number(input.generation)}, kept = storage.readServiceKeptEditsRefusal(refusal);
   if (!kept) throw new KeptEditsConflict("kept-edits-changed");
-  if (!sameKeptEditsIdentity(kept.identity, storage.getWorkspaceIdentity(workspaceId))) throw new KeptEditsConflict("kept-edits-unreachable");
   if (input.action === "page") {
     const page = await host.keptEdits.page(kept, input.cursor as JsonValue | undefined, signal);
     if (!storage.readServiceKeptEditsRefusal(refusal)) throw new KeptEditsConflict("kept-edits-changed");
@@ -127,8 +128,11 @@ async function keptEditsAction(storage: SyncRelayStorage, host: KeptEditsHost, w
   if (input.action === "copied") {
     if (!storage.confirmServiceKeptEditsCopy({workspaceId, outboxId: kept.outboxId, generation: kept.generation})) throw new KeptEditsConflict("kept-edits-changed");
     host.reconcile();
+    // A handle that does not close now closes once idle.
+    await host.keptEdits.copied(kept).catch(() => {});
     return {ok: true};
   }
+  if (!sameKeptEditsIdentity(kept.identity, storage.getWorkspaceIdentity(workspaceId))) throw new KeptEditsConflict("kept-edits-earlier");
   if (kept.retrying) throw new KeptEditsConflict("kept-edits-changed");
   const outcome = await host.keptEdits.retry(kept, guard, signal);
   if (outcome === "unavailable") throw relayError("conflict", "Live editing is off for this document. Save a recovery copy to get your edits back.");

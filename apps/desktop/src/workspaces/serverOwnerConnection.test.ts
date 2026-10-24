@@ -46,12 +46,12 @@ it("sends the owner's kept-edits actions to the owner route, and reads the list 
     headers: {authorization: "Bearer secret", "content-type": "application/json"}, body: JSON.stringify({action: "copied", outboxId: "outbox", generation: 2}), redirect: "error"}));
   await session.documents(signal);
   expect(f.fetch).toHaveBeenCalledTimes(3);
-  // A refusal that changed or is gone, and one the server cannot reach, answer as such; any other conflict keeps the server's words.
-  for (const [code, unreachable] of [["kept-edits-changed", false], ["kept-edits-unreachable", true]] as const) {
+  // A refusal that changed or is gone, and a Try again of edits an earlier copy keeps, answer as such; any other conflict keeps the server's words.
+  for (const [code, earlier] of [["kept-edits-changed", false], ["kept-edits-earlier", true]] as const) {
     f.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ok: false, code, error: "x"}), {status: 409}));
     const refused = session.keptEdits({action: "retry", outboxId: "outbox", generation: 2}, signal);
     await expect(refused).rejects.toBeInstanceOf(ServerKeptEditsConflict);
-    await expect(refused).rejects.toMatchObject({unreachable});
+    await expect(refused).rejects.toMatchObject({earlier});
   }
   f.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ok: false, code: "conflict", error: "Live editing is off for this document."}), {status: 409}));
   await expect(session.keptEdits({action: "retry", outboxId: "outbox", generation: 2}, signal)).rejects.toThrow("Live editing is off for this document.");

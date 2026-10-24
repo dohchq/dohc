@@ -197,12 +197,14 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   const serverQuarantinesOf = (workspaceId: string) =>
     dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) ? serverQuarantines.get(workspaceId) ?? [] : [];
   // A server action on a row the server answers changed drops the row until
-  // the next pass lists the current one; one it cannot reach reads as such.
+  // the next pass lists the current one. A Try again it refuses for an earlier
+  // copy's edits leaves the row saveable, and a copied row copied.
   async function serverKeptEditsAction<Result>(workspaceId: string, row: ServerKeptEdits, work: () => Promise<Result>): Promise<Result> {
     try {return await work();}
     catch (error) {
       if (error instanceof ServerKeptEditsConflict) setServerQuarantines(workspaceId, serverQuarantinesOf(workspaceId).flatMap(candidate =>
-        candidate.generation !== row.generation ? [candidate] : error.unreachable ? [{...candidate, recovery: "unreachable" as const}] : []));
+        candidate.generation !== row.generation ? [candidate]
+          : error.earlier ? [{...candidate, recovery: candidate.recovery === "copied" ? "copied" as const : "earlier" as const}] : []));
       throw error;
     }
   }
@@ -810,7 +812,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       if (incident.startsWith("server:")) {
         const row = serverQuarantinesOf(workspace.workspaceId).find(candidate => candidate.objectId === objectId && serverIncident(candidate) === incident);
         if (!row || row.recovery === "retrying") throw new Error("This document changed. Open Live documents to check it.");
-        if (row.recovery === "unreachable") throw new ServerKeptEditsConflict(true);
+        if (row.recovery === "earlier") throw new ServerKeptEditsConflict(true);
         await serverKeptEditsAction(workspace.workspaceId, row, () => withServerSession(workspace.workspaceId, (session, signal) =>
           session.keptEdits({action: "retry", outboxId: row.outboxId, generation: row.generation}, signal)));
         setServerQuarantines(workspace.workspaceId, serverQuarantinesOf(workspace.workspaceId)
@@ -929,7 +931,6 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         .find(row => row.path === path && (named === undefined || serverIncident(row) === incident));
       if (named === "server" && !held) throw changed();
       if (held) {
-        if (held.recovery === "unreachable") throw new ServerKeptEditsConflict(true);
         const queue = await serverKeptEditsAction(workspace.workspaceId, held, () => withServerSession(workspace.workspaceId, (session, signal) =>
           readServerKeptEditsQueue(held, cursor => session.keptEdits({action: "page", outboxId: held.outboxId, generation: held.generation,
             ...(cursor === undefined ? {} : {cursor})}, signal))));

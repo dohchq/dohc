@@ -41,7 +41,8 @@ async function fixture() {
       retry: vi.fn(async (kept: ServiceKeptEdits, guard: () => void): Promise<"granted" | "changed" | "unavailable"> => {
         guard();
         return f.storage.markServiceKeptEditsRetrying(kept) ? "granted" : "changed";
-      })},
+      }),
+      copied: vi.fn(async (_kept: ServiceKeptEdits) => {})},
     block(objectId: string, why: ServiceActivationBlock = "refused") {blocked.set(objectId, why);}};
   let actor = {workspaceId: scope.workspaceId, userId: "owner-1"};
   const resolveActor = vi.fn(async () => actor);
@@ -148,34 +149,46 @@ it("lets only the workspace's owner see, read, try again and confirm a copy of e
   expect(await list()).toBeUndefined();
 });
 
-// Proves: a row of an earlier workspace identity's store lists as unreachable,
-// and its page reads, Try again and confirmation answer that, not a failure,
+// Proves: a row of an earlier workspace identity's store lists as earlier. Its
+// owner reads its pages from that store and confirms a copy of it, which marks
+// only that row and lets the host release the store; Try again is refused
 // without reaching the host. The current store's queue with the same outbox
-// ID lists as its own row, and each action reaches the row its generation names.
-it("lists edits kept in an earlier identity's store as unreachable and answers each action with that", async () => {
+// ID lists as its own row, and each action reaches the row its generation
+// names. A recipient or another workspace's owner reaches neither.
+it("reads and confirms edits kept in an earlier identity's store, and refuses their Try again", async () => {
   const f = await fixture(), old = {replicationEpoch: "old-epoch", streamIdentity: "old-stream"};
   for (const [of, refusalKey] of [[old, "refusal-1"], [identity, "refusal-1"]] as const) {
     f.storage.recordServiceKeptEdits({identity: of, outboxId: "outbox-x", binding, reason: "invalid-update", headDeliveryId: "delivery-1", refusalKey, nowMs: 5});
   }
   const [earlier, current] = [old, identity].map(of => f.storage.readServiceKeptEdits(queue("outbox-x", of))!.generation) as [number, number];
   const row = {objectId: binding.objectId, path: binding.currentPath, outboxId: "outbox-x", reason: "invalid-update", store: expect.any(String)};
-  const listed = ((await (await f.handle(f.request())).json()) as {keptEdits: Array<{store: string}>}).keptEdits;
-  expect(listed).toEqual([{...row, generation: earlier, recovery: "unreachable"}, {...row, generation: current, recovery: "paused"}]);
+  const list = async () => ((await (await f.handle(f.request())).json()) as {keptEdits: Array<{store: string}>}).keptEdits;
+  const listed = await list();
+  expect(listed).toEqual([{...row, generation: earlier, recovery: "earlier"}, {...row, generation: current, recovery: "paused"}]);
   // The owner tells the two stores apart without learning either identity.
   expect(listed[0]!.store).not.toBe(listed[1]!.store);
   for (const secret of ["old-epoch", "old-stream", "epoch", "stream"]) expect(JSON.stringify(listed)).not.toContain(secret);
   const act = (action: string, generation: number) => f.handle(f.request("POST", {action, outboxId: "outbox-x", generation}, {}, "/kept-edits"));
-  for (const action of ["page", "retry", "copied"]) {
-    const response = await act(action, earlier);
-    expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({ok: false, code: "kept-edits-unreachable"});
+  for (const actor of [{workspaceId: scope.workspaceId, userId: "recipient"}, {workspaceId: "other-workspace", userId: "owner-1"}]) {
+    f.setActor(actor);
+    for (const action of ["page", "copied"]) expect((await act(action, earlier)).status).toBe(404);
   }
+  f.setActor({workspaceId: scope.workspaceId, userId: "owner-1"});
   expect(f.host.keptEdits.page).not.toHaveBeenCalled();
+  const refused = await act("retry", earlier);
+  expect(refused.status).toBe(409);
+  expect(await refused.json()).toMatchObject({ok: false, code: "kept-edits-earlier"});
   expect(f.host.keptEdits.retry).not.toHaveBeenCalled();
-  expect((await act("page", current)).status).toBe(200);
-  expect(f.host.keptEdits.page.mock.calls.map(([kept]) => [kept.generation, kept.identity])).toEqual([[current, identity]]);
+  expect(await (await act("page", earlier)).json()).toEqual({ok: true, page: {kind: "page", outboxId: "outbox-x", after: null}});
+  expect(await (await act("copied", earlier)).json()).toEqual({ok: true});
+  expect(f.host.keptEdits.page.mock.calls.map(([kept]) => [kept.generation, kept.identity])).toEqual([[earlier, old]]);
+  expect(f.host.keptEdits.copied.mock.calls.map(([kept]) => [kept.generation, kept.identity])).toEqual([[earlier, old]]);
+  expect(f.storage.readServiceKeptEdits(queue("outbox-x", identity))).toMatchObject({generation: current, copied: false});
+  expect(await list()).toEqual([{...row, generation: earlier, recovery: "copied"}, {...row, generation: current, recovery: "paused"}]);
+  // A host that could not release the store keeps the confirmation.
+  f.host.keptEdits.copied.mockRejectedValueOnce(new Error("engine gone"));
   expect(await (await act("copied", current)).json()).toEqual({ok: true});
-  expect(f.storage.readServiceKeptEdits(queue("outbox-x", old))).toMatchObject({generation: earlier, copied: false});
+  expect(f.storage.readServiceKeptEdits(queue("outbox-x", identity))).toMatchObject({copied: true});
 });
 
 // Proves: the relay's dispatch sends both enrollment paths, and nothing else,
