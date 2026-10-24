@@ -2922,6 +2922,23 @@ BEGIN
 END;
 ";
 
+// A restore the relay cancelled before its fence committed here. The
+// operation never fences afterwards, so the document keeps its generation.
+const V2_LIVE_RESTORE_CANCELLATIONS_DDL: &str = "
+CREATE TABLE live_restore_cancellations (
+    relay_database_namespace TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    new_generation INTEGER NOT NULL CHECK (new_generation BETWEEN 1 AND 9007199254740991),
+    cancelled_at_ms INTEGER NOT NULL CHECK (cancelled_at_ms BETWEEN 0 AND 9007199254740991),
+    PRIMARY KEY (relay_database_namespace, operation_id),
+    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
+) STRICT;
+";
+
 /// The frozen, ordered list of migrations this build knows. No build may
 /// delete or rename the `v2-baseline` ledger row, because an older build
 /// recognizes a newer store only by that row and would otherwise offer
@@ -3377,6 +3394,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 68,
         id: "v2-live-owner-activations",
         sql: V2_LIVE_OWNER_ACTIVATIONS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 69,
+        id: "v2-live-restore-cancellations",
+        sql: V2_LIVE_RESTORE_CANCELLATIONS_DDL,
         sets_user_version: None,
     },
 ];
@@ -5218,6 +5241,10 @@ mod tests {
             (
                 "v2-live-owner-activations",
                 "ab7c083adc62cd7ceb164fda18d23f473673bf6c024c091742e292d84683cd5b",
+            ),
+            (
+                "v2-live-restore-cancellations",
+                "1fd5e4858fb45fe6019505d66fb448985893a94a770bf71c601bccc68f3f6b42",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

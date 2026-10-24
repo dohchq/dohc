@@ -92,9 +92,12 @@ pub use restore_content::{
 pub use restore_fence::require_open as require_restore_open;
 pub(crate) use restore_fence::require_registration as require_restore_registration;
 pub use restore_fence::{
+    cancel_restore_fence, NativeRestoreFence, NativeRestoreFenceReceipt, RestoreDeliveryOrigin,
+    RestoreFenceCancellation, RestoreFenceCancellationOutcome,
+};
+pub use restore_fence::{
     current_generation as restore_generation, require_generation as require_restore_generation,
 };
-pub use restore_fence::{NativeRestoreFence, NativeRestoreFenceReceipt, RestoreDeliveryOrigin};
 pub use restore_resume::{NativeRestoreResume, NativeRestoreResumeReceipt};
 pub use settlement::{
     with_retirement_settlement, with_settlement, LiveSettlementAudit,

@@ -29,6 +29,137 @@ pub struct NativeRestoreFenceReceipt {
     pub recorded_at_ms: i64,
 }
 
+/// The restore fence a cancellation names: one operation's fence of one
+/// document lineage. The engine's configuration fixes its namespace and
+/// workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RestoreFenceCancellation {
+    pub operation_id: String,
+    pub object_id: String,
+    pub lineage_claim_id: String,
+    pub new_fence: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestoreFenceCancellationOutcome {
+    /// No fence of the operation committed here, and none ever will. The
+    /// document keeps the generation before it; `binding` is its binding in
+    /// the namespace at that generation, while it has one.
+    Cancelled {
+        generation: i64,
+        binding: Option<LiveObjectBinding>,
+    },
+    /// The fence committed and nothing admitted the restore since. The
+    /// document stays stopped at the fenced generation.
+    Fenced(NativeRestoreFenceReceipt),
+}
+
+/// Cancel a restore whose fence may still be in flight. The store's one
+/// writer orders this against the fence: a cancellation recorded first makes
+/// the operation's fence refuse, and a fence committed first is answered. A
+/// replay answers the same. Another key for the operation, a key the
+/// document's generation has passed, and a restore already admitted refuse.
+pub fn cancel_restore_fence(
+    store: &mut EngineStore,
+    namespace: &str,
+    workspace_id: &str,
+    input: &RestoreFenceCancellation,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<RestoreFenceCancellationOutcome, ApplicationError> {
+    identifier(namespace, 512)?;
+    identifier(&input.operation_id, 512)?;
+    identifier(&input.object_id, 1024)?;
+    digest(&input.lineage_claim_id)?;
+    integer(input.new_fence, 1, SAFE)?;
+    integer(now_ms, 0, SAFE)?;
+    let generation = input.new_fence - 1;
+    let outcome = store.write_with(faults, |tx| {
+        let main: String = tx
+            .query_row(
+                "SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1",
+                [workspace_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(read_sql)?
+            .ok_or(ApplicationError::WorkspaceMismatch)?;
+        let key = (
+            workspace_id.to_owned(),
+            main.clone(),
+            input.object_id.clone(),
+            input.lineage_claim_id.clone(),
+            input.new_fence,
+        );
+        type Fenced = (String, String, String, Option<String>, Option<i64>, String, bool);
+        let fenced: Option<Fenced> = tx.query_row(
+            "SELECT workspace_id,main_version_id,object_id,lineage_claim_id,new_generation,receipt_json,
+                application_json IS NOT NULL OR resume_receipt_json IS NOT NULL
+             FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2",
+            params![namespace, input.operation_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+        ).optional().map_err(read_sql)?;
+        if let Some((workspace, version, object, lineage, fence, receipt, admitted)) = fenced {
+            let Some((lineage, fence)) = lineage.zip(fence) else {
+                return Err(ApplicationError::Corrupt);
+            };
+            if (workspace, version, object, lineage, fence) != key || admitted {
+                return Err(ApplicationError::Conflict);
+            }
+            let receipt: NativeRestoreFenceReceipt =
+                serde_json::from_str(&receipt).map_err(|_| ApplicationError::Corrupt)?;
+            if receipt.operation.operation_id != input.operation_id
+                || receipt.operation.relay_database_namespace != namespace
+                || receipt.operation.new_fence != input.new_fence
+            {
+                return Err(ApplicationError::Corrupt);
+            }
+            return Ok(RestoreFenceCancellationOutcome::Fenced(receipt));
+        }
+        let doc = DocKey::new(workspace_id, &main, &input.object_id)?;
+        let bound = retirement::read_bound_binding(tx, namespace, &doc)?.map(|(binding, _)| binding);
+        let saved: Option<(String, String, String, String, i64)> = tx.query_row(
+            "SELECT workspace_id,main_version_id,object_id,lineage_claim_id,new_generation
+             FROM live_restore_cancellations WHERE relay_database_namespace=?1 AND operation_id=?2",
+            params![namespace, input.operation_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        ).optional().map_err(read_sql)?;
+        match saved {
+            Some(saved) if saved == key => {}
+            Some(_) => return Err(ApplicationError::Conflict),
+            None => {
+                // Only a key the document still holds: its binding, or a
+                // fence, at the generation after it names another owner.
+                if bound.as_ref().is_some_and(|b| {
+                    b.lineage_claim_id != input.lineage_claim_id
+                        || b.restore_fence_generation != generation
+                }) || latest_generation(tx, &doc)?.is_some_and(|(g, _)| g >= input.new_fence)
+                {
+                    return Err(ApplicationError::Conflict);
+                }
+                tx.execute(
+                    "INSERT INTO live_restore_cancellations(relay_database_namespace,operation_id,workspace_id,
+                        main_version_id,object_id,lineage_claim_id,new_generation,cancelled_at_ms)
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                    params![namespace, input.operation_id, workspace_id, main, input.object_id,
+                        input.lineage_claim_id, input.new_fence, now_ms],
+                ).map_err(write_sql)?;
+            }
+        }
+        Ok(RestoreFenceCancellationOutcome::Cancelled {
+            generation,
+            binding: bound.filter(|b| {
+                b.lineage_claim_id == input.lineage_claim_id && b.restore_fence_generation == generation
+            }),
+        })
+    })?;
+    match outcome {
+        TxnOutcome::Committed(outcome) => Ok(outcome),
+        TxnOutcome::Crashed { .. } => Err(ApplicationError::Interrupted),
+    }
+}
+
 // This document lineage's settlements whose moments have not reached the relay:
 // local moments above the origin's pushed cursor, then settlements a retained
 // history export has not journaled yet. Unpushed rows bound the scan, not history.
@@ -319,8 +450,10 @@ impl ApplicationOwner {
                 }
                 return Ok(receipt);
             }
+            // A cancelled operation never fences.
             let collision: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2)",
+                "SELECT EXISTS(SELECT 1 FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2)
+                    OR EXISTS(SELECT 1 FROM live_restore_cancellations WHERE relay_database_namespace=?1 AND operation_id=?2)",
                 params![held.namespace,input.operation_id], |r| r.get(0),
             ).map_err(read_sql)?;
             if collision { return Err(ApplicationError::Conflict); }

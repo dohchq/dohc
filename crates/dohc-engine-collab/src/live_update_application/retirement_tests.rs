@@ -1687,6 +1687,143 @@ fn a_restore_waits_while_its_activation_retires() {
     fence(&mut f).unwrap();
 }
 
+/// The fixture's restore fence of `operation`, from generation 0 to 1.
+fn restore_fence(f: &mut Fixture, operation: &str) -> Result<NativeRestoreFenceReceipt, ApplicationError> {
+    let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
+    f._owner.fence_restore(
+        &mut f.store,
+        None,
+        NativeRestoreFence {
+            operation_id: operation.into(),
+            relay_database_namespace: "namespace".into(),
+            old_binding: f.binding.clone(),
+            host_id: "host".into(),
+            new_fence: 1,
+            origin: RestoreDeliveryOrigin::Owner { id: f.cut.adoption_id.clone() },
+            terminal: f.cut.terminal_receipt.clone(),
+            applied_sequence: f.cut.expected_local_sequence,
+        },
+        coordinate,
+        40,
+        &NoFaults,
+    )
+}
+
+fn cancellation(f: &Fixture, operation: &str) -> RestoreFenceCancellation {
+    RestoreFenceCancellation {
+        operation_id: operation.into(),
+        object_id: f.binding.object_id.clone(),
+        lineage_claim_id: f.binding.lineage_claim_id.clone(),
+        new_fence: 1,
+    }
+}
+
+fn cancel(
+    f: &mut Fixture,
+    input: &RestoreFenceCancellation,
+) -> Result<RestoreFenceCancellationOutcome, ApplicationError> {
+    cancel_restore_fence(&mut f.store, "namespace", "workspace", input, 50, &NoFaults)
+}
+
+/// The document's binding generation and availability in the namespace.
+fn bound(f: &Fixture) -> (i64, bool) {
+    f.store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT restore_fence_generation,available FROM live_device_application_bindings
+                 WHERE relay_database_namespace='namespace'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap()
+}
+
+/// Sol's ruling, after relay fencing: a fence that has not landed is
+/// cancelled for good. The fence request still in flight, or replayed later,
+/// refuses, so the document keeps its generation and the relay keeps the
+/// retirement key it had. A duplicate answers the same; another key refuses.
+#[test]
+fn a_restore_fence_that_never_landed_is_cancelled_for_good() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let input = cancellation(&f, "restore");
+    let cancelled = RestoreFenceCancellationOutcome::Cancelled {
+        generation: 0,
+        binding: Some(f.binding.clone()),
+    };
+    assert_eq!(cancel(&mut f, &input).unwrap(), cancelled);
+    assert_eq!(cancel(&mut f, &input).unwrap(), cancelled, "a duplicate answers the same");
+    assert_eq!(f.store.table_row_count("live_restore_cancellations").unwrap(), 1);
+    // The fence request that was in flight arrives late, and again on replay.
+    for _ in 0..2 {
+        assert!(matches!(restore_fence(&mut f, "restore"), Err(ApplicationError::Conflict)));
+    }
+    assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
+    assert_eq!(bound(&f), (0, true));
+    // Another key for the operation refuses and records nothing.
+    let mut later = input.clone();
+    later.new_fence = 2;
+    let mut lineage = input.clone();
+    lineage.lineage_claim_id = "f".repeat(64);
+    let mut object = input.clone();
+    object.object_id = "other".into();
+    for wrong in [later, lineage, object] {
+        assert!(matches!(cancel(&mut f, &wrong), Err(ApplicationError::Conflict)), "{wrong:?}");
+    }
+    assert_eq!(f.store.table_row_count("live_restore_cancellations").unwrap(), 1);
+    // Retirement accepts the key the relay kept, at the generation before.
+    assert!(!begin(&mut f, 10).unwrap().released);
+    assert_eq!(intents(&f), [("adoption".to_owned(), 0)]);
+    // A restart keeps the cancellation.
+    drop(f.store);
+    f.store = EngineStore::open(&f._scratch.join("engine.db"), 31).unwrap();
+    assert_eq!(cancel(&mut f, &input).unwrap(), cancelled);
+}
+
+/// Sol's ruling, after native fencing: a cancellation racing a fence whose
+/// reply was lost answers that fence, at its generation and binding, and
+/// records nothing, until the restore is admitted. No other operation can
+/// claim that no fence landed for the fenced generation.
+#[test]
+fn a_committed_restore_fence_answers_its_cancellation_until_admission() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    // The fence commits; its reply never reaches the relay.
+    let receipt = restore_fence(&mut f, "restore").unwrap();
+    let input = cancellation(&f, "restore");
+    for _ in 0..2 {
+        assert_eq!(
+            cancel(&mut f, &input).unwrap(),
+            RestoreFenceCancellationOutcome::Fenced(receipt.clone())
+        );
+    }
+    assert_eq!(receipt.operation.new_fence, 1);
+    assert_eq!(bound(&f), (1, false));
+    assert_eq!(f.store.table_row_count("live_restore_cancellations").unwrap(), 0);
+    assert_eq!(restore_fence(&mut f, "restore").unwrap(), receipt, "the fence still replays");
+    let mut lineage = input.clone();
+    lineage.lineage_claim_id = "f".repeat(64);
+    let mut later = input.clone();
+    later.new_fence = 2;
+    for wrong in [lineage, later, cancellation(&f, "other")] {
+        assert!(matches!(cancel(&mut f, &wrong), Err(ApplicationError::Conflict)), "{wrong:?}");
+    }
+    assert_eq!(f.store.table_row_count("live_restore_cancellations").unwrap(), 0);
+    // Once the host admitted the restore, cancellation refuses.
+    let conn = rusqlite::Connection::open(f._scratch.join("engine.db")).unwrap();
+    conn.execute_batch(
+        "PRAGMA foreign_keys=OFF;
+         UPDATE live_restore_fences SET proposal_json='{}',proposal_candidate_sha256='a',
+           proposal_frozen_sha256='a',proposal_point_sha256='a',application_json='{}',
+           application_delivery_id='admitted'",
+    )
+    .unwrap();
+    drop(conn);
+    assert!(matches!(cancel(&mut f, &input), Err(ApplicationError::Conflict)));
+    assert_eq!(f.store.table_row_count("live_restore_cancellations").unwrap(), 0);
+}
+
 /// Sol: a released activation never regains live authority, after a
 /// reconnect (a new owner, whose retired set is empty) or a restart (the
 /// store reopened), whether it adopted or not.
