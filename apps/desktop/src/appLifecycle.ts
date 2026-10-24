@@ -100,6 +100,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     refreshTray(): Promise<boolean>;
     /** dohc stays in the tray: close workspaces nothing uses any more. */
     releaseIdleWorkspaces(): Promise<void>;
+    /** dohc stays running after its last window: say so where no tray does. */
+    noticeRunningInBackground(): Promise<void>;
     reportTrayFailure(error: unknown): void;
     warmCredentials(): Promise<void>;
     reconcileCloud(): void;
@@ -442,7 +444,10 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
           .then((enabled) => {
             if (!enabled && !quitting) app.quit();
             // A failed close leaves the workspace open; it never quits dohc.
-            else if (enabled && !quitting) return services.releaseIdleWorkspaces().catch(() => undefined);
+            else if (enabled && !quitting) {
+              void services.noticeRunningInBackground().catch(services.reportTrayFailure);
+              return services.releaseIdleWorkspaces().catch(() => undefined);
+            }
           })
           .catch(() => {
             if (!quitting) app.quit();

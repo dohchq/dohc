@@ -65,9 +65,17 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
   const showWindow = vi.fn(async () => undefined);
   let lifecycle: { isQuitting(): boolean } | undefined;
   let schedules = 0;
+  const notices: Notice[] = [];
+  class Notice {
+    readonly listeners = new Map<string, () => void>();
+    readonly show = vi.fn(() => undefined);
+    constructor(readonly options: { title: string; body: string }) { notices.push(this); }
+    on(event: "click", listener: () => void) { this.listeners.set(event, listener); return this; }
+  }
+  const linuxTrayShown = vi.fn(async () => false);
   const owner = createDesktopTray({
     app, process: runtime, moduleDirectory, Menu: { buildFromTemplate: buildMenu },
-    nativeImage: { createFromPath: createImage }, nativeTheme: theme, Tray,
+    nativeImage: { createFromPath: createImage }, nativeTheme: theme, Tray, Notification: Notice, linuxTrayShown,
     readCachedUserSettingsFile: readSettings, stateDir: () => stateRoot,
     chatDispatchService: service, showOrCreateMainWindow: showWindow,
     runningSchedules: () => schedules,
@@ -76,7 +84,7 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
   lifecycle = { isQuitting: () => false };
   return {
     root, iconRoot, resourcesPath, stateRoot, created, service, app, runtime, theme,
-    owner, readSettings, createImage, emptyPaths, buildMenu, showWindow, configure,
+    owner, readSettings, createImage, emptyPaths, buildMenu, showWindow, configure, notices, linuxTrayShown,
     asset: async (name: string) => { const path = join(iconRoot, name); await writeFile(path, "native image fixture"); return path; },
     setLifecycle: (value: { isQuitting(): boolean }) => { lifecycle = value; },
     setSchedules: (count: number) => { schedules = count; },
@@ -157,6 +165,50 @@ describe("desktop tray owner", () => {
     expect(h.showWindow).toHaveBeenCalledTimes(2);
     expect(h.app.quit).toHaveBeenCalledTimes(1);
     expect(h.created).toHaveLength(1);
+  });
+
+  it("tells a Linux desktop without a tray, once a run, that dohc keeps running and how to quit", async () => {
+    const h = await harness("linux");
+    await h.asset("icon-light.png");
+    h.setSchedules(2);
+    await h.owner.refreshDispatchTray();
+    await h.owner.noticeRunningInBackground();
+    await h.owner.noticeRunningInBackground();
+    expect(h.notices.map(({ options }) => options)).toEqual([{
+      title: "dohc is still running",
+      body: "Agent dispatch is on. Running 2 schedules. To quit, open dohc and press Ctrl+Q.",
+    }]);
+    expect(h.notices[0]!.show).toHaveBeenCalledTimes(1);
+    h.notices[0]!.listeners.get("click")!();
+    expect(h.showWindow).toHaveBeenCalledTimes(1);
+    expect(h.linuxTrayShown).toHaveBeenCalledTimes(1);
+  });
+
+  it("names only what keeps dohc running", async () => {
+    const h = await harness("linux");
+    await h.asset("icon-light.png");
+    await h.configure(false);
+    h.setSchedules(1);
+    await h.owner.refreshDispatchTray();
+    await h.owner.noticeRunningInBackground();
+    expect(h.notices[0]?.options.body).toBe("Running 1 schedule. To quit, open dohc and press Ctrl+Q.");
+  });
+
+  it("leaves the notice to the tray where one shows", async () => {
+    const linux = await harness("linux");
+    await linux.asset("icon-light.png");
+    linux.linuxTrayShown.mockResolvedValue(true);
+    await linux.owner.refreshDispatchTray();
+    await linux.owner.noticeRunningInBackground();
+    expect(linux.notices).toHaveLength(0);
+    for (const platform of ["win32", "darwin"] as const) {
+      const other = await harness(platform);
+      await other.asset("icon-light.png");
+      await other.owner.refreshDispatchTray();
+      await other.owner.noticeRunningInBackground();
+      expect(other.notices, platform).toHaveLength(0);
+      expect(other.linuxTrayShown, platform).not.toHaveBeenCalled();
+    }
   });
 
   it.each(["win32", "linux"] as const)("refreshes the existing %s tray from the live theme", async (platform) => {
