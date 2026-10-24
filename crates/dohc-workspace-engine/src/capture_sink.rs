@@ -659,6 +659,7 @@ impl StoreCaptureSink {
         sha256: &str,
         claim_foreign_head: bool,
     ) -> Result<DomainIngest, CaptureError> {
+        let captured_root = self.captured_root()?;
         let result = self.actor.capture_ingest_with_search_policy_blocking(
             CaptureIngest {
                 workspace_id: self.workspace_id.clone(),
@@ -673,6 +674,7 @@ impl StoreCaptureSink {
                 request_id: None,
                 claim_foreign_head,
             },
+            captured_root.canonical_path.clone(),
             Arc::clone(&self.search_policy),
             self.leases.clone(),
             Arc::new(NoFaults),

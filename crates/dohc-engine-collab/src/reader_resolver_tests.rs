@@ -136,6 +136,65 @@ fn construction_as_proof_refuses_body_deletions() {
     assert_eq!(live.encode_full_state(), before);
 }
 
+fn reject_native_metadata(key: &str) {
+    reject_native_metadata_value(key, yrs::Any::String("unexpected".into()));
+}
+
+fn reject_native_metadata_value(key: &str, value: yrs::Any) {
+    use yrs::{updates::decoder::Decode, Map, ReadTxn, Transact};
+    let base = Ydoc::wire();
+    base.rewrite_content_to_markdown(ContentKind::Richdoc, "Before")
+        .unwrap();
+    let before = base.encode_full_state();
+    let raw = yrs::Doc::new();
+    raw.transact_mut()
+        .apply_update(yrs::Update::decode_v1(&before).unwrap())
+        .unwrap();
+    let vector = raw.transact().state_vector();
+    raw.get_or_insert_map("meta")
+        .insert(&mut raw.transact_mut(), key, value);
+    let delta = raw.transact().encode_state_as_update_v1(&vector);
+    assert!(base.native_fold_candidate(&delta).is_err(), "{key}");
+    assert_eq!(base.encode_full_state(), before);
+}
+
+#[test]
+fn native_fold_candidate_rejects_source() {
+    reject_native_metadata("dohcMarkdownSource");
+}
+#[test]
+fn native_fold_candidate_rejects_source_digest() {
+    reject_native_metadata("dohcMarkdownSourceSha256");
+}
+#[test]
+fn native_fold_candidate_rejects_source_witness() {
+    reject_native_metadata("dohcMarkdownSourceProjectionSha256");
+}
+#[test]
+fn native_fold_candidate_rejects_reader_marker() {
+    reject_native_metadata("dohcMarkdownSourceReader");
+}
+#[test]
+fn native_fold_candidate_rejects_unknown_metadata() {
+    reject_native_metadata("unknown");
+}
+
+#[test]
+fn native_fold_candidate_rejects_non_string_epoch_metadata() {
+    reject_native_metadata_value("dohcLineageEpoch", yrs::Any::Number(7.0));
+}
+
+#[test]
+fn native_fold_candidate_rejects_pending_updates() {
+    let base = Ydoc::wire();
+    base.rewrite_content_to_markdown(ContentKind::Richdoc, "Before")
+        .unwrap();
+    let missing = Ydoc::wire();
+    missing.richdoc_append_paragraph("Missing dependency");
+    let delta = missing.richdoc_append_paragraph("Cannot integrate");
+    assert!(base.native_fold_candidate(&delta).is_err());
+}
+
 #[test]
 fn construction_as_proof_cannot_change_content_or_unknown_metadata() {
     let (_, _, doc, _, _) = fixture();
