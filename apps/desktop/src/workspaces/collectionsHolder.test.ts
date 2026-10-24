@@ -1,4 +1,5 @@
 import { lstat, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { lstatSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -15,6 +16,11 @@ import {
   type KeepSteps,
 } from "./collectionsHolder";
 import { createTestScratch } from "./testTemp";
+
+vi.mock("node:fs", async importOriginal => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {...actual, lstatSync: vi.fn(actual.lstatSync)};
+});
 
 const here = { installId: "install-here", label: "Studio" };
 const laptop = { installId: "install-laptop", label: "Laptop" };
@@ -53,6 +59,20 @@ beforeEach(async () => {
 });
 
 describe("a workspace's Collections holder", () => {
+  it("refuses a changed holder even when its file metadata did not change", async () => {
+    await named(here, storeId);
+    const check = createHoldingCheck(root, workspaceId, required, () => storeId);
+    const metadata = lstatSync(recordPath(), {bigint: true});
+    check();
+    // A same-size overwrite can share all timestamps on a coarse filesystem.
+    await named({installId: "install-away", label: "Studio"}, storeId);
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    vi.mocked(lstatSync).mockImplementation(((path: string, options: unknown) =>
+      path === recordPath() ? metadata : actual.lstatSync(path, options as never)) as typeof lstatSync);
+    try {
+      expect(() => check()).toThrowError(expect.objectContaining({code: "collections-elsewhere"}));
+    } finally {vi.mocked(lstatSync).mockReset();}
+  });
   it("names the installation that made a new workspace, with no store yet, and keeps a record already there", async () => {
     await recordNewCollectionsHolder(root, workspaceId, here);
     expect(JSON.parse(await readFile(recordPath(), "utf8"))).toEqual({ version: 1, workspaceId, installId: "install-here", label: "Studio", storeId: null });
@@ -131,15 +151,14 @@ describe("a workspace's Collections holder", () => {
     for (const place of ["local", "old"] as const) expect(await exists(join(root, ...places[place], "state.sqlite"))).toBe(false);
   });
 
-  it("checks an open store against the record before each use, reading it again only after it changed", async () => {
+  it("checks an open store and the holder record before each use", async () => {
     await named(here, storeId);
     let open: string | null = storeId;
     const check = createHoldingCheck(root, workspaceId, required, () => open);
     check();
-    // Unchanged, the record is not read again: a store id that changed meanwhile goes unnoticed until the record changes.
-    open = "0b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f";
-    check();
     const stop = (expected: object) => { try { check(); } catch (error) { expect((error as CollectionsRefusalError).refusal).toMatchObject(expected); return; } throw new Error("Expected a refusal."); };
+    open = "0b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f";
+    stop({ kind: "replaced" });
     await named(here, storeId);
     stop({ kind: "replaced" });
     open = storeId;
@@ -153,7 +172,7 @@ describe("a workspace's Collections holder", () => {
     stop({ kind: "unreadable" });
     await named(here, storeId);
     check();
-    // The same bytes rewritten in place still count as a change, and are read again.
+    // Rewriting identical bytes remains valid even when timestamps do not change.
     await writeFile(recordPath(), await readFile(recordPath()));
     check();
     expect(() => createHoldingCheck(root, workspaceId, { here: () => here, required: () => false }, () => null)()).not.toThrow();

@@ -44,9 +44,8 @@ import { OLD_STORE_PATH, STORE_PATH } from "./localDatasetFolders";
 // Then the store id catches the one whose record lost, as "elsewhere" or
 // "replaced", and it stops.
 //
-// An open store reads the record's file identity before each piece of work
-// and reads the record again whenever it changed, so a record that names
-// another computer or store stops the next write, with no wait between.
+// An open store reads the record before each piece of work, so a record that
+// names another computer or store stops the next write, with no wait between.
 //
 // A server's sync never carries .dohc, so a workspace that syncs through a
 // server keeps the record too. Only a received share does not use it.
@@ -290,20 +289,15 @@ export async function recordCollectionsStore(rootPath: string, workspaceId: stri
 /**
  * The check an open store makes before each piece of work, with nothing
  * awaited: the record still names this installation and the store's id.
- * It compares the record file's identity, size and times with the ones it
- * last read, and reads the record again only when they changed. Throws a
- * CollectionsRefusalError otherwise.
+ * File times and sizes cannot prove that the record is unchanged.
+ * Throws a CollectionsRefusalError when it no longer holds the store.
  */
 export function createHoldingCheck(rootPath: string, workspaceId: string, check: CollectionsHolderCheck, storeId: () => string | null): () => void {
   const metadata = join(rootPath, ".dohc"), path = join(metadata, RECORD);
-  let read: string | null = null;
   return () => {
-    if (!check.required()) { read = null; return; }
+    if (!check.required()) return;
     const stats = lstatSync(path, { bigint: true, throwIfNoEntry: false });
     if (stats === undefined) throw refused({ kind: "unclaimed" });
-    const identity = `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}`;
-    if (identity === read && stats.isFile()) return;
-    read = null;
     const folder = lstatSync(metadata);
     if (folder.isSymbolicLink() || !folder.isDirectory()) throw refused({ kind: "unreadable", words: notARealFolderRefusal(DOHC_METADATA_GUARD, folder) });
     if (!stats.isFile()) throw refused({ kind: "unreadable", words: notAFileRefusal(DOHC_COLLECTIONS_GUARD, stats) });
@@ -315,7 +309,6 @@ export function createHoldingCheck(rootPath: string, workspaceId: string, check:
     // An open store the record does not name yet may be another computer's.
     if (holder.storeId === null) throw refused({ kind: "unclaimed" });
     if (holder.storeId !== storeId()) throw refused({ kind: "replaced", path: STORE_PATH });
-    read = identity;
   };
 }
 
