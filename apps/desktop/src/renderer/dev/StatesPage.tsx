@@ -23,7 +23,7 @@ import type {
   UsageRecordRow,
   WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
-import { readError, withErrorWords } from "../../ipc/errorWords";
+import { collectionsElsewhereWords, readError, withErrorWords } from "../../ipc/errorWords";
 import { CsvPreviewBound, CsvTable, CsvViewActions, csvColumns } from "../CsvView";
 import { DatabaseGrid, DatabaseViewActions, editOf } from "../DatabaseStudioView";
 import { DocumentMenu } from "../DocumentMenu";
@@ -61,7 +61,7 @@ import { ActivityBar } from "../workbench/ActivityBar";
 import { AgentBadge } from "../workbench/AgentBadge";
 import { AgentColorContext, AgentColorSwatches } from "../workbench/AgentColorPicker";
 import { AppRows } from "../workbench/AppsView";
-import { chatTabPath, collectionTabPath, HISTORY_TAB_PATH, siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
+import { chatTabPath, collectionTabPath, HISTORY_TAB_PATH, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MIN_WIDTH, siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { neutralPresentation, relayPresentation } from "../workbench/actorPresentation";
@@ -75,7 +75,7 @@ import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
 import { EditorTabs } from "../workbench/EditorTabs";
 import { EditorGroupFrame } from "../workbench/tabRowActions";
 import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
-import { TreeRow, type VisibleRow } from "../workbench/Explorer";
+import { CollectionsElsewhereRow, CollectionsRefusalRow, TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
 import { EngineHistoryView, MomentRow } from "../workbench/EngineHistory";
 import { DiffCounts, UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "../workbench/unifiedDiff";
@@ -352,6 +352,21 @@ function OverflowStripSpecimen(props: { groupId: string; groupNumber: number; ac
     </div>
   );
 }
+
+// The sidebar's Collections section, at a width the sidebar takes.
+function CollectionsSectionSpecimen(props: { width: number; children: ReactNode }) {
+  return (
+    <div style={{ width: props.width }} className="rounded-lg border border-line bg-panel px-1 py-1">
+      <SectionLabel as="div" className="px-2 py-1">Collections</SectionLabel>
+      {props.children}
+    </div>
+  );
+}
+
+const STUDIO_MAC = { label: "Studio Mac", sameName: false };
+const UNCLAIMED_REFUSAL = { kind: "unclaimed", words: "dohc doesn't know which computer keeps this workspace's Collections." } as const;
+const ELSEWHERE_REFUSAL = { kind: "elsewhere", computer: STUDIO_MAC.label, words: collectionsElsewhereWords(STUDIO_MAC) } as const;
+const OTHERS_ELSEWHERE = { computer: STUDIO_MAC.label, others: true, words: collectionsElsewhereWords(STUDIO_MAC, true) };
 
 function treeRow(name: string, folder = false): VisibleRow {
   return {
@@ -1574,6 +1589,24 @@ function Pane(props: { theme: "light" | "dark" }) {
           <Row name="focused, hover" force="hover focus-visible" />
           <Row name="drop target" folder drop />
         </ul>
+      </Section>
+
+      <Section part="collections-rows" title="Collections rows">
+        {[SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MIN_WIDTH].map((width) => (
+          <Specimen key={width} label={`no computer keeps them; another one does; others beside the server's, ${width}px`}>
+            <div className="flex flex-col gap-2">
+              <CollectionsSectionSpecimen width={width}>
+                <CollectionsRefusalRow refusal={UNCLAIMED_REFUSAL} onKeep={noop} onRetry={noop} />
+              </CollectionsSectionSpecimen>
+              <CollectionsSectionSpecimen width={width}>
+                <CollectionsRefusalRow refusal={ELSEWHERE_REFUSAL} onKeep={noop} onRetry={noop} />
+              </CollectionsSectionSpecimen>
+              <CollectionsSectionSpecimen width={width}>
+                <CollectionsElsewhereRow elsewhere={OTHERS_ELSEWHERE} onKeep={noop} />
+              </CollectionsSectionSpecimen>
+            </div>
+          </Specimen>
+        ))}
       </Section>
 
       {/* Both menus are opened by the capture, one at a time, and their

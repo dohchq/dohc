@@ -90,12 +90,12 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
     expect((await openWorkspaceFromFirstRun(restored, target)).workspaceId).toBe(workspaceId);
     // The copied manifest names no computer for the Collections, so this computer neither opens nor creates a store until the person keeps them here.
     const collections = restored.getByRole("region", { name: "Collections", exact: true });
-    await expect(collections.getByTestId("collections-refusal")).toContainText("dohc doesn't know which computer keeps this workspace's Collections.");
+    await expect(collections.getByTestId("collections-refusal")).toHaveText("Which computer keeps these Collections?Use this computer");
     await expect(restored.getByRole("button", { name: "Restore from recovery file", exact: true })).toBeHidden();
     const missing = (...path: string[]) => lstat(join(target.rootPath, ...path)).then(() => false, () => true);
     expect(await missing(".dohc", "local", "datasets", "state.sqlite")).toBe(true);
     expect(await missing(".dohc", "datasets")).toBe(true);
-    await collections.getByRole("button", { name: "Keep the Collections on this computer", exact: true }).click();
+    await collections.getByRole("button", { name: "Use this computer", exact: true }).click();
     await expect(collections.getByTestId("collections-refusal")).toBeHidden();
     expect(await dataset(restored, { action: "list", workspaceId, includeArchived: true })).toMatchObject({ kind: "list", datasets: [] });
     await restoredDesktop.app.evaluate(({ dialog }, filePath) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] }); }, archivePath);

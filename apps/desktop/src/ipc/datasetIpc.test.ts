@@ -467,7 +467,7 @@ it.each([2, 3])("recovers revision %s to the base address", async number => {
   expect(f.sources.has(`${directory}/dataset.json`)).toBe(false);
 });
 
-const unclaimed = "dohc doesn't know which computer keeps this workspace's Collections. If it's this one, choose Keep the Collections on this computer.";
+const unclaimed = "dohc doesn't know which computer keeps this workspace's Collections. To keep them on this computer, choose Use this computer in dohc.";
 const storeIn = (...folder: string[]) => async (root: string) => { await mkdir(join(root, ...folder), { recursive: true }); await writeFile(join(root, ...folder, "state.sqlite"), ""); };
 it.each([
   ["another computer keeps them", "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.",

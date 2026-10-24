@@ -99,8 +99,9 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
 
     const section = page.getByRole("region", { name: "Collections", exact: true });
     await expect(section.getByRole("button", { name: "Registrations", exact: true })).toBeVisible();
-    await expect(section.getByTestId("collections-elsewhere"))
-      .toHaveText("Other Collections are on Studio Mac. Open this workspace there to use them, or to move them to a server.Keep the Collections on this computer");
+    await expect(section.getByTestId("collections-elsewhere")).toHaveText("Others on Studio MacUse this computer");
+    await expect(section.getByTestId("collections-elsewhere").locator("p"))
+      .toHaveAttribute("title", "Other Collections are on Studio Mac. Open this workspace there to use them, or to move them to a server.");
     await expect(section.getByTestId("collections-refusal")).toHaveCount(0);
     await expect(section.getByRole("button", { name: "Restore from recovery file" })).toHaveCount(0);
     const listed = await page.evaluate(workspaceId => window.dohcDesktop!.dataset({ workspaceId, action: "list" }), workspaceId);
@@ -172,8 +173,9 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
     desktop = await launchDesktopApp({ workspace });
     await openWorkspaceFromFirstRun(desktop.page, workspace);
     const offline = desktop.page.getByRole("region", { name: "Collections", exact: true });
-    await expect(offline.getByTestId("collections-elsewhere"))
-      .toHaveText("These Collections are on Studio Mac. Open this workspace there to use them, or to move them to a server.Keep the Collections on this computer");
+    await expect(offline.getByTestId("collections-elsewhere")).toHaveText("On Studio MacUse this computer");
+    await expect(offline.getByTestId("collections-elsewhere").locator("p"))
+      .toHaveAttribute("title", "These Collections are on Studio Mac. Open this workspace there to use them, or to move them to a server.");
     await expect(offline.getByTestId("collections-refusal")).toHaveCount(0);
     await expect(offline.getByRole("button", { name: "Registrations", exact: true })).toHaveCount(0);
     await expect(desktop.page.getByTestId("notice-toasts")).toContainText("Could not read Collections.");
@@ -185,8 +187,9 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
     desktop = await launchDesktopApp({ workspace });
     await openWorkspaceFromFirstRun(desktop.page, workspace);
     const signedOut = desktop.page.getByRole("region", { name: "Collections", exact: true });
-    await expect(signedOut.getByTestId("collections-refusal"))
-      .toContainText("These Collections are on Studio Mac. Open this workspace there to use them, or to move them to a server.");
+    await expect(signedOut.getByTestId("collections-refusal")).toHaveText("On Studio MacUse this computerTry again");
+    await expect(signedOut.getByTestId("collections-refusal").locator("p"))
+      .toHaveAttribute("title", "These Collections are on Studio Mac. Open this workspace there to use them, or to move them to a server.");
     await expect(signedOut.getByTestId("collections-elsewhere")).toHaveCount(0);
     await expect(signedOut.getByRole("button", { name: "Registrations", exact: true })).toHaveCount(0);
     await shoot(desktop.page, "collections-signed-out");

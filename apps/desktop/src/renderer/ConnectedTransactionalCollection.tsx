@@ -17,7 +17,7 @@ import { CollectionRecoveryExportDialog } from "./CollectionRecoveryExportDialog
 import { CollectionPendingResponsesDialog } from "./CollectionPendingResponsesDialog";
 import { EmptyState, SecondaryButton } from "./ui/controls";
 import { Laptop, TriangleAlert } from "lucide-react";
-import { KEEP_COLLECTIONS_HERE, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, type CollectionsRefusalKind } from "../ipc/errorWords";
+import { KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, USE_THIS_COMPUTER, type CollectionsRefusalKind } from "../ipc/errorWords";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { CreateDatasetFormDialog } from "./CreateDatasetFormDialog";
 import { DeleteCollectionRecordDialog } from "./DeleteCollectionRecordDialog";
@@ -192,7 +192,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCo
     return <EmptyState data-testid="collection-refusal" icon={held ? Laptop : TriangleAlert} tone={held ? "warning" : "danger"} title={refusal.words}>
       <div className="flex flex-wrap justify-center gap-2">
         {KEEPABLE_COLLECTIONS_REFUSALS.includes(refusal.kind) && onKeepCollections &&
-          <SecondaryButton onClick={() => onKeepCollections(() => { void refresh(); })}>{KEEP_COLLECTIONS_HERE}</SecondaryButton>}
+          <SecondaryButton onClick={() => onKeepCollections(() => { void refresh(); })}>{USE_THIS_COMPUTER}</SecondaryButton>}
         {refusal.kind !== "unclaimed" && <SecondaryButton onClick={() => { void refresh(); }}>Try again</SecondaryButton>}
       </div>
     </EmptyState>;

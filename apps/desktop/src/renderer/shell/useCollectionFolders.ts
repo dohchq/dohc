@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { bridge } from "../bridge";
 import type { AddressedDatasetDescription as DatasetDescription, DatasetListElsewhere } from "@dohc/cli/dataset";
-import { collectionsElsewhereWords, readCollectionsRefusal, readServerCollectionsUnavailable, type CollectionsRefusalKind } from "../../ipc/errorWords";
+import { collectionsElsewhereWords, readCollectionsRefusal, readServerCollectionsUnavailable, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
 
 // Stable empty set: the Explorer is memoized, so the "no collections"
 // default must not be a fresh identity per render.
@@ -9,8 +9,8 @@ const EMPTY_COLLECTION_FOLDERS: ReadonlySet<string> = new Set();
 const EMPTY_DATASETS: DatasetDescription[] = [];
 
 // Where the Collections this computer doesn't list are, beside the ones it lists.
-const elsewhereWords = (elsewhere: DatasetListElsewhere | undefined, datasets: readonly DatasetDescription[]) =>
-  elsewhere ? collectionsElsewhereWords(elsewhere.computer, datasets.length > 0) : null;
+const elsewhereOf = (elsewhere: DatasetListElsewhere | undefined, datasets: readonly DatasetDescription[]): CollectionsElsewhere | null =>
+  elsewhere ? { computer: elsewhere.computer.label, others: datasets.length > 0, words: collectionsElsewhereWords(elsewhere.computer, datasets.length > 0) } : null;
 
 export function useCollectionFolders(
   workspaceId: string,
@@ -30,17 +30,17 @@ export function useCollectionFolders(
   >(EMPTY_COLLECTION_FOLDERS);
   const collectionsRequest = useRef(0);
   // `elsewhere`: another computer keeps the workspace's Collections, and the
-  // list holds the ones on this computer's server. The words say where the
-  // others are, or, when the server didn't answer, where all of them are.
-  const [dataState, setDataState] = useState<{ workspaceId: string; datasets: DatasetDescription[]; nextCursor: string | null; elsewhere: string | null } | null>(null);
+  // list holds the ones on this computer's server. It says where the others
+  // are, or, when the server didn't answer, where all of them are.
+  const [dataState, setDataState] = useState<{ workspaceId: string; datasets: DatasetDescription[]; nextCursor: string | null; elsewhere: CollectionsElsewhere | null } | null>(null);
   const datasets = !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.datasets : EMPTY_DATASETS;
   const nextDataset = !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.nextCursor : null;
   const collectionsElsewhere = !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.elsewhere : null;
   // Why this computer cannot list the workspace's Collections, such as
   // another computer keeping them. The list says so in place, so a refresh
   // after each change does not report it again.
-  const [refusalState, setRefusalState] = useState<{ workspaceId: string; kind: CollectionsRefusalKind; words: string } | null>(null);
-  const collectionsRefusal = refusalState?.workspaceId === workspaceId ? refusalState : null;
+  const [refusalState, setRefusalState] = useState<{ workspaceId: string; refusal: CollectionsRefusalRead } | null>(null);
+  const collectionsRefusal = refusalState?.workspaceId === workspaceId ? refusalState.refusal : null;
   const datasetRequest = useRef(0);
   const [archiveView, setArchiveView] = useState<{ workspaceId: string; enabled: boolean }>({ workspaceId, enabled: false });
   const includeArchived = !isShareView && archiveView.workspaceId === workspaceId && archiveView.enabled;
@@ -59,19 +59,19 @@ export function useCollectionFolders(
         if (unavailable === null) throw error;
         if (request === datasetRequest.current) {
           setDataState(current => current?.workspaceId === workspaceId && current.elsewhere !== null ? current
-            : { workspaceId, datasets: [], nextCursor: null, elsewhere: unavailable.elsewhere });
+            : { workspaceId, datasets: [], nextCursor: null, elsewhere: { computer: unavailable.computer, others: false, words: unavailable.elsewhere } });
           setRefusalState(null);
         }
         throw new Error(unavailable.failure);
       }
       if (request !== datasetRequest.current) return;
       setDataState({ workspaceId, datasets: [], nextCursor: null, elsewhere: null });
-      setRefusalState({ workspaceId, ...refusal });
+      setRefusalState({ workspaceId, refusal });
       return;
     }
     if (request !== datasetRequest.current) return;
     if (result.kind !== "list") throw Error("dohc could not read the Collections list.");
-    setDataState({ workspaceId, datasets: result.datasets, nextCursor: result.nextCursor, elsewhere: elsewhereWords(result.elsewhere, result.datasets) });
+    setDataState({ workspaceId, datasets: result.datasets, nextCursor: result.nextCursor, elsewhere: elsewhereOf(result.elsewhere, result.datasets) });
     setRefusalState(null);
   }, [workspaceId, includeArchived]);
   const loadMoreDatasets = useCallback(async () => {
@@ -82,7 +82,7 @@ export function useCollectionFolders(
     if (result.kind !== "list") throw Error("dohc could not read the Collections list.");
     setDataState(current => {
       const datasets = [...(current?.workspaceId === workspaceId ? current.datasets : []), ...result.datasets];
-      return { workspaceId, datasets, nextCursor: result.nextCursor, elsewhere: elsewhereWords(result.elsewhere, datasets) };
+      return { workspaceId, datasets, nextCursor: result.nextCursor, elsewhere: elsewhereOf(result.elsewhere, datasets) };
     });
   }, [workspaceId, nextDataset, includeArchived]);
   const refreshCollections = useCallback(async () => {

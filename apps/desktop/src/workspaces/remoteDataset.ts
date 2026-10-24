@@ -273,9 +273,11 @@ export function createRemoteDatasetData(input: {
 export class ServerCollectionsUnavailableError extends Error {
   override name = "ServerCollectionsUnavailableError";
   readonly code = SERVER_COLLECTIONS_UNAVAILABLE;
+  readonly computerLabel: string | null;
   constructor(elsewhere: CollectionsRefusalError, cause: unknown) {
     const wire = ipcWireError(cause);
     super(`${elsewhere.message}\n${wire instanceof Error && wire.name === "Error" ? wire.message : String(wire)}`, { cause });
+    this.computerLabel = elsewhere.computerLabel;
   }
 }
 

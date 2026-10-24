@@ -507,17 +507,17 @@ describe("a dataset table's ⚡ panel", () => {
 });
 
 describe("a Collection this computer cannot use", () => {
-  const refused = (code: string, words: string) =>
-    new Error(`Error invoking remote method 'desktop:dataset': CollectionsRefusalError [${code}]: ${words}`);
+  const refused = (code: string, words: string, computer?: string) =>
+    new Error(`Error invoking remote method 'desktop:dataset': CollectionsRefusalError [${code}]${computer ? ` [computer=${computer}]` : ""}: ${words}`);
   const props = { workspaceId: "workspace-a", datasetPath: "data/dataset.json", tableId: id(2), onFormCreated: vi.fn(), onOpenFile: vi.fn(), onOpenScheduleSettings: vi.fn() };
 
   it("says which computer keeps it in place, without a toast, and reads again on Try again", async () => {
     const words = "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.";
-    backend.dataset.mockRejectedValueOnce(refused("collections-elsewhere", words));
+    backend.dataset.mockRejectedValueOnce(refused("collections-elsewhere", words, "Laptop"));
     const onError = vi.fn(), onKeepCollections = vi.fn();
     render(<ConnectedTransactionalCollection {...props} onError={onError} onKeepCollections={onKeepCollections} />);
     expect((await screen.findByTestId("collection-refusal")).textContent).toContain(words);
-    expect(screen.getByRole("button", { name: "Keep the Collections on this computer" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Use this computer" })).toBeTruthy();
     expect(onError).not.toHaveBeenCalled();
     backend.dataset.mockResolvedValueOnce({ kind: "description", dataset });
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
@@ -526,11 +526,11 @@ describe("a Collection this computer cannot use", () => {
   });
 
   it("keeps Collections no computer keeps on this one, then opens the Collection", async () => {
-    backend.dataset.mockRejectedValueOnce(refused("collections-unclaimed", "dohc doesn't know which computer keeps this workspace's Collections. If it's this one, choose Keep the Collections on this computer."));
+    backend.dataset.mockRejectedValueOnce(refused("collections-unclaimed", "dohc doesn't know which computer keeps this workspace's Collections. To keep them on this computer, choose Use this computer in dohc."));
     const onKeepCollections = vi.fn((then: () => void) => then());
     render(<ConnectedTransactionalCollection {...props} onError={vi.fn()} onKeepCollections={onKeepCollections} />);
     backend.dataset.mockResolvedValueOnce({ kind: "description", dataset });
-    fireEvent.click(await screen.findByRole("button", { name: "Keep the Collections on this computer" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Use this computer" }));
     expect(onKeepCollections).toHaveBeenCalledOnce();
     await screen.findByLabelText("Collection view state");
   });
