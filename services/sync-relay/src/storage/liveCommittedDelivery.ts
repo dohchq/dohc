@@ -1573,7 +1573,7 @@ export class LiveCommittedDeliveryStore {
     return this.#storage.readTx(() => {
       const {operation} = this.#restore(input, input.host);
       integrity((operation.phase === "old-cut-applied" || operation.phase === "native-fenced") && operation.applied && operation.newFence !== null);
-      return {operation: nativeRestoreFence(operation.applied, operation.newFence), receipt: structuredClone(operation.nativeReceipt)};
+      return {operation: nativeRestoreFence(operation.applied, operation.newFence, operation.intent), receipt: structuredClone(operation.nativeReceipt)};
     });
   }
   acknowledgeStopRestoreFence(input: StopRestoreLookup & {host: LiveHostConnectionCoordinate}, value: unknown): NativeRestoreFenceReceipt {
@@ -1581,7 +1581,7 @@ export class LiveCommittedDeliveryStore {
     return this.#storage.tx(() => {
       const {operation} = this.#restore(input, input.host);
       integrity((operation.phase === "old-cut-applied" || operation.phase === "native-fenced") && operation.applied && operation.newFence !== null);
-      integrity(isDeepStrictEqual(receipt.operation, nativeRestoreFence(operation.applied, operation.newFence)));
+      integrity(isDeepStrictEqual(receipt.operation, nativeRestoreFence(operation.applied, operation.newFence, operation.intent)));
       if (operation.nativeReceipt) {
         integrity(isDeepStrictEqual(operation.nativeReceipt, receipt));
         return structuredClone(operation.nativeReceipt);

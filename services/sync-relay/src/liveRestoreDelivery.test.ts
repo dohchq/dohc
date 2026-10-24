@@ -3,7 +3,7 @@ import {DaemonRefusalError} from "@dohc/workspace-engine-client";
 import {deliverStopRestore} from "./liveRestoreDelivery";
 
 const binding={workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"b".repeat(64),currentPath:"file.md",selectorPaths:["file.md"],restoreFenceGeneration:0};
-const operation={operationId:"operation",relayDatabaseNamespace:"relay",oldBinding:binding,hostId:"service",newFence:1,
+const operation={point:{journalCursor:0,receiptDigest:binding.lineageClaimId},operationId:"operation",relayDatabaseNamespace:"relay",oldBinding:binding,hostId:"service",newFence:1,
   origin:{kind:"owner",id:"adoption"},terminal:null,appliedSequence:2};
 const receipt={operation,localHeadSequence:2,recordedAtMs:3};
 const refused={status:"pending",reason:"publication-pending"};

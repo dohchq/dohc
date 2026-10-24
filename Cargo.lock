@@ -326,6 +326,7 @@ dependencies = [
  "dohc-engine-storage",
  "dohc-engine-testkit",
  "dohc-test-scratch",
+ "memchr",
  "rusqlite",
  "ryu-js",
  "serde",
