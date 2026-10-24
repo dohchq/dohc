@@ -2123,6 +2123,87 @@ mod tests {
         assert!(lock(&service.handles).is_empty());
     }
 
+    #[tokio::test]
+    async fn an_earlier_stores_frozen_queue_without_its_recovery_checkpoint_refuses_the_copy() {
+        let earlier = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let copies = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let (service, owner, _ingress) =
+            EngineService::configured_live_host(recovering(copies.path()))
+                .await
+                .unwrap();
+        let ctx = || {
+            let mut ctx = RequestContext::unbounded();
+            ctx.connection = Some(owner.handle());
+            ctx
+        };
+        let attached = service
+            .configured_attach_workspace(
+                &ctx(),
+                host_request(
+                    "liveApplication.attachWorkspace",
+                    None,
+                    json!({"root": earlier.path(), "workspaceId": "workspace", "maxRegistrations": 4,
+                        "relay": {"baseUrl": "https://relay.invalid", "bearerToken": "owner"}}),
+                ),
+            )
+            .await
+            .unwrap();
+        let handle: WorkspaceHandle =
+            serde_json::from_value(attached["workspaceHandle"].clone()).unwrap();
+        let appended = service
+            .owner_ydoc_outbox_append(&ctx(), Some(handle.clone()), append("workspace", b"seed"))
+            .await
+            .unwrap();
+        let outbox = appended["outboxId"].as_str().unwrap().to_owned();
+        service
+            .configured_detach_workspace(
+                &ctx(),
+                host_request("liveApplication.detachWorkspace", Some(handle), json!({})),
+            )
+            .await
+            .unwrap();
+        host_identity(earlier.path(), "earlier");
+        // Its owner's adoption seed was refused for good while its document's
+        // binding stayed on the queue's generation, and no read built the
+        // recovery checkpoint of that generation's last applied cursor.
+        let frozen = rusqlite::Connection::open(database(earlier.path())).unwrap();
+        frozen
+            .execute_batch(
+                "UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason='invalid-update'; \
+                 UPDATE owner_ydoc_outbox_entries SET native_source_json='{\"origin\":{\"kind\":\"adoptionSeed\"}}'; \
+                 INSERT INTO live_device_application_bindings SELECT 'namespace',workspace_id,main_version_id,object_id,\
+                 lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,'host',1,'instance','connection',0 \
+                 FROM owner_ydoc_outboxes;",
+            )
+            .unwrap();
+        drop(frozen);
+        // The earlier store has no writer to build it, so the copy is refused
+        // instead of answering a change it can never finish.
+        let recovery = open_prepared(
+            &service,
+            ctx(),
+            recover(earlier.path(), "workspace", "earlier"),
+        )
+        .await
+        .unwrap();
+        for _ in 0..2 {
+            let refused = first_page(&service, ctx(), &recovery, &outbox)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                (refused.code, refused.message.as_str()),
+                (
+                    ErrorCode::InvalidParams,
+                    "owner-outbox-recovery-checkpoint-unavailable"
+                )
+            );
+        }
+        service
+            .dispatch(ctx(), close_request(&recovery))
+            .await
+            .unwrap();
+    }
+
     /// Attaches the store at `root` as `workspace`, then detaches it.
     async fn detached_store(service: &EngineService, ctx: &RequestContext, root: &Path) {
         let attached = service

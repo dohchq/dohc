@@ -1259,11 +1259,15 @@ fn read_page(
                 header["firstEntryCursor"] = serde_json::to_value(next_entry(0)?)
                     .map_err(|_| OwnerOutboxError::Corrupt)?;
                 // Outside the snapshot: acceptances advance them while the queue waits.
-                let frozen = frozen_seed_cursor_in(&tx, &parent)?;
-                header["frozenAtRefusedSeed"] = frozen.is_some().into();
-                header["checkpointDigest"] = checkpoint_in(&tx, &parent, frozen)?
-                    .map(|(digest, _)| digest)
+                let seed = refused_seed_in(&tx, &parent)?;
+                header["frozenAtRefusedSeed"] = matches!(seed, RefusedSeed::Frozen(_)).into();
+                let checkpoint = checkpoint_in(&tx, &parent, &seed)?.map(|(digest, _)| digest);
+                // What a recovery copy must hold, at any restore generation.
+                header["recoveryCheckpointDigest"] = checkpoint
+                    .clone()
+                    .filter(|_| !matches!(seed, RefusedSeed::None))
                     .into();
+                header["checkpointDigest"] = checkpoint.into();
                 let bytes = page_json(&header)?;
                 let (total, digest, bytes) = slice_header(bytes, cursor.offset, max_bytes)?;
                 (total, digest, bytes, following_part(Base))
@@ -1275,8 +1279,8 @@ fn read_page(
             Checkpoint => {
                 // Outside the snapshot, so a checkpoint that moved on, or that this
                 // queue's binding no longer holds, changes the read instead of failing it.
-                let frozen = frozen_seed_cursor_in(&tx, &parent)?;
-                let checkpoint = match checkpoint_in(&tx, &parent, frozen) {
+                let seed = refused_seed_in(&tx, &parent)?;
+                let checkpoint = match checkpoint_in(&tx, &parent, &seed) {
                     Err(OwnerOutboxError::RecoveryCheckpointOutdated) => None,
                     checkpoint => checkpoint?,
                 };
@@ -1440,52 +1444,62 @@ fn accepted_checkpoint_in(
     Ok(Some((digest, length)))
 }
 
-/// The last applied cursor of this queue's lineage while the queue holds its
-/// owner's refused adoption seed with no Try again granted, at the restore
-/// generation its document's application binding still has. Nothing applied
-/// on that lineage since the adoption can settle past the seed, so a recovery
-/// copy must carry it.
-fn frozen_seed_cursor_in(
-    conn: &Connection,
-    parent: &ParentRow,
-) -> Result<Option<i64>, OwnerOutboxError> {
+/// Where a queue stands with its owner's adoption seed.
+enum RefusedSeed {
+    /// It holds no refused seed.
+    None,
+    /// It holds its owner's refused adoption seed with no Try again granted,
+    /// at the restore generation its document's application binding still
+    /// has, whose lineage last applied this cursor. Nothing applied on that
+    /// lineage since the adoption can settle past the seed, so a recovery copy
+    /// must carry it.
+    Frozen(i64),
+    /// It holds a refused seed of a generation its document left. The restore
+    /// fence kept that generation's final accepted state as its recovery checkpoint.
+    Earlier,
+}
+
+/// An adoption seed entry of queue `o` that nothing applied.
+const UNAPPLIED_SEED: &str = "EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries e WHERE e.outbox_id=o.outbox_id AND e.pending=1
+    AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed'
+    AND NOT EXISTS(SELECT 1 FROM live_device_update_applications s WHERE s.delivery_id=e.delivery_id))";
+
+fn refused_seed_in(conn: &Connection, parent: &ParentRow) -> Result<RefusedSeed, OwnerOutboxError> {
     if parent.state != OwnerOutboxState::Quarantined || parent.retry_delivery_id.is_some() {
-        return Ok(None);
+        return Ok(RefusedSeed::None);
     }
     let seeded: bool = conn
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries e WHERE e.outbox_id=?1 AND e.pending=1
-                AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed'
-                AND NOT EXISTS(SELECT 1 FROM live_device_update_applications s WHERE s.delivery_id=e.delivery_id))",
+            &format!("SELECT {UNAPPLIED_SEED} FROM owner_ydoc_outboxes o WHERE o.outbox_id=?1"),
             [&parent.outbox_id],
             |row| row.get(0),
         )
         .map_err(read_sql)?;
     if !seeded {
-        return Ok(None);
+        return Ok(RefusedSeed::None);
     }
-    let key = draft::key(&parent.binding)?;
-    let applied = crate::live_update_application::read_native_applied_cursor_in(conn, &key)
-        .map_err(|_| OwnerOutboxError::ParentMismatch)?;
-    Ok(applied.and_then(|(current, cursor)| {
-        (current.lineage_claim_id == parent.binding.lineage_claim_id
-            && current.restore_fence_generation == parent.binding.restore_fence_generation)
-            .then_some(cursor)
-    }))
+    Ok(applied_cursor_in(conn, &parent.binding)?.map_or(RefusedSeed::Earlier, RefusedSeed::Frozen))
+}
+
+/// The last applied cursor of `binding`'s lineage while its document's
+/// application binding is still on that lineage and restore generation.
+fn applied_cursor_in(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+) -> Result<Option<i64>, OwnerOutboxError> {
+    crate::live_update_application::read_native_applied_cursor_in(conn, binding)
+        .map_err(|_| OwnerOutboxError::ParentMismatch)
 }
 
 /// The checkpoint a read of this queue names. A frozen lineage's is the
 /// recovery checkpoint built at its current applied cursor, which only the
-/// writer builds, so a missing or older one is out of date.
+/// writer builds, so a missing or older one is out of date. An earlier
+/// generation's is the one its restore fence kept.
 fn checkpoint_in(
     conn: &Connection,
     parent: &ParentRow,
-    frozen: Option<i64>,
+    seed: &RefusedSeed,
 ) -> Result<Option<(String, i64)>, OwnerOutboxError> {
-    let Some(cursor) = frozen else {
-        return accepted_checkpoint_in(conn, &parent.outbox_id, &parent.binding);
-    };
-    require_no_deferred_in(conn, &parent.binding)?;
     let (digest, built): (Option<String>, Option<i64>) = conn
         .query_row(
             "SELECT recovery_checkpoint_digest,recovery_checkpoint_cursor FROM owner_ydoc_outboxes WHERE outbox_id=?1",
@@ -1493,8 +1507,15 @@ fn checkpoint_in(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(read_sql)?;
-    let Some(digest) = digest.filter(|_| built == Some(cursor)) else {
-        return Err(OwnerOutboxError::RecoveryCheckpointOutdated);
+    let digest = match (seed, digest) {
+        (RefusedSeed::Frozen(cursor), digest) => {
+            require_no_deferred_in(conn, &parent.binding)?;
+            digest
+                .filter(|_| built == Some(*cursor))
+                .ok_or(OwnerOutboxError::RecoveryCheckpointOutdated)?
+        }
+        (RefusedSeed::Earlier, Some(digest)) => digest,
+        _ => return accepted_checkpoint_in(conn, &parent.outbox_id, &parent.binding),
     };
     let length: i64 = conn
         .query_row(
@@ -1528,11 +1549,7 @@ fn require_no_deferred_in(
 }
 
 /// Builds the recovery checkpoint of a queue frozen at its lineage's refused
-/// adoption seed: the accepted frames applied on that lineage and generation
-/// through its last applied cursor, and never an outbox entry. It is built
-/// once per cursor, so every page of a read slices the same bytes; a newer
-/// cursor replaces it. Refused while an applied update waits on a missing
-/// dependency. Changes nothing for any other queue.
+/// adoption seed. Changes nothing for any other queue.
 pub fn prepare_recovery_checkpoint(
     store: &mut EngineStore,
     workspace_id: &str,
@@ -1542,53 +1559,109 @@ pub fn prepare_recovery_checkpoint(
     let outcome = store.write_with(&NoFaults, |tx| {
         let parent = read_parent(tx, outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
         require_workspace(workspace_id, &parent.binding.workspace_id)?;
-        let Some(cursor) = frozen_seed_cursor_in(tx, &parent)? else {
-            return Ok(());
-        };
-        require_no_deferred_in(tx, &parent.binding)?;
-        let (previous, built): (Option<String>, Option<i64>) = tx
-            .query_row(
-                "SELECT recovery_checkpoint_digest,recovery_checkpoint_cursor FROM owner_ydoc_outboxes WHERE outbox_id=?1",
-                [outbox_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(read_sql)?;
-        if built == Some(cursor) {
-            return Ok(());
+        match refused_seed_in(tx, &parent)? {
+            RefusedSeed::Frozen(cursor) => build_recovery_checkpoint_in(tx, &parent, cursor),
+            _ => Ok(()),
         }
-        let key = draft::key(&parent.binding)?;
-        let mut remaining = crate::limits::MAX_YDOC_UPDATE_BYTES;
-        let (current, through, accepted) =
-            crate::live_update_application::read_native_accepted_cut_in(tx, &key, &mut remaining)
-                .map_err(|error| match error {
-                    crate::live_update_application::ApplicationError::Conflict => {
-                        OwnerOutboxError::AcceptedStateIncomplete
-                    }
-                    _ => OwnerOutboxError::ParentMismatch,
-                })?
-                .ok_or(OwnerOutboxError::NotFound)?;
-        if through != cursor
-            || current.lineage_claim_id != parent.binding.lineage_claim_id
-            || current.restore_fence_generation != parent.binding.restore_fence_generation
-        {
-            return Err(OwnerOutboxError::ParentMismatch);
-        }
-        let bytes = accepted
-            .encode_full_state_bounded(crate::limits::MAX_YDOC_UPDATE_BYTES)
-            .ok_or(OwnerOutboxError::Corrupt)?;
-        let digest =
-            dohc_engine_storage::put_binary_blob(tx, &bytes).map_err(OwnerOutboxError::Storage)?;
-        tx.execute(
-            "UPDATE owner_ydoc_outboxes SET recovery_checkpoint_digest=?2,recovery_checkpoint_cursor=?3 WHERE outbox_id=?1",
-            params![outbox_id, digest, cursor],
-        )
-        .map_err(write_sql)?;
-        if let Some(previous) = previous.filter(|previous| *previous != digest) {
-            delete_binary_blob_if_unreferenced(tx, &previous)?;
-        }
-        Ok(())
     })?;
     committed(outcome)
+}
+
+/// Before a restore fence moves `binding`'s document to its next generation,
+/// while that generation's last applied cursor is final, keeps that accepted
+/// state as the recovery checkpoint of each of its queues holding an
+/// adoption seed nothing applied. A copy of such a queue reads it once the
+/// generation moved on.
+pub(crate) fn keep_recovery_checkpoints_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &LiveObjectBinding,
+) -> Result<(), OwnerOutboxError> {
+    let outboxes = {
+        let mut stmt = tx
+            .prepare(&format!(
+                "SELECT outbox_id FROM owner_ydoc_outboxes o WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND {UNAPPLIED_SEED}"
+            ))
+            .map_err(read_sql)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    binding.workspace_id,
+                    binding.main_version_id,
+                    binding.object_id,
+                    binding.lineage_claim_id,
+                    binding.restore_fence_generation
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(read_sql)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(read_sql)?
+    };
+    for outbox_id in outboxes {
+        let parent = read_parent(tx, &outbox_id)?.ok_or(OwnerOutboxError::Corrupt)?;
+        let cursor =
+            applied_cursor_in(tx, &parent.binding)?.ok_or(OwnerOutboxError::ParentMismatch)?;
+        build_recovery_checkpoint_in(tx, &parent, cursor)?;
+    }
+    Ok(())
+}
+
+/// Each accepted record is bounded on its own, and the writer rebuilds one
+/// recovery checkpoint at a time.
+const RECOVERY_RECONSTRUCTION: crate::live_update_application::NativeHistoryReconstruction =
+    crate::live_update_application::NativeHistoryReconstruction {
+        working_reserve_bytes: 8 * 1024 * 1024,
+    };
+
+/// The accepted frames applied on the queue's lineage and generation through
+/// `cursor`, and never an outbox entry, as its recovery checkpoint. It is
+/// built once per cursor, so every page of a read slices the same bytes; a
+/// newer cursor replaces it. Refused while an applied update waits on a
+/// missing dependency.
+fn build_recovery_checkpoint_in(
+    tx: &rusqlite::Transaction<'_>,
+    parent: &ParentRow,
+    cursor: i64,
+) -> Result<(), OwnerOutboxError> {
+    require_no_deferred_in(tx, &parent.binding)?;
+    let (previous, built): (Option<String>, Option<i64>) = tx
+        .query_row(
+            "SELECT recovery_checkpoint_digest,recovery_checkpoint_cursor FROM owner_ydoc_outboxes WHERE outbox_id=?1",
+            [&parent.outbox_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(read_sql)?;
+    if built == Some(cursor) {
+        return Ok(());
+    }
+    let (through, accepted) = crate::live_update_application::read_native_accepted_cut_in(
+        tx,
+        &parent.binding,
+        RECOVERY_RECONSTRUCTION,
+    )
+    .map_err(|error| match error {
+        crate::live_update_application::ApplicationError::Conflict => {
+            OwnerOutboxError::AcceptedStateIncomplete
+        }
+        _ => OwnerOutboxError::ParentMismatch,
+    })?
+    .ok_or(OwnerOutboxError::ParentMismatch)?;
+    if through != cursor {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
+    let bytes = accepted
+        .encode_full_state_bounded(crate::limits::MAX_YDOC_UPDATE_BYTES)
+        .ok_or(OwnerOutboxError::Corrupt)?;
+    let digest =
+        dohc_engine_storage::put_binary_blob(tx, &bytes).map_err(OwnerOutboxError::Storage)?;
+    tx.execute(
+        "UPDATE owner_ydoc_outboxes SET recovery_checkpoint_digest=?2,recovery_checkpoint_cursor=?3 WHERE outbox_id=?1",
+        params![parent.outbox_id, digest, cursor],
+    )
+    .map_err(write_sql)?;
+    if let Some(previous) = previous.filter(|previous| *previous != digest) {
+        delete_binary_blob_if_unreferenced(tx, &previous)?;
+    }
+    Ok(())
 }
 
 fn slice_blob(

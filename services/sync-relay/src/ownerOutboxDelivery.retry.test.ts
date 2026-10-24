@@ -74,7 +74,7 @@ function fixture(edit: (doc: Y.Doc) => void = doc => doc.getMap("frontmatter").s
         baseByteLength: relay.input.baselineBytes.byteLength,state: native.state,pendingBytes: pending.length * update.byteLength,
         pendingEntryCount: pending.length,nextSequence: 2,oldestEntryAtMs: pending.length ? 1 : null,quarantineReason: native.quarantineReason,
         observedBinding: null,retryDeliveryId: native.retryDeliveryId,firstEntryCursor: pending.length ? cursor("entryHeader") : null,
-        frozenAtRefusedSeed: false,checkpointDigest: null}));
+        frozenAtRefusedSeed: false,checkpointDigest: null,recoveryCheckpointDigest: null}));
       nextCursor = cursor("base");
     } else if (current.part === "entryHeader") {
       bytes = Buffer.from(JSON.stringify(entry)); nextCursor = cursor("update");

@@ -565,9 +565,12 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
     const snapshot = sha256(Buffer.from(JSON.stringify(header))), cursor = (part: string, sequence = 0) => ({snapshot, part, sequence, offset: 0});
     const requested = (params.cursor as ReturnType<typeof cursor> | undefined) ?? cursor("header");
     if (requested.snapshot !== snapshot) return {kind: "readChanged"};
-    // Outside the snapshot, as the engine's: the frozen answer and the checkpoint a copy reads now.
+    // Outside the snapshot, as the engine's: the frozen answer and the checkpoint a copy reads now, which
+    // a copy of a queue holding a refused seed, at any restore generation, must hold.
+    const checkpointDigest = queue.checkpoint ? sha256(queue.checkpoint) : null;
+    const refusedSeed = queue.state === "quarantined" && queue.appendKey.startsWith("owner-adoption:") && queue.retryDeliveryId === null;
     const live = {firstEntryCursor: cursor("entryHeader", 1), frozenAtRefusedSeed: seeded(queue) && queue.retryDeliveryId === null,
-      checkpointDigest: queue.checkpoint ? sha256(queue.checkpoint) : null};
+      checkpointDigest, recoveryCheckpointDigest: refusedSeed ? checkpointDigest : null};
     if (requested.part === "checkpoint" && !queue.checkpoint) return {kind: "readChanged"};
     const [bytes, nextCursor] = requested.part === "header" ? [Buffer.from(JSON.stringify({...header, ...live})), cursor("base")] as const
       : requested.part === "checkpoint" ? [queue.checkpoint!, null] as const
@@ -1267,6 +1270,72 @@ it("settles a later restore generation's accepted work although an earlier gener
   await o.depart();
   await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
   expect(o.calls(sent)).toEqual(departure);
+  expect(k.row()).toBeNull();
+});
+
+// Proves: a restore keeps an earlier generation's recovery checkpoint. A copy
+// confirmed before another accepted edit of that generation no longer counts
+// once its restore moved the document on, although the earlier seed freezes
+// nothing of the next generation, until a copy of the checkpoint the restore kept.
+it("holds a restored document until its owner copies the earlier generation's final accepted state", async () => {
+  const o = await enrolledServiceHost(), k = keptEdits(o);
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  o.keptOutbox.appendKey = "owner-adoption:seed";
+  o.keptOutbox.checkpoint = acceptedState("Original");
+  const early = await keptCheckpoint(o.host, k.row()!, o.workspace.root);
+  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation, checkpointDigest: early.digest})).toBe(true);
+  o.acceptEdit("recipient");
+  await o.host.drain(o.document);
+  // The restore fence kept the earlier generation's final accepted state, then moved the binding on.
+  o.keptOutbox.checkpoint = acceptedState("Original\n\nRecipient text");
+  o.engine.generation = o.binding.restoreFenceGeneration + 1;
+  o.stop();
+  await o.depart();
+  await vi.waitFor(() => expect(errors).toHaveBeenCalledWith("Service activation pass failed.", expect.stringContaining("recovery copy")));
+  expect(k.row()).toMatchObject({copied: false});
+  const late = await keptCheckpoint(o.host, k.row()!, o.workspace.root);
+  expect(late.text).toContain("Recipient text");
+  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation, checkpointDigest: late.digest})).toBe(true);
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  expect(k.row()).toBeNull();
+});
+
+// Proves: a departure that keeps its owner's live authority records the
+// checkpoint a copy reads at that departure. A digest an earlier departure
+// recorded holds nothing once the owner copied the current one.
+it("lets a document go when its copy holds the current checkpoint, whatever an earlier departure recorded", async () => {
+  const o = await enrolledServiceHost(), k = keptEdits(o);
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.keptOutbox.appendKey = "owner-adoption:seed";
+  o.keptOutbox.checkpoint = acceptedState("Original");
+  const current = await keptCheckpoint(o.host, k.row()!, o.workspace.root);
+  o.f.storage.observeServiceKeptEditsCheckpoint(k.row()!, "e".repeat(64));
+  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation, checkpointDigest: current.digest})).toBe(true);
+  expect(k.row()).toMatchObject({copied: false});
+  await o.depart();
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  expect(k.row()).toBeNull();
+});
+
+// Proves: a row no departure recorded a checkpoint on never lets a copy
+// that misses a later accepted edit count. The departure records the
+// checkpoint holding that edit, and only a copy of it lets the document go.
+it("holds a departing document whose unrecorded copy misses a later accepted edit", async () => {
+  const o = await enrolledServiceHost(), k = keptEdits(o);
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  o.keptOutbox.appendKey = "owner-adoption:seed";
+  o.keptOutbox.checkpoint = acceptedState("Original");
+  const early = await keptCheckpoint(o.host, k.row()!, o.workspace.root);
+  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation, checkpointDigest: early.digest})).toBe(true);
+  expect(k.row()).toMatchObject({copied: true});
+  // A recipient's edit the host applied after that copy: the engine's recovery checkpoint now holds it.
+  o.keptOutbox.checkpoint = acceptedState("Original\n\nRecipient text");
+  await o.depart();
+  await vi.waitFor(() => expect(errors).toHaveBeenCalledWith("Service activation pass failed.", expect.stringContaining("recovery copy")));
+  expect(k.row()).toMatchObject({copied: false});
+  const late = await keptCheckpoint(o.host, k.row()!, o.workspace.root);
+  expect(o.f.storage.confirmServiceKeptEditsCopy({workspaceId: "workspace", outboxId: "kept-outbox", generation: k.row()!.generation, checkpointDigest: late.digest})).toBe(true);
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
   expect(k.row()).toBeNull();
 });
 

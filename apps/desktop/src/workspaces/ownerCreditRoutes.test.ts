@@ -21,7 +21,7 @@ async function deliver(route: "desktop" | "outbox", f: ReturnType<typeof registe
   if (route === "outbox") {
     let pending = bytes.length;
     vi.spyOn(OwnerYDocOutbox.prototype, "readDeliveryHead").mockResolvedValue({...envelope, state: "active", pendingBytes: pending,
-      oldestEntryAtMs: 0, quarantineReason: null, observedBinding: null, retryDeliveryId: null, frozenAtRefusedSeed: false, checkpointDigest: null,
+      oldestEntryAtMs: 0, quarantineReason: null, observedBinding: null, retryDeliveryId: null, frozenAtRefusedSeed: false, checkpointDigest: null, recoveryCheckpointDigest: null,
       entry: {...envelope, byteLength: pending, createdAtMs: 0}});
     vi.spyOn(OwnerYDocOutbox.prototype, "acknowledge").mockImplementation(async () => {pending = 0; return {acknowledged: 1, pendingBytes: 0, oldestEntryAtMs: null};});
     const validateJournal = createLiveMarkdownJournalValidator(policy);

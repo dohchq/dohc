@@ -1,6 +1,6 @@
 import {join} from "node:path";
 import {expect, it, vi} from "vitest";
-import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
+import {EngineRequestError, type EngineClient} from "@dohc/workspace-engine-client/daemon";
 import type {OwnerYDocOutboxRecovery} from "@dohc/workspace-engine-client";
 import {createUnwrittenReleases, recoverySnapshot} from "./ownerLiveReleases";
 import {createTestScratch} from "./testTemp";
@@ -11,8 +11,12 @@ const outboxes = vi.hoisted(() => ({heads: new Map<string, unknown>(), pending: 
 vi.mock("@dohc/workspace-engine-client", async original => ({
   ...await original<typeof import("@dohc/workspace-engine-client")>(),
   OwnerYDocOutbox: class {
-    // A delivery head never transfers the base.
-    readDeliveryHead(outboxId: string) {outboxes.reads.push(`delivery:${outboxId}`); return Promise.resolve(outboxes.heads.get(outboxId));}
+    // A delivery head never transfers the base. A head set to an error is the engine's refusal of it.
+    readDeliveryHead(outboxId: string) {
+      outboxes.reads.push(`delivery:${outboxId}`);
+      const head = outboxes.heads.get(outboxId);
+      return head instanceof Error ? Promise.reject(head) : Promise.resolve(head);
+    }
     readHead(outboxId: string) {outboxes.reads.push(`head:${outboxId}`); return Promise.resolve(outboxes.heads.get(outboxId));}
     readRecovery(outboxId: string) {outboxes.reads.push(`recovery:${outboxId}`); return Promise.resolve(outboxes.pending.get(outboxId));}
     retry(input: unknown) {outboxes.retried.push(input); return Promise.resolve({retryDeliveryId: "delivery-a"});}
@@ -48,6 +52,25 @@ it("reads every refused queue from durable state, and leaves binding changes to 
     record("d", "stopped-kept"),
   ]);
   expect(listDrafts.mock.calls.map(call => call[1].after?.objectId ?? null)).toEqual([null, "live"]);
+});
+
+// The engine refusing one queue's head drops only its row; an engine that
+// cannot answer at all still fails the whole read.
+it("drops only the row of a queue whose head the engine refuses", async () => {
+  head("before", "invalid-update"); head("after", "invalid-update");
+  outboxes.heads.set("outbox-waiting", new EngineRequestError(1, {code: "INVALID_PARAMS", message: "owner-outbox-accepted-state-incomplete", retry: "no"}));
+  outboxes.heads.set("outbox-damaged", new EngineRequestError(1, {code: "INTERNAL", message: "owner-outbox-state-corrupt", retry: "no"}));
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const client = {sendRequest: vi.fn(), ownerYDocStopList: vi.fn(async () => []),
+    ownerYDocListDrafts: vi.fn(async () => ({drafts: ["before", "waiting", "damaged", "after"].map(id => draft(id, "quarantined")), next: null}))} as unknown as EngineClient;
+  expect((await readOwnerLiveQuarantines(client, "handle")).map(row => row.objectId)).toEqual(["before", "after"]);
+  expect(warn).toHaveBeenCalledWith("Could not read a refused live document queue.",
+    {outboxId: "outbox-waiting", path: "waiting.md", reason: "owner-outbox-accepted-state-incomplete"});
+  expect(warn).toHaveBeenCalledTimes(2);
+  const unavailable = new EngineRequestError(1, {code: "WORKSPACE_UNAVAILABLE", message: "workspace unavailable", retry: "afterBackoff"});
+  outboxes.heads.set("outbox-waiting", unavailable);
+  await expect(readOwnerLiveQuarantines(client, "handle")).rejects.toBe(unavailable);
+  warn.mockRestore();
 });
 
 // A Stop that asked the server but has no confirmed retirement and release is

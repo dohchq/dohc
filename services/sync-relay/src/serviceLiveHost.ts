@@ -480,7 +480,7 @@ export async function startServiceLiveHost(options: {
     };
     const forget = (key: string) => {
       activation!.removeTarget(hosted.get(key)!.target); hosted.delete(key); leaving.delete(key); recovering.delete(key); parking.delete(key); idle.delete(key); unloading.delete(key); keeping.delete(key);
-      grantsEnded.delete(key); seededOf.delete(key);
+      grantsEnded.delete(key); seededOf.delete(key); observed.delete(key);
     };
     // The engine's reason while it holds unfinished work for the document, or undefined once nothing of it is loaded.
     const requestUnload = async (document: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal) => {
@@ -515,8 +515,10 @@ export async function startServiceLiveHost(options: {
     // departing document or delivers its queues, so each of these scans runs
     // once until the document returns: the documents whose departure ended
     // every grant, and the lineages each one's first scan in its document's
-    // work found frozen at the seed.
-    const grantsEnded = new Set<string>(), seededOf = new Map<string, ReadonlySet<string>>();
+    // work found frozen at the seed. Once a departing document unloaded,
+    // nothing applies to it either: `observed` holds the documents whose
+    // departure recorded the checkpoints their copies must hold.
+    const grantsEnded = new Set<string>(), seededOf = new Map<string, ReadonlySet<string>>(), observed = new Set<string>();
     // Whether one of the document's refusals in its attached store has no recovery copy.
     const uncopied = (row: {target: ServiceActivationTarget; objectId: string}) => {
       const attached = attachments.get(row.target.workspaceId);
@@ -530,8 +532,11 @@ export async function startServiceLiveHost(options: {
     };
     // Once it leaves with a recovery copy of every refusal, its rows go too. Its store keeps the queues.
     // A row released here comes back uncopied if the same quarantined queue drains again, as after the
-    // document is shared again, and its owner is asked for a recovery copy once more.
-    const gone = (key: string, row: {target: ServiceActivationTarget; objectId: string}) => {
+    // document is shared again, and its owner is asked for a recovery copy once more. Its first check in a
+    // departure records the checkpoint a copy of each of its queues reads now, as it unloaded with nothing
+    // more to apply, so a digest an earlier departure recorded decides nothing.
+    const gone = async (key: string, row: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal) => {
+      if (!observed.has(key)) {await observeKeptCheckpoints(row, joined); observed.add(key);}
       const waiting = kept(key, row);
       if (waiting === undefined) {forget(key); storage.releaseServiceKeptEdits({workspaceId: row.target.workspaceId, objectId: row.objectId});}
       return waiting;
@@ -543,8 +548,9 @@ export async function startServiceLiveHost(options: {
     // again, or that the engine no longer holds, is forgotten. Resolves to
     // the engine's answer whether the queue stays frozen at its owner's
     // adoption seed at its document's current restore generation, which no
-    // settlement may pass. A frozen queue's row records the checkpoint a
-    // recovery copy reads now, which its copy must hold.
+    // settlement may pass. The row of a queue holding a refused seed, at any
+    // generation, records the checkpoint a recovery copy reads now, which its
+    // copy must hold.
     const endKeptRetry = async (kept: ServiceKeptEdits, outbox: OwnerYDocOutbox) => {
       let head;
       try {head = await outbox.readDeliveryHead(kept.outboxId, kept.binding);}
@@ -560,25 +566,46 @@ export async function startServiceLiveHost(options: {
         head = await outbox.readDeliveryHead(kept.outboxId, kept.binding);
       } else if (!quarantined) {storage.forgetServiceKeptEdits(kept); return false;}
       if (kept.retrying) storage.endServiceKeptEditsRetry(kept);
-      storage.observeServiceKeptEditsCheckpoint(kept, head.frozenAtRefusedSeed ? head.checkpointDigest : null);
+      storage.observeServiceKeptEditsCheckpoint(kept, head.recoveryCheckpointDigest);
       return head.frozenAtRefusedSeed;
     };
-    // Runs `endKeptRetry` on every queue of the document in its attached store,
-    // page by page, so each gets its turn. Takes no turn of its document's work
-    // when `inTurn` is set. Resolves to the lineages whose queue stays frozen at the seed
-    // at the current restore generation; an earlier generation's seed freezes nothing.
-    const endKeptRetries = async (row: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal, inTurn: boolean) => {
-      const attached = attachments.get(row.target.workspaceId), seeded = new Set<string>();
-      if (!attached) return seeded;
+    // Runs `work` on every queue of the document in its attached store, page
+    // by page, so each gets its turn. Takes no turn of its document's work
+    // when `inTurn` is set.
+    const eachKeptOutbox = async (row: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal, inTurn: boolean,
+      work: (kept: ServiceKeptEdits, outbox: OwnerYDocOutbox) => Promise<void>) => {
+      const attached = attachments.get(row.target.workspaceId);
+      if (!attached) return;
       for (let after: number | null = 0; after !== null;) {
         const page = storage.serviceKeptEditsOf({workspaceId: row.target.workspaceId, objectId: row.objectId}, after);
         for (const kept of page.keptEdits) {
           if (!sameKeptEditsIdentity(kept.identity, attached.identity)) continue;
-          const work = (outbox: OwnerYDocOutbox) => endKeptRetry(kept, outbox);
-          if (await (inTurn ? openKeptOutbox(kept, joined, work) : withKeptOutbox(kept, joined, work))) seeded.add(kept.binding.lineageClaimId);
+          const each = (outbox: OwnerYDocOutbox) => work(kept, outbox);
+          await (inTurn ? openKeptOutbox(kept, joined, each) : withKeptOutbox(kept, joined, each));
         }
         after = page.nextCursor;
       }
+    };
+    // Records, on each of the document's rows, the checkpoint a recovery copy of its queue reads now,
+    // before a departure checks the copies, so a digest an earlier departure recorded decides nothing.
+    const observeKeptCheckpoints = (row: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal) =>
+      eachKeptOutbox(row, joined, false, async (kept, outbox) => {
+        let head;
+        try {head = await outbox.readDeliveryHead(kept.outboxId, kept.binding);}
+        catch (error) {
+          if (!(error instanceof Error && error.message === "owner-outbox-not-found")) throw error;
+          storage.forgetServiceKeptEdits(kept);
+          return;
+        }
+        storage.observeServiceKeptEditsCheckpoint(kept, head.recoveryCheckpointDigest);
+      });
+    // Runs `endKeptRetry` on every queue of the document. Resolves to the lineages whose queue stays frozen
+    // at the seed at the current restore generation; an earlier generation's seed freezes nothing.
+    const endKeptRetries = async (row: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal, inTurn: boolean) => {
+      const seeded = new Set<string>();
+      await eachKeptOutbox(row, joined, inTurn, async (kept, outbox) => {
+        if (await endKeptRetry(kept, outbox)) seeded.add(kept.binding.lineageClaimId);
+      });
       return seeded;
     };
     // The engine refused the document as not ready, as once it parked. Only a pull that starts after
@@ -612,7 +639,7 @@ export async function startServiceLiveHost(options: {
       if (required !== undefined) {
         if (attached.confirmed < required) return PARKING;
         parking.delete(key);
-        if (attached.hosted.departed?.has(row.objectId) === false) return gone(key, row);
+        if (attached.hosted.departed?.has(row.objectId) === false) return gone(key, row, joined);
       }
       const publish = async (operation: AbortSignal) => (await attached.hosted.publish(operation)).hasMore ? "Hosted publication has more pages." : undefined;
       if (lost) {
@@ -643,7 +670,7 @@ export async function startServiceLiveHost(options: {
           const waiting = await requestUnload(row, joined);
           if (waiting !== undefined) return waiting;
         }
-        return gone(key, row);
+        return gone(key, row, joined);
       }
       // Resuming loads what an earlier daemon left, and delivers and settles it, as for a document that left this one.
       if (recovering.has(key) && activation!.retained(row.target)) {
@@ -673,7 +700,7 @@ export async function startServiceLiveHost(options: {
         const waiting = document ? await runDocument(document, joined, leave) : await leave(joined);
         if (waiting !== undefined) return waiting;
       }
-      return gone(key, row);
+      return gone(key, row, joined);
     };
     // Resolves to why a retained document stays, or undefined once its owner has
     // a recovery copy of every refusal, when its rows go too. Nothing delivers
@@ -929,7 +956,7 @@ export async function startServiceLiveHost(options: {
       for (const [key, document] of hosted) {
         if (isDeepStrictEqual(wanted.get(key), document)) {
           if (leaving.delete(key)) {
-            recovering.delete(key); parking.delete(key); keeping.delete(key); grantsEnded.delete(key); seededOf.delete(key);
+            recovering.delete(key); parking.delete(key); keeping.delete(key); grantsEnded.delete(key); seededOf.delete(key); observed.delete(key);
             activation.addTarget(document.target, document.objectId);
           }
         } else if (!changed.includes(document.target.workspaceId)) leaving.add(key);

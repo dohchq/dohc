@@ -142,7 +142,7 @@ it("reads the committed owner update while applyThrough is pending", async () =>
         baseUpdateDigest: binding.lineageClaimId, baseByteLength: f.input.baselineBytes.byteLength,
         state: "active", pendingBytes: update.byteLength, pendingEntryCount: 1, nextSequence: 2,
         oldestEntryAtMs: 1, quarantineReason: null, observedBinding: null, retryDeliveryId: null, firstEntryCursor: cursor("entryHeader"),
-        frozenAtRefusedSeed: false, checkpointDigest: null}))
+        frozenAtRefusedSeed: false, checkpointDigest: null, recoveryCheckpointDigest: null}))
         : current.part === "entryHeader" ? Buffer.from(JSON.stringify(entry)) : Buffer.from(update);
       return {id: request.id, result: {kind: "page", ...current, totalBytes: bytes.length, digest: hash(bytes),
         bytesBase64: bytes.toString("base64"), nextCursor: current.part === "header" ? cursor("base")

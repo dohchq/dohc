@@ -260,7 +260,7 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     const snapshot = "a".repeat(64);
     const parts = [
       { part: "header", sequence: 0, bytes: Buffer.from(JSON.stringify({
-        frozenAtRefusedSeed: false, checkpointDigest: null,
+        frozenAtRefusedSeed: false, checkpointDigest: null, recoveryCheckpointDigest: null,
         ...header, baseByteLength: base.length, pendingEntryCount: entries.length,
         nextSequence: Math.max(0, ...entries.map((entry) => entry.sequence)) + 1,
         firstEntryCursor: entries[0] ? {snapshot,part: "entryHeader",sequence: entries[0].sequence,offset: 0} : null,
@@ -575,14 +575,21 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
   });
 
   it("reports whether a delivery head is a seed frozen at its generation, with the checkpoint a copy reads, and refuses a header without them", async () => {
-    const frozen = {...pendingResult(), state: "quarantined", quarantineReason: "invalid-update", frozenAtRefusedSeed: true, checkpointDigest: "c".repeat(64)};
+    const frozen = {...pendingResult(), state: "quarantined", quarantineReason: "invalid-update", frozenAtRefusedSeed: true, checkpointDigest: "c".repeat(64),
+      recoveryCheckpointDigest: "c".repeat(64) as string | null};
     frozen.binding.lineageClaimId = frozen.baseUpdateDigest;
-    expect(await deliveryReader(pages(frozen, 4096), frozen.binding).read()).toMatchObject({frozenAtRefusedSeed: true, checkpointDigest: "c".repeat(64)});
-    // A plain read of the queue carries neither.
+    expect(await deliveryReader(pages(frozen, 4096), frozen.binding).read())
+      .toMatchObject({frozenAtRefusedSeed: true, checkpointDigest: "c".repeat(64), recoveryCheckpointDigest: "c".repeat(64)});
+    // An earlier generation's refused seed freezes nothing, and a copy must still hold its checkpoint.
+    const earlier = {...frozen, frozenAtRefusedSeed: false};
+    expect(await deliveryReader(pages(earlier, 4096), earlier.binding).read())
+      .toMatchObject({frozenAtRefusedSeed: false, recoveryCheckpointDigest: "c".repeat(64)});
+    // A plain read of the queue carries none of them.
     const plain = await read(frozen);
     expect(plain).not.toHaveProperty("frozenAtRefusedSeed");
     expect(plain).not.toHaveProperty("checkpointDigest");
-    for (const damage of [{frozenAtRefusedSeed: "yes"}, {checkpointDigest: "c"}]) {
+    expect(plain).not.toHaveProperty("recoveryCheckpointDigest");
+    for (const damage of [{frozenAtRefusedSeed: "yes"}, {checkpointDigest: "c"}, {recoveryCheckpointDigest: "d".repeat(64)}, {recoveryCheckpointDigest: undefined}]) {
       const damaged = {...frozen, ...damage};
       await expect(deliveryReader(pages(damaged, 4096), damaged.binding).read()).rejects.toThrow();
     }

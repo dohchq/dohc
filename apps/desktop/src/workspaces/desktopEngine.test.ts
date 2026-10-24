@@ -241,7 +241,7 @@ function servedPages(queue: OwnerYDocOutboxRecovery, chunk = 3) {
     state: queue.state, pendingBytes: queue.pendingBytes, pendingEntryCount: queue.entries.length, nextSequence: (queue.entries.at(-1)?.sequence ?? 0) + 1,
     oldestEntryAtMs: queue.oldestEntryAtMs, quarantineReason: queue.quarantineReason, observedBinding: queue.observedBinding, retryDeliveryId: queue.retryDeliveryId,
     firstEntryCursor: first ? cursor("entryHeader", first.sequence) : null, checkpointDigest: queue.checkpoint ? digest(queue.checkpoint) : null,
-    frozenAtRefusedSeed: false};
+    frozenAtRefusedSeed: false, recoveryCheckpointDigest: null};
   const parts = new Map<string, {bytes: Uint8Array; next: ReturnType<typeof cursor> | null}>([
     ["header:0", {bytes: Buffer.from(JSON.stringify(header)), next: cursor("base")}], ["base:0", {bytes: queue.baseUpdate, next: header.firstEntryCursor}]]);
   queue.entries.forEach(({update, ...entry}, index) => {

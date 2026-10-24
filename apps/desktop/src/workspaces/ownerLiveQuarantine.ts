@@ -1,5 +1,5 @@
 import {OwnerYDocOutbox, OwnerYDocOutboxReadChangedError, type JsonValue, type LiveObjectBinding, type OwnerYDocOutboxRecovery} from "@dohc/workspace-engine-client";
-import type {EngineClient, OwnerYDocDraftDescriptor} from "@dohc/workspace-engine-client/daemon";
+import {EngineRequestError, type EngineClient, type OwnerYDocDraftDescriptor} from "@dohc/workspace-engine-client/daemon";
 import {z} from "zod";
 import {recoverySnapshot, sameBinding, type UnwrittenRelease} from "./ownerLiveReleases";
 
@@ -112,6 +112,8 @@ export async function readServerKeptEditsQueue(row: ServerKeptEdits, page: (curs
 
 // Enrollment recovers these by itself. Only a refusal waits for the owner.
 const BINDING_QUARANTINES = new Set(["stale-binding", "restore-fenced", "binding-changed"]);
+// The engine's answers about one queue, not about the engine or the workspace.
+const QUEUE_REFUSALS = new Set(["INVALID_PARAMS", "INTERNAL"]);
 
 /**
  * paused: waiting for the owner. retrying: the owner's Try again waits for
@@ -181,7 +183,14 @@ export async function readOwnerLiveQuarantines(client: EngineClient, workspace: 
       const page = await client.ownerYDocListDrafts(request(), {after, limit: 64}, signal);
       for (const draft of page.drafts) {
         if (draft.state !== "quarantined" || draft.outboxId === null) continue;
-        const head = await readFacts({...draft, outboxId: draft.outboxId});
+        // The engine refusing one queue's head, as while an accepted update
+        // waits on a missing dependency, drops only that queue's row.
+        const head = await readFacts({...draft, outboxId: draft.outboxId}).catch((error: unknown) => {
+          if (!(error instanceof EngineRequestError && QUEUE_REFUSALS.has(error.wireError?.code ?? ""))) throw error;
+          console.warn("Could not read a refused live document queue.", {outboxId: draft.outboxId, path: draft.binding.currentPath, reason: error.message});
+          return null;
+        });
+        if (head === null) continue;
         if (head.state !== "quarantined" || head.headDeliveryId === null || head.reason === null || BINDING_QUARANTINES.has(head.reason)) continue;
         const stop = stopFor(head.binding);
         found.push({objectId: draft.binding.objectId, path: draft.binding.currentPath, reason: head.reason,

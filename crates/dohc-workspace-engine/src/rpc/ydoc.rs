@@ -832,7 +832,9 @@ impl EngineService {
         // prepared, a read answers `preparing`. The read's lease moves into
         // the worker, so the store stays open for recovery until the worker
         // ends, even once this request is cancelled. An earlier store is never
-        // written, so its pages are read as they are.
+        // written, so its pages are read as they are, and a frozen queue whose
+        // recovery checkpoint was never built at its final cursor refuses the
+        // copy instead of answering a change forever.
         enum Source {
             Recovery(crate::rpc::configured_live_host::RecoveryRead),
             Current(Arc<OpenWorkspace>),
@@ -880,7 +882,15 @@ impl EngineService {
                     })
                     .await
                     .map_err(|_| WireError::new(ErrorCode::Internal, "owner-outbox-worker-failed"))?
-                    .map_err(map_owner_outbox);
+                    .map_err(|error| match error {
+                        dohc_engine_collab::OwnerOutboxError::RecoveryCheckpointOutdated => {
+                            WireError::new(
+                                ErrorCode::InvalidParams,
+                                "owner-outbox-recovery-checkpoint-unavailable",
+                            )
+                        }
+                        error => map_owner_outbox(error),
+                    });
                 }
             };
             let first = read_page(
