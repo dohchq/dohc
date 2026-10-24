@@ -15,7 +15,7 @@ import { chromium } from "playwright";
 
 const buildDir = join(dirname(fileURLToPath(import.meta.url)), "..", "build");
 // Small icon sizes get a heavier mark and no paper grid, so they stay legible.
-const SMALL_ICON = ".mark{stroke-width:11}.dot{r:11}.grid{display:none}";
+const SMALL_ICON = ".mark{stroke-width:13}.dot{r:13}.grid{display:none}";
 // iconutil's iconset names and their pixel sizes.
 const ICONSET = [16, 32, 128, 256, 512].flatMap((size) => [
   [`icon_${size}x${size}.png`, size],
