@@ -657,6 +657,7 @@ export interface SyncRelayStorage {
   confirmAutomationServerRunsSent(input: Parameters<typeof import("./automationHosts").confirmAutomationServerRunsSent>[1]): void;
   markAutomationServerRunsLost(input: { workspaceId: string; incarnation: number; nowMs: number }): void;
   lostAutomationServerRuns(input: Parameters<typeof import("./automationHosts").lostAutomationServerRuns>[1]): import("./automationHosts").LostAutomationServerRun[];
+  unreportedLostAutomationServerRuns(input: { workspaceId: string; nowMs: number }): ReturnType<typeof import("./automationHosts").unreportedLostAutomationServerRuns>;
   reportAutomationServerRunsLost(input: Parameters<typeof import("./automationHosts").reportAutomationServerRunsLost>[1]): void;
   joinAutomationWorkspace(input: { workspaceId: string; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
   replaceLostAutomationReplica(input: { workspaceId: string; incarnation: number; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;

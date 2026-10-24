@@ -348,6 +348,19 @@ describe("collection result schemas", () => {
     expect(() => parseCliResult("automationRun", { ok: true, run: { ...timed, writeCount: -1 } })).toThrow();
   });
 
+  it("parses a server's run, with what it changed and the mark of a lost copy, and renders its changes", () => {
+    const run = {
+      run: "atc_lost", state: "failed", error: "Your server lost its copy of this workspace and may not have sent this run's latest changes.",
+      createdAtMs: 1, updatedAtMs: 2, trigger: { kind: null, recordId: null, by: null, sharedAuthor: null, depth: 0 },
+      definitionChanged: false, neverStarted: false, chainStopped: false, undone: false, unsentChangesLost: true, server: true,
+      changes: [{ kind: "field", recordId: "a", path: "tasks/a.md", field: "Status", before: "Open", after: "Paid" }],
+    };
+    expect(parseCliResult("automationRun", { ok: true, run })).toEqual({ ok: true, run });
+    expect(renderCliResult("automationRun", parseCliResult("automationRun", { ok: true, run }))).toContain('set Status on tasks/a.md: "Open" -> "Paid"');
+    expect(() => parseCliResult("automationRun", { ok: true, run: { ...run, unsentChangesLost: false } })).toThrow();
+    expect(() => parseCliResult("automationRun", { ok: true, run: { ...run, steps: [] } })).toThrow();
+  });
+
   it("refuses a result that does not match the verb", () => {
     expect(() => parseCliResult("collectionSetFields", { recordPath: "x" })).toThrow();
     expect(() =>

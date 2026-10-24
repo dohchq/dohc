@@ -5,7 +5,10 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import type { ScheduledAutomation, CollectionAutomationsOptions, DatasetAutomationHost, CollectionAutomationHold } from "@dohc/automation-executor/collection-automations";
-import type { StoredRun, StoredStep } from "@dohc/automation-executor/automation-run-store";
+import type { AutomationRunStore, StoredRun, StoredStep } from "@dohc/automation-executor/automation-run-store";
+import { runSteps, type StepBackend } from "@dohc/automation-executor/automation-step-run";
+import { newRun } from "@dohc/automation-executor/collection-automation-run";
+import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { AUTOMATION_SERVER_MAX_WORKSPACES } from "@dohc/workspace-contracts/relay";
 import type {RelayButtonInspection} from "@dohc/workspace-contracts/relay";
 import {SHARED_BUTTON_DENIED, SHARED_BUTTON_HELD, SHARED_BUTTON_MOVED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_UNCHECKED} from "@dohc/automation-executor/button-presser";
@@ -171,8 +174,6 @@ async function server(storage: SyncRelayStorage, h: Pick<ReturnType<typeof testH
   inspection?: RelayButtonInspection;
   recordDelivery?: AutomationServerOptions["recordDelivery"];
   root?: string;
-  /** Where the copy keeps its run history; a test that saves runs gives a real folder. */
-  metadataDir?: string;
   startReplicas?: typeof startAutomationReplicas;
 } = {}) {
   const marks = input.marks ?? new Map();
@@ -223,7 +224,7 @@ async function server(storage: SyncRelayStorage, h: Pick<ReturnType<typeof testH
       const signal = new AbortController().signal;
       open.set(WORKSPACE, {
         workspaceId: WORKSPACE, ownerUserId: OWNER, incarnation: input.incarnation ?? 1, startedAtMs: input.startedAtMs ?? at(7),
-        root: "unused", metadataDir: input.metadataDir ?? "unused", client: input.client ?? {} as unknown as EngineClient, workspace: "handle", signal,
+        root: "unused", metadataDir: "unused", client: input.client ?? {} as unknown as EngineClient, workspace: "handle", signal,
         nextRequestId: () => 1, sync, withRecordWork: work => work(), get pulledHead() { return pulledHead; },
       });
       hooks!.onChanged?.(WORKSPACE);
@@ -245,6 +246,63 @@ async function server(storage: SyncRelayStorage, h: Pick<ReturnType<typeof testH
 
 const notices = (storage: SyncRelayStorage, userId: string) =>
   storage.readNoticeChanges({ recipientUserId: userId, cursor: null, limit: 50, nowMs: clock }).notices;
+
+function resolvers() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function payAutomation() {
+  const parsed = parseAutomationsFile("version: 1\nautomations:\n  - id: pay\n    name: Pay\n    when: record-added\n    do: [{set: {Status: Paid}}]\n");
+  if (parsed.status !== "read" || parsed.entries[0]?.status !== "valid") throw new Error("invalid fixture");
+  return parsed.entries[0].automation;
+}
+const setStatus = (n: number): StoredStep["effects"][number] => ({ kind: "set", target: { recordId: `record-${n}`, collectionPath: "Tasks", path: `Tasks/${n}.md` },
+  fields: [{ field: "Status", before: "Open", after: "Paid" }] });
+/** A run of Pay, as the server's executor starts one in its copy. */
+const payRunRecord = (claimId: string): StoredRun => ({ ...newRun({ automationId: PRESSED, claimId }, payAutomation(), `seed-${claimId}`, clock),
+  collections: [{ collectionId: "Tasks", path: "Tasks" }] });
+
+/**
+ * One run of Pay through the executor's own step runner, with the hooks the
+ * server gives its executor. Its step sets Status on `effects` records.
+ */
+function payRun(options: CollectionAutomationsOptions, claimId: string, effects: number) {
+  const automation = payAutomation();
+  const claim = { claimId, automationId: PRESSED, collectionPath: "Tasks", createdAtMs: clock, change: { kind: "added" as const, fields: [], fieldsOmitted: 0 } };
+  const run = newRun(claim, automation, `seed-${claimId}`, clock);
+  // Each save, as `outcome:durableEffects`.
+  const saves: string[] = [];
+  const backend: StepBackend = {
+    step: (async () => ({ step: { ordinal: 0, effects: Array.from({ length: effects }, (_, n) => setStatus(n)) } })) as StepBackend["step"],
+    collectionsOf: () => [{ collectionId: "Tasks", path: "Tasks" }],
+    added: () => null,
+    apply: async (_run, effect) => effect.kind === "set"
+      ? [{ kind: "field", recordId: effect.target.recordId, path: effect.target.path, field: "Status", before: "Open", after: "Paid" }] : [],
+  };
+  const f = {
+    run, saves, backend,
+    onSave: async (_run: StoredRun): Promise<void> => undefined,
+    execute: (saved: boolean) => runSteps(dependencies, backend, {
+      automation, collection: { path: "Tasks", name: "Tasks" }, roster: { kind: "owner", ownerUserId: OWNER, grants: [] },
+      signal: new AbortController().signal, stopped: new AbortController().signal, claimRun: 1, engineClaimId: claimId,
+    }, { automation, claim, message: null, person: null, chat: null, nowMs: clock, key: { claimId, hash: "key" } }, run, saved, { prepareMs: 0, runMs: 0 }),
+  };
+  const store = {
+    save: async (saved: StoredRun) => { saves.push(`${saved.outcome?.state ?? "open"}:${saved.durableEffects}`); await f.onSave(saved); },
+    appendEffect: async () => undefined,
+    appendStep: async () => { throw new Error("A fresh run saves its first step with the run."); },
+  } as unknown as AutomationRunStore;
+  const dependencies: Parameters<typeof runSteps>[0] = {
+    store, nowMs: () => clock, makeDurable: async () => undefined,
+    evaluator: { evaluate: async () => { throw new Error("Pay has no formulas."); }, runCode: async () => { throw new Error("Pay runs no code."); } },
+    chat: { hasMessage: async () => false, directory: async () => null, write: async () => { throw new Error("Pay posts nothing."); } },
+    recipientVerdicts: async () => [], readCode: async () => null,
+    beforeEffect: options.beforeEffect, onRunEnded: options.onRunEnded,
+  };
+  return f;
+}
 
 describe("a server that runs a workspace's automations", () => {
   it("notifies the owner, last editor and triggering person of a breaker with current permission checks", async () => {
@@ -781,6 +839,34 @@ describe("a server that pushes its copy of a workspace", () => {
     await vi.waitFor(() => expect(s.sync.mock.calls.length).toBeGreaterThan(1));
     readHead.mockRestore(); currentBinding.mockRestore();
   });
+  it("confirms no run's changes sent while a record update it found no outbox for waits", async () => {
+    clock = at(8);
+    const {storage, h} = await relay();
+    const binding = {workspaceId: WORKSPACE, mainVersionId: "main", objectId: "record", lineageClaimId: "a".repeat(64),
+      currentPath: "Tasks/one.md", selectorPaths: ["Tasks"], restoreFenceGeneration: 0};
+    let drafts: unknown[] = [];
+    const client = {ownerYDocListDrafts: vi.fn(async () => ({drafts, next: null})),
+      ownerYDocPrepareEnrollment: vi.fn(async () => ({status: "capture"}))};
+    const s = await server(storage, h, {client: client as unknown as EngineClient, recordDelivery: {namespace: "relay", capture: vi.fn()}});
+    const {options} = await s.openReplica();
+    const ended = () => storage.endedAutomationServerRuns({workspaceId: WORKSPACE, incarnation: 1});
+    // With no record update waiting, the sync after a run ends confirms its changes.
+    const sent = payRunRecord("claim-sent");
+    options.beforeEffect!(sent, setStatus(0));
+    options.onRunEnded!(sent);
+    await vi.waitFor(() => expect(ended()).toEqual([]));
+    // A record's update waits, and the flush finds no outbox to deliver it from.
+    drafts = [{binding, pendingBytes: 10, state: "active", outboxId: null}];
+    const held = payRunRecord("claim-held");
+    options.beforeEffect!(held, setStatus(0));
+    const syncs = s.sync.mock.calls.length;
+    options.onRunEnded!(held);
+    // Closing waits for the sync that began after the run ended, which leaves it on record.
+    await vi.waitFor(() => expect(s.sync.mock.calls.length).toBeGreaterThan(syncs));
+    await s.run.close();
+    expect(client.ownerYDocPrepareEnrollment).toHaveBeenCalled();
+    expect(ended()).toEqual([expect.objectContaining({claimId: "claim-held"})]);
+  });
   it("tries a sync the engine refused again, and reports only one that keeps failing", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
@@ -1180,76 +1266,155 @@ describe("the owner's routes to the server's runs", () => {
     expect(fake.asked).toEqual([]);
   });
 
-  it("shows the owner which runs a copy lost with the server's host data had not sent", async () => {
-    clock = at(8);
-    const storage = await testStorage();
-    let serverRuns: ServerRuns | undefined;
-    const h = testHandler(storage, { nowMs: () => clock, automationServer: { label: "My dohc server" }, serverRuns: () => serverRuns });
-    await claimWorkspace(h, OWNER, WORKSPACE);
-    storage.claimWorkspaceIdentity({ workspaceId: WORKSPACE, replicationEpoch: "epoch-1", streamIdentity: "stream-1" });
-    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
-    // The server runs this workspace's automations.
-    await h(request(OWNER, `/sync/${WORKSPACE}/automation-host/check-in`, jsonBody({ installId: "laptop", label: "Laptop", claim: true })));
-    const call = async (action: string, body?: Record<string, unknown>) => {
-      const response = await h(request(OWNER, `/sync/${WORKSPACE}/automation-server/${action}`, body ? jsonBody(body) : {}));
-      return { status: response.status, body: await json(response) };
-    };
-    // Each copy's metadata folder, as the replicas module makes it.
-    const homes = [await mkdtemp(join(tmpdir(), "dohc-lost-runs-")), await mkdtemp(join(tmpdir(), "dohc-lost-runs-"))];
-    cleanup.push(async () => { for (const home of homes) await rm(home, { recursive: true, force: true }); });
-    const storedRun = (claimId: string): StoredRun => ({
-      version: 13, durableEffects: 0, claimId, automationId: PRESSED, definitionHash: "hash-pay", keySeed: `seed-${claimId}`,
-      startedAtMs: clock, finishedAtMs: null, steps: [], applied: [], created: [], replans: [], undoRequests: [], undoCalls: [],
-      undoCovers: [], readableFields: null, collections: [{ collectionId: "Tasks", path: "Tasks" }], rules: null, superseded: false,
-      undo: null, undoKept: [], settled: false, outcome: null,
+  describe("after the server loses its host data", () => {
+    const LOST_ERROR = "Your server lost its copy of this workspace and may not have sent this run's latest changes. Check the records it changed.";
+    const runsOf = (query = "") => `runs?automationId=${encodeURIComponent(PRESSED)}${query}`;
+
+    // Each start opens the server's copy of the workspace from its host
+    // data. A higher incarnation is a copy rebuilt from empty host data.
+    async function copies() {
+      clock = at(8);
+      const storage = await testStorage();
+      let serverRuns: ServerRuns | undefined;
+      const h = testHandler(storage, { nowMs: () => clock, automationServer: { label: "My dohc server" }, serverRuns: () => serverRuns });
+      await claimWorkspace(h, OWNER, WORKSPACE);
+      storage.claimWorkspaceIdentity({ workspaceId: WORKSPACE, replicationEpoch: "epoch-1", streamIdentity: "stream-1" });
+      storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+      // The server runs this workspace's automations.
+      await h(request(OWNER, `/sync/${WORKSPACE}/automation-host/check-in`, jsonBody({ installId: "laptop", label: "Laptop", claim: true })));
+      const call = async (action: string, body?: Record<string, unknown>) => {
+        const response = await h(request(OWNER, `/sync/${WORKSPACE}/automation-server/${action}`, body ? jsonBody(body) : {}));
+        return { status: response.status, body: await json(response) };
+      };
+      const start = async (incarnation: number) => {
+        const s = await server(storage, h, { incarnation });
+        serverRuns = s.run.runs;
+        return { ...s, fake: await s.openReplica() };
+      };
+      return { storage, call, start };
+    }
+
+    it("shows the owner which runs' changes the lost copy may not have sent", async () => {
+      const { storage, call, start } = await copies();
+      const first = await start(1);
+      const { beforeEffect, onRunEnded } = first.fake.options;
+      // One run ends and a sync sends its changes. One sends only a notice,
+      // which the relay holds itself. One is still changing the copy.
+      const sent = payRunRecord("claim-sent"), notified = payRunRecord("claim-notified"), unsent = payRunRecord("claim-unsent");
+      beforeEffect!(sent, setStatus(0));
+      beforeEffect!(notified, { kind: "notice", name: "Tell", notice: { noticeId: "n-claim-notified", kind: "automation-notify", title: "Paid", body: "Paid",
+        target: { path: "Tasks/a.md", automation: PRESSED, run: "claim-notified" }, recipientUserId: OWNER } });
+      clock = at(8, 5);
+      beforeEffect!(unsent, setStatus(0));
+      onRunEnded!(sent);
+      onRunEnded!(notified);
+      // The run's end is on record now, and the sync it started confirms it.
+      await vi.waitFor(() => expect(storage.endedAutomationServerRuns({ workspaceId: WORKSPACE, incarnation: 1 })).toEqual([]));
+
+      await first.run.close();
+      clock = at(9);
+      const second = await start(2);
+      const lostRun = { claimId: "claim-unsent", state: "failed", createdAtMs: at(8), updatedAtMs: at(8, 5), writes: [], unsentChangesLost: true, error: LOST_ERROR };
+      await vi.waitFor(() => expect(notices(storage, OWNER)).toEqual([expect.objectContaining({
+        kind: "automation-failed", title: 'Automation "Pay" may have lost changes', body: LOST_ERROR,
+        target: { automation: PRESSED, run: "claim-unsent", path: "Tasks/automations.yaml" },
+      })]));
+      // Run history, as the owner's computers and agents read it, lists the lost run after this copy's own.
+      const listed = await call(runsOf());
+      expect(listed).toMatchObject({ status: 200, body: { runs: [{ claimId: "claim-1" }, lostRun], next: null } });
+      expect(listed.body.runs).toHaveLength(2);
+      expect(await call(runsOf("&claimId=claim-unsent"))).toMatchObject({ status: 200, body: { run: lostRun } });
+      expect(await call("retry", { automationId: PRESSED, claimId: "claim-unsent", startOver: false })).toMatchObject({ status: 200,
+        body: { status: "refused", reason: "Your server lost this run's history with its copy of the workspace, so it will not run this again." } });
+
+      // Opening the copy again tells the owner nothing new.
+      await second.run.close();
+      await start(2);
+      expect(await call(runsOf("&claimId=claim-unsent"))).toMatchObject({ body: { run: lostRun } });
+      expect(notices(storage, OWNER)).toHaveLength(1);
     });
-    const setField: StoredStep = { ordinal: 0, effects: [{ kind: "set", target: { recordId: "record", collectionPath: "Tasks", path: "Tasks/a.md" },
-      fields: [{ field: "Status", before: "Open", after: "Paid" }] }] };
-    const notify = (run: string): StoredStep => ({ ordinal: 0, effects: [{ kind: "notice", name: "Tell", notice: { noticeId: `n-${run}`,
-      kind: "automation-notify", title: "Paid", body: "Paid", target: { path: "Tasks/a.md", automation: PRESSED, run }, recipientUserId: OWNER } }] });
 
-    const first = await server(storage, h, { metadataDir: homes[0] });
-    serverRuns = first.run.runs;
-    const { store } = (await first.openReplica()).options;
-    // One run ends and a sync sends its changes. One sends only a notice,
-    // which the relay holds itself. One is still changing the copy.
-    const sent = storedRun("claim-sent"), notified = storedRun("claim-notified"), unsent = storedRun("claim-unsent");
-    for (const run of [sent, notified, unsent]) await store.save(run);
-    await store.appendStep(sent, setField);
-    await store.appendStep(notified, notify("claim-notified"));
-    clock = at(8, 5);
-    await store.appendStep(unsent, setField);
-    await store.save({ ...sent, finishedAtMs: clock, outcome: { state: "done" } });
-    // The run's end is on record now, and the sync it started confirms it.
-    await vi.waitFor(() => expect(storage.endedAutomationServerRuns({ workspaceId: WORKSPACE, incarnation: 1 })).toEqual([]));
+    it("reports a fresh run that saves its first step with the run, before that step changes the copy", async () => {
+      const { storage, call, start } = await copies();
+      const first = await start(1);
+      const pay = payRun(first.fake.options, "claim-fresh", 1);
+      const applying = resolvers(), applied = resolvers();
+      const apply = pay.backend.apply;
+      pay.backend.apply = async (...args) => { applying.resolve(); await applied.promise; return apply(...args); };
+      const running = pay.execute(false);
+      await applying.promise;
 
-    // The server starts again with empty host data: a new copy, with no run history.
-    await first.run.close();
-    clock = at(9);
-    const second = await server(storage, h, { incarnation: 2, metadataDir: homes[1] });
-    serverRuns = second.run.runs;
-    await second.openReplica();
-    const lostRun = { claimId: "claim-unsent", state: "failed", createdAtMs: at(8), updatedAtMs: at(8, 5), writes: [], unsentChangesLost: true,
-      error: "Your server lost its copy of this workspace before sending this run's latest changes. Check the records it changed." };
-    await vi.waitFor(() => expect(notices(storage, OWNER)).toEqual([expect.objectContaining({
-      kind: "automation-failed", title: 'Automation "Pay" lost changes', body: lostRun.error,
-      target: { automation: PRESSED, run: "claim-unsent", path: "Tasks/automations.yaml" },
-    })]));
-    // Run history, as the owner's computers and agents read it, lists the lost run after this copy's own.
-    const listed = await call(`runs?automationId=${encodeURIComponent(PRESSED)}`);
-    expect(listed).toMatchObject({ status: 200, body: { runs: [{ claimId: "claim-1" }, lostRun], next: null } });
-    expect(listed.body.runs).toHaveLength(2);
-    expect(await call(`runs?automationId=${encodeURIComponent(PRESSED)}&claimId=claim-unsent`)).toMatchObject({ status: 200, body: { run: lostRun } });
-    expect(await call("retry", { automationId: PRESSED, claimId: "claim-unsent", startOver: false })).toMatchObject({ status: 200,
-      body: { status: "refused", reason: "Your server lost this run's history with its copy of the workspace, so it will not run this again." } });
+      // The server loses its host data while the run changes its copy.
+      await first.run.close();
+      clock = at(9);
+      await start(2);
+      await vi.waitFor(() => expect(notices(storage, OWNER)).toEqual([expect.objectContaining({
+        body: LOST_ERROR, target: { automation: PRESSED, run: "claim-fresh", path: "Tasks/automations.yaml" },
+      })]));
+      expect(await call(runsOf("&claimId=claim-fresh"))).toMatchObject({ body: { run: { createdAtMs: at(8), updatedAtMs: at(8), unsentChangesLost: true } } });
+      applied.resolve();
+      await expect(running).resolves.toEqual({ kind: "done" });
+      expect(pay.saves).toEqual(["open:0", "done:1"]);
+    });
 
-    // Opening the copy again tells the owner nothing new.
-    await second.run.close();
-    const third = await server(storage, h, { incarnation: 2, metadataDir: homes[1] });
-    serverRuns = third.run.runs;
-    await third.openReplica();
-    expect(await call(`runs?automationId=${encodeURIComponent(PRESSED)}&claimId=claim-unsent`)).toMatchObject({ body: { run: lostRun } });
-    expect(notices(storage, OWNER)).toHaveLength(1);
+    it("reports Try again on a failed run, which stays on record past its saved progress until it ends", async () => {
+      const { storage, start } = await copies();
+      const first = await start(1);
+      const pay = payRun(first.fake.options, "claim-again", 50);
+      const apply = pay.backend.apply;
+      pay.backend.apply = async () => ({ outcome: { kind: "failed", error: "The record is locked.", timedOut: false } });
+      await expect(pay.execute(false)).resolves.toMatchObject({ kind: "failed" });
+      // The failed run's end is on record, and the sync it started confirms it.
+      await vi.waitFor(() => expect(storage.endedAutomationServerRuns({ workspaceId: WORKSPACE, incarnation: 1 })).toEqual([]));
+
+      // Try again lands all 50 changes, slowly enough that it saves its
+      // progress after the last, before it saves its end.
+      clock = at(8, 30);
+      pay.backend.apply = async (...args) => { clock += 50; return apply(...args); };
+      const ending = resolvers(), ended = resolvers();
+      pay.onSave = async (saved) => { if (saved.outcome?.state === "done") { ending.resolve(); await ended.promise; } };
+      const running = pay.execute(true);
+      await ending.promise;
+      expect(pay.saves).toEqual(["open:0", "failed:0", "failed:50", "done:50"]);
+
+      // The server loses its host data before the run's end is on record.
+      await first.run.close();
+      clock = at(9);
+      await start(2);
+      await vi.waitFor(() => expect(notices(storage, OWNER)).toEqual([expect.objectContaining({
+        body: LOST_ERROR, target: { automation: PRESSED, run: "claim-again", path: "Tasks/automations.yaml" },
+      })]));
+      ended.resolve();
+      await expect(running).resolves.toEqual({ kind: "done" });
+    });
+
+    it("lists every run the lost copy may not have sent, and tells the owner of them all in one Notice", async () => {
+      const { storage, call, start } = await copies();
+      const changing = (claimId: string, startedAtMs: number) => storage.recordAutomationServerRunChanging({ workspaceId: WORKSPACE, incarnation: 1,
+        automationId: PRESSED, claimId, automationName: "Pay", collectionPath: "Tasks", startedAtMs, nowMs: startedAtMs });
+      // The first copy changed 260 runs it never sent, and one run waited
+      // longer than run history keeps a run.
+      changing("claim-waited", at(8) - 31 * 24 * HOUR);
+      const lost = Array.from({ length: 260 }, (_, n) => `claim-${String(n).padStart(3, "0")}`);
+      lost.forEach((claimId, n) => changing(claimId, at(8) + n));
+      clock = at(9);
+      await start(2);
+      await vi.waitFor(() => expect(notices(storage, OWNER)).toEqual([expect.objectContaining({
+        title: 'Automation "Pay" may have lost changes',
+        body: "Your server lost its copy of this workspace and may not have sent the latest changes of 260 runs. Check the records they changed.",
+        target: { automation: PRESSED, run: "claim-259", path: "Tasks/automations.yaml" },
+      })]));
+      const listed: string[] = [];
+      let before: string | null = null;
+      do {
+        const page = await call(runsOf(before === null ? "" : `&before=${encodeURIComponent(before)}`));
+        expect(page.status).toBe(200);
+        const body = page.body as { runs: Array<{ claimId: string }>; next: string | null };
+        listed.push(...body.runs.map((run) => run.claimId));
+        before = body.next;
+      } while (before !== null);
+      expect(listed).toEqual(["claim-1", ...[...lost].reverse()]);
+    });
   });
 
   it("refuses what the server would not run", async () => {

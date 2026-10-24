@@ -2992,8 +2992,8 @@ describe("an automation's runs", () => {
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Deleted 1 added record. History can restore them."));
   });
 
-  it("shows a server run whose changes its lost copy had not sent, with nothing to run again or undo", async () => {
-    const error = "Your server lost its copy of this workspace before sending this run's latest changes. Check the records it changed.";
+  it("shows a server run whose changes its lost copy may not have sent, with nothing to run again or undo", async () => {
+    const error = "Your server lost its copy of this workspace and may not have sent this run's latest changes. Check the records it changed.";
     const lost = run({ claimId: "atc_lost", state: "failed", error, unsentChangesLost: true });
     makeBridge(read([summary(stamp)]), [], { serverRuns: [lost] });
     render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);

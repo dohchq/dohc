@@ -1939,6 +1939,7 @@ describe("CLI socket server", () => {
       run: vi.fn(async (_automationId: string, claimId: string) =>
         claimId === "atc_1" ? { ...run, findMs: 12, planMs: 0, writeMs: 30, writeCount: 1,
           steps: [{ step: 2, writes: [field] }], failedStep: 3, startsOver: true } : null),
+      serverRuns: vi.fn(), serverRun: vi.fn(),
       retry: vi.fn(async (input) => {
         retries.push(input);
         return answers.shift()!;
@@ -1994,6 +1995,46 @@ describe("CLI socket server", () => {
     expect(retries).toHaveLength(3);
   });
 
+  it("reads the runs of the workspace's server, including one its rebuilt copy says may not have been sent", async () => {
+    const trigger = { kind: "added" as const, recordId: "rec_1", by: "human" as const, sharedAuthor: null, depth: 0 };
+    const ran = { claimId: "atc_server", state: "done" as const, error: null, createdAtMs: 3, updatedAtMs: 4, trigger,
+      definitionChanged: false, neverStarted: false, chainStopped: false, undoUnfinished: false, undone: false,
+      writes: [{ kind: "field" as const, recordId: "rec_1", path: "tasks/one.md", field: "Status", before: "Open", after: "Paid" }] };
+    // The server lost its copy after this run changed it; the rebuilt copy keeps only this mark of it.
+    const lost = { ...ran, claimId: "atc_lost", state: "failed" as const, writes: [], unsentChangesLost: true as const,
+      trigger: { kind: null, recordId: null, by: null, sharedAuthor: null, depth: 0 },
+      error: "Your server lost its copy of this workspace and may not have sent this run's latest changes. Check the records it changed." };
+    const pages = new Map([[undefined, { runs: [ran], next: "lost:1:1:atc_lost" }], ["lost:1:1:atc_lost", { runs: [lost], next: null }]]);
+    context.automations = {
+      automationIdAt: vi.fn(async (_collectionPath: string, id: string) => `collection:object-tasks#${id}`),
+      runs: vi.fn(), run: vi.fn(), retry: vi.fn(),
+      serverRuns: vi.fn(async (_automationId: string, before?: string) => pages.get(before) ?? null),
+      serverRun: vi.fn(async (_automationId: string, claimId: string) => [ran, lost].find((run) => run.claimId === claimId) ?? null),
+    };
+    const args = { cwd: workspaceRoot, actor: "agent" as const, collectionPath: "tasks", automation: "stamp", server: true };
+    const fields = { error: lost.error, createdAtMs: 3, updatedAtMs: 4, trigger: lost.trigger, definitionChanged: false, neverStarted: false,
+      chainStopped: false, undone: false };
+    await expect(invoke("automationRuns", args)).resolves.toMatchObject({ ok: true, runs: [{ run: "atc_server", changes: 1 }], next: "lost:1:1:atc_lost" });
+    await expect(invoke("automationRuns", { ...args, page: "lost:1:1:atc_lost" })).resolves.toEqual({
+      ok: true, runs: [{ run: "atc_lost", state: "failed", ...fields, unsentChangesLost: true, changes: 0 }], next: null,
+    });
+    expect(context.automations.serverRuns).toHaveBeenLastCalledWith("collection:object-tasks#stamp", "lost:1:1:atc_lost");
+    await expect(invoke("automationRun", { ...args, run: "atc_lost" })).resolves.toEqual({
+      ok: true, run: { run: "atc_lost", state: "failed", ...fields, unsentChangesLost: true, server: true, changes: [] },
+    });
+    await expect(invoke("automationRun", { ...args, run: "atc_server" })).resolves.toMatchObject({
+      ok: true, run: { run: "atc_server", server: true, changes: ran.writes },
+    });
+    await expect(invoke("automationRun", { ...args, run: "atc_gone" })).resolves.toEqual({
+      ok: false, reason: "Your server has no run atc_gone of this automation that this computer can read.",
+    });
+    expect(context.automations.runs).not.toHaveBeenCalled();
+    expect(context.automations.run).not.toHaveBeenCalled();
+    await expect(invoke("automationRuns", { ...args, page: "unknown" })).resolves.toEqual({
+      ok: false, reason: "Your server has no runs in this workspace that this computer can read.",
+    });
+  });
+
 
   it("gives share agents the definition list and switch seam, including pending results", async () => {
     context.readOnly = true;
@@ -2001,7 +2042,7 @@ describe("CLI socket server", () => {
       sync: "pending" as const };
     const switched = { status: "written" as const, contentHash: "b".repeat(64), sync: "pending" as const };
     const list = vi.fn(async () => definitions), toggle = vi.fn(async () => switched);
-    context.automations = { automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), retry: vi.fn(), list, switch: toggle };
+    context.automations = { automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), serverRuns: vi.fn(), serverRun: vi.fn(), retry: vi.fn(), list, switch: toggle };
     const args = { cwd: workspaceRoot, actor: "agent" as const, collectionPath: "tasks" };
     await expect(invoke("automationList", args)).resolves.toEqual({ ok: true, definitions });
     await expect(invoke("automationSwitch", { ...args, automation: "stamp", enabled: false, expectedContentHash: "a".repeat(64), reformat: true, submitId: "switch-1" })).resolves.toEqual({ ok: true, result: switched });
@@ -2454,6 +2495,8 @@ describe("CLI socket server", () => {
     context.automations = {
       automationIdAt: vi.fn(async () => "collection:app-tasks#stamp"),
       runs: vi.fn(),
+      serverRuns: vi.fn(),
+      serverRun: vi.fn(),
       retry: vi.fn(),
       run: vi.fn(async () => ({ claimId: "atc_1", state: "done" as const, error: null, createdAtMs: 1, updatedAtMs: 2, trigger: { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, sharedAuthor: null, depth: 1 }, definitionChanged: false, neverStarted: false, chainStopped: false, undoUnfinished: false, undone: false, steps: [{ step: 1, writes: [kept, action] }], failedStep: null, startsOver: false })),
     };

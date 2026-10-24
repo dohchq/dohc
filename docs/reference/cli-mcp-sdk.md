@@ -513,27 +513,29 @@ Returns `{ ok: true, recordId, recordPath, kept? } | { ok: false, reason, partia
 
 ### `dohc_list_automation_runs`
 
-List an automation's runs on this computer, 20 at a time, newest first: each run's id, state, what started it, how many changes it made, and why it failed. Name the automation by its Collection's folder and its id in automations.yaml. When older runs remain, `next` is not null; pass it as `page` to list them. Each computer keeps the runs of the automations it ran for 30 days after they end.
+List an automation's runs on this computer, 20 at a time, newest first: each run's id, state, what started it, how many changes it made, and why it failed. Name the automation by its Collection's folder and its id in automations.yaml. When older runs remain, `next` is not null; pass it as `page` to list them. Each computer keeps the runs of the automations it ran for 30 days after they end. With server true, list the runs of the workspace's self-hosted server instead. A run marked unsentChangesLost ran in a copy the server lost, and its latest changes may not have been sent.
 
 A shared view keeps no automation runs, so it does not offer this tool.
 
 - `collectionPath`: `string`. Required.
 - `automation`: `string`. Required.
 - `page`: `string`
+- `server`: `boolean`
 
-Returns `{ ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, changes }[], next } | { ok: false, reason }`.
+Returns `{ ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, unsentChangesLost?: true, changes }[], next } | { ok: false, reason }`.
 
 ### `dohc_read_automation_run`
 
-Read one automation run: what started it, what each step changed, why it failed, which step failed, and whether Try again resumes there or starts over. Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.
+Read one automation run: what started it, what each step changed, why it failed, which step failed, and whether Try again resumes there or starts over. Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed. With server true, read a run of the workspace's self-hosted server: it lists what the run changed, oldest first, as `changes` instead of steps.
 
 A shared view keeps no automation runs, so it does not offer this tool.
 
 - `collectionPath`: `string`. Required.
 - `automation`: `string`. Required.
 - `run`: `string`. Required.
+- `server`: `boolean`
 
-Returns `{ ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, findMs?, planMs?, writeMs?, writeCount?, steps, failedStep, startsOver } } | { ok: false, reason }`.
+Returns `{ ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, unsentChangesLost?: true, findMs?, planMs?, writeMs?, writeCount?, steps, failedStep, startsOver } | { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, unsentChangesLost?: true, server: true, changes } } | { ok: false, reason }`.
 
 ### `dohc_retry_automation_run`
 
@@ -1713,8 +1715,9 @@ List an automation's runs on this computer, newest first.
 Lists 20 runs at a time, newest first, as the Automations panel does. Each line starts with the run's ID. When older runs remain, the last line gives the --page value that lists them.
 
 - `--page <page>`: List the older runs the last line of an earlier listing names.
+- `--server`: List the runs of the workspace's self-hosted server instead.
 
-With `--json`, prints `{ schemaVersion, ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, changes }[], next }`.
+With `--json`, prints `{ schemaVersion, ok: true, runs: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, unsentChangesLost?: true, changes }[], next }`.
 
 #### `dohc automation run`
 
@@ -1726,7 +1729,9 @@ Show one run: what started it, what each step changed, and why it failed.
 
 Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.
 
-With `--json`, prints `{ schemaVersion, ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, findMs?, planMs?, writeMs?, writeCount?, steps, failedStep, startsOver } }`.
+- `--server`: Show a run of the workspace's self-hosted server. It lists what the run changed, without steps.
+
+With `--json`, prints `{ schemaVersion, ok: true, run: { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, unsentChangesLost?: true, findMs?, planMs?, writeMs?, writeCount?, steps, failedStep, startsOver } | { run, state, error, createdAtMs, updatedAtMs, trigger, definitionChanged, neverStarted, chainStopped, undone, unsentChangesLost?: true, server: true, changes } }`.
 
 #### `dohc automation retry`
 

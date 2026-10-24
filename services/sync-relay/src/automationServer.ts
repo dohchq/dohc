@@ -8,7 +8,7 @@ import { cutText } from "@dohc/automation-executor/automation-chat";
 import { automationFailedNoticeId, type ReportedRun } from "@dohc/automation-executor/automation-failed-notice";
 import { reportAutomationFailure } from "@dohc/automation-executor/automation-failure-reporting";
 import { whoChangedLast, type AutomationsFileHistory } from "@dohc/automation-executor/automation-history";
-import { createAutomationRunStore, type AutomationRunStore, type AutomationStoreFolder, type StoredRun, type StoredStep } from "@dohc/automation-executor/automation-run-store";
+import { createAutomationRunStore, type AutomationStoreFolder, type StoredRun } from "@dohc/automation-executor/automation-run-store";
 import {
   CollectionAutomations,
   type CollectionAutomationRun,
@@ -65,7 +65,7 @@ import type { AppBackendAuth } from "./appBackendAuthority";
 import { notFound, RelayError } from "./errors";
 import { observeRelayWrites } from "./relayWriteChanges";
 import type { SyncRelayStorage } from "./storage";
-import type { AutomationServer, AutomationServerSchedules, LostAutomationServerRun } from "./storage/automationHosts";
+import type { AutomationServer, AutomationServerSchedules, LostAutomationServerRun, LostAutomationServerRunCursor } from "./storage/automationHosts";
 
 function checkedButtonAuthority<T>(read: () => T): T {
   try { return read(); }
@@ -112,14 +112,15 @@ const PRESS_WAIT_MS = 25_000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 // An owner's action on a copy the server keeps closed waits this long for it to open.
 const RETAINED_COPY_OPEN_MS = 30_000;
-// The effects a run makes in its copy, which reach the relay only when the copy syncs.
-const COPY_EFFECTS: ReadonlySet<string> = new Set(["set", "add", "message", "wake"]);
-// Run history lists at most this many of an automation's runs a lost copy had not sent.
-const LOST_RUNS_LISTED = 50;
-// A Notice tells of at most this many lost runs at a time.
-const LOST_RUNS_REPORTED = 200;
+// The effects a run makes in its copy, which reach the relay only when the
+// copy syncs. Notices and agent wakes go straight to the relay.
+const COPY_EFFECTS: ReadonlySet<string> = new Set(["set", "add", "message"]);
+// A page of run history lists this many of an automation's runs a lost copy may not have sent.
+const LOST_RUNS_PAGE = 50;
+// The `before` of a page of those runs, after the copy's own runs end.
+const LOST_RUNS_CURSOR = /^lost:(\d{1,16}):(\d{1,16}):(.+)$/su;
 const LOST_CHANGES_NOTICE_PREFIX = "server-lost-changes:";
-const LOST_CHANGES_ERROR = "Your server lost its copy of this workspace before sending this run's latest changes. Check the records it changed.";
+const LOST_CHANGES_ERROR = "Your server lost its copy of this workspace and may not have sent this run's latest changes. Check the records it changed.";
 const LOST_CHANGES_RETRY = "Your server lost this run's history with its copy of the workspace, so it will not run this again.";
 
 /** What the server drives in each workspace's executor. CollectionAutomations satisfies it. */
@@ -167,7 +168,8 @@ export interface AutomationServerOptions {
 
 /** One workspace this server runs, before its executor and press loop exist. */
 interface WorkspaceState {
-  flushRecordDelivery?(): Promise<void>;
+  /** Delivers every record's queued updates. False when one had updates it found no outbox for. */
+  flushRecordDelivery?(): Promise<boolean>;
   refreshRecord?(path: string): Promise<void>;
   refreshAcceptedRecords?(): Promise<void>;
   readonly replica: AutomationReplica;
@@ -475,33 +477,27 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     });
   }
 
-  /** Tells the owner, once for each automation, which of its runs' changes a lost copy may not have sent. */
+  /** Tells the owner, once for each automation of a lost copy, how many of its runs' changes that copy may not have sent. */
   function reportLostRuns(ws: WorkspaceState): void {
     if (!ws.lostToReport) return;
     const { workspaceId, ownerUserId } = ws.replica;
     ws.reporting = ws.reporting.then(async () => {
-      const lost = storage.lostAutomationServerRuns({ workspaceId, nowMs: nowMs(), limit: LOST_RUNS_REPORTED, unreported: true });
-      const byAutomation = new Map<string, LostAutomationServerRun[]>();
-      for (const run of lost) {
-        const key = JSON.stringify([run.incarnation, run.automationId]);
-        byAutomation.set(key, [...byAutomation.get(key) ?? [], run]);
-      }
-      for (const [key, runs] of byAutomation) {
+      for (const lost of storage.unreportedLostAutomationServerRuns({ workspaceId, nowMs: nowMs() })) {
         if (ws.closed) return;
-        const newest = runs[0]!;
-        const name = cutText(newest.automationName ?? newest.automationId.slice(newest.automationId.lastIndexOf("#") + 1), NOTICE_TITLE_MAX_CHARS - 30);
-        const run = { automation: newest.automationId, run: newest.claimId };
-        const target = newest.collectionPath === null ? run : { ...run, path: `${newest.collectionPath}/automations.yaml` };
+        const name = cutText(lost.automationName ?? lost.automationId.slice(lost.automationId.lastIndexOf("#") + 1), NOTICE_TITLE_MAX_CHARS - 40);
+        const run = { automation: lost.automationId, run: lost.newestClaimId };
+        const target = lost.collectionPath === null ? run : { ...run, path: `${lost.collectionPath}/automations.yaml` };
         await posterOf(ws)({
-          noticeId: `${LOST_CHANGES_NOTICE_PREFIX}${sha256(workspaceId)}:${sha256(key)}`, kind: "automation-failed",
-          title: cutText(`Automation "${name}" lost changes`, NOTICE_TITLE_MAX_CHARS),
-          body: runs.length === 1 ? LOST_CHANGES_ERROR
-            : `Your server lost its copy of this workspace before sending the latest changes of ${runs.length} runs. Check the records they changed.`,
+          noticeId: `${LOST_CHANGES_NOTICE_PREFIX}${sha256(workspaceId)}:${sha256(JSON.stringify([lost.incarnation, lost.automationId]))}`,
+          kind: "automation-failed",
+          title: cutText(`Automation "${name}" may have lost changes`, NOTICE_TITLE_MAX_CHARS),
+          body: lost.runs === 1 ? LOST_CHANGES_ERROR
+            : `Your server lost its copy of this workspace and may not have sent the latest changes of ${lost.runs} runs. Check the records they changed.`,
           target: isNoticeTarget(target) ? target : run, recipientUserId: ownerUserId,
         }, ws.replica.signal);
-        storage.reportAutomationServerRunsLost({ workspaceId, runs });
+        storage.reportAutomationServerRunsLost({ workspaceId, incarnation: lost.incarnation, automationId: lost.automationId });
       }
-      if (lost.length < LOST_RUNS_REPORTED) ws.lostToReport = false;
+      ws.lostToReport = false;
     }).catch((error: unknown) => options.onError(`tell the owner of workspace "${workspaceId}" which runs' changes its copy lost`, error));
   }
 
@@ -548,9 +544,11 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       // The runs that ended before this sync began: it sends all their changes.
       const ended = storage.endedAutomationServerRuns({ workspaceId, incarnation });
       // Each lane finishes independently. A waiting draft never prevents sync.
-      const results = await Promise.allSettled([ws.flushRecordDelivery?.(), ws.replica.sync()]);
-      for (const result of results) if (result.status === "rejected") throw result.reason;
-      storage.confirmAutomationServerRunsSent({ workspaceId, incarnation, runs: ended });
+      const [flushed, synced] = await Promise.allSettled([ws.flushRecordDelivery?.() ?? true, ws.replica.sync()]);
+      if (flushed.status === "rejected") throw flushed.reason;
+      if (synced.status === "rejected") throw synced.reason;
+      // A record update the flush left may hold an ended run's changes.
+      if (flushed.value) storage.confirmAutomationServerRunsSent({ workspaceId, incarnation, runs: ended });
       reportLostRuns(ws);
     })().then(() => { ws.syncFailures = 0; }, (error: unknown) => {
       if (ws.replica.signal.aborted) return;
@@ -585,7 +583,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
   function executorOptions(ws: WorkspaceState, self: () => Hosted): CollectionAutomationsOptions {
     const { replica, adapter } = ws;
     const { workspaceId, ownerUserId } = replica;
-    const runStore = unsentRunStore(ws, self, createAutomationRunStore(storeFolderOf(replica.metadataDir)));
+    const runStore = createAutomationRunStore(storeFolderOf(replica.metadataDir));
     const chat = replicaAutomationChat({ runStore, replica, store: replicaChatStore(replica), storage, nowMs, ownerName: () => ownerName(ws) });
     // A canonical sync changes the replica's draft revision. Keep it outside
     // another write's preparation and settlement, including background retries.
@@ -639,19 +637,20 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         const current = storage.automationRecordBinding(workspaceId, ownerUserId, path);
         if (current) {await delivery.drain(current.binding, signal); await accepted.track(current.binding);}
       };
-      let draining: Promise<void> | undefined;
+      let draining: Promise<boolean> | undefined;
       ws.flushRecordDelivery = () => draining ??= (async () => {
-        let after = null;
+        let after = null, drained = true;
         const failures: unknown[] = [];
         do {
           const page = await replica.client.ownerYDocListDrafts({id: replica.nextRequestId(), workspace: replica.workspace, deadlineMs: 30_000}, {after, limit: 64, pendingOnly: true}, replica.signal);
           for (const draft of page.drafts) if (draft.pendingBytes > 0 && draft.state !== "quarantined") {
-            try {await serializeRecords(() => delivery.drain(draft.binding, replica.signal, draft.outboxId ?? undefined));}
+            try {if (!await serializeRecords(() => delivery.drain(draft.binding, replica.signal, draft.outboxId ?? undefined))) drained = false;}
             catch (error) {failures.push(error); options.onError(`deliver automation record "${draft.binding.currentPath}" in workspace "${workspaceId}"`, error);}
           }
           after = page.next;
         } while (after !== null);
         if (failures.length) throw failures[0];
+        return drained;
       })().finally(() => {draining = undefined;});
     } else {
       recordEngine.prepareSharedRecord = async path => {
@@ -739,6 +738,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       readMessageBody: async (messageId) => (await replicaChatStore(replica).getMessage({ workspaceId, messageId })).body,
       postNotice: posterOf(ws),
       onRunsChanged: () => undefined,
+      ...unsentRunHooks(ws, self),
       reportFailure: (report) => ws.reporting = reportAutomationFailure({
           computer: { installId: AUTOMATION_SERVER_INSTALL_ID, label: server.label },
           primary: { recipientUserId: ownerUserId },
@@ -787,32 +787,27 @@ export async function startAutomationServer(options: AutomationServerOptions) {
   }
 
   /**
-   * The copy's run store, telling the relay before a run first changes the
-   * copy, and when the run ends, so a later copy can tell the owner which
-   * runs' changes this one never sent.
+   * Tells the relay before each attempt first changes the copy, and when it
+   * ends, so a later copy can tell the owner which runs' changes this one
+   * may not have sent.
    */
-  function unsentRunStore(ws: WorkspaceState, self: () => Hosted, store: AutomationRunStore): AutomationRunStore {
+  function unsentRunHooks(ws: WorkspaceState, self: () => Hosted): Pick<CollectionAutomationsOptions, "beforeEffect" | "onRunEnded"> {
     const { workspaceId, incarnation } = ws.replica;
     const keyOf = (run: StoredRun) => JSON.stringify([run.automationId, run.claimId]);
-    // Runs already on record as changing, so each records once.
+    // Attempts already on record as changing, so each records once.
     const changing = new Set<string>();
     return {
-      ...store,
-      async appendStep(run, step) {
-        if (!changing.has(keyOf(run)) && step.effects.some((effect) => COPY_EFFECTS.has(effect.kind))) {
-          const name = self().executor.automationName(run.automationId);
-          storage.recordAutomationServerRunChanging({
-            workspaceId, incarnation, automationId: run.automationId, claimId: run.claimId,
-            automationName: name === null || name.trim() === "" ? null : cutText(name, 256),
-            collectionPath: collectionPathOf(run, step), startedAtMs: run.startedAtMs, nowMs: nowMs(),
-          });
-          changing.add(keyOf(run));
-        }
-        await store.appendStep(run, step);
+      beforeEffect(run, effect) {
+        if (!COPY_EFFECTS.has(effect.kind) || changing.has(keyOf(run))) return;
+        const name = self().executor.automationName(run.automationId);
+        storage.recordAutomationServerRunChanging({
+          workspaceId, incarnation, automationId: run.automationId, claimId: run.claimId,
+          automationName: name === null || name.trim() === "" ? null : cutText(name, 256),
+          collectionPath: collectionPathOf(run), startedAtMs: run.startedAtMs, nowMs: nowMs(),
+        });
+        changing.add(keyOf(run));
       },
-      async save(run) {
-        await store.save(run);
-        if (run.finishedAtMs === null) return;
+      onRunEnded(run) {
         changing.delete(keyOf(run));
         // A sync that begins now sends everything the run changed. A run
         // whose end is not on record counts as unsent, which is never wrong.
@@ -1219,22 +1214,32 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     return ownedCopy(scope);
   }
 
-  /** The runs a lost copy of this workspace had not sent, newest first. */
-  const lostRuns = (scope: OwnerScope, automationId: string, claimId?: string) => storage.lostAutomationServerRuns({
-    workspaceId: scope.workspaceId, automationId, ...(claimId === undefined ? {} : { claimId }), nowMs: nowMs(), limit: LOST_RUNS_LISTED,
-  });
+  /** One page of the runs a lost copy of this workspace may not have sent, newest first. */
+  function lostRunsPage(scope: OwnerScope, automationId: string, after?: LostAutomationServerRunCursor) {
+    const lost = storage.lostAutomationServerRuns({
+      workspaceId: scope.workspaceId, automationId, nowMs: nowMs(), limit: LOST_RUNS_PAGE + 1, ...(after === undefined ? {} : { after }),
+    });
+    const shown = lost.slice(0, LOST_RUNS_PAGE);
+    const last = shown.at(-1);
+    return { runs: shown.map(lostRunRow), next: lost.length > LOST_RUNS_PAGE && last ? `lost:${last.startedAtMs}:${last.incarnation}:${last.claimId}` : null };
+  }
+  const lostRun = (scope: OwnerScope, automationId: string, claimId: string) =>
+    storage.lostAutomationServerRuns({ workspaceId: scope.workspaceId, automationId, claimId, nowMs: nowMs(), limit: 1 })[0];
 
   const runs: ServerRuns = {
-    // They are older than any run of this copy, so they end the last page.
+    // They are older than any run of this copy, so they follow its last page.
     list: (scope, automationId, before) => withCopy(scope, async (ws) => {
+      const lostAfter = before === undefined ? null : LOST_RUNS_CURSOR.exec(before);
+      if (lostAfter) return lostRunsPage(scope, automationId, { startedAtMs: Number(lostAfter[1]), incarnation: Number(lostAfter[2]), claimId: lostAfter[3]! });
       const page = await ws.executor.runs(automationId, before);
       if (page.next !== null) return page;
       const listed = new Set(page.runs.map((run) => run.claimId));
-      return { runs: [...page.runs, ...lostRuns(scope, automationId).filter((lost) => !listed.has(lost.claimId)).map(lostRunRow)], next: null };
+      const lost = lostRunsPage(scope, automationId);
+      return { runs: [...page.runs, ...lost.runs.filter((run) => !listed.has(run.claimId))], next: lost.next };
     }),
     get: (scope, automationId, claimId) => withCopy(scope, async (ws) => {
       const run = await ws.executor.listedRun(automationId, claimId);
-      const lost = run === null ? lostRuns(scope, automationId, claimId)[0] : undefined;
+      const lost = run === null ? lostRun(scope, automationId, claimId) : undefined;
       return run ?? (lost === undefined ? null : lostRunRow(lost));
     }),
     retry: (scope, input) => withCopy(scope, async (ws) => {
@@ -1242,7 +1247,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       if (!allWantedWorkspaces().includes(scope.workspaceId)) {
         return { status: "refused", reason: "Your server no longer runs this workspace's automations, so it will not run this again." };
       }
-      if (lostRuns(scope, input.automationId, input.claimId).length > 0 && await ws.executor.listedRun(input.automationId, input.claimId) === null) {
+      if (lostRun(scope, input.automationId, input.claimId) !== undefined && await ws.executor.listedRun(input.automationId, input.claimId) === null) {
         return { status: "refused", reason: LOST_CHANGES_RETRY };
       }
       return await ws.executor.retry(input);
@@ -1320,12 +1325,12 @@ export async function startAutomationServer(options: AutomationServerOptions) {
 }
 
 /** Where the run's own Collection was when the run last named it, or null. */
-function collectionPathOf(run: StoredRun, step: StoredStep): string | null {
+function collectionPathOf(run: StoredRun): string | null {
   const collectionId = /^collection:(.+)#[^#]+$/u.exec(run.automationId)?.[1];
-  return [...run.collections, ...(step.collections ?? [])].find((collection) => collection.collectionId === collectionId)?.path ?? null;
+  return run.collections.find((collection) => collection.collectionId === collectionId)?.path ?? null;
 }
 
-/** A run a lost copy had not sent, as run history lists it: failed, with nothing left to run or undo. */
+/** A run a lost copy may not have sent, as run history lists it: failed, with nothing left to run or undo. */
 function lostRunRow(lost: LostAutomationServerRun): CollectionAutomationRun {
   return {
     claimId: lost.claimId, state: "failed", error: LOST_CHANGES_ERROR, createdAtMs: lost.startedAtMs, updatedAtMs: lost.unsentSinceMs,

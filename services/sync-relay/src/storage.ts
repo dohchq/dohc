@@ -744,6 +744,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return this.readTx(() => automationHostStorage.lostAutomationServerRuns(this, input));
   }
 
+  unreportedLostAutomationServerRuns(input: { workspaceId: string; nowMs: number }) {
+    return this.readTx(() => automationHostStorage.unreportedLostAutomationServerRuns(this, input));
+  }
+
   reportAutomationServerRunsLost(input: Parameters<typeof automationHostStorage.reportAutomationServerRunsLost>[1]) {
     automationHostStorage.reportAutomationServerRunsLost(this, input);
   }
