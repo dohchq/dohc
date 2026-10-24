@@ -27,6 +27,7 @@ import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory.j
 import type { LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
 import { parseLiveSettlementConfig, type LiveSettlementConfig } from "./liveSettlementConfig.js";
 import {snapshotStopRestoreLookup} from "./liveRestoreDelivery.js";
+import {relayError} from "./errors.js";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation.js";
 import {parseLiveRestoreConfig, LiveRestorePreparation, type LiveRestoreConfig} from "./liveRestorePreparation.js";
 import {parseServiceHostedReplicationConfig, ServiceHostedReplication} from "./serviceHostedReplication.js";
@@ -757,9 +758,11 @@ export async function startServiceLiveHost(options: {
     // workspace's recovery work takes turns, and its handle closes before
     // another of its stores opens. A handle also closes once idle, once a
     // read through it is abandoned, and once no refusal kept in its store
-    // waits for a recovery copy. A close with no answer keeps the handle
-    // recorded, so the next turn closes it again.
-    const recoveries = new Map<string, {identity: ServiceKeptEditsIdentity; handle: string; idle?: ReturnType<typeof setTimeout>}>();
+    // waits for a recovery copy. An open whose answer was lost stays recorded
+    // with no handle, and a close that fails keeps its handle: either closes
+    // on the workspace's next turn, or once idle.
+    type Recovery = {readonly identity: ServiceKeptEditsIdentity; readonly root: string; handle?: string; idle?: ReturnType<typeof setTimeout>};
+    const recoveries = new Map<string, Recovery>();
     const recoveryTurns = new Map<string, Promise<void>>();
     const recoveryTurn = <T>(workspaceId: string, work: () => Promise<T>): Promise<T> => {
       const run = (recoveryTurns.get(workspaceId) ?? Promise.resolve()).then(work);
@@ -768,42 +771,74 @@ export async function startServiceLiveHost(options: {
       void settled.then(() => {if (recoveryTurns.get(workspaceId) === settled) recoveryTurns.delete(workspaceId);});
       return run;
     };
+    // The recovery handle, opening its store if it has none. The engine
+    // answers an open of a store it already holds with that store's handle,
+    // so this also finds the handle of an open whose answer was lost.
+    const recoveryHandle = async (workspaceId: string, open: Recovery, joined: AbortSignal) => {
+      if (open.handle !== undefined) return open.handle;
+      const opened = record(await membershipRequest("liveApplication.openRecoveryStore", undefined, {root: open.root, workspaceId,
+        replicationEpoch: open.identity.replicationEpoch, streamIdentity: open.identity.streamIdentity}, joined), ["workspaceHandle"]);
+      if (typeof opened.workspaceHandle !== "string" || !opened.workspaceHandle) throw new Error("Invalid recovery store response.");
+      return open.handle = opened.workspaceHandle;
+    };
     const closeRecovery = async (workspaceId: string) => {
       const open = recoveries.get(workspaceId);
       if (!open) return;
       clearTimeout(open.idle);
-      try {await membershipRequest("liveApplication.closeRecoveryStore", open.handle, {}, signal);}
-      catch (error) {if (engineCode(error) !== "WORKSPACE_UNAVAILABLE") throw error;}
+      let handle: string;
+      try {handle = await recoveryHandle(workspaceId, open, signal);}
+      catch (error) {
+        // The engine refused the open, so it holds no handle for the store.
+        if (engineCode(error) !== undefined) {recoveries.delete(workspaceId); return;}
+        idleRecovery(workspaceId, open);
+        throw error;
+      }
+      try {await membershipRequest("liveApplication.closeRecoveryStore", handle, {}, signal);}
+      catch (error) {
+        if (engineCode(error) !== "WORKSPACE_UNAVAILABLE") {idleRecovery(workspaceId, open); throw error;}
+      }
       recoveries.delete(workspaceId);
     };
-    const idleRecovery = (workspaceId: string, open: {idle?: ReturnType<typeof setTimeout>}) => {
+    const idleRecovery = (workspaceId: string, open: Recovery) => {
       clearTimeout(open.idle);
+      if (signal.aborted) return;
       open.idle = setTimeout(() => {
-        void recoveryTurn(workspaceId, async () => {if (recoveries.get(workspaceId) === open) await closeRecovery(workspaceId);}).catch(() => {});
+        void recoveryTurn(workspaceId, async () => {if (!signal.aborted && recoveries.get(workspaceId) === open) await closeRecovery(workspaceId);}).catch(() => {});
       }, RECOVERY_IDLE_MS);
       open.idle.unref?.();
     };
     // A page of a queue kept in an earlier store of its workspace, at `root`,
-    // read through that store's recovery handle. It admits, settles and publishes nothing.
+    // read through that store's recovery handle. It admits, settles,
+    // publishes and delivers nothing, so it needs no live registration, only
+    // a host that was not retired.
     const readEarlierKeptEdits = (kept: ServiceKeptEdits, root: string, cursor: JsonValue | undefined, callerSignal?: AbortSignal) =>
       withLiveHostSignal(signal, callerSignal, joined => recoveryTurn(kept.workspaceId, async () => {
         joined.throwIfAborted();
-        check();
-        let open = recoveries.get(kept.workspaceId);
-        if (open && !sameKeptEditsIdentity(open.identity, kept.identity)) {await closeRecovery(kept.workspaceId); open = undefined;}
-        if (!open) {
-          const opened = record(await membershipRequest("liveApplication.openRecoveryStore", undefined, {root, workspaceId: kept.workspaceId}, joined), ["workspaceHandle"]);
-          if (typeof opened.workspaceHandle !== "string" || !opened.workspaceHandle) throw new Error("Invalid recovery store response.");
-          open = {identity: kept.identity, handle: opened.workspaceHandle};
-          recoveries.set(kept.workspaceId, open);
-        }
+        checkPreparing();
+        const held = recoveries.get(kept.workspaceId);
+        if (held && (!sameKeptEditsIdentity(held.identity, kept.identity) || held.root !== root)) await closeRecovery(kept.workspaceId);
+        const open = recoveries.get(kept.workspaceId) ?? {identity: kept.identity, root};
+        recoveries.set(kept.workspaceId, open);
         clearTimeout(open.idle);
         try {
-          return keptPage((await client.sendRequest({id: nextRequestId(), workspace: open.handle, method: "ydoc.ownerOutbox.readPending",
+          let handle: string;
+          try {handle = await recoveryHandle(kept.workspaceId, open, joined);}
+          catch (error) {
+            // A refused open made no handle; any other failure may have made one.
+            if (engineCode(error) === undefined) throw error;
+            recoveries.delete(kept.workspaceId);
+            if (error instanceof EngineRequestError && error.wireError?.message === "recovery-store-needs-migration") {
+              throw relayError("conflict", "This server can't read the earlier copy of this workspace that holds these edits yet. Contact the server's operator.");
+            }
+            throw error;
+          }
+          return keptPage((await client.sendRequest({id: nextRequestId(), workspace: handle, method: "ydoc.ownerOutbox.readPending",
             params: {outboxId: kept.outboxId, ...(cursor === undefined ? {} : {cursor})}, deadlineMs: config.client.requestDeadlineMs}, joined)).result);
         } finally {
-          if (joined.aborted) await closeRecovery(kept.workspaceId).catch(() => {});
-          else if (recoveries.get(kept.workspaceId) === open) idleRecovery(kept.workspaceId, open);
+          if (recoveries.get(kept.workspaceId) === open) {
+            if (joined.aborted) await closeRecovery(kept.workspaceId).catch(() => {});
+            else idleRecovery(kept.workspaceId, open);
+          }
         }
       }));
     // Restore work takes a turn, so no idle unload runs beside it. A step that
@@ -1084,13 +1119,13 @@ export async function startServiceLiveHost(options: {
        * queue changed under it. It admits, settles and publishes nothing.
        * `store` is the root of the store that holds the queue: a queue of an
        * earlier identity of its workspace is read there, through a read-only
-       * recovery handle; one of the current identity, or of the store still
-       * attached, through its attachment.
+       * recovery handle, even on a daemon that hosts no document; one of the
+       * current identity, or of the store still attached, through its attachment.
        */
       readKeptEditsPage(kept: ServiceKeptEdits, cursor: JsonValue | undefined, store: string, callerSignal?: AbortSignal): Promise<JsonValue> {
-        check();
         if (!sameKeptEditsIdentity(kept.identity, attachments.get(kept.workspaceId)?.identity) &&
           !sameKeptEditsIdentity(kept.identity, storage.getWorkspaceIdentity(kept.workspaceId))) return readEarlierKeptEdits(kept, store, cursor, callerSignal);
+        check();
         return withKeptOutbox(kept, callerSignal, async (_outbox, joined) => keptPage((await client.sendRequest({id: nextRequestId(),
           workspace: reachable(kept).handle, method: "ydoc.ownerOutbox.readPending",
           params: {outboxId: kept.outboxId, ...(cursor === undefined ? {} : {cursor})}, deadlineMs: config.client.requestDeadlineMs}, joined)).result));

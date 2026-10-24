@@ -85,7 +85,7 @@ impl EngineService {
         let method = request.method.as_str();
         // An earlier store open for recovery answers page reads and its own
         // close to the configured host, and nothing else to anyone.
-        if self.recovery_store(request.workspace.as_ref()).is_some() {
+        if self.is_recovery_handle(request.workspace.as_ref()) {
             let allowed = matches!(
                 method,
                 "ydoc.ownerOutbox.readPending" | "liveApplication.closeRecoveryStore"
@@ -364,7 +364,7 @@ impl EngineService {
                 Box::pin(self.configured_open_recovery_store(&ctx, request)).await?
             }
             "liveApplication.closeRecoveryStore" => {
-                self.configured_close_recovery_store(&ctx, request)?
+                Box::pin(self.configured_close_recovery_store(&ctx, request)).await?
             }
             "liveApplication.unloadDocument" => {
                 Box::pin(self.live_application_unload(&ctx, request.workspace, request.params))

@@ -464,7 +464,8 @@ export function createDesktopCliServer<State>(
             ...(ownerLiveRecovery ? {
               keptEdits: {
                 list: () => withOwnerLiveRecovery(async operation =>
-                  ownerLiveRecovery.keptEdits(operation.workspace.workspaceId).map(({ path, reason, storedOn, incident, recovery }) => ({ path, reason, storedOn, incident, recovery }))),
+                  ownerLiveRecovery.keptEdits(operation.workspace.workspaceId).map(({ path, reason, storedOn, incident, recovery, earlier }) =>
+                    ({ path, reason, storedOn, incident, recovery, ...(earlier ? { earlier } : {}) }))),
                 saveRecoveryCopy: (path: string, incident?: string) => withOwnerLiveRecovery(operation => ownerLiveRecovery.save(operation.workspace, path, incident)),
                 retry: (path: string, incident: string) => withOwnerLiveRecovery(async operation => {
                   const kept = keptEditsAt(operation.workspace.workspaceId, path, incident);

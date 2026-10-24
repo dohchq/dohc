@@ -3814,6 +3814,21 @@ pub(crate) fn newer_build_refusal(
         }))
 }
 
+/// Whether the ledger records every migration in `migrations` as complete. A
+/// read-only open applies none, so a store an older build last opened misses
+/// the later ones. Reads only.
+pub(crate) fn all_migrations_complete(
+    conn: &Connection,
+    migrations: &[Migration],
+) -> Result<bool, StorageError> {
+    for migration in migrations {
+        if matches!(ledger_status(conn, migration.id)?, LedgerStatus::Missing) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Run every pending migration in `migrations` (ordered) against `conn`,
 /// idempotently and crash-recoverably. Safe to call on every open: already-
 /// applied migrations are skipped after a checksum check.

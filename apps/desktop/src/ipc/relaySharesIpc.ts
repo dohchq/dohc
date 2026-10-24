@@ -317,7 +317,8 @@ export function createRelaySharesIpcHandlers<
         if (deferred) Object.assign(row, {deferredStop: deferred,
           canResume: row.reason !== "session-host-diverged" && row.reason !== "live-edit-unadmitted"});
         const quarantine = quarantines.find(candidate => candidate.path === row.path);
-        if (quarantine) Object.assign(row, {quarantine: quarantine.recovery, storedOn: quarantine.storedOn, incident: quarantine.incident, objectId: quarantine.objectId});
+        if (quarantine) Object.assign(row, {quarantine: quarantine.recovery, storedOn: quarantine.storedOn, incident: quarantine.incident, objectId: quarantine.objectId,
+          ...(quarantine.earlier ? {earlier: true} : {})});
       }
       return OwnerLiveDocumentsResult.parse({documents: [...documents.values()], nextCursor: stopped.nextCursor});
     }, assertOriginalWorkspace);

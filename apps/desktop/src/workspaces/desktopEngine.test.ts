@@ -1633,7 +1633,7 @@ describe("server owner peer lifecycle", () => {
       expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{objectId: "object-2"}]);
       answer = "earlier";
       await expect(f.engine.retryOwnerLiveQuarantine(await workspace(), "object-2", "server:server-outbox-2:2")).rejects.toThrow("Save a recovery copy to get them back.");
-      expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{objectId: "object-2", recovery: "earlier"}]);
+      expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{objectId: "object-2", recovery: "paused", earlier: true}]);
       const asked = keptEdits.mock.calls.length;
       await expect(f.engine.retryOwnerLiveQuarantine(await workspace(), "object-2", "server:server-outbox-2:2")).rejects.toThrow("Save a recovery copy to get them back.");
       expect(keptEdits).toHaveBeenCalledTimes(asked);
@@ -1643,12 +1643,13 @@ describe("server owner peer lifecycle", () => {
   // Proves: the server's rows of two copies of the workspace that share an
   // outbox ID stay two rows. Saving the earlier copy's row reads that copy's
   // queue, writes its package and confirms that row alone, which then reads as
-  // copied; the current copy's row stays as it was until its own save.
+  // copied and still earlier, so it offers no Try again; the current copy's
+  // row stays as it was until its own save.
   it("saves the earlier copy's row of two copies that share an outbox ID from that copy, and confirms only that row", async () => {
     const {both, first} = twoEditQueue(keptBinding);
     const served = new Map([[1, servedPages({...both, outboxId: "server-outbox"})], [2, servedPages({...first, outboxId: "server-outbox"})]]);
     const row = {objectId: "object", path: "notes/plan.md", outboxId: "server-outbox", reason: "invalid-update"};
-    let kept = [{...row, generation: 1, store: "earlier", recovery: "earlier"}, {...row, generation: 2, store: "current", recovery: "paused"}];
+    let kept = [{...row, generation: 1, store: "earlier", recovery: "paused", earlier: true}, {...row, generation: 2, store: "current", recovery: "paused"}];
     const actions: unknown[] = [];
     const {f, credentials, workspace} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}], {kept: () => kept,
       keptEdits: async input => {
@@ -1663,13 +1664,16 @@ describe("server owner peer lifecycle", () => {
     try {
       expect(await f.engine.start()).toBe(true);
       await vi.waitFor(() => expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([
-        {incident: "server:server-outbox:1", recovery: "earlier"}, {incident: "server:server-outbox:2", recovery: "paused"}]));
+        {incident: "server:server-outbox:1", recovery: "paused", earlier: true}, {incident: "server:server-outbox:2", recovery: "paused"}]));
       const earlier = await f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "notes/plan.md", "server:server-outbox:1");
       expect(earlier).toMatchObject({storedOn: "server", keptEdits: "copied"});
       expect(await updates(earlier.packagePath)).toBe(2);
       expect(actions).toEqual([{action: "copied", outboxId: "server-outbox", generation: 1}]);
       expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([
-        {incident: "server:server-outbox:1", recovery: "copied"}, {incident: "server:server-outbox:2", recovery: "paused"}]);
+        {incident: "server:server-outbox:1", recovery: "copied", earlier: true}, {incident: "server:server-outbox:2", recovery: "paused"}]);
+      expect(f.engine.ownerLiveQuarantines("owner")[1]).not.toHaveProperty("earlier");
+      await expect(f.engine.retryOwnerLiveQuarantine(await workspace(), "object", "server:server-outbox:1")).rejects.toThrow("Save a recovery copy to get them back.");
+      expect(actions).toHaveLength(1);
       const current = await f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "notes/plan.md", "server:server-outbox:2");
       expect(await updates(current.packagePath)).toBe(1);
       expect(actions).toEqual([{action: "copied", outboxId: "server-outbox", generation: 1}, {action: "copied", outboxId: "server-outbox", generation: 2}]);

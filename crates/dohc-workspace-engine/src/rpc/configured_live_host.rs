@@ -2,6 +2,7 @@ use crate::live_application_ingress::{
     LiveApplicationIngress, LiveApplicationIngressConfig, SettlementAdmission,
 };
 use crate::{EngineService, LiveApplicationHostConfig, lock};
+use dohc_engine_collab::HostedStoreIdentity;
 use dohc_engine_collab::live_update_application::{ApplicationHostCoordinate, ApplicationOwner};
 use dohc_engine_protocol::error::{ErrorCode, WireError};
 use dohc_engine_protocol::limits::{MAX_WIRE_INTEGER, MIN_NEGOTIABLE_FRAME_BYTES, WireLimits};
@@ -213,8 +214,9 @@ pub(crate) struct Discovery {
     adoption: Option<ConfiguredOwnerAdoption>,
     /// Earlier stores open for their owner's recovery copy, at most one per
     /// workspace. They stay out of `attached`, so a workspace's attached store
-    /// and its earlier store are open at once.
-    recovery: Mutex<Vec<RecoveryStore>>,
+    /// and its earlier store are open at once. A close ends an entry once its
+    /// page reads finished, even if its caller went away.
+    recovery: Arc<Mutex<Vec<RecoveryStore>>>,
 }
 
 /// One attached workspace, in attach order. An entry whose handle has no live
@@ -226,12 +228,29 @@ struct AttachedWorkspace {
     ordinary: bool,
 }
 
-/// An earlier store of a workspace, open read-only. It has no workspace actor:
-/// each page read opens the store read-only and closes it again.
+/// An earlier store of a workspace, open read-only by its workspace identity.
+/// It has no workspace actor: each page read opens the store read-only and
+/// closes it again.
 struct RecoveryStore {
     workspace_id: String,
     root: PathBuf,
     handle: WorkspaceHandle,
+    identity: HostedStoreIdentity,
+    /// Each page read holds it shared until its worker ends, and a close
+    /// takes it exclusively, so the entry, and the root it keeps from opening
+    /// or attaching, outlasts every read.
+    reads: Arc<tokio::sync::RwLock<()>>,
+    /// Set once a close began. The handle then reads nothing.
+    closing: bool,
+}
+
+/// A page read of a store open for recovery. Its lease keeps the store open
+/// for recovery until the read's worker drops it.
+pub(super) struct RecoveryRead {
+    pub(super) workspace_id: String,
+    pub(super) database_path: PathBuf,
+    pub(super) identity: HostedStoreIdentity,
+    pub(super) _lease: tokio::sync::OwnedRwLockReadGuard<()>,
 }
 
 #[derive(Deserialize)]
@@ -239,6 +258,8 @@ struct RecoveryStore {
 struct RecoveryStoreParams {
     root: PathBuf,
     workspace_id: String,
+    replication_epoch: String,
+    stream_identity: String,
 }
 
 /// Whether one root is the other or contains it.
@@ -246,9 +267,39 @@ fn overlaps(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
 
-/// Refuses a root that is not a store bound to it, or that holds versioned
-/// state of another workspace, as a read-only workspace open does.
-fn check_recovery_store(root: &Path, workspace_id: &str) -> Result<(), WireError> {
+/// The handle of the workspace's recovery store when it is this store, open as
+/// `identity` and not closing. Any other recovery store of the workspace is a
+/// conflict.
+fn open_recovery_handle(
+    recovery: &[RecoveryStore],
+    workspace_id: &str,
+    root: &Path,
+    identity: &HostedStoreIdentity,
+) -> Result<Option<WorkspaceHandle>, WireError> {
+    match recovery
+        .iter()
+        .find(|entry| entry.workspace_id == workspace_id)
+    {
+        Some(entry) if entry.root == root && &entry.identity == identity && !entry.closing => {
+            Ok(Some(entry.handle.clone()))
+        }
+        Some(_) => Err(WireError::new(
+            ErrorCode::Conflict,
+            "a recovery store is already open for this workspace",
+        )),
+        None => Ok(None),
+    }
+}
+
+/// Refuses a root that is not a store bound to it, that a newer or an older
+/// build migrated, that holds versioned state of another workspace, or that
+/// does not hold `identity` with a hosted replica. The read-only open runs no
+/// migration, so this build's queries could misread an older build's store.
+fn check_recovery_store(
+    root: &Path,
+    workspace_id: &str,
+    identity: &HostedStoreIdentity,
+) -> Result<(), WireError> {
     use rusqlite::OptionalExtension;
     let unavailable = || invalid("recovery store unavailable");
     let token = crate::root_binding::read_root_binding(root)
@@ -258,7 +309,10 @@ fn check_recovery_store(root: &Path, workspace_id: &str) -> Result<(), WireError
         &root.join(".dohc").join("engine").join("engine.db"),
     )
     .map_err(|_| unavailable())?;
-    let (bound, other) = store
+    if !store.is_fully_migrated().map_err(|_| unavailable())? {
+        return Err(invalid("recovery-store-needs-migration"));
+    }
+    let (bound, other, held) = store
         .read_with(|conn| {
             let bound: Option<String> = conn
                 .query_row(
@@ -272,10 +326,10 @@ fn check_recovery_store(root: &Path, workspace_id: &str) -> Result<(), WireError
                 rusqlite::params![workspace_id],
                 |row| row.get(0),
             )?;
-            Ok::<_, rusqlite::Error>((bound, other))
+            Ok::<_, rusqlite::Error>((bound, other, identity.held_in(conn, workspace_id)?))
         })
         .map_err(|_| unavailable())?;
-    if bound.as_deref() != Some(token.as_str()) || other {
+    if bound.as_deref() != Some(token.as_str()) || other || !held {
         return Err(invalid("recovery store belongs to another root or workspace"));
     }
     Ok(())
@@ -341,7 +395,7 @@ impl EngineService {
             sync,
             restore: config.restore,
             adoption: config.adoption,
-            recovery: Mutex::new(Vec::new()),
+            recovery: Arc::new(Mutex::new(Vec::new())),
         });
         let mut result = Ok(());
         for workspace in config.workspaces {
@@ -443,12 +497,13 @@ impl EngineService {
     }
 
     /// `liveApplication.openRecoveryStore`: open an earlier store of a
-    /// workspace read-only, so its owner can copy the edits the host kept
-    /// there. Nothing captures, relays, migrates, applies or settles in it,
-    /// and its handle answers only `ydoc.ownerOutbox.readPending`. A workspace
-    /// has at most one: opening its store again returns the same handle, and
-    /// any other store of it is refused. So is a root that is attached or
-    /// open for recovery, or that contains or sits inside one.
+    /// workspace read-only, as the workspace identity the host created it
+    /// for, so its owner can copy the edits the host kept there. Nothing
+    /// captures, relays, migrates, applies or settles in it, and its handle
+    /// answers only `ydoc.ownerOutbox.readPending`. A workspace has at most
+    /// one: opening its store again returns the same handle, and any other
+    /// store of it is refused. So is a root that is attached or open for
+    /// recovery, or that contains or sits inside one.
     pub(super) async fn configured_open_recovery_store(
         &self,
         ctx: &RequestContext,
@@ -464,7 +519,10 @@ impl EngineService {
             .map_err(|_| invalid("invalid recovery store"))?;
         ApplicationOwner::new(params.workspace_id.clone())
             .map_err(|_| invalid("invalid recovery store workspace identity"))?;
-        if !params.root.is_absolute() {
+        if !params.root.is_absolute()
+            || params.replication_epoch.is_empty()
+            || params.stream_identity.is_empty()
+        {
             return Err(invalid("invalid recovery store"));
         }
         let root = std::fs::canonicalize(&params.root)
@@ -472,41 +530,27 @@ impl EngineService {
         if root.to_str().is_none() || !root.is_dir() {
             return Err(invalid("recovery store unavailable"));
         }
-        let _membership = discovery.membership.lock().await;
-        self.configured_host_caller(ctx)?;
-        {
-            let recovery = lock(&discovery.recovery);
-            if let Some(entry) = recovery
-                .iter()
-                .find(|entry| entry.workspace_id == params.workspace_id)
-            {
-                // The same store again, as after an open whose reply was lost, keeps its handle.
-                if entry.root == root {
-                    return Ok(json!({"workspaceHandle": entry.handle}));
-                }
-                return Err(WireError::new(
-                    ErrorCode::Conflict,
-                    "a recovery store is already open for this workspace",
-                ));
-            }
-            if recovery.iter().any(|entry| overlaps(&entry.root, &root))
-                || lock(&self.handles)
-                    .values()
-                    .any(|open| overlaps(&open.root, &root))
-            {
-                return Err(invalid("recovery store root is already open"));
-            }
-            if recovery.len() >= super::workspace::MAX_OPEN_HANDLES {
-                return Err(WireError::new(
-                    ErrorCode::Overloaded,
-                    "recovery store limit reached",
-                ));
-            }
+        let identity = HostedStoreIdentity {
+            replication_epoch: params.replication_epoch,
+            stream_identity: params.stream_identity,
+        };
+        // The same store again, as after an open whose reply was lost, keeps its handle.
+        if let Some(handle) = open_recovery_handle(
+            &lock(&discovery.recovery),
+            &params.workspace_id,
+            &root,
+            &identity,
+        )? {
+            return Ok(json!({"workspaceHandle": handle}));
         }
+        // The check reads the whole store, so attaches and detaches do not
+        // wait on it. The checks under membership below catch an attach that
+        // took the root meanwhile.
         let cancellation = super::request::OperationCancellation::new(ctx);
-        let (checked_root, workspace_id) = (root.clone(), params.workspace_id.clone());
+        let (checked_root, workspace_id, expected) =
+            (root.clone(), params.workspace_id.clone(), identity.clone());
         let checking = tokio::task::spawn_blocking(move || {
-            check_recovery_store(&checked_root, &workspace_id)
+            check_recovery_store(&checked_root, &workspace_id, &expected)
         });
         tokio::select! {
             biased;
@@ -516,21 +560,48 @@ impl EngineService {
             checked = checking => checked
                 .map_err(|_| WireError::new(ErrorCode::Internal, "recovery store check failed"))??,
         }
+        let _membership = discovery.membership.lock().await;
+        self.configured_host_caller(ctx)?;
+        let mut recovery = lock(&discovery.recovery);
+        if let Some(handle) =
+            open_recovery_handle(&recovery, &params.workspace_id, &root, &identity)?
+        {
+            return Ok(json!({"workspaceHandle": handle}));
+        }
+        if recovery.iter().any(|entry| overlaps(&entry.root, &root))
+            || lock(&self.handles)
+                .values()
+                .any(|open| overlaps(&open.root, &root))
+        {
+            return Err(invalid("recovery store root is already open"));
+        }
+        if recovery.len() >= super::workspace::MAX_OPEN_HANDLES {
+            return Err(WireError::new(
+                ErrorCode::Overloaded,
+                "recovery store limit reached",
+            ));
+        }
         let sequence = self
             .next_handle
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let handle = WorkspaceHandle(format!("ws-{sequence:016x}"));
-        lock(&discovery.recovery).push(RecoveryStore {
+        recovery.push(RecoveryStore {
             workspace_id: params.workspace_id,
             root,
             handle: handle.clone(),
+            identity,
+            reads: Arc::default(),
+            closing: false,
         });
         Ok(json!({"workspaceHandle": handle}))
     }
 
-    /// `liveApplication.closeRecoveryStore`: end a recovery handle. A page
-    /// read already running finishes on its own connection.
-    pub(super) fn configured_close_recovery_store(
+    /// `liveApplication.closeRecoveryStore`: end a recovery handle. It reads
+    /// nothing from then on, and its root stays unavailable to open or attach
+    /// until every page read through it finished. The reply waits for that
+    /// too, so its caller may then remove the store. A close whose caller
+    /// goes away still ends the handle once its reads finish.
+    pub(super) async fn configured_close_recovery_store(
         &self,
         ctx: &RequestContext,
         request: Request,
@@ -548,31 +619,61 @@ impl EngineService {
         let handle = request
             .workspace
             .ok_or_else(super::error::workspace_unavailable)?;
-        let mut recovery = lock(&discovery.recovery);
-        let open = recovery.len();
-        recovery.retain(|entry| entry.handle != handle);
-        if recovery.len() == open {
-            return Err(super::error::workspace_unavailable());
-        }
+        let reads = {
+            let mut recovery = lock(&discovery.recovery);
+            let entry = recovery
+                .iter_mut()
+                .find(|entry| entry.handle == handle)
+                .ok_or_else(super::error::workspace_unavailable)?;
+            entry.closing = true;
+            entry.reads.clone()
+        };
+        let recovery = discovery.recovery.clone();
+        tokio::spawn(async move {
+            let _closed = reads.write_owned().await;
+            lock(&recovery).retain(|entry| entry.handle != handle);
+        })
+        .await
+        .map_err(|_| WireError::new(ErrorCode::Internal, "recovery store close failed"))?;
         Ok(json!({"closed": true}))
     }
 
-    /// The workspace and engine database of the earlier store open for
-    /// recovery under `handle`, if it is one.
-    pub(super) fn recovery_store(
+    /// Whether `handle` is a recovery store's, closing or not.
+    pub(super) fn is_recovery_handle(&self, handle: Option<&WorkspaceHandle>) -> bool {
+        let (Some(handle), Some(discovery)) = (handle, self.configured_live_host.get()) else {
+            return false;
+        };
+        lock(&discovery.recovery)
+            .iter()
+            .any(|entry| &entry.handle == handle)
+    }
+
+    /// A page read of the earlier store open for recovery under `handle`, if
+    /// it is one, with its lease. A closing handle reads nothing.
+    pub(super) fn recovery_read(
         &self,
         handle: Option<&WorkspaceHandle>,
-    ) -> Option<(String, PathBuf)> {
+    ) -> Option<Result<RecoveryRead, WireError>> {
         let handle = handle?;
-        lock(&self.configured_live_host.get()?.recovery)
-            .iter()
-            .find(|entry| &entry.handle == handle)
-            .map(|entry| {
-                (
-                    entry.workspace_id.clone(),
-                    entry.root.join(".dohc").join("engine").join("engine.db"),
-                )
-            })
+        let recovery = lock(&self.configured_live_host.get()?.recovery);
+        let entry = recovery.iter().find(|entry| &entry.handle == handle)?;
+        // A close sets `closing` under this lock before it waits for the
+        // leases, so no read starts after it.
+        let lease = if entry.closing {
+            None
+        } else {
+            entry.reads.clone().try_read_owned().ok()
+        };
+        Some(
+            lease
+                .map(|lease| RecoveryRead {
+                    workspace_id: entry.workspace_id.clone(),
+                    database_path: entry.root.join(".dohc").join("engine").join("engine.db"),
+                    identity: entry.identity.clone(),
+                    _lease: lease,
+                })
+                .ok_or_else(super::error::workspace_unavailable),
+        )
     }
 
     /// Open, provision, and list one workspace. Callers serialize membership.
@@ -1477,6 +1578,39 @@ mod tests {
         })
     }
 
+    /// The engine database of the store at `root`.
+    fn database(root: &Path) -> PathBuf {
+        root.join(".dohc").join("engine").join("engine.db")
+    }
+
+    /// Records `epoch` as the hosted workspace identity of the detached store
+    /// at `root`, as creating its hosted replica does.
+    fn host_identity(root: &Path, epoch: &str) {
+        rusqlite::Connection::open(database(root))
+            .unwrap()
+            .execute_batch(&format!(
+                "INSERT INTO sync_identity \
+                 (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+                 VALUES ('workspace','service-host:host','{epoch}','stream',1) \
+                 ON CONFLICT(workspace_id) DO UPDATE SET \
+                 replication_epoch=excluded.replication_epoch, \
+                 stream_identity=excluded.stream_identity; \
+                 INSERT OR IGNORE INTO hosted_replicas (workspace_id,created_at_ms) \
+                 VALUES ('workspace',1);"
+            ))
+            .unwrap();
+    }
+
+    /// Opens the store at `root` for recovery as workspace `id`'s store of `epoch`.
+    fn recover(root: &Path, id: &str, epoch: &str) -> Request {
+        host_request(
+            "liveApplication.openRecoveryStore",
+            None,
+            json!({"root": root, "workspaceId": id, "replicationEpoch": epoch,
+                "streamIdentity": "stream"}),
+        )
+    }
+
     /// The queued update bytes, read page by page through dispatch.
     async fn queued(
         service: &EngineService,
@@ -1535,13 +1669,7 @@ mod tests {
                     "relay": {"baseUrl": "https://relay.invalid", "bearerToken": "owner"}}),
             )
         };
-        let recover = |root: &Path, id: &str| {
-            host_request(
-                "liveApplication.openRecoveryStore",
-                None,
-                json!({"root": root, "workspaceId": id}),
-            )
-        };
+        let recover = |root: &Path, id: &str| recover(root, id, "earlier");
         let handle_of = |value: Value| -> WorkspaceHandle {
             serde_json::from_value(value["workspaceHandle"].clone()).unwrap()
         };
@@ -1574,10 +1702,20 @@ mod tests {
                     )
                     .await
                     .unwrap();
+                host_identity(root, "earlier");
             }
         }
         assert_eq!(outboxes[0], outboxes[1]);
         let outbox = outboxes[0].as_str();
+        // The earlier store opens only as the identity it holds.
+        assert_eq!(
+            service
+                .dispatch(ctx(), self::recover(earlier.path(), "workspace", "later"))
+                .await
+                .unwrap_err()
+                .message,
+            "recovery store belongs to another root or workspace"
+        );
         let recovery = handle_of(
             service
                 .dispatch(ctx(), recover(earlier.path(), "workspace"))
@@ -1726,6 +1864,166 @@ mod tests {
                 host_request(
                     "liveApplication.detachWorkspace",
                     Some(attached[1].clone()),
+                    json!({}),
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(lock(&service.handles).is_empty());
+    }
+
+    /// Attaches the store at `root` as `workspace`, then detaches it.
+    async fn detached_store(service: &EngineService, ctx: &RequestContext, root: &Path) {
+        let attached = service
+            .configured_attach_workspace(
+                ctx,
+                host_request(
+                    "liveApplication.attachWorkspace",
+                    None,
+                    json!({"root": root, "workspaceId": "workspace", "maxRegistrations": 4}),
+                ),
+            )
+            .await
+            .unwrap();
+        service
+            .configured_detach_workspace(
+                ctx,
+                host_request(
+                    "liveApplication.detachWorkspace",
+                    Some(serde_json::from_value(attached["workspaceHandle"].clone()).unwrap()),
+                    json!({}),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_store_opens_for_recovery_only_as_the_identity_it_holds_and_fully_migrated() {
+        let store = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let (service, owner, _ingress) = EngineService::configured_live_host(config(&[]))
+            .await
+            .unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        detached_store(&service, &ctx, store.path()).await;
+        host_identity(store.path(), "epoch");
+        // With no versioned state, only its identity says whose store it is.
+        rusqlite::Connection::open(database(store.path()))
+            .unwrap()
+            .execute_batch("PRAGMA foreign_keys=OFF; DELETE FROM versioned_workspaces;")
+            .unwrap();
+        for (id, epoch) in [("workspace", "later"), ("other", "epoch")] {
+            assert_eq!(
+                service
+                    .dispatch(ctx.clone(), recover(store.path(), id, epoch))
+                    .await
+                    .unwrap_err()
+                    .message,
+                "recovery store belongs to another root or workspace",
+                "{id} {epoch}"
+            );
+        }
+        // A store an older build last migrated is refused, and left as it was.
+        rusqlite::Connection::open(database(store.path()))
+            .unwrap()
+            .execute_batch(
+                "DELETE FROM engine_migrations \
+                 WHERE ordinal=(SELECT MAX(ordinal) FROM engine_migrations)",
+            )
+            .unwrap();
+        let before = std::fs::read(database(store.path())).unwrap();
+        assert_eq!(
+            service
+                .dispatch(ctx.clone(), recover(store.path(), "workspace", "epoch"))
+                .await
+                .unwrap_err()
+                .message,
+            "recovery-store-needs-migration"
+        );
+        assert_eq!(std::fs::read(database(store.path())).unwrap(), before);
+        assert!(lock(&service.handles).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_closed_recovery_store_keeps_its_root_until_its_reads_end() {
+        let store = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let (service, owner, _ingress) = EngineService::configured_live_host(config(&[]))
+            .await
+            .unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        detached_store(&service, &ctx, store.path()).await;
+        host_identity(store.path(), "epoch");
+        let recovery: WorkspaceHandle = serde_json::from_value(
+            service
+                .dispatch(ctx.clone(), recover(store.path(), "workspace", "epoch"))
+                .await
+                .unwrap()
+                .response
+                .result["workspaceHandle"]
+                .clone(),
+        )
+        .unwrap();
+        // A read whose request was cancelled before its worker opened the
+        // store: the worker still holds the read's lease.
+        let worker = service.recovery_read(Some(&recovery)).unwrap().unwrap();
+        let closing = service.dispatch(
+            ctx.clone(),
+            host_request(
+                "liveApplication.closeRecoveryStore",
+                Some(recovery.clone()),
+                json!({}),
+            ),
+        );
+        tokio::pin!(closing);
+        tokio::select! {
+            biased;
+            _ = &mut closing => panic!("the close ended while a read held its lease"),
+            () = std::future::ready(()) => {}
+        }
+        // Closing, the handle reads nothing, and the root neither opens nor attaches.
+        assert!(service.recovery_read(Some(&recovery)).unwrap().is_err());
+        assert_eq!(
+            service
+                .dispatch(ctx.clone(), recover(store.path(), "workspace", "epoch"))
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+        let attach = || {
+            host_request(
+                "liveApplication.attachWorkspace",
+                None,
+                json!({"root": store.path(), "workspaceId": "workspace", "maxRegistrations": 4}),
+            )
+        };
+        assert_eq!(
+            service
+                .configured_attach_workspace(&ctx, attach())
+                .await
+                .unwrap_err()
+                .message,
+            "live host workspace root is open for recovery"
+        );
+        // Once the worker ends, the close answers and the root attaches.
+        drop(worker);
+        assert_eq!(
+            closing.await.unwrap().response.result,
+            json!({"closed": true})
+        );
+        assert!(!service.is_recovery_handle(Some(&recovery)));
+        let attached = service
+            .configured_attach_workspace(&ctx, attach())
+            .await
+            .unwrap();
+        service
+            .configured_detach_workspace(
+                &ctx,
+                host_request(
+                    "liveApplication.detachWorkspace",
+                    Some(serde_json::from_value(attached["workspaceHandle"].clone()).unwrap()),
                     json!({}),
                 ),
             )

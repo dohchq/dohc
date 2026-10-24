@@ -13,7 +13,9 @@ export type LiveDocumentRow = {
   canResume: boolean;
   deferredStop?: {unsentEdits: number; editable: boolean};
   /** The server refused this document's edits for good, and dohc keeps them where `storedOn` says. */
-  quarantine?: "paused" | "retrying" | "stopping" | "stopped-kept" | "not-written" | "cannot-write" | "copied" | "earlier";
+  quarantine?: "paused" | "retrying" | "stopping" | "stopped-kept" | "not-written" | "cannot-write" | "copied";
+  /** The server keeps them in an earlier copy of the workspace, copied or not. */
+  earlier?: true;
   storedOn?: "this-computer" | "server";
   /** Those kept edits' incident, so Save recovery copy saves what the row shows. */
   incident?: string;
@@ -154,11 +156,11 @@ function mergeRows(
 }
 
 function statusLabel(row: LiveDocumentRow): string {
+  if (row.quarantine === "paused" && row.earlier) return "Kept on the server";
   if (row.quarantine === "paused" || row.quarantine === "copied") return "Paused";
   if (row.quarantine === "retrying") return "Trying again";
   if (row.quarantine === "stopping") return "Stopping";
   if (row.quarantine === "stopped-kept") return "Stopped";
-  if (row.quarantine === "earlier") return "Kept on the server";
   // not-written and cannot-write keep an earlier Stop's edits; the session says whether the document is live now.
   if (row.reason === "document-unavailable") return "File moved or removed";
   if (row.reason === "workspace-changed") return "Workspace changed";
@@ -209,6 +211,7 @@ function deferredStopNote(row: LiveDocumentRow, stop: NonNullable<LiveDocumentRo
 function quarantineNote(row: LiveDocumentRow): string | null {
   switch (row.quarantine) {
     case "paused":
+      if (row.earlier) return "The server could not accept your edits. It kept them in an earlier copy of this workspace. Save a recovery copy to get them back.";
       return `The server could not accept your edits. dohc kept them ${row.storedOn === "server" ? "on the server" : "on this computer"}. Save a recovery copy to get them back.`;
     case "copied":
       return "The server could not accept your edits. A recovery copy of them is saved, so the server may now release them.";
@@ -222,8 +225,6 @@ function quarantineNote(row: LiveDocumentRow): string | null {
       return "When live editing stopped, dohc kept your unsent edits but could not write them to your file. Save a recovery copy to get them back.";
     case "cannot-write":
       return "When live editing stopped, dohc kept your unsent edits but can't finish writing them to your file. Save a recovery copy to get them back.";
-    case "earlier":
-      return "The server could not accept your edits. It kept them in an earlier copy of this workspace. Save a recovery copy to get them back.";
     default:
       return null;
   }

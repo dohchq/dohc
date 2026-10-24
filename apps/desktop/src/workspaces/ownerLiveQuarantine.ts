@@ -6,15 +6,15 @@ import {recoverySnapshot, sameBinding, type UnwrittenRelease} from "./ownerLiveR
 const ServerKeptEdits = z.object({
   objectId: z.string().min(1).max(512), path: z.string().min(1).max(4096), outboxId: z.string().min(1).max(512),
   reason: z.string().min(1).max(128), generation: z.number().int().positive().safe(), store: z.string().min(1).max(64),
-  recovery: z.enum(["paused", "retrying", "copied", "earlier"]),
+  recovery: z.enum(["paused", "retrying", "copied"]), earlier: z.literal(true).optional(),
 }).strict();
 /**
  * A refused queue the server keeps for a document it hosts. `generation`
  * names the refusal; Try again and a confirmed copy name it back. `store`
  * names the server's copy of the workspace that holds it: copies can hold
  * different queues with the same outbox ID.
- * `earlier`: the server keeps them in an earlier copy of the workspace.
- * Save recovery copy reads them from there; Try again cannot reach them.
+ * `earlier`: the server keeps them in an earlier copy of the workspace, before
+ * and after a copy. Save recovery copy reads them from there; Try again cannot reach them.
  */
 export type ServerKeptEdits = z.infer<typeof ServerKeptEdits>;
 

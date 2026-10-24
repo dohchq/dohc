@@ -149,10 +149,11 @@ it("lets only the workspace's owner see, read, try again and confirm a copy of e
   expect(await list()).toBeUndefined();
 });
 
-// Proves: a row of an earlier workspace identity's store lists as earlier. Its
-// owner reads its pages from that store and confirms a copy of it, which marks
-// only that row and lets the host release the store; Try again is refused
-// without reaching the host. The current store's queue with the same outbox
+// Proves: a row of an earlier workspace identity's store lists as earlier,
+// before and after its copy. Its owner reads its pages from that store and
+// confirms a copy of it, which marks only that row and lets the host release
+// the store; Try again is refused without reaching the host, copied or not.
+// The current store's queue with the same outbox
 // ID lists as its own row, and each action reaches the row its generation
 // names. A recipient or another workspace's owner reaches neither.
 it("reads and confirms edits kept in an earlier identity's store, and refuses their Try again", async () => {
@@ -164,7 +165,7 @@ it("reads and confirms edits kept in an earlier identity's store, and refuses th
   const row = {objectId: binding.objectId, path: binding.currentPath, outboxId: "outbox-x", reason: "invalid-update", store: expect.any(String)};
   const list = async () => ((await (await f.handle(f.request())).json()) as {keptEdits: Array<{store: string}>}).keptEdits;
   const listed = await list();
-  expect(listed).toEqual([{...row, generation: earlier, recovery: "earlier"}, {...row, generation: current, recovery: "paused"}]);
+  expect(listed).toEqual([{...row, generation: earlier, recovery: "paused", earlier: true}, {...row, generation: current, recovery: "paused"}]);
   // The owner tells the two stores apart without learning either identity.
   expect(listed[0]!.store).not.toBe(listed[1]!.store);
   for (const secret of ["old-epoch", "old-stream", "epoch", "stream"]) expect(JSON.stringify(listed)).not.toContain(secret);
@@ -184,7 +185,11 @@ it("reads and confirms edits kept in an earlier identity's store, and refuses th
   expect(f.host.keptEdits.page.mock.calls.map(([kept]) => [kept.generation, kept.identity])).toEqual([[earlier, old]]);
   expect(f.host.keptEdits.copied.mock.calls.map(([kept]) => [kept.generation, kept.identity])).toEqual([[earlier, old]]);
   expect(f.storage.readServiceKeptEdits(queue("outbox-x", identity))).toMatchObject({generation: current, copied: false});
-  expect(await list()).toEqual([{...row, generation: earlier, recovery: "copied"}, {...row, generation: current, recovery: "paused"}]);
+  expect(await list()).toEqual([{...row, generation: earlier, recovery: "copied", earlier: true}, {...row, generation: current, recovery: "paused"}]);
+  const copiedRetry = await act("retry", earlier);
+  expect(copiedRetry.status).toBe(409);
+  expect(await copiedRetry.json()).toMatchObject({ok: false, code: "kept-edits-earlier"});
+  expect(f.host.keptEdits.retry).not.toHaveBeenCalled();
   // A host that could not release the store keeps the confirmation.
   f.host.keptEdits.copied.mockRejectedValueOnce(new Error("engine gone"));
   expect(await (await act("copied", current)).json()).toEqual({ok: true});

@@ -79,16 +79,16 @@ export function serviceHostEnrollmentRefusals(storage: SyncRelayStorage, workspa
 
 /**
  * A refused queue the server keeps, as its owner sees it. One in the store of
- * an earlier workspace identity is `earlier`: its owner can save a recovery
- * copy from that store, but nothing delivers it any more, so Try again cannot
- * reach it. `store` tells queues of different stores apart that share an
- * outbox ID, without naming either identity.
+ * an earlier workspace identity is `earlier`, before and after a copy: its
+ * owner can save a recovery copy from that store, but nothing delivers it any
+ * more, so Try again cannot reach it. `store` tells queues of different stores
+ * apart that share an outbox ID, without naming either identity.
  */
 function keptView(row: ServiceKeptEdits, identity: {replicationEpoch: string | null; streamIdentity: string | null} | null) {
   const current = sameKeptEditsIdentity(row.identity, identity);
   return {objectId: row.objectId, path: row.binding.currentPath, outboxId: row.outboxId, reason: row.reason, generation: row.generation,
     store: createHash("sha256").update(JSON.stringify([row.identity.replicationEpoch, row.identity.streamIdentity])).digest("hex").slice(0, 32),
-    recovery: current && row.retrying ? "retrying" : row.copied ? "copied" : current ? "paused" : "earlier"};
+    recovery: current && row.retrying ? "retrying" : row.copied ? "copied" : "paused", ...(current ? {} : {earlier: true})};
 }
 
 /** A kept edits action that names a refusal the server no longer has, or a Try again of an earlier store's. Answered as 409 with its code. */

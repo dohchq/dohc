@@ -1831,7 +1831,7 @@ export function DesktopWorkspaceShell(props: {
       if (!listed.has(identity)) {shown.delete(identity);clearIdentity(identity);}
     }
     for (const row of rows) {
-      const identity=identityOf(row), incident=`${row.recovery}\n${row.incident}`;
+      const identity=identityOf(row), incident=`${row.recovery}${row.earlier ? " earlier" : ""}\n${row.incident}`;
       if (shown.get(identity)===incident) continue;
       shown.set(identity,incident);
       const onServer=row.storedOn==="server";
@@ -1877,7 +1877,7 @@ export function DesktopWorkspaceShell(props: {
         continue;
       }
       // Try again cannot reach an earlier copy of the workspace, so the row offers only Save.
-      if (row.recovery==="earlier") {
+      if (row.earlier && row.recovery==="paused") {
         reportShellFailure({title:`Live editing paused for ${row.path}`,
           message:"The server could not accept your edits. It kept them in an earlier copy of this workspace. Save a recovery copy to get them back.",
           details,action:save,identity});
@@ -1891,10 +1891,11 @@ export function DesktopWorkspaceShell(props: {
         });
       };
       // The server keeps them, and the owner saved a recovery copy, maybe on another computer: the row stays quiet.
+      // Try again still cannot reach an earlier copy of the workspace.
       if (row.recovery==="copied") {
         reportShellFailure({title:`Live editing paused for ${row.path}`,tone:"warning",quiet:true,
           message:"The server could not accept your edits. A recovery copy of them is saved, so the server may now release them.",
-          details,retry,action:save,identity});
+          details,...(row.earlier ? {} : {retry}),action:save,identity});
         continue;
       }
       reportShellFailure({title:`Live editing paused for ${row.path}`,
