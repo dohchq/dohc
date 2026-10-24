@@ -254,7 +254,7 @@ export function LossyNoteNotice(props: {
   const historyLine = history?.asked !== asked ? null
     : history.keeps === "kept" ? "History keeps the original."
     : history.keeps === "untracked" ? "History does not track this file, so dohc can't restore the original."
-    : "History has not recorded the original, so dohc can't restore it.";
+    : "dohc could not confirm that History can restore the original.";
   return (
     <div
       data-testid="lossy-note-notice"

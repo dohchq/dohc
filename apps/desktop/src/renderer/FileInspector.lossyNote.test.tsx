@@ -165,7 +165,7 @@ describe("a lossy note", () => {
 
     await user.click(await screen.findByTestId("lossy-note-edit-anyway"));
     const dialog = screen.getByRole("dialog", { name: "Edit this document anyway?" });
-    await waitFor(() => expect(dialog.textContent).toContain("History has not recorded the original, so dohc can't restore it."));
+    await waitFor(() => expect(dialog.textContent).toContain("dohc could not confirm that History can restore the original."));
     expect(dialog.textContent).not.toContain("History keeps the original.");
   });
 
@@ -177,7 +177,7 @@ describe("a lossy note", () => {
 
     await user.click(await screen.findByTestId("lossy-note-edit-anyway"));
     const dialog = screen.getByRole("dialog", { name: "Edit this document anyway?" });
-    await waitFor(() => expect(dialog.textContent).toContain("History has not recorded the original, so dohc can't restore it."));
+    await waitFor(() => expect(dialog.textContent).toContain("dohc could not confirm that History can restore the original."));
     expect(dialog.textContent).not.toContain("History keeps the original.");
     await user.click(screen.getByTestId("lossy-note-edit-anyway-cancel"));
 
