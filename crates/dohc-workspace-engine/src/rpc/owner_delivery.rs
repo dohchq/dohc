@@ -131,7 +131,7 @@ struct OwnerOutputGuard {
     connection: ConnectionHandle,
     cancel: dohc_engine_protocol::cancel::CancelSignal,
     deadline: Option<Instant>,
-    reservation: Arc<dyn Send + Sync>,
+    reservation: std::sync::Mutex<Option<Arc<dyn Send + Sync>>>,
 }
 impl std::fmt::Debug for OwnerOutputGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -173,6 +173,9 @@ impl OutputGuard for OwnerOutputGuard {
                     .open(Some(&self.workspace))
                     .is_ok_and(|open| Arc::ptr_eq(&open, &self.open))
             })
+    }
+    fn release(&self) {
+        crate::lock(&self.reservation).take();
     }
 }
 
@@ -223,7 +226,7 @@ impl EngineService {
             &ctx,
             request.workspace.as_ref(),
             Some(&params.binding),
-            reservation,
+            reservation.clone(),
         )?;
         let cancellation = OperationCancellation::new(&ctx);
         let _serial = self
@@ -249,7 +252,7 @@ impl EngineService {
                     automation_declaration: None,
                 },
                 cancellation.token(),
-                guard.reservation.clone(),
+                reservation.clone(),
             )
             .await
             .map_err(map_runtime)?
@@ -285,11 +288,12 @@ impl EngineService {
         if !ctx.capabilities.iter().any(|c| c == "blobs") {
             return Err(invalid());
         }
+        let reservation = self.reserve_owner_delivery()?;
         let guard = self.owner_delivery_guard(
             &ctx,
             request.workspace.as_ref(),
             Some(&params.binding),
-            self.reserve_owner_delivery()?,
+            reservation.clone(),
         )?;
         let cancellation = OperationCancellation::new(&ctx);
         let state = guard
@@ -299,7 +303,7 @@ impl EngineService {
                 params.binding,
                 params.expected_revision,
                 cancellation.token(),
-                guard.reservation.clone(),
+                reservation.clone(),
             )
             .await
             .map_err(map_runtime)?
@@ -342,12 +346,9 @@ impl EngineService {
             writes: Option<Vec<dohc_engine_collab::owner_outbox::draft::OwnerDraftWrite>>,
         }
         let params: Params = serde_json::from_value(request.params).map_err(|_| invalid())?;
-        let guard = self.owner_delivery_guard(
-            &ctx,
-            request.workspace.as_ref(),
-            None,
-            self.reserve_owner_delivery()?,
-        )?;
+        let reservation = self.reserve_owner_delivery()?;
+        let guard =
+            self.owner_delivery_guard(&ctx, request.workspace.as_ref(), None, reservation.clone())?;
         let cancellation = OperationCancellation::new(&ctx);
         if let Some(writes) = params.writes {
             let states = guard
@@ -357,7 +358,7 @@ impl EngineService {
                     guard.open.workspace_id.clone(),
                     writes,
                     cancellation.token(),
-                    guard.reservation.clone(),
+                    reservation.clone(),
                 )
                 .await
                 .map_err(map_runtime)?
@@ -383,7 +384,7 @@ impl EngineService {
                 params.limit,
                 params.pending_only,
                 cancellation.token(),
-                guard.reservation.clone(),
+                reservation.clone(),
             )
             .await
             .map_err(map_runtime)?
@@ -479,7 +480,7 @@ impl EngineService {
             connection: connection.clone(),
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
-            reservation,
+            reservation: std::sync::Mutex::new(Some(reservation)),
         });
         if !guard.is_current() {
             return Err(workspace_unavailable());
@@ -523,11 +524,12 @@ impl EngineService {
             OwnerUpload::Accepted(params) => params,
         };
         params.validate(&request.method)?;
+        let reservation = input.reservation;
         let guard = self.owner_delivery_guard(
             &ctx,
             request.workspace.as_ref(),
             Some(&params.binding),
-            input.reservation,
+            reservation.clone(),
         )?;
         let cancellation = OperationCancellation::new(&ctx);
         let serial = self
@@ -574,7 +576,7 @@ impl EngineService {
                             vector,
                             now,
                             token,
-                            guard.reservation.clone(),
+                            reservation.clone(),
                         )
                         .await
                 } else {
@@ -586,7 +588,7 @@ impl EngineService {
                             applied,
                             now,
                             token,
-                            guard.reservation.clone(),
+                            reservation.clone(),
                         )
                         .await
                 }
@@ -637,7 +639,7 @@ impl EngineService {
             &ctx,
             request.workspace.as_ref(),
             Some(&params.binding),
-            reservation,
+            reservation.clone(),
         )?;
         let cancellation = OperationCancellation::new(&ctx);
         let _serial = self
@@ -670,7 +672,7 @@ impl EngineService {
                 limits,
                 now_ms()?,
                 cancellation.token(),
-                guard.reservation.clone(),
+                reservation.clone(),
             )
             .await
             .map_err(map_runtime)?
@@ -724,7 +726,7 @@ impl EngineService {
             &ctx,
             request.workspace.as_ref(),
             Some(&params.binding),
-            reservation,
+            reservation.clone(),
         )?;
         let cancellation = OperationCancellation::new(&ctx);
         let result = guard
@@ -735,7 +737,7 @@ impl EngineService {
                 params.relay_database_namespace,
                 params.recovery,
                 cancellation.token(),
-                guard.reservation.clone(),
+                reservation.clone(),
             )
             .await
             .map_err(map_runtime)?
@@ -761,11 +763,12 @@ impl EngineService {
         // Keep the refusal future and its construction out of the RPC dispatcher.
         Box::pin(async move {
             let input = serde_json::from_value(request.params).map_err(|_| invalid())?;
+            let reservation = self.reserve_owner_delivery()?;
             let guard = self.owner_delivery_guard(
                 &ctx,
                 request.workspace.as_ref(),
                 None,
-                self.reserve_owner_delivery()?,
+                reservation.clone(),
             )?;
             let cancellation = OperationCancellation::new(&ctx);
             let _serial = self
@@ -782,7 +785,7 @@ impl EngineService {
                     input,
                     now_ms()?,
                     cancellation.token(),
-                    guard.reservation.clone(),
+                    reservation.clone(),
                 )
                 .await
                 .map_err(map_runtime)?
@@ -828,7 +831,7 @@ impl EngineService {
             &ctx,
             request.workspace.as_ref(),
             Some(&p.binding),
-            reservation,
+            reservation.clone(),
         )?;
         let cancellation = OperationCancellation::new(&ctx);
         let (result, blob_egress) = if let Some(receipt) = p.receipt {
@@ -840,7 +843,7 @@ impl EngineService {
                     p.relay_database_namespace,
                     receipt,
                     cancellation.token(),
-                    guard.reservation.clone(),
+                    reservation.clone(),
                 )
                 .await
                 .map_err(map_runtime)?
@@ -854,7 +857,7 @@ impl EngineService {
                     p.binding,
                     p.relay_database_namespace,
                     cancellation.token(),
-                    guard.reservation.clone(),
+                    reservation.clone(),
                 )
                 .await
                 .map_err(map_runtime)?

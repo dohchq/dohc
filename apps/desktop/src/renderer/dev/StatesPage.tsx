@@ -2386,6 +2386,20 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
+      {/* Privacy's rows in the narrowest pane, an 840px window's, and the widest. */}
+      <Section part="settings-privacy" title="Settings: Privacy">
+        <Specimen label="narrowest pane: Diagnostics' buttons under its text; usage reports changed, keyboard focus on its switch">
+          <div className="w-[504px]" data-force-state="focus focus-visible" data-force-target='[role="switch"][aria-label="Send usage reports"]'>
+            <PrivacyRowsSpecimen />
+          </div>
+        </Specimen>
+        <Specimen label="widest pane: every control beside its text">
+          <div className="w-[640px]">
+            <PrivacyRowsSpecimen />
+          </div>
+        </Specimen>
+      </Section>
+
       <Section part="rails" title="Rails">
         <Specimen label="activity bar: Chats beside Files, selected; Search hovered; Graph focused">
           <div className="flex h-[400px] overflow-hidden rounded-lg border border-line">
@@ -3172,6 +3186,43 @@ function ZoomSpecimen(props: { percent: number; atMost?: boolean }) {
       reset={{ label: "Reset to 100%", to: "100%", keys: shortcutKeys("zoom-reset", "win32"), onClick: noop }}
       increase={{ label: "Zoom in", keys: shortcutKeys("zoom-in", "win32"), disabled: props.atMost, onClick: noop }}
     />
+  );
+}
+
+const TRUST_OPTIONS = [
+  { value: "trusted", label: "Trusted" },
+  { value: "restricted", label: "Restricted Mode" },
+];
+const DIAGNOSTICS_BUTTON =
+  "rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink";
+
+// Privacy's rows as Settings draws them: a segmented control, two switches,
+// and Diagnostics' three buttons, the widest controls in Settings.
+function PrivacyRowsSpecimen() {
+  return (
+    <>
+      <SettingRow title="Workspace trust" description="A trusted workspace runs its apps' dev and build commands, and starts agents, on this computer.">
+        <div className="shrink-0 whitespace-nowrap">
+          <SegmentedControl label="Workspace trust" value="trusted" options={TRUST_OPTIONS} onChange={noop} />
+        </div>
+      </SettingRow>
+      <SettingRow
+        title="Send usage reports"
+        description="Counts when you open dohc, create or open a workspace, share, publish an app, or send a chat message. Includes a random ID for this installation. No names, content, or links."
+        modified
+        onReset={noop}
+      >
+        <SwitchControl label="Send usage reports" checked={false} onChange={noop} />
+      </SettingRow>
+      <SettingRow title="Send error reports" description="Sends an error's type and where in dohc's code it happened. No messages, file names, or other paths.">
+        <SwitchControl label="Send error reports" checked onChange={noop} />
+      </SettingRow>
+      <SettingRow title="Diagnostics" description="Version, system, report settings, and recent problems. They stay on this computer until you copy or save them.">
+        <button type="button" className={DIAGNOSTICS_BUTTON}>Show</button>
+        <CopyButton label="Copy diagnostics" getText={() => ""} />
+        <button type="button" className={DIAGNOSTICS_BUTTON}>Save…</button>
+      </SettingRow>
+    </>
   );
 }
 

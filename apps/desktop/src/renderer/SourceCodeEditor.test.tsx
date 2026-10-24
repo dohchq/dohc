@@ -49,12 +49,15 @@ describe("code highlighting", () => {
       return rule?.match(/color:\s*([^;}]+)/)?.[1]?.trim() ?? null;
     };
 
-    await waitFor(() => expect(colorOf("import")).toBe("var(--dohc-ink)"));
-    expect(colorOf('"react"')).toBe("var(--dohc-success)");
-    expect(colorOf("// note")).toBe("var(--dohc-muted)");
-    expect(colorOf("1")).toBe("var(--dohc-warning)");
-    expect(colorOf("useRows")).toBe("var(--dohc-agent)");
-    expect(colorOf("number")).toBe("var(--dohc-agent)");
+    // The parser colors the code in time slices, so the first can end before the last token.
+    await waitFor(() => {
+      expect(colorOf("import")).toBe("var(--dohc-ink)");
+      expect(colorOf('"react"')).toBe("var(--dohc-success)");
+      expect(colorOf("// note")).toBe("var(--dohc-muted)");
+      expect(colorOf("1")).toBe("var(--dohc-warning)");
+      expect(colorOf("useRows")).toBe("var(--dohc-agent)");
+      expect(colorOf("number")).toBe("var(--dohc-agent)");
+    });
   });
 });
 

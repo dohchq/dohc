@@ -1209,7 +1209,7 @@ it("records a hand-made record as a local file edit under the person main read, 
 describe("before the workspace's open prepares .dohc/local", () => {
   const notReady = {
     "not-opened": () => readLocalStateFrom(null),
-    "not-excluded": () => readLocalStateFrom({ currentBinding: () => ({ localStateReady: false }) }),
+    "not-excluded": () => readLocalStateFrom({ currentBinding: () => ({ localStateReady: false }), localStateOpenAt: async () => ({ current: () => true }) }),
   };
   const because = {
     "not-opened": "because the workspace has not finished opening. Try again when it opens.",

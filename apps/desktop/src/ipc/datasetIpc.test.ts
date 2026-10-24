@@ -331,7 +331,7 @@ it.each(["data/dataset.json", "data/schema.sql", "data/operations.js"].flatMap(p
     await adapter.captureSourceMetadata({ workspaceId: "workspace", versionId: "main", paths: ["data/dataset.json", "data/schema.sql", "data/operations.js"], bounds: { maxInputFiles: 3, maxInputBytes: 4096 }, signal: f.abort.signal });
     throw Error("review read held source");
   } });
-  await expect(f.handler("window", { workspaceId: "workspace", action: "prepare", descriptorPath: "data/dataset.json" })).rejects.toThrow(waiting ? `"${path}" has an outside change waiting` : `dohc cannot use "${path}" for this change. dohc cannot represent part of the file`);
+  await expect(f.handler("window", { workspaceId: "workspace", action: "prepare", descriptorPath: "data/dataset.json" })).rejects.toThrow(waiting ? `"${path}" has an outside change waiting` : `dohc cannot use "${path}" for this change. dohc cannot take in this file's Markdown.`);
   expect(f.sourceRequests.filter(request => request.method === "versionedText.captureSources")).toHaveLength(0);
 });
 

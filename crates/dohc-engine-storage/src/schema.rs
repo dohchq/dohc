@@ -332,8 +332,8 @@ fn open_engine_db_configured(
     // Step 1: "is this file empty?" is our question, not the VFS's.
     reject_undersized_database(path)?;
 
-    let mut conn = Connection::open_with_flags(
-        crate::sqlite_path(path),
+    let mut conn = crate::open_store(
+        path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
     )
     .map_err(StorageError::corrupt)?;
@@ -442,8 +442,7 @@ pub(crate) fn open_engine_db_read_only(
 ) -> Result<OpenedEngineDb, StorageError> {
     reject_undersized_database(path)?;
     let conn =
-        Connection::open_with_flags(crate::sqlite_path(path), OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(StorageError::corrupt)?;
+        crate::open_store(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(StorageError::corrupt)?;
     count_open_work(&conn, work)?;
     apply_session_pragmas(&conn)?;
     if classify_fingerprint(&conn)? != Disposition::ExistingV2 {

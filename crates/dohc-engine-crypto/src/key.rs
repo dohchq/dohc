@@ -222,12 +222,16 @@ pub fn load_key_file(engine_dir: &std::path::Path) -> Result<Option<SecretDataKe
 
 /// The key folder must not resolve anywhere else: neither it nor the folder
 /// above it, `.dohc` in a workspace, may be reached through a link, as each
-/// load and mint checked on main. A folder named by its ID, as the engine
-/// reaches the folder it checked on a Mac, has no names to follow. Shared by
-/// load and mint.
+/// load and mint checked on main. A folder the engine reaches as the folder it
+/// checked has no names to follow: by its ID on a Mac, and by the descriptor
+/// it holds on Linux. Shared by load and mint.
 fn verify_key_dir(engine_dir: &std::path::Path) -> Result<(), CryptoError> {
     #[cfg(target_vendor = "apple")]
     if dohc_macos_files::is_path_by_id(engine_dir) {
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    if dohc_linux_files::held::is_path_by_fd(engine_dir) {
         return Ok(());
     }
     let parent = engine_dir.parent();
@@ -409,6 +413,31 @@ mod tests {
         assert!(moved.join(SECRET_KEY_FILE_NAME).is_file());
         std::fs::write(engine.join(SECRET_KEY_FILE_NAME), "not the key").unwrap();
         assert_eq!(load_key_file(&by_id).unwrap(), Some(key));
+    }
+
+    /// On Linux the key goes through the descriptor held for the folder the
+    /// engine checked. After that folder moves and another takes its name,
+    /// the key still publishes and loads in the checked folder, and the
+    /// other folder gets nothing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_key_publishes_and_loads_through_the_held_folder() {
+        use std::os::fd::AsFd;
+        let scratch = dohc_test_scratch::ScratchDir::new_named("key-held").unwrap();
+        let engine = scratch.path().join("engine");
+        std::fs::create_dir(&engine).unwrap();
+        let folder = std::fs::File::open(&engine).unwrap();
+        let held =
+            dohc_linux_files::held::held_path(folder.as_fd(), std::path::Path::new(".dohc/engine"))
+                .unwrap();
+        let moved = scratch.path().join("moved");
+        std::fs::rename(&engine, &moved).unwrap();
+        std::fs::create_dir(&engine).unwrap();
+        let key = create_key_file(&held).unwrap();
+        assert_eq!(std::fs::read_dir(&engine).unwrap().count(), 0);
+        assert!(moved.join(SECRET_KEY_FILE_NAME).is_file());
+        std::fs::write(engine.join(SECRET_KEY_FILE_NAME), "not the key").unwrap();
+        assert_eq!(load_key_file(&held).unwrap(), Some(key));
     }
 
     #[cfg(target_vendor = "apple")]
