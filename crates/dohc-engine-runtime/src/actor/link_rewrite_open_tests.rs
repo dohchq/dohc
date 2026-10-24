@@ -266,7 +266,7 @@ async fn closed_forward_open_inverse_and_open_forward_closed_inverse() {
         } else {
             lease = Some(f.open_document("source-0000").await.0);
         }
-        let undone = f.undo_open_with_busy_retry().await.unwrap();
+        let undone = f.undo_open().await.unwrap();
         assert!(undone.not_restored.is_empty());
         assert_eq!(f.text("source-0000.md").await, BODY);
         drop(lease);
@@ -760,7 +760,7 @@ async fn unmappable_open_inverse_is_not_restored_and_other_members_continue() {
         .unwrap();
     f.publish().await;
     let (lease, _) = f.open_document_with_elements("source-0000", false).await;
-    let result = f.undo_open_with_busy_retry().await;
+    let result = f.undo_open().await;
     let request = format!("{}-undo", f.ws);
     let reasons = f
         .actor
@@ -895,7 +895,7 @@ async fn undo_preflight_leaves_parked_peer_updates_for_the_session_drain() {
         })
         .await
         .unwrap();
-    let undone = f.undo_open_with_busy_retry().await;
+    let undone = f.undo_open().await;
     let text = f.text("source-0000.md").await;
     let (queued, drained, projected) = f
         .actor
@@ -970,7 +970,7 @@ async fn preflight_settle_failure_is_durable_and_other_members_continue() {
         })?;
         Ok(())
     }).await.unwrap();
-    let result = f.undo_open_with_busy_retry().await;
+    let result = f.undo_open().await;
     let request = format!("{}-undo", f.ws);
     let errors: String = f
         .actor
