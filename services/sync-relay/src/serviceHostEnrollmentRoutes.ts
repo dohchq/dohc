@@ -12,7 +12,7 @@ import {canonicalLiveSelector} from "./storage/liveDocumentAuthority";
 import {parseShareId, parseWorkspaceId} from "./requestInputs";
 import {badRequest, errorResponse, notFound, relayError, RelayError} from "./errors";
 import type {JsonValue} from "@dohc/workspace-engine-client";
-import {sameKeptEditsIdentity, type ServiceKeptEdits} from "./storage/serviceKeptEdits";
+import {RecoveryCopyRefusal, sameKeptEditsIdentity, type ServiceKeptEdits} from "./storage/serviceKeptEdits";
 
 export function serviceHostSharePaths(storage: SyncRelayStorage, input: {workspaceId: string; ownerUserId: string; shareId: string; missingOnly?: boolean}): string[] {
   const share = storage.getShare(input.shareId), parsed = share && parseStoredAnyShareSelectorJson(share.selectorJson);
@@ -303,6 +303,7 @@ export function createServiceHostEnrollmentRoutes(options: {
       return response({ok: true, ...(input.path === undefined ? {documents} : documents[0])}, documents.every(row => row.status === "ready") ? 200 : 202);
     } catch (error) {
       if (error instanceof KeptEditsConflict) return response({ok: false, code: error.code, error: error.message}, 409);
+      if (error instanceof RecoveryCopyRefusal) return response({ok: false, code: "kept-edits-unrecoverable", reason: error.reason, error: error.message}, 409);
       if (error instanceof ServiceHostRetirementConflict) return response({ok:false,code:"restore-fenced",restoreFenceGeneration:error.restoreFenceGeneration},409); return errorResponse(error);}
   };
 }

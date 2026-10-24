@@ -667,6 +667,7 @@ export function LiveDocumentsDialog({
                     size="compact"
                     className="shrink-0"
                     disabled={savingCopies.has(`${workspaceId}\n${row.path}`)}
+                    aria-busy={savingCopies.has(`${workspaceId}\n${row.path}`) || undefined}
                     aria-label={`Save recovery copy of ${row.path}`}
                     onClick={() => {
                       const key = `${workspaceId}\n${row.path}`;
@@ -678,7 +679,8 @@ export function LiveDocumentsDialog({
                       }));
                     }}
                   >
-                    Save recovery copy
+                    {/* The server first prepares the earlier copy of the workspace that holds these edits. */}
+                    {row.earlier && savingCopies.has(`${workspaceId}\n${row.path}`) ? "Preparing recovery copy…" : "Save recovery copy"}
                   </SecondaryButton>
                 ) : null}
                 {/* A Resume alone fails again until dohc has opened the document once. */}

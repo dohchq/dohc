@@ -1161,6 +1161,23 @@ describe("LiveDocumentsDialog", () => {
       expect(save).toHaveProperty("disabled", false);
     });
 
+    // The server prepares the earlier copy of the workspace that holds the edits before the copy reads them.
+    it("reads Preparing recovery copy on an earlier copy's row while its save runs", async () => {
+      const h = harness();
+      h.load.mockResolvedValue(page([row("docs/a.md", { quarantine: "paused", earlier: true, storedOn: "server" })]));
+      const saving = deferred();
+      h.saveRecoveryCopy.mockReturnValueOnce(saving.promise);
+      render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+      const save = await screen.findByRole("button", { name: "Save recovery copy of docs/a.md" });
+      await userEvent.setup().click(save);
+      expect(save.textContent).toBe("Preparing recovery copy…");
+      expect(save).toHaveProperty("disabled", true);
+      expect(save.getAttribute("aria-busy")).toBe("true");
+      await act(async () => { saving.resolve(); await saving.promise; });
+      expect(save.textContent).toBe("Save recovery copy");
+      expect(save.getAttribute("aria-busy")).toBeNull();
+    });
+
     it.each(["recovered", "kept"] as const)("reports a Stop that %s the refused edits only after it answers", async (keptEdits) => {
       const h = harness();
       h.load.mockResolvedValue(page([row("docs/a.md", { quarantine: "paused" })]));

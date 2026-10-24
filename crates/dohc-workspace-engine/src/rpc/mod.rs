@@ -13,6 +13,7 @@ pub(crate) mod live_application;
 pub(crate) mod ordinary_live_host;
 pub(crate) mod owner_delivery;
 pub(super) mod reads;
+pub(crate) mod recovery_copies;
 pub(super) mod relay;
 pub(crate) mod replica;
 pub(super) mod request;

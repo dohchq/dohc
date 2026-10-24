@@ -19,7 +19,7 @@ import * as Exit from "effect/Exit";
 import * as Scope from "effect/Scope";
 import { createEngineClient, EngineRequestError, isHostedDocumentUnready } from "@dohc/workspace-engine-client/daemon";
 import { OwnerYDocOutbox, VersionedLiveAdapter, type Event, type JsonValue } from "@dohc/workspace-engine-client";
-import { sameKeptEditsIdentity, type ServiceKeptEdits, type ServiceKeptEditsIdentity } from "./storage/serviceKeptEdits.js";
+import { RecoveryCopyRefusal, sameKeptEditsIdentity, type ServiceKeptEdits, type ServiceKeptEditsIdentity } from "./storage/serviceKeptEdits.js";
 import type { LiveClaimLedger } from "./automationLiveClaims.js";
 import { parseLiveDocumentKey, parseLiveUpdateIdentifier, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import { LiveCommittedDelivery, type CommittedDeliveryOutcome } from "./liveCommittedDelivery.js";
@@ -46,6 +46,12 @@ interface ServiceLiveHostConfig {
   readonly activation?: ServiceActivationConfig;
   readonly adoption?: { readonly maxBytes: number; readonly maxEvents: number;
     readonly ownerOutbox: { readonly maxPendingBytes: number; readonly maxPendingAgeMs: number } };
+  /**
+   * Where the daemon copies an earlier store that needs migrations before its
+   * owner's recovery copy, under `<root>/.recovery`, and how long preparing
+   * one may take. Without it, no earlier store opens for recovery.
+   */
+  readonly recovery?: { readonly root: string; readonly preparationDeadlineMs: number };
 }
 
 function record(value: unknown, keys: string[], optional: string[] = []): Record<string, unknown> {
@@ -114,7 +120,7 @@ function checkServiceMembership(workspaces: readonly ServiceWorkspace[], targets
 /** Operator configuration only. Incoming document fields never supply these paths. */
 export function readServiceLiveHostConfig(configPath: string, keepWorkspace: (id: string) => boolean = () => true): ServiceLiveHostConfig {
   const value = record(JSON.parse(readFileSync(path(configPath, false), "utf8")),
-    ["version", "engineExecutable", "hostId", "instanceId", "workspaces", "ingress", "client"], ["settlement", "restore", "sync", "adoption", "activation"]);
+    ["version", "engineExecutable", "hostId", "instanceId", "workspaces", "ingress", "client"], ["settlement", "restore", "sync", "adoption", "activation", "recovery"]);
   // A host may start empty; `update` attaches workspaces as documents are shared.
   if (value.version !== 1 || !Array.isArray(value.workspaces)) throw new TypeError("Invalid service host configuration.");
   const workspaces = value.workspaces.filter(item => {
@@ -131,6 +137,11 @@ export function readServiceLiveHostConfig(configPath: string, keepWorkspace: (id
     return Object.freeze({maxBytes: integer(row.maxBytes), maxEvents: integer(row.maxEvents),
       ownerOutbox: Object.freeze({maxPendingBytes: integer(outbox.maxPendingBytes), maxPendingAgeMs: integer(outbox.maxPendingAgeMs)})});
   })();
+  const recovery = value.recovery === undefined ? undefined : (() => {
+    const row = record(value.recovery, ["root", "preparationDeadlineMs"]);
+    // The engine answers no request after 300 s.
+    return Object.freeze({root: path(row.root, true), preparationDeadlineMs: integer(row.preparationDeadlineMs, 1, 300_000)});
+  })();
   const parsedActivation=parseServiceActivationConfig(value.activation);
   const activation=parsedActivation ? {...parsedActivation, targets: parsedActivation.targets.filter(row => keepWorkspace(row.workspaceId))} : undefined;
   const sync=parseNativeLiveSyncConfig(value.sync,integer(ingress.aggregateBytes));
@@ -143,7 +154,7 @@ export function readServiceLiveHostConfig(configPath: string, keepWorkspace: (id
   return Object.freeze({ version: 1, engineExecutable: path(value.engineExecutable, false),
     hostId: parseLiveUpdateIdentifier(value.hostId, "host ID"), instanceId: parseLiveUpdateIdentifier(value.instanceId, "instance ID"),
     workspaces: Object.freeze(workspaces),
-    settlement, restore, adoption, activation, sync,
+    settlement, restore, adoption, activation, sync, recovery,
     ingress: Object.freeze({ aggregateBytes: integer(ingress.aggregateBytes), applicationWorkingReserveBytes,
       maxUploads: integer(ingress.maxUploads), uploadDeadlineMs: integer(ingress.uploadDeadlineMs, 1, 2_147_483_647) }),
     client: Object.freeze({ aggregateBytes: integer(client.aggregateBytes), maxUploads: integer(client.maxUploads),
@@ -154,6 +165,17 @@ export function readServiceLiveHostConfig(configPath: string, keepWorkspace: (id
 const held = new WeakSet<SyncRelayStorage>();
 // An earlier store's recovery handle closes after this long without a page read.
 const RECOVERY_IDLE_MS = 60_000;
+// An engine refusal of an open with one of these codes proves it holds no
+// handle for the store. Any other failure, an overloaded or expired request
+// included, may follow an open that made one.
+const RECOVERY_OPEN_REFUSALS = new Set(["INVALID_PARAMS", "CONFLICT"]);
+// A page read failing with one of these says nothing about the store.
+const RECOVERY_READ_TRANSIENT = new Set(["WORKSPACE_UNAVAILABLE", "OVERLOADED", "DEADLINE_EXCEEDED", "CANCELLED", "SESSION_EXPIRED"]);
+const recoveryRefusal = (error: unknown) => new RecoveryCopyRefusal(
+  !(error instanceof EngineRequestError) ? "server"
+    : error.wireError?.message === "recovery-store-disk-full" ? "disk-space"
+    : error.wireError?.message === "recovery-store-needs-update" ? "newer-schema"
+    : error.wireError?.message === "recovery-store-busy" ? "busy" : "server");
 /**
  * An attached workspace's hosted replica. `pulls` counts the pulls started and
  * `confirmed` numbers the last one that succeeded. A departing document is
@@ -338,7 +360,7 @@ export async function startServiceLiveHost(options: {
     yield* Effect.promise(() => writeFile(nativeConfig, JSON.stringify({ version: 1, relayNamespace: history.namespace, host,
       workspaces: config.workspaces.map(({hostedReplication, ...workspace}) => ({...workspace,
         ...(hostedReplication ? {relay: hostedReplication.relay} : {})})),
-      ingress: config.ingress, settlement: config.settlement, sync: config.sync, adoption: config.adoption,
+      ingress: config.ingress, settlement: config.settlement, sync: config.sync, adoption: config.adoption, recovery: config.recovery,
       restore: config.restore ? {maxBytes: config.restore.maxBytes, maxEvents: config.restore.maxEvents} : undefined }), { flag: "wx", mode: 0o600 }));
     signal.throwIfAborted();
     const native = yield* Effect.acquireRelease(Effect.promise(() => createEngineClient({ command: config.engineExecutable, authToken: randomBytes(32).toString("base64url"),
@@ -755,18 +777,20 @@ export async function startServiceLiveHost(options: {
       return runDocument({workspaceId: binding.workspaceId, mainVersionId: binding.mainVersionId, objectId: binding.objectId,
         lineageClaimId: binding.lineageClaimId}, callerSignal, joined => openKeptOutbox(kept, joined, work));
     };
+    // `preparing`: an earlier store is still being prepared; its reader asks again.
     const keptPage = (page: JsonValue | undefined): JsonValue => {
-      if (!page || typeof page !== "object" || Array.isArray(page) || (page.kind !== "page" && page.kind !== "readChanged")) throw new Error("Invalid kept edits page.");
+      if (!page || typeof page !== "object" || Array.isArray(page) || !["page", "readChanged", "preparing"].includes(String(page.kind))) throw new Error("Invalid kept edits page.");
       return page;
     };
     // Earlier stores open read-only for their owners' recovery copies, by
     // workspace. The engine opens at most one per workspace, so each
     // workspace's recovery work takes turns, and its handle closes before
     // another of its stores opens. A handle also closes once idle, once a
-    // read through it is abandoned, and once no refusal kept in its store
-    // waits for a recovery copy. An open whose answer was lost stays recorded
-    // with no handle, and a close that fails keeps its handle: either closes
-    // on the workspace's next turn, or once idle.
+    // read through it is abandoned, once the engine refused its store, and
+    // once no refusal kept in its store waits for a recovery copy. An open
+    // whose answer was lost, or whose lookup failed without the engine
+    // refusing it, stays recorded with no handle, and a close that fails keeps
+    // its handle: either closes on the workspace's next turn, or once idle.
     type Recovery = {readonly identity: ServiceKeptEditsIdentity; readonly root: string; handle?: string; idle?: ReturnType<typeof setTimeout>};
     const recoveries = new Map<string, Recovery>();
     const recoveryTurns = new Map<string, Promise<void>>();
@@ -794,8 +818,7 @@ export async function startServiceLiveHost(options: {
       let handle: string;
       try {handle = await recoveryHandle(workspaceId, open, signal);}
       catch (error) {
-        // The engine refused the open, so it holds no handle for the store.
-        if (engineCode(error) !== undefined) {recoveries.delete(workspaceId); return;}
+        if (RECOVERY_OPEN_REFUSALS.has(engineCode(error) ?? "")) {recoveries.delete(workspaceId); return;}
         idleRecovery(workspaceId, open);
         throw error;
       }
@@ -816,30 +839,43 @@ export async function startServiceLiveHost(options: {
     // A page of a queue kept in an earlier store of its workspace, at `root`,
     // read through that store's recovery handle. It admits, settles,
     // publishes and delivers nothing, so it needs no live registration, only
-    // a host that was not retired.
+    // a host that was not retired. The engine answers `preparing` until the
+    // store is ready; a store it refused throws RecoveryCopyRefusal, and its
+    // handle closes, so another read prepares it again.
     const readEarlierKeptEdits = (kept: ServiceKeptEdits, root: string, cursor: JsonValue | undefined, callerSignal?: AbortSignal) =>
-      withLiveHostSignal(signal, callerSignal, joined => recoveryTurn(kept.workspaceId, async () => {
+      withLiveHostSignal(signal, callerSignal, joined => recoveryTurn(kept.workspaceId, async (): Promise<JsonValue> => {
         joined.throwIfAborted();
         checkPreparing();
+        // A read that waited behind an account deletion, or behind a change to
+        // the row it names, opens nothing.
+        if (workspaceIsDeleted(storage, kept.workspaceId) ||
+          !storage.readServiceKeptEditsRefusal({workspaceId: kept.workspaceId, outboxId: kept.outboxId, generation: kept.generation})) return {kind: "readChanged"};
         const held = recoveries.get(kept.workspaceId);
         if (held && (!sameKeptEditsIdentity(held.identity, kept.identity) || held.root !== root)) await closeRecovery(kept.workspaceId);
         const open = recoveries.get(kept.workspaceId) ?? {identity: kept.identity, root};
         recoveries.set(kept.workspaceId, open);
         clearTimeout(open.idle);
         try {
-          let handle: string;
-          try {handle = await recoveryHandle(kept.workspaceId, open, joined);}
-          catch (error) {
-            // A refused open made no handle; any other failure may have made one.
-            if (engineCode(error) === undefined) throw error;
-            recoveries.delete(kept.workspaceId);
-            if (error instanceof EngineRequestError && error.wireError?.message === "recovery-store-needs-migration") {
-              throw relayError("conflict", "This server can't read the earlier copy of this workspace that holds these edits yet. Contact the server's operator.");
+          for (let reopened = false; ; reopened = true) {
+            let handle: string;
+            try {handle = await recoveryHandle(kept.workspaceId, open, joined);}
+            catch (error) {
+              if (!RECOVERY_OPEN_REFUSALS.has(engineCode(error) ?? "")) throw error;
+              recoveries.delete(kept.workspaceId);
+              throw recoveryRefusal(error);
             }
-            throw error;
+            try {
+              return keptPage((await client.sendRequest({id: nextRequestId(), workspace: handle, method: "ydoc.ownerOutbox.readPending",
+                params: {outboxId: kept.outboxId, ...(cursor === undefined ? {} : {cursor})}, deadlineMs: config.client.requestDeadlineMs}, joined)).result);
+            } catch (error) {
+              const code = engineCode(error);
+              // A handle whose close timed out is gone: its store opens once more.
+              if (code === "WORKSPACE_UNAVAILABLE" && !reopened) {delete open.handle; continue;}
+              if (code === undefined || RECOVERY_READ_TRANSIENT.has(code)) throw error;
+              await closeRecovery(kept.workspaceId).catch(() => {});
+              throw recoveryRefusal(error);
+            }
           }
-          return keptPage((await client.sendRequest({id: nextRequestId(), workspace: handle, method: "ydoc.ownerOutbox.readPending",
-            params: {outboxId: kept.outboxId, ...(cursor === undefined ? {} : {cursor})}, deadlineMs: config.client.requestDeadlineMs}, joined)).result);
         } finally {
           if (recoveries.get(kept.workspaceId) === open) {
             if (joined.aborted) await closeRecovery(kept.workspaceId).catch(() => {});

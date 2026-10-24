@@ -1148,7 +1148,14 @@ pub fn read_pending_hosted_page(
     cursor: Option<OwnerOutboxReadCursor>,
     max_bytes: usize,
 ) -> Result<OwnerOutboxPageResult, OwnerOutboxError> {
-    read_page(store, workspace_id, Some(identity), outbox_id, cursor, max_bytes)
+    read_page(
+        store,
+        workspace_id,
+        Some(identity),
+        outbox_id,
+        cursor,
+        max_bytes,
+    )
 }
 
 fn read_page(

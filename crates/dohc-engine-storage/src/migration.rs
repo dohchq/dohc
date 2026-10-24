@@ -3826,19 +3826,76 @@ pub(crate) fn newer_build_refusal(
         }))
 }
 
-/// Whether the ledger records every migration in `migrations` as complete. A
-/// read-only open applies none, so a store an older build last opened misses
-/// the later ones. Reads only.
-pub(crate) fn all_migrations_complete(
+/// What a store's ledger says about this build's migrations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedgerState {
+    /// Every migration completed from this build's definition and passed its
+    /// integrity check.
+    Current,
+    /// Some migrations have not run, as in a store an older build last
+    /// opened. Every recorded one matches this build's definition.
+    Pending,
+}
+
+/// Classify the ledger of an existing store against `migrations`, reading
+/// only. A recorded migration must match its definition's ordinal and, once
+/// completed, its checksum and a passed integrity check; anything else is a
+/// ledger the runner would refuse or this build cannot judge. A migration
+/// this build does not define means a newer build ran it.
+pub(crate) fn classify_ledger(
     conn: &Connection,
     migrations: &[Migration],
-) -> Result<bool, StorageError> {
-    for migration in migrations {
-        if matches!(ledger_status(conn, migration.id)?, LedgerStatus::Missing) {
-            return Ok(false);
-        }
+) -> Result<LedgerState, StorageError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT ordinal, id, checksum, completed_at IS NOT NULL, integrity_ok \
+             FROM engine_migrations ORDER BY ordinal",
+        )
+        .map_err(StorageError::corrupt)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, bool>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+            ))
+        })
+        .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+        .map_err(StorageError::corrupt)?;
+    if !rows.iter().any(|(_, id, ..)| id == BASELINE_MIGRATION_ID) {
+        return Err(StorageError::StateCorrupt { source: None });
     }
-    Ok(true)
+    let mut completed = 0;
+    for (ordinal, id, checksum, complete, integrity_ok) in &rows {
+        let Some(migration) = migrations.iter().find(|migration| migration.id == id) else {
+            return Err(StorageError::MigratedByNewerBuild {
+                ordinal: *ordinal,
+                id: id.chars().take(64).collect(),
+            });
+        };
+        if i64::from(migration.ordinal) != *ordinal
+            || (*complete
+                && (*checksum != migration_checksum(migration.sql) || *integrity_ok != Some(1)))
+        {
+            return Err(StorageError::MigrationFailed {
+                source: Some(
+                    format!(
+                        "migration {} ({}) was recorded unlike this build's definition",
+                        migration.ordinal, migration.id
+                    )
+                    .into(),
+                ),
+            });
+        }
+        completed += usize::from(*complete);
+    }
+    Ok(if completed == migrations.len() {
+        LedgerState::Current
+    } else {
+        LedgerState::Pending
+    })
 }
 
 /// Run every pending migration in `migrations` (ordered) against `conn`,

@@ -3,7 +3,7 @@ import {createServerOwnerConnection} from "./serverOwnerConnection";
 import type {CloudCredentials} from "./cloudCredentialStore";
 import type {RegistryEntry} from "./registryStore";
 import {deferred} from "../testing/deferred";
-import {ServerKeptEditsConflict} from "./ownerLiveQuarantine";
+import {ServerKeptEditsConflict, ServerRecoveryCopyRefusedError} from "./ownerLiveQuarantine";
 
 function fixture() {
   let credentials: CloudCredentials | null = {serverUrl: "https://auth.test", relayUrl: "https://relay.test", userId: "owner", email: "owner@test", token: "secret"};
@@ -56,6 +56,16 @@ it("sends the owner's kept-edits actions to the owner route, and reads the list 
   }
   f.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ok: false, code: "conflict", error: "Live editing is off for this document."}), {status: 409}));
   await expect(session.keptEdits({action: "retry", outboxId: "outbox", generation: 2}, signal)).rejects.toThrow("Live editing is off for this document.");
+  // An earlier copy the server could not prepare says why, in the desktop's words; an unknown reason asks for a check.
+  for (const [reason, code, words] of [["disk-space", "disk-space", "Ask the server administrator to free disk space, then try again."],
+    ["newer-schema", "newer-schema", "Ask the server administrator to update dohc, then try again."],
+    ["busy", "busy", "The server is using the earlier workspace copy. Try again when it finishes."],
+    ["later", "server", "Ask the server administrator to check the server, then try again."]] as const) {
+    f.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ok: false, code: "kept-edits-unrecoverable", reason, error: "x"}), {status: 409}));
+    const refused = session.keptEdits({action: "page", outboxId: "outbox", generation: 2}, signal);
+    await expect(refused).rejects.toBeInstanceOf(ServerRecoveryCopyRefusedError);
+    await expect(refused).rejects.toMatchObject({code, message: words, name: "ServerRecoveryCopyRefusedError"});
+  }
   // A page read names the previous page's cursor, and leaves the cached list alone.
   const cursor = {snapshot: "s", part: "base", sequence: 0, offset: 0};
   f.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ok: true, page: {kind: "readChanged"}})));

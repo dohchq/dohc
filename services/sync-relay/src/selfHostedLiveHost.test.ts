@@ -1,5 +1,5 @@
 import {mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile} from "node:fs/promises";
-import {existsSync} from "node:fs";
+import {existsSync, realpathSync} from "node:fs";
 import {createHash} from "node:crypto";
 import {basename, dirname, join} from "node:path";
 import {tmpdir} from "node:os";
@@ -291,6 +291,13 @@ it.skipIf(process.platform === "win32")("writes the daemon's configuration in th
   vi.stubEnv("TMPDIR", linked);
   f.add(); await f.waitStarted(1);
   expect(dirname(dirname(f.starts[0]!.configPath))).toBe(real);
+});
+
+// The daemon copies an earlier store for its owner's recovery copy under the
+// store root, within the profile's preparation deadline.
+it("names the store root for recovery copies in the daemon's configuration", async () => {
+  const f = await fixture(); await f.waitStarted(1);
+  expect((f.starts[0]!.config as unknown as {recovery: unknown}).recovery).toEqual({root: realpathSync(f.data), preparationDeadlineMs: 300_000});
 });
 
 it("adds and removes documents on the running daemon while the sibling stays hosted", async () => {

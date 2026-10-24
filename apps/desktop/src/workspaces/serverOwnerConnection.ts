@@ -8,7 +8,7 @@ import type {RegistryEntry} from "./registryStore";
 import {workspaceRemoteMatchesCredentials} from "./chatRelayIdentity";
 import {canonicalRelayUrl} from "./syncCode";
 import {OwnerLiveRefusalsResult} from "../ipc/bridgeContract";
-import {ServerKeptEditsConflict} from "./ownerLiveQuarantine";
+import {ServerKeptEditsConflict, ServerRecoveryCopyRefusedError} from "./ownerLiveQuarantine";
 import {z} from "zod";
 
 // A list page holds up to 256 rows of edits the server kept. A row is at most
@@ -117,6 +117,7 @@ export function createServerOwnerConnection(options: {
           if (response.status === 409) {
             const code = value && typeof value === "object" && "code" in value ? value.code : undefined;
             if (code === "kept-edits-changed" || code === "kept-edits-earlier") throw new ServerKeptEditsConflict(code === "kept-edits-earlier");
+            if (code === "kept-edits-unrecoverable") throw new ServerRecoveryCopyRefusedError(value && typeof value === "object" && "reason" in value ? value.reason : undefined);
             throw new Error(value && typeof value === "object" && "error" in value && typeof value.error === "string" ? value.error
               : "This document changed. Open Live documents to check it.");
           }

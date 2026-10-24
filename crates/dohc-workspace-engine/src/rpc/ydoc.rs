@@ -828,16 +828,19 @@ impl EngineService {
             ));
         }
         // An earlier store open for recovery has no workspace actor; its handle
-        // names the store and its identity. The read's lease moves into the
-        // worker, so the store stays open for recovery until the worker ends,
-        // even once this request is cancelled. An earlier store is never
+        // names the store, prepared once, and its identity. Until it is
+        // prepared, a read answers `preparing`. The read's lease moves into
+        // the worker, so the store stays open for recovery until the worker
+        // ends, even once this request is cancelled. An earlier store is never
         // written, so its pages are read as they are.
         enum Source {
             Recovery(crate::rpc::configured_live_host::RecoveryRead),
             Current(Arc<OpenWorkspace>),
         }
+        use crate::rpc::configured_live_host::RecoveryPage;
         let source = match self.recovery_read(handle.as_ref()).transpose()? {
-            Some(read) => Source::Recovery(read),
+            Some(RecoveryPage::Preparing) => return Ok(json!({ "kind": "preparing" })),
+            Some(RecoveryPage::Read(read)) => Source::Recovery(read),
             None => Source::Current(self.open(handle.as_ref())?),
         };
         let cancellation = OperationCancellation::new(ctx);
@@ -863,18 +866,15 @@ impl EngineService {
                 Source::Recovery(read) => {
                     let (outbox_id, cursor) = (params.outbox_id, params.cursor);
                     return tokio::task::spawn_blocking(move || {
-                        let store =
-                            dohc_engine_storage::EngineStore::open_read_only(&read.database_path)?;
                         let page = dohc_engine_collab::read_pending_hosted_owner_outbox_page(
-                            &store,
+                            crate::lock(&read.store).store(),
                             &read.workspace_id,
                             &read.identity,
                             &outbox_id,
                             cursor,
                             max_bytes,
                         );
-                        // The lease ends only once the store is closed.
-                        drop(store);
+                        // Its store goes before its lease.
                         drop(read);
                         page
                     })

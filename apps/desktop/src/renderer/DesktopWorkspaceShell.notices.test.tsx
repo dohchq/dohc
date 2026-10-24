@@ -223,6 +223,31 @@ describe("edits the server refused", () => {
     expect(bridge.saveOwnerLiveRecoveryCopy).toHaveBeenCalledTimes(2);
   });
 
+  // The server could not prepare the earlier copy of the workspace that holds
+  // the edits. Its reason replaces the second sentence, and Try again saves
+  // the copy again without sending the edits.
+  it("says why the server could not prepare a recovery copy, in a toast and a Notices row with Try again and details", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(async () => quarantined(quarantine));
+    bridge.saveOwnerLiveRecoveryCopy = vi.fn()
+      .mockRejectedValueOnce(new Error("Error invoking remote method 'saveOwnerLiveRecoveryCopy': ServerRecoveryCopyRefusedError [disk-space]: Ask the server administrator to free disk space, then try again."))
+      .mockResolvedValueOnce({copyPath: "notes/plan (recovered).md", packagePath: "notes/plan (recovered).dohc-recovery.json", storedOn: "server", keptEdits: "copied"});
+    renderShell(bridge);
+    const user = userEvent.setup();
+    await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", {name: "Save recovery copy"}));
+    const MESSAGE = "dohc could not save a recovery copy of notes/plan.md. Ask the server administrator to free disk space, then try again.";
+    const toast = (await screen.findByText(MESSAGE)).closest<HTMLElement>("[data-testid='workspace-shell-error']")!;
+    expect(within(toast).getByRole("button", {name: "Copy error details"})).toBeTruthy();
+    expect(within(toast).getByRole("button", {name: "Try again"})).toBeTruthy();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const row = within(await screen.findByTestId("notice-center")).getByText(MESSAGE).closest("li")!;
+    expect(within(row).getByRole("button", {name: "Copy error details"})).toBeTruthy();
+    await user.click(within(row).getByRole("button", {name: "Try again"}));
+    expect(await screen.findByText("Saved a recovery copy of notes/plan.md in notes. The server may now release your kept edits.")).toBeTruthy();
+    expect(bridge.saveOwnerLiveRecoveryCopy).toHaveBeenCalledTimes(2);
+    expect(bridge.retryOwnerLiveQuarantine).not.toHaveBeenCalled();
+  });
+
   it("runs one save per file at a time, and names the workspace folder for a file at its top", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.getSyncStatus = vi.fn(async () => quarantined({...quarantine, path: "plan.md"}));

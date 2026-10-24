@@ -11,7 +11,7 @@ import {authorizeServiceHostReplication, deriveServiceHostBearer} from "./servic
 import {relayError} from "./errors";
 import {SERVICE_HOST_ENROLLMENTS} from "./storage/serviceHostEnrollment";
 import type {ServiceActivationBlock} from "./serviceActivationDriver";
-import type {ServiceKeptEdits} from "./storage/serviceKeptEdits";
+import {RecoveryCopyRefusal, type ServiceKeptEdits} from "./storage/serviceKeptEdits";
 import type {JsonValue} from "@dohc/workspace-engine-client";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -197,6 +197,11 @@ it("reads and confirms edits kept in an earlier identity's store, and refuses th
   expect(await (await act("copied", earlier)).json()).toEqual({ok: true});
   expect(f.host.keptEdits.page.mock.calls.map(([kept]) => [kept.generation, kept.identity])).toEqual([[earlier, old]]);
   expect(f.host.keptEdits.copied.mock.calls.map(([kept]) => [kept.generation, kept.identity])).toEqual([[earlier, old]]);
+  // An earlier store the server could not prepare answers with the reason.
+  f.host.keptEdits.page.mockRejectedValueOnce(new RecoveryCopyRefusal("disk-space"));
+  const unprepared = await act("page", earlier);
+  expect(unprepared.status).toBe(409);
+  expect(await unprepared.json()).toMatchObject({ok: false, code: "kept-edits-unrecoverable", reason: "disk-space"});
   expect(f.storage.readServiceKeptEdits(queue("outbox-x", identity))).toMatchObject({generation: current, copied: false});
   expect(await list()).toEqual([{...row, generation: earlier, recovery: "copied", earlier: true}, {...row, generation: current, recovery: "paused"}]);
   const copiedRetry = await act("retry", earlier);

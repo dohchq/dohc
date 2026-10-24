@@ -25,7 +25,7 @@ import { directDocumentProjection } from "./documentProjection";
 import { createHash } from "node:crypto";
 import { readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { readServerKeptEditsQueue, ServerKeptEditsConflict, type OwnerLiveQuarantineRecord } from "./ownerLiveQuarantine";
+import { readServerKeptEditsQueue, ServerKeptEditsConflict, ServerRecoveryCopyRefusedError, type OwnerLiveQuarantineRecord } from "./ownerLiveQuarantine";
 import { liveRecoveryUpdates, parseLiveRecoveryPackage } from "./ownerLiveRecoveryCopy";
 import * as Y from "yjs";
 import type { LiveObjectBinding } from "@dohc/workspace-engine-client";
@@ -1652,6 +1652,28 @@ describe("server owner peer lifecycle", () => {
       .rejects.toBeInstanceOf(ServerKeptEditsConflict);
   });
 
+  // Proves: while the server prepares the earlier copy of the workspace that
+  // holds a queue, the read asks for the same page again after a wait, then
+  // reads the queue whole. One the server keeps preparing past the desktop's
+  // own limit fails as a recovery copy the server could not prepare.
+  it("asks again while the server prepares an earlier copy, and gives up past its limit", async () => {
+    const {queue} = recoveryQueue(keptBinding);
+    const served = {...queue, outboxId: "server-outbox"};
+    const row = {objectId: "object", path: "notes/plan.md", outboxId: "server-outbox", reason: "invalid-update", generation: 1, store: "store", recovery: "paused" as const, earlier: true as const};
+    const pages = servedPages(served), cursors: unknown[] = [];
+    let preparing = 2;
+    const waits: number[] = [];
+    expect(await readServerKeptEditsQueue(row, async cursor => {
+      cursors.push(cursor);
+      return {ok: true, page: preparing-- > 0 ? {kind: "preparing"} : pages(cursor)};
+    }, async ms => {waits.push(ms);})).toEqual(served);
+    expect(waits).toEqual([1_000, 1_000]);
+    expect(cursors.slice(0, 3)).toEqual([undefined, undefined, undefined]);
+    const refused = readServerKeptEditsQueue(row, async () => ({ok: true, page: {kind: "preparing"}}), async () => {});
+    await expect(refused).rejects.toBeInstanceOf(ServerRecoveryCopyRefusedError);
+    await expect(refused).rejects.toMatchObject({code: "server", message: "Ask the server administrator to check the server, then try again."});
+  });
+
   // Proves: the desktop lists every row the server keeps, past its first page,
   // and saves and confirms one only that later page names. A later page that
   // fails keeps the last complete list.
@@ -1744,8 +1766,9 @@ describe("server owner peer lifecycle", () => {
       const earlier = await f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "notes/plan.md", "server:server-outbox:1");
       expect(earlier).toMatchObject({storedOn: "server", keptEdits: "copied"});
       expect(await updates(earlier.packagePath)).toBe(2);
-      // MERGE-REVIEW (coordinator): round 6 makes `copied` carry the checkpoint digest the copy read; check what this earlier-store copy sends.
-      expect(actions).toEqual([{action: "copied", outboxId: "server-outbox", generation: 1, checkpointDigest: expect.anything()}]);
+      // Each copy confirms the checkpoint its own header named; both queues build on one checkpoint.
+      const checkpointDigest = digest(both.checkpoint!);
+      expect(actions).toEqual([{action: "copied", outboxId: "server-outbox", generation: 1, checkpointDigest}]);
       expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([
         {incident: "server:server-outbox:1", recovery: "copied", earlier: true}, {incident: "server:server-outbox:2", recovery: "paused"}]);
       expect(f.engine.ownerLiveQuarantines("owner")[1]).not.toHaveProperty("earlier");
@@ -1753,7 +1776,8 @@ describe("server owner peer lifecycle", () => {
       expect(actions).toHaveLength(1);
       const current = await f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "notes/plan.md", "server:server-outbox:2");
       expect(await updates(current.packagePath)).toBe(1);
-      expect(actions).toEqual([{action: "copied", outboxId: "server-outbox", generation: 1}, {action: "copied", outboxId: "server-outbox", generation: 2}]);
+      expect(actions).toEqual([{action: "copied", outboxId: "server-outbox", generation: 1, checkpointDigest},
+        {action: "copied", outboxId: "server-outbox", generation: 2, checkpointDigest}]);
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
   });
 

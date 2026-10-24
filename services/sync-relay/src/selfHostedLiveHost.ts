@@ -162,8 +162,9 @@ export async function startSelfHostedLiveHost(options: {
     try {
       const configPath = join(temporary, "service.json");
       // The daemon starts empty. Each update attaches and detaches its workspaces and documents.
+      // It copies earlier stores for recovery under the store root.
       await writeFile(configPath, JSON.stringify({version: 1, engineExecutable, hostId, instanceId, workspaces: [],
-        ...profile.service, activation: {...profile.service.activation, targets: []}}), {flag: "wx", mode: 0o600});
+        ...profile.service, activation: {...profile.service.activation, targets: []}, recovery: {...profile.service.recovery, root}}), {flag: "wx", mode: 0o600});
       signal.throwIfAborted();
       const host = await (options.startHost ?? startServiceLiveHost)({trustedAccount: options.trustedAccount,configPath, storage, history, frameChanges: options.frameChanges, signal});
       host.onEvent((event) => { for (const handler of eventHandlers) handler(event); });

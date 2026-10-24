@@ -219,6 +219,8 @@ async fn run_stdio(auth_token: String, passive: bool, replica: bool) -> Result<(
         live,
     )
     .await;
+    // Earlier stores open for recovery close, and their copies go.
+    service.close_recovery_stores().await;
     // Store actors are closed by the hook above; any in-flight capture write
     // failed contained and stays un-acked (the next start re-offers it). This
     // drain joins the watcher/files threads so the process exits clean.

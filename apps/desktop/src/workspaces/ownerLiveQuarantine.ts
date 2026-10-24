@@ -26,6 +26,34 @@ export class ServerKeptEditsConflict extends Error {
   }
 }
 
+const RECOVERY_COPY_REFUSALS = {
+  "disk-space": "Ask the server administrator to free disk space, then try again.",
+  "newer-schema": "Ask the server administrator to update dohc, then try again.",
+  busy: "The server is using the earlier workspace copy. Try again when it finishes.",
+  server: "Ask the server administrator to check the server, then try again.",
+} as const;
+export type RecoveryCopyRefusalReason = keyof typeof RECOVERY_COPY_REFUSALS;
+
+/**
+ * The server could not prepare the earlier copy of the workspace that holds
+ * the edits, for the reason its code names. The server keeps them; saving
+ * the copy again asks the server to prepare it again.
+ */
+export class ServerRecoveryCopyRefusedError extends Error {
+  override readonly name = "ServerRecoveryCopyRefusedError";
+  readonly code: RecoveryCopyRefusalReason;
+  constructor(reason: unknown) {
+    const code = typeof reason === "string" && Object.hasOwn(RECOVERY_COPY_REFUSALS, reason) ? reason as RecoveryCopyRefusalReason : "server";
+    super(RECOVERY_COPY_REFUSALS[code]);
+    this.code = code;
+  }
+}
+
+// How often a read asks again while the server prepares an earlier copy,
+// and how long it waits in all. The server ends its own preparation sooner.
+const PREPARING_POLL_MS = 1_000;
+const PREPARING_LIMIT_MS = 6 * 60_000;
+
 const SERVER_KEPT_EDITS_PAGE = 256;
 const FirstKeptEditsPage = z.object({keptEdits: z.array(ServerKeptEdits).max(SERVER_KEPT_EDITS_PAGE).optional(),
   keptEditsCursor: z.number().int().positive().safe().optional()});
@@ -55,14 +83,22 @@ export async function readServerKeptEdits(response: unknown, page: (after: numbe
 /**
  * Reads a refused queue the server keeps, whole, one bounded page per
  * request through `page`, as this computer's engine would read its own. A
- * queue that changed under the read answers as changed.
+ * queue that changed under the read answers as changed. While the server
+ * prepares the earlier copy of the workspace that holds it, each page is
+ * asked for again after `wait`.
  */
-export async function readServerKeptEditsQueue(row: ServerKeptEdits, page: (cursor: JsonValue | undefined) => Promise<unknown>): Promise<OwnerYDocOutboxRecovery> {
+export async function readServerKeptEditsQueue(row: ServerKeptEdits, page: (cursor: JsonValue | undefined) => Promise<unknown>,
+  wait: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms))): Promise<OwnerYDocOutboxRecovery> {
   const served = z.object({ok: z.literal(true), page: z.record(z.string(), z.unknown())}).strict();
   const outbox = new OwnerYDocOutbox({sendRequest: async request => {
     const params = request.params as {outboxId?: unknown; cursor?: JsonValue};
     if (request.method !== "ydoc.ownerOutbox.readPending" || params.outboxId !== row.outboxId) throw new Error("Unsupported kept edits read.");
-    return {id: request.id, result: served.parse(await page(params.cursor)).page as JsonValue};
+    for (let waited = 0; ; waited += PREPARING_POLL_MS) {
+      const result = served.parse(await page(params.cursor)).page;
+      if (result.kind !== "preparing") return {id: request.id, result: result as JsonValue};
+      if (waited >= PREPARING_LIMIT_MS) throw new ServerRecoveryCopyRefusedError("server");
+      await wait(PREPARING_POLL_MS);
+    }
   }}, "server");
   try {
     const queue = await outbox.readRecovery(row.outboxId);

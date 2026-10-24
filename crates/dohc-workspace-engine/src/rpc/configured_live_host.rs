@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -31,6 +32,7 @@ pub struct ConfiguredLiveHostConfig {
     restore: Option<crate::live_application_ingress::RestoreConfig>,
     sync: Option<super::live_application::sync::SyncConfig>,
     adoption: Option<ConfiguredOwnerAdoption>,
+    recovery: Option<super::recovery_copies::RecoveryConfig>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -215,8 +217,11 @@ pub(crate) struct Discovery {
     /// Earlier stores open for their owner's recovery copy, at most one per
     /// workspace. They stay out of `attached`, so a workspace's attached store
     /// and its earlier store are open at once. A close ends an entry once its
-    /// page reads finished, even if its caller went away.
+    /// preparation and page reads finished, even if its caller went away.
     recovery: Arc<Mutex<Vec<RecoveryStore>>>,
+    /// Where earlier stores that need migrations are copied, when the host's
+    /// operator configured it. Without it no store opens for recovery.
+    copies: Option<Arc<super::recovery_copies::RecoveryCopies>>,
 }
 
 /// One attached workspace, in attach order. An entry whose handle has no live
@@ -228,30 +233,58 @@ struct AttachedWorkspace {
     ordinary: bool,
 }
 
-/// An earlier store of a workspace, open read-only by its workspace identity.
-/// It has no workspace actor: each page read opens the store read-only and
-/// closes it again.
+/// An earlier store of a workspace, open for recovery by its workspace
+/// identity. It has no workspace actor. One worker prepares it: a store this
+/// build fully migrated is read in place, and any other is copied and
+/// migrated privately. Page reads then share the prepared store.
 struct RecoveryStore {
     workspace_id: String,
     root: PathBuf,
     handle: WorkspaceHandle,
     identity: HostedStoreIdentity,
-    /// Each page read holds it shared until its worker ends, and a close
-    /// takes it exclusively, so the entry, and the root it keeps from opening
-    /// or attaching, outlasts every read.
+    /// The preparing worker and each page read hold it shared until they end,
+    /// and a close takes it exclusively, so the entry, and the root it keeps
+    /// from opening or attaching, outlasts all of them.
     reads: Arc<tokio::sync::RwLock<()>>,
+    /// Set by a close, or once preparation runs out of time: the worker stops.
+    cancelled: Arc<AtomicBool>,
+    prepared: Arc<Mutex<Preparation>>,
     /// Set once a close began. The handle then reads nothing.
     closing: bool,
 }
 
-/// A page read of a store open for recovery. Its lease keeps the store open
-/// for recovery until the read's worker drops it.
+/// Where the preparation of a store open for recovery stands.
+enum Preparation {
+    Running,
+    /// The store, and the copy folder it is in, if it is a copy.
+    Ready {
+        store: Arc<Mutex<dohc_engine_storage::PreparedRecovery>>,
+        copy: Option<PathBuf>,
+    },
+    /// Every page read answers this refusal until the handle closes.
+    Failed(WireError),
+}
+
+/// What a page read of a store open for recovery may do now.
+pub(super) enum RecoveryPage {
+    /// Its preparation still runs.
+    Preparing,
+    Read(RecoveryRead),
+}
+
+/// A page read of a prepared store. Its lease keeps the store open for
+/// recovery until the read's worker drops it, after the store.
 pub(super) struct RecoveryRead {
     pub(super) workspace_id: String,
-    pub(super) database_path: PathBuf,
     pub(super) identity: HostedStoreIdentity,
+    pub(super) store: Arc<Mutex<dohc_engine_storage::PreparedRecovery>>,
     pub(super) _lease: tokio::sync::OwnedRwLockReadGuard<()>,
 }
+
+/// Preparations wait here, in tests, until their gate opens.
+#[cfg(test)]
+static PREPARATION_GATES: Mutex<Vec<(PathBuf, std::sync::mpsc::Receiver<()>)>> =
+    Mutex::new(Vec::new());
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -291,29 +324,42 @@ fn open_recovery_handle(
     }
 }
 
-/// Refuses a root that is not a store bound to it, that a newer or an older
-/// build migrated, that holds versioned state of another workspace, or that
-/// does not hold `identity` with a hosted replica. The read-only open runs no
-/// migration, so this build's queries could misread an older build's store.
-fn check_recovery_store(
+/// Prepare the store at `root` for page reads as workspace `workspace_id`'s
+/// store of `identity`. It is refused unless it is a store bound to `root`
+/// that holds no versioned state of another workspace and holds `identity`
+/// with a hosted replica, checked in the snapshot it is then read or copied
+/// from. A store this build has not fully migrated is copied into a new
+/// folder of `copies` and migrated there; the source is never changed.
+fn prepare_recovery(
     root: &Path,
     workspace_id: &str,
     identity: &HostedStoreIdentity,
-) -> Result<(), WireError> {
+    copies: &super::recovery_copies::RecoveryCopies,
+    cancelled: &Arc<AtomicBool>,
+) -> Preparation {
+    use dohc_engine_storage::{RecoveryError, StorageError};
     use rusqlite::OptionalExtension;
-    let unavailable = || invalid("recovery store unavailable");
-    let token = crate::root_binding::read_root_binding(root)
-        .map_err(|_| unavailable())?
-        .ok_or_else(unavailable)?;
-    let store = dohc_engine_storage::EngineStore::open_read_only(
-        &root.join(".dohc").join("engine").join("engine.db"),
-    )
-    .map_err(|_| unavailable())?;
-    if !store.is_fully_migrated().map_err(|_| unavailable())? {
-        return Err(invalid("recovery-store-needs-migration"));
+    #[cfg(test)]
+    {
+        let gate = {
+            let mut gates = lock(&PREPARATION_GATES);
+            let found = gates.iter().position(|(gated, _)| gated == root);
+            found.map(|index| gates.remove(index).1)
+        };
+        if let Some(gate) = gate {
+            let _ = gate.recv();
+        }
     }
-    let (bound, other, held) = store
-        .read_with(|conn| {
+    let (Ok(Some(token)), Ok(now_ms)) = (
+        crate::root_binding::read_root_binding(root),
+        super::request::now_ms(),
+    ) else {
+        return Preparation::Failed(invalid("recovery store unavailable"));
+    };
+    let mut copy = None;
+    let prepared = dohc_engine_storage::open_for_recovery(
+        &root.join(".dohc").join("engine").join("engine.db"),
+        |conn| {
             let bound: Option<String> = conn
                 .query_row(
                     "SELECT token FROM shadow_clone WHERE rowid_guard = 1",
@@ -326,13 +372,74 @@ fn check_recovery_store(
                 rusqlite::params![workspace_id],
                 |row| row.get(0),
             )?;
-            Ok::<_, rusqlite::Error>((bound, other, identity.held_in(conn, workspace_id)?))
-        })
-        .map_err(|_| unavailable())?;
-    if bound.as_deref() != Some(token.as_str()) || other || !held {
-        return Err(invalid("recovery store belongs to another root or workspace"));
+            Ok(bound.as_deref() == Some(token.as_str())
+                && !other
+                && identity.held_in(conn, workspace_id)?)
+        },
+        || {
+            let folder = copies.folder()?;
+            copy = Some(folder.clone());
+            Ok(folder)
+        },
+        &dohc_engine_storage::RealFreeSpace,
+        cancelled,
+        now_ms,
+    );
+    match prepared {
+        Ok(store) => Preparation::Ready {
+            store: Arc::new(Mutex::new(store)),
+            copy,
+        },
+        Err(error) => {
+            if let Some(copy) = copy {
+                copies.remove(copy);
+            }
+            Preparation::Failed(invalid(match error {
+                RecoveryError::Refused => "recovery store belongs to another root or workspace",
+                RecoveryError::Cancelled => "recovery-store-preparation-timed-out",
+                RecoveryError::Storage(StorageError::MigratedByNewerBuild { .. }) => {
+                    "recovery-store-needs-update"
+                }
+                RecoveryError::Storage(StorageError::DiskFull { .. }) => "recovery-store-disk-full",
+                RecoveryError::Storage(StorageError::FileLocked) => "recovery-store-busy",
+                _ => "recovery store unavailable",
+            }))
+        }
     }
-    Ok(())
+}
+
+/// The end of a store open for recovery whose close began: once its
+/// preparation and page reads end, it closes, its copy goes, and its entry,
+/// which kept its root reserved until then, goes last.
+async fn end_recovery(
+    recovery: Arc<Mutex<Vec<RecoveryStore>>>,
+    copies: Option<Arc<super::recovery_copies::RecoveryCopies>>,
+    (reads, prepared, handle): (
+        Arc<tokio::sync::RwLock<()>>,
+        Arc<Mutex<Preparation>>,
+        WorkspaceHandle,
+    ),
+) {
+    let _closed = reads.write_owned().await;
+    let _ = tokio::task::spawn_blocking(move || close_prepared(&prepared, copies.as_deref())).await;
+    lock(&recovery).retain(|entry| entry.handle != handle);
+}
+
+/// Close a prepared store, then remove its copy, if it has one.
+fn close_prepared(
+    prepared: &Mutex<Preparation>,
+    copies: Option<&super::recovery_copies::RecoveryCopies>,
+) {
+    let ended = std::mem::replace(
+        &mut *lock(prepared),
+        Preparation::Failed(super::error::workspace_unavailable()),
+    );
+    if let Preparation::Ready { store, copy } = ended {
+        drop(store);
+        if let (Some(copy), Some(copies)) = (copy, copies) {
+            copies.remove(copy);
+        }
+    }
 }
 
 impl Discovery {
@@ -384,6 +491,11 @@ impl EngineService {
                     .map(|admission| (config.max_applications_per_settlement, admission))
             })
             .transpose()?;
+        let copies = config
+            .recovery
+            .map(super::recovery_copies::RecoveryCopies::start)
+            .transpose()?
+            .map(Arc::new);
         let owner = ConnectionOwner::authenticated();
         let _ = service.configured_live_host.set(Discovery {
             connection: owner.handle(),
@@ -396,6 +508,7 @@ impl EngineService {
             restore: config.restore,
             adoption: config.adoption,
             recovery: Arc::new(Mutex::new(Vec::new())),
+            copies,
         });
         let mut result = Ok(());
         for workspace in config.workspaces {
@@ -497,13 +610,17 @@ impl EngineService {
     }
 
     /// `liveApplication.openRecoveryStore`: open an earlier store of a
-    /// workspace read-only, as the workspace identity the host created it
+    /// workspace for reading, as the workspace identity the host created it
     /// for, so its owner can copy the edits the host kept there. Nothing
-    /// captures, relays, migrates, applies or settles in it, and its handle
-    /// answers only `ydoc.ownerOutbox.readPending`. A workspace has at most
-    /// one: opening its store again returns the same handle, and any other
-    /// store of it is refused. So is a root that is attached or open for
-    /// recovery, or that contains or sits inside one.
+    /// captures, relays, applies or settles in it, and its handle answers
+    /// only `ydoc.ownerOutbox.readPending`. The reply comes at once: a worker
+    /// then checks the store and, if this build has not fully migrated it,
+    /// copies and migrates it privately, within the configured deadline.
+    /// Until then each page read answers `preparing`, and after a refusal,
+    /// the refusal. A workspace has at most one: opening its store again
+    /// returns the same handle, whatever its preparation's state, and any
+    /// other store of it is refused. So is a root that is attached or open
+    /// for recovery, or that contains or sits inside one or the copies.
     pub(super) async fn configured_open_recovery_store(
         &self,
         ctx: &RequestContext,
@@ -534,6 +651,10 @@ impl EngineService {
             replication_epoch: params.replication_epoch,
             stream_identity: params.stream_identity,
         };
+        let copies = discovery
+            .copies
+            .clone()
+            .ok_or_else(|| invalid("recovery copies are not configured"))?;
         // The same store again, as after an open whose reply was lost, keeps its handle.
         if let Some(handle) = open_recovery_handle(
             &lock(&discovery.recovery),
@@ -543,64 +664,78 @@ impl EngineService {
         )? {
             return Ok(json!({"workspaceHandle": handle}));
         }
-        // The check reads the whole store, so attaches and detaches do not
-        // wait on it. The checks under membership below catch an attach that
-        // took the root meanwhile.
-        let cancellation = super::request::OperationCancellation::new(ctx);
-        let (checked_root, workspace_id, expected) =
-            (root.clone(), params.workspace_id.clone(), identity.clone());
-        let checking = tokio::task::spawn_blocking(move || {
-            check_recovery_store(&checked_root, &workspace_id, &expected)
-        });
-        tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => {
-                return Err(cancellation.interruption("liveApplication.openRecoveryStore"));
-            }
-            checked = checking => checked
-                .map_err(|_| WireError::new(ErrorCode::Internal, "recovery store check failed"))??,
-        }
         let _membership = discovery.membership.lock().await;
         self.configured_host_caller(ctx)?;
-        let mut recovery = lock(&discovery.recovery);
-        if let Some(handle) =
-            open_recovery_handle(&recovery, &params.workspace_id, &root, &identity)?
-        {
-            return Ok(json!({"workspaceHandle": handle}));
-        }
-        if recovery.iter().any(|entry| overlaps(&entry.root, &root))
-            || lock(&self.handles)
-                .values()
-                .any(|open| overlaps(&open.root, &root))
-        {
-            return Err(invalid("recovery store root is already open"));
-        }
-        if recovery.len() >= super::workspace::MAX_OPEN_HANDLES {
-            return Err(WireError::new(
-                ErrorCode::Overloaded,
-                "recovery store limit reached",
-            ));
-        }
-        let sequence = self
-            .next_handle
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let handle = WorkspaceHandle(format!("ws-{sequence:016x}"));
-        recovery.push(RecoveryStore {
-            workspace_id: params.workspace_id,
-            root,
-            handle: handle.clone(),
-            identity,
-            reads: Arc::default(),
-            closing: false,
+        let (handle, lease, cancelled, prepared) = {
+            let mut recovery = lock(&discovery.recovery);
+            if let Some(handle) =
+                open_recovery_handle(&recovery, &params.workspace_id, &root, &identity)?
+            {
+                return Ok(json!({"workspaceHandle": handle}));
+            }
+            if copies.overlaps(&root)
+                || recovery.iter().any(|entry| overlaps(&entry.root, &root))
+                || lock(&self.handles)
+                    .values()
+                    .any(|open| overlaps(&open.root, &root))
+            {
+                return Err(invalid("recovery store root is already open"));
+            }
+            if recovery.len() >= super::workspace::MAX_OPEN_HANDLES {
+                return Err(WireError::new(
+                    ErrorCode::Overloaded,
+                    "recovery store limit reached",
+                ));
+            }
+            let sequence = self.next_handle.fetch_add(1, Ordering::Relaxed);
+            let handle = WorkspaceHandle(format!("ws-{sequence:016x}"));
+            let reads = Arc::<tokio::sync::RwLock<()>>::default();
+            let lease = reads
+                .clone()
+                .try_read_owned()
+                .map_err(|_| WireError::new(ErrorCode::Internal, "recovery store lease"))?;
+            let (cancelled, prepared) = (
+                Arc::<AtomicBool>::default(),
+                Arc::new(Mutex::new(Preparation::Running)),
+            );
+            recovery.push(RecoveryStore {
+                workspace_id: params.workspace_id.clone(),
+                root: root.clone(),
+                handle: handle.clone(),
+                identity: identity.clone(),
+                reads,
+                cancelled: cancelled.clone(),
+                prepared: prepared.clone(),
+                closing: false,
+            });
+            (handle, lease, cancelled, prepared)
+        };
+        // The worker owns the source's lease until it recorded its outcome,
+        // so a close waits for it, and the root stays reserved meanwhile.
+        // Membership operations do not wait on it.
+        let deadline = tokio::spawn({
+            let (cancelled, wait) = (cancelled.clone(), copies.deadline);
+            async move {
+                tokio::time::sleep(wait).await;
+                cancelled.store(true, Ordering::Relaxed);
+            }
+        });
+        tokio::task::spawn_blocking(move || {
+            let outcome =
+                prepare_recovery(&root, &params.workspace_id, &identity, &copies, &cancelled);
+            deadline.abort();
+            *lock(&prepared) = outcome;
+            drop(lease);
         });
         Ok(json!({"workspaceHandle": handle}))
     }
 
     /// `liveApplication.closeRecoveryStore`: end a recovery handle. It reads
-    /// nothing from then on, and its root stays unavailable to open or attach
-    /// until every page read through it finished. The reply waits for that
-    /// too, so its caller may then remove the store. A close whose caller
-    /// goes away still ends the handle once its reads finish.
+    /// nothing from then on, a preparation still running stops, and its root
+    /// stays unavailable to open or attach until that preparation and every
+    /// page read through it finished. The store then closes and its copy goes.
+    /// The reply waits for all of it, so its caller may then remove the store.
+    /// A close whose caller goes away still ends the handle.
     pub(super) async fn configured_close_recovery_store(
         &self,
         ctx: &RequestContext,
@@ -619,23 +754,47 @@ impl EngineService {
         let handle = request
             .workspace
             .ok_or_else(super::error::workspace_unavailable)?;
-        let reads = {
+        let ending = {
             let mut recovery = lock(&discovery.recovery);
             let entry = recovery
                 .iter_mut()
                 .find(|entry| entry.handle == handle)
                 .ok_or_else(super::error::workspace_unavailable)?;
             entry.closing = true;
-            entry.reads.clone()
+            entry.cancelled.store(true, Ordering::Relaxed);
+            (entry.reads.clone(), entry.prepared.clone(), handle)
         };
-        let recovery = discovery.recovery.clone();
-        tokio::spawn(async move {
-            let _closed = reads.write_owned().await;
-            lock(&recovery).retain(|entry| entry.handle != handle);
-        })
-        .await
-        .map_err(|_| WireError::new(ErrorCode::Internal, "recovery store close failed"))?;
+        let (recovery, copies) = (discovery.recovery.clone(), discovery.copies.clone());
+        tokio::spawn(end_recovery(recovery, copies, ending))
+            .await
+            .map_err(|_| WireError::new(ErrorCode::Internal, "recovery store close failed"))?;
         Ok(json!({"closed": true}))
+    }
+
+    /// Close every store open for recovery, as the daemon stops, then remove
+    /// this daemon's copy folder.
+    pub async fn close_recovery_stores(&self) {
+        let Some(discovery) = self.configured_live_host.get() else {
+            return;
+        };
+        let ending: Vec<_> = lock(&discovery.recovery)
+            .iter_mut()
+            .map(|entry| {
+                entry.closing = true;
+                entry.cancelled.store(true, Ordering::Relaxed);
+                (
+                    entry.reads.clone(),
+                    entry.prepared.clone(),
+                    entry.handle.clone(),
+                )
+            })
+            .collect();
+        for ending in ending {
+            end_recovery(discovery.recovery.clone(), discovery.copies.clone(), ending).await;
+        }
+        if let Some(copies) = discovery.copies.clone() {
+            let _ = tokio::task::spawn_blocking(move || copies.shutdown()).await;
+        }
     }
 
     /// Whether `handle` is a recovery store's, closing or not.
@@ -649,30 +808,39 @@ impl EngineService {
     }
 
     /// A page read of the earlier store open for recovery under `handle`, if
-    /// it is one, with its lease. A closing handle reads nothing.
+    /// it is one: with its lease once it is prepared, or its refusal. A
+    /// closing handle reads nothing.
     pub(super) fn recovery_read(
         &self,
         handle: Option<&WorkspaceHandle>,
-    ) -> Option<Result<RecoveryRead, WireError>> {
+    ) -> Option<Result<RecoveryPage, WireError>> {
         let handle = handle?;
         let recovery = lock(&self.configured_live_host.get()?.recovery);
         let entry = recovery.iter().find(|entry| &entry.handle == handle)?;
         // A close sets `closing` under this lock before it waits for the
         // leases, so no read starts after it.
-        let lease = if entry.closing {
-            None
-        } else {
-            entry.reads.clone().try_read_owned().ok()
+        if entry.closing {
+            return Some(Err(super::error::workspace_unavailable()));
+        }
+        let store = match &*lock(&entry.prepared) {
+            Preparation::Running => return Some(Ok(RecoveryPage::Preparing)),
+            Preparation::Failed(refusal) => return Some(Err(refusal.clone())),
+            Preparation::Ready { store, .. } => store.clone(),
         };
         Some(
-            lease
-                .map(|lease| RecoveryRead {
-                    workspace_id: entry.workspace_id.clone(),
-                    database_path: entry.root.join(".dohc").join("engine").join("engine.db"),
-                    identity: entry.identity.clone(),
-                    _lease: lease,
+            entry
+                .reads
+                .clone()
+                .try_read_owned()
+                .map(|lease| {
+                    RecoveryPage::Read(RecoveryRead {
+                        workspace_id: entry.workspace_id.clone(),
+                        identity: entry.identity.clone(),
+                        store,
+                        _lease: lease,
+                    })
                 })
-                .ok_or_else(super::error::workspace_unavailable),
+                .map_err(|_| super::error::workspace_unavailable()),
         )
     }
 
@@ -686,9 +854,13 @@ impl EngineService {
             .get()
             .ok_or_else(|| WireError::new(ErrorCode::Forbidden, "live host is not configured"))?;
         workspace.canonicalize()?;
-        if lock(&discovery.recovery)
-            .iter()
-            .any(|entry| overlaps(&entry.root, &workspace.root))
+        if discovery
+            .copies
+            .as_ref()
+            .is_some_and(|copies| copies.overlaps(&workspace.root))
+            || lock(&discovery.recovery)
+                .iter()
+                .any(|entry| overlaps(&entry.root, &workspace.root))
         {
             return Err(invalid("live host workspace root is open for recovery"));
         }
@@ -1583,6 +1755,69 @@ mod tests {
         root.join(".dohc").join("engine").join("engine.db")
     }
 
+    /// An empty host that copies earlier stores under `root`.
+    fn recovering(root: &Path) -> ConfiguredLiveHostConfig {
+        let mut configured = config(&[]);
+        configured.recovery = Some(
+            serde_json::from_value(json!({"root": root, "preparationDeadlineMs": 60_000})).unwrap(),
+        );
+        configured
+    }
+
+    /// Waits until the preparation of the store open for recovery under
+    /// `handle` ended, as its worker's lease does.
+    async fn prepared(service: &EngineService, handle: &WorkspaceHandle) {
+        let reads = lock(&service.configured_live_host.get().unwrap().recovery)
+            .iter()
+            .find(|entry| &entry.handle == handle)
+            .map(|entry| entry.reads.clone())
+            .unwrap();
+        drop(reads.write().await);
+    }
+
+    /// Opens the store for recovery, waits for its preparation, and returns
+    /// its handle.
+    async fn open_prepared(
+        service: &EngineService,
+        ctx: RequestContext,
+        request: Request,
+    ) -> Result<WorkspaceHandle, WireError> {
+        let opened = service.dispatch(ctx, request).await?.response.result;
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspaceHandle"].clone()).unwrap();
+        prepared(service, &handle).await;
+        Ok(handle)
+    }
+
+    /// The first page of the queue `outbox_id` through `handle`, or its refusal.
+    async fn first_page(
+        service: &EngineService,
+        ctx: RequestContext,
+        handle: &WorkspaceHandle,
+        outbox_id: &str,
+    ) -> Result<Value, WireError> {
+        Ok(service
+            .dispatch(
+                ctx,
+                host_request(
+                    "ydoc.ownerOutbox.readPending",
+                    Some(handle.clone()),
+                    json!({"outboxId": outbox_id}),
+                ),
+            )
+            .await?
+            .response
+            .result)
+    }
+
+    fn close_request(handle: &WorkspaceHandle) -> Request {
+        host_request(
+            "liveApplication.closeRecoveryStore",
+            Some(handle.clone()),
+            json!({}),
+        )
+    }
+
     /// Records `epoch` as the hosted workspace identity of the detached store
     /// at `root`, as creating its hosted replica does.
     fn host_identity(root: &Path, epoch: &str) {
@@ -1653,9 +1888,11 @@ mod tests {
     async fn an_earlier_store_opens_read_only_for_recovery_beside_the_attached_store() {
         let earlier = dohc_engine_testkit::ScratchDir::new().unwrap();
         let current = dohc_engine_testkit::ScratchDir::new().unwrap();
-        let (service, owner, _ingress) = EngineService::configured_live_host(config(&[]))
-            .await
-            .unwrap();
+        let copies = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let (service, owner, _ingress) =
+            EngineService::configured_live_host(recovering(copies.path()))
+                .await
+                .unwrap();
         let ctx = || {
             let mut ctx = RequestContext::unbounded();
             ctx.connection = Some(owner.handle());
@@ -1707,23 +1944,39 @@ mod tests {
         }
         assert_eq!(outboxes[0], outboxes[1]);
         let outbox = outboxes[0].as_str();
-        // The earlier store opens only as the identity it holds.
-        assert_eq!(
-            service
-                .dispatch(ctx(), self::recover(earlier.path(), "workspace", "later"))
-                .await
-                .unwrap_err()
-                .message,
-            "recovery store belongs to another root or workspace"
-        );
-        let recovery = handle_of(
-            service
-                .dispatch(ctx(), recover(earlier.path(), "workspace"))
-                .await
-                .unwrap()
-                .response
-                .result,
-        );
+        // The earlier store reads only as the identity it holds.
+        let refused = open_prepared(
+            &service,
+            ctx(),
+            self::recover(earlier.path(), "workspace", "later"),
+        )
+        .await
+        .unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                first_page(&service, ctx(), &refused, outbox)
+                    .await
+                    .unwrap_err()
+                    .message,
+                "recovery store belongs to another root or workspace"
+            );
+        }
+        service
+            .dispatch(ctx(), close_request(&refused))
+            .await
+            .unwrap();
+        let recovery = open_prepared(&service, ctx(), recover(earlier.path(), "workspace"))
+            .await
+            .unwrap();
+        // A store this build fully migrated is read in place.
+        let daemon = service
+            .configured_live_host
+            .get()
+            .unwrap()
+            .copies
+            .clone()
+            .unwrap();
+        assert_eq!(std::fs::read_dir(daemon.daemon()).unwrap().count(), 0);
         assert_eq!(
             queued(&service, ctx, &recovery, outbox).await.unwrap(),
             b"earlier"
@@ -1835,23 +2088,21 @@ mod tests {
                 .code,
             crate::rpc::error::workspace_unavailable().code
         );
-        // A store of one workspace never opens as another's.
+        // A store of one workspace never reads as another's.
+        let other = open_prepared(&service, ctx(), recover(earlier.path(), "other"))
+            .await
+            .unwrap();
         assert_eq!(
-            service
-                .dispatch(ctx(), recover(earlier.path(), "other"))
+            first_page(&service, ctx(), &other, outbox)
                 .await
                 .unwrap_err()
-                .code,
-            ErrorCode::InvalidParams
+                .message,
+            "recovery store belongs to another root or workspace"
         );
-        let again = handle_of(
-            service
-                .dispatch(ctx(), recover(earlier.path(), "workspace"))
-                .await
-                .unwrap()
-                .response
-                .result,
-        );
+        service.dispatch(ctx(), close(&other)).await.unwrap();
+        let again = open_prepared(&service, ctx(), recover(earlier.path(), "workspace"))
+            .await
+            .unwrap();
         assert_ne!(again, recovery);
         assert_eq!(
             queued(&service, ctx, &again, outbox).await.unwrap(),
@@ -1899,11 +2150,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_store_opens_for_recovery_only_as_the_identity_it_holds_and_fully_migrated() {
+    async fn a_store_reads_for_recovery_only_as_the_identity_it_holds() {
         let store = dohc_engine_testkit::ScratchDir::new().unwrap();
-        let (service, owner, _ingress) = EngineService::configured_live_host(config(&[]))
-            .await
-            .unwrap();
+        let copies = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let (service, owner, _ingress) =
+            EngineService::configured_live_host(recovering(copies.path()))
+                .await
+                .unwrap();
         let mut ctx = RequestContext::unbounded();
         ctx.connection = Some(owner.handle());
         detached_store(&service, &ctx, store.path()).await;
@@ -1914,60 +2167,652 @@ mod tests {
             .execute_batch("PRAGMA foreign_keys=OFF; DELETE FROM versioned_workspaces;")
             .unwrap();
         for (id, epoch) in [("workspace", "later"), ("other", "epoch")] {
+            let handle = open_prepared(&service, ctx.clone(), recover(store.path(), id, epoch))
+                .await
+                .unwrap();
             assert_eq!(
-                service
-                    .dispatch(ctx.clone(), recover(store.path(), id, epoch))
+                first_page(&service, ctx.clone(), &handle, "outbox")
                     .await
                     .unwrap_err()
                     .message,
                 "recovery store belongs to another root or workspace",
                 "{id} {epoch}"
             );
+            service
+                .dispatch(ctx.clone(), close_request(&handle))
+                .await
+                .unwrap();
         }
-        // A store an older build last migrated is refused, and left as it was.
-        rusqlite::Connection::open(database(store.path()))
+        assert!(lock(&service.handles).is_empty());
+    }
+
+    /// Every file of the store at `root` with the digest of its bytes,
+    /// sidecars and root marker included.
+    fn store_files(root: &Path) -> Vec<(std::ffi::OsString, String)> {
+        let mut files: Vec<_> = std::fs::read_dir(root.join(".dohc").join("engine"))
             .unwrap()
-            .execute_batch(
-                "DELETE FROM engine_migrations \
-                 WHERE ordinal=(SELECT MAX(ordinal) FROM engine_migrations)",
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let bytes = std::fs::read(entry.path()).unwrap();
+                (entry.file_name(), dohc_engine_storage::hex_sha256(&bytes))
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
+    /// Makes `earlier` the store an older build, which lacked this build's
+    /// last migration, would hold with the rows of the queues, blobs, root
+    /// binding and hosted identity of the detached store at `reference`. Its
+    /// schema comes from the genuine migration prefix.
+    fn earlier_copy_of(reference: &Path, earlier: &Path) {
+        let token = crate::root_binding::read_root_binding(reference)
+            .unwrap()
+            .unwrap();
+        crate::root_binding::write_root_binding(earlier, &token).unwrap();
+        dohc_engine_storage::recovery::create_earlier_store_for_test(&database(earlier), 1)
+            .unwrap();
+        let conn = rusqlite::Connection::open(database(earlier)).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+        conn.execute(
+            "ATTACH DATABASE ?1 AS reference",
+            [database(reference).to_str().unwrap()],
+        )
+        .unwrap();
+        // Entries before their queues, so no count trigger finds a queue to change.
+        for table in [
+            "binary_blobs",
+            "sync_identity",
+            "hosted_replicas",
+            "shadow_clone",
+            "owner_ydoc_outbox_entries",
+            "owner_ydoc_outboxes",
+        ] {
+            let columns = conn
+                .prepare(&format!(
+                    "SELECT name FROM pragma_table_info('{table}', 'main')"
+                ))
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .join(",");
+            conn.execute_batch(&format!(
+                "INSERT INTO main.{table} ({columns}) SELECT {columns} FROM reference.{table}"
+            ))
+            .unwrap();
+        }
+        conn.execute_batch("DETACH DATABASE reference").unwrap();
+    }
+
+    /// Every page of the queue `outbox_id` through `handle`, then its
+    /// checkpoint's when its header names one.
+    async fn package(
+        service: &EngineService,
+        ctx: impl Fn() -> RequestContext,
+        handle: &WorkspaceHandle,
+        outbox_id: &str,
+    ) -> Vec<Value> {
+        use base64::Engine as _;
+        let read = |cursor: Value| {
+            service.dispatch(
+                ctx(),
+                host_request(
+                    "ydoc.ownerOutbox.readPending",
+                    Some(handle.clone()),
+                    json!({"outboxId": outbox_id, "cursor": cursor}),
+                ),
+            )
+        };
+        let (mut pages, mut cursor) = (Vec::new(), Value::Null);
+        loop {
+            let page = read(cursor).await.unwrap().response.result;
+            assert_eq!(page["kind"], "page");
+            cursor = page["nextCursor"].clone();
+            pages.push(page);
+            if cursor.is_null() {
+                break;
+            }
+        }
+        let header: Value = serde_json::from_slice(
+            &base64::engine::general_purpose::STANDARD
+                .decode(pages[0]["bytesBase64"].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        if !header["checkpointDigest"].is_null() {
+            let checkpoint = json!({"snapshot": pages[0]["snapshot"], "part": "checkpoint",
+                "sequence": 0, "offset": 0});
+            pages.push(read(checkpoint).await.unwrap().response.result);
+        }
+        pages
+    }
+
+    #[tokio::test]
+    async fn an_earlier_store_of_an_older_build_is_copied_migrated_and_read_whole() {
+        let reference = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let earlier = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let copies = dohc_engine_testkit::ScratchDir::new().unwrap();
+        // A daemon refused the owner's edits, then the workspace's identity changed.
+        let outbox = {
+            let (service, owner, _ingress) = EngineService::configured_live_host(config(&[]))
+                .await
+                .unwrap();
+            let mut ctx = RequestContext::unbounded();
+            ctx.connection = Some(owner.handle());
+            let attached: WorkspaceHandle = serde_json::from_value(
+                service
+                    .configured_attach_workspace(
+                        &ctx,
+                        host_request(
+                            "liveApplication.attachWorkspace",
+                            None,
+                            json!({"root": reference.path(), "workspaceId": "workspace",
+                                "maxRegistrations": 4, "relay": {"baseUrl": "https://relay.invalid",
+                                "bearerToken": "owner"}}),
+                        ),
+                    )
+                    .await
+                    .unwrap()["workspaceHandle"]
+                    .clone(),
             )
             .unwrap();
-        let before = std::fs::read(database(store.path())).unwrap();
-        assert_eq!(
+            let appended = service
+                .owner_ydoc_outbox_append(
+                    &ctx,
+                    Some(attached.clone()),
+                    append("workspace", b"refused edits"),
+                )
+                .await
+                .unwrap();
+            let outbox = appended["outboxId"].as_str().unwrap().to_owned();
             service
+                .owner_ydoc_outbox_quarantine(
+                    &ctx,
+                    Some(attached.clone()),
+                    json!({"outboxId": outbox, "reason": "invalid-update"}),
+                )
+                .await
+                .unwrap();
+            service
+                .configured_detach_workspace(
+                    &ctx,
+                    host_request("liveApplication.detachWorkspace", Some(attached), json!({})),
+                )
+                .await
+                .unwrap();
+            outbox
+        };
+        host_identity(reference.path(), "earlier");
+        earlier_copy_of(reference.path(), earlier.path());
+        assert!(matches!(
+            dohc_engine_storage::EngineStore::open_read_only(&database(earlier.path())),
+            Err(dohc_engine_storage::StorageError::MigrationPending)
+        ));
+        // That read left empty sidecars; the store the older build left has none.
+        for sidecar in ["engine.db-wal", "engine.db-shm"] {
+            let path = database(earlier.path()).with_file_name(sidecar);
+            if path.exists() {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+        let before = store_files(earlier.path());
+        // A restarted daemon reads both: the current one in place, the older one from a copy.
+        let (service, owner, _ingress) =
+            EngineService::configured_live_host(recovering(copies.path()))
+                .await
+                .unwrap();
+        let ctx = || {
+            let mut ctx = RequestContext::unbounded();
+            ctx.connection = Some(owner.handle());
+            ctx
+        };
+        let daemon = service
+            .configured_live_host
+            .get()
+            .unwrap()
+            .copies
+            .clone()
+            .unwrap();
+        let read = |root: PathBuf| {
+            let (service, daemon, outbox) = (&service, daemon.clone(), outbox.clone());
+            async move {
+                let handle = open_prepared(service, ctx(), recover(&root, "workspace", "earlier"))
+                    .await
+                    .unwrap();
+                let copied = std::fs::read_dir(daemon.daemon()).unwrap().count();
+                let pages = package(service, ctx, &handle, &outbox).await;
+                service
+                    .dispatch(ctx(), close_request(&handle))
+                    .await
+                    .unwrap();
+                (pages, copied)
+            }
+        };
+        let (expected, copied) = read(reference.path().to_path_buf()).await;
+        assert_eq!(copied, 0);
+        let (recovered, copied) = read(earlier.path().to_path_buf()).await;
+        assert_eq!(copied, 1);
+        assert_eq!(recovered, expected);
+        assert_eq!(
+            recovered
+                .iter()
+                .map(|page| page["part"].clone())
+                .collect::<Vec<_>>(),
+            [
+                json!("header"),
+                json!("base"),
+                json!("entryHeader"),
+                json!("update")
+            ]
+        );
+        use base64::Engine as _;
+        let header: Value = serde_json::from_slice(
+            &base64::engine::general_purpose::STANDARD
+                .decode(recovered[0]["bytesBase64"].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(header["state"], "quarantined");
+        assert_eq!(header["quarantineReason"], "invalid-update");
+        assert_eq!(header["pendingEntryCount"], 1);
+        let update = base64::engine::general_purpose::STANDARD
+            .decode(recovered[3]["bytesBase64"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(update, b"refused edits");
+        assert_eq!(
+            recovered[3]["digest"],
+            dohc_engine_storage::hex_sha256(b"refused edits")
+        );
+        // The copy went with its close, and the earlier store is as it was.
+        assert_eq!(std::fs::read_dir(daemon.daemon()).unwrap().count(), 0);
+        assert_eq!(store_files(earlier.path()), before);
+        service.close_recovery_stores().await;
+        assert!(!daemon.daemon().exists());
+        assert_eq!(
+            std::fs::read_dir(copies.path().join(".recovery"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    /// The detached store at `root`, with `epoch` its hosted identity, as an
+    /// older build left it. `reference` holds the current store it came from.
+    async fn earlier_store(
+        service: &EngineService,
+        ctx: &RequestContext,
+        reference: &Path,
+        root: &Path,
+    ) {
+        detached_store(service, ctx, reference).await;
+        host_identity(reference, "epoch");
+        earlier_copy_of(reference, root);
+    }
+
+    #[tokio::test]
+    async fn a_preparing_store_keeps_its_root_while_membership_continues_and_ends_with_its_close() {
+        let (reference, store, sibling, copies) = (
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+        );
+        let (service, owner, _ingress) =
+            EngineService::configured_live_host(recovering(copies.path()))
+                .await
+                .unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        earlier_store(&service, &ctx, reference.path(), store.path()).await;
+        let before = store_files(store.path());
+        let daemon = service
+            .configured_live_host
+            .get()
+            .unwrap()
+            .copies
+            .clone()
+            .unwrap();
+        for ending in ["close", "shutdown"] {
+            // The worker waits at its gate, before it opens the store.
+            let (open_gate, gate) = std::sync::mpsc::channel();
+            lock(&PREPARATION_GATES).push((std::fs::canonicalize(store.path()).unwrap(), gate));
+            let opened = service
                 .dispatch(ctx.clone(), recover(store.path(), "workspace", "epoch"))
+                .await
+                .unwrap()
+                .response
+                .result;
+            let handle: WorkspaceHandle =
+                serde_json::from_value(opened["workspaceHandle"].clone()).unwrap();
+            assert_eq!(
+                first_page(&service, ctx.clone(), &handle, "outbox")
+                    .await
+                    .unwrap(),
+                json!({"kind": "preparing"})
+            );
+            // An open whose reply was lost finds the same preparation.
+            assert_eq!(
+                service
+                    .dispatch(ctx.clone(), recover(store.path(), "workspace", "epoch"))
+                    .await
+                    .unwrap()
+                    .response
+                    .result,
+                opened
+            );
+            assert_eq!(
+                service
+                    .configured_attach_workspace(
+                        &ctx,
+                        host_request(
+                            "liveApplication.attachWorkspace",
+                            None,
+                            json!({"root": store.path(), "workspaceId": "workspace", "maxRegistrations": 4}),
+                        ),
+                    )
+                    .await
+                    .unwrap_err()
+                    .message,
+                "live host workspace root is open for recovery"
+            );
+            // Membership does not wait on the preparation.
+            detached_store(&service, &ctx, sibling.path()).await;
+            let ended = async {
+                if ending == "close" {
+                    service
+                        .dispatch(ctx.clone(), close_request(&handle))
+                        .await
+                        .unwrap();
+                } else {
+                    service.close_recovery_stores().await;
+                }
+            };
+            tokio::pin!(ended);
+            tokio::select! {
+                biased;
+                () = &mut ended => panic!("the {ending} ended while its preparation ran"),
+                () = std::future::ready(()) => {}
+            }
+            assert!(service.is_recovery_handle(Some(&handle)), "{ending}");
+            open_gate.send(()).unwrap();
+            ended.await;
+            assert!(!service.is_recovery_handle(Some(&handle)), "{ending}");
+            assert_eq!(store_files(store.path()), before, "{ending}");
+        }
+        assert!(!daemon.daemon().exists());
+    }
+
+    #[tokio::test]
+    async fn a_failed_preparation_refuses_its_reads_and_removes_its_copy() {
+        let (reference, store, copies) = (
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+        );
+        let (service, owner, _ingress) =
+            EngineService::configured_live_host(recovering(copies.path()))
+                .await
+                .unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        earlier_store(&service, &ctx, reference.path(), store.path()).await;
+        // The migration this build adds then fails on the copy.
+        rusqlite::Connection::open(database(store.path()))
+            .unwrap()
+            .execute_batch("CREATE TABLE owner_ydoc_outbox_refusals (planted INTEGER)")
+            .unwrap();
+        let before = store_files(store.path());
+        let handle = open_prepared(
+            &service,
+            ctx.clone(),
+            recover(store.path(), "workspace", "epoch"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            first_page(&service, ctx.clone(), &handle, "outbox")
                 .await
                 .unwrap_err()
                 .message,
-            "recovery-store-needs-migration"
+            "recovery store unavailable"
         );
-        assert_eq!(std::fs::read(database(store.path())).unwrap(), before);
-        assert!(lock(&service.handles).is_empty());
+        let daemon = service
+            .configured_live_host
+            .get()
+            .unwrap()
+            .copies
+            .clone()
+            .unwrap();
+        assert_eq!(std::fs::read_dir(daemon.daemon()).unwrap().count(), 0);
+        assert_eq!(store_files(store.path()), before);
+        service
+            .dispatch(ctx.clone(), close_request(&handle))
+            .await
+            .unwrap();
+    }
+
+    /// Every root is compared canonical, so a verbatim `\\?\` spelling or
+    /// another case names the same folder.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_root_spelled_another_way_still_overlaps() {
+        let (store, attached, copies) = (
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+        );
+        let (service, owner, _ingress) =
+            EngineService::configured_live_host(recovering(copies.path()))
+                .await
+                .unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let spellings = |path: &Path| {
+            let plain = path.display().to_string();
+            let plain = plain.strip_prefix(r"\\?\").unwrap_or(&plain).to_owned();
+            [
+                PathBuf::from(format!(r"\\?\{plain}")),
+                PathBuf::from(plain.to_uppercase()),
+            ]
+        };
+        let attach = |root: &Path, id: &str| {
+            host_request(
+                "liveApplication.attachWorkspace",
+                None,
+                json!({"root": root, "workspaceId": id, "maxRegistrations": 4}),
+            )
+        };
+        let kept: WorkspaceHandle = serde_json::from_value(
+            service
+                .configured_attach_workspace(&ctx, attach(attached.path(), "other"))
+                .await
+                .unwrap()["workspaceHandle"]
+                .clone(),
+        )
+        .unwrap();
+        detached_store(&service, &ctx, store.path()).await;
+        host_identity(store.path(), "epoch");
+        let handle = open_prepared(
+            &service,
+            ctx.clone(),
+            recover(store.path(), "workspace", "epoch"),
+        )
+        .await
+        .unwrap();
+        for root in spellings(attached.path())
+            .into_iter()
+            .chain(spellings(&copies.path().join(".recovery")))
+        {
+            assert_eq!(
+                service
+                    .dispatch(ctx.clone(), recover(&root, "other", "epoch"))
+                    .await
+                    .unwrap_err()
+                    .message,
+                "recovery store root is already open",
+                "{}",
+                root.display()
+            );
+        }
+        for root in spellings(store.path()) {
+            assert_eq!(
+                service
+                    .configured_attach_workspace(&ctx, attach(&root, "workspace"))
+                    .await
+                    .unwrap_err()
+                    .message,
+                "live host workspace root is open for recovery",
+                "{}",
+                root.display()
+            );
+        }
+        service
+            .dispatch(ctx.clone(), close_request(&handle))
+            .await
+            .unwrap();
+        service
+            .configured_detach_workspace(
+                &ctx,
+                host_request("liveApplication.detachWorkspace", Some(kept), json!({})),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_start_removes_only_the_copies_of_daemons_that_are_gone() {
+        let copies = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let base = copies.path().join(".recovery");
+        std::fs::create_dir(&base).unwrap();
+        let (gone, unlocked, running) = ("a".repeat(32), "b".repeat(32), "c".repeat(32));
+        for name in [&gone, &unlocked, &running] {
+            std::fs::create_dir_all(base.join(name).join("copy")).unwrap();
+            std::fs::write(base.join(name).join("copy").join("engine.db"), b"copy").unwrap();
+        }
+        std::fs::write(base.join(format!("{unlocked}.lock")), b"").unwrap();
+        let held = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(base.join(format!("{running}.lock")))
+            .unwrap();
+        fs4::FileExt::try_lock(&held).unwrap();
+        let (service, _owner, _ingress) =
+            EngineService::configured_live_host(recovering(copies.path()))
+                .await
+                .unwrap();
+        assert!(!base.join(&gone).exists());
+        assert!(!base.join(&unlocked).exists());
+        assert!(!base.join(format!("{unlocked}.lock")).exists());
+        assert!(base.join(&running).join("copy").join("engine.db").exists());
+        service.close_recovery_stores().await;
+        drop(held);
+    }
+
+    /// Prepares an earlier store of `RECOVERY_LARGE_STORE_MB` megabytes and
+    /// prints how long it took and how much the copy held at its peak.
+    #[tokio::test]
+    #[ignore = "measures a large store; run by hand"]
+    async fn a_large_earlier_store_prepares_within_its_deadline() {
+        let megabytes: usize = std::env::var("RECOVERY_LARGE_STORE_MB")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(512);
+        let (reference, store, sibling, copies) = (
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+        );
+        let (service, owner, _ingress) =
+            EngineService::configured_live_host(recovering(copies.path()))
+                .await
+                .unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        earlier_store(&service, &ctx, reference.path(), store.path()).await;
+        {
+            let conn = rusqlite::Connection::open(database(store.path())).unwrap();
+            let tx = conn.unchecked_transaction().unwrap();
+            let mut chunk = vec![0_u8; 1024 * 1024];
+            for index in 0..megabytes {
+                chunk[..8].copy_from_slice(&(index as u64).to_le_bytes());
+                dohc_engine_storage::put_binary_blob(&tx, &chunk).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let source_bytes = std::fs::metadata(database(store.path())).unwrap().len();
+        let started = Instant::now();
+        let opened = service
+            .dispatch(ctx.clone(), recover(store.path(), "workspace", "epoch"))
+            .await
+            .unwrap()
+            .response
+            .result;
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspaceHandle"].clone()).unwrap();
+        let attach_started = Instant::now();
+        detached_store(&service, &ctx, sibling.path()).await;
+        let attached_in = attach_started.elapsed();
+        let preparing_after_attach = first_page(&service, ctx.clone(), &handle, "outbox")
+            .await
+            .is_ok_and(|page| page["kind"] == "preparing");
+        prepared(&service, &handle).await;
+        let prepared_in = started.elapsed();
+        let daemon = service
+            .configured_live_host
+            .get()
+            .unwrap()
+            .copies
+            .clone()
+            .unwrap();
+        let copy = std::fs::read_dir(daemon.daemon())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let peak: u64 = std::fs::read_dir(&copy)
+            .unwrap()
+            .map(|entry| entry.unwrap().metadata().unwrap().len())
+            .sum();
+        println!(
+            "recovery preparation: source {source_bytes} bytes, prepared in {prepared_in:?}, \
+             copy {peak} bytes; an unrelated attach and detach took {attached_in:?} \
+             (still preparing after it: {preparing_after_attach})"
+        );
+        service
+            .dispatch(ctx.clone(), close_request(&handle))
+            .await
+            .unwrap();
+        assert!(prepared_in < daemon.deadline);
     }
 
     #[tokio::test]
     async fn a_closed_recovery_store_keeps_its_root_until_its_reads_end() {
         let store = dohc_engine_testkit::ScratchDir::new().unwrap();
-        let (service, owner, _ingress) = EngineService::configured_live_host(config(&[]))
-            .await
-            .unwrap();
+        let copies = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let (service, owner, _ingress) =
+            EngineService::configured_live_host(recovering(copies.path()))
+                .await
+                .unwrap();
         let mut ctx = RequestContext::unbounded();
         ctx.connection = Some(owner.handle());
         detached_store(&service, &ctx, store.path()).await;
         host_identity(store.path(), "epoch");
-        let recovery: WorkspaceHandle = serde_json::from_value(
-            service
-                .dispatch(ctx.clone(), recover(store.path(), "workspace", "epoch"))
-                .await
-                .unwrap()
-                .response
-                .result["workspaceHandle"]
-                .clone(),
+        let recovery = open_prepared(
+            &service,
+            ctx.clone(),
+            recover(store.path(), "workspace", "epoch"),
         )
+        .await
         .unwrap();
-        // A read whose request was cancelled before its worker opened the
+        // A read whose request was cancelled before its worker read the
         // store: the worker still holds the read's lease.
-        let worker = service.recovery_read(Some(&recovery)).unwrap().unwrap();
+        let Some(Ok(RecoveryPage::Read(worker))) = service.recovery_read(Some(&recovery)) else {
+            panic!("a prepared store reads");
+        };
         let closing = service.dispatch(
             ctx.clone(),
             host_request(

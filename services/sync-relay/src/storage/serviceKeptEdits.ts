@@ -57,6 +57,19 @@ export const sameKeptEditsIdentity = (a: ServiceKeptEditsIdentity, b: {replicati
   !!b && a.replicationEpoch === b.replicationEpoch && a.streamIdentity === b.streamIdentity;
 
 /**
+ * Why the server could not prepare an earlier store for its owner's recovery
+ * copy: it has no room for the copy, a newer build migrated the store, the
+ * store is busy, or anything else, which the server's administrator must
+ * check. The edits stay where they are.
+ */
+export type RecoveryCopyReason = "disk-space" | "newer-schema" | "busy" | "server";
+export class RecoveryCopyRefusal extends Error {
+  constructor(readonly reason: RecoveryCopyReason) {
+    super("The server could not prepare a recovery copy of these edits.");
+  }
+}
+
+/**
  * One refused service-held queue. `copied` is whether the owner confirmed a
  * recovery copy of this refusal that holds the checkpoint a copy reads now.
  */
