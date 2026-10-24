@@ -54,6 +54,21 @@ it("remembers verdicts across a restart of a built app, for the same checker onl
   }
 });
 
+it("checks again when stored verdicts are damaged", async () => {
+  vi.stubEnv("DEV", false);
+  try {
+    await expect(checkLossyNote("d".repeat(64), "# Note\n")).resolves.toBe(false);
+    const { checker } = JSON.parse(localStorage.getItem("dohc.lossyNoteVerdicts") ?? "null") as { checker: string };
+    for (const damaged of ["{", JSON.stringify({ checker, verdicts: [["d".repeat(64), "false"]] }), JSON.stringify({ checker, verdicts: "d" })]) {
+      localStorage.setItem("dohc.lossyNoteVerdicts", damaged);
+      vi.resetModules();
+      expect((await import("./lossyNote")).knownLossyNoteVerdict("d".repeat(64))).toBeUndefined();
+    }
+  } finally {
+    localStorage.removeItem("dohc.lossyNoteVerdicts");
+  }
+});
+
 it("keeps verdicts out of storage on a dev server", async () => {
   await expect(checkLossyNote("c".repeat(64), "# Note\n")).resolves.toBe(false);
   expect(localStorage.getItem("dohc.lossyNoteVerdicts")).toBeNull();

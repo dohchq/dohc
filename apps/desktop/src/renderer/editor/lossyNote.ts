@@ -1,14 +1,12 @@
 import {useEffect, useRef, useState} from 'react';
 import * as Y from 'yjs';
-import checker from './lossyNote.worker.ts?worker&url';
+import checkerUrl from './lossyNote.worker.ts?worker&url';
 
 // A lossy note is one dohc would change in meaning by saving it from the
 // editor (CONTEXT.md). The check parses the whole note, so it runs in a
 // worker, never on the UI thread. Verdicts are kept by the file's content
 // hash, so reopening unchanged bytes is free. This profile's storage keeps
 // them across restarts, so a restart doesn't wait for the worker either.
-// The built checker's URL changes with its code, so a build that checks
-// differently starts with none. A dev server's URL doesn't, so it stores none.
 
 const VERDICT_LIMIT = 256;
 const IDLE_MS = 30_000;
@@ -16,6 +14,11 @@ const IDLE_MS = 30_000;
 // worker, and its note opens read-only until a later read checks it again.
 const DEADLINE_MS = 30_000;
 const STORED_VERDICTS = 'dohc.lossyNoteVerdicts';
+// Stored verdicts hold only for the checker and runtime that gave them. Vite
+// names the built checker's file after its contents, and the user agent names
+// the Chromium whose Unicode tables the parser uses. A dev server's file name
+// doesn't change with its contents, so it stores none.
+const checker = `${checkerUrl.slice(checkerUrl.lastIndexOf('/') + 1)} ${navigator.userAgent}`;
 const verdicts = storedVerdicts();
 const checks = new Map<string, Promise<boolean>>();
 type Answer = {lossy: boolean; witnessKeepsMeaning?: boolean};
@@ -74,7 +77,7 @@ function idle(): void {
 }
 
 function startWorker(): Worker {
-  const started = new Worker(checker, {type: 'module'});
+  const started = new Worker(checkerUrl, {type: 'module'});
   started.onerror = () => {if (worker === started) stop(new Error('The note check stopped.'));};
   started.onmessage = ({data}: MessageEvent<{id: number; lossy?: boolean; witnessKeepsMeaning?: boolean; error?: string}>) => {
     if (worker !== started) return;
