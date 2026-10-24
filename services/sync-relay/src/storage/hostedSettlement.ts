@@ -124,6 +124,16 @@ function nativeSettlementRecord(record: Record<string, unknown>): LiveObjectBind
     applications! <= events! && record.settlementId === nativeSettlementId(record));
   return binding;
 }
+/** Whether native would accept `record` as a settlement record, under the settlement ID it derives. */
+export function isNativeSettlementRecord(record: unknown): boolean {
+  try {
+    nativeSettlementRecord(bag(record));
+    return true;
+  } catch (error) {
+    if (error instanceof SettlementProofRefusal) return false;
+    throw error;
+  }
+}
 export type SettlementAdmission =
   | { status: "accepted"; settlementId: string }
   | { status: "refused"; settlementId: string; reason: "authorship-mismatch" };

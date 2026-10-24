@@ -40,11 +40,11 @@ const host={mode:'service' as const,hostId:'service',hostEpoch:parseHostEpoch(1)
 const actor={kind:'owner' as const,userId:'owner',shareId:'share'}
 const bounds={maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000}
 const stop={operationId:'restore',workspaceId:'workspace',ownerUserId:'owner'}
-function fixture(){
+function fixture(text='Original'){
   const root=mkdtempSync(join(tmpdir(),'dohc-service-activation-')),path=join(root,'relay.sqlite')
   const storage=openSyncRelayStorage(path),raw=new DatabaseSync(path)
   const history=createLiveJournalHistoryAuthority({namespace:'history',reconciled:true}),store=storage.createServiceActivationStore(history)
-  const doc=markdownToYDoc('Original'),baselineBytes=Buffer.from(Y.encodeStateAsUpdate(doc))
+  const doc=markdownToYDoc(text),baselineBytes=Buffer.from(Y.encodeStateAsUpdate(doc))
   doc.getMap('frontmatter').set('title','Edited')
   const fullState=Buffer.from(Y.encodeStateAsUpdate(doc));doc.destroy()
   const document={workspaceId:'workspace',mainVersionId:'main' as const,objectId:'object',lineageClaimId:hash(baselineBytes)}
@@ -431,6 +431,82 @@ it.each([
     expect(f.prepare).toThrow(message)
     expect(f.raw.prepare('SELECT * FROM sync_relay_live_documents').all()).toEqual([])
   }finally{loser.doc.destroy();f.close()}
+})
+// Proves: the complete history is charged once, however many later prefixes
+// must keep the source's projection.
+it('activates a source followed by many projection-neutral rows over a 1 MB baseline within the self-hosted budget',()=>{
+  const f=fixture('x'.repeat(1_000_000)),doc=new Y.Doc();try{
+    const {maxCaptureBytes,maxEntriesPerDrain,maxBytesPerDrain}=selfHostLiveProfile().service.activation
+    expect(f.capture.baselineBytes.length).toBeGreaterThan(1_000_000)
+    Y.applyUpdate(doc,f.capture.baselineBytes);const base=Y.encodeStateVector(doc)
+    Y.applyUpdate(doc,f.capture.fullState);const edit=Y.encodeStateAsUpdate(doc,base)
+    f.raw.prepare("UPDATE sync_relay_log SET payload_json=json_set(payload_json,'$.updateBlobSha256',?) WHERE origin_id='origin' AND origin_seq=2").run(hash(edit))
+    f.raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)").run(hash(edit),edit.length,edit)
+    const frontmatter=doc.getMap('frontmatter')
+    for(let seq=3;seq<3+24;seq++){
+      const before=Y.encodeStateVector(doc);frontmatter.set('temporary',seq);frontmatter.delete('temporary');const neutral=Y.encodeStateAsUpdate(doc,before)
+      append(f,'origin',seq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(neutral)}),neutral)
+    }
+    const fullState=Buffer.from(Y.encodeStateAsUpdate(doc))
+    Object.assign(f.capture,{fullState});Object.assign(f.capture.source,{fullStateDigest:hash(fullState),fullStateByteLength:fullState.length})
+    expect(f.prepare({maxCaptureBytes,maxEntriesPerDrain,maxBytesPerDrain})).toMatchObject({completed:false})
+  }finally{doc.destroy();f.close()}
+})
+// A later native-shaped write of the document under a native settlement name,
+// whose projection the edit at origin sequence 2 made stale.
+function staleArtifact(f:ReturnType<typeof fixture>,origin='origin',originSeq=3){
+  const stale=f.raw.prepare("SELECT blob_sha256,byte_length FROM sync_relay_object_moments WHERE moment_id='original-moment'").get()!
+  const momentId=`moment-ydoc-${hash(Buffer.from(`${origin}:${originSeq}`))}`
+  append(f,origin,originSeq,'moment.append',{momentId,versionId:'main',objectId:'object',objectCreatedAtMs:0,path:'docs/a.md',recordedAtMs:3,
+    operation:'write',payloadBeforeBlobSha256:null,payloadBeforePath:null,payloadAfterBlobSha256:stale.blob_sha256,payloadAfterPath:'docs/a.md',
+    payloadBeforeContentKind:null,payloadBeforeByteLength:null,payloadAfterContentKind:'text',payloadAfterByteLength:stale.byte_length,
+    metadata:{origin:'sync',summary:null,correlationId:null},authors:null,beforePresent:'null',beforeObjectId:null,beforeVersionId:null,beforePath:null,
+    beforeBlobSha256:null,beforeContentKind:null,beforeByteLength:null,beforeUpdatedAtMs:null,beforeLatestMomentId:null,beforeMetadata:null})
+  f.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+    VALUES ('workspace','object',?,?,'main','docs/a.md',?,'text',?,3)`).run(f.capture.source.committedCursor,momentId,stale.blob_sha256,stale.byte_length)
+}
+const otherWrite=(changes:Record<string,unknown>)=>({versionId:'main',objectId:'other-object',momentId:'other',path:'docs/c.md',operation:'write',
+  payloadAfterPath:'docs/c.md',payloadAfterContentKind:'text',payloadAfterBlobSha256:'c'.repeat(64),payloadAfterByteLength:1,...changes})
+// Proves: a later divergent file moment of the same lineage leaves an earlier
+// source standing, beside a losing device's base and delta that break nothing.
+it('activates past a same-lineage stale settlement artifact and a losing base from another device',()=>{
+  const f=fixture(),loser=losingDevice(f);try{
+    append(f,'losing-device',2,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:loser.lineageClaimId,updateBlobSha256:hash(Buffer.from('losing'))}))
+    staleArtifact(f)
+    expect(f.prepare()).toEqual({document:f.document,replayed:false,completed:false})
+  }finally{loser.doc.destroy();f.close()}
+})
+const divergent='Ordinary activation found a later ordinary file moment with a divergent projection.'
+it.each([
+  // The artifact origin's nearest row names another lineage; its favourable row behind that doesn't count.
+  ['an unfavourable nearer row',f=>{append(f,'origin',3,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:'b'.repeat(64),updateBlobSha256:'b'.repeat(64)}));staleArtifact(f,'origin',4)},divergent],
+  // A refused row keeps no object, so it may have been the document's.
+  ['a refused nearer row',f=>{append(f,'origin',3,'relay.refused',{opKind:'ydoc.update',payloadSha256:'b'.repeat(64),reason:'outside-hosted-documents'})
+    f.raw.exec("UPDATE sync_relay_log SET relay_admission='refused' WHERE origin_id='origin' AND origin_seq=3");staleArtifact(f,'origin',4)},divergent],
+  ['a losing base that is its origin\'s nearest row',f=>{losingDevice(f).doc.destroy();staleArtifact(f,'losing-device',2)},divergent],
+  ['no nearest row in the captured history',f=>staleArtifact(f,'other-device',0),divergent],
+  ['a name native does not give a settlement',f=>{staleArtifact(f);f.raw.exec("UPDATE sync_relay_object_moments SET moment_id='moment-ydoc-short' WHERE object_id='object' AND relay_seq=4")
+    f.raw.exec("UPDATE sync_relay_log SET payload_json=json_set(payload_json,'$.momentId','moment-ydoc-short') WHERE relay_seq=4")},divergent],
+  ['another object taking the path',f=>{staleArtifact(f);append(f,'other',0,'moment.append',otherWrite({path:'docs/a.md',payloadAfterPath:'docs/a.md'}))},divergent],
+  ['another object moving onto the path and away again',f=>{staleArtifact(f)
+    append(f,'other',0,'moment.append',otherWrite({operation:'move',path:'docs/a.md',payloadAfterPath:'docs/a.md',beforePath:'docs/c.md'}))
+    append(f,'other',1,'moment.append',otherWrite({operation:'move',beforePath:'docs/a.md'}))},divergent],
+  ['a before-image naming the document',f=>{staleArtifact(f);append(f,'other',0,'moment.append',otherWrite({beforeObjectId:'object'}))},divergent],
+  ['the document moving away and back',f=>{staleArtifact(f)
+    append(f,'origin',4,'moment.append',otherWrite({objectId:'object',operation:'move',path:'docs/b.md',payloadAfterPath:'docs/b.md'}))
+    append(f,'origin',5,'moment.append',otherWrite({objectId:'object',operation:'move',path:'docs/a.md',payloadAfterPath:'docs/a.md'}))},
+    'Ordinary activation history replaced the live document.'],
+  ['unclaimed lineage evidence',f=>{staleArtifact(f);append(f,'other',0,'ydoc.update',ydocUpdate({isBaseState:false,updateBlobSha256:'d'.repeat(64)}))},
+    'Ordinary activation history differs from the captured lineage.'],
+  ['a base inconsistent with the captured claim',f=>{staleArtifact(f);const other=Buffer.from('another base')
+    append(f,'other',0,'ydoc.update',ydocUpdate({isBaseState:true,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(other)}),other)},
+    'Ordinary activation has a different baseline.'],
+] as [string,(f:ReturnType<typeof fixture>)=>void,string][])('refuses a stale settlement artifact after %s',(_case,add,message)=>{
+  const f=fixture();try{
+    add(f)
+    expect(f.prepare).toThrow(message)
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_documents').all()).toEqual([])
+  }finally{f.close()}
 })
 it('rejects a different replication epoch even at the same relay cursor',()=>{
   const f=fixture();try{
@@ -1290,29 +1366,39 @@ const markdownOf=(f:ReturnType<typeof fixture>,state:Uint8Array)=>{
 }
 
 // Proves: a retiring document's host may publish its baseline, its retained
-// source state and source moment, each as a departed row that moves no
-// projection; anything else of the same document is refused at its coordinate.
+// source state and source moment as native writes it, each as a departed row
+// that moves no projection; the moment's author fields prove no authorship.
+// Anything else of the same document is refused at its coordinate.
 it("admits only a retiring document's verified Y.Doc rows and source moment",async()=>{
   const f=fixture();try{
     const r=await retiringFeed(f)
     const source=markdownOf(f,f.capture.fullState),stray=new TextEncoder().encode('unproved bytes')
     expect(hash(source)).toBe(f.capture.source.sourceDigest)
     for(const bytes of [f.capture.baselineBytes,f.capture.fullState,source,stray])await r.upload(bytes)
-    const moment=(changes:Record<string,unknown>={}):Row=>['moment.append',{versionId:'main',objectId:'object',momentId:f.capture.source.sourceMomentId,path:'docs/a.md',
-      operation:'write',payloadAfterPath:'docs/a.md',payloadAfterContentKind:'text',payloadAfterBlobSha256:hash(source),payloadAfterByteLength:source.length,
-      recordedAtMs:20,metadata:{origin:'sync',summary:null,correlationId:null},beforePresent:'absent',...changes}]
-    const {beforePresent:_,...partial}=moment()[1]
+    // The payload `outbound.rs` builds for a moment with no stored authors.
+    const moment=(changes:Record<string,unknown>={}):Row=>['moment.append',{momentId:f.capture.source.sourceMomentId,versionId:'main',objectId:'object',
+      objectCreatedAtMs:1,path:'docs/a.md',recordedAtMs:20,operation:'write',payloadBeforeBlobSha256:null,payloadBeforePath:null,
+      payloadAfterBlobSha256:hash(source),payloadAfterPath:'docs/a.md',payloadBeforeContentKind:null,payloadBeforeByteLength:null,
+      payloadAfterContentKind:'text',payloadAfterByteLength:source.length,metadata:{origin:'sync',summary:null,correlationId:null},authors:null,
+      beforePresent:'null',beforeObjectId:null,beforeVersionId:null,beforePath:null,beforeBlobSha256:null,beforeContentKind:null,beforeByteLength:null,
+      beforeUpdatedAtMs:null,beforeLatestMomentId:null,beforeMetadata:null,...changes}]
+    const {beforePresent:_,...partial}=moment()[1],{authors:_authors,...unattributed}=moment()[1]
     const rows=[r.ydocRow(f.capture.baselineBytes,{isBaseState:true}),r.ydocRow(f.capture.fullState),moment(),
       r.ydocRow(f.capture.fullState,{lineageClaimId:'b'.repeat(64)}),r.ydocRow(stray),r.ydocRow(f.capture.baselineBytes),moment({momentId:'another-moment'}),
       moment({operation:'rename',path:'docs/b.md',payloadAfterPath:'docs/b.md',beforePath:'docs/a.md'}),moment({operation:'delete'}),moment({beforeObjectId:'other-object'}),
-      moment({conflictId:'conflict'}),['moment.append',partial] as Row]
+      moment({authors:[]}),['moment.append',partial] as Row,
+      ['moment.append',{...unattributed,attributionUnavailable:{settlementId:'settlement',reason:'authorship-mismatch'},
+        metadata:{origin:'sync',summary:'Attribution unavailable',correlationId:null}}] as Row,
+      moment({authorContext:{kind:'account',accountId:'owner'}})]
     const answer=await r.push(rows,0)
-    expect(answer).toMatchObject({status:200,body:{inserted:12}})
+    expect(answer).toMatchObject({status:200,body:{inserted:14}})
     expect(answer.body.refusals).toEqual(r.refusals([3,'ydoc.update','unproved-retirement-output'],[4,'ydoc.update','unproved-retirement-output'],
       [5,'ydoc.update','unproved-retirement-output'],[6,'moment.append','unproved-retirement-output'],[7,'moment.append','outside-hosted-documents'],
       [8,'moment.append','outside-hosted-documents'],[9,'moment.append','outside-hosted-documents'],[10,'moment.append','unproved-retirement-output'],
       [11,'moment.append','unproved-retirement-output']))
-    for(const originSeq of [0,1,2])expect(r.coordinate(originSeq)).toEqual(departed(rows[originSeq]![0]))
+    for(const originSeq of [0,1,2,12,13])expect(r.coordinate(originSeq)).toEqual(departed(rows[originSeq]![0]))
+    expect(f.raw.prepare('SELECT admitted_author_snapshot_json AS authors FROM sync_relay_log WHERE origin_id=? AND origin_seq IN (2,12,13)').all(HOST_ORIGIN))
+      .toEqual([{authors:null},{authors:null},{authors:null}])
     expect(f.raw.prepare('SELECT moment_id FROM sync_relay_object_moments WHERE moment_id=?').get(f.capture.source.sourceMomentId)).toBeUndefined()
   }finally{f.close()}
 })
@@ -1397,6 +1483,61 @@ it('proves a retiring settlement audit before its later moment, and refuses a se
     expect(r.coordinate(6)).toEqual(departed('moment.append'))
     expect(f.raw.prepare('SELECT settlement_id FROM sync_relay_live_settlement_bindings').all()).toEqual([{settlement_id:record.settlementId}])
     expect(f.raw.prepare('SELECT moment_id FROM sync_relay_object_moments WHERE moment_id=?').get(String(record.momentId))).toBeUndefined()
+  }finally{f.close()}
+})
+
+// A successor's capture whose source is the retiring host's settlement moment:
+// the host published the edit it settled as a departed Y.Doc row, then the
+// settlement's audit and, unless only the audit, its moment.
+async function departedSettlementSource(f:ReturnType<typeof fixture>,published:'moment'|'audit'){
+  const r=await retiringFeed(f);r.applyEdit()
+  await r.upload(r.editBytes)
+  const {record,audit,moment}=await retiringSettlement(f,r)
+  const rows:Row[]=[r.ydocRow(r.editBytes),audit(),...(published==='moment'?[moment()]:[])]
+  expect(await r.push(rows,0)).toMatchObject({status:200,body:{inserted:rows.length}})
+  for(const [originSeq,[opKind]] of rows.entries())expect(r.coordinate(originSeq)).toEqual(departed(opKind))
+  const state=Buffer.from(f.raw.prepare('SELECT content FROM sync_relay_blobs WHERE sha256=?').get(String(record.acceptedStateBlobSha256))!.content as Uint8Array)
+  const markdown=markdownOf(f,state)
+  Object.assign(f.capture,{fullState:state})
+  Object.assign(f.capture.source,{committedCursor:Number(f.raw.prepare('SELECT MAX(relay_seq) AS seq FROM sync_relay_log').get()!.seq),
+    sourceMomentId:String(record.momentId),sourceDigest:hash(markdown),sourceByteLength:markdown.length,fullStateDigest:hash(state),fullStateByteLength:state.length})
+  return record
+}
+// Proves: a successor's source may be the retiring host's departed settlement
+// moment, proved by the binding the relay committed with it. The departed
+// Y.Doc row it settled counts as history: without it the states differ.
+it('verifies a capture whose source is a departed settlement moment the relay proved',async()=>{
+  const f=fixture();try{
+    await departedSettlementSource(f,'moment')
+    expect(verify(f)).toEqual({verified:true})
+  }finally{f.close()}
+})
+const unsettled='neither ordinary history nor a proved settlement',unproved='Native activation source settlement is not proved.'
+it.each([
+  ['its moment without the committed binding','moment',f=>{f.raw.exec('DELETE FROM sync_relay_live_settlement_bindings')},unsettled],
+  ['a departed flag alone','audit',f=>{const source=f.capture.source
+    append(f,HOST_ORIGIN,2,'moment.append',{versionId:'main',objectId:'object',momentId:source.sourceMomentId,path:'docs/a.md',operation:'write',payloadAfterPath:'docs/a.md',
+      payloadAfterContentKind:'text',payloadAfterBlobSha256:source.sourceDigest,payloadAfterByteLength:source.sourceByteLength})
+    f.raw.prepare("UPDATE sync_relay_log SET relay_admission='departed' WHERE relay_seq=?").run(source.committedCursor)},unsettled],
+  ['a matching settlement name alone','audit',f=>{f.capture.source.sourceMomentId=`moment-ydoc-${'d'.repeat(64)}`},unsettled],
+  ['an audit without a committed binding','audit',()=>{},unsettled],
+  ['a pruned terminal cut','moment',f=>{f.raw.exec('DELETE FROM sync_relay_live_settlement_cuts')},unproved],
+  ['pruned settled state','moment',f=>{f.raw.prepare('DELETE FROM sync_relay_blobs WHERE sha256=?').run(f.capture.source.fullStateDigest)},unproved],
+  ['a projection change after the source','moment',f=>{
+    const doc=new Y.Doc({gc:false});Y.applyUpdate(doc,f.capture.fullState)
+    const frontmatter=doc.getMap('frontmatter'),title=frontmatter.get('title')
+    for(const [originSeq,value] of [[3,'Changed'],[4,title]] as const){
+      const before=Y.encodeStateVector(doc);frontmatter.set('title',value);const suffix=Y.encodeStateAsUpdate(doc,before)
+      append(f,'origin',originSeq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(suffix)}),suffix)
+    }
+    const fullState=Buffer.from(Y.encodeStateAsUpdate(doc));doc.destroy()
+    Object.assign(f.capture,{fullState});Object.assign(f.capture.source,{fullStateDigest:hash(fullState),fullStateByteLength:fullState.length})
+  },'does not project the captured source'],
+] as [string,'moment'|'audit',(f:ReturnType<typeof fixture>)=>void,string][])('refuses a departed settlement source with %s',async(_case,published,change,message)=>{
+  const f=fixture();try{
+    await departedSettlementSource(f,published)
+    change(f)
+    expect(()=>verify(f)).toThrow(message)
   }finally{f.close()}
 })
 
