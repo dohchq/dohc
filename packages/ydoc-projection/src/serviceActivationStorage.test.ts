@@ -20,8 +20,10 @@ import {verifyOrdinaryActivationCut} from '../../../services/sync-relay/src/stor
 import {selfHostLiveProfile} from '../../../services/sync-relay/src/selfHostLiveProfile.js'
 import {requireStopRestoreOwnerOrigin,type StopRestoreBasis,type StopRestoreIntent} from '../../../services/sync-relay/src/storage/liveRestoreOperation.js'
 import type {StorageContext} from '../../../services/sync-relay/src/storage/context.js'
-import {readServiceActivationRetirement} from '../../../services/sync-relay/src/storage/serviceActivationRetirement.js'
+import {openServiceActivationRetirement,readServiceActivationRetirement} from '../../../services/sync-relay/src/storage/serviceActivationRetirement.js'
 import {allowsServiceActivation} from '../../../services/sync-relay/src/storage/serviceActivationAccess.js'
+import {readServiceActivationOrigin} from '../../../services/sync-relay/src/storage/serviceActivationOrigin.js'
+import {authorizeServiceHostReplication,deriveServiceHostBearer} from '../../../services/sync-relay/src/serviceHostCredential.js'
 
 const {DatabaseSync}=createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite')
 const hash=(bytes:Uint8Array)=>createHash('sha256').update(bytes).digest('hex')
@@ -716,7 +718,7 @@ it('reports a restore fence that lands while a completed activation waits for do
     const {d,work,key,send,capture,signal,fence,queueBehind}=serializedActivation(f)
     const settle=vi.fn(async()=>{expect(work.busy(key)).toBe(true)})
     let drain=vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'done'} as never)
-    expect(await d.driver.activate(d.target,signal,settle)).toMatchObject({kind:'done'})
+    expect(await d.driver.activate(d.target,signal,settle,new Map())).toMatchObject({kind:'done'})
     expect(settle).toHaveBeenCalledTimes(1)
     // Only this first pass, which has no owner yet, catches up first.
     expect(d.pull).toHaveBeenCalledTimes(1)
@@ -937,7 +939,7 @@ it('restarts a pending activation with its retained ID and cut after catching up
       f.raw.exec("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','other',1,'object.snapshot','{}',3)")
       return {hasMore:false}
     })
-    await expect(resumed.driver.activate(resumed.target,new AbortController().signal)).resolves.toMatchObject({kind:'pending',reason:'transport interrupted'})
+    await expect(resumed.driver.activate(resumed.target,new AbortController().signal,undefined,new Map())).resolves.toMatchObject({kind:'pending',reason:'transport interrupted'})
     expect(order).toEqual(['pull','capture'])
     expect(capture).toHaveBeenCalledWith(expect.objectContaining({workspace:'native-workspace'}),'docs/a.md',1_000_000,expect.any(AbortSignal),f.capture.activationId)
     expect(send).not.toHaveBeenCalled()
@@ -974,6 +976,18 @@ const resumeDocument=(f:ReturnType<typeof fixture>,nowMs:number)=>f.storage.setS
 const retirement=(storage:unknown)=>readServiceActivationRetirement(storage as StorageContext,{workspaceId:'workspace',objectId:'object'})
 const generation=(f:ReturnType<typeof fixture>)=>Number(f.raw.prepare('SELECT restore_fence_generation AS fence FROM sync_relay_live_documents').get()!.fence)
 const refused={kind:'refused',reason:'host-unavailable'}
+const credential={key:new Uint8Array(32).fill(7),namespace:'history'}
+const keyOf=({objectId,lineageClaimId,activationId,restoreFenceGeneration,acceptedThrough}:NonNullable<ReturnType<typeof retirement>>)=>
+  ({objectId,lineageClaimId,activationId,restoreFenceGeneration,acceptedThrough})
+// The released boundary at the journal row a receipt names.
+function boundaryAt(f:ReturnType<typeof fixture>,receipt:LiveUpdateReceipt){
+  const row=f.raw.prepare('SELECT accepted_event_count AS count,accepted_evidence_digest AS digest FROM sync_relay_live_update_journal WHERE journal_cursor=?').get(receipt.journalCursor)!
+  return {terminalReceipt:{deliveryId:receipt.deliveryId,updateDigest:receipt.updateDigest,journalCursor:receipt.journalCursor,acceptingHostEpoch:receipt.acceptingHostEpoch},
+    eventCount:Number(row.count),historyEvidenceDigest:String(row.digest)}
+}
+// The boundary a release keeps: the retiring owner's applied tip.
+const ownerBoundary=(f:ReturnType<typeof fixture>)=>
+  boundaryAt(f,JSON.parse(String(f.raw.prepare('SELECT tip_receipt_json FROM sync_relay_live_delivery_owners').get()!.tip_receipt_json)))
 
 it('records the exact activation and F in Stop, and keeps that fence through a duplicate Stop, a restart and an early Resume',()=>{
   const f=fixture();let reopened:ReturnType<typeof openSyncRelayStorage>|undefined
@@ -1017,8 +1031,8 @@ it("records the held activation's obligation inside its Resume's enrollment tran
     enroll(f);completeActivation(f);const edit=commitEdit(f)
     const held=(changes={})=>({activationId:f.capture.activationId,replicationEpoch:'epoch',streamIdentity:'stream',assertHeld(){},...changes})
     const resume=(snapshot:ReturnType<typeof held>,nowMs=10)=>f.storage.enrollServiceHostDocument({...enrollment,nowMs,held:snapshot})
-    expect(()=>resume(held({activationId:'other-activation'}))).toThrow('changed while live editing resumed')
-    expect(()=>resume(held({streamIdentity:'other-stream'}))).toThrow('changed while live editing resumed')
+    expect(()=>resume(held({activationId:'other-activation'}))).toThrow('changed while live editing was resuming')
+    expect(()=>resume(held({streamIdentity:'other-stream'}))).toThrow('changed while live editing was resuming')
     expect(()=>resume(held({assertHeld(){throw new Error('hold ended')}}))).toThrow('hold ended')
     f.raw.exec("CREATE TRIGGER resume_failure BEFORE UPDATE ON sync_relay_service_host_enrollments BEGIN SELECT RAISE(ABORT,'resume fault'); END")
     expect(()=>resume(held())).toThrow('resume fault')
@@ -1057,11 +1071,7 @@ it('completes a retirement once: archives the owner row, refunds the retained st
     if(current.kind!=='current')throw new Error('Missing owner authority')
     stopDocument(f,10);resumeDocument(f,15)
     const owner=f.raw.prepare('SELECT * FROM sync_relay_live_delivery_owners').get()!,tip=JSON.parse(String(owner.tip_receipt_json)) as LiveUpdateReceipt
-    const endpoint=(receipt:LiveUpdateReceipt)=>{
-      const row=f.raw.prepare('SELECT accepted_event_count AS count,accepted_evidence_digest AS digest FROM sync_relay_live_update_journal WHERE journal_cursor=?').get(receipt.journalCursor)!
-      return {terminalReceipt:{deliveryId:receipt.deliveryId,updateDigest:receipt.updateDigest,journalCursor:receipt.journalCursor,acceptingHostEpoch:receipt.acceptingHostEpoch},
-        eventCount:Number(row.count),historyEvidenceDigest:String(row.digest)}
-    }
+    const endpoint=(receipt:LiveUpdateReceipt)=>boundaryAt(f,receipt)
     const key={objectId:'object',lineageClaimId:f.document.lineageClaimId,activationId:f.capture.activationId,restoreFenceGeneration:generation(f),acceptedThrough:edit.journalCursor}
     const complete=(boundary=endpoint(tip),changes={})=>f.store.completeRetirement({workspaceId:'workspace',key,boundary,host,registeredAtMs:20,nowMs:20,guard(){},...changes})
     const usage=()=>Number(f.raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()!.usage_bytes)
@@ -1071,8 +1081,14 @@ it('completes a retirement once: archives the owner row, refunds the retained st
     expect(()=>complete(endpoint(edit))).toThrow('differs from its release')
     expect(()=>complete({...endpoint(tip),eventCount:99})).toThrow('differs from the live journal')
     expect(()=>complete(endpoint(tip),{key:{...key,acceptedThrough:edit.journalCursor+1}})).toThrow('retirement is unavailable')
+    // A generation that moved with no restore running is not the one the key names.
+    f.raw.exec('UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation+1')
+    expect(()=>complete()).toThrow('names another generation')
+    f.raw.exec('UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation-1')
     expect(usage()).toBe(before.usage)
-    expect(complete()).toEqual({replayed:false})
+    const origin=()=>readServiceActivationOrigin(f.storage as StorageContext,'history',f.document,f.capture.activationId)
+    expect(origin()).not.toBeNull()
+    expect(complete()).toEqual({status:'retired',replayed:false})
     const boundaryJson=JSON.stringify(endpoint(tip)),refund=f.capture.fullState.length-Buffer.byteLength(boundaryJson)
     expect(usage()).toBe(before.usage-refund)
     expect(activation()).toEqual({state_bytes:null,accounted_bytes:before.accounted-refund,retired_at_ms:20,retired_boundary_json:boundaryJson})
@@ -1084,14 +1100,96 @@ it('completes a retirement once: archives the owner row, refunds the retained st
     expect(allowsServiceActivation(f.storage as StorageContext,{document:f.document,actor},host,current.binding)).toBe(false)
     expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor})).toEqual(refused)
     expect(f.store.read('workspace','docs/a.md',1_000_000)).toBeNull()
+    // Its archived owner row's origin starts no delivery.
+    expect(origin).toThrow('Retained service activation origin differs.')
     // An exact replay changes nothing, not even a successor's owner row on the same lineage.
     const successor={...owner,origin_json:JSON.stringify({...JSON.parse(String(owner.origin_json)),adoptionId:'successor-activation'})}
     f.raw.prepare(`INSERT INTO sync_relay_live_delivery_owners(${Object.keys(successor).join(',')}) VALUES (${Object.keys(successor).map(()=>'?').join(',')})`)
       .run(...Object.values(successor) as never[])
-    expect(complete()).toEqual({replayed:true})
+    expect(complete()).toEqual({status:'retired',replayed:true})
     expect(usage()).toBe(before.usage-refund)
     expect(f.raw.prepare('SELECT * FROM sync_relay_live_delivery_owners').all()).toEqual([successor])
     expect(()=>complete({...endpoint(tip),eventCount:endpoint(tip).eventCount+1})).toThrow('another boundary')
+  }finally{f.close()}
+})
+
+// Proves: the host's drain of a stopped last document leaves the workspace its
+// hosted credential and settling scope while the activation retires, and both
+// end once it has.
+it('keeps the hosted credential and settling scope through the release of a stopped last document until its activation retires',()=>{
+  const f=fixture();try{
+    enroll(f);completeActivation(f)
+    const bearer=deriveServiceHostBearer(f.storage.currentServiceHostWorkspace('workspace')!,credential)
+    const hosted=()=>authorizeServiceHostReplication(f.storage,{...credential,workspaceId:'workspace',bearer,method:'GET',pathname:'/sync/workspace/hosted/log'})
+    stopDocument(f,10)
+    const open=retirement(f.storage)!
+    expect(f.storage.releaseServiceHostEnrollment({workspaceId:'workspace',objectId:'object',nowMs:11})).toMatchObject({retired:true,hostDrainedAtMs:11})
+    expect(hosted()).toBe('owner')
+    expect(f.storage.readServiceHostFeedScope('workspace')?.settling).toEqual(new Map([['object',open]]))
+    expect(f.store.completeRetirement({workspaceId:'workspace',key:keyOf(open),boundary:ownerBoundary(f),host,registeredAtMs:20,nowMs:20,guard(){}}))
+      .toEqual({status:'retired',replayed:false})
+    expect(hosted()).toBeNull()
+    expect(f.storage.readServiceHostFeedScope('workspace')).toBeNull()
+  }finally{f.close()}
+})
+
+// Proves: completion checks the document's current generation, not only the
+// one saved with the obligation. A restore that advanced it after the
+// obligation opened defers completion, and nothing is archived or refunded.
+it('defers completing a retirement while a restore that advanced its generation is unfinished',()=>{
+  const f=fixture();try{
+    enroll(f);completeActivation(f)
+    const fence=generation(f)
+    f.storage.beginStopRestore({deliveryKind:'owner',operationId:'restore',ownerUserId:'owner',document:f.document,shareId:'share',grantId:'grant',
+      expectedGrantGeneration:1,expectedDependentGrantIds:[],expectedFence:fence,restorePointCursor:0,restorePointReceiptDigest:f.document.lineageClaimId},20)
+    // The shared retirement path can open an obligation while a restore runs.
+    const open=(f.storage as StorageContext).tx(()=>openServiceActivationRetirement(f.storage as StorageContext,f.document,30))!
+    expect(open.restoreFenceGeneration).toBe(fence)
+    f.storage.advanceStopRestoreFence({operationId:'restore',workspaceId:'workspace',ownerUserId:'owner'},40)
+    expect(generation(f)).toBe(fence+1)
+    const rows=()=>f.raw.prepare(`SELECT (SELECT usage_bytes FROM sync_relay_workspace_usage) AS usage,(SELECT count(*) FROM sync_relay_live_delivery_owners) AS owners,
+      (SELECT count(*) FROM sync_relay_live_delivery_owner_history) AS archived,(SELECT retired_at_ms FROM sync_relay_service_activations) AS retired`).get()
+    const before=rows()
+    expect(f.store.completeRetirement({workspaceId:'workspace',key:keyOf(open),boundary:ownerBoundary(f),host,registeredAtMs:50,nowMs:50,guard(){}}))
+      .toEqual({status:'pending',reason:'restore'})
+    expect(rows()).toEqual({...before,owners:1,archived:0,retired:null})
+    expect(retirement(f.storage)).toEqual(open)
+  }finally{f.close()}
+})
+
+// Proves: a workspace identity change leaves an open obligation behind. Its
+// lineage is stale, so it could never retire, and once the document is
+// enrolled under the new identity the obligation neither fences it nor names
+// it settling.
+it('stops fencing a document with an open retirement once the workspace identity changes',()=>{
+  const f=fixture();try{
+    enroll(f);completeActivation(f);stopDocument(f,10)
+    expect(retirement(f.storage)).toMatchObject({activationId:f.capture.activationId})
+    expect(f.storage.rotateWorkspaceIdentity({workspaceId:'workspace',ownerUserId:'owner',replicationEpoch:'next-epoch',streamIdentity:'next-stream',rotatedAtMs:20})).toBe('rotated')
+    expect(retirement(f.storage)).toBeNull()
+    // Nothing enrolls a document again under a new identity yet, so the test writes its enrollment there.
+    f.raw.exec("UPDATE sync_relay_service_host_enrollments SET replication_epoch='next-epoch',stream_identity='next-stream',owner_stop=NULL,enabled=1,retired=0,host_drained_at_ms=NULL")
+    expect(f.storage.serviceHostDocumentEnabled(f.document)).toBe(true)
+    expect(f.storage.readServiceHostFeedScope('workspace')?.settling).toEqual(new Map())
+    // Only the old lineage's staleness refuses it now; a new activation registers a new lineage.
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor})).toEqual({kind:'refused',reason:'stale-document'})
+  }finally{f.close()}
+})
+
+// Proves: a duplicate Stop returns the open obligation's F even after the
+// document's current lineage changed.
+it("returns the original F to a duplicate Stop after the document's current lineage changed",()=>{
+  const f=fixture();try{
+    enroll(f);completeActivation(f);const edit=commitEdit(f)
+    expect(stopDocument(f,10)).toMatchObject({acceptedCursor:edit.journalCursor})
+    const recorded=retirement(f.storage)
+    f.raw.exec(`UPDATE sync_relay_live_documents SET lineage_state='retired',admission_state='closed',retired_at_ms=20;
+      INSERT INTO sync_relay_live_documents(workspace_id,main_version_id,object_id,lineage_claim_id,replaces_lineage_claim_id,current_path,baseline_moment_relay_seq,
+        baseline_projected_sha256,baseline_projected_byte_length,baseline_digest,baseline_bytes,lineage_state,admission_state,restore_fence_generation,registered_at_ms,retired_at_ms)
+      SELECT workspace_id,main_version_id,object_id,'${'b'.repeat(64)}',lineage_claim_id,current_path,baseline_moment_relay_seq,baseline_projected_sha256,
+        baseline_projected_byte_length,'${'b'.repeat(64)}',baseline_bytes,'current','open',restore_fence_generation,20,NULL FROM sync_relay_live_documents`)
+    expect(stopDocument(f,30)).toMatchObject({acceptedCursor:edit.journalCursor})
+    expect(retirement(f.storage)).toEqual(recorded)
   }finally{f.close()}
 })
 

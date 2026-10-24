@@ -50,8 +50,9 @@ export function readServiceHostFeedScope(storage: StorageContext, workspaceId: s
     // Current enrollments share the workspace's owner and identity.
     ({ownerUserId, replicationEpoch, streamIdentity} = all[0]!);
   } else {
-    // A Stop can leave an undrained row with enabled=0. Keep the hosted
-    // credential alive so the host can observe the empty scope and retire it.
+    // A Stop can leave an undrained row with enabled=0, and an open retirement
+    // outlasts the drain. Keep the hosted credential alive so the host can
+    // observe the empty scope and retire it, and finish that retirement.
     const workspace = storage.currentServiceHostWorkspace(workspaceId, true);
     if (!workspace) return null;
     ({ownerUserId, replicationEpoch, streamIdentity} = workspace);

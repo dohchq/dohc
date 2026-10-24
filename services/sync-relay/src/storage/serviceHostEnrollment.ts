@@ -10,7 +10,7 @@ import {canonicalLiveSelector, currentLiveDocumentMoment} from "./liveDocumentAu
 import {LIVE_RESTORE_OPERATIONS} from "./liveRestoreOperationSchema";
 import {assertWorkspaceQuota} from "./workspaces";
 import {forgetServiceHostUploads} from "./serviceHostUploads";
-import {openServiceActivationRetirement, serviceActivationRetirementOpen} from "./serviceActivationRetirement";
+import {OPEN_RETIREMENT, openServiceActivationRetirement, serviceActivationRetirementOpen} from "./serviceActivationRetirement";
 import {SERVICE_ACTIVATIONS} from "./serviceActivationSchema";
 import {badRequest, notFound, relayError} from "../errors";
 
@@ -325,8 +325,8 @@ function enrollInsideTransaction(storage: StorageContext, input: EnrollServiceHo
     storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge, workspaceId);
     return read(storage, workspaceId, path)!;
 }
-const HELD_CHANGED = "This document changed while live editing resumed. Try again.";
-const restoreInProgress = (storage: StorageContext, workspaceId: string, objectId: string) =>
+export const HELD_CHANGED = "This document changed while live editing was resuming. Try again.";
+export const restoreInProgress = (storage: StorageContext, workspaceId: string, objectId: string) =>
   storage.db.prepare(`SELECT 1 FROM ${LIVE_RESTORE_OPERATIONS} WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND phase<>'resumed'`)
     .get(workspaceId, objectId) !== undefined;
 /**
@@ -399,14 +399,18 @@ export interface ServiceHostWorkspace {
 const CURRENT = `FROM ${SERVICE_HOST_ENROLLMENTS} e JOIN sync_relay_workspaces w USING(workspace_id)
   WHERE e.workspace_id=? AND e.enabled=1 AND e.retired=0 AND e.owner_user_id=w.owner_user_id
     AND e.replication_epoch=w.replication_epoch AND e.stream_identity=w.stream_identity`;
+// Current enrollments the host has not drained, or whose document's activation is still retiring.
 const CURRENT_UNDRAINED = `FROM ${SERVICE_HOST_ENROLLMENTS} e JOIN sync_relay_workspaces w USING(workspace_id)
-  WHERE e.workspace_id=? AND e.host_drained_at_ms IS NULL AND e.owner_user_id=w.owner_user_id
-    AND e.replication_epoch=w.replication_epoch AND e.stream_identity=w.stream_identity`;
+  WHERE e.workspace_id=? AND (e.host_drained_at_ms IS NULL OR EXISTS(SELECT 1 FROM ${SERVICE_ACTIVATIONS}
+      WHERE ${SERVICE_ACTIVATIONS}.workspace_id=e.workspace_id AND ${SERVICE_ACTIVATIONS}.main_version_id='main'
+        AND ${SERVICE_ACTIVATIONS}.object_id=e.object_id AND ${OPEN_RETIREMENT}))
+    AND e.owner_user_id=w.owner_user_id AND e.replication_epoch=w.replication_epoch AND e.stream_identity=w.stream_identity`;
 /**
  * The workspace identity while at least one enrollment is eligible for the
  * requested credential. Ordinary callers require enabled and current rows;
- * hosted callers may include any undrained current row. One SQL snapshot is
- * safe both on the request path and inside a write guard.
+ * hosted callers may include any undrained current row, and a drained one
+ * until its document's activation retires. One SQL snapshot is safe both on
+ * the request path and inside a write guard.
  */
 export function currentServiceHostWorkspace(storage: StorageContext, workspaceId: string, includeUndrained = false): ServiceHostWorkspace | null {
   storage.captureStanding();

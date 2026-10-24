@@ -13,7 +13,7 @@ import { attachLiveJournalHistory, requireLiveJournalHistory, type LiveJournalHi
 import { authorityInteger, currentLiveDocumentBinding, registerOrdinaryActivationBaselineInTransaction } from "./liveDocumentAuthority";
 import { initialAcceptedHistoryDigest } from "../liveAcceptedHistory";
 import { LIVE_DELIVERY_OWNERS } from "./liveCommittedDeliverySchema";
-import { SERVICE_HOST_ENROLLMENTS } from "./serviceHostEnrollment";
+import { restoreInProgress, SERVICE_HOST_ENROLLMENTS } from "./serviceHostEnrollment";
 import type { RetirementKey } from "./serviceActivationRetirement";
 import {verifyOrdinaryActivationCut,type OrdinaryActivationBounds} from "./ordinaryActivationSource";
 export {ServiceActivationStaleCut} from "./ordinaryActivationSource";
@@ -143,15 +143,18 @@ export class ServiceActivationStore {
    * it at `boundary` and its document parked. Archives its owner row, keeps
    * that boundary, and drops its retained state, refunding those bytes once.
    * Exact replay changes nothing, so it never touches a successor's owner row.
+   * Pending, with nothing changed, while the document's restore is unfinished.
    */
   completeRetirement(input: {workspaceId: string; key: RetirementKey; boundary: RetainedPrefixBody | null;
-    host: LiveHostConnectionCoordinate; registeredAtMs: number; nowMs: number; guard(): void}): {replayed: boolean} {
+    host: LiveHostConnectionCoordinate; registeredAtMs: number; nowMs: number; guard(): void}):
+    {status: "retired"; replayed: boolean} | {status: "pending"; reason: "restore"} {
     const key = retirementKey(input.key), boundary = retainedBoundary(input.boundary), boundaryJson = JSON.stringify(boundary);
     const nowMs = authorityInteger(input.nowMs);
     return this.storage.tx(() => {
       input.guard(); requireLiveJournalHistory(this.storage, this.history);
       const namespace = this.history.namespace;
       const row = this.storage.db.prepare(`SELECT workspace_id,object_id,lineage_claim_id,owner_user_id,predecessor_activation_id,length(state_bytes) AS state_length,
+        json_extract(source_json,'$.replicationEpoch') AS replication_epoch,json_extract(source_json,'$.streamIdentity') AS stream_identity,
         retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor,retired_at_ms,retired_boundary_json FROM ${SERVICE_ACTIVATIONS}
         WHERE relay_database_namespace=? AND activation_id=?`).get(namespace, key.activationId);
       if (!row || row.workspace_id !== input.workspaceId || row.object_id !== key.objectId || row.lineage_claim_id !== key.lineageClaimId ||
@@ -160,15 +163,23 @@ export class ServiceActivationStore {
       }
       if (row.retired_at_ms !== null) {
         if (row.retired_boundary_json !== boundaryJson) throw new Error("Service activation retired at another boundary.");
-        return {replayed: true};
+        return {status: "retired", replayed: true};
       }
       const document = parseLiveDocumentKey({workspaceId: input.workspaceId, mainVersionId: "main", objectId: key.objectId, lineageClaimId: key.lineageClaimId});
       const identity = this.storage.getWorkspaceIdentity(document.workspaceId);
       const enrollment = this.storage.db.prepare(`SELECT owner_user_id,replication_epoch,stream_identity FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=?`)
         .get(document.workspaceId, document.objectId);
       if (!this.storage.workspaceIsOwnedBy(document.workspaceId, String(row.owner_user_id)) || !identity || !enrollment || enrollment.owner_user_id !== row.owner_user_id ||
-          enrollment.replication_epoch !== identity.replicationEpoch || enrollment.stream_identity !== identity.streamIdentity) {
+          enrollment.replication_epoch !== identity.replicationEpoch || enrollment.stream_identity !== identity.streamIdentity ||
+          row.replication_epoch !== identity.replicationEpoch || row.stream_identity !== identity.streamIdentity) {
         throw new Error("Service activation retirement owner changed.");
+      }
+      // A restore moves the generation the key names, so retirement waits for it.
+      if (restoreInProgress(this.storage, document.workspaceId, document.objectId)) return {status: "pending", reason: "restore"};
+      const current = this.storage.db.prepare(`SELECT lineage_claim_id,restore_fence_generation FROM sync_relay_live_documents
+        WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current'`).get(document.workspaceId, document.objectId);
+      if (current?.lineage_claim_id !== key.lineageClaimId || current.restore_fence_generation !== key.restoreFenceGeneration) {
+        throw new Error("Service activation retirement names another generation.");
       }
       if (!registerLiveHostInTransaction(this.storage, {...input.host, updatedAtMs: input.registeredAtMs, guard: input.guard}).ok) {
         throw new Error("Service activation host is unavailable.");
@@ -204,7 +215,7 @@ export class ServiceActivationStore {
         .run(Math.max(nowMs, authorityInteger(row.retire_requested_at_ms)), boundaryJson, charge, namespace, key.activationId);
       const usage = this.storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge, document.workspaceId);
       if (retired.changes !== 1 || usage.changes !== 1) throw new Error("Service activation retirement is damaged.");
-      return {replayed: false};
+      return {status: "retired", replayed: false};
     });
   }
 

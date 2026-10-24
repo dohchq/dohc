@@ -1,4 +1,4 @@
-import {ServiceHostRetirementConflict} from "./storage/serviceHostEnrollment";
+import {HELD_CHANGED, ServiceHostRetirementConflict} from "./storage/serviceHostEnrollment";
 import {readBoundedJson} from "@dohc/service-http";
 import type {ResolveActor} from "@dohc/workspace-auth/session";
 import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents";
@@ -112,7 +112,7 @@ export function createServiceHostEnrollmentRoutes(options: {
     const saved = activation.read(row.workspaceId, row.path, 4 * 1024 * 1024), identity = storage.getWorkspaceIdentity(row.workspaceId);
     if (!saved?.completed || !identity) return undefined;
     return {activationId: saved.activationId, replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity,
-      assertHeld() {if (host.blocked(row) !== "live-edit-unadmitted") throw relayError("conflict", "This document changed while live editing resumed. Try again.");}};
+      assertHeld() {if (host.blocked(row) !== "live-edit-unadmitted") throw relayError("conflict", HELD_CHANGED);}};
   }
   const response = (body: unknown, status = 200) => Response.json(body, {status, headers: {"cache-control": "private, no-store"}});
   return async (request: Request): Promise<Response> => {

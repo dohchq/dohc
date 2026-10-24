@@ -14,11 +14,12 @@ function integer(value: unknown, minimum: number): number {
 
 // Initial preparation proves the ordinary cut. Later delivery retains that source,
 // separately from the original CRDT baseline and from older file snapshots.
+// A retired activation's owner row is archived, so its origin starts no delivery.
 export function readServiceActivationOrigin(storage: StorageContext, namespace: string,
   document: LiveDocumentKey, adoptionId: string) {
   const row = readServiceActivation(storage, document);
   if (!row) return null;
-  requireOrigin(row.relay_database_namespace === namespace && row.activation_id === adoptionId);
+  requireOrigin(row.relay_database_namespace === namespace && row.activation_id === adoptionId && row.retired_at_ms === null);
   const binding = parseLiveObjectBinding(JSON.parse(String(row.binding_json)));
   const source = parseNativeOwnerActivationSource(JSON.parse(String(row.source_json)), binding.currentPath, 20_971_520);
   requireOrigin(source.relayDatabaseNamespace === namespace && source.workspaceId === document.workspaceId &&

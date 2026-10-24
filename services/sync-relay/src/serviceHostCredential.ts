@@ -36,7 +36,8 @@ export function serviceHostFeedRoute(input: {workspaceId: string; method: string
 /**
  * A service token grants the scoped feed only: never the workspace's ordinary
  * replication, account or share administration. It stays valid while the
- * current identity has an undrained enrollment, including one retired by Stop.
+ * current identity has an undrained enrollment, including one retired by Stop,
+ * or an enrollment whose document's activation is still retiring.
  */
 export function authorizeServiceHostReplication(storage: SyncRelayStorage, input: ServiceHostCredentialKey & {
   workspaceId: string; bearer: string; method: string; pathname: string;
