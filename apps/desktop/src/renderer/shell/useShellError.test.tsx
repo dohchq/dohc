@@ -282,12 +282,12 @@ describe("useShellError", () => {
     try {
       const retry = vi.fn();
       const { result } = renderHook(() => useShellError("ws-a"));
-      const words = "dohc doesn't know which computer keeps this workspace's Collections. If it's this one, choose Keep the Collections on this computer.";
+      const words = "dohc doesn't know which computer keeps this workspace's Collections. To keep them on this computer, choose Use this computer in dohc.";
       act(() => result.current.reportShellError("Could not create the Collection.",
         new Error(`Error invoking remote method 'desktop:dataset': CollectionsRefusalError [collections-unclaimed]: ${words}`), retry));
       const row = result.current.shellErrors[0]!;
       expect(row.message).toBe(`Could not create the Collection. ${words}`);
-      expect(row.action?.label).toBe("Keep the Collections on this computer");
+      expect(row.action?.label).toBe("Use this computer");
       await act(async () => { result.current.runShellErrorAction(row.id); });
       expect(keepCollectionsHere).toHaveBeenCalledWith({ workspaceId: "ws-a" });
       expect(retry).toHaveBeenCalledOnce();
@@ -295,9 +295,9 @@ describe("useShellError", () => {
       // Collections another computer keeps offer it too, behind main's question; a cancelled question retries nothing.
       keepCollectionsHere.mockResolvedValueOnce({ kept: false });
       act(() => result.current.reportShellError("Could not create the Collection.",
-        new Error("Error invoking remote method 'desktop:dataset': CollectionsRefusalError [collections-elsewhere]: These Collections are on Laptop."), retry));
+        new Error("Error invoking remote method 'desktop:dataset': CollectionsRefusalError [collections-elsewhere] [computer=Laptop]: These Collections are on Laptop."), retry));
       const elsewhere = result.current.shellErrors[0]!;
-      expect(elsewhere.action?.label).toBe("Keep the Collections on this computer");
+      expect(elsewhere.action?.label).toBe("Use this computer");
       await act(async () => { result.current.runShellErrorAction(elsewhere.id); });
       expect(retry).toHaveBeenCalledOnce();
       // A store that is gone, or a record that changed, offers no such step.

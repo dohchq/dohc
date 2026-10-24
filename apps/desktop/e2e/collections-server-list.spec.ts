@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -62,6 +62,29 @@ async function shoot(page: Page, name: string): Promise<void> {
   await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
 }
 
+// A row names the computer in a few words, and keyboard focus on them shows
+// the whole sentence inside the sidebar, which does not scroll sideways for
+// it. The row's button is the next tab stop, and Escape hides the words.
+async function expectRowTooltip(page: Page, row: Locator, short: string, words: string, name: string): Promise<void> {
+  const trigger = row.getByText(short, { exact: true });
+  await expect(row.getByRole("tooltip")).toBeHidden();
+  await trigger.focus();
+  const tooltip = row.getByRole("tooltip");
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip).toHaveText(words);
+  await expect(trigger).toHaveAccessibleDescription(words);
+  const tree = page.getByTestId("file-tree");
+  const [box, treeBox] = [await tooltip.boundingBox(), await tree.boundingBox()];
+  expect(box!.x + box!.width, "the tooltip stays inside the sidebar").toBeLessThanOrEqual(treeBox!.x + treeBox!.width + 0.5);
+  expect(await tree.evaluate((el) => el.scrollWidth <= el.clientWidth), "the sidebar does not scroll sideways for the tooltip").toBe(true);
+  await shoot(page, `${name}-tooltip`);
+  await page.keyboard.press("Escape");
+  await expect(tooltip).toBeHidden();
+  await page.keyboard.press("Tab");
+  await expect(row.getByRole("button", { name: "Use this computer", exact: true })).toBeFocused();
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+}
+
 // Another computer keeps this workspace's Collections, as one that iCloud
 // Drive carries does. This computer, signed in and not syncing the
 // workspace, lists and uses the Collection moved to the server, and leaves
@@ -99,8 +122,9 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
 
     const section = page.getByRole("region", { name: "Collections", exact: true });
     await expect(section.getByRole("button", { name: "Registrations", exact: true })).toBeVisible();
-    await expect(section.getByTestId("collections-elsewhere"))
-      .toHaveText("Other Collections are on Studio Mac. Open this workspace there to use them, or to move them to a server.Keep the Collections on this computer");
+    await expect(section.getByTestId("collections-elsewhere").getByRole("button", { name: "Use this computer", exact: true })).toBeVisible();
+    await expectRowTooltip(page, section.getByTestId("collections-elsewhere"), "Others on Studio Mac",
+      "Other Collections are on Studio Mac. Open this workspace there to use them, or to move them to a server.", "collections-server-list");
     await expect(section.getByTestId("collections-refusal")).toHaveCount(0);
     await expect(section.getByRole("button", { name: "Restore from recovery file" })).toHaveCount(0);
     const listed = await page.evaluate(workspaceId => window.dohcDesktop!.dataset({ workspaceId, action: "list" }), workspaceId);
@@ -172,8 +196,8 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
     desktop = await launchDesktopApp({ workspace });
     await openWorkspaceFromFirstRun(desktop.page, workspace);
     const offline = desktop.page.getByRole("region", { name: "Collections", exact: true });
-    await expect(offline.getByTestId("collections-elsewhere"))
-      .toHaveText("These Collections are on Studio Mac. Open this workspace there to use them, or to move them to a server.Keep the Collections on this computer");
+    await expectRowTooltip(desktop.page, offline.getByTestId("collections-elsewhere"), "On Studio Mac",
+      "These Collections are on Studio Mac. Open this workspace there to use them, or to move them to a server.", "collections-server-offline");
     await expect(offline.getByTestId("collections-refusal")).toHaveCount(0);
     await expect(offline.getByRole("button", { name: "Registrations", exact: true })).toHaveCount(0);
     await expect(desktop.page.getByTestId("notice-toasts")).toContainText("Could not read Collections.");
@@ -185,8 +209,9 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
     desktop = await launchDesktopApp({ workspace });
     await openWorkspaceFromFirstRun(desktop.page, workspace);
     const signedOut = desktop.page.getByRole("region", { name: "Collections", exact: true });
-    await expect(signedOut.getByTestId("collections-refusal"))
-      .toContainText("These Collections are on Studio Mac. Open this workspace there to use them, or to move them to a server.");
+    await expect(signedOut.getByTestId("collections-refusal").getByRole("button", { name: "Try again", exact: true })).toBeVisible();
+    await expectRowTooltip(desktop.page, signedOut.getByTestId("collections-refusal"), "On Studio Mac",
+      "These Collections are on Studio Mac. Open this workspace there to use them, or to move them to a server.", "collections-signed-out");
     await expect(signedOut.getByTestId("collections-elsewhere")).toHaveCount(0);
     await expect(signedOut.getByRole("button", { name: "Registrations", exact: true })).toHaveCount(0);
     await shoot(desktop.page, "collections-signed-out");

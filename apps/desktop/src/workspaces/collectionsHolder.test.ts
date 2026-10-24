@@ -73,7 +73,8 @@ describe("a workspace's Collections holder", () => {
       const refused = await refusal(admitCollectionsStore(root, workspaceId, required));
       expect(refused.refusal).toEqual({ kind: "unclaimed" });
       expect(refused.code).toBe("collections-unclaimed");
-      expect(refused.message).toBe("dohc doesn't know which computer keeps this workspace's Collections. If it's this one, choose Keep the Collections on this computer.");
+      expect(refused.message).toBe("dohc doesn't know which computer keeps this workspace's Collections. To keep them on this computer, choose Use this computer in dohc.");
+      expect(refused.computerLabel).toBeNull();
     }
     expect(await readdir(join(root, ".dohc")), "nothing but the store this test made").toEqual([places[place][1]]);
     expect(await readdir(join(root, ...places[place]))).toEqual(["state.sqlite-wal"]);
@@ -92,6 +93,7 @@ describe("a workspace's Collections holder", () => {
       if (store) await addStore();
       const refused = await refusal(admitCollectionsStore(root, workspaceId, required));
       expect(refused.code).toBe("collections-elsewhere");
+      expect(refused.computerLabel).toBe("Laptop");
       expect(refused.message).toBe("These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.");
     }
     await named({ installId: "install-old", label: "Studio" });
@@ -306,7 +308,7 @@ describe("keeping the Collections on this computer", () => {
     expect(declined.confirm).toHaveBeenCalledWith({ kind: "made-elsewhere", computer: laptop });
     expect(await exists(recordPath()), "nothing kept").toBe(false);
     expect(keepQuestionWords({ kind: "made-elsewhere", computer: laptop })).toEqual({
-      message: "Keep the Collections on this computer?",
+      message: "Use this computer for these Collections?",
       detail: "Laptop made this workspace. Its Collections may still be syncing from there. If you keep them here before they arrive, this computer can replace Laptop's Collections.",
     });
     const accepted = steps({ madeBy: async () => laptop });
@@ -345,7 +347,7 @@ describe("keeping the Collections of an earlier installation of dohc on this com
     expect(kept.adoptStore).not.toHaveBeenCalled();
     expect(await recordNow()).toEqual({ version: 1, workspaceId, installId: "install-here", label: "Studio", storeId });
     expect(keepQuestionWords({ kind: "earlier-installation", computer: laptop })).toEqual({
-      message: "Keep the Collections on this computer?",
+      message: "Use this computer for these Collections?",
       detail: "Laptop keeps these Collections. If Laptop was this computer before dohc was set up again, keep them here. If Laptop is another computer that still uses them, don't, or its changes can be lost.",
     });
   });

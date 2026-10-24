@@ -3,7 +3,7 @@ import { lstatSync, readFileSync } from "node:fs";
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { DOHC_COLLECTIONS_GUARD, DOHC_METADATA_GUARD, notAFileRefusal, notARealFolderRefusal, type DohcPathGuard } from "@dohc/workspace-core";
-import { COLLECTIONS_REFUSAL_CODE, KEEP_COLLECTIONS_HERE, collectionsElsewhereWords, type CollectionsRefusalKind } from "../ipc/errorWords";
+import { COLLECTIONS_REFUSAL_CODE, USE_THIS_COMPUTER, collectionsElsewhereWords, type CollectionsRefusalKind } from "../ipc/errorWords";
 import { atomicWriteFile } from "../atomicReplaceFile";
 import { computerOf, guardedFileExists, parseObject, readGuardedFile, type Computer } from "./syncHistory";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
@@ -80,7 +80,7 @@ const UNREADABLE = `${DOHC_COLLECTIONS_GUARD.lead} Restore ${DOHC_COLLECTIONS_GU
 function collectionsRefusalMessage(refusal: CollectionsRefusal): string {
   switch (refusal.kind) {
     case "unclaimed":
-      return `dohc doesn't know which computer keeps this workspace's Collections. If it's this one, choose ${KEEP_COLLECTIONS_HERE}.`;
+      return `dohc doesn't know which computer keeps this workspace's Collections. To keep them on this computer, choose ${USE_THIS_COMPUTER} in dohc.`;
     case "elsewhere":
       return collectionsElsewhereWords({ label: refusal.computer.label, sameName: refusal.sameName });
     case "unreadable":
@@ -95,19 +95,21 @@ function collectionsRefusalMessage(refusal: CollectionsRefusal): string {
 }
 
 /**
- * A typed refusal. Nothing opened or created a store. Its code crosses IPC,
- * so the desktop can offer what fits; its message is the same words for
- * every caller.
+ * A typed refusal. Nothing opened or created a store. Its code, and the
+ * name of the computer that keeps the Collections, cross IPC, so the desktop
+ * can offer what fits; its message is the same words for every caller.
  */
 export class CollectionsRefusalError extends Error {
   override name = "CollectionsRefusalError";
   readonly refusal: CollectionsRefusal;
   readonly code: `${typeof COLLECTIONS_REFUSAL_CODE}${CollectionsRefusalKind}`;
+  readonly computerLabel: string | null;
 
   constructor(refusal: CollectionsRefusal) {
     super(collectionsRefusalMessage(refusal));
     this.refusal = refusal;
     this.code = `${COLLECTIONS_REFUSAL_CODE}${refusal.kind}`;
+    this.computerLabel = refusal.kind === "elsewhere" ? refusal.computer.label : null;
   }
 }
 
@@ -327,7 +329,7 @@ export type KeepQuestion =
 /** The question's words: a title, and what the person weighs. */
 export function keepQuestionWords(question: KeepQuestion): { message: string; detail: string } {
   const { label } = question.computer;
-  const message = "Keep the Collections on this computer?";
+  const message = "Use this computer for these Collections?";
   return question.kind === "made-elsewhere"
     ? { message, detail: `${label} made this workspace. Its Collections may still be syncing from there. If you keep them here before they arrive, this computer can replace ${label}'s Collections.` }
     : { message, detail: `${label} keeps these Collections. If ${label} was this computer before dohc was set up again, keep them here. If ${label} is another computer that still uses them, don't, or its changes can be lost.` };
