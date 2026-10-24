@@ -3373,13 +3373,19 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
               WHERE release_blocked IS NOT NULL;",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 68,
+        id: "v2-accepted-reader-history",
+        sql: include_str!("accepted_reader_history.sql"),
+        sets_user_version: None,
+    },
     // The delivery a quarantined outbox's owner asked to try once more.
     // Acceptance or another refusal clears it. Every refusal recorded for the
     // pending head keeps its key, so writing any of them again changes nothing.
     // A queue still waiting when a later restore generation replaces its
     // accepted checkpoint keeps that checkpoint, which its edits may build on.
     Migration {
-        ordinal: 68,
+        ordinal: 69,
         id: "v2-owner-outbox-retry",
         sql: "ALTER TABLE owner_ydoc_outboxes ADD COLUMN retry_delivery_id TEXT \
               CHECK (retry_delivery_id IS NULL OR (state = 'quarantined' AND length(retry_delivery_id) > 0)); \
@@ -4467,6 +4473,10 @@ mod tests {
                 "16b4bee68d7fde08b97ade0bd28c4969c185b73bb65bf54ceb6006bfeaee40ff",
             ),
             (
+                "v2-accepted-reader-history",
+                "df391d026835c68d1b0c026cad2408d90afb109e2cc2968a664bd36e383ec84d",
+            ),
+            (
                 "v2-owner-outbox-retry",
                 "6297a5c253c0080fc95450855893ee303184937d82bf3f62ab5afed0c39e5ada",
             ),
@@ -4686,7 +4696,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
             MigrationOutcome::Applied { newly_applied: 1 }
         );
         let rows = crate::materialize::retained_rows(&conn, 0).unwrap();
@@ -7800,6 +7810,36 @@ mod tests {
         eprintln!(
             "TRIGGER_GUARD before_ns={} after_ns={} lookups_per_trial=15000 trials=6; SQL dispatch included",
             before_ns[3], after_ns[3]
+        );
+    }
+
+    #[test]
+    fn reader_history_migration_leaves_prior_lineages_unknown() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("reader-history.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-accepted-reader-history");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces VALUES('w','main');
+            INSERT INTO binary_blobs VALUES('native',2,x'0000');
+            INSERT INTO live_accepted_checkpoints VALUES('r','w','main','o','l',0,0,'null','{}',
+                lower(hex(zeroblob(32))),'native',lower(hex(zeroblob(32))),NULL,NULL);",
+        )
+        .unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM live_accepted_reader_history",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
         );
     }
 

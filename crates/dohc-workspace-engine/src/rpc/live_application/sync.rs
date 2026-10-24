@@ -96,7 +96,7 @@ impl EngineService {
             registration: registration.clone(),
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
-            _reservation: reservation.clone(),
+            reservation: Mutex::new(Some(reservation.clone())),
         });
         if !guard.is_current() {
             return Err(workspace_unavailable());

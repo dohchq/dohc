@@ -63,7 +63,9 @@ pub(crate) use restore_fence::require_registration as require_restore_registrati
 pub use restore_fence::{
     current_generation as restore_generation, require_generation as require_restore_generation,
 };
-pub use restore_fence::{NativeRestoreFence, NativeRestoreFenceReceipt, RestoreDeliveryOrigin};
+pub use restore_fence::{
+    NativeRestoreFence, NativeRestoreFenceReceipt, NativeRestoreSelection, RestoreDeliveryOrigin,
+};
 pub use restore_resume::{NativeRestoreResume, NativeRestoreResumeReceipt};
 pub use settlement::{
     with_settlement, LiveSettlementAudit, LiveSettlementPublicationState, LiveSettlementResult,

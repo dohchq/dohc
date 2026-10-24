@@ -174,7 +174,7 @@ it.each([
   ["not-excluded", false, "dohc did not duplicate this file because it can't keep this workspace's .dohc/local out of iCloud Drive. Restart dohc to try again."],
 ] as const)("refuses Duplicate before the workspace's open prepares .dohc/local (%s)", async (_refusal, ready, words) => {
   const f = await fixture();
-  readLocalStateFrom(ready === null ? null : {currentBinding: () => ({localStateReady: ready})});
+  readLocalStateFrom(ready === null ? null : {currentBinding: () => ({localStateReady: ready}), localStateOpenAt: async () => ({ current: () => true })});
   await expect(f.run()).rejects.toThrow(words);
   expect(f.changePathsAs).not.toHaveBeenCalled();
   const {readdir} = await import("node:fs/promises");

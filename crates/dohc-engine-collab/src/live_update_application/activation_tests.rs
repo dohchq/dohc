@@ -1073,7 +1073,8 @@ fn reader_restore_can_fence_before_lazy_proof_dispatch() {
     reader_application_result(|| adopt_owner_committed(&mut f.store, &f.handle, f.cut.clone(), 1_000_000, 100, 10, &NoFaults, Some(&resolver), |_, _, _, _| Ok(()))).unwrap();
     let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
     let operation = NativeRestoreFence {
-        operation_id: "reader-restore".into(), relay_database_namespace: "namespace".into(),
+        point: crate::live_update_application::NativeRestoreSelection { journal_cursor: 0, receipt_digest: f.binding.lineage_claim_id.clone() },
+            operation_id: "reader-restore".into(), relay_database_namespace: "namespace".into(),
         old_binding: f.binding.clone(), host_id: "host".into(), new_fence: 1,
         origin: RestoreDeliveryOrigin::Owner { id: f.cut.adoption_id.clone() },
         terminal: None, applied_sequence: 0,

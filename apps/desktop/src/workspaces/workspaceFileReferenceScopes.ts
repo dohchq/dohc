@@ -4,6 +4,7 @@ import { recordedShareSelector } from "./shareViewRecords";
 import { shareViewIsPresent } from "./shareViewMarker";
 import { relayUrlsMatch } from "./syncCode";
 import { storedShareMounts } from "./shareViewFilesTarget";
+import { workspaceRootsMatch } from "./workspaceRootsMatch";
 
 export interface ReceivedReferencePin { receivedSource: string; grantId: string; generation: number }
 export function receivedReferencePin(value: unknown): ReceivedReferencePin | undefined {
@@ -57,7 +58,7 @@ export interface ReceivedScopeDependencies<Workspace extends ReferenceWorkspace>
 export function createReceivedFileReferenceScopes<Workspace extends ReferenceWorkspace>(dependencies: ReceivedScopeDependencies<Workspace>) {
   return async (workspace: Workspace): Promise<ReceivedFileReferenceScope<Workspace>[]> => {
     const captured = dependencies.findWorkspace(workspace.workspaceId);
-    if (!captured || captured.rootPath !== workspace.rootPath) return [];
+    if (!captured || !workspaceRootsMatch(captured.rootPath, workspace.rootPath)) return [];
     const attachment = dependencies.currentAttachment(workspace.workspaceId);
     if (workspace.attachmentId && workspace.attachmentId !== attachment) return [];
     await dependencies.warmCredentials();

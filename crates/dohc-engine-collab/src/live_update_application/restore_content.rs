@@ -231,6 +231,11 @@ impl NativeRestorePreparation {
             return Err(invalid("invalid restore preparation budget"));
         }
         self.fence.operation.validate()?;
+        if self.point.journal_cursor != self.fence.operation.point.journal_cursor
+            || self.point.receipt_digest != self.fence.operation.point.receipt_digest
+        {
+            return Err(ApplicationError::Conflict);
+        }
         integer(self.fence.local_head_sequence, 0, SAFE)?;
         integer(self.fence.recorded_at_ms, 0, SAFE)?;
         integer(self.point.journal_cursor, 0, SAFE)?;
@@ -361,22 +366,13 @@ fn prepare_in(
     if accepted_history.proof.terminal != operation.terminal {
         return Err(ApplicationError::Conflict);
     }
-    let selected_history = accepted_history::read(
+    let selected_history = accepted_history::read_selected_point(
         tx,
         held,
-        input.point.journal_cursor,
+        &operation.point,
         &mut budget,
         max_events.saturating_sub(accepted_history.proof.suffix.len()),
     )?;
-    if selected_history
-        .proof
-        .terminal
-        .as_ref()
-        .map_or(b.lineage_claim_id.as_str(), |r| r.update_digest.as_str())
-        != input.point.receipt_digest
-    {
-        return Err(ApplicationError::Conflict);
-    }
     let accepted = accepted_history.doc;
     let point = selected_history.doc;
     let event_count = accepted_history.proof.suffix.len() + selected_history.proof.suffix.len();
@@ -783,10 +779,8 @@ fn prefix_source(
         conn,
         &key,
         doc,
-        &crate::reader_snapshot::SnapshotIdentity {
-            moment: "",
+        &crate::reader_snapshot::HistoryIdentity {
             path: &b.current_path,
-            digest: "",
             lineage: &b.lineage_claim_id,
             authority: &authority,
             restore_fence: Some(input.fence.operation.new_fence),
@@ -817,10 +811,8 @@ pub(super) fn point_source(
         &key,
         doc,
         canonical,
-        &crate::reader_snapshot::SnapshotIdentity {
-            moment: "",
+        &crate::reader_snapshot::HistoryIdentity {
             path: &b.current_path,
-            digest: &input.point.markdown_digest,
             lineage: &b.lineage_claim_id,
             authority: &authority,
             restore_fence: Some(input.fence.operation.new_fence),
