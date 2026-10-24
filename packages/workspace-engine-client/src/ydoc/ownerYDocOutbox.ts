@@ -55,7 +55,7 @@ export interface OwnerYDocOutboxEntry {
   readonly nativeSource?: OwnerYDocNativeSource;
 }
 
-export interface OwnerYDocNativeSource {
+interface OwnerYDocNativeSource {
   readonly binding: LiveObjectBinding;
   readonly adoptionId: string;
   readonly nativeSequence: number;
