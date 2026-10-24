@@ -115,6 +115,7 @@ const PRESENCE_HEARTBEAT_MS = 10_000;
 const SELF_TEST_POLL_MS = 250;
 const SELF_TEST_THREAD_TITLE = "dohc runner self-test";
 const SELF_TEST_MARKER_PREFIX = "dohc-runner-self-test:";
+const SELF_TEST_OPENING = "Reply here to check the agent connection.";
 
 export interface ChatDispatchWorkspace {
   workspaceId: string;
@@ -155,6 +156,7 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   listOpenWorkspaces(): ChatDispatchWorkspace[];
   listSyncWorkspaces(): ChatDispatchWorkspace[];
   chatStoreFor(workspace: ChatDispatchWorkspace): LinkedChatStore;
+  startSelfTestThread(workspace: ChatDispatchWorkspace, input: { channelId: string; title: string; body: string }): Promise<string>;
   dispatchStoreFor(
     workspace: ChatDispatchWorkspace,
   ): AwaitableAgentDispatchStore;
@@ -267,12 +269,22 @@ function signalExitCode(signal: NodeJS.Signals | null): number {
 }
 
 
-function buildRunnerPrompt(threadMarkdown: string, threadId: string): string {
+function buildRunnerPrompt(threadMarkdown: string, threadId: string, useBashHereDocument: boolean): string {
+  const replyInstruction = useBashHereDocument ? `Reply with Markdown on stdin using a quoted here-document:
+
+\`\`\`sh
+dohc chat reply ${threadId} --as-agent - <<'DOHC_REPORT'
+<report>
+DOHC_REPORT
+\`\`\`
+
+Choose a delimiter that does not appear on a line in your report. Keep the delimiter quoted to prevent shell expansion.`
+    : `Reply in-thread with \`dohc chat reply ${threadId} --as-agent "<report>"\`.`;
   return `${threadMarkdown.trimEnd()}
 
 ## Report contract
 
-Work on the request represented by this thread. Reply in-thread with \`dohc chat reply ${threadId} --as-agent "<report>"\`. Report outcomes, not tool logs. On long tasks, post progress the way a teammate would. If blocked on the user, reply with \`--needs-decision\`. To ask them to pick, add \`--option "<choice>"\` once per choice; their answer arrives as the next message with the chosen option. Your final text is not shown anywhere; only messages you post through \`dohc chat\` are shown.`;
+Work on the request represented by this thread. Report outcomes, not tool logs. ${replyInstruction} On long tasks, post progress the way a teammate would. If blocked on the user, reply with \`--needs-decision\`. To ask them to pick, add \`--option "<choice>"\` once per choice; their answer arrives as the next message with the chosen option. Your final text is not shown anywhere; only messages you post through \`dohc chat\` are shown.`;
 }
 
 export function createChatDispatchService(options: ChatDispatchServiceOptions) {
@@ -872,7 +884,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         logPath,
         command: configuredRunnerCommand(runner),
         profile: runner.profile,
-        prompt: buildRunnerPrompt(markdown, claim.run.threadId),
+        prompt: buildRunnerPrompt(markdown, claim.run.threadId, runner.profile?.tool === "claude"),
         assertMayStart,
       });
       const timeout = setTimeout(() => {
@@ -1613,8 +1625,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         });
         const opening = messages[0];
         if (
-          opening?.author.kind === "agent" &&
-          opening.body.startsWith(SELF_TEST_MARKER_PREFIX)
+          opening?.author.kind === "human" &&
+          opening.body === SELF_TEST_OPENING
         ) {
           scratchThreadId = summary.thread.id;
           break;
@@ -1623,10 +1635,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       const runId = `run_self_test_${createId()}`;
       const marker = `${SELF_TEST_MARKER_PREFIX}${runId}`;
       const logPath = join(options.stateDir(), "run-logs", `${runId}.log`);
-      const commandToRun = scratchThreadId
-        ? `dohc chat reply ${scratchThreadId} --as-agent "${marker}"`
-        : `dohc chat post ${agentChannel.id} --as-agent --title "${SELF_TEST_THREAD_TITLE}" "${marker}"`;
-      const prompt = `This is a dohc runner self-test. Run exactly this command and do not post another message:\n\n${commandToRun}`;
       try {
         if (
           shuttingDown ||
@@ -1642,6 +1650,18 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
               : "A runner became active before the self-test could start.",
           };
         }
+        assertMayStart();
+        const threadId = scratchThreadId ?? await options.startSelfTestThread(workspace, {
+          channelId: agentChannel.id,
+          title: SELF_TEST_THREAD_TITLE,
+          body: SELF_TEST_OPENING,
+        });
+        if (shuttingDown) return { ok: false, detail: "Agent dispatch is stopping." };
+        if (liveRuns.has(workspaceId) || runReservations.has(workspaceId) || selfTests.has(workspaceId) || options.runSlotOccupied?.(workspace) === true) {
+          return { ok: false, detail: "A runner became active before the self-test could start." };
+        }
+        const commandToRun = `dohc chat reply ${threadId} --as-agent "${marker}"`;
+        const prompt = `This is a dohc runner self-test. Run exactly this command and do not post another message:\n\n${commandToRun}`;
         await options.setRunAttribution(workspace, {
           agentId: UNNAMED_AGENT_ID,
           agentRunId: runId,
@@ -1650,7 +1670,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         });
         const child = spawnConfiguredRunner({
           rootPath: workspace.rootPath,
-          threadId: scratchThreadId ?? undefined,
+          threadId,
           runId,
           logPath,
           command,
@@ -1707,14 +1727,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             const test = selfTests.get(workspaceId);
             if (!test || test.settled) return;
             try {
-              const candidates = scratchThreadId
-                ? [scratchThreadId]
-                : (await chat.listChannelThreads({ workspaceId, channelId: agentChannel.id }))
-                    .filter((summary) => summary.thread.title === SELF_TEST_THREAD_TITLE)
-                    .map((summary) => summary.thread.id);
-              const messages = (await Promise.all(candidates.map((threadId) =>
-                chat.listMessages({ workspaceId, threadId }),
-              ))).flat();
+              const messages = await chat.listMessages({ workspaceId, threadId });
               if (
                 messages.some(
                   (message) =>

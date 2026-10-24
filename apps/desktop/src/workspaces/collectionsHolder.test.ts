@@ -1,4 +1,5 @@
 import { lstat, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { lstatSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -15,6 +16,11 @@ import {
   type KeepSteps,
 } from "./collectionsHolder";
 import { createTestScratch } from "./testTemp";
+
+vi.mock("node:fs", async importOriginal => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {...actual, lstatSync: vi.fn(actual.lstatSync)};
+});
 
 const here = { installId: "install-here", label: "Studio" };
 const laptop = { installId: "install-laptop", label: "Laptop" };
@@ -53,6 +59,20 @@ beforeEach(async () => {
 });
 
 describe("a workspace's Collections holder", () => {
+  it("refuses a changed holder even when its file metadata did not change", async () => {
+    await named(here, storeId);
+    const check = createHoldingCheck(root, workspaceId, required, () => storeId);
+    const metadata = lstatSync(recordPath(), {bigint: true});
+    check();
+    // A same-size overwrite can share all timestamps on a coarse filesystem.
+    await named({installId: "install-away", label: "Studio"}, storeId);
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    vi.mocked(lstatSync).mockImplementation(((path: string, options: unknown) =>
+      path === recordPath() ? metadata : actual.lstatSync(path, options as never)) as typeof lstatSync);
+    try {
+      expect(() => check()).toThrowError(expect.objectContaining({code: "collections-elsewhere"}));
+    } finally {vi.mocked(lstatSync).mockReset();}
+  });
   it("names the installation that made a new workspace, with no store yet, and keeps a record already there", async () => {
     await recordNewCollectionsHolder(root, workspaceId, here);
     expect(JSON.parse(await readFile(recordPath(), "utf8"))).toEqual({ version: 1, workspaceId, installId: "install-here", label: "Studio", storeId: null });
@@ -73,7 +93,8 @@ describe("a workspace's Collections holder", () => {
       const refused = await refusal(admitCollectionsStore(root, workspaceId, required));
       expect(refused.refusal).toEqual({ kind: "unclaimed" });
       expect(refused.code).toBe("collections-unclaimed");
-      expect(refused.message).toBe("dohc doesn't know which computer keeps this workspace's Collections. If it's this one, choose Keep the Collections on this computer.");
+      expect(refused.message).toBe("dohc doesn't know which computer keeps this workspace's Collections. To keep them on this computer, choose Use this computer in dohc.");
+      expect(refused.computerLabel).toBeNull();
     }
     expect(await readdir(join(root, ".dohc")), "nothing but the store this test made").toEqual([places[place][1]]);
     expect(await readdir(join(root, ...places[place]))).toEqual(["state.sqlite-wal"]);
@@ -92,6 +113,7 @@ describe("a workspace's Collections holder", () => {
       if (store) await addStore();
       const refused = await refusal(admitCollectionsStore(root, workspaceId, required));
       expect(refused.code).toBe("collections-elsewhere");
+      expect(refused.computerLabel).toBe("Laptop");
       expect(refused.message).toBe("These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.");
     }
     await named({ installId: "install-old", label: "Studio" });
@@ -129,15 +151,14 @@ describe("a workspace's Collections holder", () => {
     for (const place of ["local", "old"] as const) expect(await exists(join(root, ...places[place], "state.sqlite"))).toBe(false);
   });
 
-  it("checks an open store against the record before each use, reading it again only after it changed", async () => {
+  it("checks an open store and the holder record before each use", async () => {
     await named(here, storeId);
     let open: string | null = storeId;
     const check = createHoldingCheck(root, workspaceId, required, () => open);
     check();
-    // Unchanged, the record is not read again: a store id that changed meanwhile goes unnoticed until the record changes.
-    open = "0b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f";
-    check();
     const stop = (expected: object) => { try { check(); } catch (error) { expect((error as CollectionsRefusalError).refusal).toMatchObject(expected); return; } throw new Error("Expected a refusal."); };
+    open = "0b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f";
+    stop({ kind: "replaced" });
     await named(here, storeId);
     stop({ kind: "replaced" });
     open = storeId;
@@ -151,7 +172,7 @@ describe("a workspace's Collections holder", () => {
     stop({ kind: "unreadable" });
     await named(here, storeId);
     check();
-    // The same bytes rewritten in place still count as a change, and are read again.
+    // Rewriting identical bytes remains valid even when timestamps do not change.
     await writeFile(recordPath(), await readFile(recordPath()));
     check();
     expect(() => createHoldingCheck(root, workspaceId, { here: () => here, required: () => false }, () => null)()).not.toThrow();
@@ -306,7 +327,7 @@ describe("keeping the Collections on this computer", () => {
     expect(declined.confirm).toHaveBeenCalledWith({ kind: "made-elsewhere", computer: laptop });
     expect(await exists(recordPath()), "nothing kept").toBe(false);
     expect(keepQuestionWords({ kind: "made-elsewhere", computer: laptop })).toEqual({
-      message: "Keep the Collections on this computer?",
+      message: "Use this computer for these Collections?",
       detail: "Laptop made this workspace. Its Collections may still be syncing from there. If you keep them here before they arrive, this computer can replace Laptop's Collections.",
     });
     const accepted = steps({ madeBy: async () => laptop });
@@ -345,7 +366,7 @@ describe("keeping the Collections of an earlier installation of dohc on this com
     expect(kept.adoptStore).not.toHaveBeenCalled();
     expect(await recordNow()).toEqual({ version: 1, workspaceId, installId: "install-here", label: "Studio", storeId });
     expect(keepQuestionWords({ kind: "earlier-installation", computer: laptop })).toEqual({
-      message: "Keep the Collections on this computer?",
+      message: "Use this computer for these Collections?",
       detail: "Laptop keeps these Collections. If Laptop was this computer before dohc was set up again, keep them here. If Laptop is another computer that still uses them, don't, or its changes can be lost.",
     });
   });

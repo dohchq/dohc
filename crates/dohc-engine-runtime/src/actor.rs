@@ -85,7 +85,7 @@ use dohc_engine_collab::WriterDocCache;
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::sync_channel as std_sync_channel;
 use std::thread::JoinHandle;
 use tokio::sync::mpsc::OwnedPermit;
@@ -192,6 +192,7 @@ enum Command {
 /// Owns the worker thread and the command sender. Held by the supervisor;
 /// callers use [`ActorHandle`]s. Dropping it joins the worker.
 pub struct WorkspaceActor {
+    reader_configured: Arc<AtomicBool>,
     identity: EngineDbIdentity,
     store: Arc<StoreLocation>,
     generation: u64,
@@ -440,6 +441,7 @@ impl WorkspaceActor {
             Ok(Ok(store_freshly_created)) => {
                 #[allow(unused_mut)]
                 let mut actor = WorkspaceActor {
+                    reader_configured: Arc::default(),
                     identity,
                     store,
                     generation,
@@ -483,6 +485,7 @@ impl WorkspaceActor {
     /// A clonable handle for issuing commands.
     pub fn handle(&self) -> ActorHandle {
         ActorHandle {
+            reader_configured: Arc::clone(&self.reader_configured),
             identity: self.identity.clone(),
             store: Arc::clone(&self.store),
             tx: self.tx.clone(),
@@ -579,6 +582,7 @@ impl Drop for WorkspaceActor {
 /// current view projection cache.
 #[derive(Clone)]
 pub struct ActorHandle {
+    reader_configured: Arc<AtomicBool>,
     #[cfg(unix)]
     retained_root: retained::Root,
     identity: EngineDbIdentity,
@@ -644,8 +648,10 @@ impl ActorHandle {
         &self,
         resolver: std::sync::Arc<dohc_engine_collab::reader_resolver::ReaderResolver>,
     ) -> Result<(), RuntimeError> {
+        let configured = Arc::clone(&self.reader_configured);
         self.run(move |_, cache| {
             cache.reader_resolver = Some(resolver);
+            configured.store(true, Ordering::Release);
             Ok(())
         })
         .await
@@ -1398,6 +1404,7 @@ mod saturation_tests {
         let metrics = SharedMetrics::default();
         let holds = Arc::new(AtomicU64::new(0));
         let mut actor = WorkspaceActor {
+            reader_configured: Arc::default(),
             identity,
             store: StoreLocation::new(db.to_path_buf()),
             generation: 1,

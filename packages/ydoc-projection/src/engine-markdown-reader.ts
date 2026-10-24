@@ -24,7 +24,10 @@ function checkRoot(node: ReturnType<typeof root>): void {
 }
 
 /** source must be the engine's compared snapshot, never a value read from witness metadata. */
-export interface EngineMarkdownInput extends LiveMarkdownRegistrationInput {readonly source: Uint8Array}
+export interface EngineMarkdownInput extends LiveMarkdownRegistrationInput {
+  readonly source: Uint8Array
+  readonly nativeFold?: boolean
+}
 type Reason = 'invalid-source' | 'invalid-update' | 'invalid-schema' | 'witness-mismatch'
   | 'reading-mismatch' | 'capacity-refused' | 'journal-refused'
 type Refused = {readonly kind: 'refused'; readonly reason: Reason}
@@ -57,7 +60,8 @@ function checkInput(input: EngineMarkdownInput): {source: string; input: EngineM
   requireReading(rawCheckpoint instanceof Uint8Array, 'invalid-update')
   const checkpoint = new Uint8Array(rawCheckpoint)
   requireReading(checkpoint.length > 0 && checkpoint.length <= MAX_UPDATE_BYTES, 'invalid-update')
-  return {source, input: {source: bytes, checkpoint, document: input.document, currentPath: input.currentPath}}
+  return {source, input: {source: bytes, checkpoint, document: input.document, currentPath: input.currentPath,
+    nativeFold: input.nativeFold}}
 }
 // ProseMirror drops hidden Yjs state; this comparison is sound only with the strict journal check afterward.
 function compareReadings(actual: Y.Doc, imported: Y.Doc): void {
@@ -121,6 +125,8 @@ export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
         const sourceValues = getDohcYDocFrontmatter(imported), oldValues = getDohcYDocFrontmatter(doc)
         const meta = doc.getMap('meta'), sourceMeta = imported.getMap('meta'), frontmatter = doc.getMap('frontmatter')
         const canonical = yDocToMarkdown(imported)
+        const native = input.nativeFold === true
+        if (native) requireReading(!meta.has('dohcMarkdownSourceReader') && source === canonical, 'reading-mismatch')
         doc.transact(() => {
           updateYFragment(doc!, fragment, target, {mapping, isOMark: new Map()})
           for (const key of frontmatter.keys()) if (!Object.hasOwn(sourceValues, key)) frontmatter.delete(key)
@@ -131,10 +137,15 @@ export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
             else meta.delete(key)
           }
           recordFrontmatterSourceItems(frontmatter, meta)
-          setIfChanged(meta, 'dohcMarkdownSource', source)
-          setIfChanged(meta, 'dohcMarkdownSourceSha256', sha(input.source))
-          setIfChanged(meta, 'dohcMarkdownSourceProjectionSha256', textSha(canonical))
-          setIfChanged(meta, 'dohcMarkdownSourceReader', 1)
+          if (native) {
+            for (const key of ['dohcMarkdownSource', 'dohcMarkdownSourceSha256',
+              'dohcMarkdownSourceProjectionSha256', 'dohcMarkdownSourceReader']) meta.delete(key)
+          } else {
+            setIfChanged(meta, 'dohcMarkdownSource', source)
+            setIfChanged(meta, 'dohcMarkdownSourceSha256', sha(input.source))
+            setIfChanged(meta, 'dohcMarkdownSourceProjectionSha256', textSha(canonical))
+            setIfChanged(meta, 'dohcMarkdownSourceReader', 1)
+          }
         })
         compareReadings(doc, imported)
         // Full-state encoding repeats historical deletes even for a no-op; keep only this construction's updates.
