@@ -4,10 +4,12 @@ import {liveContentAuthors} from "./liveAuthorWindow";
 import {subtractJournalRanges} from "./liveUpdateJournal";
 import {sharedMomentAuthors} from "../sharedMomentAuthors";
 import {parseSettlementAuthors} from "./hostedSettlement";
+import {OTHER_LINEAGE_UPDATE} from "./otherLineageUpdate";
 import {replicaStatement as statement} from "./replicaStatements";
 
 const SCAN_LIMIT = 10_000;
-export function replicaHistoryAuthors(storage: StorageContext, workspace: string, version: string, object: string,
+/** Credits the pinned state's lineage. A file with no lineage kept no row that names one. */
+export function replicaHistoryAuthors(storage: StorageContext, workspace: string, version: string, object: string, lineage: string | null,
   fromLog: number, toLog: number, fromJournal: number, toJournal: number) {
   const authors = new Map<string,LiveAuthorEntry>();
   const snapshots = new Set<unknown>();
@@ -27,8 +29,9 @@ export function replicaHistoryAuthors(storage: StorageContext, workspace: string
       AND json_extract(payload_json,'$.objectId')=? AND relay_seq>? AND relay_seq<=?
       AND op_kind IN ('ydoc.update','moment.append') AND relay_admission IS NULL
       AND (settlement_admission_json IS NULL OR json_extract(settlement_admission_json,'$.status')<>'refused')
+      AND NOT (${OTHER_LINEAGE_UPDATE})
       ORDER BY relay_seq LIMIT ?`)
-    .all(workspace,version,object,fromLog,toLog,SCAN_LIMIT+1);
+    .all(workspace,version,object,fromLog,toLog,lineage,SCAN_LIMIT+1);
   for (const row of logs.slice(0,SCAN_LIMIT)) {
     add(row.admitted_author_snapshot_json);
   }

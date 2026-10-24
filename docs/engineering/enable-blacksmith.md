@@ -3,11 +3,11 @@
 This procedure is for the maintainer enabling paid CI at launch.
 Track the remaining public-contributor setup in [issue #1193](https://github.com/dohchq/dohc/issues/1193).
 
-## Keep cloud execution off
+## Keep automatic PR checks off
 
 The repository variable `BLACKSMITH_ENABLED` controls runner allocation in `PR checks`.
 An absent variable or `false` skips every PR job before a runner starts.
-Manual dispatch still uses registered self-hosted Linux x64 runners.
+While Blacksmith is off, manual dispatch uses GitHub-hosted `ubuntu-24.04` runners.
 
 Inspect the switch:
 
@@ -52,7 +52,7 @@ gh variable set BLACKSMITH_ENABLED --repo dohchq/dohc --body true
 
 New updates to ready, same-repository PRs now run on Blacksmith.
 Existing PRs need another push, a reopen, or a ready-for-review event to start checks.
-Drafts and forks remain local-only. Converting a PR to draft cancels its older run.
+Drafts and forks start no automatic checks. Converting a PR to draft cancels its older run.
 New commits cancel older runs for the same PR.
 There are no automatic main-branch, nightly, Windows, macOS, or release builds in this workflow.
 
@@ -112,7 +112,8 @@ GitHub accepts skipped checks when their names match a required check.
 In the observed disabled run, GitHub left this job's dynamic name unexpanded.
 A required `PR verification` check can therefore remain `Expected` for a skipped run.
 Resolve the fork-verification policy in issue #1193 before requiring this check for outside contributors.
-Forks, drafts, and all PRs while Blacksmith is off still need recorded local evidence before merging.
+Drafts and other same-repository PRs without cloud checks need recorded local evidence before merging.
+Never check out, install, build, or test fork PR code on the shared Windows host, the shared Mac, or any machine with Ice's credentials. Ask Ice how to verify it.
 A skipped check provides no verification evidence.
 Manual runs report `Manual verification`, so a partial benchmark cannot satisfy the required PR check.
 Retain evidence for every gate selected by the PR.
@@ -123,8 +124,8 @@ Record the run URL and verification scope in the PR before artifacts expire.
 
 ## Turn it off
 
-Remove `PR verification` from required checks before turning cloud CI off.
+Remove `PR verification` from required checks before turning Blacksmith off.
 Set `BLACKSMITH_ENABLED` to `false` with the command above.
 Cancel any queued or running Blacksmith workflows in GitHub Actions.
 Changing the variable alone does not cancel runners already allocated.
-Resume local verification. Manual dispatch returns to self-hosted runners.
+Resume local verification. Manual dispatch uses GitHub-hosted `ubuntu-24.04` runners.

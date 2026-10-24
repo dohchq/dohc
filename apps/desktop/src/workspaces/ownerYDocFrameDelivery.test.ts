@@ -102,10 +102,10 @@ it("freezes a conflicting delivery for explicit recovery instead of retrying for
   expect(await f.delivery.deliver(fresh.authority, envelope)).toEqual({kind: "quarantine", reason: "delivery-conflict"});
 });
 
-it("freezes a provenance refusal for visible recovery", async () => {
-  const f = fixture({result: {result: "refused", reason: "provenance-refused"}}), fresh = await f.delivery.freshOwnerAuthority(binding);
+it.each(["provenance-refused", "capacity-refused"] as const)("freezes a %s refusal for visible recovery", async reason => {
+  const f = fixture({result: {result: "refused", reason}}), fresh = await f.delivery.freshOwnerAuthority(binding);
   if (fresh.kind !== "authority") throw new Error("Missing authority");
-  expect(await f.delivery.deliver(fresh.authority, envelope)).toEqual({kind: "quarantine", reason: "provenance-refused"});
+  expect(await f.delivery.deliver(fresh.authority, envelope)).toEqual({kind: "quarantine", reason});
 });
 
 it("requires an owner frame policy that carries the largest declared submission", () => {

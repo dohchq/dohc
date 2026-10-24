@@ -35,13 +35,7 @@ While that job is installed, do not dispatch a nightly by hand unless Ice asks.
 Read the job's reports on #2281 before starting any nightly work.
 To test the workflow without publishing, run `node scripts/release-nightly.mjs run --dry-run` on the Mac mini.
 Check the live workflow and its inputs before dispatching.
-Confirm that the required self-hosted runners are online and owned by the release operator.
-If a selected Windows runner is offline, start its scheduled task, `dohc Windows runner`, for this release.
-For Linux-only builds, use the registered Linux runner for every job, including preflight and publication.
-For WSL, follow the Linux runner and shared-PC requirements in the release procedure.
-Start only a registered Linux runner that the operator owns, using its `run.sh` and native Linux tools.
-Record the process identity and stop that task-started listener after the run finishes.
-Check the local build budget before dispatching on the shared PC.
+The workflow uses fresh GitHub-hosted Windows and Linux runners.
 Release jobs accept only reviewed code on `main`.
 Record the dispatched commit and inputs before starting the run.
 Use `gh workflow run desktop-release.yml --ref main` with explicit channel, platforms, and dry-run values.
