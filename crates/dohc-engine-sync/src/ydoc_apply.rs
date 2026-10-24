@@ -1812,9 +1812,9 @@ impl PreparedLocalYdocLineage {
             });
         }
         if let Ok(candidate) = doc.native_fold_candidate(&fold.delta)
-            && project_ydoc_with_store(conn, &self.complete.key, &candidate, ContentKind::Richdoc)?
-                .content
-                == source
+            && let Ok(projection) =
+                project_ydoc_with_store(conn, &self.complete.key, &candidate, ContentKind::Richdoc)
+            && projection.content == source
         {
             self.reader_delta = Some(fold.delta.clone());
         }

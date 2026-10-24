@@ -46,6 +46,16 @@ fn fixture() -> (Connection, DocKey, Ydoc, String, ReaderResolver) {
     )
 }
 
+#[test]
+fn outside_fold_round1_unclaimed_note_skips_document_load() {
+    let (conn, key, _, _, _) = fixture();
+    conn.execute("UPDATE ydoc_docs SET lineage_claim_id=NULL", [])
+        .unwrap();
+    assert!(prepare_fold(&conn, &key, "note.md", "**changed**")
+        .expect("unclaimed document was loaded")
+        .is_none());
+}
+
 fn canonical_fold_clears_the_reader_marker(staging: bool) {
     let (_, _, doc, _, _) = fixture();
     assert!(doc.has_reader_source());

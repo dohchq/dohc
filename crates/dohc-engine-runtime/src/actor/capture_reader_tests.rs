@@ -440,10 +440,14 @@ async fn outside_reader_fold_plain_edits_never_dispatch_with_a_reader_configured
     ] {
         std::fs::write(scratch.path().join("note.md"), source).unwrap();
         assert!(
-            prepare(&actor, Arc::from([input(source)]), scratch.path())
-                .await
-                .unwrap()
-                .is_empty()
+            prepare(
+                &actor,
+                Arc::from([input(source)]),
+                scratch.path(),
+                &mut None
+            )
+            .await
+            .is_empty()
         );
     }
     assert_eq!(
@@ -566,8 +570,14 @@ async fn outside_reader_fold_native_admissions_match_the_editor_tree() {
     let reader = Reader::new(Some(
         serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap(),
     ));
+    let mut mismatches = Vec::new();
     for source in [
         "ordinary paragraph",
+        "- a\n\n- b",
+        "3. a\n4. b",
+        "a\nb",
+        "-",
+        "1.",
         "# heading",
         "- first\n- second",
         "1. first\n2. second",
@@ -614,14 +624,277 @@ async fn outside_reader_fold_native_admissions_match_the_editor_tree() {
         let editor = Ydoc::wire();
         editor.apply(&checkpoint).unwrap();
         editor.apply(&delta).unwrap();
+        if native.canonical_content()["body"] != editor.canonical_content()["body"]
+            && !needs_reader(source)
+        {
+            mismatches.push(format!(
+                "{source:?}: native={} editor={}",
+                native.canonical_content()["body"],
+                editor.canonical_content()["body"]
+            ));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "different editor trees bypassed: {mismatches:#?}"
+    );
+}
+
+struct Round1Root;
+impl WorkspaceRootGuard for Round1Root {
+    fn validate(&self, root: &std::path::Path) -> Result<(), RuntimeError> {
+        assert!(root.is_dir());
+        Ok(())
+    }
+}
+
+fn round1_batch(
+    actor: ActorHandle,
+    root: PathBuf,
+    inputs: Vec<CaptureIngest>,
+    guard: Arc<dyn WorkspaceRootGuard>,
+) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
+    let policy = Arc::new(crate::search::read_engine_search_policy(&root));
+    std::thread::spawn(move || {
+        actor.capture_ingest_batch_blocking(
+            inputs,
+            policy,
+            LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            root,
+            guard,
+        )
+    })
+    .join()
+    .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+async fn outside_reader_fold_round1_stale_retry_keeps_receipt_bytes_and_author() {
+    let (scratch, store, _) = fixture(false);
+    let db = store.database_path().to_owned();
+    drop(store);
+    let supervisor = crate::WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 3).unwrap().actor;
+    actor
+        .configure_reader_resolver(Arc::new(resolver()))
+        .await
+        .unwrap();
+    let mut captured = input("**Receipt A**");
+    captured.author_json = Some(r#"[{"name":"capture-sink-author"}]"#.into());
+    let author = captured.author_json.clone();
+    std::fs::write(scratch.path().join("note.md"), &captured.text).unwrap();
+    hooks().lock().unwrap().insert(
+        scratch.path().to_owned(),
+        VecDeque::from([Change::File("**Later B**".into())]),
+    );
+    let results = round1_batch(
+        actor.clone(),
+        scratch.path().to_owned(),
+        vec![captured.clone()],
+        Arc::new(Round1Root),
+    )
+    .unwrap();
+    let result = results[0].as_ref().unwrap();
+    assert_eq!(
+        result.snapshot.text, captured.text,
+        "committed bytes differ from the sink receipt"
+    );
+    assert_eq!(
+        result.snapshot.blob_sha256,
+        dohc_engine_storage::hex_sha256(captured.text.as_bytes())
+    );
+    assert_eq!(
+        result.moment.author_json, author,
+        "stale retry lost the sink author"
+    );
+    let later = round1_batch(
+        actor,
+        scratch.path().to_owned(),
+        vec![input("**Later B**")],
+        Arc::new(Round1Root),
+    )
+    .unwrap();
+    assert_eq!(later[0].as_ref().unwrap().snapshot.text, "**Later B**");
+    hooks().lock().unwrap().remove(scratch.path());
+    supervisor.close(&db).unwrap();
+}
+
+#[tokio::test]
+async fn outside_reader_fold_round1_preparation_error_is_per_item() {
+    use rusqlite::hooks::{AuthAction, Authorization};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (scratch, store, key) = fixture(false);
+    let db = store.database_path().to_owned();
+    drop(store);
+    let supervisor = crate::WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 3).unwrap().actor;
+    actor
+        .configure_reader_resolver(Arc::new(reader_resolver::ReaderResolver::new(Arc::new(
+            Reader::new(None),
+        ))))
+        .await
+        .unwrap();
+    let deny = Arc::new(AtomicBool::new(true));
+    let observed = deny.clone();
+    actor
+        .run(move |store, _| {
+            store.read_with(|conn| {
+                conn.authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+                    if matches!(
+                        context.action,
+                        AuthAction::Read {
+                            table_name: "ydoc_docs",
+                            ..
+                        }
+                    ) && deny.swap(false, Ordering::SeqCst)
+                    {
+                        Authorization::Deny
+                    } else {
+                        Authorization::Allow
+                    }
+                }))
+                .unwrap();
+                Ok::<_, RuntimeError>(())
+            })
+        })
+        .await
+        .unwrap();
+    let original = input("**Strict keeps this literal**");
+    let mut sibling = input("Sibling commits");
+    sibling.path = "sibling.md".into();
+    std::fs::write(scratch.path().join("note.md"), &original.text).unwrap();
+    std::fs::write(scratch.path().join("sibling.md"), &sibling.text).unwrap();
+    let results = round1_batch(
+        actor.clone(),
+        scratch.path().to_owned(),
+        vec![original.clone(), sibling],
+        Arc::new(Round1Root),
+    );
+    assert!(
+        !observed.load(Ordering::SeqCst),
+        "preparation did not exercise the denied read"
+    );
+    let results = results.expect("one preparation error escaped the batch");
+    assert_eq!(results[0].as_ref().unwrap().snapshot.text, original.text);
+    assert_eq!(
+        results[1].as_ref().unwrap().snapshot.text,
+        "Sibling commits"
+    );
+    actor
+        .run(move |store, _| {
+            let doc = store.read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))?;
+            let strict = Ydoc::wire();
+            strict.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &original.text)?;
+            assert_eq!(
+                doc.canonical_content()["body"],
+                strict.canonical_content()["body"]
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    supervisor.close(&db).unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+async fn outside_reader_fold_round1_later_batch_failure_keeps_committed_receipts() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct FailRetry(AtomicUsize);
+    impl WorkspaceRootGuard for FailRetry {
+        fn validate(&self, _: &std::path::Path) -> Result<(), RuntimeError> {
+            if self.0.fetch_add(1, Ordering::SeqCst) >= 2 {
+                Err(RuntimeError::Cancelled)
+            } else {
+                Ok(())
+            }
+        }
+    }
+    let (scratch, store, key) = fixture(false);
+    let db = store.database_path().to_owned();
+    drop(store);
+    let supervisor = crate::WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 3).unwrap().actor;
+    actor
+        .configure_reader_resolver(Arc::new(resolver()))
+        .await
+        .unwrap();
+    let rich = input("Changed\n\n- parent\n  - child");
+    let mut sibling = input("Committed sibling");
+    sibling.path = "sibling.md".into();
+    std::fs::write(scratch.path().join("note.md"), &rich.text).unwrap();
+    std::fs::write(scratch.path().join("sibling.md"), &sibling.text).unwrap();
+    hooks().lock().unwrap().insert(
+        scratch.path().to_owned(),
+        VecDeque::from([Change::Remote(key)]),
+    );
+    let results = round1_batch(
+        actor,
+        scratch.path().to_owned(),
+        vec![sibling, rich],
+        Arc::new(FailRetry(AtomicUsize::new(0))),
+    )
+    .expect("retry failure discarded committed siblings");
+    assert_eq!(
+        results[0].as_ref().unwrap().snapshot.text,
+        "Committed sibling"
+    );
+    assert!(!results[0].as_ref().unwrap().deduped);
+    assert_eq!(results[1].as_ref().unwrap_err().code(), "cancelled");
+    hooks().lock().unwrap().remove(scratch.path());
+    supervisor.close(&db).unwrap();
+}
+
+#[test]
+fn outside_reader_fold_round1_non_markdown_skips_preparation() {
+    for path in [
+        "data.json",
+        "code.rs",
+        "code.ts",
+        "data.csv",
+        "notes.md/code.py",
+    ] {
+        let mut captured = input("{\"bold\":\"**literal**\"}");
+        captured.path = path.into();
         assert!(
-            native.canonical_content()["body"] == editor.canonical_content()["body"]
-                || needs_reader(source),
-            "different editor tree bypassed: {source:?}\nnative: {}\neditor: {}",
-            native.canonical_content()["body"],
-            editor.canonical_content()["body"]
+            eligible(&[captured]).is_empty(),
+            "non-Markdown capture prepared: {path}"
         );
     }
+}
+
+#[tokio::test]
+async fn outside_reader_fold_round1_batch_reader_budget_bounds_dispatches() {
+    let (scratch, store, _) = fixture(false);
+    let db = store.database_path().to_owned();
+    drop(store);
+    let supervisor = crate::WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 3).unwrap().actor;
+    let reader = Arc::new(Reader::new(Some(failing_reader(&scratch, false))));
+    actor
+        .configure_reader_resolver(Arc::new(reader_resolver::ReaderResolver::new(
+            reader.clone(),
+        )))
+        .await
+        .unwrap();
+    let captured = input("**A changed note**");
+    std::fs::write(scratch.path().join("note.md"), &captured.text).unwrap();
+    let results = round1_batch(
+        actor,
+        scratch.path().to_owned(),
+        vec![captured.clone(), captured],
+        Arc::new(Round1Root),
+    )
+    .unwrap();
+    assert!(results.iter().all(Result::is_ok));
+    assert_eq!(
+        reader.dispatch_count(),
+        1,
+        "batch exceeded its shared reader construction budget"
+    );
+    supervisor.close(&db).unwrap();
 }
 
 #[tokio::test]
@@ -641,7 +914,13 @@ async fn outside_reader_fold_crash_and_timeout_fall_back_without_holding_the_wri
             )))
             .await
             .unwrap();
-        let preparation = prepare(&actor, Arc::from([input(source)]), scratch.path());
+        let mut deadline = None;
+        let preparation = prepare(
+            &actor,
+            Arc::from([input(source)]),
+            scratch.path(),
+            &mut deadline,
+        );
         let barrier = async {
             while reader.dispatch_count() == 0 {
                 tokio::task::yield_now().await;
@@ -664,7 +943,7 @@ async fn outside_reader_fold_crash_and_timeout_fall_back_without_holding_the_wri
         })
         .await
         .expect("outside-fold reader deadline bounds the capture wait");
-        assert!(folds.unwrap().is_empty());
+        assert!(folds.is_empty());
         assert_eq!(reader.dispatch_count(), 1);
         let result = actor
             .capture_ingest(
@@ -721,7 +1000,7 @@ async fn outside_reader_fold_retries_once_then_uses_strict_fallback() {
                     CancellationToken::new(),
                 )
                 .await;
-            if changes == 1 {
+            if changes == 1 && !file {
                 assert!(result.is_ok(), "{result:?}");
             } else {
                 assert!(
@@ -729,7 +1008,7 @@ async fn outside_reader_fold_retries_once_then_uses_strict_fallback() {
                     "{result:?}"
                 );
             }
-            assert_eq!(reader.dispatch_count(), 2);
+            assert_eq!(reader.dispatch_count(), if file { 1 } else { 2 });
             assert!(
                 hooks()
                     .lock()

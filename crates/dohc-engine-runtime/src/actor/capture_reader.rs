@@ -27,20 +27,6 @@ pub(super) fn file_matches(root: &std::path::Path, input: &CaptureIngest) -> boo
         if bytes == input.text.as_bytes())
 }
 
-pub(super) fn refresh(root: &std::path::Path, input: &mut CaptureIngest) {
-    if input.request_id.is_some() {
-        return;
-    }
-    if let Ok(PublicationTarget::Bytes(bytes)) = read_publication_target(root, &input.path)
-        && bytes.len() <= reader_resolver::MAX_FOLD_SOURCE_BYTES
-        && let Ok(source) = String::from_utf8(bytes)
-        && source != input.text
-    {
-        input.text = source;
-        input.author_json = None;
-    }
-}
-
 pub(super) fn indexing(
     indexing: CaptureIndexing,
     root: PathBuf,
@@ -65,6 +51,7 @@ fn needs_reader(source: &str) -> bool {
     }
     let mut fenced = false;
     let mut list = false;
+    let mut list_gap = false;
     for line in source.as_bytes().split(|byte| *byte == b'\n') {
         let line = line.strip_suffix(b"\r").unwrap_or(line);
         if line.starts_with(b"```") {
@@ -88,6 +75,7 @@ fn needs_reader(source: &str) -> bool {
             continue;
         }
         if line.is_empty() {
+            list_gap |= list;
             list = false;
             continue;
         }
@@ -139,10 +127,11 @@ fn needs_reader(source: &str) -> bool {
         {
             return true;
         }
-        if list && !item || line == b"---" {
+        if list && !item || list_gap && item || matches!(line, b"---" | b"-" | b"+") {
             return true;
         }
         list = item;
+        list_gap = false;
     }
     fenced
 }
@@ -151,7 +140,12 @@ fn eligible(inputs: &[CaptureIngest]) -> Vec<CaptureIngest> {
     inputs
         .iter()
         .filter(|input| {
-            input.text.len() <= reader_resolver::MAX_FOLD_SOURCE_BYTES && needs_reader(&input.text)
+            input.path.rsplit_once('.').is_some_and(|(_, extension)| {
+                ["md", "markdown", "mdx"]
+                    .iter()
+                    .any(|kind| extension.eq_ignore_ascii_case(kind))
+            }) && input.text.len() <= reader_resolver::MAX_FOLD_SOURCE_BYTES
+                && needs_reader(&input.text)
         })
         .cloned()
         .collect()
@@ -161,22 +155,26 @@ pub(super) async fn prepare(
     actor: &ActorHandle,
     inputs: Arc<[CaptureIngest]>,
     root: &std::path::Path,
-) -> Result<Arc<Vec<PreparedFold>>, RuntimeError> {
+    deadline: &mut Option<std::time::Instant>,
+) -> Arc<Vec<PreparedFold>> {
     if !actor.reader_configured.load(Ordering::Acquire) {
-        return Ok(Arc::new(Vec::new()));
+        return Arc::new(Vec::new());
     }
-    prepare_eligible(actor, eligible(&inputs), root).await
+    prepare_eligible(actor, eligible(&inputs), root, deadline).await
 }
 
 async fn prepare_eligible(
     actor: &ActorHandle,
     eligible: Vec<CaptureIngest>,
     root: &std::path::Path,
-) -> Result<Arc<Vec<PreparedFold>>, RuntimeError> {
+    deadline: &mut Option<std::time::Instant>,
+) -> Arc<Vec<PreparedFold>> {
     if eligible.is_empty() {
-        return Ok(Arc::new(Vec::new()));
+        return Arc::new(Vec::new());
     }
-    let (resolver, preparations) = actor.run(move |store, cache| {
+    let deadline = *deadline
+        .get_or_insert_with(|| std::time::Instant::now() + std::time::Duration::from_secs(5));
+    let Ok((resolver, preparations)) = actor.run(move |store, cache| {
         let resolver = cache.reader_resolver.clone();
         let mut preparations = Vec::new();
         if resolver.is_some() {
@@ -192,46 +190,56 @@ async fn prepare_eligible(
                     if sha == dohc_engine_storage::hex_sha256(input.text.as_bytes()) { return Ok(None); }
                     let key = DocKey::new(&input.workspace_id, version, object)?;
                     Ok(reader_resolver::prepare_fold(conn, &key, &input.path, &input.text)?)
-                })?;
+                }).ok().flatten();
                 if let Some(preparation) = preparation { preparations.push((preparation, input)); }
             }
         }
         Ok((resolver, preparations))
-    }).await?;
+    }).await else { return Arc::new(Vec::new()); };
     let mut folds = Vec::new();
     if let Some(resolver) = resolver {
         for (preparation, input) in preparations {
             if !file_matches(root, &input) {
                 continue;
             }
-            if let Some(fold) = preparation.construct(&resolver).await {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                break;
+            };
+            let Ok(fold) = tokio::time::timeout(remaining, preparation.construct(&resolver)).await
+            else {
+                break;
+            };
+            if let Some(fold) = fold {
                 folds.push(fold);
             }
         }
     }
     #[cfg(test)]
-    tests::after_prepare(actor, root).await?;
-    Ok(Arc::new(folds))
+    let _ = tests::after_prepare(actor, root).await;
+    Arc::new(folds)
 }
 
 pub(super) fn prepare_blocking(
     actor: &ActorHandle,
     inputs: Arc<[CaptureIngest]>,
     root: &std::path::Path,
-) -> Result<Arc<Vec<PreparedFold>>, RuntimeError> {
+    deadline: &mut Option<std::time::Instant>,
+) -> Arc<Vec<PreparedFold>> {
     if !actor.reader_configured.load(Ordering::Acquire) {
-        return Ok(Arc::new(Vec::new()));
+        return Arc::new(Vec::new());
     }
     let eligible = eligible(&inputs);
     if eligible.is_empty() {
-        return Ok(Arc::new(Vec::new()));
+        return Arc::new(Vec::new());
     }
     // The capture worker is outside Tokio. The actor's writer never enters this runtime.
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
-        .map_err(|_| RuntimeError::ActorUnavailable)?;
-    runtime.block_on(prepare_eligible(actor, eligible, root))
+    else {
+        return Arc::new(Vec::new());
+    };
+    runtime.block_on(prepare_eligible(actor, eligible, root, deadline))
 }
 
 #[cfg(test)]

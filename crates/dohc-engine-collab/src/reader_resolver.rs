@@ -80,13 +80,13 @@ pub fn prepare_fold(
     {
         return Ok(None);
     }
+    let Some(claim) = marker.lineage_claim_id.clone() else {
+        return Ok(None);
+    };
     let doc = crate::load_doc_in(conn, key)?;
     if doc.has_reader_source() || doc.has_pending_dependencies() {
         return Ok(None);
     }
-    let Some(claim) = marker.lineage_claim_id.clone() else {
-        return Ok(None);
-    };
     Ok(Some(FoldPreparation {
         vector: doc.encode_state_vector(),
         deletes: doc.encode_delete_set(),

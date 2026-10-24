@@ -1274,19 +1274,22 @@ impl ActorHandle {
     /// Capture and index text against one reconcile-owned policy snapshot.
     pub fn capture_ingest_with_search_policy_blocking(
         &self,
-        mut input: CaptureIngest,
+        input: CaptureIngest,
         root_dir: PathBuf,
         search_policy: Arc<SearchPolicySnapshot>,
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteResult, RuntimeError> {
         let token: CancellationToken = CancellationToken::new();
+        let mut reader_deadline = None;
         for attempt in 0..=2 {
-            if attempt > 0 {
-                reader::refresh(&root_dir, &mut input);
-            }
             let folds = if attempt < 2 {
-                reader::prepare_blocking(self, Arc::from([input.clone()]), &root_dir)?
+                reader::prepare_blocking(
+                    self,
+                    Arc::from([input.clone()]),
+                    &root_dir,
+                    &mut reader_deadline,
+                )
             } else {
                 Arc::new(Vec::new())
             };
@@ -1342,16 +1345,10 @@ impl ActorHandle {
         let mut result = Err(RuntimeError::ActorUnavailable);
         let mut completed: Vec<_> = inputs.iter().map(|_| None).collect();
         let mut indices: Vec<_> = (0..inputs.len()).collect();
+        let mut reader_deadline = None;
         for attempt in 0..=2 {
-            if attempt > 0 {
-                let mut refreshed = inputs.to_vec();
-                for input in &mut refreshed {
-                    reader::refresh(&root_dir, input);
-                }
-                inputs = refreshed.into();
-            }
             let folds = if attempt < 2 {
-                reader::prepare_blocking(self, inputs.clone(), &root_dir)?
+                reader::prepare_blocking(self, inputs.clone(), &root_dir, &mut reader_deadline)
             } else {
                 Arc::new(Vec::new())
             };
@@ -1378,6 +1375,13 @@ impl ActorHandle {
                     )
                 })
             });
+            if result.is_err() && completed.iter().any(Option::is_some) {
+                let error = Arc::new(result.unwrap_err());
+                result = Ok(indices
+                    .iter()
+                    .map(|_| Err(RuntimeError::CaptureBatchPass(error.clone())))
+                    .collect());
+            }
             let Ok(items) = &mut result else {
                 break;
             };
@@ -1560,22 +1564,18 @@ impl ActorHandle {
 
     async fn capture_ingest_with_root(
         &self,
-        mut input: CaptureIngest,
+        input: CaptureIngest,
         root_dir: Option<PathBuf>,
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<WriteResult, RuntimeError> {
+        let mut reader_deadline = None;
         for attempt in 0..=2 {
-            if attempt > 0
-                && let Some(root) = root_dir.as_ref()
-            {
-                reader::refresh(root, &mut input);
-            }
             let folds = if attempt < 2
                 && let Some(root) = root_dir.as_ref()
             {
-                reader::prepare(self, Arc::from([input.clone()]), root).await?
+                reader::prepare(self, Arc::from([input.clone()]), root, &mut reader_deadline).await
             } else {
                 Arc::new(Vec::new())
             };
