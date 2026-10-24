@@ -264,8 +264,17 @@ fn verify_key_dir(engine_dir: &std::path::Path) -> Result<(), CryptoError> {
 /// orphaned ciphertext would strand it silently; the capture layer checks the
 /// encrypted store first and fails closed instead (TS parity:
 /// `loadSecretDataKey` checks protected rows before its create branch).
-/// Creation requires hard-link support; unsupported filesystems refuse creation.
+/// A drive without hard links, such as exFAT or FAT32, gets the key created
+/// at its name instead (`create_in_place`).
 pub fn create_key_file(engine_dir: &std::path::Path) -> Result<SecretDataKey, CryptoError> {
+    create_key_file_with(engine_dir, |temp, path| std::fs::hard_link(temp, path))
+}
+
+/// [`create_key_file`], publishing with `link`.
+fn create_key_file_with(
+    engine_dir: &std::path::Path,
+    link: impl FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+) -> Result<SecretDataKey, CryptoError> {
     let path = engine_dir.join(SECRET_KEY_FILE_NAME);
     let key = SecretDataKey::generate()?;
     // A link at `.dohc` or the folder would send key custody off the
@@ -276,49 +285,97 @@ pub fn create_key_file(engine_dir: &std::path::Path) -> Result<SecretDataKey, Cr
     // a crash that lost a visible-but-unflushed key would strand every
     // sealed snapshot, and a later restart would silently re-mint. The
     // link-publish also means a partially written key can never be visible
-    // at the final path.
+    // at the final path, except on a drive without hard links.
     // Unique per attempt: pid + a process-wide counter, so two same-process
     // minters can never share (and cross-delete) one temp file.
     static MINT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = MINT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let temp = path.with_extension(format!("tmp-{}-{seq}", std::process::id()));
-    // On macOS a 0600 mode does not limit an ACL entry the workspace folder
-    // gives every new file, so the key takes none of them. A failed create
-    // removes what it made, so nothing is left here for a path to clean up.
-    #[cfg(target_vendor = "apple")]
-    let mut file = (|| -> std::io::Result<std::fs::File> {
-        let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidInput);
-        let folder = std::fs::File::open(temp.parent().ok_or_else(invalid)?)?;
-        let name = temp.file_name().ok_or_else(invalid)?;
-        Ok(dohc_macos_files::create_uninherited(folder, name, 0o600)?.into())
-    })()
-    .map_err(|err| key_create_error(&err))?;
-    let written = (|| -> std::io::Result<()> {
-        #[cfg(not(target_vendor = "apple"))]
-        let mut file = {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            options.open(&temp)?
-        };
-        use std::io::Write;
-        // The serialized payload carries the key; it must zeroize on drop
-        // like every other buffer holding key material.
-        let payload = Zeroizing::new(key.to_key_file());
-        file.write_all(payload.as_bytes())?;
-        file.sync_all()?;
-        Ok(())
-    })();
+    // The serialized payload carries the key; it must zeroize on drop
+    // like every other buffer holding key material.
+    let payload = Zeroizing::new(key.to_key_file());
+    let mut file = create_new_key_file(&temp).map_err(|err| key_create_error(&err))?;
+    let written = write_and_flush(&mut file, &payload);
+    drop(file);
     if written.is_err() {
         let _ = std::fs::remove_file(&temp);
         return Err(CryptoError::KeyFileMalformed);
     }
-    let publication = std::fs::hard_link(&temp, &path);
+    let publication = match link(&temp, &path) {
+        Err(err) if hard_links_unsupported(&err) => {
+            let _ = std::fs::remove_file(&temp);
+            create_in_place(&path, &payload)
+        }
+        published => published,
+    };
     finish_key_publication(&path, &temp, publication)
+}
+
+/// Create a key file that does not exist yet, readable only by its owner.
+/// On macOS a 0600 mode does not limit an ACL entry the workspace folder
+/// gives every new file, so the key takes none of them. A failed create
+/// removes what it made, so nothing is left here for a path to clean up.
+fn create_new_key_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    #[cfg(target_vendor = "apple")]
+    {
+        let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidInput);
+        let folder = std::fs::File::open(path.parent().ok_or_else(invalid)?)?;
+        let name = path.file_name().ok_or_else(invalid)?;
+        Ok(dohc_macos_files::create_uninherited(folder, name, 0o600)?.into())
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(path)
+    }
+}
+
+fn write_and_flush(file: &mut std::fs::File, payload: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    file.write_all(payload.as_bytes())?;
+    file.sync_all()
+}
+
+/// Publish the key on a drive without hard links by creating it at its
+/// name. The create still never replaces a key, and the key is flushed
+/// before anything is sealed under it. A reader that comes between the
+/// create and the write finds a key that fails closed for that try, as
+/// every reader does after a crash in that moment.
+fn create_in_place(path: &std::path::Path, payload: &str) -> std::io::Result<()> {
+    let mut file = create_new_key_file(path)?;
+    let written = write_and_flush(&mut file, payload);
+    drop(file);
+    // Nothing adopts a key it cannot parse, so only such a file can go.
+    let complete = || {
+        read_key_file_no_follow(path)
+            .map(Zeroizing::new)
+            .is_ok_and(|content| SecretDataKey::parse_key_file(&content).is_ok())
+    };
+    if written.is_err() && !complete() {
+        let _ = std::fs::remove_file(path);
+    }
+    written
+}
+
+/// Whether a hard link failed because the drive has none. The rule is
+/// `materialize.rs::hard_links_unsupported`'s.
+#[cfg(unix)]
+fn hard_links_unsupported(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::Unsupported
+        || err.raw_os_error().is_some_and(|code| {
+            code == libc::EPERM || code == libc::ENOTSUP || code == libc::EOPNOTSUPP
+        })
+}
+
+#[cfg(windows)]
+fn hard_links_unsupported(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::Unsupported || matches!(err.raw_os_error(), Some(1 | 50))
 }
 
 /// The error for a key file that could not be created.
@@ -331,14 +388,18 @@ fn key_create_error(err: &std::io::Error) -> CryptoError {
     }
 }
 
+#[cfg(not(target_vendor = "apple"))]
+fn key_create_error(_: &std::io::Error) -> CryptoError {
+    CryptoError::KeyFileMalformed
+}
+
 fn finish_key_publication(
     path: &std::path::Path,
     temp: &std::path::Path,
     publication: std::io::Result<()>,
 ) -> Result<SecretDataKey, CryptoError> {
-    // Hard links publish atomically without replacing a concurrent winner.
-    // Replacing the winner would orphan data already encrypted with its key.
-    // Refuse filesystems that cannot provide that guarantee.
+    // Neither publication replaces a concurrent winner, which would orphan
+    // data already encrypted with its key.
     let _ = std::fs::remove_file(temp);
     if publication.is_err_and(|err| err.kind() != std::io::ErrorKind::AlreadyExists) {
         return Err(CryptoError::KeyFileMalformed);
@@ -699,5 +760,85 @@ mod tests {
             assert_eq!(key, published);
         }
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    /// A hard link on exFAT or FAT32.
+    fn no_hard_links(_: &std::path::Path, _: &std::path::Path) -> std::io::Result<()> {
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
+
+    #[test]
+    fn a_drive_without_hard_links_creates_the_key_at_its_name() {
+        let dir = dohc_test_scratch::ScratchDir::new_named("key-no-links").unwrap();
+        let key = create_key_file_with(&dir, no_hard_links).unwrap();
+        assert_eq!(load_key_file(&dir).unwrap(), Some(key));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let path = dir.join(SECRET_KEY_FILE_NAME);
+            let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[test]
+    fn a_drive_without_hard_links_keeps_the_published_key() {
+        let dir = dohc_test_scratch::ScratchDir::new_named("key-no-links-winner").unwrap();
+        let winner = create_key_file(&dir).unwrap();
+        assert_eq!(create_key_file_with(&dir, no_hard_links).unwrap(), winner);
+        assert_eq!(load_key_file(&dir).unwrap(), Some(winner));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    /// A minter there can fail a try while another writes the key, but no
+    /// two minters ever return different keys.
+    #[test]
+    fn concurrent_minters_without_hard_links_return_only_the_published_key() {
+        let dir = dohc_test_scratch::ScratchDir::new_named("key-no-links-race").unwrap();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let keys = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    let start = std::sync::Arc::clone(&start);
+                    let root = &dir;
+                    scope.spawn(move || {
+                        start.wait();
+                        create_key_file_with(root, no_hard_links)
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let published = load_key_file(&dir).unwrap().expect("published key");
+        assert!(keys.iter().any(Result::is_ok));
+        for key in keys.into_iter().flatten() {
+            assert_eq!(key, published);
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_drive_without_hard_links_publishes_in_place() {
+        for code in [libc::EPERM, libc::ENOTSUP, libc::EOPNOTSUPP] {
+            assert!(hard_links_unsupported(&std::io::Error::from_raw_os_error(
+                code
+            )));
+        }
+        for code in [
+            libc::EACCES,
+            libc::EEXIST,
+            libc::EXDEV,
+            libc::EIO,
+            libc::ENOSPC,
+        ] {
+            assert!(!hard_links_unsupported(&std::io::Error::from_raw_os_error(
+                code
+            )));
+        }
     }
 }

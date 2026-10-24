@@ -100,7 +100,7 @@ describe("durable create-once publication", () => {
     const root = await createTestScratch("dohc-create-once-");
     const path = join(root, "record");
     expect(await atomicCreateFile(path, "loser", 0o666, {
-      allowDirectWrite: true,
+      directWriteAfter: () => true,
       link: async () => {
         await writeFile(path, "winner");
         throw Object.assign(new Error(code), { code });
@@ -117,7 +117,7 @@ describe("durable create-once publication", () => {
     const failure = Object.assign(new Error(phase), { code: phase === "write" ? "ENOSPC" : "EIO" });
     let fail = true;
     const dependencies = {
-      allowDirectWrite: true,
+      directWriteAfter: () => true,
       link: async () => { throw Object.assign(new Error("unsupported"), { code: "ENOTSUP" }); },
       open: async (name: string, flags: string, mode?: number) => {
         const handle = await open(name, flags, mode);

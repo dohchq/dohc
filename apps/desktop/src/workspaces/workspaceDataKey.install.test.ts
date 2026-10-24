@@ -1,4 +1,4 @@
-import { mkdir, readdir } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { atomicCreateFile } from "../atomicReplaceFile";
@@ -12,9 +12,36 @@ vi.mock("../atomicReplaceFile", async (importOriginal) => {
 const actual = await vi.importActual<typeof import("../atomicReplaceFile")>("../atomicReplaceFile");
 afterEach(() => vi.mocked(atomicCreateFile).mockReset());
 
-const unsupportedWords =
-  "This drive can't store the workspace's secret key safely. Move the workspace to an NTFS, APFS or ext4 drive, then try again.";
 const generalWords = "The workspace secret key file could not be installed.";
+const keyFile = (fill: number) => `dohc-secret-key-v1:${Buffer.alloc(32, fill).toString("base64")}\n`;
+
+async function keyFolder(): Promise<{ root: string; path: string }> {
+  const root = await createTestScratch("dohc-key-install-");
+  const path = join(root, SECRET_KEY_RELATIVE_PATH);
+  await mkdir(dirname(path), { recursive: true });
+  return { root, path };
+}
+
+function failLinks(code: string, errno: number, before?: (destination: string) => Promise<void>) {
+  const link = vi.fn(async (_source: string, destination: string) => {
+    await before?.(destination);
+    throw Object.assign(new Error("link failed"), { code, errno, syscall: "link" });
+  });
+  vi.mocked(atomicCreateFile).mockImplementationOnce((destination, data, mode, options) =>
+    actual.atomicCreateFile(destination, data, mode, { ...options, link }),
+  );
+  return link;
+}
+
+async function onPlatform<T>(platform: NodeJS.Platform, run: () => Promise<T>): Promise<T> {
+  const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+  try {
+    Object.defineProperty(process, "platform", { ...descriptor, value: platform });
+    return await run();
+  } finally {
+    Object.defineProperty(process, "platform", descriptor);
+  }
+}
 
 describe.each(["win32", "linux", "darwin"] as const)("key publication on %s", platform => {
   it.each([
@@ -26,38 +53,42 @@ describe.each(["win32", "linux", "darwin"] as const)("key publication on %s", pl
     ["EACCES", -4092, false],
     ["EXDEV", -4037, false],
     ["EIO", -4070, false],
-  ] as const)("explains a failed key publication: %s", async (code, errno, unsupported) => {
-    const root = await createTestScratch("dohc-key-install-refusal-");
-    const path = join(root, SECRET_KEY_RELATIVE_PATH);
-    await mkdir(dirname(path), { recursive: true });
-    const link = vi.fn(async () => {
-      throw Object.assign(new Error("link failed"), { code, errno, syscall: "link" });
-    });
-    vi.mocked(atomicCreateFile).mockImplementationOnce((destination, data, mode) =>
-      actual.atomicCreateFile(destination, data, mode, { link }),
-    );
-
-    const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
-    try {
-      Object.defineProperty(process, "platform", { ...descriptor, value: platform });
-      await expect(installWorkspaceDataKey(root, Buffer.alloc(32, 7))).rejects.toMatchObject({
-        name: "SecretFileStoreError",
-        code: unsupported ? "key-install-unsupported" : "key-corrupt",
-        message: unsupported ? unsupportedWords : generalWords,
-      });
-    } finally {
-      Object.defineProperty(process, "platform", descriptor);
+  ] as const)("writes the key in place only on a drive without hard links: %s", async (code, errno, inPlace) => {
+    const { root, path } = await keyFolder();
+    const link = failLinks(code, errno);
+    const installed = onPlatform(platform, () => installWorkspaceDataKey(root, Buffer.alloc(32, 7)));
+    if (inPlace) {
+      await installed;
+      expect(await readFile(path, "utf8")).toBe(keyFile(7));
+      expect(await readdir(dirname(path))).toEqual(["secret.key"]);
+    } else {
+      await expect(installed).rejects.toMatchObject({ name: "SecretFileStoreError", code: "key-corrupt", message: generalWords });
+      expect(await readdir(dirname(path))).toEqual([]);
     }
     expect(link).toHaveBeenCalledOnce();
-    // No direct key write, and no incomplete temporary key left behind.
-    expect(await readdir(dirname(path))).toEqual([]);
   });
 });
 
+it("writes the key in place readable only by its owner", async () => {
+  const { root, path } = await keyFolder();
+  failLinks("ENOTSUP", -4049);
+  await installWorkspaceDataKey(root, Buffer.alloc(32, 7));
+  if (process.platform !== "win32") expect((await stat(path)).mode & 0o777).toBe(0o600);
+});
+
+it("keeps a different key that appears while the key is written in place", async () => {
+  const { root, path } = await keyFolder();
+  failLinks("ENOTSUP", -4049, destination => writeFile(destination, keyFile(9)));
+  await expect(installWorkspaceDataKey(root, Buffer.alloc(32, 7))).rejects.toMatchObject({
+    code: "key-corrupt",
+    message: "A different workspace secret key already exists locally; refusing to overwrite protected state.",
+  });
+  expect(await readFile(path, "utf8")).toBe(keyFile(9));
+  expect(await readdir(dirname(path))).toEqual(["secret.key"]);
+});
+
 it("keeps the general words when the temporary file cannot be opened", async () => {
-  const root = await createTestScratch("dohc-key-install-refusal-");
-  const path = join(root, SECRET_KEY_RELATIVE_PATH);
-  await mkdir(dirname(path), { recursive: true });
+  const { root, path } = await keyFolder();
   vi.mocked(atomicCreateFile).mockImplementationOnce((destination, data, mode) =>
     actual.atomicCreateFile(destination, data, mode, {
       open: async () => {

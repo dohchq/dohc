@@ -155,8 +155,10 @@ export async function atomicReplaceFile(
 
 /**
  * Create without replacing an existing entry. True means this creator won.
- * Hard links publish complete, flushed bytes. Failed direct writes remove
- * their new entry; a crash during a direct write can still leave it cut off.
+ * Hard links publish complete, flushed bytes. After a link error that
+ * `directWriteAfter` accepts, the entry is written in place instead. Failed
+ * direct writes remove their new entry; a crash during a direct write can
+ * still leave it cut off.
  * Node cannot open directories for fsync on Windows.
  */
 export async function atomicCreateFile(
@@ -167,12 +169,12 @@ export async function atomicCreateFile(
     open: openFile = open,
     link: publish = link,
     rm: remove = rm,
-    allowDirectWrite = false,
+    directWriteAfter = () => false,
     platform = process.platform,
   }: Pick<DurableFileOperations, "open" | "platform"> & {
     link?: (source: string, destination: string) => Promise<void>;
     rm?: typeof rm;
-    allowDirectWrite?: boolean;
+    directWriteAfter?: (error: NodeJS.ErrnoException) => boolean;
   } = {},
 ): Promise<boolean> {
   const temporary = `${destination}.tmp-${process.pid}-${randomUUID()}`;
@@ -194,7 +196,7 @@ export async function atomicCreateFile(
       if ((error as NodeJS.ErrnoException).code === "EEXIST") {
         created = false;
       } else {
-        if (!allowDirectWrite) throw error;
+        if (!directWriteAfter(error as NodeJS.ErrnoException)) throw error;
         let handle;
         try {
           handle = await openFile(destination, "wx", mode);

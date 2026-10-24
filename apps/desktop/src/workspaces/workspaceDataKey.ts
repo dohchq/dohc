@@ -20,9 +20,10 @@ export class SecretFileStoreError extends Error {
   }
 }
 
-function hardLinksUnsupported(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) return false;
-  const { code, syscall } = error as NodeJS.ErrnoException;
+// exFAT and FAT32 have no hard links, so the key is written in place there.
+// The exclusive create still never replaces a key; a reader that comes before
+// the write finds a key that fails closed for that try.
+function hardLinksUnsupported({ code, syscall }: NodeJS.ErrnoException): boolean {
   // libuv maps Windows ERROR_INVALID_FUNCTION (1) to EISDIR and ERROR_NOT_SUPPORTED (50) to ENOTSUP.
   // Off Windows, match materialize.rs::hard_links_unsupported; Windows EPERM remains a permissions failure.
   return syscall === "link" && (
@@ -136,7 +137,7 @@ export async function loadSecretDataKey(
   const payload = `${SECRET_KEY_FILE_PREFIX}${key.toString("base64")}\n`;
   let created: boolean;
   try {
-    created = await atomicCreateFile(path, payload, 0o600);
+    created = await atomicCreateFile(path, payload, 0o600, { directWriteAfter: hardLinksUnsupported });
   } catch {
     throw new SecretFileStoreError(
       "key-corrupt",
@@ -177,14 +178,8 @@ export async function installWorkspaceDataKey(
   const payload = `${SECRET_KEY_FILE_PREFIX}${key.toString("base64")}\n`;
   let created: boolean;
   try {
-    created = await atomicCreateFile(path, payload, 0o600);
-  } catch (error) {
-    if (hardLinksUnsupported(error)) {
-      throw new SecretFileStoreError(
-        "key-install-unsupported",
-        "This drive can't store the workspace's secret key safely. Move the workspace to an NTFS, APFS or ext4 drive, then try again.",
-      );
-    }
+    created = await atomicCreateFile(path, payload, 0o600, { directWriteAfter: hardLinksUnsupported });
+  } catch {
     throw new SecretFileStoreError(
       "key-corrupt",
       "The workspace secret key file could not be installed.",
