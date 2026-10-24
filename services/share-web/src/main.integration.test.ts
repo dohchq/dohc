@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { linkRefusalBody } from "@dohc/security-contract/link-refusal";
 import { EXCHANGE_BUCKET_CAPACITY, shareWebRefusalBody } from "./server";
 
 const PUBLIC_HOST = "share.example.test";
@@ -577,7 +578,7 @@ describe("share-web Node request adapter", () => {
     expect(addresses).toEqual([expected]);
   });
 
-  it("limits each session to 8 blob proxies and releases settled slots", { timeout: 30_000 }, async () => {
+  it("limits each session to 8 blob proxies, answers the ninth as busy, and releases settled slots", { timeout: 30_000 }, async () => {
     const relay = await startControlledBlobRelay();
     const server = await startShareWeb({ relayUrl: relay.url });
     const session = await exchangeSession(server.port);
@@ -598,8 +599,8 @@ describe("share-web Node request adapter", () => {
 
       expect(outcome.kind).toBe("response");
       if (outcome.kind !== "response") return;
-      expect(outcome.response.statusCode).toBe(404);
-      expect(await readResponse(outcome.response)).toBe(shareWebRefusalBody);
+      expect(outcome.response.statusCode).toBe(503);
+      expect(JSON.parse(await readResponse(outcome.response))).toEqual(linkRefusalBody("link_unavailable"));
 
       relay.finishBlob(0);
       const settled = await Promise.race(firstEight.map((blob) => blob.response));

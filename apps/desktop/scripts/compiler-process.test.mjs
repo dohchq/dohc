@@ -4,13 +4,25 @@ import { mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/prom
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runOwnedCompilerProcess } from '../src/workspaces/compilerProcessSupervisor.ts';
-import { compileClosedAppInProcess } from '../src/workspaces/closedAppCompilerProcess.ts';
+import { runOwnedCompilerProcess as superviseCompilerProcess } from '../src/workspaces/compilerProcessSupervisor.ts';
+import { compileClosedAppInProcess as compileClosedApp } from '../src/workspaces/closedAppCompilerProcess.ts';
 import { stageAppCompiler } from './stage-app-compiler.mjs';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
+import { warmWindowsCompiler } from './warm-windows-compiler.mjs';
+
+before(warmWindowsCompiler,{timeout:190000});
+
+function reportCompilerFailure(running){
+  // assert.rejects' property comparison omits custom error fields. Observe
+  // rejection immediately, including while a fixture waits for readiness.
+  void running.catch(error=>{if(error.details)process.stderr.write(`${error.name}: ${error.message} ${error.details}\n`);});
+  return running;
+}
+const runOwnedCompilerProcess=(...args)=>reportCompilerFailure(superviseCompilerProcess(...args));
+const compileClosedAppInProcess=(...args)=>reportCompilerFailure(compileClosedApp(...args));
 
 // The compile deadline counts from the owner's spawn. Beside other work, one
 // Windows owner and worker took 17.6 s to answer, so the deadline is 20 s,
@@ -112,9 +124,20 @@ for(const mode of ['cancel','timeout','normal-exit'])test(`${mode} closes owned 
   const context=await fixture(t,`import {spawn}from'node:child_process';import{existsSync,writeFileSync}from'node:fs';${markerLine}${proceedLine}const child=spawn(process.execPath,['-e','console.log(process.pid);setInterval(()=>{},1000)'],{windowsHide:true,stdio:['ignore','pipe','ignore']});child.stdout.once('data',chunk=>{writeFileSync(marker,JSON.stringify({worker:process.pid,descendant:Number(chunk.toString())}));${mode==='normal-exit'?'proceed(()=>process.exit(0))':'setInterval(()=>{},1000)'}});`);
   const {directory,runtime}=context;runtime.workerArgs=[join(directory,'ready.json')];let owner;runtime.onOwnerSpawn=pid=>{owner=pid;};const controller=new AbortController();
   const running=runOwnedCompilerProcess(runtime,{input:Buffer.alloc(0),bounds,signal:controller.signal});
-  const outcome=mode==='normal-exit'?running:assert.rejects(running,{reason:mode==='cancel'?'cancelled':'timeout'});
-  const identities=await waitForMarker(context);await proceed(context);if(mode==='cancel')controller.abort();await outcome;
-  for(const pid of [owner,identities.worker,identities.descendant])assert.equal(await exited(pid),true,`process ${pid} exited`);
+  const outcome=mode==='normal-exit'?running:assert.rejects(running,error=>{
+    assert.equal(error.reason,mode==='cancel'?'cancelled':'timeout');
+    if(mode==='timeout'){
+      assert.match(error.details,/Last stage: /);assert.match(error.details,/elapsed=\d+ms/);assert.match(error.details,/stderr tail: /);
+      if(process.platform==='win32')for(const stage of ['PowerShell running','Add-Type done','job assigned','admitted','worker spawned'])assert.match(error.details,new RegExp(`${stage}=\\d+ms`));
+    }
+    return true;
+  });
+  void outcome.catch(()=>{});
+  try{
+    const identities=await waitForMarker(context);await proceed(context);if(mode==='cancel')controller.abort();await outcome;
+    for(const pid of [owner,identities.worker,identities.descendant])assert.equal(await exited(pid),true,`process ${pid} exited`);
+  }catch(error){await outcome;throw error;}
+  finally{controller.abort();await outcome.catch(()=>{});}
 });
 test('aggregate memory covers two sub-limit native allocations',owned,async t=>{
   const {runtime}=await fixture(t,`import{spawn}from'node:child_process';globalThis.held=Buffer.alloc(160*1024*1024,1);const child=spawn(process.execPath,['-e','try{globalThis.held=Buffer.alloc(160*1024*1024,1);setInterval(()=>{},1000)}catch{process.exit(42)}'],{windowsHide:true,stdio:'inherit'});child.once('exit',code=>process.exit(code??1));`);

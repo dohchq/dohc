@@ -2235,12 +2235,13 @@ export async function deleteRetainedCopies(
 // in that Collection's automations.yaml.
 export async function listAutomationRuns(
   ctx: ToolContext,
-  args: { collectionPath: string; automation: string; page?: string },
+  args: { collectionPath: string; automation: string; page?: string; server?: boolean },
 ) {
   const resolved = await safeResolve(ctx, args.collectionPath, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   return requestCli(ctx, "automationRuns", {
     collectionPath: resolved.normalized, automation: args.automation, ...(args.page === undefined ? {} : { page: args.page }),
+    ...(args.server ? { server: true } : {}),
   });
 }
 
@@ -2260,11 +2261,12 @@ export async function switchAutomation(ctx: ToolContext, args: {
 
 export async function readAutomationRun(
   ctx: ToolContext,
-  args: { collectionPath: string; automation: string; run: string },
+  args: { collectionPath: string; automation: string; run: string; server?: boolean },
 ) {
   const resolved = await safeResolve(ctx, args.collectionPath, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  return requestCli(ctx, "automationRun", { ...args, collectionPath: resolved.normalized });
+  const { server, ...read } = args;
+  return requestCli(ctx, "automationRun", { ...read, collectionPath: resolved.normalized, ...(server ? { server: true } : {}) });
 }
 
 export async function retryAutomationRun(

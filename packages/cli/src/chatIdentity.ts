@@ -1,5 +1,5 @@
 interface CliChatAuthor {
-  kind: "human" | "agent" | "automation";
+  kind: "human" | "agent" | "automation" | "link";
   displayName: string;
 }
 

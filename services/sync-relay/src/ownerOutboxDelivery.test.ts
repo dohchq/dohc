@@ -159,8 +159,10 @@ it("retains configured entry and byte limits without acknowledging unread update
   expect(bounded.storage.commitLiveUpdateJournal).not.toHaveBeenCalled();
 });
 
-it.each(["provenance-refused", "delivery-conflict"])("quarantines a terminal %s without acknowledging or retrying it", async reason => {
-  const f = fixture(1);
+it.each(["provenance-refused", "delivery-conflict", "capacity-refused"])("quarantines a terminal %s without acknowledging or retrying it", async reason => {
+  const f = fixture(1), other = fixture(3);
+  // An out-of-memory check answers capacity-refused, and commit refuses the entry the same way.
+  if (reason === "capacity-refused") f.validate.mockReturnValue({kind: "refused", reason, source: "final"});
   f.storage.commitLiveUpdateJournal.mockReturnValue({result: {kind: "refused", reason}} as never);
   const original = f.client.sendRequest.getMockImplementation()!;
   f.client.sendRequest.mockImplementation(async request => {
@@ -171,12 +173,18 @@ it.each(["provenance-refused", "delivery-conflict"])("quarantines a terminal %s 
     }
     return original(request);
   });
+  // A pass visits the stuck document, then another of the owner's documents.
   expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(await other.run()).toEqual({admittedEntries: 3, hasMore: false});
   expect(f.state.value).toBe("quarantined");
   expect(f.receipts).toEqual([]);
-  f.storage.commitLiveUpdateJournal.mockClear();
+  expect(f.validate).toHaveBeenCalledTimes(1);
+  f.storage.commitLiveUpdateJournal.mockClear(); f.validate.mockClear();
   expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(f.validate).not.toHaveBeenCalled();
   expect(f.storage.commitLiveUpdateJournal).not.toHaveBeenCalled();
+  expect(f.client.sendRequest.mock.calls.filter(([request]) => request.method === "liveApplication.quarantineOwnerOutbox")).toHaveLength(1);
 });
 
 it("continues a byte-limited pass only after a real admission and native outbox ACK", async () => {

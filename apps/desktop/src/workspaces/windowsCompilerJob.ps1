@@ -1,4 +1,5 @@
 param([string]$NodeExecutable, [string]$RelayPath, [string]$Payload, [UInt64]$MemoryBytes, [UInt32]$MaxProcesses, [Int32]$TimeoutMs, [Int64]$InputBytes)
+[Console]::Error.WriteLine('[dohc-compiler] PowerShell running')
 $ErrorActionPreference = 'Stop'
 if ($PSVersionTable.PSVersion.Major -lt 5) { throw 'Compiler containment requires PowerShell 5 or later.' }
 if ($MemoryBytes -eq 0 -or $MaxProcesses -eq 0 -or $TimeoutMs -le 0 -or $InputBytes -lt 0) { throw 'Invalid compiler job bounds.' }
@@ -78,6 +79,7 @@ public static class CompilerJob {
                 try {
                     if (!AssignProcessToJobObject(job, child.Handle))
                         throw new Win32Exception(Marshal.GetLastWin32Error());
+                    Console.Error.WriteLine("[dohc-compiler] job assigned");
                     byte[] admission = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(Convert.FromBase64String(payload)) + "\n");
                     child.StandardInput.BaseStream.Write(admission, 0, admission.Length);
                     child.StandardInput.BaseStream.Flush();
@@ -114,5 +116,6 @@ public static class CompilerJob {
     }
 }
 '@
+[Console]::Error.WriteLine('[dohc-compiler] Add-Type done')
 try { exit [CompilerJob]::Run($NodeExecutable, $RelayPath, $Payload, $MemoryBytes, $MaxProcesses, $TimeoutMs, $InputBytes) }
 catch { [Console]::Error.WriteLine($_.Exception.ToString()); exit 1 }

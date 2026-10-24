@@ -981,6 +981,62 @@ it("uses admitted ordinary authors, ignores forged payloads, refused settlements
   f.at(170_000); f.save(); expect(JSON.parse(String(f.pins()[1]!.authors_json))).toEqual(human("next"));
 });
 
+function lineageAuthors(f: Awaited<ReturnType<typeof fixture>>) {
+  const human = (name: string) => ({kind:"human",humanId:name,humanName:name});
+  const insert = f.db.prepare(`INSERT INTO sync_relay_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,admitted_author_snapshot_json)
+    VALUES ('w','device',(SELECT count(*) FROM sync_relay_log),?,?,1,?)`);
+  const add = (kind: string, name: string, payload: Record<string,unknown> = {}) =>
+    insert.run(kind,JSON.stringify({versionId:"main",objectId:"object",...payload}),JSON.stringify([human(name)]));
+  const authors = (text: string) => JSON.parse(String(f.pins().find(p => p.sha256 === sha256(text))!.authors_json));
+  return {human,add,authors};
+}
+
+// A second device set up the same document before the two synced. Native ignores its base and deltas.
+it("credits only the kept lineage's ordinary Y.Doc rows and keeps unreadable claims", async () => {
+  const f = await fixture(false), {human,add,authors} = lineageAuthors(f), kept = sha256("kept"), losing = sha256("losing");
+  const patch = {lineageClaimId:kept,restoreGeneration:1};
+  f.save(f.view("baseline",patch));
+  add("ydoc.update","winner",{lineageClaimId:kept,isBaseState:false});
+  add("ydoc.update","losing base",{lineageClaimId:losing,isBaseState:true});
+  add("ydoc.update","losing delta",{lineageClaimId:losing,isBaseState:false});
+  add("moment.append","writer",{operation:"write"});
+  add("ydoc.update","missing");
+  add("ydoc.update","malformed",{lineageClaimId:"unknown"});
+  add("ydoc.update","uppercase",{lineageClaimId:losing.toUpperCase()});
+  add("ydoc.update","embedded NUL",{lineageClaimId:"b".repeat(64)+"\u0000damaged"});
+  add("ydoc.update","number",{lineageClaimId:42});
+  f.save(f.view("edited",patch)); f.at(130_000); f.save();
+  expect(authors("edited")).toEqual(["winner","writer","missing","malformed","uppercase","embedded NUL","number"].map(human));
+});
+
+it("credits each state of a lineage change only with its own lineage's rows", async () => {
+  const f = await fixture(false), {human,add,authors} = lineageAuthors(f);
+  const predecessor = {lineageClaimId:sha256("predecessor"),restoreGeneration:1}, successor = {lineageClaimId:sha256("successor"),restoreGeneration:1};
+  f.save(f.view("baseline",predecessor));
+  add("ydoc.update","predecessor editor",{lineageClaimId:predecessor.lineageClaimId});
+  f.save(f.view("predecessor",predecessor));
+  // The successor's first pin starts at the predecessor's last cut, so it spans both lineages.
+  // Known gap (#2541): the late predecessor editor's edit may survive into the successor, but relay
+  // storage can't yet prove which resolution was installed or which side it kept, so no pin credits it.
+  add("ydoc.update","late predecessor editor",{lineageClaimId:predecessor.lineageClaimId});
+  add("ydoc.update","successor editor",{lineageClaimId:successor.lineageClaimId});
+  add("ydoc.update","stale predecessor editor",{lineageClaimId:predecessor.lineageClaimId});
+  f.at(100_001); f.save(f.view("successor",successor)); f.at(140_000); f.save();
+  expect(f.pins().find(p => p.sha256 === sha256("predecessor"))).toMatchObject({reason:"lineage",lineage_claim_id:predecessor.lineageClaimId});
+  expect(authors("predecessor")).toEqual([human("predecessor editor")]);
+  expect(authors("successor")).toEqual([human("successor editor")]);
+});
+
+it("credits no named lineage's rows to a state with no lineage", async () => {
+  const f = await fixture(false), {human,add,authors} = lineageAuthors(f);
+  f.save(f.view("baseline"));
+  add("ydoc.update","retired",{lineageClaimId:sha256("retired")});
+  add("moment.append","writer",{operation:"write"});
+  add("ydoc.update","missing");
+  f.save(f.view("edited")); f.at(130_000); f.save();
+  expect(authors("edited")).toEqual([human("writer"),human("missing")]);
+});
+
 it.each(["firstSeen","deletes","empty","seed"])("journal authors require credited content: %s", async source => {
   const f = await fixture(); const lineage = sha256("journal");
   f.db.prepare(`INSERT INTO sync_relay_live_update_journal

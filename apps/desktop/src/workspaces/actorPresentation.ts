@@ -99,6 +99,11 @@ export function ownActorPresentation(installationId: string, credentials: CloudC
 }
 
 export function chatActorForPresentation(message: DisplayMessage, issuer: ActorIssuer | null): ActorRef {
+  // A link holder is its link alone: no local key, issuer, or account.
+  if (message.author.kind === "link") {
+    const { displayName, grantId, principalId } = message.author;
+    return deriveRelayChatActor({ issuer: null, kind: "link", grantId, principalId, displayName });
+  }
   return readLocalChatActor(message) ?? deriveRelayChatActor({
     issuer, authorUserId: message.authorUserId, displayName: message.author.displayName,
     ...(message.origin ? { origin: message.origin } : {}),
@@ -174,6 +179,9 @@ export function createHistoryPresentationRequest(input: { workspaceId: string; a
 export function chatLinkMessageForPresentation(
   author: NonNullable<ChatLinksEnginePage>["entries"][number]["author"],
 ): DisplayMessage {
+  if (author.authorKind === "link") {
+    return { author: { kind: "link", displayName: author.authorDisplayName, grantId: author.linkGrantId, principalId: author.linkPrincipalId } };
+  }
   // Relay origin changes assurance, not the key used for grouping, hue and self.
   return {
     author: { kind: author.authorKind, displayName: author.authorDisplayName },

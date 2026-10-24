@@ -44,7 +44,7 @@ const THEMES = ["light", "dark"] as const;
 // instead of leaving its baselines unread.
 const PARTS = [
   "surfaces", "buttons", "copy", "segmented", "switch", "state-mark", "chips", "avatars", "badges", "text-inputs",
-  "steps", "folder-chip", "hue-control", "color-control", "native-controls", "list-rows", "menu", "document-menu",
+  "steps", "folder-chip", "hue-control", "color-control", "native-controls", "list-rows", "collections-rows", "menu", "document-menu",
   "empty", "loading", "toasts", "notices", "dialog", "menu-radio", "menu-field", "menu-overflow", "menu-danger",
   "editor-groups", "editor-groups-empty",
   "kind-glyph",

@@ -23,16 +23,15 @@ const runId = process.env.DOHC_RUN_ID;
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
 const prompt = Buffer.concat(chunks).toString("utf8");
-// A runner self-test ends its prompt with the one command to run. Its first
-// run has no thread yet: that command starts one.
+// A runner self-test ends its prompt with the one reply command to run.
 const selfTestCommand = prompt.includes("This is a dohc runner self-test.")
   ? prompt.trim().split("\n").at(-1)
   : null;
 
-if (!runId || prompt.trim().length === 0 || (!threadId && !selfTestCommand)) {
+if (!runId || prompt.trim().length === 0 || !threadId) {
   console.error(
     "fake chat runner: expected a non-empty prompt on stdin, plus " +
-      "DOHC_RUN_ID and, outside a self-test, DOHC_CHAT_THREAD in the environment. Got " +
+      "DOHC_RUN_ID and DOHC_CHAT_THREAD in the environment. Got " +
       `${prompt.length} prompt bytes on stdin, ` +
       `DOHC_CHAT_THREAD=${threadId ?? "unset"}, ` +
       `DOHC_RUN_ID=${runId ?? "unset"}.`,
@@ -46,27 +45,39 @@ if (mode === "silent-fail") {
 
 // Do what the prompt asks, as an installed tool would. The shell resolves dohc
 // from the runner's PATH, as installed tools must do.
-function runCommand(command) {
-  if (!/^dohc chat (?:post|reply) [\w-]+ --as-agent [^\r\n]*$/u.test(command)) {
+function runCommand(command, body) {
+  if (!/^dohc chat reply [\w-]+ --as-agent [^\r\n]*$/u.test(command)) {
     console.error("Unexpected runner command", command);
     process.exit(2);
   }
   const child = spawn(command, {
-    cwd: process.cwd(), env: process.env, stdio: ["ignore", "inherit", "inherit"], windowsHide: true, shell: true,
+    cwd: process.cwd(), env: process.env, stdio: [body === undefined ? "ignore" : "pipe", "inherit", "inherit"], windowsHide: true, shell: true,
   });
+  if (body !== undefined) child.stdin.end(body);
   child.on("error", (error) => { console.error(error); process.exit(1); });
   child.on("exit", (code) => process.exit(code ?? 1));
 }
 
 if (profileTool) {
   const expected = profileTool === "claude"
-    ? ["-p", "--permission-prompts", "none", "--no-session-persistence"]
+    ? ["-p", "--permission-prompts", "none", "--no-session-persistence", "--allowedTools", "Edit(/**)", "Bash(dohc chat reply:*)", "--disallowedTools", "Edit(/.dohc/**)"]
     : ["exec", "--config", "approval_policy=never", "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-"];
   if (JSON.stringify(process.argv.slice(3)) !== JSON.stringify(expected)) {
     console.error("Unexpected profile arguments", process.argv.slice(3));
     process.exit(2);
   }
-  runCommand(selfTestCommand ?? `dohc chat reply ${threadId} --as-agent "done: checked the exports"`);
+  if (selfTestCommand) {
+    runCommand(selfTestCommand);
+  } else {
+    const expectedReply = profileTool === "claude"
+      ? `dohc chat reply ${threadId} --as-agent - <<'DOHC_REPORT'`
+      : `dohc chat reply ${threadId} --as-agent "<report>"`;
+    if (!prompt.includes(expectedReply)) {
+      console.error("Unexpected reply form in the report contract");
+      process.exit(2);
+    }
+    runCommand(`dohc chat reply ${threadId} --as-agent -`, '# Done\n\ndone: checked the exports\n');
+  }
 } else if (selfTestCommand) {
   runCommand(selfTestCommand);
 } else {
@@ -97,14 +108,16 @@ const child = spawn(
     "reply",
     threadId,
     "--as-agent",
-    ...replyArgs,
+    ...replyArgs.slice(0, -1),
+    "-",
   ],
   {
     cwd: process.cwd(),
     env: process.env,
-    stdio: "inherit",
+    stdio: ["pipe", "inherit", "inherit"],
   },
 );
+child.stdin.end(replyArgs.at(-1));
 
 child.once("error", (error) => {
   console.error(error instanceof Error ? error.message : String(error));

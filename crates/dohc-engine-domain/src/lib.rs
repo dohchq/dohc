@@ -77,10 +77,10 @@ pub use chats::{
     ChannelThreadSummary, ChatActorKind, ChatAgentReadState, ChatAttachment, ChatBookmark,
     ChatBookmarkTransition, ChatChannel, ChatChannelKind, ChatChannelSummary, ChatChannelType,
     ChatDecision, ChatDecisionState, ChatFeedItem, ChatFeedPage, ChatFeedReadState, ChatFollow,
-    ChatMention, ChatMessage, ChatMessageAutomation, ChatMessagePage, ChatProjectionFileAccess,
-    ChatReaction, ChatReactionState, ChatThread, ChatThreadLane, ChatThreadProjection,
-    ChatThreadReadState, CreateFileThread, DispatchClaim, DispatchRecord, DispatchRecovery,
-    FeedCoordinateResolution, FeedCursorValue, FollowState, FollowTargetKind,
+    ChatMention, ChatMessage, ChatMessageAutomation, ChatMessageLinkAuthor, ChatMessagePage,
+    ChatProjectionFileAccess, ChatReaction, ChatReactionState, ChatThread, ChatThreadLane,
+    ChatThreadProjection, ChatThreadReadState, CreateFileThread, DispatchClaim, DispatchRecord,
+    DispatchRecovery, FeedCoordinateResolution, FeedCursorValue, FollowState, FollowTargetKind,
     FollowTargetResolution, GENERAL_CHANNEL_NAME, GENERAL_CHANNEL_WIRE_ID,
     LINKED_CHAT_PROJECTION_KIND, LinkedChatStore, LocalAttachmentInput, MAX_MESSAGE_BODY_BYTES,
     MAX_MESSAGE_PAGE, MentionCursor, PENDING_CHAT_WORKSPACE_EXISTS_SQL, PendingBookmarkRow,
@@ -97,6 +97,7 @@ pub use chats::{
     reaction_id_for, render_chat_thread_projection, replay_pending_chat_coordinates_for_change,
     replay_ready_pending_chat_coordinates, resolve_feed_coordinate, resolve_follow_target,
     resolve_thread_message, thread_has_message, validate_follow_target,
+    validate_replicated_link_author,
 };
 pub use collections::{
     AgentDeclaration, AutomationDeclaration, AutomationRunAttribution, COLLECTION_SCHEMA_FILENAME,

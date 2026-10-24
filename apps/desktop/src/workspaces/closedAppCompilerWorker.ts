@@ -1,6 +1,7 @@
 import { compileClosedApp } from "./closedAppCompiler.ts";
 
 // This entry executes only under the trusted process supervisor's OS job.
+process.stderr.write("[dohc-compiler] worker ready\n");
 try {
   const [maxInputBytes, maxOutputBytes] = process.argv.slice(2).map(Number);
   if (![maxInputBytes, maxOutputBytes].every(value => Number.isSafeInteger(value) && value > 0)) throw new Error("Invalid compiler wire bounds.");

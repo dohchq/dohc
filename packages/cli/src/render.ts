@@ -178,6 +178,7 @@ function renderMoment(result: CliResultByVerb["moment"], side: "before" | "after
 type AutomationRunsResult = Extract<CliResultByVerb["automationRuns"], { ok: true }>;
 type AutomationRunResult = Extract<CliResultByVerb["automationRun"], { ok: true }>;
 type AutomationRunLine = AutomationRunsResult["runs"][number];
+type AutomationRunChange = Extract<AutomationRunResult["run"], { server: true }>["changes"][number];
 
 const TRIGGER_KINDS = {
   added: "record added",
@@ -226,7 +227,7 @@ function json(value: unknown): string {
   return lineSafe(JSON.stringify(value) ?? "null");
 }
 
-function changeText(change: AutomationRunResult["run"]["steps"][number]["changes"][number]): string {
+function changeText(change: AutomationRunChange): string {
   switch (change.kind) {
     case "field":
       return `set ${change.field} on ${change.path}: ${json(change.before)} -> ${json(change.after)}`;
@@ -254,10 +255,14 @@ function changeText(change: AutomationRunResult["run"]["steps"][number]["changes
 }
 
 function renderAutomationRun({ run }: AutomationRunResult): string {
-  return [
+  const head = [
     `${run.run} · ${dateTime(run.createdAtMs)} · ${runStateText(run)}`,
     `trigger: ${triggerText(run.trigger)}`,
     ...(run.error === null ? [] : [`error: ${lineSafe(run.error)}`]),
+  ];
+  if ("server" in run) return [...head, ...run.changes.map(changeText)].join("\n");
+  return [
+    ...head,
     ...(run.failedStep === null ? [] : [`step ${run.failedStep} failed`]),
     ...(run.startsOver
       ? ["Try again starts over from step 1 and needs --start-over."]

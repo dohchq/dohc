@@ -895,6 +895,10 @@ const SERVED_CHAT_FIELDS = {
     // An automation's chain depth, so a chain stops across computers. The
     // automation and its Collection path never leave the author's computer.
     "chainDepth",
+    // A link post's link grant and link principal, which name the link and
+    // no account. Every desktop refuses a link post without them.
+    "linkGrantId",
+    "linkPrincipalId",
   ],
   "chat.reaction.set": [
     "reactionId",

@@ -36,7 +36,7 @@ import {
 import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProtocol";
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
-import { ipcWireError, KEEP_COLLECTIONS_HERE, readError, withErrorWords } from "./ipc/errorWords";
+import { ipcWireError, readError, USE_THIS_COMPUTER, withErrorWords } from "./ipc/errorWords";
 import { assertRootNotPrivacyDenied, withPrivacyDenial } from "./workspaces/privacyDenial";
 import { onNetworkShare } from "./workspaces/networkShare";
 import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
@@ -2743,6 +2743,9 @@ const activity = {
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.dispatchedAgentRun(lease.state.activity),
     ),
+  agentRunWorkspace: (runId: string) => workspaceAuthorities.workspaceIds().find((workspaceId) =>
+    withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.agentRun(lease.state.activity)?.agentRunId === runId),
+  ),
   engineCaptureFor: (workspaceId: string, expectedRootPath?: string) => {
     if (!findWorkspace(workspaceId)) return null;
     return withWorkspaceActivityState(workspaceId, (lease) =>
@@ -3552,6 +3555,15 @@ const chatDispatchService = createChatDispatchService({
   listOpenWorkspaces: openDispatchWorkspaces,
   listSyncWorkspaces: syncDispatchWorkspaces,
   chatStoreFor: linkedChatStoreFor,
+  startSelfTestThread: (workspace, input) => withWorkspaceAttachmentAsync(workspace, async (lease) => {
+    const started = await chatWrites.startThread({ workspaceId: workspace.workspaceId, store: linkedChatStoreFor(lease) }, {
+      ...input,
+      // CLI origin keeps this person's test message from starting an agent run.
+      writer: { via: "cli", actor: "human" },
+      resolveAttachments: async () => [],
+    });
+    return started.thread.id;
+  }),
   dispatchStoreFor: (workspace) =>
     agentDispatchStoreHandleFor(workspace).store,
   readRunnerSettings: async () =>
@@ -4721,7 +4733,7 @@ function collectionsHolderCheck(workspaceId: string): CollectionsHolderCheck {
 // that asked. Cancel is the default.
 async function confirmKeepCollections(window: BrowserWindow | null, question: KeepQuestion): Promise<boolean> {
   const { message, detail } = keepQuestionWords(question);
-  const options = { type: "warning" as const, message, detail, buttons: [KEEP_COLLECTIONS_HERE, "Cancel"], defaultId: 1, cancelId: 1, noLink: true };
+  const options = { type: "warning" as const, message, detail, buttons: [USE_THIS_COMPUTER, "Cancel"], defaultId: 1, cancelId: 1, noLink: true };
   const { response } = window ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
   return response === 0;
 }
@@ -4955,6 +4967,8 @@ const { startDesktopCliServer } = createDesktopCliServer({
       automationIdAt: async (collectionPath, id) => (await opened()).automationIdAt(collectionPath, id),
       runs: async (automationId, before) => (await opened()).runs(automationId, before),
       run: async (automationId, claimId) => (await opened()).run(automationId, claimId),
+      serverRuns: (automationId, before) => serverRuns.runs(workspace.workspaceId, automationId, before),
+      serverRun: (automationId, claimId) => serverRuns.get(workspace.workspaceId, automationId, claimId),
       retry: (input) => retryAutomationRun({
         notices: noticeStore(),
         installId: localInstallationId(),

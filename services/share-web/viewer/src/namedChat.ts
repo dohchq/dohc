@@ -10,12 +10,17 @@ export interface NamedChatChannel {shareId: string; userId: string; channelWireI
 /** `body` is null when the relay left it out because it is too large for a browser response. */
 export interface NamedChatMessage {
   relaySeq: number; messageId: string; threadId: string; authorUserId: string | null; authorDisplayName: string;
-  authorKind: "human" | "agent" | "automation"; authorOwnerDisplayName: string | null; createdAtMs: number; body: string | null;
+  authorKind: "human" | "agent" | "automation" | "link"; authorOwnerDisplayName: string | null; createdAtMs: number; body: string | null;
 }
 
-/** A failed chat request. Status 0 means no usable answer arrived, so a post's outcome is unknown. */
+/**
+ * A failed chat request. Status 0 means no usable answer arrived, so a post's outcome is unknown.
+ * `reason` is share-web's sentence for a refusal the reader can act on.
+ */
 export class NamedChatError extends Error {
-  constructor(readonly status: number, readonly code: string | null = null) {super(`Named chat request failed (${status})`);}
+  constructor(readonly status: number, readonly code: string | null = null, readonly reason: string | null = null) {
+    super(`Named chat request failed (${status})`);
+  }
 }
 
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -40,12 +45,14 @@ function cursor(value: unknown): number {
   return Number(value);
 }
 
-function message(value: unknown): NamedChatMessage {
+export function chatMessage(value: unknown): NamedChatMessage {
   if (!record(value) || !["messageId", "threadId", "authorDisplayName"].every(key => typeof value[key] === "string") ||
       (value.authorUserId !== null && typeof value.authorUserId !== "string") ||
       !((value.bodyTooLarge === false && typeof value.body === "string") || (value.bodyTooLarge === true && value.body === null)) ||
-      (value.authorKind !== "human" && value.authorKind !== "agent" && value.authorKind !== "automation") ||
+      (value.authorKind !== "human" && value.authorKind !== "agent" && value.authorKind !== "automation" && value.authorKind !== "link") ||
       (value.authorOwnerDisplayName !== null && typeof value.authorOwnerDisplayName !== "string") ||
+      // A link holder has no account.
+      (value.authorKind === "link" && (value.authorUserId !== null || value.authorOwnerDisplayName !== null)) ||
       !Number.isSafeInteger(value.createdAtMs) || !Number.isSafeInteger(value.relaySeq) || Number(value.relaySeq) <= 0) throw invalid();
   return {relaySeq: Number(value.relaySeq), messageId: String(value.messageId), threadId: String(value.threadId),
     authorUserId: value.authorUserId, authorDisplayName: String(value.authorDisplayName), authorKind: value.authorKind,
@@ -54,7 +61,7 @@ function message(value: unknown): NamedChatMessage {
 
 function page(value: Record<string, unknown>, channel: NamedChatChannel): NamedChatMessage[] {
   if (value.shareId !== channel.shareId || value.channelWireId !== channel.channelWireId || !Array.isArray(value.messages)) throw invalid();
-  return value.messages.map(message);
+  return value.messages.map(chatMessage);
 }
 
 const coordinates = (channel: NamedChatChannel) => ({shareId: channel.shareId, channelWireId: channel.channelWireId});
@@ -100,7 +107,7 @@ export async function followNamedChat(channel: NamedChatChannel, since: number, 
 export async function postNamedChatMessage(channel: NamedChatChannel, post: {id: string; body: string}, signal: AbortSignal) {
   const value = await chatRequest("/api/named-chat/messages", signal, {...coordinates(channel), ...post, authorKind: "human"});
   if (value.shareId !== channel.shareId || value.channelWireId !== channel.channelWireId) throw invalid();
-  return message(value.message);
+  return chatMessage(value.message);
 }
 
 /** The body the relay stores, or null when it would refuse it. */
