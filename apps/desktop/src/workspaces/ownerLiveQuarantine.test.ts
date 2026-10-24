@@ -96,6 +96,22 @@ it("keeps a release that could not write the file only while the queue it came f
   expect(outboxes.reads.filter(read => read.startsWith("recovery:"))).toEqual(["recovery:outbox-q", "recovery:outbox-restored"]);
 });
 
+// A record damaged in another field keeps the head and snapshot of the queue
+// it came from, but no binding the queue's row could speak for. It keeps its
+// own row, so Save recovery copy can end it.
+it("shows a damaged record beside the queue it came from, even with that queue's head and snapshot", async () => {
+  head("intact", "invalid-update");
+  const contents = {outboxId: "outbox-intact", binding: binding("intact"), baseUpdateDigest: "b".repeat(64), checkpoint: null, state: "quarantined",
+    entries: [{sequence: 1, deliveryId: "delivery-intact", appendKey: "a", updateDigest: "d".repeat(64), update: new Uint8Array([1]), byteLength: 1, createdAtMs: 1}]} as unknown as OwnerYDocOutboxRecovery;
+  outboxes.pending.set("outbox-intact", contents);
+  const client = {sendRequest: vi.fn(), ownerYDocStopList: vi.fn(async () => []),
+    ownerYDocListDrafts: vi.fn(async () => ({drafts: [draft("intact", "quarantined")], next: null}))} as unknown as EngineClient;
+  const damaged = {workspaceId: "workspace", objectId: "intact", path: "intact.md", reason: "invalid-update", binding: null,
+    headDeliveryId: "delivery-intact", snapshot: recoverySnapshot(contents), retry: false};
+  expect(await readOwnerLiveQuarantines(client, "handle", {unwritten: [damaged]})).toEqual([record("intact", "paused"),
+    {objectId: "intact", path: "intact.md", reason: "invalid-update", outboxId: null, binding: null, headDeliveryId: "delivery-intact", recovery: "cannot-write"}]);
+});
+
 // A large parked queue is read once: its base never, its head only when the draft changed.
 it("reads an unchanged queue's head once, and never its base", async () => {
   outboxes.reads.length = 0;

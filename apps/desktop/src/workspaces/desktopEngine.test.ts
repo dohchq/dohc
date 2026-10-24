@@ -119,8 +119,8 @@ function fixture(options: {ownerLiveReleases?: UnwrittenReleases} = {}) {
       endRetry: async (id, objectId) => {
         unwritten.splice(0, unwritten.length, ...unwritten.map(row => row.workspaceId === id && row.objectId === objectId ? {...row, retry: false} : row));
       },
-      written: async (id, objectId) => {
-        if (!unwritten.some(row => row.workspaceId === id && row.objectId === objectId && row.retry)) return;
+      written: async (id, objectId, {snapshot}) => {
+        if (!unwritten.some(row => row.workspaceId === id && row.objectId === objectId && row.retry && snapshot !== null && row.snapshot === snapshot)) return;
         recoveries.delete(objectId);
         unwritten.splice(0, unwritten.length, ...unwritten.filter(row => row.workspaceId !== id || row.objectId !== objectId));
       },
@@ -258,6 +258,11 @@ const keptBinding = {workspaceId: "owner", mainVersionId: "main", objectId: "obj
   currentPath: "notes/plan.md", selectorPaths: ["notes/plan.md"], restoreFenceGeneration: 1};
 const releasedStop = {binding: keptBinding, document: {mainVersionId: "main", objectId: "object", currentPath: "notes/plan.md"},
   relayDatabaseNamespace: "namespace", retirementOwed: false, state: "released"};
+/** A release as the engine answers it: its Stop names the kept edits the request named. */
+const releaseAnswer = (materialized: boolean) => (request: Request): Response => {
+  const {keptSnapshot} = request.params as {keptSnapshot?: string};
+  return {id: request.id, result: {stops: [{...releasedStop, ...(keptSnapshot === undefined ? {} : {keptSnapshot}), materialized}]}};
+};
 const releaseConflict = (request: Request): Response => {
   throw new EngineRequestError(request.id, {code: "INVALID_PARAMS", message: "owner-stop-conflict", retry: "no"});
 };
@@ -1213,7 +1218,10 @@ describe("server owner peer lifecycle", () => {
       if (request.method === "ydoc.ownerStop.release") {
         if (failRelease) throw new Error("dohc could not write the file.");
         released = true;
-        return {id: request.id, result: {stops: [stopRow("released")]}};
+        // The Stop keeps the snapshot of the kept edits the record holds.
+        const {keptSnapshot} = request.params as {keptSnapshot?: string};
+        expect(keptSnapshot).toBe(f.unwritten[0]?.snapshot);
+        return {id: request.id, result: {stops: [{...stopRow("released"), keptSnapshot}]}};
       }
       if (request.method === "ydoc.ownerStop.list") return {id: request.id, result: {stops: released ? [] : [stopRow("requested")]}};
       if (request.method === "ydoc.ownerStop.request") return {id: request.id, result: {stops: [stopRow("requested")]}};
@@ -1262,7 +1270,7 @@ describe("server owner peer lifecycle", () => {
   ] as const)("keeps the edits a release owed to a renamed file through %s, until the file or a recovery copy holds them", async (_title, outcome) => {
     // The record keeps the path the document had when it stopped; it has since been renamed.
     const kept = await keptRelease("notes/old plan.md");
-    if (outcome !== "conflict") kept.engine.release = request => ({id: request.id, result: {stops: [{...releasedStop, materialized: outcome === "materialized"}]}});
+    if (outcome !== "conflict") kept.engine.release = releaseAnswer(outcome === "materialized");
     try {
       await (await kept.launch()).f.close();
       // Nothing was exported before the Try again.
@@ -1326,7 +1334,7 @@ describe("server owner peer lifecycle", () => {
     try {
       expect(await f.engine.retryOwnerLiveRelease(workspace, "object")).toBeUndefined();
       expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{recovery: "cannot-write"}]);
-      kept.engine.release = request => ({id: request.id, result: {stops: [{...releasedStop, materialized: true}]}});
+      kept.engine.release = releaseAnswer(true);
       expect(await f.engine.releaseOwnerLiveStop(workspace, keptBinding, 0)).toMatchObject({materialized: true});
       expect(await kept.records().list("owner")).toMatchObject([{objectId: "object", retry: false}]);
       expect(await kept.records().recovery("owner", "object")).toEqual(expect.any(String));
@@ -1334,6 +1342,27 @@ describe("server owner peer lifecycle", () => {
       expect(saved.keptEdits).toBe("ended");
       expect(await readFile(join(kept.rootPath, saved.copyPath!), "utf8")).toContain("kept");
       expect(await kept.records().list("owner")).toEqual([]);
+    } finally {await f.close(); quarantineMock.read.mockReset();}
+  });
+
+  // An engine snapshot saved after an older Stop S1 finished is restored over
+  // a newer Stop's record R2 under the same binding. Try again settles S1,
+  // whose release took other edits: R2 and its package stay, for Save only.
+  // A later release of S1 that names no kept edits ends nothing either.
+  it("keeps a newer record when Try again settles an older finished Stop restored under the same binding", async () => {
+    const {both, first} = twoEditQueue(keptBinding);
+    const kept = await keptRelease("notes/plan.md", both);
+    kept.engine.release = request => ({id: request.id, result: {stops: [{...releasedStop, keptSnapshot: recoverySnapshot(first), materialized: true}]}});
+    const {f, workspace, methods} = await kept.launch();
+    try {
+      expect(await f.engine.retryOwnerLiveRelease(workspace, "object")).toBeUndefined();
+      expect(stopMethods(methods)).toEqual(["ydoc.ownerStop.release"]);
+      expect(await kept.records().list("owner")).toMatchObject([{objectId: "object", snapshot: recoverySnapshot(both), retry: false}]);
+      expect(await kept.records().recovery("owner", "object")).toEqual(expect.any(String));
+      kept.engine.release = releaseAnswer(true);
+      await f.engine.releaseOwnerLiveStop(workspace, keptBinding, 0);
+      expect(await kept.records().list("owner")).toMatchObject([{objectId: "object", snapshot: recoverySnapshot(both)}]);
+      expect(await kept.records().recovery("owner", "object")).toEqual(expect.any(String));
     } finally {await f.close(); quarantineMock.read.mockReset();}
   });
 

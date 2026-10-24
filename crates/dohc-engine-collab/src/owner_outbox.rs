@@ -825,6 +825,87 @@ fn append_with_retained_base(
     })
 }
 
+/// Keeps native work a restore fenced in its generation's queue, which no
+/// longer takes edits. The queue keeps its state: a refusal stays, with its
+/// head, and a sealed queue stays sealed. Only a Stop's release or a recovery
+/// copy reaches the work.
+fn retain_fenced_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    parent: &ParentRow,
+    draft_revision: i64,
+    append_key: &str,
+    update: &[u8],
+    created_at_ms: i64,
+) -> Result<(), OwnerOutboxError> {
+    validate_identifier(append_key, "append key must be non-empty and bounded")?;
+    if parent.state == OwnerOutboxState::Active {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
+    if update.is_empty() || update.len() > crate::limits::MAX_YDOC_UPDATE_BYTES {
+        return Err(OwnerOutboxError::InvalidInput("invalid draft update size"));
+    }
+    let update_digest = hex_sha256(update);
+    let existing: Option<(String, String)> = tx
+        .query_row(
+            "SELECT outbox_id,update_digest FROM owner_ydoc_outbox_entries WHERE append_key=?1",
+            [append_key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(read_sql)?;
+    if let Some((outbox_id, digest)) = existing {
+        return if outbox_id == parent.outbox_id && digest == update_digest {
+            Ok(())
+        } else {
+            Err(OwnerOutboxError::AppendKeyMismatch)
+        };
+    }
+    let byte_length = i64::try_from(update.len())
+        .map_err(|_| OwnerOutboxError::InvalidInput("update is too large"))?;
+    let pending_bytes =
+        parent
+            .pending_bytes
+            .checked_add(byte_length)
+            .ok_or(OwnerOutboxError::InvalidInput(
+                "pending byte count overflow",
+            ))?;
+    let oldest_entry_at_ms = parent.oldest_entry_at_ms.unwrap_or(created_at_ms);
+    let delivery_id = delivery_id(&parent.outbox_id, parent.next_sequence, &update_digest);
+    put_binary_blob_with_sha(tx, update, &update_digest)?;
+    tx.execute(
+        "INSERT INTO owner_ydoc_outbox_entries \
+             (outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,\
+              byte_length,created_at_ms,pending,result_pending_bytes,\
+              result_oldest_entry_at_ms,result_state,draft_binding_revision) \
+             VALUES (?1,?2,?3,?4,?5,?5,?6,?7,1,?8,?9,?10,?11)",
+        params![
+            parent.outbox_id,
+            parent.next_sequence,
+            append_key,
+            delivery_id,
+            update_digest,
+            byte_length,
+            created_at_ms,
+            pending_bytes,
+            oldest_entry_at_ms,
+            parent.state.as_str(),
+            draft_revision,
+        ],
+    )
+    .map_err(write_sql)?;
+    tx.execute(
+        "UPDATE owner_ydoc_outboxes SET pending_bytes=?2,oldest_entry_at_ms=?3,next_sequence=?4 WHERE outbox_id=?1",
+        params![
+            parent.outbox_id,
+            pending_bytes,
+            oldest_entry_at_ms,
+            parent.next_sequence + 1,
+        ],
+    )
+    .map_err(write_sql)?;
+    Ok(())
+}
+
 /// Called only by the ordinary local append transaction. Remote applications
 /// use their own receipt ledger and never enter this path.
 pub fn append_adopted_local_update_in_tx(

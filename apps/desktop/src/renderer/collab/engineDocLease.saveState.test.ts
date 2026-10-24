@@ -148,6 +148,23 @@ it("does not close another document when Stop changes one document", async () =>
   expect(harness.openCount()).toBe(1);
 });
 
+// A record keeps the path its document had when it stopped. A Stop that names
+// the document by its object id closes the panes that opened it at a new path.
+it("closes the panes of the document a Stop names, at whatever path they opened it", async () => {
+  const open = harness.api.openEngineYDocSession.bind(harness.api);
+  vi.spyOn(harness.api, "openEngineYDocSession").mockImplementation(async payload => Object.assign(await open(payload), { objectId: "object-1" }));
+  retainDocument("notes/new.md");
+  await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
+  const previous = harness.sessionId()!;
+  await withClosedEngineDocSession("ws-1", "notes/old.md", async () => undefined, "other-object");
+  await withClosedEngineDocSession("other-workspace", "notes/old.md", async () => undefined, "object-1");
+  expect(harness.closed).toEqual([]);
+  const work = vi.fn(async () => {expect(harness.closed).toContain(previous);});
+  await act(async () => {await withClosedEngineDocSession("ws-1", "notes/old.md", work, "object-1");});
+  expect(work).toHaveBeenCalledOnce();
+  await waitFor(() => expect(harness.openCount()).toBe(2));
+});
+
 it("refuses Stop when its lease is disposed while the draft closes", async () => {
   await retainBound();
   let finish!: () => void;

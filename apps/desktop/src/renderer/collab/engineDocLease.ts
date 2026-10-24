@@ -354,6 +354,7 @@ type EngineDocSession = {
 };
 
 export type EngineDocLease = Omit<EngineDocSession, "start"> & {
+  workspaceId: string;
   documentKey: string;
   startAfter: (barrier: Promise<void> | undefined) => void;
   retain: () => void;
@@ -1559,6 +1560,7 @@ function createEngineDocLease(
   };
 
   lease = {
+    workspaceId: input.workspaceId,
     documentKey: stableDocumentKey,
     withClosedSession(work) {
       const generation = ++transitionGeneration;
@@ -1697,9 +1699,16 @@ export async function disposeEngineDocLeasesForTests(): Promise<void> {
   await Promise.all(leases.map((lease) => lease.dispose()));
 }
 
-/** Flush and close every pane for this document before changing its live mode. */
-export async function withClosedEngineDocSession(workspaceId: string, path: string, work: () => Promise<void>): Promise<void> {
-  const leases = [...engineDocLeases.values()].filter(lease => lease.documentKey === documentKey(workspaceId, path));
+/**
+ * Flush and close every pane for this document before changing its live mode.
+ * With its object id, panes that opened the document at another path close too.
+ */
+export async function withClosedEngineDocSession(workspaceId: string, path: string, work: () => Promise<void>, objectId?: string): Promise<void> {
+  const bound = (lease: EngineDocLease) => {
+    const {outcome} = lease.getSnapshot();
+    return objectId !== undefined && lease.workspaceId === workspaceId && outcome?.kind === "bound" && outcome.objectId === objectId;
+  };
+  const leases = [...engineDocLeases.values()].filter(lease => lease.documentKey === documentKey(workspaceId, path) || bound(lease));
   const close = (index: number): Promise<void> => index === leases.length ? work() : leases[index]!.withClosedSession(() => close(index + 1));
   await close(0);
 }

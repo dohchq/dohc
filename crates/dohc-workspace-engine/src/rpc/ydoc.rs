@@ -609,10 +609,19 @@ impl EngineService {
             binding: Option<dohc_engine_collab::LiveObjectBinding>,
             document: Option<dohc_engine_collab::owner_outbox::release::OwnerStopDocument>,
             accepted_cursor: Option<i64>,
+            kept_snapshot: Option<String>,
         }
         let params: Params = parse(params)?;
+        // A release names its relay cut, a Try again only its kept edits.
         if (action == "release") != params.binding.is_some()
-            || (action == "release") != params.accepted_cursor.is_some()
+            || (action == "release")
+                != (params.accepted_cursor.is_some() || params.kept_snapshot.is_some())
+            || params.kept_snapshot.as_deref().is_some_and(|digest| {
+                digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            })
             || params
                 .accepted_cursor
                 .is_some_and(|cursor| !(0..=9_007_199_254_740_991).contains(&cursor))
@@ -649,6 +658,7 @@ impl EngineService {
                 params.binding,
                 params.document,
                 params.accepted_cursor,
+                params.kept_snapshot,
                 action.into(),
                 now_ms()?,
                 Arc::new(NoFaults),

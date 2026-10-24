@@ -17,10 +17,14 @@ export type LiveDocumentRow = {
   storedOn?: "this-computer" | "server";
   /** Those kept edits' incident, so Save recovery copy saves what the row shows. */
   incident?: string;
+  /** Their document, so Try again acts on it even after another document took its path. */
+  objectId?: string;
 };
 
 /** What a Stop did with edits the server refused. */
 export type LiveDocumentStopResult = { keptEdits: "none" | "recovered" | "kept" };
+/** The kept edits a Try again runs the Stop for: their document, and why the Stop waits. */
+export type LiveDocumentStopAgain = { objectId: string; recovery: "not-written" | "stopping" };
 
 /** One read: the latest active documents, then the next page of stopped ones. */
 export type LiveDocumentPage = {
@@ -46,7 +50,7 @@ export type LiveRefusalPage = {
 export type LiveDocumentsDialogProps = {
   workspaceId: string;
   load: (workspaceId: string, retiredAfter?: string) => Promise<LiveDocumentPage>;
-  stop: (workspaceId: string, path: string) => Promise<LiveDocumentStopResult>;
+  stop: (workspaceId: string, path: string, again?: LiveDocumentStopAgain) => Promise<LiveDocumentStopResult>;
   resume: (workspaceId: string, path: string) => Promise<void>;
   /** Told when a Stop wrote refused edits into the file, or kept them on this computer. */
   onStopped?: (path: string, keptEdits: "recovered" | "kept") => void;
@@ -68,7 +72,7 @@ export type LiveDocumentsDialogProps = {
 type Work =
   | { kind: "reload" }
   | { kind: "more"; cursor: string }
-  | { kind: "stop"; path: string }
+  | { kind: "stop"; path: string; again?: LiveDocumentStopAgain }
   | { kind: "resume"; path: string };
 type ListState =
   | { kind: "loading" }
@@ -362,7 +366,7 @@ export function LiveDocumentsDialog({
       let mutated = false;
       try {
         if (work.kind === "stop") {
-          const { keptEdits } = await stop(workspaceId, work.path);
+          const { keptEdits } = await (work.again ? stop(workspaceId, work.path, work.again) : stop(workspaceId, work.path));
           if (!isCurrent()) return;
           mutated = true;
           if (keptEdits !== "none") onStopped?.(work.path, keptEdits);
@@ -643,15 +647,16 @@ export function LiveDocumentsDialog({
                     Stop live editing
                   </SecondaryButton>
                 ) : null}
-                {/* The Stop runs again, and writes the file it could not before. */}
-                {row.quarantine === "not-written" ? (
+                {/* The Stop runs again for the row's document, and writes the file it could not before. */}
+                {row.quarantine === "not-written" && row.objectId !== undefined ? (
                   <SecondaryButton
                     size="compact"
                     className="shrink-0"
                     disabled={listBusy}
                     data-live-document-stop=""
                     aria-label={`Try again to write your kept edits to ${row.path}`}
-                    onClick={() => perform({ kind: "stop", path: row.path })}
+                    onClick={() => perform({ kind: "stop", path: row.path,
+                      again: { objectId: row.objectId!, recovery: "not-written" } })}
                   >
                     Try again
                   </SecondaryButton>

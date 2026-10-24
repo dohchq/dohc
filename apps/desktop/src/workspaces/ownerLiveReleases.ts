@@ -17,8 +17,8 @@ import {atomicWriteFile} from "../atomicReplaceFile";
  * restored from an earlier engine state with the same head but other edits,
  * is another. `retry` is false once the engine no longer holds that release,
  * or when the record could not be read whole: then only Save recovery copy
- * remains. Only Save, or a release that wrote the file while the engine still
- * held it, ends a record.
+ * remains. Only Save, or a release that wrote the file while the engine's Stop
+ * still named this snapshot, ends a record.
  */
 export type UnwrittenRelease = {workspaceId: string; objectId: string; path: string; reason: string;
   binding: LiveObjectBinding | null; headDeliveryId: string | null; snapshot: string | null; retry: boolean};
@@ -36,8 +36,12 @@ export interface UnwrittenReleases {
   recovery(workspaceId: string, objectId: string): Promise<string | null>;
   /** The engine no longer holds this release: keep the record and its package, without Try again. */
   endRetry(workspaceId: string, objectId: string, binding: LiveObjectBinding): Promise<void>;
-  /** The release of this binding wrote the file: ends its record while the engine still held that release. */
-  written(workspaceId: string, objectId: string, binding: LiveObjectBinding): Promise<void>;
+  /**
+   * A release wrote the file: ends the record of the edits it took, which the
+   * engine's Stop names by their snapshot. A release of another Stop under the
+   * same binding, restored from an earlier engine state, ends nothing.
+   */
+  written(workspaceId: string, objectId: string, release: {binding: LiveObjectBinding; snapshot: string | null}): Promise<void>;
   /** Removes the document's record only while it is still the record of this binding, queue and edits. */
   remove(workspaceId: string, objectId: string, record: ReleaseIdentity): Promise<void>;
 }
@@ -79,17 +83,18 @@ const UnwrittenReleaseRow = z.object({
   headDeliveryId: z.string().min(1).nullable(), snapshot: z.string().regex(/^[0-9a-f]{64}$/).nullable(), retry: z.boolean(),
 }).strict().refine(row => (row.binding !== null && row.headDeliveryId !== null && row.snapshot !== null) || !row.retry);
 // What a damaged row still says: enough to find and save its stored package.
+// It names no edits, so no queue's row can stand in for it.
 const KeptReleaseRow = z.object({workspaceId: z.string().min(1), objectId: z.string().min(1), path: z.string().min(1),
-  reason: z.unknown().optional(), headDeliveryId: z.unknown().optional(), snapshot: z.unknown().optional()});
+  reason: z.unknown().optional(), headDeliveryId: z.unknown().optional()});
 
 function parseRow(value: unknown): {row: UnwrittenRelease; whole: boolean} | null {
   try {return {row: UnwrittenReleaseRow.parse(value), whole: true};} catch {/* Read what it still says. */}
   const kept = KeptReleaseRow.safeParse(value);
   if (!kept.success) return null;
-  const {workspaceId, objectId, path, reason, headDeliveryId, snapshot} = kept.data;
+  const {workspaceId, objectId, path, reason, headDeliveryId} = kept.data;
   const text = (field: unknown) => typeof field === "string" && field ? field : null;
   return {row: {workspaceId, objectId, path, reason: text(reason) ?? "unreadable-record", binding: null,
-    headDeliveryId: text(headDeliveryId), snapshot: text(snapshot), retry: false}, whole: false};
+    headDeliveryId: text(headDeliveryId), snapshot: null, retry: false}, whole: false};
 }
 
 /** One file on this computer, written durably, so the notice survives a restart. */
@@ -153,7 +158,8 @@ export function createUnwrittenReleases(filePath: () => string): UnwrittenReleas
     },
     endRetry: (workspaceId, objectId, binding) => change(current => current.map(row =>
       isRecord(row, workspaceId, objectId) && row.retry && sameBinding(row.binding, binding) ? {...row, retry: false} : row)),
-    written: (workspaceId, objectId, binding) => ended(workspaceId, objectId, row => !row.retry || !sameBinding(row.binding, binding)),
+    written: (workspaceId, objectId, {binding, snapshot}) =>
+      ended(workspaceId, objectId, row => !row.retry || snapshot === null || row.snapshot !== snapshot || !sameBinding(row.binding, binding)),
     remove: (workspaceId, objectId, record) => ended(workspaceId, objectId, row => !sameRelease(row, record)),
   };
 }

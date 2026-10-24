@@ -173,7 +173,7 @@ import {
   useCollectionWritesBlockingAdmission,
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
-import { LiveDocumentsDialog, type LiveDocumentStopResult } from "./LiveDocumentsDialog";
+import { LiveDocumentsDialog, type LiveDocumentStopAgain, type LiveDocumentStopResult } from "./LiveDocumentsDialog";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
@@ -934,12 +934,13 @@ export function DesktopWorkspaceShell(props: {
       }),
     [],
   );
+  // A Try again names its row's document, whose editors may be at a new path.
   const stopLiveDocument = useCallback(
-    async (id: string, path: string) => {
+    async (id: string, path: string, again?: LiveDocumentStopAgain) => {
       let result: LiveDocumentStopResult = { keptEdits: "none" };
       await withClosedEngineDocSession(id, path, async () => {
-        result = await bridge().stopOwnerLiveDocument({ workspaceId: id, path });
-      });
+        result = await bridge().stopOwnerLiveDocument({ workspaceId: id, path, ...(again ? { again } : {}) });
+      }, again?.objectId);
       return result;
     },
     [],
@@ -1838,10 +1839,11 @@ export function DesktopWorkspaceShell(props: {
       const open={label:"Open Live documents",run:() => openLiveDocuments(workspaceId,row.path)};
       const save={label:"Save recovery copy",run:() => {void saveLiveRecoveryCopyRef.current(workspaceId,row.path,row.incident);},additional:[open]};
       // A Stop runs again for this row's document: it finishes a waiting Stop, or writes the file a finished one could not.
+      // Its editors close wherever the document is now, since a record keeps the path it had.
       const again=row.recovery==="not-written" || row.recovery==="stopping" ? {objectId:row.objectId,recovery:row.recovery} : undefined;
       const stopAgain=() => {
         let result:LiveDocumentStopResult={keptEdits:"none"};
-        void withClosedEngineDocSession(workspaceId,row.path,async () => {result=await bridge().stopOwnerLiveDocument({workspaceId,path:row.path,...(again ? {again} : {})});})
+        void withClosedEngineDocSession(workspaceId,row.path,async () => {result=await bridge().stopOwnerLiveDocument({workspaceId,path:row.path,...(again ? {again} : {})});},row.objectId)
           .then(() => {if (workspaceIdRef.current===workspaceId && result.keptEdits==="recovered") liveDocumentStopped(row.path,"recovered");},
             (error: unknown) => {
               if (workspaceIdRef.current!==workspaceId || workspaceAdmission.superseded) return;
