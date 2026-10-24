@@ -180,7 +180,7 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     expect((await peer!.sendRequest({id: 10,method: "liveApplication.register",workspace: "ws-ordinary",params: {binding,resumeAdoptionId: "adoption"}})).result).toEqual({registrationId: 9});
     expect(owner.prepareHandoff).toHaveBeenCalledTimes(handoffs);
     expect(singleton.forwardLiveOwnerAdoption).toHaveBeenCalledTimes(1);
-    const operation: NativeRestoreFence = {operationId: "stop", relayDatabaseNamespace: "namespace", oldBinding: binding,
+    const operation: NativeRestoreFence = {point:{journalCursor:0,receiptDigest:binding.lineageClaimId},operationId: "stop", relayDatabaseNamespace: "namespace", oldBinding: binding,
       hostId: "host", newFence: 2, origin: {kind: "owner",id: "adoption"}, terminal: null, appliedSequence: 0};
     const receipt = {operation,localHeadSequence: 4,recordedAtMs: 10};
     const calls = singleton.sendRequest.mock.calls.length;

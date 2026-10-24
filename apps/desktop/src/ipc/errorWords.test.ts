@@ -32,7 +32,7 @@ import {
 
 it("explains the held-file live-open refusal after Electron serializes it", () => {
   const error = new Error("Error invoking remote method 'desktop:engine-ydoc-open': DaemonRefusalError [CONFLICT]: capture-file-held: notes/held.md");
-  expect(readError(error).words).toBe('dohc cannot open "notes/held.md" for live editing. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.');
+  expect(readError(error).words).toBe('dohc cannot open "notes/held.md" for live editing. dohc cannot take in this file\'s Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Restore the file\'s exact contents from before that edit. For nested lists, make the edit in dohc after the file opens again.');
 });
 
 // What the renderer receives when a main-process handler rejects: Electron

@@ -1047,7 +1047,7 @@ export function SettingsDialog(props: {
               {settingsFilePath ? (
                 <code
                   title={settingsFilePath}
-                  className="max-w-sm select-text cursor-text truncate rounded-md bg-panel-2 px-2 py-1 font-mono text-[11px] text-ink"
+                  className="max-w-70 select-text cursor-text truncate rounded-md bg-panel-2 px-2 py-1 font-mono text-[11px] text-ink"
                 >
                   {settingsFilePath}
                 </code>

@@ -1,4 +1,5 @@
 import { createChatLinksReader } from "./workspaces/chatLinks";
+import { workspaceRootForOperation, workspaceRootsMatch } from "./workspaces/workspaceRootsMatch";
 import { createActorPresentationRequest } from "./workspaces/actorPresentation";
 import { agentColorsForPresentation } from "./settings/userSettingsStore";
 import { createChatFileMentionsReader } from "./workspaces/chatFileMentions";
@@ -3027,7 +3028,7 @@ async function withEngineAdapter<T>(
   if (!registered) return await read(workspace);
   if (
     workspace.attachmentId === undefined &&
-    registered.rootPath !== workspace.rootPath
+    !workspaceRootsMatch(registered.rootPath, workspace.rootPath)
   ) {
     throw new Error(
       "This workspace changed while this ran. Try again.",
@@ -3216,8 +3217,10 @@ async function syncWorkspaceForDispatch(
         return await withEngineStoreRecoveredForAuthority(lease, async () => {
           lease.assertCurrent();
           if (activity.listOpenWorkspaceIds().includes(workspaceId)) {
+            const activityRootPath = activity.workspaceRootPath(workspaceId);
             if (
-              activity.workspaceRootPath(workspaceId) !== workspace.rootPath
+              activityRootPath === null ||
+              !workspaceRootsMatch(activityRootPath, workspace.rootPath)
             ) {
               throw new Error(
                 "This workspace was closed. Open it again.",
@@ -4815,12 +4818,12 @@ const datasetRuntimePath = () => join(app.isPackaged ? process.resourcesPath : j
 const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: string }, signal: AbortSignal) =>
   workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
     signal.throwIfAborted(); operation.assertCurrent();
-    if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("This workspace changed while this ran. Try again.");
+    const workspaceRoot = workspaceRootForOperation(operation.workspace.rootPath, workspace.rootPath);
     const slot = operation.state.datasetHost;
     let pending = slot.pending;
     if (!pending) {
       const runtimePath = datasetRuntimePath(), attachment = { workspaceId: workspace.workspaceId, attachmentId: operation.workspace.attachmentId };
-      pending = createLocalDatasetHost({ workspaceId: workspace.workspaceId, workspaceRoot: workspace.rootPath, attachmentId: attachment.attachmentId, localPersonId: localUserId,
+      pending = createLocalDatasetHost({ workspaceId: workspace.workspaceId, workspaceRoot, attachmentId: attachment.attachmentId, localPersonId: localUserId,
         holder: collectionsHolderCheck(workspace.workspaceId),
         trashItem: path => shell.trashItem(path),
         runtime: { launch: createDesktopAppRuntimeLauncher(utilityProcess, true), entryPath: join(runtimePath, "child.mjs") },
@@ -4844,11 +4847,11 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
         },
         onDatasetsChanged: () => collectionAutomationsOf(workspace.workspaceId)?.datasetsChanged(),
         collectionEngine: () => {
-          const capture = activity.engineCaptureFor(workspace.workspaceId, workspace.rootPath);
+          const capture = activity.engineCaptureFor(workspace.workspaceId, workspaceRoot);
           if (!capture) throw new Error("The workspace engine is unavailable.");
-          return localCollectionEngine({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath, capture,
+          return localCollectionEngine({ workspaceId: workspace.workspaceId, rootPath: workspaceRoot, capture,
             withAdapter: async work => {
-              const result = await withEngineAdapter({ ...workspace, attachmentId: attachment.attachmentId }, async adapter => ({ value: await work(adapter) }));
+              const result = await withEngineAdapter({ ...workspace, rootPath: workspaceRoot, attachmentId: attachment.attachmentId }, async adapter => ({ value: await work(adapter) }));
               if (result === null) throw new Error("The workspace engine is unavailable.");
               return result.value;
             } });
@@ -5189,7 +5192,7 @@ const desktopEngine = createDesktopEngine({
   onWorkspaceOpened: workspaceId => {
     const workspace = findWorkspace(workspaceId);
     if (workspace) void withWorkspaceAttachment({workspaceId}, lease => recoverOutageTyping(canonicalWorkspaceFor(lease)));
-    if (workspace && activity.engineCaptureFor(workspaceId)) reconcileLocalCollectionApps(workspace);
+    if (workspace && activity.engineCaptureFor(workspaceId)) withWorkspaceAttachment({workspaceId}, lease => reconcileLocalCollectionApps(canonicalWorkspaceFor(lease)));
     void noticeStore().refreshRefusals(workspaceId).catch(error => {
       console.warn("[notices] could not refresh workspace sync refusals after open", error);
     });
@@ -6647,11 +6650,12 @@ function registerIpcHandlers(): void {
             currentCredentialGeneration: () => credentialCacheGeneration,
             assertCurrent: () => signal.throwIfAborted(), relayJson: relayShareJsonWithCredentials });
           const ownerKey = datasetCopyOwnerKey(remote.credentials);
-          let attachmentId: symbol | undefined;
+          let copyWorkspace: EngineWorkspace | undefined;
           const openCopy = () => workspaceAuthorities.withOperation(workspace.workspaceId, async operation => {
-            signal.throwIfAborted(); operation.assertCurrent(); attachmentId = operation.workspace.attachmentId;
-            if (operation.workspace.rootPath !== workspace.rootPath) throw new Error("This workspace changed while this ran. Try again.");
-            return ownerDatasetCopies.get({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath, attachmentId: operation.workspace.attachmentId,
+            signal.throwIfAborted(); operation.assertCurrent();
+            const rootPath = workspaceRootForOperation(operation.workspace.rootPath, workspace.rootPath);
+            copyWorkspace = { ...operation.workspace, rootPath };
+            return ownerDatasetCopies.get({ ...copyWorkspace,
               datasetId, origin: targetOrigin, ownerKey, lifetime: operation.signal,
               assertOwner: () => {
                 if (!cachedCredentials || datasetCopyOwnerKey(cachedCredentials) !== ownerKey) throw new Error("Sign in as this Collection's owner.");
@@ -6664,8 +6668,8 @@ function registerIpcHandlers(): void {
           // way. If the folder still isn't ready, the server holds the
           // Collection, so it works online without an offline copy.
           const copy = await openCopy().catch(async (error: unknown) => {
-            if (!(error instanceof LocalStateUnavailableError) || error.refusal !== "not-opened") throw error;
-            await localStateOpened({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath, attachmentId });
+            if (!(error instanceof LocalStateUnavailableError) || error.refusal !== "not-opened" || !copyWorkspace) throw error;
+            await localStateOpened(copyWorkspace);
             return openCopy();
           }).catch((error: unknown) => { if (error instanceof LocalStateUnavailableError) return null; throw error; });
           if (copy === null) return data;

@@ -243,7 +243,7 @@ it("suppresses a cut whose borrowed registration was fenced while the native rea
     f.singleton.openLiveAppliedSync.mockImplementationOnce(async () => {entered.resolve(); return release.promise;});
     const pending = f.peer.openLiveAppliedSync(f.next(), Buffer.from([0]), {maxInputBytes: 1024, maxOutputBytes: 1_000_000});
     const refused = expect(pending).rejects.toThrow(); await entered.promise;
-    const operation = {operationId: "stop", relayDatabaseNamespace: "namespace", oldBinding: binding, hostId: "host", newFence: 2,
+    const operation = {point:{journalCursor:0,receiptDigest:binding.lineageClaimId},operationId: "stop", relayDatabaseNamespace: "namespace", oldBinding: binding, hostId: "host", newFence: 2,
       origin: {kind: "owner", id: "adoption"}, terminal: null, appliedSequence: 0};
     const receipt = {operation, localHeadSequence: 7, recordedAtMs: 1};
     f.singleton.sendRequest.mockResolvedValueOnce({result: {status: "fenced", receipt}});

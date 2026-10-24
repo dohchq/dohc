@@ -222,7 +222,7 @@ describe("agent run IPC registrations", () => {
 
   it("detects tools only for the active workspace without starting a session", async () => {
     const h = await harness();
-    await expect(h.invoke(CHANNELS.detectAgentTools)).resolves.toEqual({ workingDirectory: h.physical.rootPath, tools: [] });
+    await expect(h.invoke(CHANNELS.detectAgentTools)).resolves.toEqual({ workingDirectory: h.workspace.rootPath, tools: [] });
     expect(h.detection).toHaveBeenCalledOnce();
     expect(h.detection).toHaveBeenCalledWith(h.physical.rootPath, expect.any(AbortSignal));
     expect(h.activity).not.toHaveBeenCalled();
@@ -294,7 +294,7 @@ describe("agent run IPC registrations", () => {
       expect(await retired).toMatchObject({ message: "Agent detection stopped because this window changed workspaces." });
 
       keptCall!.finish();
-      await expect(kept).resolves.toEqual({ workingDirectory: h.physical.rootPath, tools: [] });
+      await expect(kept).resolves.toEqual({ workingDirectory: h.workspace.rootPath, tools: [] });
     } finally {
       for (const call of calls) call.finish();
       await Promise.allSettled([retired, kept, retiring]);
@@ -380,6 +380,7 @@ describe("agent run IPC registrations", () => {
       command: "dohc-mcp", args: ["--workspace", canonicalRootPath], workspacePath: canonicalRootPath, home: h.workspace.rootPath,
     });
     expect(h.config).toHaveBeenCalledWith(canonicalRootPath, "view");
+    await expect(h.invoke(CHANNELS.detectAgentTools)).resolves.toEqual({ workingDirectory: canonicalRootPath, tools: [] });
   });
 
   it("forwards main-owned MCP configuration for a shared view", async () => {

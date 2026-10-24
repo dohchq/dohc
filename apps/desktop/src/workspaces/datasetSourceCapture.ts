@@ -1,4 +1,5 @@
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { CAPTURE_HELD_WORDS } from "../ipc/errorWords";
 
 export interface SourceCaptureStatus {
   heldFiles: readonly { path: string }[];
@@ -36,6 +37,6 @@ export function assertSourcePathsNotDeferred(files: readonly string[], paths: re
 export function assertSourcePathsNotHeld(files: readonly { path: string }[], paths: readonly string[]): void {
   const held = files.find(file => paths.includes(file.path));
   if (held) {
-    throw new Error(`dohc cannot use "${held.path}" for this change. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.`);
+    throw new Error(`dohc cannot use "${held.path}" for this change. ${CAPTURE_HELD_WORDS}`);
   }
 }

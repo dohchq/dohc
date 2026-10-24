@@ -1,4 +1,4 @@
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -47,9 +47,11 @@ export async function spawnSyncRelay(input: {
   const deployment = input.editLinks ? join(dirname(dirname(input.dbPath)), "relay-deployment") : null;
   // A restart keeps the deployment and live host stores the first start made.
   if (deployment && !existsSync(join(deployment, "deployment.json"))) {
-    execFileSync(process.execPath, ["--import", "tsx/esm", "src/relayDeploymentCommand.ts", "initialize",
-      "--config", join(deployment, "deployment.json"), "--database", input.dbPath, "--continuity-directory", join(deployment, "continuity")],
-    { cwd: relayRoot, stdio: "pipe", windowsHide: true });
+    const command = input.compiledMain
+      ? [join(dirname(input.compiledMain), "relay-deployment.js")]
+      : ["--import", "tsx/esm", "src/relayDeploymentCommand.ts"];
+    await initializeRelayDeployment([...command, "initialize",
+      "--config", join(deployment, "deployment.json"), "--database", input.dbPath, "--continuity-directory", join(deployment, "continuity")]);
     mkdirSync(join(deployment, "live-host"));
   }
   const child: ChildProcess = spawn(
@@ -177,6 +179,33 @@ export async function spawnSyncRelay(input: {
     diagnostics: () => ({ stdout, stderr }),
     stop,
   };
+}
+
+async function initializeRelayDeployment(args: string[]): Promise<void> {
+  const started = performance.now();
+  const child = spawn(process.execPath, args, { cwd: relayRoot, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  const closed = new Promise<void>(resolve => child.once("close", () => resolve()));
+  let stdout = "", stderr = "";
+  child.stdout?.on("data", chunk => { stdout += String(chunk); });
+  child.stderr?.on("data", chunk => { stderr += String(chunk); });
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      timeout = setTimeout(() => reject(new Error("Deployment initializer did not finish.")), 120_000);
+      child.once("error", reject);
+      child.once("close", (code, signal) => {
+        if (code === 0) resolve();
+        else reject(new Error(`Deployment initializer exited with code=${code}, signal=${signal}.`));
+      });
+    });
+  } catch (error) {
+    if (child.pid && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await closed;
+    throw new Error(`sync relay deployment initialization failed after ${Math.round(performance.now() - started)}ms ` +
+      `(pid=${child.pid}, exit=${child.exitCode}, signal=${child.signalCode})\nstdout:\n${stdout}\nstderr:\n${stderr}`, { cause: error });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export interface RelayWorkspaceIdentity {

@@ -40,7 +40,7 @@ async function fixture(maxRestoreBytes: number | null = 1_000_000) {
     maxUploads:2,maxRegistrations:2,aggregateBytes:1_000_000 * 5 + 1_048_576 * 4,maxAdoptionBytes:1_000_000,maxAdoptionEvents:10,maxRestoreBytes:maxRestoreBytes ?? undefined,
     requestDeadlineMs:30_000},start,ws:deviceSocket,limits,stop});
   const peer = await started;await peer.ready();
-  const fence = {operation:{operationId:"restore",relayDatabaseNamespace:"namespace",hostId:"host",newFence:2,
+  const fence = {operation:{point:{journalCursor:0,receiptDigest:"a".repeat(64)},operationId:"restore",relayDatabaseNamespace:"namespace",hostId:"host",newFence:2,
     oldBinding:{workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),
       currentPath:"a.md",selectorPaths:["a.md"],restoreFenceGeneration:1},origin:{kind:"owner",id:"adoption"},
     terminal:null,appliedSequence:0},localHeadSequence:0,recordedAtMs:10};
