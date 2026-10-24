@@ -55,6 +55,26 @@ async function publishKey(temporary: string, destination: string): Promise<void>
   }
 }
 
+// Flush the key file, then its folder, after reading the key and before it is
+// used. On Linux FAT32 only a flush of the renamed file writes its entry, and
+// a creator that lost the claim can read a key renamed over that claim after
+// atomicCreateFile flushed the folder. Node can't open a folder on Windows.
+async function flushKey(path: string, message: string): Promise<void> {
+  if (process.platform === "win32") return;
+  try {
+    for (const target of [path, dirname(path)]) {
+      const handle = await open(target, "r");
+      try {
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    }
+  } catch {
+    throw new SecretFileStoreError("key-corrupt", message);
+  }
+}
+
 function keyFilePath(rootDir: string): string {
   return join(resolve(rootDir), SECRET_KEY_RELATIVE_PATH);
 }
@@ -156,16 +176,16 @@ export async function loadSecretDataKey(
   // workspace, which callers do first. Writing here never creates it.
   const key = randomBytes(SECRET_KEY_BYTES);
   const payload = `${SECRET_KEY_FILE_PREFIX}${key.toString("base64")}\n`;
+  const createFailed = "The workspace secret key file could not be created; refusing to store protected files.";
   let created: boolean;
   try {
     created = await atomicCreateFile(path, payload, 0o600, { link: publishKey });
   } catch {
-    throw new SecretFileStoreError(
-      "key-corrupt",
-      "The workspace secret key file could not be created; refusing to store protected files.",
-    );
+    throw new SecretFileStoreError("key-corrupt", createFailed);
   }
-  return created ? key : loadSecretDataKey(rootDir, { createIfMissing: false });
+  const published = created ? key : await loadSecretDataKey(rootDir, { createIfMissing: false });
+  await flushKey(path, createFailed);
+  return published;
 }
 
 export async function installWorkspaceDataKey(
@@ -212,5 +232,6 @@ export async function installWorkspaceDataKey(
       "The workspace secret key file could not be installed.",
     );
   }
-  if (!created) return installWorkspaceDataKey(rootDir, key);
+  if (!created) await installWorkspaceDataKey(rootDir, key);
+  await flushKey(path, "The workspace secret key file could not be installed.");
 }

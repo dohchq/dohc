@@ -1,14 +1,17 @@
 import { chmod, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { atomicCreateFile } from "../atomicReplaceFile";
 import { SECRET_KEY_RELATIVE_PATH, installWorkspaceDataKey } from "./workspaceDataKey";
 import { createTestScratch } from "./testTemp";
 
 // A drive's hard links, and the rename that replaces them where it has none.
+// `events` records each read and each flush of a file or folder, in order.
 const drive = vi.hoisted(() => ({
   link: null as null | { code: string; errno: number; before?: (source: string, destination: string) => Promise<void> },
   renameFails: false,
+  afterFlush: null as null | (() => Promise<void>),
+  events: [] as string[],
 }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const fs = await importOriginal<typeof import("node:fs/promises")>();
@@ -23,6 +26,23 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       if (drive.renameFails) throw Object.assign(new Error("rename failed"), { code: "EIO", syscall: "rename" });
       return fs.rename(source, destination);
     },
+    readFile: async (...args: Parameters<typeof fs.readFile>) => {
+      drive.events.push("read");
+      return fs.readFile(...args);
+    },
+    open: async (...args: Parameters<typeof fs.open>) => {
+      const handle = await fs.open(...args);
+      if (args[1] !== "r") return handle;
+      const sync = handle.sync.bind(handle);
+      handle.sync = async () => {
+        await sync();
+        drive.events.push(`flush ${basename(String(args[0]))}`);
+        const after = drive.afterFlush;
+        drive.afterFlush = null;
+        await after?.();
+      };
+      return handle;
+    },
   };
 });
 vi.mock("../atomicReplaceFile", async (importOriginal) => {
@@ -34,6 +54,8 @@ afterEach(() => {
   vi.mocked(atomicCreateFile).mockReset();
   drive.link = null;
   drive.renameFails = false;
+  drive.afterFlush = null;
+  drive.events = [];
 });
 
 const unsupportedWords =
@@ -58,7 +80,9 @@ async function onPlatform<T>(platform: NodeJS.Platform, run: () => Promise<T>): 
   }
 }
 
-describe.each(["win32", "linux", "darwin"] as const)("key publication on %s", platform => {
+// Faking another Unix on Windows would still meet Windows file modes and folders.
+const platforms: NodeJS.Platform[] = process.platform === "win32" ? ["win32"] : ["win32", process.platform];
+describe.each(platforms)("key publication on %s", platform => {
   it.each([
     ["ENOTSUP", -4049, true],
     ["ENOSYS", -4054, true],
@@ -89,11 +113,12 @@ describe.each(["win32", "linux", "darwin"] as const)("key publication on %s", pl
 });
 
 describe.runIf(process.platform !== "win32")("on a drive without hard links", () => {
-  it("publishes the key readable only by its owner", async () => {
+  it("publishes and flushes the key readable only by its owner", async () => {
     const { root, path } = await keyFolder();
     drive.link = { code: "ENOTSUP", errno: -4049 };
     await installWorkspaceDataKey(root, Buffer.alloc(32, 7));
     expect((await stat(path)).mode & 0o777).toBe(0o600);
+    expect(drive.events.slice(-2)).toEqual(["flush secret.key", "flush engine"]);
   });
 
   it("keeps a different key that claims the name first", async () => {
@@ -115,6 +140,15 @@ describe.runIf(process.platform !== "win32")("on a drive without hard links", ()
       message: unsupportedWords,
     });
     expect(await readdir(dirname(path))).toEqual([]);
+  });
+
+  it("flushes the folder after reading a key renamed over the claim it lost", async () => {
+    const { root, path } = await keyFolder();
+    // Another creator holds the claim, and renames the same key over it after this one's flush.
+    drive.link = { code: "ENOTSUP", errno: -4049, before: (_, destination) => writeFile(destination, "") };
+    drive.afterFlush = () => writeFile(path, keyFile(7));
+    await installWorkspaceDataKey(root, Buffer.alloc(32, 7));
+    expect(drive.events.slice(drive.events.lastIndexOf("read"))).toEqual(["read", "flush secret.key", "flush engine"]);
   });
 
   it("removes its empty claim when the rename over it fails", async () => {

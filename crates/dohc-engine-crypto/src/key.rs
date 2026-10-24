@@ -312,7 +312,26 @@ fn create_key_file_with(
         Err(err) if hard_links_unsupported(&err) => publish_by_rename(&temp, &path),
         published => published,
     };
-    finish_key_publication(&path, &temp, publication)
+    finish_key_publication(&path, &temp, publication, sync_key)
+}
+
+/// Flush the key file, then its folder's entries. On Linux FAT32, a rename
+/// over the claim moves the key's entry into the claim's slot, and only a
+/// flush of the key file writes that slot. std cannot open a folder on
+/// Windows, or flush a file opened to read; NTFS metadata journaling is the
+/// best effort there.
+fn sync_key(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        open_no_follow(path)?.sync_all()?;
+        let folder = path
+            .parent()
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        std::fs::File::open(folder)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 /// Create a key file that does not exist yet, readable only by its owner.
@@ -390,6 +409,7 @@ fn finish_key_publication(
     path: &std::path::Path,
     temp: &std::path::Path,
     publication: std::io::Result<()>,
+    sync_key: impl FnOnce(&std::path::Path) -> std::io::Result<()>,
 ) -> Result<SecretDataKey, CryptoError> {
     // Neither publication replaces a concurrent winner, which would orphan
     // data already encrypted with its key.
@@ -397,22 +417,17 @@ fn finish_key_publication(
     if publication.is_err_and(|err| err.kind() != std::io::ErrorKind::AlreadyExists) {
         return Err(CryptoError::KeyFileMalformed);
     }
-    // Durability of the publish itself: fsync the parent directory where the
-    // platform allows it (std cannot open directories on Windows; NTFS
-    // metadata journaling is the best effort there). A failed directory sync
-    // must fail the mint — returning a key whose publish may not survive a
-    // crash would let ciphertext commit under a possibly-vanishing key.
-    #[cfg(unix)]
-    {
-        let parent = path.parent().ok_or(CryptoError::KeyFileMalformed)?;
-        let dir = std::fs::File::open(parent).map_err(|_| CryptoError::KeyFileMalformed)?;
-        dir.sync_all().map_err(|_| CryptoError::KeyFileMalformed)?;
-    }
-    // Return what is durably at the path — under any interleaving the
-    // published file is the single source of truth.
+    // Return what is at the path — under any interleaving the published file
+    // is the single source of truth — and read it before flushing it.
+    // A creator that lost the claim can find a key renamed over that claim
+    // after its own attempt, and only a later flush makes that key durable.
+    // A failed flush must fail the mint: ciphertext must not commit under a
+    // key that may not survive a crash.
     let content =
         Zeroizing::new(read_key_file_no_follow(path).map_err(|_| CryptoError::KeyFileMalformed)?);
-    SecretDataKey::parse_key_file(&content)
+    let key = SecretDataKey::parse_key_file(&content)?;
+    sync_key(path).map_err(|_| CryptoError::KeyFileMalformed)?;
+    Ok(key)
 }
 
 #[cfg(test)]
@@ -644,7 +659,8 @@ mod tests {
                     std::fs::write(&path, winner.to_key_file()).unwrap();
                 }
 
-                let result = finish_key_publication(&path, &temp, Err(std::io::Error::from(kind)));
+                let result =
+                    finish_key_publication(&path, &temp, Err(std::io::Error::from(kind)), sync_key);
 
                 assert_eq!(result.unwrap_err(), CryptoError::KeyFileMalformed);
                 assert!(
@@ -867,6 +883,32 @@ mod tests {
         std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert!(publish_by_rename(&temp, &path).is_err());
         assert!(!path.exists());
+    }
+
+    /// A creator that lost the claim returns a key only if it flushed that
+    /// key after reading it, so the flush covers the winner's rename.
+    #[test]
+    fn a_losing_creator_flushes_the_key_it_adopts() {
+        let dir = dohc_test_scratch::ScratchDir::new_named("key-adopt-flush").unwrap();
+        let path = dir.join(SECRET_KEY_FILE_NAME);
+        let temp = dir.join("pending-key");
+        let lost = || -> std::io::Result<()> { Err(std::io::ErrorKind::AlreadyExists.into()) };
+        let winner = SecretDataKey::from_bytes(&[3; SECRET_KEY_BYTES]).unwrap();
+        // The winner renames its key over the empty claim during the flush.
+        std::fs::write(&path, "").unwrap();
+        let adopted = finish_key_publication(&path, &temp, lost(), |_| {
+            std::fs::write(&path, winner.to_key_file())
+        });
+        assert!(matches!(adopted, Err(CryptoError::KeyFileMalformed)));
+
+        std::fs::write(&path, winner.to_key_file()).unwrap();
+        let mut flushed = None;
+        let adopted = finish_key_publication(&path, &temp, lost(), |key| {
+            flushed = Some(key.to_path_buf());
+            sync_key(key)
+        });
+        assert_eq!(adopted.unwrap(), winner);
+        assert_eq!(flushed, Some(path));
     }
 
     #[cfg(unix)]
