@@ -391,6 +391,7 @@ export interface CliServerOptions {
   agentRunDepth(workspaceId: string): number;
   // Whether a run dohc dispatched holds the workspace's run slot.
   dispatchedAgentRun(workspaceId: string): boolean;
+  agentRunWorkspace(runId: string): string | undefined;
   // Runs once a command has made its last durable change.
   onWrite?(workspace: CliWorkspaceContext): void | Promise<void>;
   // A chat read has no renderer poll behind it — with no window open, nothing
@@ -3663,6 +3664,13 @@ async function workspaceContextForRequest(
 ): Promise<CliWorkspaceContext> {
   const workspace = await resolveCliWorkspace(request.args.cwd, options.listWorkspaces());
   if (!workspace) throw new CliCommandError("not inside a dohc workspace");
+  if ("runId" in request.args && request.args.runId) {
+    const runWorkspaceId = options.agentRunWorkspace(request.args.runId);
+    if (runWorkspaceId !== undefined) {
+      if (runWorkspaceId !== workspace.workspaceId) throw new CliCommandError("Agent runs cannot write in another workspace.");
+      request.args.actor = "agent";
+    }
+  }
   const collectionWriteRequest =
     request.verb === "collectionSetFields" ||
     request.verb === "collectionCreateRecord";

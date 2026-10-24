@@ -3021,8 +3021,8 @@ export function DesktopWorkspaceShell(props: {
     openRecovery: openCaptureRecovery,
   });
   const [heldEvent, setHeldEvent] = useState<{ admission: typeof workspaceAdmission; files: CaptureFileHold[] } | null>(null);
-  useCaptureHoldNotices({ workspaceId,
-    heldFiles: heldEvent?.admission === workspaceAdmission ? heldEvent.files : syncStatus?.heldFiles,
+  const heldFiles = heldEvent?.admission === workspaceAdmission ? heldEvent.files : syncStatus?.heldFiles;
+  const retryHeldCapture = useCaptureHoldNotices({ workspaceId, heldFiles,
     show: showCaptureHolds, reportShellError, reportShellFailure });
   useEffect(() => {
     return bridge().onCaptureHolds(event => {
@@ -6041,6 +6041,8 @@ export function DesktopWorkspaceShell(props: {
                 onClosePath={closePathTabs}
                 onOpenRecordHistory={recordHistory.open}
                 accessEnded={shareViewEnded}
+                captureHeld={heldFiles?.some(file => file.workspaceId === workspaceId && file.path === tabPath) ?? false}
+                onRetryHeldCapture={retryHeldCapture}
                 readOnly={
                   (!!shareView && !shareViewWritable) ||
                   isMountedSharePath(tabPath)

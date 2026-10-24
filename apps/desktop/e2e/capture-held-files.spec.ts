@@ -55,20 +55,17 @@ test("a real daemon holds a deep quote, shows its notice, and clears it after an
     for (let i = 0; i < 100 && !await file.evaluate(node => node === document.activeElement); i++) await page.keyboard.press("Tab");
     await expect(file).toBeFocused();
     await page.keyboard.press("Enter");
-    // A quote nested past the limit opens read-only first.
-    const readOnly = page.getByTestId("lossy-note-notice");
-    await expect(readOnly).toContainText("dohc can't edit this document yet without changing parts it can't show.");
-    await expect(page.getByTestId("engine-may-hold-document-notice")).toHaveCount(0);
-    await expect(page.locator('[data-testid="markdown-editor"][contenteditable="true"]')).toHaveCount(0);
-    // Edit anyway asks first, then the engine refuses the held file's live open.
-    await page.getByTestId("lossy-note-edit-anyway").focus();
-    await page.keyboard.press("Enter");
-    await expect(page.getByRole("dialog", { name: "Edit this document anyway?" })).toBeVisible();
-    await page.getByTestId("lossy-note-edit-anyway-confirm").focus();
-    await page.keyboard.press("Enter");
-    await expect(readOnly).toHaveCount(0);
-    await expect(page.getByTestId("engine-may-hold-document-notice")).toContainText('dohc cannot open "held.md" for live editing');
-    await expect(page.getByTestId("engine-may-hold-document-notice")).toContainText("Restore the file's exact contents from before that edit.");
+    // The held note shows the hold right away, read-only, with no Edit anyway.
+    const held = page.getByTestId("engine-may-hold-document-notice");
+    await expect(held).toContainText('dohc cannot open "held.md" for live editing');
+    await expect(held).toContainText("Restore the file's exact contents from before that edit.");
+    await expect(held.getByRole("button", { name: "Open externally" })).toBeVisible();
+    await expect(page.getByTestId("lossy-note-notice")).toHaveCount(0);
+    await expect(page.getByTestId("lossy-note-edit-anyway")).toHaveCount(0);
+    for (const theme of ["light", "dark"] as const) {
+      await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
+      await page.screenshot({ path: test.info().outputPath(`held-note-${theme}.png`) });
+    }
     await expect(page.locator('[data-testid="markdown-editor"][contenteditable="true"]')).toHaveCount(0);
     const notices = page.getByTestId("notice-center-toggle");
     for (let i = 0; i < 100 && !await notices.evaluate(node => node === document.activeElement); i++) await page.keyboard.press("Tab");

@@ -23,6 +23,45 @@ const reader = {
 }
 const document = {workspaceId: 'workspace', mainVersionId: 'main', objectId: 'object', lineageClaimId: 'lineage'}
 const context = {document, currentPath: 'note.md'}
+
+it.each([
+  'Changed beside the list\n\n- parent\n  - child',
+  'A **bold** word, an *italic* word, and a [link](https://example.com).\n\n- parent\n  - child',
+])('constructs an exact native outside fold for %j', source => {
+  const base = markdownToYDoc('Before\n\n- parent\n  - child'), imported = markdownToYDoc(source)
+  try {
+    const result = reader.construct({...context, source, checkpoint: Y.encodeStateAsUpdate(base), nativeFold: true})
+    expect(result.kind).toBe('accepted')
+    if (result.kind !== 'accepted') throw Error(JSON.stringify(result))
+    Y.applyUpdate(base, result.delta)
+    expect(tree(base).eq(tree(imported))).toBe(true)
+    expect(yDocToMarkdown(base)).toBe(source)
+    expect([...base.getMap('meta').keys()].filter(key => key.startsWith('dohcMarkdownSource'))).toEqual([])
+    if (source.includes('**bold**')) {
+      const json = JSON.stringify(tree(base).toJSON())
+      for (const mark of ['bold', 'italic', 'link']) expect(json).toContain(`"type":"${mark}"`)
+    }
+  } finally {base.destroy(); imported.destroy()}
+})
+
+it.each(['* parent\n  * child', '- parent\n    - child', '__bold__',
+  '- first\ncontinuation', '- parent\n  - child\n', '- parent\r\n  - child\r\n'])
+('refuses a non-exact native outside fold for %j', source => {
+  const base = markdownToYDoc('Before')
+  try {
+    expect(reader.construct({...context, source, checkpoint: Y.encodeStateAsUpdate(base), nativeFold: true}))
+      .toMatchObject({kind: 'refused', reason: 'reading-mismatch'})
+  } finally {base.destroy()}
+})
+
+it('leaves reader-built notes out of native outside folds', () => {
+  const base = markdownToYDoc('Before')
+  try {
+    base.getMap('meta').set('dohcMarkdownSourceReader', 1)
+    expect(reader.construct({...context, source: 'After', checkpoint: Y.encodeStateAsUpdate(base), nativeFold: true}))
+      .toMatchObject({kind: 'refused', reason: 'reading-mismatch'})
+  } finally {base.destroy()}
+})
 const sha = (text: string) => createHash('sha256').update(text).digest('hex')
 function bind(doc: Y.Doc, source: string) {
   const meta = doc.getMap('meta')

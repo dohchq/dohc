@@ -126,13 +126,14 @@ describe("executeCli", () => {
     });
   });
 
-  it("materializes stdin and sends agent attribution", async () => {
+  it("preserves multiline Markdown from stdin and sends agent attribution", async () => {
     const requests: CliRequestWithoutToken[] = [];
+    const report = '# Updated "Kyoto"\n\n- Added November packing.\n- It\'s ready. `$HOME` and $(whoami) stay literal.\n';
     const result = await executeCli({
       argv: ["chat", "reply", "th_8f", "--as-agent", "-"],
       cwd: "/workspace/project",
       env: { DOHC_RUN_ID: "run_ambient" },
-      readStdin: async () => "A detailed report\n",
+      readStdin: async () => report,
       request: async (request) => {
         requests.push(request);
         return { threadId: "th_8f2k1c", messageId: "msg_new" };
@@ -149,7 +150,7 @@ describe("executeCli", () => {
           thread: "th_8f",
           attachments: [],
           needsDecision: false,
-          body: "A detailed report\n",
+          body: report,
         },
       },
     ]);

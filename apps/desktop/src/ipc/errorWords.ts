@@ -3,13 +3,16 @@ import type { DaemonErrorCode } from "@dohc/workspace-engine-client";
 
 // Electron hands a rejected handler's error to the renderer as one string,
 // `error.toString()`: the class survives, the code does not. `ipcWireError`
-// keeps the code (`DaemonRefusalError [OVERLOADED]: …`), and a wait the error
-// sets (`… [dataset_reopen_wait] [retryAfterMs=5000]: …`), and `readError`
-// turns that string back into words a person can act on.
+// keeps the code (`DaemonRefusalError [OVERLOADED]: …`), a wait the error
+// sets (`… [dataset_reopen_wait] [retryAfterMs=5000]: …`), and the computer
+// that keeps a workspace's Collections (`… [computer=Studio%20Mac]: …`), and
+// `readError` turns that string back into words a person can act on.
 
 // `null`: the error names nothing a person can act on, so the caller's own
 // sentence stands alone. Copy details still carry the error as it arrived.
 type Words = string | null;
+
+export const APP_COMPILER_TIMEOUT_WORDS = "The app took too long to build. Remove files the app does not use, then try again.";
 
 const UPDATING = "dohc is still reading this workspace's files. Try again when it finishes.";
 const NOT_READ = "dohc has not read this file yet. Try again when it has.";
@@ -159,6 +162,7 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
   EngineClientError: { "*": null },
   DaemonProtocolError: { "*": null },
   DaemonClientCapabilityError: { "*": null },
+  AppCompilerTimeoutError: { "*": APP_COMPILER_TIMEOUT_WORDS },
   CompilerProcessError: {
     exit: "The app's code did not build.",
     timeout: "Building the app took too long. Try again.",
@@ -226,7 +230,7 @@ export const UNKNOWN_ERROR_WORDS = "dohc could not finish that.";
 // A bare code such as `invalid-input` or `EACCES`, or one that leads a message.
 const RAW_CODE = /^(?:\S*[-_]\S*|[A-Z0-9]{3,})$|^[A-Z][A-Z0-9_]+: /;
 const IPC_PREFIX = /^Error invoking remote method '[^']*': /;
-const CLASS_PREFIX = /^((?:[A-Z][A-Za-z0-9]*)?Error)(?: \[([^\]\s]+)\])?(?: \[retryAfterMs=(\d{1,15})\])?: /;
+const CLASS_PREFIX = /^((?:[A-Z][A-Za-z0-9]*)?Error)(?: \[([^\]\s]+)\])?(?: \[retryAfterMs=(\d{1,15})\])?(?: \[computer=([^\]\s]+)\])?: /;
 
 // The engine client's `wireCode`, the dataset worker's `code`, the compiler's
 // `reason`.
@@ -244,19 +248,35 @@ function retryAfterOf(error: Error): number | null {
   return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : null;
 }
 
-// The class, the code, and the wait, as the wire carries them before the message.
-function wireName(error: Error, code: string): string {
-  const wait = retryAfterOf(error);
-  return `${error.name} [${code}]${wait === null ? "" : ` [retryAfterMs=${wait}]`}`;
+// The name of the computer that keeps a workspace's Collections, as a Collections refusal sets it.
+function computerLabelOf(error: Error): string | null {
+  const value: unknown = Reflect.get(error, "computerLabel");
+  return typeof value === "string" && value !== "" ? value : null;
 }
 
-/** Main's IPC boundary: keeps the error's code and wait in the one string Electron sends. */
+// The class, the code, the wait, and the computer, as the wire carries them before the message.
+function wireName(error: Error, code: string): string {
+  const wait = retryAfterOf(error), computer = computerLabelOf(error);
+  return `${error.name} [${code}]${wait === null ? "" : ` [retryAfterMs=${wait}]`}${computer === null ? "" : ` [computer=${encodeURIComponent(computer)}]`}`;
+}
+
+// A name that does not decode names no computer.
+function decodedComputer(wire: string | undefined): string | null {
+  if (wire === undefined) return null;
+  try { return decodeURIComponent(wire) || null; } catch { return null; }
+}
+
+/** Main's IPC boundary: keeps the error's code, wait and computer in the one string Electron sends. */
 export function ipcWireError(error: unknown): unknown {
   if (!(error instanceof Error)) return error;
   const code = codeOf(error);
-  if (code === null) return error;
-  const wire = new Error(error.message, { cause: error });
-  wire.name = wireName(error, code);
+  // Electron sends only toString(). Keep safe compiler facts in Copy details,
+  // while readError maps this name back to the unchanged sentence above.
+  const details: unknown = error.name === "AppCompilerTimeoutError"
+    ? Reflect.get(error, "details") : undefined;
+  if (code === null && typeof details !== "string") return error;
+  const wire = new Error(`${error.message}${typeof details === "string" ? `\n${details}` : ""}`, { cause: error });
+  wire.name = code === null ? error.name : wireName(error, code);
   return wire;
 }
 
@@ -276,6 +296,7 @@ function parse(error: unknown) {
     name: match?.[1] ?? "Error",
     code: match?.[2],
     retryAfterMs: match?.[3] === undefined ? undefined : Number(match[3]),
+    computer: decodedComputer(match?.[4]),
     message: (match ? text.slice(match[0].length) : text).trim(),
   };
 }
@@ -356,8 +377,8 @@ export const COLLECTIONS_REFUSAL_KINDS = ["unclaimed", "elsewhere", "unreadable"
 export const KEEPABLE_COLLECTIONS_REFUSALS: readonly CollectionsRefusalKind[] = ["unclaimed", "elsewhere"];
 export type CollectionsRefusalKind = typeof COLLECTIONS_REFUSAL_KINDS[number];
 export const COLLECTIONS_REFUSAL_CODE = "collections-";
-/** The control that keeps Collections no computer keeps yet on this one. */
-export const KEEP_COLLECTIONS_HERE = "Keep the Collections on this computer";
+/** The control that keeps a workspace's Collections on this computer. */
+export const USE_THIS_COMPUTER = "Use this computer";
 
 /**
  * Where another computer keeps a workspace's Collections, and the two ways
@@ -369,6 +390,13 @@ export function collectionsElsewhereWords(computer: { label: string; sameName: b
 }
 
 /**
+ * The computer that keeps the Collections this computer doesn't list, whether
+ * it lists others, and the sentence that says so. `computer` is null when the
+ * error that said so named none.
+ */
+export interface CollectionsElsewhere { computer: string | null; others: boolean; words: string }
+
+/**
  * The code of a Collections list this computer's server didn't give, where
  * another computer keeps the workspace's own Collections.
  */
@@ -378,18 +406,26 @@ export const SERVER_COLLECTIONS_UNAVAILABLE = "server-collections-unavailable";
  * main's words for that list: on the first line, where the workspace's
  * Collections are. After it, the server's error, which reads as it would alone.
  */
-export function readServerCollectionsUnavailable(error: unknown): { elsewhere: string; failure: string } | null {
-  const { name, code, message } = parse(error);
+export function readServerCollectionsUnavailable(error: unknown): { elsewhere: string; computer: string | null; failure: string } | null {
+  const { name, code, computer, message } = parse(error);
   if (name !== "ServerCollectionsUnavailableError" || code !== SERVER_COLLECTIONS_UNAVAILABLE) return null;
   const [elsewhere = "", ...failure] = message.split("\n");
-  return elsewhere ? { elsewhere, failure: failure.join("\n") } : null;
+  return elsewhere ? { elsewhere, computer, failure: failure.join("\n") } : null;
 }
 
-/** main's refusal to use a workspace's Collections here, with its words. */
-export function readCollectionsRefusal(error: unknown): { kind: CollectionsRefusalKind; words: string } | null {
-  const { name, code, message } = parse(error);
+/**
+ * main's refusal to use a workspace's Collections here, with its words.
+ * Another computer's refusal names it, or null when the error named none.
+ */
+export type CollectionsRefusalRead =
+  | { kind: Exclude<CollectionsRefusalKind, "elsewhere">; words: string }
+  | { kind: "elsewhere"; words: string; computer: string | null };
+
+export function readCollectionsRefusal(error: unknown): CollectionsRefusalRead | null {
+  const { name, code, computer, message } = parse(error);
   if (name !== "CollectionsRefusalError" || !code?.startsWith(COLLECTIONS_REFUSAL_CODE) || !message) return null;
   const kind = COLLECTIONS_REFUSAL_KINDS.find((candidate) => code === `${COLLECTIONS_REFUSAL_CODE}${candidate}`);
+  if (kind === "elsewhere") return { kind, words: message, computer };
   return kind === undefined ? null : { kind, words: message };
 }
 

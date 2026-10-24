@@ -31,6 +31,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+#[path = "capture_reader.rs"]
+mod reader;
+
 #[cfg(test)]
 mod capture_file_hold_tests {
     use super::*;
@@ -1043,6 +1046,20 @@ enum CaptureIndexing {
     Skip,
     ReadRoot(PathBuf),
     UseSnapshot(Arc<SearchPolicySnapshot>),
+    Reader {
+        indexing: Box<CaptureIndexing>,
+        root: PathBuf,
+        folds: Arc<Vec<dohc_engine_collab::reader_resolver::PreparedFold>>,
+    },
+}
+
+impl CaptureIndexing {
+    fn base(&self) -> &Self {
+        match self {
+            Self::Reader { indexing, .. } => indexing.base(),
+            other => other,
+        }
+    }
 }
 
 pub struct CapturePlacementPath {
@@ -1258,17 +1275,48 @@ impl ActorHandle {
     pub fn capture_ingest_with_search_policy_blocking(
         &self,
         input: CaptureIngest,
+        root_dir: PathBuf,
         search_policy: Arc<SearchPolicySnapshot>,
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteResult, RuntimeError> {
-        let indexing = CaptureIndexing::UseSnapshot(search_policy);
         let token: CancellationToken = CancellationToken::new();
-        self.run_blocking(move |store, cache| {
-            with_local_file_mutation_cache_reset(cache, || {
-                capture_ingest_on_store(store, &input, &indexing, &leases, faults.as_ref(), &token)
-            })
-        })
+        let mut reader_deadline = None;
+        for attempt in 0..=2 {
+            let folds = if attempt < 2 {
+                reader::prepare_blocking(
+                    self,
+                    Arc::from([input.clone()]),
+                    &root_dir,
+                    &mut reader_deadline,
+                )
+            } else {
+                Arc::new(Vec::new())
+            };
+            let indexing = reader::indexing(
+                CaptureIndexing::UseSnapshot(search_policy.clone()),
+                root_dir.clone(),
+                folds,
+            );
+            let (input, leases, faults, token) =
+                (input.clone(), leases.clone(), faults.clone(), token.clone());
+            let result = self.run_blocking(move |store, cache| {
+                with_local_file_mutation_cache_reset(cache, || {
+                    capture_ingest_on_store(
+                        store,
+                        &input,
+                        &indexing,
+                        &leases,
+                        faults.as_ref(),
+                        &token,
+                    )
+                })
+            });
+            if !reader::is_stale(&result) {
+                return result;
+            }
+        }
+        unreachable!()
     }
 
     /// Capture a bounded text chunk in one durable transaction. A clean chunk
@@ -1283,7 +1331,7 @@ impl ActorHandle {
         root_dir: PathBuf,
         root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
-        let inputs = inputs.into();
+        let mut inputs = inputs.into();
         #[cfg(feature = "fault-injection")]
         let mut roundtrip = dohc_engine_storage::capture_phase::Phase::new(
             "queued_capture_batch",
@@ -1294,19 +1342,73 @@ impl ActorHandle {
             false,
         );
         let token: CancellationToken = CancellationToken::new();
-        let result = self.run_blocking(move |store, cache| {
-            with_local_file_mutation_cache_reset(cache, || {
-                capture_ingest_batch_on_store(
-                    store,
-                    &inputs,
-                    &search_policy,
-                    &leases,
-                    faults.as_ref(),
-                    &token,
-                    (&root_dir, root_guard.as_ref()),
-                )
-            })
-        });
+        let mut result = Err(RuntimeError::ActorUnavailable);
+        let mut completed: Vec<_> = inputs.iter().map(|_| None).collect();
+        let mut indices: Vec<_> = (0..inputs.len()).collect();
+        let mut reader_deadline = None;
+        for attempt in 0..=2 {
+            let folds = if attempt < 2 {
+                reader::prepare_blocking(self, inputs.clone(), &root_dir, &mut reader_deadline)
+            } else {
+                Arc::new(Vec::new())
+            };
+            let (batch_inputs, search_policy, leases, faults, token, root_dir, root_guard) = (
+                inputs.clone(),
+                search_policy.clone(),
+                leases.clone(),
+                faults.clone(),
+                token.clone(),
+                root_dir.clone(),
+                root_guard.clone(),
+            );
+            result = self.run_blocking(move |store, cache| {
+                with_local_file_mutation_cache_reset(cache, || {
+                    capture_ingest_batch_with_reader_on_store(
+                        store,
+                        &batch_inputs,
+                        &search_policy,
+                        &leases,
+                        faults.as_ref(),
+                        &token,
+                        (&root_dir, root_guard.as_ref()),
+                        folds,
+                    )
+                })
+            });
+            if result.is_err() && completed.iter().any(Option::is_some) {
+                let error = Arc::new(result.unwrap_err());
+                result = Ok(indices
+                    .iter()
+                    .map(|_| Err(RuntimeError::CaptureBatchPass(error.clone())))
+                    .collect());
+            }
+            let Ok(items) = &mut result else {
+                break;
+            };
+            let mut retry_inputs = Vec::new();
+            let mut retry_indices = Vec::new();
+            for ((index, input), item) in indices
+                .into_iter()
+                .zip(inputs.iter())
+                .zip(std::mem::take(items))
+            {
+                if attempt < 2 && reader::is_stale(&item) {
+                    retry_inputs.push(input.clone());
+                    retry_indices.push(index);
+                } else {
+                    completed[index] = Some(item);
+                }
+            }
+            if retry_inputs.is_empty() {
+                result = Ok(completed
+                    .into_iter()
+                    .map(|item| item.expect("every capture item finished"))
+                    .collect());
+                break;
+            }
+            inputs = retry_inputs.into();
+            indices = retry_indices;
+        }
         #[cfg(feature = "fault-injection")]
         roundtrip.finish(if result.is_ok() { "returned" } else { "error" });
         result
@@ -1468,13 +1570,40 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<WriteResult, RuntimeError> {
-        let indexing = root_dir.map_or(CaptureIndexing::Skip, CaptureIndexing::ReadRoot);
-        self.run(move |store, cache| {
-            with_local_file_mutation_cache_reset(cache, || {
-                capture_ingest_on_store(store, &input, &indexing, &leases, faults.as_ref(), &token)
-            })
-        })
-        .await
+        let mut reader_deadline = None;
+        for attempt in 0..=2 {
+            let folds = if attempt < 2
+                && let Some(root) = root_dir.as_ref()
+            {
+                reader::prepare(self, Arc::from([input.clone()]), root, &mut reader_deadline).await
+            } else {
+                Arc::new(Vec::new())
+            };
+            let base = root_dir
+                .clone()
+                .map_or(CaptureIndexing::Skip, CaptureIndexing::ReadRoot);
+            let indexing = reader::indexing(base, root_dir.clone().unwrap_or_default(), folds);
+            let (input, leases, faults, token) =
+                (input.clone(), leases.clone(), faults.clone(), token.clone());
+            let result = self
+                .run(move |store, cache| {
+                    with_local_file_mutation_cache_reset(cache, || {
+                        capture_ingest_on_store(
+                            store,
+                            &input,
+                            &indexing,
+                            &leases,
+                            faults.as_ref(),
+                            &token,
+                        )
+                    })
+                })
+                .await;
+            if !reader::is_stale(&result) {
+                return result;
+            }
+        }
+        unreachable!()
     }
 
     /// Capture a binary file on the actor's single writer thread.
@@ -1742,6 +1871,7 @@ fn prepare_capture_recovery_in(
     tx: &Transaction<'_>,
     input: &CaptureIngest,
     object_id: &str,
+    indexing: &CaptureIndexing,
 ) -> Result<PreparedCaptureRecovery, RuntimeError> {
     let key = DocKey::new(&input.workspace_id, &input.version_id, object_id)?;
     let mut prepared = PreparedCaptureRecovery {
@@ -1750,6 +1880,18 @@ fn prepare_capture_recovery_in(
         preserve: false,
         authors: None,
     };
+    if let CaptureIndexing::Reader { folds, root, .. } = indexing
+        && let Some(fold) = folds
+            .iter()
+            .find(|fold| fold.key == key && fold.path == input.path)
+    {
+        if !reader::file_matches(root, input) {
+            return Err(reader::stale());
+        }
+        prepared
+            .lineage
+            .accept_outside_fold(tx, fold, &input.text)?;
+    }
     let Some(projection) = prepared.lineage.projection() else {
         return Ok(prepared);
     };
@@ -1846,7 +1988,7 @@ fn capture_ingest_in_tx(
             |workspace_id, version_id, object_id| {
                 ensure_capture_target_not_leased(tx, leases, workspace_id, version_id, object_id)?;
                 if may_have_ydoc_state {
-                    recovery = Some(prepare_capture_recovery_in(tx, input, object_id)?);
+                    recovery = Some(prepare_capture_recovery_in(tx, input, object_id, indexing)?);
                 }
                 admitted = true;
                 Ok::<_, RuntimeError>(())
@@ -1858,7 +2000,7 @@ fn capture_ingest_in_tx(
             |workspace_id, version_id, object_id| {
                 ensure_capture_target_not_leased(tx, leases, workspace_id, version_id, object_id)?;
                 if may_have_ydoc_state {
-                    recovery = Some(prepare_capture_recovery_in(tx, input, object_id)?);
+                    recovery = Some(prepare_capture_recovery_in(tx, input, object_id, indexing)?);
                 }
                 admitted = true;
                 Ok::<_, RuntimeError>(())
@@ -1970,7 +2112,8 @@ fn capture_ingest_in_tx(
     if !result.deduped {
         #[cfg(feature = "fault-injection")]
         let _search_phase = dohc_engine_storage::capture_phase::Measure::new("search");
-        match indexing {
+        match indexing.base() {
+            CaptureIndexing::Reader { .. } => unreachable!(),
             CaptureIndexing::Skip => {}
             CaptureIndexing::ReadRoot(root_dir) => upsert_file_search_index(
                 tx,
@@ -2050,6 +2193,7 @@ fn capture_ingest_in_tx(
     Ok(result)
 }
 
+#[cfg(test)]
 fn capture_ingest_batch_on_store(
     store: &mut EngineStore,
     inputs: &[CaptureIngest],
@@ -2058,6 +2202,29 @@ fn capture_ingest_batch_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
     workspace_root: (&std::path::Path, &dyn WorkspaceRootGuard),
+) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
+    capture_ingest_batch_with_reader_on_store(
+        store,
+        inputs,
+        search_policy,
+        leases,
+        faults,
+        token,
+        workspace_root,
+        Arc::new(Vec::new()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_ingest_batch_with_reader_on_store(
+    store: &mut EngineStore,
+    inputs: &[CaptureIngest],
+    search_policy: &Arc<SearchPolicySnapshot>,
+    leases: &LeaseRegistry,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+    workspace_root: (&std::path::Path, &dyn WorkspaceRootGuard),
+    folds: Arc<Vec<dohc_engine_collab::reader_resolver::PreparedFold>>,
 ) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
     #[cfg(feature = "fault-injection")]
     let mut phase = dohc_engine_storage::capture_phase::Phase::new(
@@ -2113,7 +2280,11 @@ fn capture_ingest_batch_on_store(
             return Err(RuntimeError::Cancelled);
         }
         validate_workspace_root(root_dir, Some(root_guard))?;
-        let indexing = CaptureIndexing::UseSnapshot(Arc::clone(search_policy));
+        let indexing = reader::indexing(
+            CaptureIndexing::UseSnapshot(Arc::clone(search_policy)),
+            root_dir.to_owned(),
+            folds.clone(),
+        );
 
         // Most startup batches are clean. Keep their database and FTS work in
         // one rollback scope instead of preparing and releasing a savepoint

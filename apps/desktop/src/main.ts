@@ -36,7 +36,7 @@ import {
 import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProtocol";
 import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
-import { ipcWireError, KEEP_COLLECTIONS_HERE, readError, withErrorWords } from "./ipc/errorWords";
+import { ipcWireError, readError, USE_THIS_COMPUTER, withErrorWords } from "./ipc/errorWords";
 import { assertRootNotPrivacyDenied, withPrivacyDenial } from "./workspaces/privacyDenial";
 import { onNetworkShare } from "./workspaces/networkShare";
 import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
@@ -146,6 +146,7 @@ import {
   Menu,
   nativeImage,
   nativeTheme,
+  Notification,
   powerMonitor,
   protocol,
   safeStorage,
@@ -238,6 +239,7 @@ import {
 } from "./quitGuard";
 import { decideNavigation } from "./security/electronSecurity";
 import { createDesktopTray } from "./window/desktopTray";
+import { linuxTrayShown } from "./window/linuxTrayShown";
 import { createDesktopWindows } from "./window/desktopWindows";
 import { renderHtmlToPdf } from "./window/documentPdfExport";
 import {
@@ -2745,6 +2747,9 @@ const activity = {
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.dispatchedAgentRun(lease.state.activity),
     ),
+  agentRunWorkspace: (runId: string) => workspaceAuthorities.workspaceIds().find((workspaceId) =>
+    withWorkspaceActivityState(workspaceId, (lease) => workspaceActivity.agentRun(lease.state.activity)?.agentRunId === runId),
+  ),
   engineCaptureFor: (workspaceId: string, expectedRootPath?: string) => {
     if (!findWorkspace(workspaceId)) return null;
     return withWorkspaceActivityState(workspaceId, (lease) =>
@@ -3554,6 +3559,15 @@ const chatDispatchService = createChatDispatchService({
   listOpenWorkspaces: openDispatchWorkspaces,
   listSyncWorkspaces: syncDispatchWorkspaces,
   chatStoreFor: linkedChatStoreFor,
+  startSelfTestThread: (workspace, input) => withWorkspaceAttachmentAsync(workspace, async (lease) => {
+    const started = await chatWrites.startThread({ workspaceId: workspace.workspaceId, store: linkedChatStoreFor(lease) }, {
+      ...input,
+      // CLI origin keeps this person's test message from starting an agent run.
+      writer: { via: "cli", actor: "human" },
+      resolveAttachments: async () => [],
+    });
+    return started.thread.id;
+  }),
   dispatchStoreFor: (workspace) =>
     agentDispatchStoreHandleFor(workspace).store,
   readRunnerSettings: async () =>
@@ -4723,7 +4737,7 @@ function collectionsHolderCheck(workspaceId: string): CollectionsHolderCheck {
 // that asked. Cancel is the default.
 async function confirmKeepCollections(window: BrowserWindow | null, question: KeepQuestion): Promise<boolean> {
   const { message, detail } = keepQuestionWords(question);
-  const options = { type: "warning" as const, message, detail, buttons: [KEEP_COLLECTIONS_HERE, "Cancel"], defaultId: 1, cancelId: 1, noLink: true };
+  const options = { type: "warning" as const, message, detail, buttons: [USE_THIS_COMPUTER, "Cancel"], defaultId: 1, cancelId: 1, noLink: true };
   const { response } = window ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
   return response === 0;
 }
@@ -5192,11 +5206,12 @@ function broadcastUpdateState(state: PublicUpdateState): void {
   }
 }
 
-const { refreshDispatchTray, refreshTrayIcon, dispatchKeepsRunning } = createDesktopTray<
+const { refreshDispatchTray, refreshTrayIcon, dispatchKeepsRunning, noticeRunningInBackground } = createDesktopTray<
   ReturnType<typeof nativeImage.createFromPath>,
   ReturnType<typeof Menu.buildFromTemplate>
 >({
-  app, process, Menu, nativeImage, nativeTheme, Tray,
+  app, process, Menu, nativeImage, nativeTheme, Tray, Notification, linuxTrayShown,
+  hasWindow: () => BrowserWindow.getAllWindows().length !== 0,
   moduleDirectory: import.meta.dirname,
   readCachedUserSettingsFile, stateDir, chatDispatchService, showOrCreateMainWindow,
   runningSchedules: () => automationScheduler.runningSchedules(),
@@ -5936,6 +5951,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     },
     refreshTray: refreshDispatchTray,
     releaseIdleWorkspaces,
+    noticeRunningInBackground,
     reportTrayFailure: (error) => console.error("[desktop] dispatch tray:", error),
     warmCredentials: warmCredentialCache,
     reconcileCloud: () => { activity.reconcileCloud(); },

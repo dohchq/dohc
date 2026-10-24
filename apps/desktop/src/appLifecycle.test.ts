@@ -101,6 +101,7 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
       },
       refreshTray: vi.fn(async () => { log.push("tray"); return false; }),
       releaseIdleWorkspaces: vi.fn(async () => { log.push("release idle"); }),
+      noticeRunningInBackground: vi.fn(async () => { log.push("background notice"); }),
       reportTrayFailure: vi.fn(),
       warmCredentials: vi.fn(async () => { log.push("credentials"); }),
       reconcileCloud: vi.fn(() => { log.push("cloud"); }),
@@ -1155,6 +1156,22 @@ describe("desktop shutdown", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(f.app.quit).toHaveBeenCalledTimes(enabled ? 0 : 1);
     expect(f.dependencies.services.releaseIdleWorkspaces, "staying closes the workspaces nothing uses").toHaveBeenCalledTimes(enabled ? 1 : 0);
+    expect(f.dependencies.services.noticeRunningInBackground, "staying says so").toHaveBeenCalledTimes(enabled ? 1 : 0);
+  });
+
+  it("reports a failed background notice and still closes idle workspaces", async () => {
+    vi.useFakeTimers();
+    const failure = new Error("notice");
+    const f = fixture((d) => {
+      d.services.refreshTray = async () => true;
+      d.services.noticeRunningInBackground = vi.fn(async () => { throw failure; });
+    });
+    await boot(f);
+    f.app.emit("window-all-closed");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.dependencies.services.reportTrayFailure).toHaveBeenCalledWith(failure);
+    expect(f.dependencies.services.releaseIdleWorkspaces).toHaveBeenCalledOnce();
+    expect(f.app.quit).not.toHaveBeenCalled();
   });
 
   it("quits once the last reason to run without windows goes, and not while a window is open", async () => {
