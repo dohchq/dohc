@@ -2004,7 +2004,7 @@ describe("CLI socket server", () => {
     const lost = { ...ran, claimId: "atc_lost", state: "failed" as const, writes: [], unsentChangesLost: true as const,
       trigger: { kind: null, recordId: null, by: null, sharedAuthor: null, depth: 0 },
       error: "Your server lost its copy of this workspace and may not have sent this run's latest changes. Check the records it changed." };
-    const pages = new Map([[undefined, { runs: [ran], next: "lost:1:atc_lost" }], ["lost:1:atc_lost", { runs: [lost], next: null }]]);
+    const pages = new Map([[undefined, { runs: [ran], next: "lost:2:1:atc_lost" }], ["lost:2:1:atc_lost", { runs: [lost], next: null }]]);
     context.automations = {
       automationIdAt: vi.fn(async (_collectionPath: string, id: string) => `collection:object-tasks#${id}`),
       runs: vi.fn(), run: vi.fn(), retry: vi.fn(),
@@ -2014,11 +2014,11 @@ describe("CLI socket server", () => {
     const args = { cwd: workspaceRoot, actor: "agent" as const, collectionPath: "tasks", automation: "stamp", server: true };
     const fields = { error: lost.error, createdAtMs: 3, updatedAtMs: 4, trigger: lost.trigger, definitionChanged: false, neverStarted: false,
       chainStopped: false, undone: false };
-    await expect(invoke("automationRuns", args)).resolves.toMatchObject({ ok: true, runs: [{ run: "atc_server", changes: 1 }], next: "lost:1:atc_lost" });
-    await expect(invoke("automationRuns", { ...args, page: "lost:1:atc_lost" })).resolves.toEqual({
+    await expect(invoke("automationRuns", args)).resolves.toMatchObject({ ok: true, runs: [{ run: "atc_server", changes: 1 }], next: "lost:2:1:atc_lost" });
+    await expect(invoke("automationRuns", { ...args, page: "lost:2:1:atc_lost" })).resolves.toEqual({
       ok: true, runs: [{ run: "atc_lost", state: "failed", ...fields, unsentChangesLost: true, changes: 0 }], next: null,
     });
-    expect(context.automations.serverRuns).toHaveBeenLastCalledWith("collection:object-tasks#stamp", "lost:1:atc_lost");
+    expect(context.automations.serverRuns).toHaveBeenLastCalledWith("collection:object-tasks#stamp", "lost:2:1:atc_lost");
     await expect(invoke("automationRun", { ...args, run: "atc_lost" })).resolves.toEqual({
       ok: true, run: { run: "atc_lost", state: "failed", ...fields, unsentChangesLost: true, server: true, changes: [] },
     });

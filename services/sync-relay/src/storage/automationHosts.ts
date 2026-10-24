@@ -195,8 +195,6 @@ export interface LostAutomationServerRun {
   startedAtMs: number;
   /** Its changes from this time on may not have reached the relay. */
   unsentSinceMs: number;
-  /** When the last copy that lost it was replaced. */
-  lostAtMs: number;
 }
 
 /** Before a run's first change to the copy since the relay last had all of them. */
@@ -279,7 +277,7 @@ export function lostAutomationServerRuns(storage: StorageContext, input: {
 }): LostAutomationServerRun[] {
   const after = input.after ?? null;
   return storage.db.prepare(
-    `SELECT claim_id, min(started_at_ms) AS first_started_at_ms, min(unsent_since_ms) AS first_unsent_since_ms, max(lost_at_ms) AS last_lost_at_ms
+    `SELECT claim_id, min(started_at_ms) AS first_started_at_ms, min(unsent_since_ms) AS first_unsent_since_ms
      FROM sync_relay_automation_server_unsent_runs
      WHERE workspace_id = ? AND lost_at_ms > ? AND automation_id = ? AND (? IS NULL OR claim_id = ?)
      GROUP BY claim_id
@@ -289,7 +287,7 @@ export function lostAutomationServerRuns(storage: StorageContext, input: {
     after === null ? null : 1, after?.startedAtMs ?? null, after?.claimId ?? null, input.limit)
     .map((row) => ({
       claimId: String(row.claim_id), startedAtMs: Number(row.first_started_at_ms),
-      unsentSinceMs: Number(row.first_unsent_since_ms), lostAtMs: Number(row.last_lost_at_ms),
+      unsentSinceMs: Number(row.first_unsent_since_ms),
     }));
 }
 
