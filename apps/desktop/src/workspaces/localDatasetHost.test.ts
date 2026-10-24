@@ -265,7 +265,7 @@ describe("local dataset owner adapter", () => {
     expect(restarted.host.list().datasets).toEqual([]);
     await expect(activate(restarted.host)).rejects.toThrow("deleted");
   });
-  it.each([115, 141])("restores a recovery file in a long workspace folder (%i characters)", async length => {
+  it.each([115, 141, 153])("restores a recovery file in a long workspace folder (%i characters)", async length => {
     const parent = await mkdtemp(join(tmpdir(), "dohc-recovery-")); roots.push(parent);
     const sourceRoot = join(parent, "s".repeat(length - parent.length - 1));
     const workspaceRoot = join(parent, "w".repeat(length - parent.length - 1));
