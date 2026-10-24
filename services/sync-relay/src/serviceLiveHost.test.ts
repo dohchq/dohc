@@ -2466,7 +2466,10 @@ it.each(["cut", "lost"] as const)("drops every owner past the window of a page w
 // the ended hold is freed within a pull or two, and none of those passes
 // pushes.
 it("frees an ended hold while another document keeps its workspace from being ready, without pushing", async () => {
-  const o = await emptyServiceHost(), workspaces = [o.workspace], driver = heldDriver();
+  // The pulls when the hold ended, and when a pass freed it, counted as that pass frees it.
+  let ended: number | undefined, freed: number | undefined;
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  const driver = heldDriver(held => {if (ended !== undefined && freed === undefined && held.releasedHold(o.sibling) === undefined) freed = o.pullCount();});
   await o.host.update({workspaces, documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -2477,10 +2480,12 @@ it("frees an ended hold while another document keeps its workspace from being re
   // The other document never finishes activating, so its workspace is not ready from here on.
   await o.host.update({workspaces, documents: [o.sibling, o.other], ...stay});
   const pushes = () => o.client().sendRequest.mock.calls.filter(call => ((call as unknown[])[0] as {method: string}).method === "sync.push").length;
-  const pushed = pushes(), ended = o.pullCount();
+  const pushed = pushes();
+  ended = o.pullCount();
   o.replies.pass = {};
-  await vi.waitFor(() => expect(driver()!.releasedHold(o.sibling)).toBeUndefined());
-  expect(o.pullCount() - ended).toBeLessThanOrEqual(2);
+  await vi.waitFor(() => expect(freed).toBeDefined());
+  expect(driver()!.releasedHold(o.sibling)).toBeUndefined();
+  expect(freed! - ended).toBeLessThanOrEqual(2);
   await o.nextPull();
   expect(pushes()).toBe(pushed);
 });

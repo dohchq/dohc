@@ -10038,6 +10038,44 @@ mod tests {
                 "{sql}: {plan:#?}"
             );
         }
+        // The activation triggers' walk over successors, from an inserted or
+        // deleted activation, or from an updated one's old and new rows: it
+        // scans only its own queue, and searches activations by the
+        // successor index.
+        let followers = |seeds: &str| {
+            format!(
+                "{generations} (WITH RECURSIVE followers(namespace,activation_id) AS ({seeds} \
+                 UNION SELECT a.relay_database_namespace,a.activation_id FROM live_owner_activations a \
+                   JOIN followers f ON a.relay_database_namespace=f.namespace AND a.predecessor_activation_id=f.activation_id) \
+                 SELECT a.workspace_id,a.main_version_id,a.object_id FROM live_owner_activations a \
+                   JOIN followers f ON a.relay_database_namespace=f.namespace AND a.predecessor_activation_id=f.activation_id)"
+            )
+        };
+        for sql in [
+            followers("SELECT ?1,?2"),
+            followers("SELECT ?1,?2 UNION SELECT ?2,?1"),
+        ] {
+            let plan = query_plan(&conn, &sql);
+            assert!(
+                plan.iter()
+                    .any(|detail| detail.starts_with("SEARCH released_tail_generations")),
+                "{sql}: {plan:#?}"
+            );
+            assert_eq!(
+                plan.iter()
+                    .filter(|detail| detail
+                        .starts_with("SEARCH a USING INDEX live_owner_activations_successor"))
+                    .count(),
+                2,
+                "{sql}: {plan:#?}"
+            );
+            assert!(
+                !plan.iter().any(|detail| detail.starts_with("SCAN")
+                    && !detail.starts_with("SCAN f")
+                    && !detail.starts_with("SCAN CONSTANT ROW")),
+                "{sql}: {plan:#?}"
+            );
+        }
         for gate in [
             "SELECT 1 FROM owner_ydoc_outbox_entries WHERE update_digest=?1",
             "SELECT 1 FROM owner_ydoc_outbox_entries WHERE terminal_blob_digest=?1",
