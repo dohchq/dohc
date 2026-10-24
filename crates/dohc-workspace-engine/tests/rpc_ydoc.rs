@@ -3356,6 +3356,73 @@ async fn a_rival_write_on_a_live_session_path_refuses_session_busy() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_seed_past_the_inband_cap_opens_as_a_blob_within_the_client_limit() {
+    // A note past 48 KiB used to refuse every open without a lineage,
+    // including each reopen after a settled close pruned it, so it was never
+    // live again (#2521).
+    let scratch = ScratchDir::new().expect("scratch");
+    let text = "A paragraph of a long note, written outside dohc.\n\n".repeat(1_100);
+    assert!(text.len() > 48 * 1024 && text.len() < 64 * 1024);
+    write_file(scratch.path(), "notes/long.md", text.as_bytes());
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let workspace_id = "ws-rpc-ydoc-large-seed";
+    let handle = open_workspace(&transport, &scratch, workspace_id, 1).await;
+    let open = |limit: Option<usize>| {
+        let mut params = json!({
+            "versionId": "main",
+            "path": "notes/long.md",
+            "contentKind": "richdoc"
+        });
+        if let Some(limit) = limit {
+            params["seedLimitBytes"] = json!(limit);
+        }
+        params
+    };
+
+    for (id, limit) in [(2, None), (3, Some(text.len() - 1))] {
+        let refused = call_error(&transport, &handle, id, "ydoc.open", open(limit)).await;
+        assert_eq!(refused.code, ErrorCode::InvalidParams);
+        assert_eq!(refused.message, "ydoc-seed-too-large");
+    }
+
+    let opened = call(&transport, &handle, 4, "ydoc.open", open(Some(64 * 1024))).await;
+    assert_eq!(opened["lineage"], json!("absent"));
+    assert_eq!(opened["head"], json!("present"));
+    assert!(opened.get("seedContent").is_none());
+    assert!(opened["seedClientId"].is_u64());
+    let sha256 = dohc_engine_storage::hex_sha256(text.as_bytes());
+    assert_eq!(opened["seedBlobSha256"], json!(sha256));
+
+    let seed = service_call_with_busy_retry(
+        service.as_ref(),
+        RequestContext::unbounded().with_capability("blobs"),
+        request(
+            5,
+            "versionedText.readBlob",
+            Some(handle.clone()),
+            json!({ "workspaceId": workspace_id, "sha256": sha256 }),
+        ),
+    )
+    .await
+    .expect("the seed blob reads");
+    assert_eq!(seed.response.result["bytesBase64"], Value::Null);
+    let egress = seed.blob_egress.expect("over-cap seed egress");
+    assert_eq!(egress.bytes, text.as_bytes());
+
+    call(
+        &transport,
+        &handle,
+        6,
+        "ydoc.evict",
+        json!({ "sessionId": opened["sessionId"] }),
+    )
+    .await;
+    call(&transport, &handle, 7, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_content() {
     // AUDIT-SILENTSAVE. Three dogfood journeys watched a doc read "Saved" in
     // the editor while its.md sat at zero bytes: the settle refused

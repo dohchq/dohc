@@ -79,6 +79,11 @@ vi.mock("./collab/useEngineDoc", () => ({
     return typeof current === "function" ? current(input) : current;
   },
 }));
+// The record's file check runs in a worker and has its own tests
+// (recordFieldWrites.test.tsx); here every record is clear.
+vi.mock("./collections/recordSourceCheck", () => ({
+  useRecordSourceCheck: () => ({ state: "clear", contentHash: "c".repeat(64) }),
+}));
 
 function engineDocState(
   partial: Partial<Pick<UseEngineDoc, "available" | "opening" | "doc" | "saveState" | "saveError" | "readOnlyWhileEditing" | "deletedWhileEditing">>,

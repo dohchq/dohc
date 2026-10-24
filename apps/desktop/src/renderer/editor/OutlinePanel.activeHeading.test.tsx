@@ -3,7 +3,7 @@ import { Profiler } from "react";
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Editor } from "@tiptap/core";
-import { OUTLINE_GEOMETRY_HOT_MS, OutlinePanel } from "./OutlinePanel";
+import { OutlinePanel } from "./OutlinePanel";
 import type { OutlineHeading } from "./outline";
 
 type FrameCallback = (time: number) => void;
@@ -122,29 +122,29 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-type HeadingTop = number | "throw";
+const DEFAULT_HEADINGS: OutlineHeading[] = [
+  { level: 1, text: "Intro", pos: 1 },
+  { level: 2, text: "Plan", pos: 10 },
+  { level: 2, text: "Review", pos: 20 },
+  { level: 2, text: "Done", pos: 30 },
+];
 
-function resolveActiveHeadingByFullScan(
-  tops: readonly number[],
-  scrollTop: number,
-  readingOffset: number,
-): number {
-  let active = 0;
-  for (let index = 0; index < tops.length; index += 1) {
-    if (tops[index]! <= scrollTop + readingOffset) active = index;
-    else break;
-  }
-  return active;
-}
-
-function renderActiveHeadingHarness(initialTops: readonly number[]) {
-  let headings: OutlineHeading[] = [
-    { level: 1, text: "Intro", pos: 1 },
-    { level: 2, text: "Plan", pos: 10 },
-    { level: 2, text: "Review", pos: 20 },
-    { level: 2, text: "Done", pos: 30 },
-  ].slice(0, initialTops.length);
-  let tops: HeadingTop[] = [...initialTops];
+// `tops` place each heading in the scroller's content, in pixels. The
+// editor's posAtCoords answers with a position inside the last heading at or
+// above the asked line, as a real hit test would. With margin hits on, a line
+// in the 24 px above a heading answers with that heading's start instead.
+function renderActiveHeadingHarness(
+  initialTops: readonly number[],
+  initialHeadings: readonly OutlineHeading[] = DEFAULT_HEADINGS.slice(0, initialTops.length),
+) {
+  let headings: OutlineHeading[] = [...initialHeadings];
+  let tops: number[] = [...initialTops];
+  let editorTop = 0;
+  let editorHeight = 1_000;
+  let unresolved: boolean | "throw" = false;
+  let marginHits = false;
+  let hitHeading: number | null = null;
+  const folded = new Set<number>();
   const updateListeners = new Set<() => void>();
   const transactionListeners = new Set<TransactionCallback>();
   const scroller = document.createElement("div");
@@ -156,35 +156,55 @@ function renderActiveHeadingHarness(initialTops: readonly number[]) {
     clientHeight: { configurable: true, value: 200 },
     scrollHeight: { configurable: true, value: 1_000 },
   });
-  scroller.getBoundingClientRect = () =>
+  const rect = (top: number, height: number) =>
     ({
-      bottom: 300,
-      height: 200,
+      bottom: top + height,
+      height,
       left: 0,
       right: 600,
-      top: 100,
+      top,
       width: 600,
       x: 0,
-      y: 100,
+      y: top,
       toJSON: () => {},
     }) satisfies DOMRect;
+  scroller.getBoundingClientRect = () => rect(100, 200);
+  editorDom.getBoundingClientRect = () =>
+    rect(100 + editorTop - scroller.scrollTop, editorHeight);
   editorContainer.append(editorDom, reactMount);
   scroller.appendChild(editorContainer);
   document.body.appendChild(scroller);
   mountedScrollers.add(scroller);
 
-  const coordsAtPos = vi.fn((pos: number) => {
-    const top = tops[headings.findIndex((heading) => heading.pos === pos)] ?? 0;
-    if (top === "throw") throw new RangeError("position is not rendered");
-    return {
-      bottom: 0,
-      left: 0,
-      right: 0,
-      top: 100 + top - scroller.scrollTop,
-    };
+  const posAtCoords = vi.fn(({ top }: { left: number; top: number }) => {
+    if (unresolved === "throw") throw new RangeError("position is not rendered");
+    if (unresolved) return null;
+    if (hitHeading !== null) {
+      const pos = headings[hitHeading]!.pos + 1;
+      return { pos, inside: pos - 1 };
+    }
+    const contentTop = top - 100 + scroller.scrollTop;
+    let reached = -1;
+    for (const [index, headingTop] of tops.entries()) {
+      if (headingTop <= contentTop) reached = index;
+    }
+    const next = headings[reached + 1];
+    if (marginHits && next && tops[reached + 1]! - contentTop <= 24) {
+      return { pos: next.pos, inside: -1 };
+    }
+    const pos = reached < 0 ? 0 : headings[reached]!.pos + 1;
+    return { pos, inside: pos - 1 };
   });
+  const nodeDOM = (pos: number) => {
+    const index = headings.findIndex((heading) => heading.pos === pos);
+    if (index < 0) return null;
+    const element = document.createElement("h2");
+    element.getBoundingClientRect = () =>
+      folded.has(index) ? rect(0, 0) : rect(100 + tops[index]! - scroller.scrollTop, 30);
+    return element;
+  };
   const doc = {
-    content: { size: 1 },
+    content: { size: 1_000 },
     descendants(callback: (node: {
       type: { name: string };
       attrs: { level: number };
@@ -205,7 +225,7 @@ function renderActiveHeadingHarness(initialTops: readonly number[]) {
   };
   const editor = {
     state: { doc },
-    view: { coordsAtPos, dom: editorDom },
+    view: { posAtCoords, nodeDOM, dom: editorDom, state: { doc } },
     on(event: string, callback: () => void) {
       if (event === "update") updateListeners.add(callback);
       if (event === "transaction") {
@@ -230,7 +250,7 @@ function renderActiveHeadingHarness(initialTops: readonly number[]) {
   act(flushFrames);
 
   return {
-    coordsAtPos,
+    posAtCoords,
     renderCommits,
     emitUpdate(flush = true) {
       act(() => {
@@ -373,111 +393,196 @@ function renderActiveHeadingHarness(initialTops: readonly number[]) {
       });
       act(flushFrames);
     },
-    setTops(next: readonly HeadingTop[]) {
+    setTops(next: readonly number[]) {
       tops = [...next];
     },
-    replaceHeadings(next: readonly OutlineHeading[], nextTops: readonly HeadingTop[]) {
+    setEditorBox(top: number, height: number) {
+      editorTop = top;
+      editorHeight = height;
+    },
+    setUnresolved(next: boolean | "throw") {
+      unresolved = next;
+    },
+    setMarginHits(next: boolean) {
+      marginHits = next;
+    },
+    setHitHeading(index: number | null) {
+      hitHeading = index;
+    },
+    fold(index: number) {
+      folded.add(index);
+    },
+    replaceHeadings(next: readonly OutlineHeading[], nextTops: readonly number[]) {
       headings = [...next];
       tops = [...nextTops];
     },
     flushFrames() {
       act(flushFrames);
     },
-    advanceTimers(milliseconds: number) {
-      act(() => vi.advanceTimersByTime(milliseconds));
-      act(flushFrames);
-    },
   };
 }
 
-describe("OutlinePanel active heading measurements", () => {
+describe("OutlinePanel active heading", () => {
   it("keeps the active identity referentially stable when frames resolve the same heading", () => {
     const harness = renderActiveHeadingHarness([0, 500, 900]);
-    harness.coordsAtPos.mockClear();
+    expect(harness.activeText()).toBe("Intro");
+    harness.posAtCoords.mockClear();
     harness.renderCommits.mockClear();
-    harness.advanceTimers(OUTLINE_GEOMETRY_HOT_MS + 1);
 
     harness.scrollTo(10);
-    expect(harness.coordsAtPos).toHaveBeenCalledTimes(3);
+    expect(harness.posAtCoords).toHaveBeenCalledTimes(1);
     expect(harness.renderCommits).not.toHaveBeenCalled();
 
-    harness.coordsAtPos.mockClear();
     harness.scrollTo(20);
-    expect(harness.coordsAtPos).not.toHaveBeenCalled();
     expect(harness.renderCommits).not.toHaveBeenCalled();
   });
 
-  it("remeasures once at gesture start, then reads no layout on cold scroll frames", () => {
+  it("reads one position per frame, however many headings the note has", () => {
+    const headings = Array.from({ length: 400 }, (_, index) => ({
+      level: 2,
+      text: `Section ${index}`,
+      pos: index * 10 + 1,
+    }));
+    const harness = renderActiveHeadingHarness(
+      headings.map((_, index) => index * 100),
+      headings,
+    );
+    harness.setEditorBox(0, 40_000);
+    harness.posAtCoords.mockClear();
+
+    harness.scrollTo(25_000);
+
+    expect(harness.activeText()).toBe("Section 250");
+    expect(harness.posAtCoords).toHaveBeenCalledTimes(1);
+  });
+
+  it("follows the reading line as the note scrolls", () => {
     const harness = renderActiveHeadingHarness([0, 200, 500]);
-    expect(harness.coordsAtPos).toHaveBeenCalledTimes(3);
-    harness.coordsAtPos.mockClear();
-    harness.advanceTimers(OUTLINE_GEOMETRY_HOT_MS + 1);
+    expect(harness.activeText()).toBe("Intro");
 
     harness.scrollTo(250);
-
     expect(harness.activeText()).toBe("Plan");
-    expect(harness.coordsAtPos.mock.calls.map(([pos]) => pos)).toEqual([
-      1,
-      10,
-      20,
-    ]);
-    harness.coordsAtPos.mockClear();
 
-    harness.scrollTo(350);
     harness.scrollTo(430);
-
     expect(harness.activeText()).toBe("Review");
-    expect(harness.coordsAtPos).not.toHaveBeenCalled();
 
-    harness.advanceTimers(OUTLINE_GEOMETRY_HOT_MS + 1);
-    harness.scrollTo(250);
-    expect(harness.coordsAtPos.mock.calls.map(([pos]) => pos)).toEqual([
-      1,
-      10,
-      20,
-    ]);
+    harness.scrollTo(0);
+    expect(harness.activeText()).toBe("Intro");
   });
 
-  it("measures hot scroll frames directly, then settles once and re-arms the cache", () => {
+  it("uses the first heading above the editor and the last below it", () => {
     const harness = renderActiveHeadingHarness([0, 200, 400]);
-    harness.advanceTimers(OUTLINE_GEOMETRY_HOT_MS + 1);
-    harness.scrollTo(350);
+    harness.setEditorBox(300, 600);
+    harness.posAtCoords.mockClear();
+
+    harness.scrollTo(100);
+    expect(harness.activeText()).toBe("Intro");
+
+    harness.scrollTo(2_000);
     expect(harness.activeText()).toBe("Review");
-    harness.coordsAtPos.mockClear();
-
-    harness.setTops([0, 800, 1_100]);
-    harness.mutateEditorDom();
-    expect(harness.activeText()).toBe("Intro");
-    expect(harness.coordsAtPos).toHaveBeenCalledTimes(3);
-    harness.coordsAtPos.mockClear();
-
-    harness.advanceTimers(OUTLINE_GEOMETRY_HOT_MS / 2);
-    harness.scrollTo(350);
-    expect(harness.coordsAtPos).toHaveBeenCalledTimes(3);
-    harness.coordsAtPos.mockClear();
-
-    harness.advanceTimers(OUTLINE_GEOMETRY_HOT_MS / 2);
-    expect(harness.coordsAtPos).toHaveBeenCalledTimes(3);
-    harness.coordsAtPos.mockClear();
-
-    harness.scrollTo(360);
-    expect(harness.activeText()).toBe("Intro");
-    expect(harness.coordsAtPos).not.toHaveBeenCalled();
+    expect(harness.posAtCoords).not.toHaveBeenCalled();
   });
 
-  it("recomputes offsets after a document update before resolving the active heading", () => {
+  it("keeps the active heading when the reading line resolves to no position", () => {
     const harness = renderActiveHeadingHarness([0, 200, 400]);
     harness.scrollTo(350);
     expect(harness.activeText()).toBe("Review");
-    harness.coordsAtPos.mockClear();
+
+    harness.setUnresolved(true);
+    harness.scrollTo(10);
+    expect(harness.activeText()).toBe("Review");
+
+    harness.setUnresolved("throw");
+    harness.scrollTo(20);
+    expect(harness.activeText()).toBe("Review");
+  });
+
+  it("reaches a heading only once its top crosses the reading line", () => {
+    const harness = renderActiveHeadingHarness([0, 200, 400]);
+    harness.setMarginHits(true);
+
+    // The line sits 10 px above Plan, where a hit resolves to Plan's start.
+    harness.scrollTo(118);
+    expect(harness.activeText()).toBe("Intro");
+
+    harness.scrollTo(130);
+    expect(harness.activeText()).toBe("Plan");
+  });
+
+  it("takes the last reached heading of a row, as in document order", () => {
+    // Plan and Review sit side by side in one table row; the hit lands in
+    // Plan's cell.
+    const harness = renderActiveHeadingHarness([0, 200, 200]);
+    harness.setHitHeading(1);
+
+    harness.scrollTo(150);
+
+    expect(harness.activeText()).toBe("Review");
+  });
+
+  it("walks back past every heading of a cell the line has not reached", () => {
+    // Plan and Review sit low in a row's first cell; the hit lands in the
+    // second cell, after both in document order.
+    const harness = renderActiveHeadingHarness([0, 300, 400]);
+    harness.setHitHeading(2);
+
+    harness.scrollTo(100);
+
+    expect(harness.activeText()).toBe("Intro");
+  });
+
+  it("walks back past a folded heading to the last drawn one", () => {
+    // Plan is folded away; Review and Done sit low in a row's first cell and
+    // the hit lands in the second cell.
+    const harness = renderActiveHeadingHarness([0, 0, 300, 400]);
+    harness.fold(1);
+    harness.setHitHeading(3);
+
+    harness.scrollTo(100);
+
+    expect(harness.activeText()).toBe("Intro");
+  });
+
+  it("passes over a folded heading between headings of a row", () => {
+    // Plan and Done share a row; Review, between them, is folded away.
+    const harness = renderActiveHeadingHarness([0, 200, 0, 200]);
+    harness.fold(2);
+    harness.setHitHeading(1);
+
+    harness.scrollTo(150);
+
+    expect(harness.activeText()).toBe("Done");
+  });
+
+  it("does not redraw the list when an edit only moves later headings", () => {
+    const harness = renderActiveHeadingHarness([0, 200, 400]);
+    harness.scrollTo(350);
+    expect(harness.activeText()).toBe("Review");
+    harness.renderCommits.mockClear();
+
+    harness.replaceHeadings(
+      [
+        { level: 1, text: "Intro", pos: 1 },
+        { level: 2, text: "Plan", pos: 11 },
+        { level: 2, text: "Review", pos: 21 },
+      ],
+      [0, 200, 400],
+    );
+    harness.emitDocumentTransaction({ mapPosition: (pos) => pos >= 5 ? pos + 1 : pos });
+
+    expect(harness.renderCommits).not.toHaveBeenCalled();
+    expect(harness.activeText()).toBe("Review");
+  });
+
+  it("recomputes after a document update before resolving the active heading", () => {
+    const harness = renderActiveHeadingHarness([0, 200, 400]);
+    harness.scrollTo(350);
+    expect(harness.activeText()).toBe("Review");
 
     harness.setTops([0, 600, 900]);
     harness.emitUpdate();
 
-    const expected = resolveActiveHeadingByFullScan([0, 600, 900], 350, 72);
-    expect(expected).toBe(0);
-    expect(harness.activeText(), "skip the update invalidation and the stale cache keeps Review active.").toBe(["Intro", "Plan", "Review"][expected]);
-    expect(harness.coordsAtPos).toHaveBeenCalledTimes(3);
+    expect(harness.activeText()).toBe("Intro");
   });
 
   it("uses document-changing transactions even when update is suppressed", () => {
@@ -521,7 +626,7 @@ describe("OutlinePanel active heading measurements", () => {
     expect(harness.activeText()).toBe("Review");
   });
 
-  it("blanks a removed active position until the new geometry lands", () => {
+  it("blanks a removed active position until the next frame resolves it", () => {
     const harness = renderActiveHeadingHarness([0, 200, 400, 700]);
     harness.scrollTo(350);
     expect(harness.activeText()).toBe("Review");
@@ -543,37 +648,18 @@ describe("OutlinePanel active heading measurements", () => {
     expect(harness.activeText()).toBe("Done");
   });
 
-  it("matches a full scan when measured positions have a gap or fail", () => {
-    const harness = renderActiveHeadingHarness([0, 200, 400, 600]);
-    harness.scrollTo(350);
-    expect(harness.activeText()).toBe("Review");
-
-    const outOfOrderTops = [0, 600, 300, 900];
-    harness.setTops(outOfOrderTops);
-    harness.emitUpdate();
-    expect(resolveActiveHeadingByFullScan(outOfOrderTops, 350, 72)).toBe(0);
-    expect(harness.activeText(), "drop the nondecreasing clamp and binary search skips the gap.").toBe("Intro");
-
-    harness.setTops([0, 200, "throw", 600]);
-    harness.scrollTo(500);
-    harness.emitUpdate();
-    expect(harness.activeText()).toBe("Plan");
-  });
-
-  it("recomputes offsets after a resize", () => {
+  it("recomputes after a resize", () => {
     const harness = renderActiveHeadingHarness([0, 200, 400]);
     harness.scrollTo(350);
     expect(harness.activeText()).toBe("Review");
-    harness.coordsAtPos.mockClear();
 
     harness.setTops([0, 700, 1_000]);
     harness.resize();
 
     expect(harness.activeText()).toBe("Intro");
-    expect(harness.coordsAtPos).toHaveBeenCalledTimes(3);
   });
 
-  it("invalidates on window resize, media load, and async renderer changes", () => {
+  it("recomputes on window resize, media load, and async renderer changes", () => {
     const harness = renderActiveHeadingHarness([0, 200, 400]);
     harness.scrollTo(350);
     expect(harness.activeText()).toBe("Review");
@@ -589,22 +675,6 @@ describe("OutlinePanel active heading measurements", () => {
     harness.setTops([0, 800, 1_100]);
     harness.mutateEditorDom();
     expect(harness.activeText()).toBe("Intro");
-  });
-
-  it("drops stale geometry as soon as a transition mutation arrives", () => {
-    const harness = renderActiveHeadingHarness([0, 200, 400]);
-    harness.scrollTo(350);
-    expect(harness.activeText()).toBe("Review");
-    harness.coordsAtPos.mockClear();
-
-    harness.setTops([0, 800, 1_100]);
-    harness.mutateEditorDom();
-    expect(harness.coordsAtPos).toHaveBeenCalledTimes(3);
-    harness.coordsAtPos.mockClear();
-    harness.scrollTo(350);
-
-    expect(harness.activeText()).toBe("Intro");
-    expect(harness.coordsAtPos).toHaveBeenCalledTimes(3);
   });
 
   it("observes details toggles and device-pixel-ratio changes", () => {
@@ -641,19 +711,14 @@ describe("OutlinePanel active heading measurements", () => {
     expect(harness.activeText()).toBe("Intro");
   });
 
-  it("corrects an unobservable idle layout shift on the next gesture's first frame", () => {
+  it("corrects an unobserved layout shift on the next scroll frame", () => {
     const harness = renderActiveHeadingHarness([0, 200, 400]);
     harness.scrollTo(350);
     expect(harness.activeText()).toBe("Review");
-    harness.coordsAtPos.mockClear();
 
     harness.setTops([0, 800, 1_100]);
-    harness.advanceTimers(OUTLINE_GEOMETRY_HOT_MS + 1);
-
-    expect(harness.coordsAtPos).not.toHaveBeenCalled();
     harness.scrollTo(351);
 
-    expect(harness.activeText(), "remove the gesture-start remeasure and the stale cache keeps Review active on this frame instead of correcting the idle shift.").toBe("Intro");
-    expect(harness.coordsAtPos).toHaveBeenCalledTimes(3);
+    expect(harness.activeText()).toBe("Intro");
   });
 });

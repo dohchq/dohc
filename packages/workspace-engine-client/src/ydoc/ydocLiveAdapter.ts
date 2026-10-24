@@ -20,6 +20,10 @@ import {
 } from "../live/daemonLiveAdapter";
 import type { Event, Request, Response, WorkspaceHandle } from "../protocol";
 import {
+  VERSIONED_METHOD,
+  decodeVersionedResult,
+} from "../versioned/versionedWireContract";
+import {
   YDOC_EVENT,
   YDOC_METHOD,
   decodeYdocRemoteUpdatePayload,
@@ -264,6 +268,15 @@ export interface OpenYdocAdapterSessionInput {
   // into a populated doc appends a second copy of the file instead of
   // resuming it. Callers that pass false own re-establishing the content.
   seedAbsentLineage?: boolean;
+  // A seed past the engine's in-band cap arrives as a blob, read in this
+  // workspace, when it is at most `maxBytes`. Without it, such a seed refuses
+  // the open.
+  largeSeed?: LargeSeedReading;
+}
+
+export interface LargeSeedReading {
+  workspaceId: string;
+  maxBytes: number;
 }
 
 export interface ApplyLocalUpdateOptions {
@@ -425,6 +438,11 @@ interface RootUtf16Snapshot {
 
 type DocUtf16Snapshot = ReadonlyMap<string, RootUtf16Snapshot>;
 
+function hasReplacementChars(snapshot: DocUtf16Snapshot): boolean {
+  for (const root of snapshot.values()) if (root.replacementCount > 0) return true;
+  return false;
+}
+
 function snapshotDocUtf16(doc: Y.Doc): DocUtf16Snapshot {
   const snapshot = new Map<string, RootUtf16Snapshot>();
   for (const [root, value] of doc.share) {
@@ -572,7 +590,9 @@ function assertTextEditIsValid(text: string, edit: YdocLocalTextEdit): void {
 interface LocalRecordCapture {
   readonly options: ApplyLocalUpdateOptions | undefined;
   readonly before: DocUtf16Snapshot;
-  readonly beforeState: Uint8Array;
+  // Only text that existed before the edit can be deleted by it, so with no
+  // U+FFFD before there is none to count and the state is not encoded.
+  readonly beforeState: Uint8Array | null;
   readonly seedUpdate: boolean;
   readonly originalUpdate?: Uint8Array;
   operation?: Promise<YdocRecordUpdateResult | undefined>;
@@ -1453,7 +1473,7 @@ export class YdocAdapterSession {
         this.doc,
         capture?.before ?? snapshotDocUtf16(this.doc),
         () =>
-          capture
+          capture?.beforeState
             ? deletedReplacementCounts(capture.beforeState, update)
             : new Map<string, number>(),
         capture?.seedUpdate ?? false,
@@ -1487,11 +1507,12 @@ export class YdocAdapterSession {
     originalUpdate?: Uint8Array,
   ): Promise<YdocRecordUpdateResult | undefined> {
     this.assertRecordable();
+    const before = snapshotDocUtf16(this.doc);
     const capture: LocalRecordCapture = {
       options: options === undefined ? undefined : structuredClone(options),
       originalUpdate,
-      before: snapshotDocUtf16(this.doc),
-      beforeState: Y.encodeStateAsUpdate(this.doc),
+      before,
+      beforeState: hasReplacementChars(before) ? Y.encodeStateAsUpdate(this.doc) : null,
       seedUpdate,
     };
     this.activeLocalRecordCapture = capture;
@@ -1580,6 +1601,7 @@ export class YdocLiveAdapter {
       ...(input.contentKind === "scene"
         ? { seedFromArtifact: input.seedAbsentLineage !== false }
         : {}),
+      ...(input.largeSeed ? { seedLimitBytes: input.largeSeed.maxBytes } : {}),
     };
     const startedAtMs = performance.now();
     let delivery: Awaited<ReturnType<YdocLiveAdapter["requestWithBlob"]>>;
@@ -1620,7 +1642,8 @@ export class YdocLiveAdapter {
     if (
       lineageAbsent &&
       input.seedAbsentLineage !== false &&
-      typeof result.seedContent === "string"
+      (typeof result.seedContent === "string" ||
+        result.seedBlobSha256 !== undefined)
     ) {
       try {
         if (result.contentKind === "scene") {
@@ -1629,7 +1652,10 @@ export class YdocLiveAdapter {
             "The engine returned text seed content for a scene. The engine must seed scenes in the initial Y.Doc update.",
           );
         }
-        if (!isWellFormedUtf16(result.seedContent)) {
+        const seedContent =
+          result.seedContent ??
+          (await this.readSeedBlob(input, result.seedBlobSha256 ?? ""));
+        if (!isWellFormedUtf16(seedContent)) {
           throw new IllFormedUtf16EditError();
         }
         const clientID = result.seedClientId;
@@ -1646,8 +1672,8 @@ export class YdocLiveAdapter {
         }
         const seedDoc =
           result.contentKind === "plaintext"
-            ? createPlaintextSeedDoc(result.seedContent, clientID)
-            : markdownToYDoc(result.seedContent, { clientID });
+            ? createPlaintextSeedDoc(seedContent, clientID)
+            : markdownToYDoc(seedContent, { clientID });
         try {
           if (result.contentKind === "richdoc") {
             let projection: string | undefined;
@@ -1657,14 +1683,14 @@ export class YdocLiveAdapter {
               // The serializer rejects some accepted imports. They can still
               // open, but cannot carry an exact-source witness yet.
             }
-            if (projection !== undefined && projection !== result.seedContent) {
+            if (projection !== undefined && projection !== seedContent) {
               // The first replicated base must still match the captured file.
               // The engine validates this source against the projection witness.
               const meta = seedDoc.getMap("meta");
-              meta.set("dohcMarkdownSource", result.seedContent);
+              meta.set("dohcMarkdownSource", seedContent);
               meta.set(
                 "dohcMarkdownSourceSha256",
-                createHash("sha256").update(result.seedContent).digest("hex"),
+                createHash("sha256").update(seedContent).digest("hex"),
               );
               meta.set(
                 "dohcMarkdownSourceProjectionSha256",
@@ -1704,6 +1730,51 @@ export class YdocLiveAdapter {
       }
     }
     return session;
+  }
+
+  // A seed past the in-band cap, read by the digest the open named. The bytes
+  // must hash to that digest, so the seed is exactly the head the engine
+  // derived the seed client from.
+  private async readSeedBlob(
+    input: OpenYdocAdapterSessionInput,
+    sha256: string,
+  ): Promise<string> {
+    if (input.largeSeed === undefined || !/^[0-9a-f]{64}$/.test(sha256)) {
+      throw new YdocAdapterError(
+        "response-mismatch",
+        "The engine returned a seed blob this open did not ask for.",
+      );
+    }
+    const delivery = await this.requester.requestWithBlob(
+      VERSIONED_METHOD.textReadBlob,
+      { workspaceId: input.largeSeed.workspaceId, sha256 },
+      (raw) =>
+        decodeVersionedResult(VERSIONED_METHOD.textReadBlob, raw)
+          .bytesBase64 === null,
+      // The open holds its lease while this read runs, so it gets the open's
+      // own bound.
+      { workspace: input.workspace, deadlineMs: YDOC_OPEN_DEADLINE_MS },
+    );
+    const read = decodeVersionedResult(
+      VERSIONED_METHOD.textReadBlob,
+      delivery.result,
+    );
+    const bytes =
+      read.bytesBase64 !== null
+        ? new Uint8Array(Buffer.from(read.bytesBase64, "base64"))
+        : delivery.blob?.bytes;
+    if (
+      bytes === undefined ||
+      bytes.byteLength > input.largeSeed.maxBytes ||
+      createHash("sha256").update(bytes).digest("hex") !== sha256
+    ) {
+      throw new YdocAdapterError(
+        "response-mismatch",
+        "The seed blob does not match the digest the engine named.",
+      );
+    }
+    // ignoreBOM keeps a leading U+FEFF, which the digest covers.
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
   }
 
   async request(

@@ -69,6 +69,7 @@ const PARTS = [
   "theme-picker",
   "zoom-stepper",
   "settings-keyboard",
+  "settings-privacy",
   "rails",
   "composer-sending",
   "about-conversation",

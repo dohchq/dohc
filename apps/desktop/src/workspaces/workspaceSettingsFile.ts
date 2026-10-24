@@ -23,7 +23,7 @@ import {
   localStateDir,
   LocalStateFolderError,
   LocalStateUnavailableError,
-  ownedLocalStateDir,
+  readOwnedLocalState,
   type LocalStateRefusal,
   type LocalStateWorkspace,
 } from "./workspaceLocalState";
@@ -113,9 +113,8 @@ async function loadWorkspaceSettings(
   workspace: LocalStateWorkspace,
 ): Promise<WorkspaceSettingsOnDisk> {
   // Reads then agree with saves, which refuse the same folders.
-  let folder: string | null;
   try {
-    folder = await ownedLocalStateDir(workspace.rootPath);
+    return await readOwnedLocalState(workspace.rootPath, settingsIn);
   } catch (error) {
     if (error instanceof LocalStateFolderError) return unusableFolder(error);
     const refused = (error as Error).message;
@@ -129,11 +128,15 @@ async function loadWorkspaceSettings(
       folderRefusal: `dohc did not save workspace settings. ${refused}`,
     };
   }
+}
+
+// These settings change what dohc does, such as whether a link opens without
+// asking, so dohc uses only a file this user owns and alone can change, read
+// through one handle. On a Mac and Linux the read does not wait for the engine
+// to prepare the folder, so the saved settings apply as the window opens. On
+// Windows it waits for an open under way.
+async function settingsIn(folder: string | null): Promise<WorkspaceSettingsOnDisk> {
   if (folder === null) return NO_SETTINGS_FILE;
-  // These settings change what dohc does, such as whether a link opens
-  // without asking, so dohc uses only a file this user owns and alone can
-  // change, read through one handle. The read does not wait for the engine to
-  // prepare the folder, so the saved settings apply as the window opens.
   const path = join(folder, WORKSPACE_SETTINGS_FILE);
   const read = await readOwnedFile(path, MAX_WORKSPACE_SETTINGS_FILE_BYTES).catch(() => null);
   if (read?.status === "missing") return NO_SETTINGS_FILE;

@@ -48,10 +48,16 @@ rustix = { version = "1", features = ["process"] }
 # Keeps the engine's folder out of iCloud Drive.
 dohc-macos-files = { path = "../dohc-macos-files" }
 
+[target.'cfg(windows)'.dependencies]
+# Keeps the engine's folder private.
+dohc-windows-files = { path = "../dohc-windows-files" }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4.7"
 seccompiler = "0.5.0"
 rustix = { version = "1", features = ["process", "thread"] }
+# Holds the engine's folder for the root binding marker.
+dohc-linux-files = { path = "../dohc-linux-files" }
 
 [features]
 # Enables capture probe state and controls plus marker hooks (`*_for_harness`).
@@ -70,6 +76,10 @@ proptest = "1"
 # Self-dependency so integration tests compile the library with the
 # harness-only hooks; production builds never do.
 dohc-workspace-engine = { path = ".", features = ["harness"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Stands in for /proc/self/fd where the engine's folder can't be held.
+dohc-linux-files = { path = "../dohc-linux-files", features = ["test-support"] }
 
 [lints]
 workspace = true

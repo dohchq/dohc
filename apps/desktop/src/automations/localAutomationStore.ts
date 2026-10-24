@@ -1,8 +1,8 @@
-import type { AutomationStoreFolder } from "@dohc/automation-executor/automation-run-store";
+import { AutomationStoreNotOpenedError, type AutomationStoreFolder } from "@dohc/automation-executor/automation-run-store";
 import {
   localStateDir,
   LocalStateUnavailableError,
-  ownedLocalStateDir,
+  readOwnedLocalState,
   type LocalStateRefusal,
   type LocalStateWorkspace,
 } from "../workspaces/workspaceLocalState";
@@ -21,7 +21,10 @@ function notSaved(refusal: LocalStateRefusal): string {
  * The run store's folder for a workspace. A write is refused at once, with
  * these words, unless the engine's current open has prepared `.dohc/local`;
  * it does not wait, and a refused write changes nothing already saved. A read
- * needs only `.dohc` and `.dohc/local` to be this user's own folders.
+ * needs `.dohc` and `.dohc/local` to be this user's own folders, and on
+ * Windows the engine's open to hold `.dohc/local` throughout. Before that
+ * open, or once it closes, a read says the workspace has not opened, not that
+ * the steps a person allowed can't be read.
  */
 export function localAutomationStoreFolder(workspace: LocalStateWorkspace): AutomationStoreFolder {
   return {
@@ -33,6 +36,13 @@ export function localAutomationStoreFolder(workspace: LocalStateWorkspace): Auto
         throw error;
       }
     },
-    forRead: () => ownedLocalStateDir(workspace.rootPath),
+    async read(work) {
+      try {
+        return await readOwnedLocalState(workspace.rootPath, work);
+      } catch (error) {
+        if (error instanceof LocalStateUnavailableError) throw new AutomationStoreNotOpenedError(error.message);
+        throw error;
+      }
+    },
   };
 }
