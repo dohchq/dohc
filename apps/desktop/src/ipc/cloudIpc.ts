@@ -365,6 +365,9 @@ export function registerCloudIpcHandlers<
       throw error;
     }
 
+    // The bootstrap binds the engine's relay client, and a join can start
+    // before the daemon handshake now that the window loads during it.
+    await engineDaemonStartup();
     await mkdir(rootPath, { recursive: true });
     let summary!: ReturnType<typeof WorkspaceSummary.parse>;
     desktopMarks.mark("workspace-join-start");

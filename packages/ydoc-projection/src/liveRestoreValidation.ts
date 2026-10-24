@@ -47,12 +47,12 @@ export function restoreValidators(policy: OrderedLiveUpdateCutPolicy, artifact?:
       } else {
         // A replacement may remove the marker when the selected point is native.
         const before = strict({...input, suffix: [], candidate: noop});
-        const native = nativeRegistration({document: input.document, currentPath: input.currentPath, checkpoint: result.evidence.stateUpdate});
         if (before.kind !== "accepted") return fallback;
         const prior = new Y.Doc({gc: false});
         try {
           Y.applyUpdate(prior, before.evidence.stateUpdate);
           if (!marked(prior)) return fallback;
+          const native = nativeRegistration({document: input.document, currentPath: input.currentPath, checkpoint: result.evidence.stateUpdate});
           if (native.kind !== "accepted") throw new Error("Restore checkpoint refused.");
           const bytes = source(prior);
           const proof = reader.prove({...input, source: bytes});

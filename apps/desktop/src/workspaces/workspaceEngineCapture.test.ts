@@ -63,6 +63,7 @@ import { createTestScratch } from "./testTemp";
 import { listLiveDraftRecovery, workspaceDraftStore } from "./liveDraftRecovery";
 import { createRelaySyncEngine } from "./relaySyncEngine";
 import { openedLocalState } from "../testing/preparedLocalState";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "./workspaceTextLimits";
 
 vi.mock("node:timers/promises", { spy: true });
 
@@ -688,6 +689,11 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(session.doc.getMap("frontmatter").toJSON()).toEqual(status === "ownerPending"
       ? { Name: "Manual", id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa" } : { Name: "Manual" });
     expect(open).toHaveBeenCalledTimes(2);
+    // The note open and the record's adoption both read a seed past the
+    // in-band cap, up to the WYSIWYG editor's limit (#2521).
+    for (const [options] of open.mock.calls) {
+      expect(options).toMatchObject({ largeSeed: { workspaceId: WORKSPACE_ID, maxBytes: WYSIWYG_MARKDOWN_THRESHOLD_BYTES } });
+    }
     expect(healthyEvict).toHaveBeenCalledTimes(1);
     expect(close).not.toHaveBeenCalled();
     expect(evict).not.toHaveBeenCalled();

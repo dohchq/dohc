@@ -42,6 +42,9 @@ export type YdocOpenParams = JsonObject & {
   expectedObjectId?: string;
   contentKind?: YdocContentKind;
   seedFromArtifact?: boolean;
+  // The largest seed this client reads as a blob when it is past the engine's
+  // in-band cap. Without it, such a seed refuses the open.
+  seedLimitBytes?: number;
 };
 
 // Declared write provenance beside the actor origin: the kind of actor that
@@ -212,6 +215,9 @@ const OpenResultSchema = mutableStruct({
   // it from the head it seeds, so every device seeding that head sends the
   // same bytes and originates the same lineage.
   seedClientId: Schema.optionalKey(Schema.Int),
+  // Set instead of seedContent for a seed past the in-band cap: the digest
+  // the client reads it by through versionedText.readBlob.
+  seedBlobSha256: Schema.optionalKey(Schema.String),
   lineageClaimId: Schema.NullOr(Schema.String),
   // Whether this device claimed the lineage from its own unclaimed history.
   lineageOriginatedHere: Schema.Boolean,

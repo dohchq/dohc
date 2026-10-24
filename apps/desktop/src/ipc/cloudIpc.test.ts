@@ -582,6 +582,20 @@ describe("registered cloud handlers", () => {
     }));
   });
 
+  it("waits for daemon startup before creating a joined workspace", async () => {
+    const h = await harness();
+    const startup = deferred();
+    const waiting = deferred();
+    h.daemonStartup.mockImplementation(() => { waiting.resolve(); return startup.promise; });
+    const result = h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload);
+    await waiting.promise;
+    expect(h.steps).toEqual(["probe"]);
+    expect(h.bindRelay).not.toHaveBeenCalled();
+    startup.resolve();
+    await expect(result).resolves.toMatchObject({ workspace: { workspaceId: "joined" } });
+    expect(h.steps.slice(0, 4)).toEqual(["probe", "mkdir", "mark", "create"]);
+  });
+
   it("keeps a failed-cleanup registration and directs recovery through Forget before rejoining", async () => {
     const h = await harness();
     h.enable.mockRejectedValue(new Error("download interrupted"));
