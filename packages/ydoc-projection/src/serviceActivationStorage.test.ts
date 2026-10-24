@@ -28,6 +28,8 @@ import {createServiceHostReplication} from '../../../services/sync-relay/src/ser
 import {SERVICE_HOST_ORIGIN_PREFIX} from '../../../services/sync-relay/src/relayLogInputs.js'
 import {canonicalVersionedAcceptedMetadata,initialAcceptedHistoryDigest} from '../../../services/sync-relay/src/liveAcceptedHistory.js'
 import {stableJsonStringify} from '../../../services/sync-relay/src/canonicalJson.js'
+import {nativeSettlementId,settlementRecordDigest} from '../../../services/sync-relay/src/storage/hostedSettlement.js'
+import {liveValidation} from '../../../services/sync-relay/src/liveValidation.js'
 
 const {DatabaseSync}=createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite')
 const hash=(bytes:Uint8Array)=>createHash('sha256').update(bytes).digest('hex')
@@ -273,6 +275,32 @@ it('keeps an earlier projecting moment when a later ordinary suffix only adds de
     Object.assign(f.capture,{fullState});Object.assign(f.capture.source,{committedCursor:4,fullStateDigest:hash(fullState),fullStateByteLength:fullState.length})
     expect(f.prepare()).toMatchObject({completed:false})
   }finally{changed.destroy();f.close()}
+})
+// Proves: an earlier source moment stands only while every later prefix keeps
+// its projection. A visible change and its reversal end at the same
+// projection, yet no longer prove the earlier source.
+it('refuses an earlier projecting moment when a later suffix changes the projection and changes it back',()=>{
+  const f=fixture(),changed=new Y.Doc({gc:false});try{
+    Y.applyUpdate(changed,f.capture.fullState)
+    const frontmatter=changed.getMap('frontmatter'),title=frontmatter.get('title')
+    const edit=(originSeq:number,value:unknown)=>{
+      const before=Y.encodeStateVector(changed);frontmatter.set('title',value);const suffix=Y.encodeStateAsUpdate(changed,before)
+      append(f,'origin',originSeq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(suffix)}),suffix)
+    }
+    edit(3,'Changed');edit(4,title)
+    const fullState=Y.encodeStateAsUpdate(changed)
+    Object.assign(f.capture,{fullState});Object.assign(f.capture.source,{fullStateDigest:hash(fullState),fullStateByteLength:fullState.length})
+    expect(f.prepare).toThrow('does not project the captured source')
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_documents').all()).toEqual([])
+  }finally{changed.destroy();f.close()}
+})
+// Proves: a receiver-generated source names an ordinarily admitted Y.Doc row,
+// never a departed host publication.
+it('refuses a source moment that names a departed Y.Doc row',()=>{
+  const f=fixture();try{
+    f.raw.exec("UPDATE sync_relay_log SET relay_admission='departed' WHERE origin_id='origin' AND origin_seq=2")
+    expect(f.prepare).toThrow('not an ordinary history coordinate')
+  }finally{f.close()}
 })
 it('checks configured history entry and byte budgets before loading relay blobs',()=>{
   const f=fixture();try{
@@ -1200,14 +1228,16 @@ it("returns the original F to a duplicate Stop after the document's current line
 
 const HOST_ORIGIN=`${SERVICE_HOST_ORIGIN_PREFIX}native`
 type Row=[string,Record<string,unknown>]
-// The service host's feed once Stop opened the retirement: the owner applied
-// the seed, and the edit accepted after it, at F, waits for its application.
-async function retiringFeed(f:ReturnType<typeof fixture>){
+// The service host's feed once Stop opened the retirement (or before, with
+// `stopped` false): the owner applied the seed, and the edit accepted after
+// it, at F, waits for its application.
+async function retiringFeed(f:ReturnType<typeof fixture>,stopped=true){
   enroll(f);completeActivation(f);const edit=admitEdit(f)
   const bearer=deriveServiceHostBearer(f.storage.currentServiceHostWorkspace('workspace')!,credential)
   const handle=createServiceHostReplication({storage:f.storage,prefix:'dohc-service-v1.',hostedFeed:true,
     authorize:input=>authorizeServiceHostReplication(f.storage,{...credential,...input})})
-  stopDocument(f,10)
+  const stop=()=>stopDocument(f,10)
+  if(stopped)stop()
   const request=(method:string,suffix:string,body?:BodyInit,type='application/json')=>handle(new Request(`https://relay.test/sync/workspace/hosted/${suffix}`,
     {method,headers:{authorization:`Bearer ${bearer}`,...(body===undefined?{}:{'content-type':type})},...(body===undefined?{}:{body})}))
   const push=async(rows:Row[],firstSeq:number)=>{
@@ -1228,7 +1258,7 @@ async function retiringFeed(f:ReturnType<typeof fixture>){
   const ydocRow=(bytes:Uint8Array,changes:Record<string,unknown>={}):Row=>['ydoc.update',{versionId:'main',objectId:'object',path:'docs/a.md',contentKind:'richdoc',
     isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(bytes),...changes}]
   const refusals=(...rows:Array<[number,string,string]>)=>rows.map(([originSeq,opKind,reason])=>({originId:HOST_ORIGIN,originSeq,opKind,reason}))
-  return {edit,receipt,request,push,upload,coordinate,editBytes,applyEdit,ydocRow,refusals}
+  return {edit,receipt,request,push,upload,coordinate,editBytes,applyEdit,ydocRow,refusals,stop}
 }
 const departed=(opKind:string)=>({op_kind:opKind,relay_admission:'departed'})
 const markdownOf=(f:ReturnType<typeof fixture>,state:Uint8Array)=>{
@@ -1247,15 +1277,19 @@ it("admits only a retiring document's verified Y.Doc rows and source moment",asy
     expect(hash(source)).toBe(f.capture.source.sourceDigest)
     for(const bytes of [f.capture.baselineBytes,f.capture.fullState,source,stray])await r.upload(bytes)
     const moment=(changes:Record<string,unknown>={}):Row=>['moment.append',{versionId:'main',objectId:'object',momentId:f.capture.source.sourceMomentId,path:'docs/a.md',
-      operation:'write',payloadAfterPath:'docs/a.md',payloadAfterContentKind:'text',payloadAfterBlobSha256:hash(source),payloadAfterByteLength:source.length,...changes}]
+      operation:'write',payloadAfterPath:'docs/a.md',payloadAfterContentKind:'text',payloadAfterBlobSha256:hash(source),payloadAfterByteLength:source.length,
+      recordedAtMs:20,metadata:{origin:'sync',summary:null,correlationId:null},beforePresent:'absent',...changes}]
+    const {beforePresent:_,...partial}=moment()[1]
     const rows=[r.ydocRow(f.capture.baselineBytes,{isBaseState:true}),r.ydocRow(f.capture.fullState),moment(),
       r.ydocRow(f.capture.fullState,{lineageClaimId:'b'.repeat(64)}),r.ydocRow(stray),r.ydocRow(f.capture.baselineBytes),moment({momentId:'another-moment'}),
-      moment({operation:'rename',path:'docs/b.md',payloadAfterPath:'docs/b.md',beforePath:'docs/a.md'}),moment({operation:'delete'}),moment({beforeObjectId:'other-object'})]
+      moment({operation:'rename',path:'docs/b.md',payloadAfterPath:'docs/b.md',beforePath:'docs/a.md'}),moment({operation:'delete'}),moment({beforeObjectId:'other-object'}),
+      moment({conflictId:'conflict'}),['moment.append',partial] as Row]
     const answer=await r.push(rows,0)
-    expect(answer).toMatchObject({status:200,body:{inserted:10}})
+    expect(answer).toMatchObject({status:200,body:{inserted:12}})
     expect(answer.body.refusals).toEqual(r.refusals([3,'ydoc.update','unproved-retirement-output'],[4,'ydoc.update','unproved-retirement-output'],
       [5,'ydoc.update','unproved-retirement-output'],[6,'moment.append','unproved-retirement-output'],[7,'moment.append','outside-hosted-documents'],
-      [8,'moment.append','outside-hosted-documents'],[9,'moment.append','outside-hosted-documents']))
+      [8,'moment.append','outside-hosted-documents'],[9,'moment.append','outside-hosted-documents'],[10,'moment.append','unproved-retirement-output'],
+      [11,'moment.append','unproved-retirement-output']))
     for(const originSeq of [0,1,2])expect(r.coordinate(originSeq)).toEqual(departed(rows[originSeq]![0]))
     expect(f.raw.prepare('SELECT moment_id FROM sync_relay_object_moments WHERE moment_id=?').get(f.capture.source.sourceMomentId)).toBeUndefined()
   }finally{f.close()}
@@ -1296,44 +1330,94 @@ it('retries a retiring application until its owner applied it, confirms its auth
   }finally{f.close()}
 })
 
+// A native-complete settlement of the retiring document through the edit at
+// F, with its uploaded state and projection, as an audit or as its moment.
+async function retiringSettlement(f:ReturnType<typeof fixture>,r:Awaited<ReturnType<typeof retiringFeed>>){
+  const doc=new Y.Doc({gc:false});Y.applyUpdate(doc,f.capture.fullState);Y.applyUpdate(doc,r.editBytes)
+  const state=Y.encodeStateAsUpdate(doc);doc.destroy()
+  const markdown=markdownOf(f,state),before=markdownOf(f,f.capture.baselineBytes)
+  for(const bytes of [state,markdown,before])await r.upload(bytes)
+  const row=f.raw.prepare('SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?').get(r.receipt.journalCursor)!
+  const record:Record<string,unknown>={settlementId:'',relayDatabaseNamespace:'history',binding:r.edit.metadata.accepted.binding,
+    hostCoordinate:{hostId:host.hostId,hostEpoch:1,instanceId:host.instanceId,connectionId:host.connectionId},previousCursor:0,
+    terminalCursor:r.receipt.journalCursor,previousYdocSequence:0,localYdocSequence:2,applicationCount:1,nativeIntervalDigest:hash(Buffer.from('native-interval')),
+    acceptedEventCount:Number(row.accepted_event_count),
+    acceptedIntervalDigest:hash(Buffer.from(JSON.stringify(['live-settlement-accepted-interval-v1',['history','workspace','main','object',f.document.lineageClaimId],
+      [0,0,initialAcceptedHistoryDigest('history',f.document)],[Number(row.accepted_event_count),r.receipt.journalCursor,row.accepted_evidence_digest]]))),
+    momentId:'retiring-settlement-moment',markdownDigest:hash(markdown),sourceStateVectorDigest:hash(Buffer.from('state-vector')),
+    acceptedStateBlobSha256:hash(state),recordedAtMs:20,restoreOperationId:null}
+  record.settlementId=nativeSettlementId(record)
+  const reference=(value:Record<string,unknown>)=>({formatVersion:1,recordDigest:settlementRecordDigest(value),record:value})
+  const audit=(value=record):Row=>['live.audit.settlement',reference(value)]
+  const moment=(value=record):Row=>['moment.append',{momentId:value.momentId,objectId:'object',versionId:'main',path:'docs/a.md',operation:'write',
+    payloadBeforePath:'docs/a.md',payloadAfterPath:'docs/a.md',payloadBeforeContentKind:'text',payloadAfterContentKind:'text',
+    payloadBeforeBlobSha256:hash(before),payloadAfterBlobSha256:hash(markdown),payloadAfterByteLength:markdown.length,recordedAtMs:20,settlementReference:reference(value)}]
+  return {record,audit,moment}
+}
+
 // Proves: a settlement audit is proved on its own, before its moment arrives
-// in a later push; both wait for the owner's applied tip; an invalid record
-// proves nothing, as an audit or a moment.
-it('proves a retiring settlement audit before its later moment, and refuses an invalid settlement',async()=>{
+// in a later push; both wait for the owner's applied tip; a record native
+// would refuse proves nothing, as an audit or a moment.
+it('proves a retiring settlement audit before its later moment, and refuses a settlement native would refuse',async()=>{
   const f=fixture();try{
     const r=await retiringFeed(f)
-    const doc=new Y.Doc({gc:false});Y.applyUpdate(doc,f.capture.fullState);Y.applyUpdate(doc,r.editBytes)
-    const state=Y.encodeStateAsUpdate(doc);doc.destroy()
-    const markdown=markdownOf(f,state),before=markdownOf(f,f.capture.baselineBytes)
-    for(const bytes of [state,markdown,before])await r.upload(bytes)
-    const row=f.raw.prepare('SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?').get(r.receipt.journalCursor)!
-    const record={settlementId:'retiring-settlement',relayDatabaseNamespace:'history',binding:r.edit.metadata.accepted.binding,previousCursor:0,
-      terminalCursor:r.receipt.journalCursor,acceptedEventCount:Number(row.accepted_event_count),
-      acceptedIntervalDigest:hash(Buffer.from(JSON.stringify(['live-settlement-accepted-interval-v1',['history','workspace','main','object',f.document.lineageClaimId],
-        [0,0,initialAcceptedHistoryDigest('history',f.document)],[Number(row.accepted_event_count),r.receipt.journalCursor,row.accepted_evidence_digest]]))),
-      momentId:'retiring-settlement-moment',markdownDigest:hash(markdown),acceptedStateBlobSha256:hash(state)}
-    const reference=(value:typeof record)=>({formatVersion:1,recordDigest:hash(Buffer.from(stableJsonStringify(value))),record:value})
-    const audit=(value=record):Row=>['live.audit.settlement',reference(value)]
-    const moment=(value=record):Row=>['moment.append',{momentId:value.momentId,objectId:'object',versionId:'main',path:'docs/a.md',operation:'write',
-      payloadBeforePath:'docs/a.md',payloadAfterPath:'docs/a.md',payloadBeforeContentKind:'text',payloadAfterContentKind:'text',
-      payloadBeforeBlobSha256:hash(before),payloadAfterBlobSha256:hash(markdown),payloadAfterByteLength:markdown.length,recordedAtMs:20,settlementReference:reference(value)}]
+    const {record,audit,moment}=await retiringSettlement(f,r)
     expect(await r.push([audit()],0)).toMatchObject({status:503})
     r.applyEdit()
-    const invalid={...record,acceptedEventCount:record.acceptedEventCount+1}
-    expect((await r.push([audit(invalid),moment(invalid)],0)).body).toMatchObject({inserted:2,refusals:r.refusals([0,'live.audit.settlement','unproved-retirement-output'],
-      [1,'moment.append','unproved-retirement-output'])})
-    expect(await r.push([audit()],2)).toMatchObject({status:200,body:{inserted:1}})
-    expect(r.coordinate(2)).toEqual(departed('live.audit.settlement'))
-    expect(await r.push([moment()],3)).toMatchObject({status:200,body:{inserted:1}})
-    expect(r.coordinate(3)).toEqual(departed('moment.append'))
-    expect(f.raw.prepare('SELECT settlement_id FROM sync_relay_live_settlement_bindings').all()).toEqual([{settlement_id:'retiring-settlement'}])
-    expect(f.raw.prepare('SELECT moment_id FROM sync_relay_object_moments WHERE moment_id=?').get(record.momentId)).toBeUndefined()
+    const {nativeIntervalDigest:_,...abbreviated}=record
+    const invalid=[{...record,acceptedEventCount:Number(record.acceptedEventCount)+1},abbreviated,{...record,settlementId:'retiring-settlement'},{...record,extra:true}]
+    expect((await r.push([audit(invalid[0]),moment(invalid[0]),...invalid.slice(1).map(value=>audit(value))],0)).body).toMatchObject({inserted:5,
+      refusals:r.refusals([0,'live.audit.settlement','unproved-retirement-output'],[1,'moment.append','unproved-retirement-output'],
+        ...[2,3,4].map(seq=>[seq,'live.audit.settlement','unproved-retirement-output'] as [number,string,string]))})
+    expect(await r.push([audit()],5)).toMatchObject({status:200,body:{inserted:1}})
+    expect(r.coordinate(5)).toEqual(departed('live.audit.settlement'))
+    expect(await r.push([moment()],6)).toMatchObject({status:200,body:{inserted:1}})
+    expect(r.coordinate(6)).toEqual(departed('moment.append'))
+    expect(f.raw.prepare('SELECT settlement_id FROM sync_relay_live_settlement_bindings').all()).toEqual([{settlement_id:record.settlementId}])
+    expect(f.raw.prepare('SELECT moment_id FROM sync_relay_object_moments WHERE moment_id=?').get(String(record.momentId))).toBeUndefined()
   }finally{f.close()}
 })
 
+// Proves: a settlement audit pushed while its document was hosted, whose
+// retirement opened after the push was screened, retries without using its
+// coordinate, and publishes once a later push proves it.
+it('retries a settlement audit whose document began settling after its push was screened',async()=>{
+  const f=fixture();try{
+    const r=await retiringFeed(f,false)
+    const {audit}=await retiringSettlement(f,r)
+    r.applyEdit()
+    const prepare=f.storage.prepareLogAppend.bind(f.storage)
+    // Stop commits while the push awaits its preparation, between screening and the writer.
+    const spy=vi.spyOn(f.storage,'prepareLogAppend').mockImplementationOnce(async(...args)=>{r.stop();return await prepare(...args)})
+    expect(await r.push([audit()],0)).toMatchObject({status:503,body:{code:'settlement_proof_budget'}})
+    expect(spy).toHaveBeenCalledOnce()
+    expect(f.storage.maxOriginSeq('workspace',HOST_ORIGIN)).toBe(-1)
+    expect(await r.push([audit()],0)).toMatchObject({status:200,body:{inserted:1}})
+    expect(r.coordinate(0)).toEqual(departed('live.audit.settlement'))
+  }finally{vi.restoreAllMocks();f.close()}
+})
+
+// Proves: a retiring proof that runs out of budget retries only while its
+// push holds another proof a smaller push could leave out; alone, it is
+// refused with its own reason, so later rows from the origin still publish.
+it('retries an over-budget retiring proof only beside another proof, and refuses it alone',async()=>{
+  const f=fixture();try{
+    const r=await retiringFeed(f);r.applyEdit()
+    const {audit,moment}=await retiringSettlement(f,r)
+    const overBudget=()=>vi.spyOn(liveValidation,'normalizeSettlement').mockResolvedValueOnce({kind:'refused',reason:'capacity-refused',source:'call'})
+    overBudget()
+    expect(await r.push([audit(),moment()],0)).toMatchObject({status:503,body:{code:'settlement_proof_budget'}})
+    expect(f.storage.maxOriginSeq('workspace',HOST_ORIGIN)).toBe(-1)
+    overBudget()
+    expect((await r.push([audit()],0)).body).toMatchObject({inserted:1,refusals:r.refusals([0,'live.audit.settlement','retirement-proof-over-budget'])})
+    expect(await r.push([audit()],1)).toMatchObject({status:200,body:{inserted:1}})
+    expect(r.coordinate(1)).toEqual(departed('live.audit.settlement'))
+  }finally{vi.restoreAllMocks();f.close()}
+})
+
 // Proves: the event-zero audit publishes with the root owner origin, its stamp,
-// the immutable baseline and a real base coordinate; a changed stamp or base
-// coordinate proves nothing.
+// the immutable baseline and a real, earlier base coordinate; a changed stamp
+// or base coordinate, or an origin native would refuse, proves nothing.
 it("admits a retiring document's event-zero audit only with its root origin, stamp, baseline and base coordinate",async()=>{
   const f=fixture();try{
     const r=await retiringFeed(f)
@@ -1350,16 +1434,22 @@ it("admits a retiring document's event-zero audit only with its root origin, sta
     const stamp=(value:typeof source)=>hash(Buffer.from(JSON.stringify([value.adoptionId,value.evidenceDigest,JSON.stringify(binding),value.sourceMomentId,
       value.sourceDigest,value.sourceByteLength,value.baselineMomentRelaySequence,value.baselineRegisteredAtMs,value.coverageDigest,value.coveredOutboxSequence,
       value.localYDocSequence,value.terminalCursor,JSON.stringify(value.terminalReceipt),JSON.stringify(value.hostCoordinate),value.maxPendingBytes,value.maxPendingAgeMs])))
-    const base=(changes:Record<string,unknown>={}):Row=>{
+    // Both hashes follow `value`, so only native's validation of the origin can refuse it.
+    const base=(changes:Record<string,unknown>={},value:Record<string,unknown>=source):Row=>{
       const record={relayDatabaseNamespace:'history',checkpoint:{eventCount:0,terminal:null,binding,stateDigest:f.document.lineageClaimId,
-        evidenceDigest:initialAcceptedHistoryDigest('history',f.document)},originStamp:stamp(source),origin:{kind:'owner',source},
+        evidenceDigest:initialAcceptedHistoryDigest('history',f.document)},originStamp:stamp(value as typeof source),origin:{kind:'owner',source:value},
         baseByteLength:f.capture.baselineBytes.length,baseCoordinate:{originId:'origin',originSeq:1},...changes}
       return ['live.audit.base',{formatVersion:1,recordDigest:hash(Buffer.from(JSON.stringify(record))),record}]
     }
-    const answer=await r.push([base(),base({originStamp:stamp({...source,coveredOutboxSequence:1})}),base({baseCoordinate:{originId:'origin',originSeq:2}}),
-      base({baseByteLength:f.capture.baselineBytes.length+1})],0)
-    expect(answer.body).toMatchObject({inserted:4,refusals:r.refusals(...[1,2,3].map(seq=>[seq,'live.audit.base','unproved-retirement-output'] as [number,string,string]))})
-    expect(r.coordinate(0)).toEqual(departed('live.audit.base'))
+    const baseRow=r.ydocRow(f.capture.baselineBytes,{isBaseState:true})
+    const answer=await r.push([baseRow,base({baseCoordinate:{originId:HOST_ORIGIN,originSeq:0}}),base(),
+      base({originStamp:stamp({...source,coveredOutboxSequence:1})}),base({baseCoordinate:{originId:'origin',originSeq:2}}),
+      base({baseByteLength:f.capture.baselineBytes.length+1}),base({baseCoordinate:{originId:HOST_ORIGIN,originSeq:7}}),baseRow,
+      ...[{coverageDigest:'not-a-digest'},{maxPendingBytes:0},{maxPendingAgeMs:0},{coveredOutboxSequence:-1},{hostCoordinate:{...hostCoordinate,hostEpoch:0}},
+        {hostCoordinate:{...hostCoordinate,connectionId:''}}].map(changes=>base({},{...source,...changes}))],0)
+    // A base row later in its own push, and every origin native's stamp refuses, prove nothing.
+    expect(answer.body).toMatchObject({inserted:14,refusals:r.refusals(...[3,4,5,6,8,9,10,11,12,13].map(seq=>[seq,'live.audit.base','unproved-retirement-output'] as [number,string,string]))})
+    for(const seq of [1,2])expect(r.coordinate(seq)).toEqual(departed('live.audit.base'))
   }finally{f.close()}
 })
 

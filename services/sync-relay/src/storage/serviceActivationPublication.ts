@@ -2,6 +2,8 @@ import {createHash} from "node:crypto";
 import {isDeepStrictEqual} from "node:util";
 import {asRecord} from "@dohc/workspace-core";
 import {parseLiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
+import {parseHostControlIdentifier, parseHostEpoch} from "@dohc/live-session-contract/host-control";
+import {parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseLiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
 import type {StorageContext} from "./context";
 import type {SyncRelayLogInput} from "./types";
 import {relayError} from "../errors";
@@ -11,7 +13,7 @@ import {LIVE_DELIVERY_OWNERS} from "./liveCommittedDeliverySchema";
 import {LIVE_DELIVERY_OWNER_HISTORY, SERVICE_ACTIVATIONS} from "./serviceActivationSchema";
 import type {ServiceActivationRetirement} from "./serviceActivationRetirement";
 import {liveApplicationConfirmed, preparedLiveApplication} from "./liveApplicationAuthorship";
-import {preparedSettlement, settlementCommitted, settlementProofCurrent, type SettlementProof} from "./hostedSettlement";
+import {preparedSettlement, settlementCommitted, settlementProofCurrent} from "./hostedSettlement";
 
 // The retirement writer: what a retiring document's host may still publish.
 // Each row needs the proof its kind names below, against the activation the
@@ -21,10 +23,23 @@ import {preparedSettlement, settlementCommitted, settlementProofCurrent, type Se
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 class Unproved extends Error {}
+// A proof no push can finish: its push held no other proof to leave out.
+class OverBudget extends Error {}
 function require(value: unknown): asserts value {if (!value) throw new Unproved();}
 // A valid row the retiring owner has not acknowledged applying yet: the push retries.
 const notYetApplied = () => relayError("settlement_proof_budget", "the retiring owner has not applied this publication yet");
-const exhausted = () => relayError("settlement_proof_budget");
+// An audit screened before its document began settling: the retried push proves it.
+const notYetProved = () => relayError("settlement_proof_budget", "the settlement audit was screened before its document began settling");
+
+/** Why the retirement writer refused a settling document's row. */
+export type RetirementRefusal = "unproved-retirement-output" | "retirement-proof-over-budget";
+export type RetirementBatch = {originId: string; ops: ReadonlyMap<number, SyncRelayLogInput>; batched: boolean};
+
+/** Whether an op charges a push's proof budget. */
+export function chargesProofBudget(op: SyncRelayLogInput): boolean {
+  if (op.opKind === "live.audit.settlement" || op.opKind === "live.audit.application") return true;
+  return op.opKind === "moment.append" && Object.hasOwn(asRecord(JSON.parse(op.payloadJson)) ?? {}, "settlementReference");
+}
 
 // The rows whose final admission waits for the writer's settlement or application confirmation.
 const awaiting = new WeakSet<SyncRelayLogInput>();
@@ -37,24 +52,26 @@ export function retirementPublicationConfirmed(op: SyncRelayLogInput): boolean {
 
 /**
  * Under the append's writer, before settlement and application confirmation:
- * true when `op` is verified output of the retiring activation, false when it
- * stays unproved. Throws a retryable error for a valid row that waits on the
- * owner's applied tip or on a proof budget.
+ * null when `op` is verified output of the retiring activation, otherwise why
+ * it is refused. Throws a retryable error for a valid row that waits on the
+ * owner's applied tip, for an audit nothing proved yet, and for a proof whose
+ * budget a smaller push may leave room for.
  */
 export function admitRetirementPublication(storage: StorageContext, retirement: ServiceActivationRetirement, op: SyncRelayLogInput,
-  batch: {originId: string; ops: ReadonlyMap<number, SyncRelayLogInput>}): boolean {
+  batch: RetirementBatch): RetirementRefusal | null {
   awaiting.delete(op);
   try {
     admit(storage, retirement, op, batch);
-    return true;
+    return null;
   } catch (error) {
-    if (error instanceof Unproved) return false;
+    if (error instanceof Unproved) return "unproved-retirement-output";
+    if (error instanceof OverBudget) return "retirement-proof-over-budget";
     throw error;
   }
 }
 
-function admit(storage: StorageContext, retirement: ServiceActivationRetirement, op: SyncRelayLogInput,
-  batch: {originId: string; ops: ReadonlyMap<number, SyncRelayLogInput>}): void {
+function admit(storage: StorageContext, retirement: ServiceActivationRetirement, op: SyncRelayLogInput, batch: RetirementBatch): void {
+  const exhausted = () => batch.batched ? relayError("settlement_proof_budget") : new OverBudget();
   const document = [retirement.workspaceId, "main", retirement.objectId, retirement.lineageClaimId] as const;
   const live = storage.db.prepare(`SELECT lineage_state,restore_fence_generation,baseline_digest,length(baseline_bytes) AS baseline_length
     FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?`).get(...document);
@@ -71,7 +88,8 @@ function admit(storage: StorageContext, retirement: ServiceActivationRetirement,
     require(cursor <= retirement.acceptedThrough);
     if (cursor > tip) throw notYetApplied();
   };
-  const settlement = (proof: SettlementProof | "exhausted" | null) => {
+  const settlement = (proof: ReturnType<typeof preparedSettlement>) => {
+    if (proof === "unattempted") throw notYetProved();
     if (proof === "exhausted") throw exhausted();
     require(proof && proof.namespace === retirement.relayDatabaseNamespace && proof.binding.workspaceId === retirement.workspaceId &&
       proof.binding.objectId === retirement.objectId && proof.binding.lineageClaimId === retirement.lineageClaimId &&
@@ -108,8 +126,9 @@ function admit(storage: StorageContext, retirement: ServiceActivationRetirement,
         awaiting.add(op);
         return;
       }
-      // The exact source moment the activation retained.
-      require(op.settlementAdmission === undefined && payload.momentId === source.sourceMomentId &&
+      // The exact source moment the activation retained, with only native moment fields.
+      require(op.settlementAdmission === undefined && Object.keys(payload).every(field => SOURCE_MOMENT_FIELDS.has(field)) &&
+        SOURCE_MOMENT_REQUIRED.every(field => Object.hasOwn(payload, field)) && payload.momentId === source.sourceMomentId &&
         payload.payloadAfterBlobSha256 === source.sourceDigest && payload.payloadAfterByteLength === source.sourceByteLength &&
         payload.payloadAfterContentKind === "text");
       return;
@@ -127,12 +146,22 @@ function admit(storage: StorageContext, retirement: ServiceActivationRetirement,
       settlement(preparedSettlement(op));
       return;
     case "live.audit.base":
-      requireBaseRecord(storage, retirement, payload, Number(live.baseline_length), batch);
+      requireBaseRecord(storage, retirement, op, payload, Number(live.baseline_length), batch);
       return;
     default:
       throw new Unproved();
   }
 }
+
+// Native `MomentAppendPayload` fields, apart from conflict effects and authors,
+// and those its deserialization requires. A source moment's before-image is
+// the host's own prior file, which the relay holds nothing to check against.
+const SOURCE_MOMENT_REQUIRED = ["momentId", "versionId", "objectId", "path", "recordedAtMs", "operation", "payloadAfterBlobSha256",
+  "payloadAfterPath", "metadata", "beforePresent"];
+const SOURCE_MOMENT_FIELDS = new Set([...SOURCE_MOMENT_REQUIRED, "objectCreatedAtMs", "payloadBeforeBlobSha256", "payloadBeforePath",
+  "payloadBeforeContentKind", "payloadBeforeByteLength", "payloadAfterContentKind", "payloadAfterByteLength", "beforeObjectId",
+  "beforeVersionId", "beforePath", "beforeBlobSha256", "beforeContentKind", "beforeByteLength", "beforeUpdatedAtMs",
+  "beforeLatestMomentId", "beforeMetadata"]);
 
 function ordered(value: unknown, fields: readonly string[]): Record<string, unknown> {
   const record = asRecord(value);
@@ -146,14 +175,41 @@ const HOST = ["hostId", "hostEpoch", "instanceId", "connectionId"];
 const OWNER_SOURCE = ["adoptionId", "evidenceDigest", "sourceMomentId", "sourceDigest", "sourceByteLength", "baselineMomentRelaySequence",
   "baselineRegisteredAtMs", "coverageDigest", "coveredOutboxSequence", "localYDocSequence", "terminalCursor", "terminalReceipt",
   "hostCoordinate", "maxPendingBytes", "maxPendingAgeMs"];
+const MAX_SOURCE_BYTES = 10 * 1024 * 1024;
+
+const valid = (parse: () => unknown) => {
+  try {parse(); return true;} catch {return false;}
+};
+const identifier = (value: unknown) => valid(() => parseLiveUpdateIdentifier(value));
+const between = (value: unknown, min: number, max = Number.MAX_SAFE_INTEGER) =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= min && value <= max;
+
+/**
+ * Native `OriginRecord::stamp` validation of an owner source (`origin_record.rs`).
+ * The relay's owner row holds the adoption, evidence, source, baseline and
+ * terminal fields, which the caller compares. The coverage digest and
+ * sequence, host coordinate and pending budgets are host-attested: the relay
+ * keeps nothing to compare them with, so only their shape is checked here.
+ */
+function requireOwnerSource(source: Record<string, unknown>): void {
+  const host = source.hostCoordinate as Record<string, unknown>, receipt = source.terminalReceipt;
+  require(identifier(source.adoptionId) && identifier(source.sourceMomentId) &&
+    [host.hostId, host.instanceId, host.connectionId].every(value => valid(() => parseHostControlIdentifier(value))) &&
+    valid(() => parseHostEpoch(host.hostEpoch)) &&
+    [source.evidenceDigest, source.sourceDigest, source.coverageDigest].every(value => valid(() => parseLiveUpdateDigest(value))) &&
+    [source.baselineMomentRelaySequence, source.baselineRegisteredAtMs, source.coveredOutboxSequence, source.localYDocSequence,
+      source.terminalCursor].every(value => between(value, 0)) && between(source.sourceByteLength, 0, MAX_SOURCE_BYTES) &&
+    between(source.maxPendingBytes, 1) && between(source.maxPendingAgeMs, 1) &&
+    (receipt === null || valid(() => parseLiveUpdateReceipt(receipt))));
+}
 
 /**
  * A `live.audit.base` record: the canonical event-zero checkpoint of the
  * lineage, the root owner origin the relay kept and its stamp, the immutable
  * baseline's digest and length, and a real base Y.Doc coordinate.
  */
-function requireBaseRecord(storage: StorageContext, retirement: ServiceActivationRetirement, value: Record<string, unknown>, baselineLength: number,
-  batch: {originId: string; ops: ReadonlyMap<number, SyncRelayLogInput>}): void {
+function requireBaseRecord(storage: StorageContext, retirement: ServiceActivationRetirement, op: SyncRelayLogInput, value: Record<string, unknown>,
+  baselineLength: number, batch: RetirementBatch): void {
   const payload = ordered(value, ["formatVersion", "recordDigest", "record"]);
   const record = ordered(payload.record, ["relayDatabaseNamespace", "checkpoint", "originStamp", "origin", "baseByteLength", "baseCoordinate"]);
   const checkpoint = ordered(record.checkpoint, ["eventCount", "terminal", "binding", "stateDigest", "evidenceDigest"]);
@@ -167,7 +223,9 @@ function requireBaseRecord(storage: StorageContext, retirement: ServiceActivatio
   const document = {workspaceId: retirement.workspaceId, mainVersionId: "main", objectId: retirement.objectId, lineageClaimId: retirement.lineageClaimId};
   let binding;
   try {binding = parseLiveObjectBinding(checkpoint.binding);} catch {throw new Unproved();}
-  require(record.relayDatabaseNamespace === retirement.relayDatabaseNamespace && checkpoint.eventCount === 0 && checkpoint.terminal === null &&
+  requireOwnerSource(source);
+  require(isDeepStrictEqual(binding, checkpoint.binding) &&
+    record.relayDatabaseNamespace === retirement.relayDatabaseNamespace && checkpoint.eventCount === 0 && checkpoint.terminal === null &&
     checkpoint.stateDigest === retirement.lineageClaimId && record.baseByteLength === baselineLength &&
     checkpoint.evidenceDigest === initialAcceptedHistoryDigest(retirement.relayDatabaseNamespace, document) &&
     binding.workspaceId === document.workspaceId && binding.objectId === document.objectId && binding.lineageClaimId === document.lineageClaimId);
@@ -203,7 +261,8 @@ function requireBaseRecord(storage: StorageContext, retirement: ServiceActivatio
     }))!;
   require(record.originStamp === hash(String(stamp.stamp)));
   // A real base coordinate: the lineage's base Y.Doc row, earlier in this push or already admitted.
-  require(typeof coordinate.originId === "string" && typeof coordinate.originSeq === "number" && Number.isSafeInteger(coordinate.originSeq));
+  require(identifier(coordinate.originId) && typeof coordinate.originSeq === "number" && Number.isSafeInteger(coordinate.originSeq) &&
+    coordinate.originSeq >= 0 && (coordinate.originId !== batch.originId || coordinate.originSeq < op.originSeq));
   const pending = coordinate.originId === batch.originId ? batch.ops.get(coordinate.originSeq) : undefined;
   const row = pending ?? storage.db.prepare(`SELECT op_kind AS opKind,payload_json AS payloadJson FROM sync_relay_log
     WHERE workspace_id=? AND origin_id=? AND origin_seq=?`).get(document.workspaceId, coordinate.originId, coordinate.originSeq);

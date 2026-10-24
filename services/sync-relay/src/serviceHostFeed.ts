@@ -11,6 +11,7 @@ import { logBlobsMissing } from "./storage/errors";
 import { readRefusal, refuseOp } from "./storage/relayAdmission";
 import type { ServiceHostFeedScope } from "./storage/serviceHostFeed";
 import type { ServiceActivationRetirement } from "./storage/serviceActivationRetirement";
+import { chargesProofBudget, type RetirementRefusal } from "./storage/serviceActivationPublication";
 import { MAX_BLOB_BYTES } from "./wireLimits";
 import {
   createWorkspaceReplicationRoutes,
@@ -111,9 +112,10 @@ export function hostedWriteAllowed(scope: ServiceHostFeedScope, opKind: string, 
 
 /**
  * Why the relay refused one of the host's ops. A settling document's row the
- * retirement writer could not prove is `unproved-retirement-output`.
+ * retirement writer could not prove is `unproved-retirement-output`;
+ * `retirement-proof-over-budget` is one whose proof no push can finish.
  */
-export type HostedRefusalReason = "outside-hosted-documents" | "unproved-retirement-output";
+export type HostedRefusalReason = "outside-hosted-documents" | RetirementRefusal;
 
 type HostedPublication = { kind: "accepted" | "departed" } | { kind: "retiring"; retirement: ServiceActivationRetirement } |
   { kind: "refused"; reason: HostedRefusalReason };
@@ -289,7 +291,7 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
       const received = new WeakMap<SyncRelayLogInput, string>();
       const refuse = (op: SyncRelayLogInput, reason: HostedRefusalReason) =>
         refuseOp(op, { opKind: op.opKind, payloadSha256: received.get(op)!, reason });
-      let pushOrigin = "";
+      let pushOrigin = "", batched = false;
       const admission: HostedAdmission = {
         async screen(originId, ops) {
           await warmReach(workspaceId);
@@ -298,13 +300,17 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
           const scope = currentScope(workspaceId), known = blobReach.known(scope);
           const held = storage.maxOriginSeq(workspaceId, originId);
           const audits: SyncRelayLogInput[] = [];
+          let proofs = 0;
           for (const op of ops) {
             received.set(op, sha256Hex(op.payloadJson));
             if (op.originSeq > held) {
               const decision = hostedPublication(scope, known, op);
               if (decision.kind === "refused") refuse(op, decision.reason);
-              // A settlement audit's proof waits for no companion moment, so it is proved here.
-              else if (decision.kind === "retiring" && op.opKind === "live.audit.settlement") audits.push(op);
+              else {
+                if (chargesProofBudget(op)) proofs++;
+                // A settlement audit's proof waits for no companion moment, so it is proved here.
+                if (decision.kind === "retiring" && op.opKind === "live.audit.settlement") audits.push(op);
+              }
               continue;
             }
             // A retried refusal gets its original decision; anything else at a held coordinate is compared on append.
@@ -314,19 +320,22 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
               refuseOp(op, refusal);
             }
           }
-          if (audits.length) await storage.prepareSettlementAudits({ workspaceId, ops: audits }, request.signal);
+          // Only a push holding another proof can leave room for an exhausted one by halving.
+          batched = proofs > 1;
+          if (audits.length) await storage.prepareSettlementAudits({ workspaceId, ops: audits, batched }, request.signal);
         },
         admit(ops) {
           const scope = currentScope(workspaceId), known = blobReach.known(scope);
-          const batch = { originId: pushOrigin, ops: new Map(ops.map(op => [op.originSeq, op])) };
+          const batch = { originId: pushOrigin, ops: new Map(ops.map(op => [op.originSeq, op])), batched };
           for (const op of ops) {
             if (op.relayAdmission === "refused") continue;
             const decision = hostedPublication(scope, known, op);
             if (decision.kind === "refused") refuse(op, decision.reason);
             else if (decision.kind === "retiring") {
               // Verified retirement output keeps its history and moves no projection.
-              if (storage.admitRetirementPublication(decision.retirement, op, batch)) op.relayAdmission = "departed";
-              else refuse(op, "unproved-retirement-output");
+              const refusal = storage.admitRetirementPublication(decision.retirement, op, batch);
+              if (refusal === null) op.relayAdmission = "departed";
+              else refuse(op, refusal);
             } else if (decision.kind === "departed") op.relayAdmission = "departed";
           }
         },

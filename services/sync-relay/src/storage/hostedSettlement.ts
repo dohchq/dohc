@@ -1,5 +1,5 @@
 import { clientMomentAuthorsRefused } from "../relayLogInputs";
-import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
+import { parseHostControlIdentifier, parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -77,6 +77,52 @@ const bag = (value: unknown) => {
   require(value && typeof value === "object" && !Array.isArray(value));
   return value as Record<string, unknown>;
 };
+const exact = (value: unknown, fields: readonly string[]) => {
+  const record = bag(value);
+  require(Object.keys(record).length === fields.length && fields.every((field) => Object.hasOwn(record, field)));
+  return record;
+};
+// Native `SettlementRecord` and `ApplicationHostCoordinate` (`settlement_record.rs`), with no optional field.
+const SETTLEMENT_RECORD_FIELDS = ["settlementId", "relayDatabaseNamespace", "binding", "hostCoordinate", "previousCursor",
+  "terminalCursor", "previousYdocSequence", "localYdocSequence", "applicationCount", "nativeIntervalDigest", "acceptedEventCount",
+  "acceptedIntervalDigest", "momentId", "markdownDigest", "sourceStateVectorDigest", "acceptedStateBlobSha256", "recordedAtMs",
+  "restoreOperationId"];
+const HOST_COORDINATE_FIELDS = ["hostId", "hostEpoch", "instanceId", "connectionId"];
+const BINDING_FIELDS = ["workspaceId", "mainVersionId", "objectId", "lineageClaimId", "currentPath", "selectorPaths", "restoreFenceGeneration"];
+const inOrder = (value: unknown, fields: readonly string[]) => Object.fromEntries(fields.map((field) => [field, bag(value)[field]]));
+/** The settlement ID native derives from a record's identity fields, with the binding in its native field order. */
+export function nativeSettlementId(record: Record<string, unknown>): string {
+  return `live-settlement-${hash(JSON.stringify([record.relayDatabaseNamespace, inOrder(record.binding, BINDING_FIELDS),
+    record.previousCursor, record.terminalCursor, record.previousYdocSequence, record.localYdocSequence,
+    record.nativeIntervalDigest, record.momentId, record.markdownDigest, record.sourceStateVectorDigest]))}`;
+}
+/** Native hashes the record as a `serde_json::Value`, whose objects sort their keys. */
+export function settlementRecordDigest(record: Record<string, unknown>): string {
+  return hash(stableJsonStringify(record));
+}
+/** What native validation requires of a settlement record before its interval is read. */
+function nativeSettlementRecord(record: Record<string, unknown>): LiveObjectBinding {
+  exact(record, SETTLEMENT_RECORD_FIELDS);
+  const host = exact(record.hostCoordinate, HOST_COORDINATE_FIELDS);
+  let binding: LiveObjectBinding;
+  try {
+    binding = parseLiveObjectBinding(record.binding);
+    for (const value of [record.relayDatabaseNamespace, host.hostId, host.instanceId, host.connectionId]) parseHostControlIdentifier(value);
+    parseHostEpoch(host.hostEpoch);
+    parseLiveUpdateIdentifier(record.momentId);
+    if (record.restoreOperationId !== null) parseLiveUpdateIdentifier(record.restoreOperationId);
+    for (const value of [record.nativeIntervalDigest, record.acceptedIntervalDigest, record.markdownDigest,
+      record.sourceStateVectorDigest, record.acceptedStateBlobSha256]) parseLiveUpdateDigest(value);
+  } catch {
+    throw new SettlementProofRefusal();
+  }
+  const [previousCursor, terminalCursor, previousSequence, localSequence, applications, events] = [record.previousCursor,
+    record.terminalCursor, record.previousYdocSequence, record.localYdocSequence, record.applicationCount, record.acceptedEventCount].map(integer);
+  integer(record.recordedAtMs);
+  require(isDeepStrictEqual(binding, record.binding) && previousCursor! <= terminalCursor! && previousSequence! <= localSequence! &&
+    applications! <= events! && record.settlementId === nativeSettlementId(record));
+  return binding;
+}
 export type SettlementAdmission =
   | { status: "accepted"; settlementId: string }
   | { status: "refused"; settlementId: string; reason: "authorship-mismatch" };
@@ -121,14 +167,18 @@ export interface SettlementProof {
 }
 // Verified `live.audit.settlement` records, apart from any companion moment.
 const audits = new WeakMap<SyncRelayLogInput, SettlementProof & { payloadJson: string }>();
+// Audits a push tried to prove: one whose document began settling after its push was screened never was.
+const attemptedAudits = new WeakSet<SyncRelayLogInput>();
 const exhaustedProofs = new WeakSet<SyncRelayLogInput>();
 /**
  * The settlement a moment or audit proved, "exhausted" when its push's budget
- * ran out first, or null. Client `settlementAdmission` fields are never proof.
+ * ran out first, "unattempted" for an audit nothing tried to prove, or null.
+ * Client `settlementAdmission` fields are never proof.
  */
-export function preparedSettlement(op: SyncRelayLogInput): SettlementProof | "exhausted" | null {
+export function preparedSettlement(op: SyncRelayLogInput): SettlementProof | "exhausted" | "unattempted" | null {
   if (exhaustedProofs.has(op)) return "exhausted";
   if (op.opKind === "moment.append") return prepared.get(op) ?? null;
+  if (!attemptedAudits.has(op)) return "unattempted";
   const audit = audits.get(op);
   return audit && audit.payloadJson === op.payloadJson ? audit : null;
 }
@@ -377,20 +427,10 @@ async function proveSettlementRecord(
   signal: AbortSignal | undefined,
   check: (record: Record<string, unknown>, binding: LiveObjectBinding) => void = () => {},
 ): Promise<ProvedSettlement> {
-  const ref = bag(reference),
+  const ref = exact(reference, ["formatVersion", "recordDigest", "record"]),
     record = bag(ref.record);
-  const settlementId = settlementResponseIdentifier(record.settlementId);
-  require(
-    settlementId !== "unavailable" &&
-      ref.formatVersion === 1 &&
-      ref.recordDigest === hash(stableJsonStringify(record)),
-  );
-  let binding: LiveObjectBinding;
-  try {
-    binding = parseLiveObjectBinding(record.binding);
-  } catch {
-    throw new SettlementProofRefusal();
-  }
+  const binding = nativeSettlementRecord(record), settlementId = String(record.settlementId);
+  require(ref.formatVersion === 1 && ref.recordDigest === settlementRecordDigest(record));
   const document = binding;
   const namespace = String(record.relayDatabaseNamespace);
   require(
@@ -428,6 +468,8 @@ async function proveSettlementRecord(
       throw new SettlementProofRefusal();
     throw error;
   }
+  // A record naming a restore names the one its terminal applied, as native requires.
+  require(record.restoreOperationId === null || events.at(-1)?.restoreOperationId === record.restoreOperationId);
   const transitions = restoreChecks(
     storage,
     namespace,
@@ -500,7 +542,7 @@ const DAMAGED_HISTORY = [
  */
 export async function prepareSettlementAudits(
   storage: StorageContext,
-  input: { workspaceId: string; ops: SyncRelayLogInput[] },
+  input: { workspaceId: string; ops: SyncRelayLogInput[]; batched: boolean },
   budget = new RestoreHistoryBudget(
     SETTLEMENT_PUSH_MAX_BYTES,
     SETTLEMENT_PUSH_MAX_METADATA_EVENTS,
@@ -511,11 +553,10 @@ export async function prepareSettlementAudits(
     if (op.opKind !== "live.audit.settlement") continue;
     audits.delete(op);
     exhaustedProofs.delete(op);
+    attemptedAudits.add(op);
     try {
-      const payload = bag(JSON.parse(op.payloadJson));
-      require(Object.keys(payload).sort().join() === "formatVersion,record,recordDigest");
       const { binding, namespace, previous, terminal, terminalDigest } =
-        await proveSettlementRecord(storage, input.workspaceId, payload, budget, false, signal);
+        await proveSettlementRecord(storage, input.workspaceId, JSON.parse(op.payloadJson), budget, input.batched, signal);
       audits.set(op, { binding, namespace, previous, terminal, terminalDigest, payloadJson: op.payloadJson });
     } catch (error) {
       if (signal?.aborted) throw error;

@@ -637,10 +637,10 @@ export interface SyncRelayStorage {
   putServiceHostBlob(input: {workspaceId: string; sha256: string; content: Uint8Array; createdAtMs: number}): PutBlobResult;
   serviceHostUploaded(workspaceId: string, sha256: string): boolean;
   /** Proves a settling document's settlement audits before the append's writer. */
-  prepareSettlementAudits(input: {workspaceId: string; ops: SyncRelayLogInput[]}, signal?: AbortSignal): Promise<void>;
-  /** Under the append's writer: whether a settling document's row is verified retirement output. */
+  prepareSettlementAudits(input: {workspaceId: string; ops: SyncRelayLogInput[]; batched: boolean}, signal?: AbortSignal): Promise<void>;
+  /** Under the append's writer: null for a settling document's verified retirement output, otherwise why it is refused. */
   admitRetirementPublication(retirement: import("./serviceActivationRetirement").ServiceActivationRetirement, op: SyncRelayLogInput,
-    batch: {originId: string; ops: ReadonlyMap<number, SyncRelayLogInput>}): boolean;
+    batch: import("./serviceActivationPublication").RetirementBatch): import("./serviceActivationPublication").RetirementRefusal | null;
   /** After confirmation: whether what that row's admission waited on was confirmed. */
   retirementPublicationConfirmed(op: SyncRelayLogInput): boolean;
   scanServiceHostCandidateShares(after?: import("./serviceHostEnrollment").ServiceHostCandidateCursor, workspaceId?: string): import("./serviceHostEnrollment").ServiceHostCandidatePage;

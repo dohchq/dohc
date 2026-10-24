@@ -421,11 +421,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   serviceHostUploaded(workspaceId: string, sha256: string) {
     return serviceHostUploadStorage.serviceHostUploaded(this, workspaceId, sha256);
   }
-  prepareSettlementAudits(input: { workspaceId: string; ops: SyncRelayLogInput[] }, signal?: AbortSignal) {
+  prepareSettlementAudits(input: { workspaceId: string; ops: SyncRelayLogInput[]; batched: boolean }, signal?: AbortSignal) {
     return prepareSettlementAudits(this, input, undefined, signal);
   }
-  admitRetirementPublication(retirement: ServiceActivationRetirement, op: SyncRelayLogInput,
-    batch: { originId: string; ops: ReadonlyMap<number, SyncRelayLogInput> }) {
+  admitRetirementPublication(retirement: ServiceActivationRetirement, op: SyncRelayLogInput, batch: serviceActivationPublication.RetirementBatch) {
     return serviceActivationPublication.admitRetirementPublication(this, retirement, op, batch);
   }
   retirementPublicationConfirmed(op: SyncRelayLogInput) {
