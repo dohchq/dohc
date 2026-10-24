@@ -1,4 +1,4 @@
-import {Worker} from "node:worker_threads";
+import type {ChildProcess} from "node:child_process";
 import {getEventListeners} from "node:events";
 import {afterEach, expect, it, vi} from "vitest";
 import {createLiveMarkdownJournalValidator} from "@dohc/ydoc-projection/live-journal-validation";
@@ -10,6 +10,15 @@ import {createLiveValidationExecutor} from "./liveValidation";
 import type {StorageContext} from "./storage/context";
 import type {CapacityLiveAdmissionValidator} from "./ownerOutboxDelivery";
 
+// Lets a test intercept the validation pool's children as they start.
+const forks = vi.hoisted(() => ({started: undefined as ((child: ChildProcess) => void) | undefined}));
+vi.mock("node:child_process", async importOriginal => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  const fork = (...args: Parameters<typeof actual.fork>) => {
+    const child = actual.fork(...args); forks.started?.(child); return child;
+  };
+  return {...actual, fork};
+});
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => {
   for (const close of cleanup.splice(0).reverse()) await close();
@@ -61,11 +70,16 @@ function waitingValidator() {
 }
 it("waits for either of two busy workers before reading a cut and acknowledges the third editor", async () => {
   const pool = createLiveValidationExecutor(); cleanup.push(() => pool.close());
-  const original = Worker.prototype.postMessage, held: Array<() => void> = [];
+  const held: Array<() => void> = [];
   let posts = 0;
-  vi.spyOn(Worker.prototype, "postMessage").mockImplementation(function (this: Worker, ...args) {
-    if (posts++ < 2) held.push(() => original.apply(this, args)); else original.apply(this, args);
-  });
+  forks.started = child => {
+    const send = child.send;
+    child.send = ((...args: unknown[]) => {
+      if (posts++ < 2) {held.push(() => Reflect.apply(send, child, args)); return true;}
+      return Reflect.apply(send, child, args);
+    }) as typeof child.send;
+  };
+  cleanup.push(() => {forks.started = undefined;});
   const validate = pool.validator(policy), entered = deferred();
   const wait = validate.waitForCapacity!;
   validate.waitForCapacity = signal => {entered.resolve(); return wait(signal);};

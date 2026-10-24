@@ -141,7 +141,7 @@ export async function drainOwnerOutbox(options: {
         cutToken: cut.cut,validation,updateBytes: entry.update,receivedAtMs: Date.now()}, admission.activation);
       if (committed.result.kind === "retry") return {admittedEntries, hasMore: true, retryReady: true};
       if (committed.result.kind !== "accepted") {
-        if (["provenance-refused", "delivery-conflict"].includes(committed.result.reason)) {
+        if (["provenance-refused", "delivery-conflict", "capacity-refused"].includes(committed.result.reason)) {
           await client.sendRequest({...request(), method: "liveApplication.quarantineOwnerOutbox",
             params: {registrationId, reason: committed.result.reason}}, signal);
           check();
