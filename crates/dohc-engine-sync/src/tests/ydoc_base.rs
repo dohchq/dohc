@@ -5281,30 +5281,57 @@ fn ingress_drain_reports_its_sibling(stopped_first: bool) {
         1_150,
     )
     .expect("the losing lineage's unsettled edit");
+    // An external head that matches neither the losing side nor its last
+    // settled text, so the base's replacement needs three copies.
+    engine
+        .write_with(&NoFaults, |tx| {
+            let sha = dohc_engine_storage::hex_sha256(b"relay winner");
+            tx.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,12,'relay winner')",
+                [&sha],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "UPDATE snapshots SET blob_sha256=?1 WHERE object_id='object-arbitrated'",
+                [&sha],
+            )
+            .map_err(SyncError::persist)
+        })
+        .expect("a third copy from an external editor");
     let winner = Ydoc::wire();
     winner.plaintext_insert(0, "relay winner");
     let winner_claim = engine
         .put_binary_blob(&winner.encode_full_state())
         .expect("winner blob");
-    let mut queued = envelope(
-        "winner",
-        0,
-        "ydoc.update",
-        json!({
-            "versionId": "main", "objectId": "object-arbitrated", "path": HEAD,
-            "contentKind": "plaintext", "updateBlobSha256": winner_claim,
-            "lineageClaimId": winner_claim, "isBaseState": true
-        }),
-    );
-    queued.relay_seq = Some(10);
-    apply_ydoc_envelope(
-        &mut engine,
-        &mut WriterDocCache::new(),
-        &queued,
-        &NoFaults,
-        &AlwaysLive,
-    )
-    .expect("queue the winning base");
+    // A real delta queues behind the base, so the drain's head differs from
+    // the external head and is written.
+    let queued_delta = winner.plaintext_insert(12, " queued");
+    let queued_sha = engine
+        .put_binary_blob(&queued_delta)
+        .expect("queued delta blob");
+    for (seq, relay_seq, sha, is_base) in
+        [(0, 10, &winner_claim, true), (1, 11, &queued_sha, false)]
+    {
+        let mut queued = envelope(
+            "winner",
+            seq,
+            "ydoc.update",
+            json!({
+                "versionId": "main", "objectId": "object-arbitrated", "path": HEAD,
+                "contentKind": "plaintext", "updateBlobSha256": sha,
+                "lineageClaimId": winner_claim, "isBaseState": is_base
+            }),
+        );
+        queued.relay_seq = Some(relay_seq);
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut WriterDocCache::new(),
+            &queued,
+            &NoFaults,
+            &AlwaysLive,
+        )
+        .expect("queue the winning base and delta");
+    }
     let siblings = |engine: &EngineStore| -> Vec<(String, String)> {
         engine
             .read_with(|conn| {
@@ -5348,11 +5375,11 @@ fn ingress_drain_reports_its_sibling(stopped_first: bool) {
     }
 
     // The pass's next op of the document drains the queue before it applies.
-    let later = winner.plaintext_insert(12, " later");
+    let later = winner.plaintext_insert(19, " later");
     let later_sha = engine.put_binary_blob(&later).expect("later blob");
     let mut incoming = envelope(
         "winner",
-        1,
+        2,
         "ydoc.update",
         json!({
             "versionId": "main", "objectId": "object-arbitrated", "path": HEAD,
@@ -5360,7 +5387,7 @@ fn ingress_drain_reports_its_sibling(stopped_first: bool) {
             "lineageClaimId": winner_claim, "isBaseState": false
         }),
     );
-    incoming.relay_seq = Some(11);
+    incoming.relay_seq = Some(12);
     let outcome = crate::ydoc_apply::apply_ydoc_envelope_in_batch(
         &mut engine,
         &mut WriterDocCache::new(),
