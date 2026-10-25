@@ -230,6 +230,10 @@ export const UNKNOWN_ERROR_WORDS = "dohc could not finish that.";
 
 // A bare code such as `invalid-input` or `EACCES`, or one that leads a message.
 const RAW_CODE = /^(?:\S*[-_]\S*|[A-Z0-9]{3,})$|^[A-Z][A-Z0-9_]+: /;
+// Data, such as the JSON a validation error sends as its message, or a stack.
+const DUMP = /^[[{]|\n/;
+// A message longer than this is a dump, not words for a toast.
+const MAX_WORDS_LENGTH = 500;
 const IPC_PREFIX = /^Error invoking remote method '[^']*': /;
 const CLASS_PREFIX = /^((?:[A-Z][A-Za-z0-9]*)?Error)(?: \[([^\]\s]+)\])?(?: \[retryAfterMs=(\d{1,15})\])?(?: \[computer=([^\]\s]+)\])?: /;
 
@@ -346,7 +350,7 @@ export function readError(error: unknown): ReadError {
     return { words, mapped: words !== null, cause: text };
   }
   if (!message) return { words: null, mapped: false, cause: null };
-  if (RAW_CODE.test(message)) {
+  if (RAW_CODE.test(message) || DUMP.test(message) || message.length > MAX_WORDS_LENGTH) {
     return { words: null, mapped: false, cause: plain ? message : text };
   }
   return { words: message, mapped: false, cause: plain ? null : text };
