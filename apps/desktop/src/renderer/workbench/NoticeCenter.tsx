@@ -630,7 +630,7 @@ export function LocalNoticeRow(props: {
             ) : null}
             {notice.filePaths?.length ? (
               <div className="mt-1 flex items-start gap-2">
-                <ul className="m-0 min-w-0 flex-1 list-none p-0 font-mono text-[12px] text-muted">
+                <ul className="m-0 min-w-0 flex-1 list-none p-0 text-[12px] text-muted">
                   {notice.filePaths.slice(0, 5).map(path => <li key={path} className="select-text break-all">{path}</li>)}
                   {notice.filePaths.length > 5 ? <li>{notice.filePaths.length - 5} more</li> : null}
                 </ul>
@@ -643,7 +643,7 @@ export function LocalNoticeRow(props: {
             {notice.timeMs !== undefined ? (
               <time
                 dateTime={new Date(notice.timeMs).toISOString()}
-                className="mt-1 block font-mono text-[10px] text-subtle"
+                className="mt-1 block text-[10px] text-subtle"
               >
                 {relativeTime(notice.timeMs)}
               </time>
@@ -1940,7 +1940,7 @@ export function NoticeCenter(props: {
         >
           <header className="flex h-9 shrink-0 items-center gap-2 border-b border-line px-3">
             <Bell size={13} aria-hidden className="text-subtle" />
-            <span className="font-semibold uppercase tracking-wide text-muted">
+            <span className="text-sm font-semibold text-ink">
               Notices
             </span>
             {canReadAll ? (
@@ -2138,7 +2138,7 @@ export function NoticeCenter(props: {
                                   </span>
                                 </div>
                                 {text.body}
-                                <p className="m-0 mt-1 flex min-w-0 gap-2 font-mono text-[10px] text-subtle">
+                                <p className="m-0 mt-1 flex min-w-0 gap-2 text-[10px] text-subtle">
                                   <time dateTime={new Date(notice.createdAtMs).toISOString()}>
                                     {relativeTime(notice.createdAtMs)}
                                   </time>
