@@ -3521,7 +3521,7 @@ describe("engine history and linked Chats IPC contract", () => {
           recordedAtMs: 100,
           operation: "write",
           origin: "local-file",
-          summary: "Reconciled offline edits",
+          summary: "Changed while dohc was closed",
           correlationId: "reconcile-1",
           momentOrder: 7,
         },
@@ -3531,7 +3531,7 @@ describe("engine history and linked Chats IPC contract", () => {
       activeVersionId: "main",
       ...historyPageFields,
     });
-    expect(page.moments[0].summary).toBe("Reconciled offline edits");
+    expect(page.moments[0].summary).toBe("Changed while dohc was closed");
     expect(page.startCursor).toEqual(historyCursor());
     expect(
       EngineMomentDetailRecord.parse({

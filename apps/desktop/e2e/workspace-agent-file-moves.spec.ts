@@ -45,7 +45,7 @@ test("an MCP move and delete each show one History row under the agent", async (
     await expect(deleted.first().getByTestId("engine-moment-source")).toHaveText("Agent");
     // Every change here came through dohc, so no row is a neutral capture.
     const rows = page.locator('[data-testid="engine-moment-open"]');
-    for (const label of ["Local file edit", "Reconciled offline edits", "dohc-mcp"]) {
+    for (const label of ["Local file edit", "Changed while dohc was closed", "Added existing files", "dohc-mcp"]) {
       await expect(rows.filter({ hasText: label })).toHaveCount(0);
     }
     await expect(undoOperation(ctx, { operationId: removed.operationId })).resolves.toEqual({ ok: true, tracked: { state: expect.stringMatching(/^restor(?:ing|ed)$/u), momentCount: 1 }, restored: [], remaining: [] });

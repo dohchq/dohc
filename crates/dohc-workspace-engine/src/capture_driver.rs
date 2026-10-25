@@ -2385,14 +2385,16 @@ impl DriverEnv for RealEnv {
             probe.pause_initial_if_armed(cancel).await;
         }
 
-        // The startup baseline is the offline-reconcile pass (TS parity):
-        // One correlation id and the "Reconciled offline edits" summary tie
-        // its per-file moments together, retries included — they finish the
-        // same pass. A new layer also performs one collection reconciliation:
-        // its in-memory retry bit cannot preserve a failed request across a
-        // daemon restart, and a rehydrated manifest may make this plan empty.
+        // The startup baseline is one pass: one correlation id and one
+        // summary tie its per-file moments together, retries included, since
+        // they finish the same pass. A workspace the store has no record of can
+        // only be taking in the files its folder already had; any other
+        // baseline reconciles edits made while dohc was closed. A new layer
+        // also performs one collection reconciliation: its in-memory retry
+        // bit cannot preserve a failed request across a daemon restart, and a
+        // rehydrated manifest may make this plan empty.
         self.status.request_collection_reconcile();
-        let provenance = reconcile_provenance();
+        let provenance = startup_provenance(workspace_missing);
         #[cfg(feature = "harness")]
         fence_phase.field(
             "correlation",
@@ -2833,12 +2835,20 @@ struct CaptureThreadOutcome {
     pending_placement_paths: Vec<CapturePlacementPath>,
 }
 
-/// TS parity (`reconcile-${createId()}` + "Reconciled offline edits"): one
-/// actor-neutral correlation id ties a reconcile pass's per-file moments
-/// together as a group without inventing an author.
-fn reconcile_provenance() -> CaptureProvenance {
+const OFFLINE_RECONCILE_SUMMARY: &str = "Changed while dohc was closed";
+const FIRST_IMPORT_SUMMARY: &str = "Added existing files";
+
+/// TS parity (`reconcile-${createId()}`): one actor-neutral correlation id
+/// ties a startup pass's per-file moments together as a group without
+/// inventing an author.
+fn startup_provenance(workspace_missing: bool) -> CaptureProvenance {
+    let summary = if workspace_missing {
+        FIRST_IMPORT_SUMMARY
+    } else {
+        OFFLINE_RECONCILE_SUMMARY
+    };
     CaptureProvenance {
-        summary: Some("Reconciled offline edits".to_owned()),
+        summary: Some(summary.to_owned()),
         correlation_id: Some(pass_correlation_id("reconcile")),
     }
 }
