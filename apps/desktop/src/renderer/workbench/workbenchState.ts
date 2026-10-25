@@ -260,6 +260,8 @@ const diffTitle: TabTitle = (_tab, label) => {
   return name ? `Diff: ${name}` : "History change";
 };
 const collectionTitle: TabTitle = (_tab, label) => label ?? "Collection";
+// An app's folder, as typed. A folder that cannot be decoded keeps its address.
+const appTitle: TabTitle = tab => basenameOf(tab.kind === "site" && tab.siteRoot !== null ? tab.siteRoot : tab.path);
 export const TAB_KINDS: Record<ParsedTab["kind"], TabRules> = {
   file: {
     virtual: false,
@@ -300,8 +302,9 @@ export const TAB_KINDS: Record<ParsedTab["kind"], TabRules> = {
   site: {
     virtual: true,
     singleton: true,
-    ...fileTitles,
-    explorerTitle: tab => `App: ${tab.kind === "site" ? tab.siteRoot ?? "preview" : "preview"}`,
+    title: appTitle,
+    tooltip: tab => tab.kind === "site" && tab.siteRoot !== null ? tab.siteRoot : tab.path,
+    explorerTitle: appTitle,
     glyph: () => "app",
   },
   momentDiff: {

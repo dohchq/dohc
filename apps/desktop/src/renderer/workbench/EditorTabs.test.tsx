@@ -54,9 +54,9 @@ function renderTabs(activeTab: string) {
 
 describe("EditorTabs strip scrolling", () => {
   it.each([
-    [siteTabPath("apps/trip"), "apps%2Ftrip"],
-    [collectionTabPath("notes/旅"), "notes%2F%E6%97%85"],
-  ])("keeps the tab-strip title and tooltip for %s", (path, title) => {
+    [siteTabPath("apps/trip"), "trip", "apps/trip"],
+    [collectionTabPath("notes/旅"), "notes%2F%E6%97%85", collectionTabPath("notes/旅")],
+  ])("keeps the tab-strip title and tooltip for %s", (path, title, tooltip) => {
     render(
       <EditorTabs
         groupId="left"
@@ -76,7 +76,7 @@ describe("EditorTabs strip scrolling", () => {
     );
     const tab = screen.getByTestId(editorTabTestId(path));
     expect(tab.textContent).toBe(title);
-    expect(tab.getAttribute("title")).toBe(path);
+    expect(tab.getAttribute("title")).toBe(tooltip);
     expect(screen.getByRole("button", { name: "Close " + title })).toBeTruthy();
   });
 
