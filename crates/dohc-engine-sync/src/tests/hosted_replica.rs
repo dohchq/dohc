@@ -6429,6 +6429,222 @@ fn an_unadmitted_edit_of_another_lineage_leaves_a_ready_document_ready() {
     );
 }
 
+/// [`ready_bound_b`] for a richdoc `doc-b` at `base`, whose session admitted
+/// `echo`, a later edit of its lineage the replica has not pulled.
+#[allow(clippy::type_complexity)]
+fn ready_bound_richdoc_b() -> (
+    ScratchDir,
+    std::path::PathBuf,
+    EngineStore,
+    RelaySyncClient<HostedFeed>,
+    Vec<u8>,
+    Vec<u8>,
+    String,
+) {
+    let (scratch, path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    let ydoc = dohc_engine_collab::Ydoc::wire();
+    ydoc.richdoc_append_paragraph("hosted b");
+    let base = ydoc.encode_full_state();
+    let lineage = dohc_engine_storage::hex_sha256(&base);
+    peer_update(feed, "richdoc", 0, "doc-b", "a.md", base.clone(), &lineage);
+    feed.share("doc-b", "a.md");
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    let echo = ydoc.richdoc_append_paragraph("accepted");
+    accept_live_update(&mut store, "doc-b", &lineage, &echo);
+    (scratch, path, store, client, base, echo, lineage)
+}
+
+/// Queue `kind` `update` of `doc-b` on `lineage`, as `peer`'s `seq` at
+/// relay position `relay_seq`, as a drain leaves one queued.
+fn queue_b(
+    store: &mut EngineStore,
+    seq: i64,
+    relay_seq: i64,
+    kind: &str,
+    update: &[u8],
+    lineage: &str,
+) {
+    let sha = store.put_binary_blob(update).unwrap();
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "doc-b").unwrap();
+    let op = envelope(
+        "peer",
+        seq,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "doc-b",
+            "path": "a.md",
+            "contentKind": kind,
+            "updateBlobSha256": sha,
+            "lineageClaimId": lineage,
+            "isBaseState": false
+        }),
+    );
+    crate::apply_envelope_with(store, &op, &NoFaults, |tx, op| {
+        crate::ydoc_apply::defer_ydoc_update_in_tx(tx, &key, op, lineage, relay_seq, Some("relay"))
+    })
+    .unwrap();
+}
+
+/// The documents the end-of-pass drain takes up again now.
+fn drained_again(store: &mut EngineStore) -> Vec<String> {
+    crate::ydoc_apply::drain_released_holds(
+        store,
+        &mut WriterDocCache::new(),
+        "ws",
+        &BTreeMap::new(),
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap()
+    .holds
+    .into_keys()
+    .collect()
+}
+
+/// Sol's 7h finding and Opus's second: an echo its session admitted, left
+/// queued while `doc-b`'s binding stands, holds nothing. `doc-b`'s read
+/// completes with only the echo queued once it is back at its scope's path:
+/// it waits for that work, the next drain consumes the echo, and `doc-b` is
+/// ready with its content as it was.
+#[test]
+fn a_queued_echo_its_session_admitted_leaves_a_bound_document_ready() {
+    let (_scratch, _path, mut store, client, _base, echo, lineage) = ready_bound_richdoc_b();
+    let before = content(&store);
+    client.transport().share("doc-b", "moved.md");
+    sync(&client, &mut store);
+    assert!(matches!(
+        hold(&store, "doc-b"),
+        Some(HostedHold::ScopePathMismatch { .. })
+    ));
+    queue_b(&mut store, 1, 2, "richdoc", &echo, &lineage);
+
+    client.transport().share("doc-b", "a.md");
+    sync(&client, &mut store);
+    assert_eq!(hold(&store, "doc-b"), Some(HostedHold::WorkWaiting));
+    assert_eq!(queued_b(&store), r#"[["peer",1,"hosted","relay"]]"#);
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(queued_b(&store), "[]");
+    assert_eq!(content(&store), before);
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM replication_refused_ydoc_blobs"
+        ),
+        0
+    );
+}
+
+/// An echo left queued behind `doc-b`'s unadmitted edit keeps its place.
+/// While the binding stands, `doc-b` stays held with both queued, its
+/// content as it was, and no pass's drain takes it up again. Once the
+/// binding goes, both apply in order, once.
+#[test]
+fn an_echo_queued_behind_an_unadmitted_edit_applies_once_after_release() {
+    let (_scratch, _path, mut store, client, base, echo, lineage) = ready_bound_richdoc_b();
+    let peer = dohc_engine_collab::Ydoc::wire();
+    peer.apply(&base).unwrap();
+    let edit = peer.richdoc_append_paragraph("unseen");
+    // The edit and the echo are concurrent, so their client IDs order them.
+    peer.apply(&echo).unwrap();
+    let merged = peer
+        .project(dohc_engine_collab::ContentKind::Richdoc)
+        .unwrap()
+        .content;
+    peer_update(
+        client.transport(),
+        "richdoc",
+        1,
+        "doc-b",
+        "a.md",
+        edit,
+        &lineage,
+    );
+    sync(&client, &mut store);
+    assert_eq!(hold(&store, "doc-b"), Some(HostedHold::LiveEditUnadmitted));
+    queue_b(&mut store, 2, 100, "richdoc", &echo, &lineage);
+    let before = content(&store);
+    for _ in 0..2 {
+        assert_eq!(drained_again(&mut store), Vec::<String>::new());
+        let outcome = pass(&client, &mut store, &NoFaults).unwrap();
+        assert_eq!(
+            outcome.held,
+            BTreeMap::from([("doc-b".to_owned(), HostedHold::LiveEditUnadmitted)])
+        );
+        assert!(commit(&client, &mut store, &outcome));
+    }
+    assert_eq!(
+        queued_b(&store),
+        r#"[["peer",1,"hosted","relay"],["peer",2,"hosted","relay"]]"#
+    );
+    assert_eq!(content(&store), before);
+
+    release_b(&mut store);
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(queued_b(&store), "[]");
+    let applied = content(&store);
+    assert_eq!(applied.0["doc-b"], merged);
+    assert_eq!(
+        (
+            merged.matches("unseen").count(),
+            merged.matches("accepted").count()
+        ),
+        (1, 1),
+        "{merged}"
+    );
+    sync(&client, &mut store);
+    assert_eq!(content(&store), applied);
+}
+
+/// Opus's 7h first finding: one binding check. A session bound on another
+/// lineage of `doc-b` keeps an edit of its current lineage queued as one of
+/// that lineage does: `doc-b` is held as live-edit-unadmitted, no drain
+/// takes it up again while the binding stands, and once it goes the edit
+/// applies.
+#[test]
+fn a_binding_on_another_lineage_holds_an_unadmitted_edit_until_release() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    let ydoc = dohc_engine_collab::Ydoc::wire();
+    ydoc.plaintext_insert(0, "hosted b");
+    let base = ydoc.encode_full_state();
+    let lineage = dohc_engine_storage::hex_sha256(&base);
+    peer_update(feed, "plaintext", 0, "doc-b", "a.md", base, &lineage);
+    feed.share("doc-b", "a.md");
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    accept_live_update(&mut store, "doc-b", &"e".repeat(64), b"live update");
+
+    let edit = ydoc.plaintext_insert(8, " and more");
+    peer_update(feed, "plaintext", 1, "doc-b", "a.md", edit, &lineage);
+    for _ in 0..2 {
+        let outcome = pass(&client, &mut store, &NoFaults).unwrap();
+        assert_eq!(
+            outcome.held,
+            BTreeMap::from([("doc-b".to_owned(), HostedHold::LiveEditUnadmitted)])
+        );
+        assert!(commit(&client, &mut store, &outcome));
+        assert_eq!(drained_again(&mut store), Vec::<String>::new());
+    }
+    assert_eq!(hold(&store, "doc-b"), Some(HostedHold::LiveEditUnadmitted));
+    assert_eq!(queued_b(&store), r#"[["peer",1,"hosted","relay"]]"#);
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b")]));
+
+    release_b(&mut store);
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b and more")]));
+    assert_eq!(queued_b(&store), "[]");
+}
+
 /// Parking: the reply to the host's push of `doc-b`'s row is lost after the
 /// relay recorded it. `doc-b` cannot park while its row looks unpushed; the
 /// next push is acknowledged, `doc-b` parks, and its return skips the row as

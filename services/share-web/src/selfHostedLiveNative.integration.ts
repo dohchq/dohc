@@ -1276,7 +1276,8 @@ it("retires a stopped document while another stays live, then resumes it as a su
   expect(proof.ownerTips()).toEqual({current: [{tip_cursor: seed}], retired: [{activation_id: P, tip_cursor: accepted.journalCursor}]});
   expect(proof.settlement()).toEqual({applied: seed, settled: seed});
   expect(proof.hosted()).toEqual({state: "ready", reason: null});
-  expect(readFileSync(join(proof.store, "docs/a.md"), "utf8")).toBe(markdown);
+  // The settlement commits before the engine writes the file.
+  await vi.waitFor(() => expect(readFileSync(join(proof.store, "docs/a.md"), "utf8")).toBe(markdown), {timeout: 10000});
   expect(readdirSync(proof.hostRoot)).toEqual([basename(proof.store)]);
   expect(readdirSync(join(proof.store, "docs"))).toEqual(["a.md", "b.md"]);
 
@@ -1289,7 +1290,7 @@ it("retires a stopped document while another stays live, then resumes it as a su
   }, {timeout: 30000});
   const edited = "---\nbeforeActivation: ordinary-owner\nbeforeStop: live\ncollaborator: named\nwhileStopped: ordinary-owner\n---\n\nHello";
   expect((await proof.hostState()).markdown).toBe(edited);
-  expect(readFileSync(join(proof.store, "docs/a.md"), "utf8")).toBe(edited);
+  await vi.waitFor(() => expect(readFileSync(join(proof.store, "docs/a.md"), "utf8")).toBe(edited), {timeout: 10000});
   expect(proof.activations()).toEqual([retired, current]);
   expect(await proof.documents()).toEqual([proof.ready("docs/a.md"), proof.ready("docs/b.md")]);
   // docs/b.md holds exactly its own live edits.
@@ -1402,7 +1403,7 @@ it("holds a document its owner edited while paused, and Resume retires the held 
   expect(held).toBeGreaterThan(captured);
   await vi.waitFor(() => expect(harness.pulls.length).toBeGreaterThan(pulls + 12), {timeout: 30000});
   expect(attempts()).toBe(held);
-  expect(proof.reports.filter(report => report.startsWith("Live editing of docs/a.md"))).toEqual([`Live editing of docs/a.md in workspace workspace cannot resume: the document changed while live editing was off, and the session host's copy is missing that edit. Its owner can keep editing it in dohc. Its store is kept at ${proof.store}.`]);
+  expect(proof.reports.filter(report => report.startsWith("Live editing of docs/a.md"))).toEqual([`Live editing of docs/a.md in workspace workspace is held: the document changed while live editing was off, and the session host's copy is missing that edit. It resumes once its owner resumes live editing in dohc. Its store is kept at ${proof.store}.`]);
   expect(proof.activations()).toEqual([completed]);
 
   // Resume again: the enrollment route retires the held activation at its seed, and the relay keeps its owner delivery in history.
@@ -1441,7 +1442,8 @@ it("holds a document its owner edited while paused, and Resume retires the held 
   expect(proof.hosted()).toEqual({state: "ready", reason: null});
   expect(queued()).toEqual([]);
   expect(refused()).toEqual([]);
-  expect(readFileSync(join(proof.store, "docs/a.md"), "utf8")).toBe(markdown);
+  // The settlement commits before the engine writes the file.
+  await vi.waitFor(() => expect(readFileSync(join(proof.store, "docs/a.md"), "utf8")).toBe(markdown), {timeout: 10000});
 
   // A later live edit settles through the successor.
   const later = await proof.liveEdit("afterResume", "live");

@@ -167,17 +167,17 @@ export function createRelaySharesIpcHandlers<
       // Concurrent list reads may see a document in both sets. The current
       // enrollment wins; all bindings and server-only credentials stay in main.
       // Resume is also how the owner tries again a document the server refused,
-      // or one it could not start until the owner opened it.
+      // one it could not start until the owner opened it, or one whose server
+      // copy misses an edit made while live editing was off: Resume retires the
+      // held session so the edit applies.
       const documents = new Map([...stopped.documents, ...current.documents].map(document => [document.path, {
         ...document, canResume: document.reason === "session-host-refused" || document.reason === "live-document-without-lineage" ||
-          (!document.reason && (document.status === "retired" || document.status === "paused")),
+          document.reason === "live-edit-unadmitted" || (!document.reason && (document.status === "retired" || document.status === "paused")),
       }]));
-      // A deferred Stop finishes through Resume, unless the server's copy diverged or misses an
-      // edit made while live editing was off: then Resume cannot work.
+      // A deferred Stop finishes through Resume, unless the server's copy diverged: then Resume cannot work.
       for (const row of documents.values()) {
         const deferred = localStops.find(stop => stop.document.currentPath === row.path)?.deferred;
-        if (deferred) Object.assign(row, {deferredStop: deferred,
-          canResume: row.reason !== "session-host-diverged" && row.reason !== "live-edit-unadmitted"});
+        if (deferred) Object.assign(row, {deferredStop: deferred, canResume: row.reason !== "session-host-diverged"});
       }
       return OwnerLiveDocumentsResult.parse({documents: [...documents.values()], nextCursor: stopped.nextCursor});
     }, assertOriginalWorkspace);

@@ -230,7 +230,7 @@ describe("sync status surface", () => {
     {
       delivery: "retrying" as const,
       reason: "live-edit-unadmitted" as const,
-      label: "Live editing can't resume",
+      label: "Live editing stopped",
     },
   ])("labels $delivery owner live delivery as $label", ({ delivery, reason, label }) => {
     renderStatus({ syncStatus: liveDeliveryStatus(delivery, reason) });

@@ -110,6 +110,33 @@ describe("LiveDocumentsDialog", () => {
       expect(actions(path)).toEqual([]);
     }
   });
+  // Proves: a document whose server copy misses an edit made while live editing
+  // was off offers Resume, alone and with a deferred Stop, through the same path.
+  it("offers Resume on a document whose server copy misses an edit, with and without a deferred Stop", async () => {
+    const h=harness(), reason="live-edit-unadmitted" as const;
+    h.load.mockResolvedValue(page([
+      row("deferred.md",{status:"unavailable",reason,canResume:true,deferredStop:{unsentEdits:2,editable:true}}),
+      row("edited.md",{status:"unavailable",reason,canResume:true}),
+    ]));
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    const deferred=await screen.findByTestId("live-document-row-deferred.md");
+    expect(deferred.textContent).toContain("Live editing stopped. 2 unsent edits remain on this computer. Resume live editing to try sending them. You can keep editing.");
+    for (const path of ["deferred.md","edited.md"]) {
+      const document=screen.getByTestId(`live-document-row-${path}`);
+      expect(document.children[1]?.textContent).toBe("Server copy misses an edit");
+      expect(document.textContent).toContain("This file changed while live editing was off, and the server's copy doesn't have that change. Resume live editing to add it.");
+    }
+    // A deferred Stop has already run, so only the other row still offers Stop.
+    expect(actions("deferred.md")).toEqual(["Resume live editing"]);
+    expect(actions("edited.md")).toEqual(["Resume live editing","Stop live editing"]);
+    fireEvent.click(within(deferred).getByRole("button",{name:"Resume live editing for deferred.md"}));
+    await vi.waitFor(() => expect(h.resume).toHaveBeenCalledWith("ws","deferred.md"));
+    // The list reloads after a Resume, and its controls wait until it has.
+    await vi.waitFor(() => expect((screen.getByRole("button",{name:"Resume live editing for edited.md"}) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button",{name:"Resume live editing for edited.md"}));
+    await vi.waitFor(() => expect(h.resume).toHaveBeenCalledWith("ws","edited.md"));
+    expect(h.resume).toHaveBeenCalledTimes(2);
+  });
   it.each([true, false])("shows deferred unsent edits and truthful editability: %s", async editable => {
     const h=harness();
     h.load.mockResolvedValue(page([row("a.md", {status:"retired",canResume:true,deferredStop:{unsentEdits:65,editable}})]));
@@ -256,7 +283,7 @@ describe("LiveDocumentsDialog", () => {
         row("docs/edited.md", {
           status: "unavailable",
           reason: "live-edit-unadmitted",
-          canResume: false,
+          canResume: true,
         }),
         row("docs/stopped.md", { status: "retired", canResume: true }),
         row("docs/stopped-gone.md", { status: "retired" }),
@@ -278,17 +305,20 @@ describe("LiveDocumentsDialog", () => {
       "Stopped by the server",
       "Not started",
       "Server copy doesn't match",
-      "Can't resume",
+      "Server copy misses an edit",
       "Stopped",
       "Stopped",
     ]);
-    // Only a document edited while live editing was off says why it can't
-    // resume, and that its file still takes edits. It offers no Resume.
+    // Only a document edited while live editing was off says the server's copy
+    // misses that edit, and that a Resume adds it.
     const edited =
-      "This file changed while live editing was off, so live editing can't resume for it. You can keep editing it in dohc.";
+      "This file changed while live editing was off, and the server's copy doesn't have that change. Resume live editing to add it.";
     expect(screen.getAllByText(edited)).toHaveLength(1);
     expect(screen.getByTestId("live-document-row-docs/edited.md").textContent).toContain(edited);
-    expect(actions("docs/edited.md")).toEqual(["Stop live editing"]);
+    expect(actions("docs/edited.md")).toEqual([
+      "Resume live editing",
+      "Stop live editing",
+    ]);
     // Only a document whose server copy diverged sends its owner to the server's operator.
     const operator =
       "The server's copy of this workspace no longer matches the synced one. Contact the server's operator.";
@@ -334,18 +364,6 @@ describe("LiveDocumentsDialog", () => {
         "Stopping live editing keeps the file and its history. Share permissions stay unchanged.",
       ),
     ).toBeTruthy();
-  });
-
-  // The warning is on screen before any Stop runs.
-  it("warns before a Stop that editing the stopped file keeps live editing from resuming", async () => {
-    const h = harness();
-    h.load.mockResolvedValue(page([row("docs/a.md")]));
-    render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
-    await screen.findByRole("button", { name: "Stop live editing for docs/a.md" });
-    expect(screen.getByTestId("live-documents-stop-warning").textContent).toBe(
-      "If you edit a file while its live editing is stopped, live editing can't resume for it.",
-    );
-    expect(h.stop).not.toHaveBeenCalled();
   });
 
   it("loads the next stopped page and keeps the newest row for a repeated path", async () => {

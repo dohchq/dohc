@@ -1101,7 +1101,7 @@ it.skipIf(engine.missing).each([
       const unadmitted = {ready: false, row: {path, status: "unavailable", reason: "live-edit-unadmitted"}};
       // The operator's reports that the host's copy misses the owner's edit.
       const reports = () => relayServer!.diagnostics().stderr
-        .split(`Live editing of ${path} in workspace ${workspaceId} cannot resume: the document changed while live editing was off`).length - 1;
+        .split(`Live editing of ${path} in workspace ${workspaceId} is held: the document changed while live editing was off`).length - 1;
       await resume();
       if (preStopFeed) {
         // Finish the pre-Stop pass, then hold the fresh feed before it can fence the stale copy.

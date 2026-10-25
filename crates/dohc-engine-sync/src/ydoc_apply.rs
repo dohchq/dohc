@@ -67,11 +67,13 @@ fn live_ordinary_classification(
     payload: &YdocUpdatePayload,
     update: &[u8],
 ) -> Result<Option<bool>, SyncError> {
-    let bound: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)
-         OR EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
-        params![key.workspace_id,key.version_id,key.object_id], |row| row.get(0),
-    ).map_err(SyncError::corrupt)?;
+    let bound: bool = conn
+        .query_row(
+            &format!("SELECT {}", crate::hosted::live_bound("?1", "?2", "?3")),
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
     if !bound {
         return Ok(None);
     }
@@ -110,18 +112,29 @@ fn live_ordinary_classification(
     Ok(Some(applied))
 }
 
-/// Whether this replica keeps an ordinary update of `lineage` that `key`'s
-/// bound session never admitted queued, holding its document until the
-/// binding goes, instead of refusing it: a hosted replica does, for the
-/// document's current lineage, whose content here would otherwise miss it.
-fn keeps_unadmitted(conn: &Connection, key: &DocKey, lineage: &str) -> Result<bool, SyncError> {
-    if !crate::hosted::is_hosted(conn, &key.workspace_id)? {
+/// Whether this replica keeps `payload`, an update that `key`'s bound
+/// session never admitted, queued, holding its document until the binding
+/// goes, instead of refusing it: a hosted replica does for an ordinary
+/// update of the document's current lineage, whose content here would
+/// otherwise miss it. A base of that lineage carries only what the lineage
+/// started from.
+fn keeps_unadmitted(
+    conn: &Connection,
+    key: &DocKey,
+    payload: &YdocUpdatePayload,
+) -> Result<bool, SyncError> {
+    if payload.is_base_state || !crate::hosted::is_hosted(conn, &key.workspace_id)? {
         return Ok(false);
     }
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 \
          AND object_id=?3 AND lineage_claim_id=?4)",
-        params![key.workspace_id, key.version_id, key.object_id, lineage],
+        params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            payload.lineage_claim_id
+        ],
         |row| row.get(0),
     )
     .map_err(SyncError::corrupt)
@@ -797,7 +810,7 @@ pub(crate) fn drain_released_holds(
                AND h.scope_generation=d.scope_generation \
              JOIN ydoc_deferred_updates u ON u.workspace_id=d.workspace_id AND u.object_id=d.object_id \
              WHERE d.workspace_id=?1 AND {} AND {} ORDER BY u.object_id,u.version_id",
-            crate::hosted::HELD_FOR_DRAIN,
+            crate::hosted::held_for_drain(),
             crate::hosted::OUTSTANDING_YDOC_UPDATE
         ))
         .and_then(|mut statement| {
@@ -1753,7 +1766,7 @@ fn drain_deferred_ydoc(
             // What follows it stays queued too.
             if !echo
                 && parked.is_none()
-                && store.read_with(|conn| keeps_unadmitted(conn, key, &lineage_claim_id))?
+                && store.read_with(|conn| keeps_unadmitted(conn, key, &payload))?
             {
                 unadmitted = true;
                 break;
@@ -6352,7 +6365,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                         lineage_replacement: None,
                         record_facts: Vec::new(),
                     }))
-                } else if keeps_unadmitted(tx, &key, &payload.lineage_claim_id)? {
+                } else if keeps_unadmitted(tx, &key, &payload)? {
                     defer_ydoc_update_in_tx(
                         tx,
                         &key,
