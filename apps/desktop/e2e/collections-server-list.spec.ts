@@ -135,8 +135,8 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
     // The Collection opens and takes a record through the server.
     await section.getByRole("button", { name: "Registrations", exact: true }).click();
     const collection = page.getByRole("region", { name: "Registrations", exact: true });
-    await collection.getByRole("button", { name: "New record", exact: true }).click();
-    await collection.getByRole("form", { name: "New record" }).getByLabel("Name", { exact: true }).fill("From the other computer");
+    await collection.getByRole("button", { name: "New record", exact: true }).first().click();
+    await collection.getByRole("row", { name: "New record" }).getByLabel("Name", { exact: true }).fill("From the other computer");
     await collection.getByRole("button", { name: "Create record", exact: true }).click();
     await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("From the other computer");
     const read = await fetch(`${relay.baseUrl}/sync/${workspaceId}/datasets/${definition.datasetId}/invoke`, { method: "POST", headers: owner,

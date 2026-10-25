@@ -98,9 +98,10 @@ export interface ExplorerProps {
   newFolderRequest: number | null;
   // New file opens a new page whose file will go in this folder ("" = root).
   onNewPage: (folder: string) => void;
-  // A path to select and focus once its row renders ("Show in Explorer").
-  // The shell expands its folders first; onRevealed clears the request.
-  revealPath?: string | null;
+  // Paths to select once their rows render ("Show in Explorer", or what an
+  // import added). The first in the tree takes focus. The shell expands their
+  // folders first; onRevealed clears the request.
+  revealPaths?: readonly string[] | null;
   onRevealed?: () => void;
   onOpenFile: (path: string) => void;
   onActivateTab: (groupId: string, path: string) => void;
@@ -459,7 +460,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     onOpenFile,
     onOpenCollection,
     onTogglePin,
-    revealPath,
+    revealPaths,
     onRevealed,
   } = props;
   const activeTab =
@@ -1010,20 +1011,22 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   }, []);
 
   useEffect(() => {
-    if (!revealPath) return;
+    if (!revealPaths) return;
     // A path the tree does not list never gets a row; drop the request so it
     // cannot take focus later when that path appears.
-    if (!fileByPath.has(revealPath) && !isFolderPath(revealPath)) {
+    if (!revealPaths.some((path) => fileByPath.has(path) || isFolderPath(path))) {
       onRevealed?.();
       return;
     }
-    if (!renderIndexByPath.has(revealPath)) return;
+    const shown = revealPaths.filter((path) => renderIndexByPath.has(path));
+    if (shown.length === 0) return;
+    const first = shown.reduce((a, b) => (renderIndexByPath.get(a)! <= renderIndexByPath.get(b)! ? a : b));
     setFilesExpanded(true);
-    setSelection(new Set([revealPath]));
-    setAnchorPath(revealPath);
-    focusRow(revealPath);
+    setSelection(new Set(shown));
+    setAnchorPath(first);
+    focusRow(first);
     onRevealed?.();
-  }, [fileByPath, focusRow, isFolderPath, onRevealed, renderIndexByPath, revealPath]);
+  }, [fileByPath, focusRow, isFolderPath, onRevealed, renderIndexByPath, revealPaths]);
 
   const onRowClick = useCallback(
     (path: string, event: MouseEvent) => {

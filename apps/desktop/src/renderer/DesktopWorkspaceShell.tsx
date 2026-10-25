@@ -18,6 +18,7 @@ import {
   Fragment,
   Suspense,
   lazy,
+  startTransition,
   useCallback,
   useEffect,
   useMemo,
@@ -159,6 +160,7 @@ import { sendToFocusedEditor } from "./editor/editorMenuCommands";
 import { NewFileDialog } from "./NewFileDialog";
 import { NewPage, type NewPageFile } from "./NewPage";
 import { displayFrontmatterValue, parseFrontmatter } from "./markdown/frontmatter";
+import { registerPendingEditorDraft } from "./pendingEditorDrafts";
 import { nextPagePath, pageFileStem } from "./workbench/new-file-name";
 import { NewCollectionDialog } from "./collections/NewCollectionDialog";
 import { type ShareViewRefresh, useShareDirectWrites } from "./shell/useShareDirectWrites";
@@ -418,6 +420,13 @@ function uniqueUntitledPath(
     if (!occupied.has(candidate.toLowerCase())) return candidate;
   }
   return `Untitled ${Date.now()}.${extension}`;
+}
+
+// A new page someone gave a title or an icon. One that has neither leaves
+// nothing behind.
+function typedNewPage(draft: string): boolean {
+  const { meta } = parseFrontmatter(draft);
+  return displayFrontmatterValue(meta.title) !== "" || displayFrontmatterValue(meta.icon) !== "";
 }
 
 type EditorFocus = {
@@ -2150,16 +2159,22 @@ export function DesktopWorkspaceShell(props: {
       workspaceId,
     ],
   );
+  // The Explorer selects these paths once their rows render. The newest
+  // request wins, so a slow import cannot take the selection back.
+  const [explorerReveal, setExplorerReveal] = useState<{ workspaceId: string; paths: readonly string[] } | null>(null);
+  const clearExplorerReveal = useCallback(() => setExplorerReveal(null), []);
+  const revealRequest = useRef(0);
   // Set once refreshShareView exists below; a failed import's Try again
   // calls it.
   // One import seam for the dialog flow and the OS drag-in flow (the latter
   // passes the preload-resolved absolute paths; see the trust-delta note on
   // ImportWorkspaceFilesPayload). targetDir aims the import at a folder ("" /
   // absent = root) — the drop target, or the folder whose context menu ran
-  // "Import Files…". Every import ends with a visible summary: what landed,
-  // where, and how many sources were skipped — never a silent shrink.
+  // "Import Files…". Every import shows what landed, where, and how many
+  // sources were skipped — never a silent shrink.
   const importFiles = useCallback(
-    async (droppedPaths?: string[], targetDir?: string) => {
+    async (from: "explorer" | "palette", droppedPaths?: string[], targetDir?: string) => {
+      const reveal = from === "explorer" ? ++revealRequest.current : 0;
       // Try again on a failed import refreshes the shared view first, since
       // some files may have landed, then asks for files for the same folder.
       // Try again already removed the row, so a refresh that leaves the view
@@ -2168,7 +2183,7 @@ export function DesktopWorkspaceShell(props: {
       const retry = () => {
         void refreshShareViewRef.current().then((refresh) => {
           if (refresh === "current") {
-            void importFiles(undefined, targetDir);
+            void importFiles(from, undefined, targetDir);
             return;
           }
           reportShellFailure({
@@ -2246,28 +2261,51 @@ export function DesktopWorkspaceShell(props: {
         }
         return;
       }
-      if (count === 0 && folders === 0 && outcome.skipped === 0) return; // cancelled dialog
-      // Every file was skipped for its name or kind; the same files would be
-      // skipped again, so there is nothing to try again.
+      const skipped = outcome.skipped;
+      if (count === 0 && folders === 0 && skipped === 0) return; // cancelled dialog
+      // The same sources would be skipped again, so there is nothing to try again.
+      const notImported = `${skipped} ${skipped === 1 ? "file wasn't" : "files weren't"} imported.`;
       if (count === 0 && folders === 0) {
-        reportShellFailure({ message: `Nothing imported${skippedSuffix}.`, kind: "import-files" });
+        reportShellFailure({ message: notImported, kind: "import-files" });
         return;
       }
-      // A drop of empty folders lands folders and no file.
-      showSuccessNotice(
-        count > 0
-          ? `Imported ${count} ${count === 1 ? "file" : "files"}${targetDir ? ` into ${targetDir}` : ""}${skippedSuffix}.`
-          : `Created ${folders} ${folders === 1 ? "folder" : "folders"}${targetDir ? ` in ${targetDir}` : ""}${skippedSuffix}.`,
-        undefined,
-        "import-files",
-      );
+      // The Explorer shows what landed, so its message is only the skip.
+      if (from === "explorer") {
+        if (skipped > 0) reportShellFailure({ message: notImported, kind: "import-files" });
+        else clearKind("import-files");
+      } else {
+        // A drop of empty folders lands folders and no file.
+        const landed = count > 0
+          ? `Imported ${count} ${count === 1 ? "file" : "files"}${targetDir ? ` into ${targetDir}` : ""}.`
+          : `Created ${folders} ${folders === 1 ? "folder" : "folders"}${targetDir ? ` in ${targetDir}` : ""}.`;
+        if (skipped > 0) {
+          reportShellFailure({ message: `${landed} ${skipped} ${skipped === 1 ? "wasn't" : "weren't"} imported.`, kind: "import-files" });
+        } else showSuccessNotice(landed, undefined, "import-files");
+      }
       try {
         await refreshFiles();
       } catch (error) {
         reportShellError("Files imported, but the explorer could not refresh.", error);
+        return;
       }
+      if (from !== "explorer" || workspaceIdRef.current !== workspaceId || revealRequest.current !== reveal) return;
+      // The target folder opens, and what landed in it is selected: each new
+      // file, and each new folder that holds the rest.
+      mutateWb((state) =>
+        (targetDir ? [...ancestorDirs(targetDir), targetDir] : []).reduce<WorkbenchState>(
+          (acc, dir) => setFolderExpanded(acc, dir, true),
+          state,
+        ),
+      );
+      const prefix = targetDir ? `${targetDir}/` : "";
+      const items = [...new Set(outcome.imported.map((path) => prefix + path.slice(prefix.length).split("/")[0]))];
+      if (items.length > 0) setExplorerReveal({ workspaceId, paths: items });
     },
-    [workspaceId, refreshFiles, reportShellError, reportShellFailure, showSuccessNotice],
+    [workspaceId, refreshFiles, reportShellError, reportShellFailure, showSuccessNotice, clearKind, mutateWb],
+  );
+  const importFromExplorer = useCallback(
+    (droppedPaths?: string[], targetDir?: string) => void importFiles("explorer", droppedPaths, targetDir),
+    [importFiles],
   );
 
   // The one way a file opens (tree click, quick-open, tab activation): marks
@@ -2673,9 +2711,11 @@ export function DesktopWorkspaceShell(props: {
       ...(path !== null && table ? { openHistory: () => openCollectionHistory(path, table.tableId) } : {}),
     }];
   })), [datasets, openCollectionHistory]);
-  const tabLabels = useMemo(() => new Map([...knownTabLabels, ...chatEditors.titles,
+  // A new page's tab says its title as it is typed (New pages, below).
+  const [newPageTitles, setNewPageTitles] = useState<ReadonlyMap<string, string>>(() => new Map());
+  const tabLabels = useMemo(() => new Map([...knownTabLabels, ...chatEditors.titles, ...newPageTitles,
     ...dataCollections.flatMap(table => table.datasetPath === null ? [] : [[transactionalCollectionTabPath(table.datasetPath, table.tableId), table.name] as const]),
-  ]), [knownTabLabels, chatEditors.titles, dataCollections]);
+  ]), [knownTabLabels, chatEditors.titles, newPageTitles, dataCollections]);
   const fileEntries = useMemo(() => new Map(files.map((file) => [file.path, file])), [files]);
   // The chat list lives in the left side panel's Chats view.
   const openChatsNavigator = useCallback(() => {
@@ -3003,7 +3043,7 @@ export function DesktopWorkspaceShell(props: {
   // person leaves the title. Its tab then becomes its file's, and the file
   // keeps the page's host while that tab is open, so the editor that opens
   // under it takes the keystrokes the page held (NewPage).
-  const newPageDrafts = useRef(new Map<string, { draft: string; writing: Promise<boolean> | null }>());
+  const newPageDrafts = useRef(new Map<string, { draft: string; writing: Promise<string | null> | null }>());
   const [bornPages, setBornPages] = useState<ReadonlyMap<string, { id: string; handedOff: boolean }>>(() => new Map());
   const openNewPage = useCallback(
     (folder: string) => {
@@ -3013,24 +3053,36 @@ export function DesktopWorkspaceShell(props: {
     },
     [openVirtualTab],
   );
-  // A closed page's draft and host go with its tab.
+  // The tab follows the title without holding up the keystroke.
+  const newPageDraftChanged = useCallback((tabPath: string, draft: string) => {
+    const pending = newPageDrafts.current.get(tabPath);
+    if (pending) pending.draft = draft;
+    const title = displayFrontmatterValue(parseFrontmatter(draft).meta.title);
+    startTransition(() =>
+      setNewPageTitles((titles) => (titles.get(tabPath) ?? "") === title ? titles : new Map(titles).set(tabPath, title)));
+  }, []);
+  // A closed page's draft, title and host go with its tab, and a created
+  // page's tab is its file's.
   useEffect(() => {
     const open = new Set(allTabs(wb).map((tab) => tab.path));
     for (const [path, page] of newPageDrafts.current) {
       if (!open.has(path) && !page.writing) newPageDrafts.current.delete(path);
     }
-    setBornPages((pages) =>
-      [...pages.keys()].every((path) => open.has(path)) ? pages : new Map([...pages].filter(([path]) => open.has(path))));
+    const keepOpen = <T,>(pages: ReadonlyMap<string, T>) =>
+      [...pages.keys()].every((path) => open.has(path)) ? pages : new Map([...pages].filter(([path]) => open.has(path)));
+    setBornPages(keepOpen);
+    setNewPageTitles(keepOpen);
   }, [wb]);
-  // Writes a new page's file, named from its title, and says whether it did.
-  // An opened file starts empty, and its editor takes the title and body from
-  // the page; a closed one starts with the title and icon. A name another
-  // file took first moves on to the next number.
+  // Writes a new page's file, named from its title, and gives its path, or
+  // null if it was not written. An opened file starts empty, so its live
+  // session opens at once, and its editor takes the title and body from the
+  // page; a closed one starts with the title and icon. A name another file
+  // took first moves on to the next number.
   const writeNewPage = useCallback(
-    (tabPath: string, open: boolean): Promise<boolean> => {
+    (tabPath: string, open: boolean): Promise<string | null> => {
       const page = parseTab(tabPath);
       const pending = newPageDrafts.current.get(tabPath);
-      if (page.kind !== "newPage" || !pending) return Promise.resolve(false);
+      if (page.kind !== "newPage" || !pending) return Promise.resolve(null);
       if (pending.writing) return pending.writing;
       const selection = workspaceSelection.current;
       const title = displayFrontmatterValue(parseFrontmatter(pending.draft).meta.title);
@@ -3050,7 +3102,7 @@ export function DesktopWorkspaceShell(props: {
       };
       pending.writing = create().then(
         (path) => {
-          if (workspaceSelection.current !== selection) return false;
+          if (workspaceSelection.current !== selection) return null;
           newPageDrafts.current.delete(tabPath);
           if (open) {
             setBornPages((pages) => new Map(pages).set(path, { id: page.id, handedOff: false }));
@@ -3058,13 +3110,13 @@ export function DesktopWorkspaceShell(props: {
               replaceTab(ancestorDirs(path).reduce((next, dir) => setFolderExpanded(next, dir, true), state), tabPath, path));
           }
           void refreshFiles();
-          return true;
+          return path;
         },
         (error: unknown) => {
           pending.writing = null;
-          if (workspaceSelection.current !== selection) return false;
+          if (workspaceSelection.current !== selection) return null;
           reportShellError("Could not create the page.", error, () => void writeNewPage(tabPath, open));
-          return false;
+          return null;
         },
       );
       return pending.writing;
@@ -3077,6 +3129,25 @@ export function DesktopWorkspaceShell(props: {
       return page && !page.handedOff ? new Map(pages).set(path, { ...page, handedOff: true }) : pages;
     });
   }, []);
+  // A typed page still in its title is written when the app quits, the
+  // window closes or the workspace switches, as closing its tab writes it,
+  // and its tab becomes its file's in case the quit stops. A page that
+  // cannot be written stops the quit, and its error says why.
+  const writeTypedPages = useRef<() => Promise<void>>(async () => undefined);
+  writeTypedPages.current = async () => {
+    const pages = [...newPageDrafts.current].filter(([, page]) => typedNewPage(page.draft)).map(([path]) => path);
+    const written = await Promise.all(pages.map((path) => writeNewPage(path, false)));
+    mutateWb((state) => pages.reduce((next, tabPath, index) => {
+      const path = written[index];
+      return path ? replaceTab(next, tabPath, path) : next;
+    }, state));
+    if (written.includes(null)) throw new Error("Could not create the page.");
+  };
+  useEffect(() => registerPendingEditorDraft(
+    () => [...newPageDrafts.current.values()].some((page) => typedNewPage(page.draft)),
+    () => writeTypedPages.current(),
+    () => undefined,
+  ), []);
 
   // Stable handlers (Tab/FileRow memo contract: a fresh closure here would
   // re-render the whole strip on every shell render, incl. each 800ms dirty
@@ -3146,10 +3217,7 @@ export function DesktopWorkspaceShell(props: {
       };
       // A new page whose title was typed is written as it closes, and stays
       // open if it cannot be. An untouched one leaves nothing.
-      const typedPages = [...requested.keys()].filter((tab) => {
-        const { meta } = parseFrontmatter(newPageDrafts.current.get(tab.path)?.draft ?? "");
-        return displayFrontmatterValue(meta.title) !== "" || displayFrontmatterValue(meta.icon) !== "";
-      });
+      const typedPages = [...requested.keys()].filter((tab) => typedNewPage(newPageDrafts.current.get(tab.path)?.draft ?? ""));
       if (typedPages.length === 0) {
         closeAfterFlush();
         return;
@@ -3352,9 +3420,6 @@ export function DesktopWorkspaceShell(props: {
     ],
   );
 
-  // The Explorer selects and focuses this path once its row renders.
-  const [explorerReveal, setExplorerReveal] = useState<{ workspaceId: string; path: string } | null>(null);
-  const clearExplorerReveal = useCallback(() => setExplorerReveal(null), []);
   const showPathInExplorer = useCallback(
     (path: string, expandPath = false) => {
       mutateWb((state) =>
@@ -3363,7 +3428,8 @@ export function DesktopWorkspaceShell(props: {
           { ...state, activeView: "explorer", sidebarVisible: true },
         ),
       );
-      setExplorerReveal({ workspaceId, path });
+      revealRequest.current += 1;
+      setExplorerReveal({ workspaceId, paths: [path] });
     },
     [mutateWb, workspaceId],
   );
@@ -4095,7 +4161,7 @@ export function DesktopWorkspaceShell(props: {
       "new-collection": () => setNewCollectionFolder(""),
       "quick-open": () => setQuickOpenOpen(true),
       "open-workspace": () => void openWorkspaceFolder(),
-      "import-files": () => void importFiles(),
+      "import-files": () => void importFiles("palette"),
       "export-workspace": () =>
         void bridge().exportWorkspaceZip({ workspaceId }).catch((error) =>
           reportShellError("Could not export this workspace.", error),
@@ -4783,7 +4849,7 @@ export function DesktopWorkspaceShell(props: {
         onOpenEditorsHeightChange={onOpenEditorsHeightChange}
         newFolderRequest={newFolderRequest}
         onNewPage={openNewPage}
-        revealPath={explorerReveal?.workspaceId === workspaceId ? explorerReveal.path : null}
+        revealPaths={explorerReveal?.workspaceId === workspaceId ? explorerReveal.paths : null}
         onRevealed={clearExplorerReveal}
         onOpenFile={openFile}
         onActivateTab={activateEditorTab}
@@ -4809,7 +4875,7 @@ export function DesktopWorkspaceShell(props: {
         onRetryCollections={retryCollectionsList}
         onBeginChanges={beginDraftOperation}
         onPathsChanged={onExplorerPathsChanged}
-        onImportFiles={importFiles}
+        onImportFiles={importFromExplorer}
         shareView={shareView}
         onRefreshShareMounts={onExplorerRefreshShareMounts}
         onUnmountShare={unmountShare}
@@ -5951,10 +6017,7 @@ export function DesktopWorkspaceShell(props: {
               <NewPage
                 key={groupTab.id}
                 draft={newPageDrafts.current.get(groupTab.path)?.draft ?? ""}
-                onDraftChange={(draft) => {
-                  const pending = newPageDrafts.current.get(groupTab.path);
-                  if (pending) pending.draft = draft;
-                }}
+                onDraftChange={(draft) => newPageDraftChanged(groupTab.path, draft)}
                 onLeaveTitle={() => void writeNewPage(groupTab.path, true)}
                 file={null}
                 handedOff={false}

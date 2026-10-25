@@ -358,35 +358,80 @@ impl ActorHandle {
     where
         F: FnMut(&[OperationMoment]) + Send,
     {
+        let checkpoint = self
+            .run(|store, _| Ok(Arc::new(store.checkpoint_cycle())))
+            .await;
+        let Ok(checkpoint) = checkpoint else {
+            result.materialized = false;
+            return result;
+        };
         result.materialized = true;
+        let mut busy_deadline = None;
         // Each actor turn finishes a bounded placement batch, then yields to other work.
         for members in result.moments.chunks(8) {
-            let selected = members.to_vec();
-            let ws = ws.clone();
-            let version = result.version_id.clone();
-            let root = root.clone();
-            let recorder = Arc::clone(&recorder);
-            match self
-                .run(move |store, _| {
-                    place_undo_members(
-                        store,
-                        &ws,
-                        &version,
-                        &selected,
-                        &root,
-                        recorder.as_ref(),
-                        &dohc_engine_storage::NoFaults,
-                        now,
-                    )
-                })
-                .await
-            {
-                Ok(true) => on_placed(members),
-                Ok(false) => result.materialized = false,
-                Err(error) => {
-                    eprintln!("engine: Undo committed; placement will retry: {error}");
+            loop {
+                if busy_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                     result.materialized = false;
-                    break;
+                    return result;
+                }
+                let selected = members.to_vec();
+                let ws = ws.clone();
+                let version = result.version_id.clone();
+                let root = root.clone();
+                let recorder = Arc::clone(&recorder);
+                match self
+                    .run(move |store, _| {
+                        place_undo_members(
+                            store,
+                            &ws,
+                            &version,
+                            &selected,
+                            &root,
+                            recorder.as_ref(),
+                            &dohc_engine_storage::NoFaults,
+                            now,
+                        )
+                    })
+                    .await
+                {
+                    Ok(true) => {
+                        on_placed(members);
+                        break;
+                    }
+                    Ok(false) => {
+                        result.materialized = false;
+                        break;
+                    }
+                    Err(error) if error.is_file_locked() => {
+                        // Match the desktop's budget from its first busy answer.
+                        let deadline = *busy_deadline.get_or_insert_with(|| {
+                            tokio::time::Instant::now() + std::time::Duration::from_secs(10)
+                        });
+                        #[cfg(test)]
+                        turns::tests::checkpoint_wait(&result.compensation_operation_id).await;
+                        // Committed placement keeps its leases while waiting outside the actor.
+                        let checkpoint = Arc::clone(&checkpoint);
+                        if !matches!(
+                            tokio::time::timeout_at(
+                                deadline,
+                                tokio::task::spawn_blocking(move || checkpoint())
+                            )
+                            .await,
+                            Ok(Ok(()))
+                        ) {
+                            result.materialized = false;
+                            return result;
+                        }
+                        tokio::time::sleep_until(deadline.min(
+                            tokio::time::Instant::now() + std::time::Duration::from_millis(50),
+                        ))
+                        .await;
+                    }
+                    Err(error) => {
+                        eprintln!("engine: Undo committed; placement remains pending: {error}");
+                        result.materialized = false;
+                        return result;
+                    }
                 }
             }
         }
@@ -605,10 +650,16 @@ fn place_undo_members(
             false,
         )
     })?;
-    let all_complete = jobs.iter().all(|id| {
-        matches!(store.load_materialization_job(id), Ok(Some(job)) if job.status == JobStatus::Complete)
-    });
-    Ok(summary.failed == 0 && summary.parked == 0 && all_complete)
+    if summary.store_busy > 0 {
+        return Err(StorageError::FileLocked.into());
+    }
+    for id in jobs {
+        if !matches!(store.load_materialization_job(&id)?, Some(job) if job.status == JobStatus::Complete)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(summary.failed == 0 && summary.parked == 0)
 }
 
 #[cfg(test)]
