@@ -62,12 +62,51 @@ describe("diskSpelling", () => {
     await writeFile(file, "body");
     const original = fsPromises.lstat.bind(fsPromises);
     const swapped = join(root, leaf.replace(/[A-Za-z]/gu, letter => letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase()));
-    vi.spyOn(fsPromises, "lstat").mockImplementation((path, options) => {
+    const lookupStat = vi.spyOn(fsPromises, "lstat").mockImplementation((path, options) => {
       if (swapped !== lookup && String(path) === swapped) return Promise.reject(Object.assign(new Error("absent"), { code: "ENOENT" }));
       return original(String(path) === lookup ? file : path, options);
     });
     const listing = vi.spyOn(fsPromises, "readdir");
     expect(await diskSpelling(root, lookup)).toBe(file);
+    expect(listing).toHaveBeenCalledTimes(1);
+    if (!/[. ]$/u.test(leaf)) {
+      const probe = lookupStat.mock.calls.findIndex(([path]) => String(path) === file);
+      expect(probe).toBeGreaterThanOrEqual(0);
+      expect(lookupStat.mock.invocationCallOrder[probe]).toBeLessThan(listing.mock.invocationCallOrder[0]!);
+    }
+  });
+
+  it.each(["1;2", "1`2", "Kickoff.md"])("does not list when case and normalization spellings of %s are absent", async leaf => {
+    const root = await createTestScratch("dohc-disk-spelling-");
+    const file = join(root, leaf);
+    await writeFile(file, "body");
+    const alternate = leaf.replaceAll(";", "\u037e").replaceAll("`", "\u1fef").replaceAll("K", "\u212a");
+    const swapped = leaf.replace(/[A-Za-z]/gu, letter => letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase());
+    const probes = [...new Set([swapped, alternate])].filter(name => name !== leaf).map(name => join(root, name));
+    const original = fsPromises.lstat.bind(fsPromises);
+    const lookup = vi.spyOn(fsPromises, "lstat").mockImplementation((path, options) => {
+      if (probes.includes(String(path))) return Promise.reject(Object.assign(new Error("absent"), { code: "ENOENT" }));
+      return original(path, options);
+    });
+    const listing = vi.spyOn(fsPromises, "readdir");
+    expect(await diskSpelling(root, file)).toBe(file);
+    expect(listing).not.toHaveBeenCalled();
+    expect(lookup.mock.calls.map(([path]) => String(path)).filter(path => probes.includes(path))).toEqual(probes);
+  });
+
+  it.each(["EACCES", "ENOTDIR", "EIO"])("lists when a look-alike probe fails with %s", async code => {
+    const root = await createTestScratch("dohc-disk-spelling-");
+    const file = join(root, "Kickoff.md"), alternate = join(root, "\u212aickoff.md");
+    await writeFile(file, "body");
+    const original = fsPromises.lstat.bind(fsPromises);
+    const lookup = vi.spyOn(fsPromises, "lstat").mockImplementation((path, options) => {
+      if (String(path) === join(root, "kICKOFF.MD")) return Promise.reject(Object.assign(new Error("absent"), { code: "ENOENT" }));
+      if (String(path) === alternate) return Promise.reject(Object.assign(new Error("unknown"), { code }));
+      return original(path, options);
+    });
+    const listing = vi.spyOn(fsPromises, "readdir");
+    expect(await diskSpelling(root, file)).toBe(file);
+    expect(lookup.mock.calls.map(([path]) => String(path))).toContain(alternate);
     expect(listing).toHaveBeenCalledTimes(1);
   });
 

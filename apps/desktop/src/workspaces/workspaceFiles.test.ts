@@ -881,6 +881,33 @@ describe("movePath", () => {
     expect(existsSync(join(root, "draft.md"))).toBe(false);
   });
 
+  for (const folder of [false, true]) {
+    for (const sameName of [false, true]) {
+      it(`keeps a symlink destination in its own folder for a ${folder ? "folder" : "file"} ${sameName ? "drag" : "rename"}`, async () => {
+        const from = folder ? "a/notes" : "a/notes.md";
+        const to = `b/${sameName ? "notes" : "link"}${folder ? "" : ".md"}`;
+        await mkdir(join(root, "a"));
+        await mkdir(join(root, "b"));
+        if (folder) await mkdir(join(root, from));
+        await writeFile(join(root, folder ? `${from}/content.md` : from), "body");
+        await symlink(join(root, from), join(root, to), folder ? "dir" : "file");
+        expect((await prepareWorkspaceMove(root, from, to)).physicalToPath).toBe(to);
+        if (folder) {
+          await expect(movePath(root, from, to)).rejects.toMatchObject({ code: process.platform === "win32" ? "EPERM" : "ENOTDIR" });
+          expect(await readdir(join(root, "a"))).toEqual(["notes"]);
+          expect((await lstat(join(root, to))).isSymbolicLink()).toBe(true);
+          expect(await readFile(join(root, from, "content.md"), "utf8")).toBe("body");
+        } else {
+          await expect(movePath(root, from, to)).resolves.toBe(to);
+          expect(await readdir(join(root, "a"))).toEqual([]);
+          expect((await lstat(join(root, to))).isSymbolicLink()).toBe(false);
+          expect(await readFile(join(root, to), "utf8")).toBe("body");
+        }
+        expect(await readdir(join(root, "b"))).toEqual([sameName ? (folder ? "notes" : "notes.md") : (folder ? "link" : "link.md")]);
+      });
+    }
+  }
+
   it("moves a file into a folder, creating the destination parent", async () => {
     await writeFile(join(root, "loose.md"), "x");
     const path = await movePath(root, "loose.md", "notes/deep/loose.md");

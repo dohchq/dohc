@@ -150,6 +150,28 @@ async function fixture(options: {
 }
 
 describe("agent moves and deletes", () => {
+  for (const folder of [false, true]) {
+    for (const sameName of [false, true]) {
+      it(`keeps a local symlink destination in its own folder for a ${folder ? "folder" : "file"} ${sameName ? "drag" : "rename"}`, async () => {
+        const f = await fixture();
+        const from = folder ? "a/notes" : "a/notes.md";
+        const to = `b/${sameName ? "notes" : "link"}${folder ? "" : ".md"}`;
+        await write(f.rootPath, folder ? `${from}/content.md` : from, "body");
+        await mkdir(join(f.rootPath, "b"));
+        await symlink(join(f.rootPath, from), join(f.rootPath, to), folder ? "dir" : "file");
+        const seen = await f.start();
+        try {
+          await expect(f.moveByHand(from, to)).rejects.toThrow(folder ? /EPERM|ENOTDIR/u : `${to} already exists.`);
+          expect(await readdir(join(f.rootPath, "a"))).toEqual([folder ? "notes" : "notes.md"]);
+          expect(await readdir(join(f.rootPath, "b"))).toEqual([sameName ? (folder ? "notes" : "notes.md") : (folder ? "link" : "link.md")]);
+          expect((await lstat(join(f.rootPath, to))).isSymbolicLink()).toBe(true);
+          expect(await readFile(join(f.rootPath, folder ? `${from}/content.md` : from), "utf8")).toBe("body");
+          expect(await f.added(seen)).toEqual([]);
+        } finally { await f.engine().stop(); }
+      });
+    }
+  }
+
   describe("stored endpoint names", () => {
     const platform = process.platform;
     afterEach(() => {
@@ -197,6 +219,26 @@ describe("agent moves and deletes", () => {
         } finally { await f.engine().stop(); }
       });
     }
+
+    it("refuses a Linux CLI move that only retypes the source folder before recording a move", async context => {
+      const requests: string[] = [];
+      const f = await fixture({ beforeRequest: request => { requests.push(request.method); } });
+      await write(f.rootPath, "Docs/a.md", "body");
+      if (!existsSync(join(f.rootPath, "docs/a.md"))) context.skip("this disk keeps case apart");
+      const seen = await f.start();
+      requests.length = 0;
+      lookupCase(f.rootPath);
+      const mutation = vi.spyOn(fsPromises, "rename");
+      try {
+        expect(await f.move("docs/a.md", "Docs/a.md")).toEqual({ ok: false, path: "docs/a.md",
+          reason: "Cannot move docs/a.md to Docs/a.md: one holds the other. Choose a destination outside both." });
+        expect(mutation).not.toHaveBeenCalled();
+        expect(requests).not.toContain(VERSIONED_METHOD.textRename);
+        expect(await f.added(seen)).toEqual([]);
+        expect(await readdir(join(f.rootPath, "Docs"))).toEqual(["a.md"]);
+        expect(await readFile(join(f.rootPath, "Docs", "a.md"), "utf8")).toBe("body");
+      } finally { await f.engine().stop(); }
+    });
 
     for (const byHand of [false, true]) {
       it(`keeps the stored parent in History for a case-only ${byHand ? "local" : "CLI"} rename through an alias parent`, async context => {

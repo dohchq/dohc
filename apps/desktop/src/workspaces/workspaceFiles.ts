@@ -1539,12 +1539,9 @@ async function inspectWorkspaceMove(
   if (await movePathsNest(realRoot, realFrom, realDestAncestor, { fromPath, toPath })) {
     throw new Error(`Cannot move a path into itself: ${fromPath}`);
   }
-  const destExists = await lstat(to).then(
-    () => true,
-    () => false,
-  );
-  const sameDestination = destExists && await sameMoveEntry(realRoot, realFrom, await realpath(to), { fromPath, toPath });
-  if (destExists && !sameDestination) {
+  const destinationStat = await lstat(to).catch(() => null);
+  const sameDestination = destinationStat !== null && await sameMoveEntry(realRoot, realFrom, await realpath(to), { fromPath, toPath });
+  if (destinationStat !== null && !sameDestination) {
     throw new Error(`Destination already exists: ${toPath}`);
   }
   return {
@@ -1552,7 +1549,7 @@ async function inspectWorkspaceMove(
     // spelling. On Windows, an IPC case alias still reaches the same entry,
     // but the engine keys stable objects by their canonical workspace path.
     physicalFromPath,
-    physicalToPath: (sameDestination ? join(dirname(physicalFromPath), basename(normalized.toPath)) : resolvedToPath).replaceAll("\\", "/"),
+    physicalToPath: (sameDestination && !destinationStat?.isSymbolicLink() ? join(dirname(physicalFromPath), basename(normalized.toPath)) : resolvedToPath).replaceAll("\\", "/"),
     visibleResultPath: normalized.toPath,
     realRoot,
     from,

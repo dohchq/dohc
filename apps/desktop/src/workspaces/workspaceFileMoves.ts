@@ -316,8 +316,9 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
             throw new Error(`${input.fromPath} or ${input.toPath} now leads somewhere else. Check both paths, then try again.`);
           }
           // Two spellings of one entry on disk are a rename of its case.
-          const caseOnly = spelledFrom.physical === to.physical && spelledFrom.relative !== to.relative;
-          if (caseOnly) to.relative = join(dirname(spelledFrom.physical), basename(to.relative)).split(sep).join("/");
+          const renamedTarget = join(dirname(spelledFrom.physical), basename(to.relative)).split(sep).join("/");
+          const caseOnly = spelledFrom.physical === to.physical && renamedTarget !== spelledFrom.physical;
+          if (caseOnly) to.relative = renamedTarget;
           const pairs = [[spelledFrom.path, to.path], [spelledFrom.relative, to.relative],
             ...(caseOnly ? [] : [[spelledFrom.physical, to.physical]])];
           for (const [a = "", b = ""] of pairs) {

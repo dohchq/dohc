@@ -25,20 +25,24 @@ export async function diskSpelling(root: string, path: string): Promise<string |
     const folder = stored;
     const lookup = await lstat(join(folder, leaf), { bigint: true }).catch(absentAsNull);
     if (lookup === null) return null;
-    if (!ignoresCase && /^[\x20-\x7e]+$/u.test(leaf) && !/[;`K]|~\d|[. ]$/u.test(leaf)) {
+    if (!ignoresCase && /^[\x20-\x7e]+$/u.test(leaf) && !/~\d|[. ]$/u.test(leaf)) {
       const swapped = swapAsciiCase(leaf);
-      if (swapped === leaf) {
+      const lookAlike = leaf.replaceAll(";", "\u037e").replaceAll("`", "\u1fef").replaceAll("K", "\u212a");
+      let exact = true;
+      for (const name of [swapped, lookAlike]) {
+        if (name === leaf) continue;
+        try {
+          await lstat(join(folder, name), { bigint: true });
+          if (name === swapped) ignoresCase = true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        }
+        exact = false;
+        break;
+      }
+      if (exact) {
         stored = join(folder, leaf);
         continue;
-      }
-      try {
-        await lstat(join(folder, swapped), { bigint: true });
-        ignoresCase = true;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-          stored = join(folder, leaf);
-          continue;
-        }
       }
     }
     let names: string[];
