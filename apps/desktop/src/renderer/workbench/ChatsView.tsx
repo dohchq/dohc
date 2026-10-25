@@ -4339,7 +4339,7 @@ export function ChatsView(props: {
                         setReplyTarget(null);
                       }}
                     >
-                      Replying to {replyTarget.authorLabel} ·
+                      Replying to {replyTarget.authorLabel}
                     </ComposerModeBar>
                   ) : null}
                 </>}
