@@ -119,9 +119,8 @@ export async function readRunnerNodeAvailable(logPath: string): Promise<boolean 
   try {
     const saved = await readFile(`${logPath}.node`, "utf8");
     return saved === "true\n" ? true : saved === "false\n" ? false : undefined;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
+  } catch {
+    return undefined;
   }
 }
 
@@ -301,7 +300,9 @@ export function createChatRunnerProcess(
             : `Couldn't find ${executable} on PATH. Use its full path in the runner command.`,
       );
     }
-    writeFileSync(`${input.logPath}.node`, `${runnerNodeAvailable(env, platform)}\n`, { mode: 0o600 });
+    try {
+      writeFileSync(`${input.logPath}.node`, `${runnerNodeAvailable(env, platform)}\n`, { mode: 0o600 });
+    } catch {}
     input.assertMayStart();
     const child = spawnRunner(resolved.command, resolved.args, {
       cwd: input.rootPath,

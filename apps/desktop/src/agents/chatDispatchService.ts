@@ -84,12 +84,13 @@ function runNoticeTitle(outcome: RunOutcome, thread: string): string {
   return sentence([...thread].length <= room ? thread : `${[...thread].slice(0, room - 1).join("")}…`);
 }
 
-// A run that failed to start says why in its notice, and the start error
-// says what to do next. A body holds no control
-// characters, or the notice store would refuse it.
+// A run that failed to start says why and what to do next.
+// A failed or no-reply run whose PATH had no node says replies need Node.js.
+// Other outcomes have no body. A body holds no control characters,
+// or the notice store would refuse it.
 function runNoticeBody(run: AgentRunRecord, outcome: RunOutcome, nodeAvailable?: boolean): string {
   if ((outcome === "failed" || outcome === "no-reply") && nodeAvailable === false) {
-    return "Agent replies need Node.js. Install Node.js, check that `node` runs in a terminal, then try again.";
+    return "Agent replies need Node.js. Install Node.js, restart dohc, then try again.";
   }
   if (outcome !== "not-started" || !run.failureReason) return "";
   const reason = [...run.failureReason

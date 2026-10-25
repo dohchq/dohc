@@ -847,7 +847,7 @@ describe("chatDispatchService", () => {
 
     expect(fixture.notices).toHaveLength(1);
     expect(fixture.notices[0]!.body).toBe(!nodePresent && !replied
-      ? "Agent replies need Node.js. Install Node.js, check that `node` runs in a terminal, then try again."
+      ? "Agent replies need Node.js. Install Node.js, restart dohc, then try again."
       : "");
   });
 
@@ -874,7 +874,7 @@ describe("chatDispatchService", () => {
     vi.unstubAllEnvs();
     await activate(fixture);
     expect(fixture.notices).toEqual([expect.objectContaining({
-      body: "Agent replies need Node.js. Install Node.js, check that `node` runs in a terminal, then try again.",
+      body: "Agent replies need Node.js. Install Node.js, restart dohc, then try again.",
     })]);
   });
 
