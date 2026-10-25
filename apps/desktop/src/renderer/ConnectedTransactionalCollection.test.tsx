@@ -11,7 +11,7 @@ import { resetKeptAutomationDraftsForTests } from "./collections/AutomationsPane
 import type { TransactionalButtons } from "./TransactionalCollectionPage";
 
 const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn(), listCollections: vi.fn(), listWorkspaceFiles: vi.fn(),
-  listAutomationButtons: vi.fn(), pressAutomationButton: vi.fn(), onCollectionAutomationsChanged: vi.fn(() => () => undefined),
+  listAutomationButtons: vi.fn(), pressAutomationButton: vi.fn(), onCollectionAutomationsChanged: vi.fn((_listener: (event: { workspaceId: string }) => void) => () => undefined),
   findDatasetCollection: vi.fn(async (): Promise<FindDatasetCollectionResult> => ({ status: "unavailable" })),
   listCollectionAutomations: vi.fn(), listAutomationHolds: vi.fn(async () => ({ holds: [], stops: [], unreadable: false })),
   onAutomationRunsChanged: vi.fn((_listener: (event: { workspaceId: string }) => void) => () => undefined), onAutomationHoldsChanged: vi.fn(() => () => undefined),
@@ -487,6 +487,25 @@ describe("a dataset table's ⚡ panel", () => {
     unmount();
     await act(async () => approved.resolve({ kind: "migrated" }));
     expect(backend.dataset.mock.calls.filter(([input]) => input.action === "describe")).toHaveLength(describes);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("asks main for the dataset's folder only once the page has read its dataset, even when automations change first", async () => {
+    const automationsChanged: Array<(event: { workspaceId: string }) => void> = [];
+    backend.onCollectionAutomationsChanged.mockImplementation(listener => { automationsChanged.push(listener); return () => undefined; });
+    const described = deferred<{ kind: "description"; dataset: DatasetDescription }>();
+    backend.dataset.mockReturnValue(described.promise);
+    backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "missing" });
+    const onError = vi.fn();
+    render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetPath="data/dataset.json" tableId={id(2)} onError={onError} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
+    // A new Collection's automations change while its page still reads the dataset.
+    await waitFor(() => expect(automationsChanged.length).toBeGreaterThan(0));
+    act(() => { for (const listener of automationsChanged) listener({ workspaceId: "workspace-a" }); });
+    expect(backend.findDatasetCollection).not.toHaveBeenCalled();
+    await act(async () => described.resolve({ kind: "description", dataset }));
+    await waitFor(() => expect(backend.findDatasetCollection).toHaveBeenCalledWith({ workspaceId: "workspace-a", datasetId: id(1) }));
+    expect(backend.findDatasetCollection).toHaveBeenCalledTimes(1);
     expect(onError).not.toHaveBeenCalled();
   });
 

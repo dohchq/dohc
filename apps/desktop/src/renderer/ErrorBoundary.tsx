@@ -52,6 +52,8 @@ type ErrorBoundaryProps = {
   // Dialog islands need the same visible card dimensions as their load state.
   fallbackClassName?: string;
   recoveryMessage?: ReactNode;
+  // A dialog island's way out, where the loaded dialog puts its own.
+  closeControl?: ReactNode;
   children: ReactNode;
 };
 
@@ -114,6 +116,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
         >
           Try again
         </button>
+        {this.props.closeControl}
       </div>
     );
   }

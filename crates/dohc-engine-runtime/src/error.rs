@@ -130,6 +130,16 @@ pub enum RuntimeError {
 }
 
 impl RuntimeError {
+    pub(crate) fn is_file_locked(&self) -> bool {
+        self.code() == "file-locked"
+            || matches!(
+                self,
+                Self::Collab(dohc_engine_collab::CollabError::Storage(
+                    StorageError::FileLocked
+                ))
+            )
+    }
+
     /// The stable machine code, preserving the storage code where wrapped.
     pub fn code(&self) -> &'static str {
         match self {
@@ -198,6 +208,23 @@ impl RuntimeError {
 mod tests {
     use super::RuntimeError;
     use dohc_engine_files::MaterializeError;
+
+    #[test]
+    fn file_locked_recognizes_storage_wrappers_without_retrying_other_errors() {
+        use dohc_engine_storage::StorageError;
+        for error in [
+            RuntimeError::Storage(StorageError::FileLocked),
+            RuntimeError::Materialize(MaterializeError::Storage(StorageError::FileLocked)),
+            RuntimeError::Collab(dohc_engine_collab::CollabError::Storage(
+                StorageError::FileLocked,
+            )),
+        ] {
+            assert!(error.is_file_locked(), "{error:?}");
+        }
+        for error in [RuntimeError::ActorUnavailable, RuntimeError::Cancelled] {
+            assert!(!error.is_file_locked(), "{error:?}");
+        }
+    }
 
     #[test]
     fn conditional_restore_delete_materialization_codes_preserve_reason() {

@@ -29,7 +29,6 @@ function backdrop(): HTMLElement {
 
 function expectDismissBlocked(onCancel: ReturnType<typeof vi.fn>): void {
   fireEvent.keyDown(document, { key: "Escape" });
-  fireEvent.click(backdrop());
   expect(onCancel).not.toHaveBeenCalled();
   expect(screen.getByTestId("chats-add-agent-cancel").hasAttribute("disabled")).toBe(true);
 }
@@ -41,7 +40,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("AddAgentForm", () => {
-  it("renders inside an overlay that Escape and the backdrop dismiss while idle", () => {
+  it("renders inside an overlay that Escape dismisses while idle and a press outside does not", () => {
     const onCancel = vi.fn();
     render(
       <AddAgentForm
@@ -58,10 +57,10 @@ describe("AddAgentForm", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onCancel).toHaveBeenCalledTimes(1);
     fireEvent.click(backdrop());
-    expect(onCancel).toHaveBeenCalledTimes(2);
+    expect(onCancel).toHaveBeenCalledTimes(1);
   });
 
-  it("blocks Escape and the backdrop while the save is held, then allows them", async () => {
+  it("blocks Escape while the save is held, then allows it", async () => {
     const user = userEvent.setup();
     const save = deferred<void>();
     const onSave = vi.fn().mockReturnValue(save.promise);
@@ -92,7 +91,7 @@ describe("AddAgentForm", () => {
     expect(onCancel).toHaveBeenCalledOnce();
   });
 
-  it("blocks Escape and the backdrop while the self-test is held, then allows them", async () => {
+  it("blocks Escape while the self-test is held, then allows it", async () => {
     const user = userEvent.setup();
     const selfTest = deferred<{ ok: boolean; detail: string }>();
     bridgeMock.runnerSelfTest.mockReturnValue(selfTest.promise);
@@ -120,7 +119,7 @@ describe("AddAgentForm", () => {
     });
     expect(screen.getByTestId("chats-add-agent-check-result").dataset.state).toBe("ok");
     expect(screen.getByTestId("chats-add-agent-cancel").hasAttribute("disabled")).toBe(false);
-    fireEvent.click(backdrop());
+    fireEvent.keyDown(document, { key: "Escape" });
     expect(onCancel).toHaveBeenCalledOnce();
   });
 });

@@ -806,10 +806,10 @@ export function VersionMergeDialog(props: {
   }, [stage, workspaceId]);
 
   // Closing while merging is never allowed. While conflicts are open, closing
-  // is explicit only ("Finish later"): a stray backdrop click or Escape must
-  // not unmount ConflictResolver and discard a hand-written combined copy.
+  // is explicit only ("Finish later"): Escape must not unmount
+  // ConflictResolver and discard a hand-written combined copy.
   const canCloseExplicitly = stage.stage !== "running";
-  const canCloseFromBackdrop =
+  const canCloseByEscape =
     stage.stage !== "running" && stage.stage !== "conflicts";
 
   // Every close path reports its outcome (when a listener asked) then closes.
@@ -825,7 +825,7 @@ export function VersionMergeDialog(props: {
   }, [props.onClose, props.onOutcome, stage.stage]);
 
   return (
-    <Overlay onClose={() => (canCloseFromBackdrop ? finish() : undefined)}>
+    <Overlay onClose={() => (canCloseByEscape ? finish() : undefined)}>
       <div
         data-testid="version-merge-dialog"
         role="dialog"
@@ -1928,12 +1928,12 @@ export function ConflictReviewDialog(props: {
   // the empty state and the close discipline must not read it as "all done".
   const anyOpen = conflicts.length > 0 || hasMoreConflicts;
   // Same close discipline as the merge dialog: while conflicts are open,
-  // closing is explicit only — a stray backdrop click must not discard a
-  // hand-written combined copy.
-  const canCloseFromBackdrop = state.status !== "ready" || !anyOpen;
+  // closing is explicit only — Escape must not discard a hand-written
+  // combined copy.
+  const canCloseByEscape = state.status !== "ready" || !anyOpen;
 
   return (
-    <Overlay onClose={() => (canCloseFromBackdrop ? props.onClose() : undefined)}>
+    <Overlay onClose={() => (canCloseByEscape ? props.onClose() : undefined)}>
       <div
         data-testid="conflict-review-dialog"
         role="dialog"
