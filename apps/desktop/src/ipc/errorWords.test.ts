@@ -334,6 +334,23 @@ describe("error words", () => {
     expect(isSharedLiveFileRefusal(acrossIpc(refusal("INVALID_PARAMS", "live-document-binding-active")))).toBe(false);
   });
 
+  it("explains an open editing session across IPC and keeps its refusal for Copy", () => {
+    const received = acrossIpc(refusal("INVALID_PARAMS", "ydoc-session-busy"), "desktop:restore-engine-moment-file");
+    expect(received.message).toBe(
+      "Error invoking remote method 'desktop:restore-engine-moment-file': DaemonRefusalError [INVALID_PARAMS]: ydoc-session-busy",
+    );
+    const words = "This file is open for editing. Close its tabs, then try again.";
+    expect(readError(received)).toEqual({
+      words,
+      mapped: true,
+      cause: "DaemonRefusalError [INVALID_PARAMS]: ydoc-session-busy",
+    });
+    for (const sentence of ["dohc could not restore kyoto.md.", "dohc could not undo the restore of kyoto.md."]) {
+      expect(withErrorWords(sentence, received)).toBe(`${sentence} ${words}`);
+      expect(ipcErrorMessage(received, sentence)).toBe(`${sentence} ${words}`);
+    }
+  });
+
   it("leaves the caller's words for a refusal that names nothing a person can act on", () => {
     expect(readError(acrossIpc(refusal("INVALID_PARAMS", "invalid-input")))).toEqual({
       words: null,
