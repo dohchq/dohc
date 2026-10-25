@@ -1429,6 +1429,32 @@ describe("About History", () => {
     expect(await screen.findAllByTestId("about-history-open")).toHaveLength(1);
   });
 
+  // A read History's growth starts replaces the one an updating answer
+  // scheduled, so that read's answer is the one that lands.
+  it("reads once when History grows before the read an updating answer scheduled", async () => {
+    vi.useFakeTimers();
+    try {
+      const grown = deferred<ListEngineMomentsResponse>();
+      bridgeMock.listEngineMoments.mockResolvedValueOnce({ status: "updating" }).mockImplementationOnce(() => grown.promise);
+      const { rerender } = render(<HistorySection revision={1} />);
+      await settleAll();
+      expect(screen.getByTestId("about-history-updating")).toBeTruthy();
+      await act(async () => vi.advanceTimersByTimeAsync(100));
+      rerender(<HistorySection revision={2} />);
+      await settleAll();
+      expect(bridgeMock.listEngineMoments).toHaveBeenCalledTimes(2);
+      await act(async () => vi.advanceTimersByTimeAsync(8_000));
+      expect(bridgeMock.listEngineMoments).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        grown.resolve(page([moment()]));
+        await grown.promise;
+      });
+      expect(screen.getAllByTestId("about-history-open")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("draws History hidden by rules it can't read in the section, with no row", async () => {
     bridgeMock.listEngineMoments.mockResolvedValue({
       status: "policy-unreadable",

@@ -859,14 +859,13 @@ export type AboutFile =
 
 // `held` is History holding the file's changes back because its rules can't
 // be read, a state of the surface drawn in place (HistoryPolicyStates.tsx).
-// `updating` is History still taking in recent changes; `reads` counts the
-// reads in a row that found it so, and each is read again, soon at first.
-// Nothing failed in either, so neither files a row.
+// `updating` is History still taking in recent changes, read again soon at
+// first. Nothing failed in either, so neither files a row.
 export type HistoryView =
   | typeof LOADING
   | { status: "ready"; moments: EngineMomentRecord[]; more: boolean }
   | { status: "untracked" }
-  | { status: "updating"; reads: number }
+  | { status: "updating" }
   | { status: "held"; words: string; retry: () => void }
   | { status: "failed"; retry: () => void };
 
@@ -894,8 +893,13 @@ export function AboutHistory(props: {
     props.notices,
   );
   const { begin, cancel } = read;
+  // History can finish taking in changes without adding one, so no newer
+  // revision is sure to come: an updating answer schedules the next read.
+  // Any read that starts first replaces it.
+  const nextRead = useRef<ReturnType<typeof setTimeout>>(undefined);
   const load = useCallback(async (updatingReads = 0) => {
     if (objectId === null) return;
+    clearTimeout(nextRead.current);
     const request = begin();
     const failed = { status: "failed", retry: () => void load() } as const;
     try {
@@ -904,9 +908,13 @@ export function AboutHistory(props: {
         request.settle({ status: "ready", moments: response.moments, more: response.nextCursor !== null });
         return;
       }
-      request.settle(response.status === "updating"
-        ? { status: "updating", reads: updatingReads + 1 }
-        : { status: "held", words: historyHiddenWords(response.unreadable), retry: failed.retry });
+      if (response.status === "updating") {
+        if (!request.current()) return;
+        request.settle({ status: "updating" });
+        nextRead.current = setTimeout(() => void load(updatingReads + 1), gatherDelay(updatingReads + 1));
+        return;
+      }
+      request.settle({ status: "held", words: historyHiddenWords(response.unreadable), retry: failed.retry });
     } catch (error) {
       request.fail(failed, ipcErrorMessage(error, "Could not load History for this file."), error, failed.retry);
     }
@@ -914,16 +922,11 @@ export function AboutHistory(props: {
   useEffect(() => {
     if (!props.expanded || objectId === null) return;
     void load();
-    return cancel;
+    return () => {
+      cancel();
+      clearTimeout(nextRead.current);
+    };
   }, [cancel, load, objectId, props.expanded, props.revision]);
-  // History can finish taking in changes without adding one, so nothing
-  // else would read again.
-  const readView = read.view;
-  useEffect(() => {
-    if (!props.expanded || readView.status !== "updating") return;
-    const timer = setTimeout(() => void load(readView.reads), gatherDelay(readView.reads));
-    return () => clearTimeout(timer);
-  }, [load, props.expanded, readView]);
 
   const view: HistoryView =
     file.status === "loading" ? LOADING

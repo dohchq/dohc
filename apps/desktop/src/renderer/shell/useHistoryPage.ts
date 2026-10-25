@@ -26,14 +26,16 @@ export type HistoryPage = {
 // first read still in flight, a read that failed, and a page dropped as stale
 // and asked again. "No changes yet" is an assertion about the WORKSPACE, so
 // only a read that answered may reach it. This says whether the newest read
-// answered at all. A commit never resets it and a retraction never touches
-// it: the page and the read state answer different questions.
+// answered at all. A commit only ends `updating`, because its read did
+// answer, and a retraction never touches it: the page and the read state
+// answer different questions.
 export type HistoryReadState = "loading" | "failed" | "updating";
 
 // A history read already spent one second in the daemon's capture-flush
 // ladder before it can answer `updating`. Four renderer retries give that
 // flush another 1.85 seconds of breathing room without leaving the panel in
-// an unbounded spinner. After this ladder, the inline Try again remains.
+// an unbounded spinner. After this ladder, the panel says History is still
+// taking in changes, and the next capture's activity reads again.
 const HISTORY_UPDATING_RETRY_DELAYS_MS = [100, 250, 500, 1_000] as const;
 const HISTORY_PAGE_LIMIT = 50;
 
@@ -260,7 +262,7 @@ export function useHistoryPage(
         setPolicyError(null);
         // The page replaces History still taking in changes, so a page
         // dropped later reads as not known yet.
-        setReadState("loading");
+        setReadState((state) => (state === "updating" ? "loading" : state));
         // A refresh returns to the newest page and starts a new source
         // chain; older pages reload on demand, so any load-more it
         // supersedes is over.
