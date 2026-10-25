@@ -273,7 +273,7 @@ export function PostCard(props: {
               />
             ) : null}
             {props.groupLabel ? (
-              <span className="truncate text-[11px] text-subtle">{props.groupLabel}</span>
+              <span className="truncate text-[11px] tabular-nums text-subtle">{props.groupLabel}</span>
             ) : null}
             <time
               data-testid="chats-post-time"

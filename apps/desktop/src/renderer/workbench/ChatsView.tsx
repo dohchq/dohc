@@ -3877,7 +3877,7 @@ export function ChatsView(props: {
                             </AgentName>
                           </span>
                           {item.message.authorKind === "link" ? <LinkHolderMark testId="chats-feed-link-holder" /> : null}
-                          <span className="truncate text-[11px] text-subtle">{where}</span>
+                          <span className="truncate text-[11px] tabular-nums text-subtle">{where}</span>
                           <time
                             dateTime={time.iso}
                             title={time.label}

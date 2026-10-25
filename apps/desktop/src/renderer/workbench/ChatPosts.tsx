@@ -745,7 +745,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 onOpenPath={props.onOpenPath}
               />
             ) : null}
-            <span className="truncate text-[11px] text-subtle">
+            <span className="truncate text-[11px] tabular-nums text-subtle">
               {nav.channel.kind === "agent" ? "My agent" : `#${nav.channel.name}`}
             </span>
             <time
