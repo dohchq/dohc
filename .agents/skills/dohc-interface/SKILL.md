@@ -144,6 +144,8 @@ A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `rol
 - Put a copy control beside text a person might need to report. Use an icon on the toast and the row, and a **Technical details** disclosure on a full-height state. Copy what the person reads, one line per fact, never a log.
 - Let a repeat of the same message, or the same kind, replace its earlier row.
 - Closing a toast keeps its row. Dismissing the row removes it.
+- A row in Notices stays unread until the pointer or keyboard focus rests on it for 0.6 s, or the person presses **Mark all read**. Reading a row closes its toast and keeps the row.
+- A row shows two lines of title and three of text. Offer **Show more** for the rest, and open it in place, wrapped and selectable.
 - Restarting or closing the app asks once, in one dialog.
 - Report errors through the shell's `reportError` callback instead of rendering them yourself.
 - For a list or section whose read failed, show `RetryRow`.

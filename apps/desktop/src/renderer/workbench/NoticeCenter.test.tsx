@@ -94,6 +94,7 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.sentNoticesAccount !== undefined ? { sentNoticesAccount: props.sentNoticesAccount } : {})}
       {...(props.onDismissSentNotice ? { onDismissSentNotice: props.onDismissSentNotice } : {})}
       {...(props.onReadAllSentNotices ? { onReadAllSentNotices: props.onReadAllSentNotices } : {})}
+      {...(props.onReadSentNotice ? { onReadSentNotice: props.onReadSentNotice } : {})}
       {...(props.automationStops ? { automationStops: props.automationStops } : {})}
       {...(props.onDismissAutomationStops ? { onDismissAutomationStops: props.onDismissAutomationStops } : {})}
       {...(props.onRunSentNoticeNow ? { onRunSentNoticeNow: props.onRunSentNoticeNow } : {})}
@@ -1975,6 +1976,112 @@ describe("notices sent to you", () => {
   it("names the toggle without a count when nothing is unread", () => {
     renderNotices({ sentNotices: [sentRow("read", { readAtMs: 1 })] });
     expect(screen.getByTestId("notice-center-toggle").getAttribute("aria-label")).toBe("Notices");
+  });
+
+  describe("reading a row", () => {
+    const error = {
+      id: "e1", message: "dohc could not save Trip/day-2.md.", details: "d", atMs: 1, canRetry: true, seen: false,
+    };
+    const errorProps = (onHideWorkspaceError = vi.fn()) => ({
+      workspaceErrors: [error, { ...error, id: "e2", message: "dohc could not search this workspace.", atMs: 2 }],
+      onRetryWorkspaceError: vi.fn(),
+      onHideWorkspaceError,
+    });
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    it("reads a row the pointer rests on, not one it crosses", () => {
+      const onHideWorkspaceError = vi.fn();
+      renderNotices(errorProps(onHideWorkspaceError));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.getByTestId("notice-center-count").textContent).toBe("2");
+
+      fireEvent.pointerEnter(screen.getByTestId("notice-e1"));
+      act(() => vi.advanceTimersByTime(300));
+      fireEvent.pointerLeave(screen.getByTestId("notice-e1"));
+      fireEvent.pointerEnter(screen.getByTestId("notice-e2"));
+      act(() => vi.advanceTimersByTime(599));
+      expect(onHideWorkspaceError).not.toHaveBeenCalled();
+
+      act(() => vi.advanceTimersByTime(1));
+      expect(onHideWorkspaceError).toHaveBeenCalledExactlyOnceWith("e2");
+      expect(screen.queryByTestId("notice-e2-unread")).toBeNull();
+      expect(screen.getByTestId("notice-e1-unread").textContent).toBe("Unread");
+      expect(screen.getByTestId("notice-center-count").textContent).toBe("1");
+      // Reading changes nothing else: the row and its Try again stay.
+      expect(within(screen.getByTestId("notice-e2")).getByRole("button", { name: "Try again" })).toBeTruthy();
+    });
+
+    it("reads a row keyboard focus rests on", () => {
+      const onReadSentNotice = vi.fn();
+      renderNotices({ sentNotices: [sentRow("a"), sentRow("b")], onReadSentNotice, onOpenSentNotice: vi.fn() });
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      act(() => screen.getByTestId("sent-notice-a").focus());
+      act(() => vi.advanceTimersByTime(300));
+      // Moving within the row keeps its rest going.
+      act(() => within(screen.getByTestId("sent-notice-a")).getByRole("button", { name: "Open" }).focus());
+      act(() => vi.advanceTimersByTime(300));
+      expect(onReadSentNotice).toHaveBeenCalledExactlyOnceWith(sentRow("a").notice);
+    });
+
+    it("reads nothing once the panel closes mid-rest", () => {
+      const onHideWorkspaceError = vi.fn();
+      renderNotices(errorProps(onHideWorkspaceError));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      fireEvent.pointerEnter(screen.getByTestId("notice-e1"));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(onHideWorkspaceError).not.toHaveBeenCalled();
+      expect(screen.getByTestId("notice-center-toggle").getAttribute("aria-label")).toBe("Notices, 2 unread");
+    });
+
+    it("marks this computer's rows read with Mark all read, and a row that returns is unread again", () => {
+      const onHideWorkspaceError = vi.fn();
+      const { rerender } = renderNotices(errorProps(onHideWorkspaceError));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+      expect(onHideWorkspaceError.mock.calls).toEqual([["e2"], ["e1"]]);
+      expect(screen.queryByTestId("notice-center-count")).toBeNull();
+      expect(screen.getByTestId("notice-center-toggle").getAttribute("aria-label")).toBe("Notices");
+      expect(screen.getByTestId("notice-e1")).toBeTruthy();
+
+      rerender(noticeElement({ ...errorProps(onHideWorkspaceError), workspaceErrors: [] }));
+      rerender(noticeElement(errorProps(onHideWorkspaceError)));
+      expect(screen.getByTestId("notice-e1-unread")).toBeTruthy();
+    });
+
+    it("opens clipped text in place", () => {
+      // jsdom lays nothing out; make every text box report more than it shows.
+      vi.spyOn(Element.prototype, "scrollHeight", "get").mockReturnValue(64);
+      vi.spyOn(Element.prototype, "clientHeight", "get").mockReturnValue(32);
+      renderNotices(errorProps());
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      const more = screen.getByTestId("notice-e1-more");
+      expect(more.textContent).toBe("Show more");
+      expect(more.getAttribute("aria-expanded")).toBe("false");
+      expect(document.getElementById(more.getAttribute("aria-controls") ?? "")?.textContent).toBe(error.message);
+
+      fireEvent.click(more);
+      expect(more.textContent).toBe("Show less");
+      expect(more.getAttribute("aria-expanded")).toBe("true");
+      fireEvent.click(more);
+      expect(more.getAttribute("aria-expanded")).toBe("false");
+
+      // A click on the clipped text opens it too; the second click of a double click does not count.
+      fireEvent.click(screen.getByText(error.message), { detail: 2 });
+      expect(more.getAttribute("aria-expanded")).toBe("false");
+      fireEvent.click(screen.getByText(error.message), { detail: 1 });
+      expect(more.getAttribute("aria-expanded")).toBe("true");
+    });
+
+    it("offers Show more only for clipped text", () => {
+      renderNotices(errorProps());
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.queryByTestId("notice-e1-more")).toBeNull();
+    });
   });
 
   it("shows each sender's shape and says who sent it", async () => {

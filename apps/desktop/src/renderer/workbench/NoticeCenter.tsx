@@ -2,8 +2,8 @@ import { useFocusReturn, useFocusSurface } from "../ui/focusReturn";
 import { modalReturnTarget } from "../modalFocus";
 import { createPortal } from "react-dom";
 import { automationReachCopy } from "../automationReachCopy";
-import { AlertTriangle, Bell, Bot, Check, CheckCircle2, CloudOff, Download, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
+import { AlertTriangle, Bell, Bot, Check, CheckCircle2, ChevronDown, CloudOff, Download, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type HTMLAttributes, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
 import {
   ENGINE_STORE_BACKUP_DIR,
   ENGINE_STORE_UPDATE_NEXT_STEP,
@@ -50,6 +50,8 @@ export type Notice = {
   filePaths?: readonly string[];
   // A terminal command the body asks the person to run, shown with its copy.
   command?: string;
+  // Closes the notice's toast once its row is read. The row stays.
+  onRead?: () => void;
   Icon: typeof Bell;
 };
 
@@ -139,21 +141,23 @@ const SENDER_NAME = {
   agent: "From an agent",
   automation: "From an automation",
 } as const;
-function SenderMark(props: { kind: NoticeRow["senderKind"] }) {
+// A toast sets the mark on its text's first line; a row passes its own place.
+function SenderMark(props: { kind: NoticeRow["senderKind"]; className?: string }) {
+  const place = props.className ?? "mt-0.5 shrink-0";
   if (props.kind === null) {
-    return <Info size={14} aria-hidden className="mt-0.5 shrink-0 text-subtle" />;
+    return <Info size={14} aria-hidden className={`${place} text-subtle`} />;
   }
   if (props.kind === "automation") {
     return (
-      <span className="mt-0.5 shrink-0">
-        <Zap size={14} aria-hidden data-sender-shape="zap" className="text-muted" />
+      <span className={place}>
+        <Zap size={14} aria-hidden data-sender-shape="zap" className="block text-muted" />
         <span className="sr-only">{SENDER_NAME.automation}</span>
       </span>
     );
   }
   const person = props.kind === "person";
   return (
-    <span className="mt-0.5 shrink-0">
+    <span className={place}>
       <span
         aria-hidden
         data-sender-shape={person ? "round" : "square"}
@@ -179,6 +183,119 @@ const sentKey = (account: string | null, { store, noticeId }: NoticeRow): string
 const NOTICE_ROW = "[data-notice-row]";
 const ROW_CLASS =
   "dohc-pop-in flex gap-2 border-b border-line px-3 py-2 last:border-b-0 focus-visible:-outline-offset-2";
+// A row's first line is as tall as its tallest control, so a title that
+// wraps leaves its controls where they were.
+const ROW_CONTROLS_CLASS = "ml-auto flex h-6 shrink-0 items-center gap-2";
+
+// A row counts as read once the pointer or keyboard focus rests on it this
+// long: longer than crossing a row on the way to another, about when a
+// tooltip would show.
+const READ_REST_MS = 600;
+
+type RestHandlers = Pick<HTMLAttributes<HTMLElement>, "onPointerEnter" | "onPointerLeave" | "onFocus" | "onBlur">;
+
+// A read row of this computer's is remembered by what it says, so one whose
+// words or time change is unread again.
+const localReadKey = (workspaceId: string, notice: Notice): string =>
+  JSON.stringify([workspaceId, notice.id, notice.timeMs ?? null, notice.title, notice.body]);
+
+// Every row keeps this column at its left edge, so unread rows line up and a
+// row that turns read does not move.
+function UnreadMark(props: { unread: boolean; testId: string; className?: string }) {
+  return (
+    <span className={`-ml-1.5 flex w-1.5 shrink-0 items-center ${props.className ?? "h-6"}`}>
+      {props.unread ? (
+        <span data-testid={props.testId} className="block size-1.5 rounded-full bg-accent">
+          <span className="sr-only">Unread</span>
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+// A row's title and text, clipped to fit. A click on clipped text, or Show
+// more, shows all of it in place, wrapped and selectable.
+function NoticeText(props: {
+  title: string;
+  // The title's weight and color.
+  titleClass: string;
+  body: string;
+  // Off for a body that is already shown whole.
+  clamp?: boolean;
+  testId: string;
+  children: (text: { title: ReactNode; body: ReactNode }) => ReactNode;
+}) {
+  const id = useId();
+  const titleRef = useRef<HTMLSpanElement>(null);
+  const bodyRef = useRef<HTMLParagraphElement>(null);
+  const [open, setOpen] = useState(false);
+  const [clipped, setClipped] = useState(false);
+  const clamp = props.clamp ?? true;
+  useLayoutEffect(() => {
+    if (open) return;
+    const title = titleRef.current;
+    const body = bodyRef.current;
+    // A pixel of slack: rounding alone can make fitting text look a pixel over.
+    const measure = () => setClipped(
+      (title !== null && title.scrollHeight > title.clientHeight + 1) ||
+      (clamp && body !== null && body.scrollHeight > body.clientHeight + 1),
+    );
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    if (title) observer.observe(title);
+    if (body) observer.observe(body);
+    return () => observer.disconnect();
+  }, [open, clamp, props.title, props.body]);
+  // A click that ends a selection, or the second of a double click, opens nothing.
+  const openOnClick = clipped && !open
+    ? (event: MouseEvent<HTMLElement>) => {
+        if (event.detail > 1 || window.getSelection()?.isCollapsed === false) return;
+        setOpen(true);
+      }
+    : undefined;
+  const pointer = open ? " cursor-text" : openOnClick ? " cursor-pointer" : "";
+  return props.children({
+    title: (
+      <span
+        ref={titleRef}
+        id={`${id}-title`}
+        title={props.title}
+        onClick={openOnClick}
+        className={`min-w-0 py-1 whitespace-pre-line wrap-anywhere text-[12px] leading-4 ${props.titleClass}${open ? "" : " line-clamp-2"}${pointer}`}
+      >
+        {props.title}
+      </span>
+    ),
+    body: (
+      <>
+        {props.body ? (
+          <p
+            ref={bodyRef}
+            id={`${id}-body`}
+            onClick={openOnClick}
+            className={`m-0 mt-0.5 whitespace-pre-line wrap-anywhere text-[11px] leading-snug text-muted${clamp && !open ? " line-clamp-3" : ""}${pointer}`}
+          >
+            {props.body}
+          </p>
+        ) : null}
+        {clipped || open ? (
+          <button
+            type="button"
+            data-testid={`${props.testId}-more`}
+            aria-expanded={open}
+            aria-controls={props.body ? `${id}-title ${id}-body` : `${id}-title`}
+            onClick={() => setOpen((value) => !value)}
+            className="-ml-1 mt-0.5 flex items-center gap-0.5 rounded-md px-1 text-[11px] font-medium text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
+          >
+            {open ? "Show less" : "Show more"}
+            <ChevronDown size={12} strokeWidth={1.9} aria-hidden className={`transition-transform duration-150 ease-out${open ? " rotate-180" : ""}`} />
+          </button>
+        ) : null}
+      </>
+    ),
+  });
+}
 
 // The one notice for every step a narrower share stopped. It names each
 // automation it will dismiss, with its file, and who cannot reach what.
@@ -431,6 +548,8 @@ export function WorkspaceErrorToast(props: {
 // One row under "On this computer". The states page renders it too.
 export function LocalNoticeRow(props: {
   notice: Notice;
+  unread: boolean;
+  rest?: RestHandlers;
   onKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
   onAction: (action: NoticeAction) => void;
   onDismiss: (event: MouseEvent<HTMLButtonElement>) => void;
@@ -442,83 +561,91 @@ export function LocalNoticeRow(props: {
       data-notice-row=""
       tabIndex={-1}
       onKeyDown={props.onKeyDown}
+      {...props.rest}
       className={ROW_CLASS}
     >
-      <notice.Icon
-        size={14}
-        aria-hidden
-        className={`mt-0.5 shrink-0 ${toneClass(notice.tone)}`}
-      />
-      <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-[12px] font-medium text-ink">
-            {notice.title}
-          </span>
-          {(notice.actions ?? []).map((action, index) => (
-            <button
-              key={action.label}
-              type="button"
-              disabled={action.disabled}
-              onClick={() => props.onAction(action)}
-              className={`${index === 0 ? "ml-auto " : ""}shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50`}
-            >
-              {action.label}
-            </button>
-          ))}
-          {notice.copyText !== undefined && !notice.filePaths?.length ? (
-            <CopyButton
-              iconOnly
-              pinName
-              label={notice.copyLabel ?? "Copy error details"}
-              testId={`notice-${notice.id}-copy`}
-              getText={() => notice.copyText ?? ""}
-            />
-          ) : null}
-          {notice.onDismiss ? (
-            <button
-              type="button"
-              data-testid={`notice-${notice.id}-dismiss`}
-              aria-label="Dismiss notice"
-              onClick={props.onDismiss}
-              className={`${notice.actions?.length ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink`}
-            >
-              <X size={11} aria-hidden />
-            </button>
-          ) : null}
-        </div>
-        <p className={`m-0 mt-0.5 ${notice.filePaths !== undefined ? "" : "line-clamp-3 "}text-[11px] leading-snug text-muted`}>
-          {notice.body}
-        </p>
-        {notice.command ? (
-          <div className="mt-1 flex items-start gap-2">
-            <code data-testid={`notice-${notice.id}-command`} className="min-w-0 flex-1 select-text break-all font-mono text-[12px] text-muted">
-              {notice.command}
-            </code>
-            <CopyButton iconOnly pinName label="Copy command" testId={`notice-${notice.id}-command-copy`}
-              getText={() => notice.command ?? ""} />
-          </div>
-        ) : null}
-        {notice.filePaths?.length ? (
-          <div className="mt-1 flex items-start gap-2">
-            <ul className="m-0 min-w-0 flex-1 list-none p-0 font-mono text-[12px] text-muted">
-              {notice.filePaths.slice(0, 5).map(path => <li key={path} className="select-text break-all">{path}</li>)}
-              {notice.filePaths.length > 5 ? <li>{notice.filePaths.length - 5} more</li> : null}
-            </ul>
-            {notice.copyText !== undefined ? (
-              <CopyButton iconOnly pinName label={notice.copyLabel ?? "Copy error details"}
-                testId={`notice-${notice.id}-copy`} getText={() => notice.copyText ?? ""} />
+      <UnreadMark unread={props.unread} testId={`notice-${notice.id}-unread`} />
+      <span className="flex h-6 w-4 shrink-0 items-center justify-center">
+        <notice.Icon size={14} aria-hidden className={toneClass(notice.tone)} />
+      </span>
+      <NoticeText
+        title={notice.title}
+        titleClass={props.unread ? "font-medium text-ink" : "text-muted"}
+        body={notice.body}
+        clamp={notice.filePaths === undefined}
+        testId={`notice-${notice.id}`}
+      >
+        {(text) => (
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-start gap-2">
+              {text.title}
+              <span className={ROW_CONTROLS_CLASS}>
+                {(notice.actions ?? []).map((action) => (
+                  <button
+                    key={action.label}
+                    type="button"
+                    disabled={action.disabled}
+                    onClick={() => props.onAction(action)}
+                    className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
+                  >
+                    {action.label}
+                  </button>
+                ))}
+                {notice.copyText !== undefined && !notice.filePaths?.length ? (
+                  <CopyButton
+                    iconOnly
+                    pinName
+                    label={notice.copyLabel ?? "Copy error details"}
+                    testId={`notice-${notice.id}-copy`}
+                    getText={() => notice.copyText ?? ""}
+                  />
+                ) : null}
+                {notice.onDismiss ? (
+                  <button
+                    type="button"
+                    data-testid={`notice-${notice.id}-dismiss`}
+                    aria-label="Dismiss notice"
+                    onClick={props.onDismiss}
+                    className="grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
+                  >
+                    <X size={11} aria-hidden />
+                  </button>
+                ) : null}
+              </span>
+            </div>
+            {text.body}
+            {notice.command ? (
+              <div className="mt-1 flex items-start gap-2">
+                <code data-testid={`notice-${notice.id}-command`} className="min-w-0 flex-1 select-text break-all font-mono text-[12px] text-muted">
+                  {notice.command}
+                </code>
+                <CopyButton iconOnly pinName label="Copy command" testId={`notice-${notice.id}-command-copy`}
+                  getText={() => notice.command ?? ""} />
+              </div>
+            ) : null}
+            {notice.filePaths?.length ? (
+              <div className="mt-1 flex items-start gap-2">
+                <ul className="m-0 min-w-0 flex-1 list-none p-0 font-mono text-[12px] text-muted">
+                  {notice.filePaths.slice(0, 5).map(path => <li key={path} className="select-text break-all">{path}</li>)}
+                  {notice.filePaths.length > 5 ? <li>{notice.filePaths.length - 5} more</li> : null}
+                </ul>
+                {notice.copyText !== undefined ? (
+                  <CopyButton iconOnly pinName label={notice.copyLabel ?? "Copy error details"}
+                    testId={`notice-${notice.id}-copy`} getText={() => notice.copyText ?? ""} />
+                ) : null}
+              </div>
+            ) : null}
+            {notice.timeMs !== undefined ? (
+              <time
+                dateTime={new Date(notice.timeMs).toISOString()}
+                className="mt-1 block font-mono text-[10px] text-subtle"
+              >
+                {relativeTime(notice.timeMs)}
+              </time>
             ) : null}
           </div>
-        ) : null}
-        {notice.timeMs !== undefined ? (
-          <time
-            dateTime={new Date(notice.timeMs).toISOString()}
-            className="mt-1 block font-mono text-[10px] text-subtle"
-          >
-            {relativeTime(notice.timeMs)}
-          </time>
-        ) : null}
-      </div>
+        )}
+      </NoticeText>
     </li>
   );
 }
@@ -605,6 +732,8 @@ export function NoticeCenter(props: {
   // Try again on a failed run's notice. The shell asks first when the run
   // would start over, and reports why it did not run.
   onRetrySentNotice?: (notice: NoticeRow) => void;
+  // Marks one notice read: the pointer or keyboard focus rested on its row.
+  onReadSentNotice?: (notice: NoticeRow) => void;
   onReadAllSentNotices?: () => void;
   // Automation steps a narrower share stopped, shown as one notice until
   // someone dismisses it.
@@ -949,6 +1078,7 @@ export function NoticeCenter(props: {
           ? { action: { label: "Send report", onClick: props.onSendCrashReport } }
           : {}),
         ...(props.onDismissCrashReport ? { onDismiss: props.onDismissCrashReport } : {}),
+        onRead: () => setClosedCrashRevision(crashReport.revision),
         timeMs: crashReport.atMs,
         copyText: crashReport.text,
         copyLabel: "Copy report",
@@ -986,6 +1116,9 @@ export function NoticeCenter(props: {
         ],
         ...(props.onDismissWorkspaceError
           ? { onDismiss: () => props.onDismissWorkspaceError?.(error.id) }
+          : {}),
+        ...(!error.seen && props.onHideWorkspaceError
+          ? { onRead: () => props.onHideWorkspaceError?.(error.id) }
           : {}),
         timeMs: error.atMs,
         copyText: error.filePaths?.length === 0 ? undefined : error.details,
@@ -1045,6 +1178,7 @@ export function NoticeCenter(props: {
         title: liveDelivery.title,
         body: liveDelivery.body,
         ...(liveDeliveryAction ? { actions: [liveDeliveryAction] } : {}),
+        onRead: () => setDismissedLiveDeliveryKey(liveDeliveryKey),
         copyText: liveDeliveryDetails,
         Icon: liveDelivery.Icon,
       });
@@ -1061,6 +1195,7 @@ export function NoticeCenter(props: {
         ...(onOpenLiveDocuments
           ? { actions: [{ label: "Live documents", onClick: onOpenLiveDocuments }] }
           : {}),
+        onRead: () => setDismissedRefusalsKey(refusalsKey),
         copyText: refusalsDetails,
         Icon: AlertTriangle,
       });
@@ -1146,6 +1281,7 @@ export function NoticeCenter(props: {
           setDismissedDeclines((current) =>
             new Set(current).add(sharingDeclinedKey(props.workspaceId, declined)),
           ),
+        onRead: () => closeDecline(declined),
         copyText: sharingDeclinedDetails(props.workspaceId, declined),
         Icon: AlertTriangle,
       });
@@ -1227,6 +1363,7 @@ export function NoticeCenter(props: {
         title: "Update ready",
         body: updateActionError ?? updateState.message,
         ...(updateState.installCommand ? { command: updateState.installCommand } : {}),
+        ...(readyUpdateKey ? { onRead: () => setDismissedUpdateToastKey(readyUpdateKey) } : {}),
         ...(updateState.canInstall
           ? {
               actions: [{
@@ -1270,6 +1407,7 @@ export function NoticeCenter(props: {
     props.onRetryWorkspaceError,
     props.onWorkspaceErrorAction,
     props.onDismissWorkspaceError,
+    props.onHideWorkspaceError,
     props.onOpenConflicts,
     props.onOpenHistory,
     props.onRefreshShareView,
@@ -1285,11 +1423,13 @@ export function NoticeCenter(props: {
     liveDelivery,
     liveDeliveryAction,
     liveDeliveryDetails,
+    liveDeliveryKey,
     onOpenLiveDocuments,
     refusalsDetails,
     refusalsKey,
     installPending,
     installUpdate,
+    readyUpdateKey,
     updateActionError,
     updateState,
   ]);
@@ -1305,9 +1445,75 @@ export function NoticeCenter(props: {
       allRecoveryRows.filter((row) => row.workspaceId === props.workspaceId),
     [allRecoveryRows, props.workspaceId],
   );
-  // This computer's rows count while they stand; sent rows while unread.
   const localCount = notices.length + (recoveryRows.length > 0 ? 1 : 0);
-  const count = localCount + unreadSent;
+  // This computer's rows read in this window. A row that goes and comes back
+  // is unread again.
+  const [localRead, setLocalRead] = useState<ReadonlySet<string>>(new Set());
+  const setAsideKey = recoveryRows.length > 0 ? JSON.stringify([props.workspaceId, "set-aside", recoveryRows.length]) : null;
+  useEffect(() => {
+    const present = new Set(notices.map((notice) => localReadKey(props.workspaceId, notice)));
+    if (setAsideKey !== null) present.add(setAsideKey);
+    setLocalRead((current) => {
+      const kept = [...current].filter((key) => present.has(key));
+      return kept.length === current.size ? current : new Set(kept);
+    });
+  }, [notices, props.workspaceId, setAsideKey]);
+  const unreadNotices = notices.filter((notice) => !localRead.has(localReadKey(props.workspaceId, notice)));
+  const setAsideUnread = setAsideKey !== null && !localRead.has(setAsideKey);
+  const unreadLocal = unreadNotices.length + (setAsideUnread ? 1 : 0);
+  // Every row counts until it is read.
+  const count = unreadLocal + unreadSent;
+  const canReadAll = unreadLocal > 0 || (unreadSent > 0 && props.onReadAllSentNotices !== undefined);
+  // Reading a row of this computer's keeps the row and closes its toast.
+  const readLocal = (rows: readonly Notice[], setAside: boolean) => {
+    setLocalRead((current) => {
+      const next = new Set(current);
+      for (const row of rows) next.add(localReadKey(props.workspaceId, row));
+      if (setAside && setAsideKey !== null) next.add(setAsideKey);
+      return next;
+    });
+    for (const row of rows) row.onRead?.();
+  };
+  // The row the pointer rests on and the row holding focus, each with the
+  // read it waits to make. Closing the panel makes none.
+  const rests = useRef<Record<"pointer" | "focus", { key: string; timer: ReturnType<typeof setTimeout> } | null>>({ pointer: null, focus: null });
+  const stopRest = (by: "pointer" | "focus") => {
+    const rest = rests.current[by];
+    if (rest) clearTimeout(rest.timer);
+    rests.current[by] = null;
+  };
+  useEffect(() => {
+    const current = rests.current;
+    return () => {
+      if (current.pointer) clearTimeout(current.pointer.timer);
+      if (current.focus) clearTimeout(current.focus.timer);
+      current.pointer = null;
+      current.focus = null;
+    };
+  }, [open]);
+  const restReads = (key: string, read: (() => void) | null): RestHandlers | undefined => {
+    if (!read) return undefined;
+    const start = (by: "pointer" | "focus") => {
+      if (rests.current[by]?.key === key) return;
+      stopRest(by);
+      const timer = setTimeout(() => {
+        rests.current[by] = null;
+        read();
+      }, READ_REST_MS);
+      rests.current[by] = { key, timer };
+    };
+    const end = (by: "pointer" | "focus") => {
+      if (rests.current[by]?.key === key) stopRest(by);
+    };
+    return {
+      onPointerEnter: () => start("pointer"),
+      onPointerLeave: () => end("pointer"),
+      onFocus: () => start("focus"),
+      onBlur: (event: FocusEvent<HTMLElement>) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) end("focus");
+      },
+    };
+  };
   // The newest error whose toast is still open. One at a time: the rest
   // wait in Notices with the count. The list is in arrival order, so two
   // messages in the same millisecond show the later one.
@@ -1717,13 +1923,14 @@ export function NoticeCenter(props: {
             <span className="font-semibold uppercase tracking-wide text-muted">
               Notices
             </span>
-            {unreadSent > 0 && props.onReadAllSentNotices ? (
+            {canReadAll ? (
               <button
                 type="button"
                 data-testid="notice-center-read-all"
                 onClick={() => {
                   centerRef.current?.focus();
-                  props.onReadAllSentNotices?.();
+                  readLocal(unreadNotices, true);
+                  if (unreadSent > 0) props.onReadAllSentNotices?.();
                 }}
                 className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
               >
@@ -1733,7 +1940,7 @@ export function NoticeCenter(props: {
             {count > 0 ? (
               <span
                 data-testid="notice-center-count"
-                className={`${unreadSent > 0 && props.onReadAllSentNotices ? "" : "ml-auto "}rounded-full border border-line bg-panel-2 px-1.5 text-[10px] font-medium leading-4 text-muted`}
+                className={`${canReadAll ? "" : "ml-auto "}rounded-full border border-line bg-panel-2 px-1.5 text-[10px] font-medium leading-4 text-muted`}
               >
                 {count}
               </span>
@@ -1748,7 +1955,7 @@ export function NoticeCenter(props: {
               </div>
             )
           ) : (
-            <div className="min-h-0 max-h-80 overflow-y-auto">
+            <div className="min-h-0 max-h-[28rem] overflow-y-auto">
               {localCount > 0 ? (
                 <section data-testid="notice-group-local">
                   <SectionLabel as="h3" className="m-0 px-3 pb-1 pt-2">
@@ -1757,17 +1964,21 @@ export function NoticeCenter(props: {
               {recoveryRows.length > 0 ? (
                 <section
                   data-testid="notice-set-aside-edits"
-                  className="border-b border-line px-3 py-2"
+                  {...restReads(setAsideKey ?? "", setAsideUnread ? () => readLocal([], true) : null)}
+                  className="flex gap-2 border-b border-line px-3 py-2"
                 >
-                  <p className="m-0 text-[12px] font-medium text-ink">
-                    {recoveryRows.length === 1
-                      ? "1 set-aside edit is waiting"
-                      : `${recoveryRows.length} set-aside edits are waiting`}
-                  </p>
-                  <p className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
-                    Copy an edit to keep its text. Dismiss deletes it for good.
-                  </p>
-                  <RecoveryList rows={recoveryRows} />
+                  <UnreadMark unread={setAsideUnread} testId="notice-set-aside-edits-unread" className="h-4" />
+                  <div className="min-w-0 flex-1">
+                    <p className={`m-0 text-[12px] ${setAsideUnread ? "font-medium text-ink" : "text-muted"}`}>
+                      {recoveryRows.length === 1
+                        ? "1 set-aside edit is waiting"
+                        : `${recoveryRows.length} set-aside edits are waiting`}
+                    </p>
+                    <p className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
+                      Copy an edit to keep its text. Dismiss deletes it for good.
+                    </p>
+                    <RecoveryList rows={recoveryRows} />
+                  </div>
                 </section>
               ) : null}
             <ul className="m-0 list-none p-0">
@@ -1775,6 +1986,8 @@ export function NoticeCenter(props: {
                 <LocalNoticeRow
                   key={notice.id}
                   notice={notice}
+                  unread={unreadNotices.includes(notice)}
+                  rest={restReads(localReadKey(props.workspaceId, notice), unreadNotices.includes(notice) ? () => readLocal([notice], false) : null)}
                   onKeyDown={rowKeys({
                     open: firstAction(notice),
                     dismiss: notice.onDismiss,
@@ -1828,100 +2041,97 @@ export function NoticeCenter(props: {
                           data-notice-row=""
                           tabIndex={-1}
                           onKeyDown={rowKeys({ open: openNotice, dismiss: dismissNotice })}
+                          {...restReads(key, unread && props.onReadSentNotice ? () => props.onReadSentNotice?.(notice) : null)}
                           className={ROW_CLASS}
                         >
-                          <SenderMark kind={notice.senderKind} />
-                          <div className="min-w-0 flex-1">
-                            <div className="flex min-w-0 items-center gap-2">
-                              <span
-                                title={notice.title}
-                                className={`truncate text-[12px] ${unread ? "font-medium text-ink" : "text-muted"}`}
-                              >
-                                {notice.title}
-                              </span>
-                              {unread ? (
-                                <span data-testid={`sent-notice-${notice.noticeId}-unread`} className="shrink-0">
-                                  <span aria-hidden className="block size-1.5 rounded-full bg-accent" />
-                                  <span className="sr-only">Unread</span>
-                                </span>
-                              ) : null}
-                              {runNow ? (
-                                <button
-                                  type="button"
-                                  data-testid={`sent-notice-${notice.noticeId}-run-now`}
-                                  aria-busy={running || undefined}
-                                  disabled={runningKey !== null}
-                                  onClick={runNow}
-                                  className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
-                                >
-                                  {running ? "Starting…" : "Run now"}
-                                </button>
-                              ) : null}
-                              {retry ? (
-                                <button
-                                  type="button"
-                                  data-testid={`sent-notice-${notice.noticeId}-retry`}
-                                  onClick={retry}
-                                  className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
-                                >
-                                  Try again
-                                </button>
-                              ) : null}
-
-                              {openNotice ? (
-                                <button
-                                  type="button"
-                                  data-testid={`sent-notice-${notice.noticeId}-open`}
-                                  aria-busy={busy || undefined}
-                                  onClick={openNotice}
-                                  className={`${runNow || retry ? "" : "ml-auto "}shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink aria-busy:opacity-50`}
-                                >
-                                  {busy ? "Opening…" : AUTOMATION_NOTICE_KINDS.has(notice.kind) ? "Open automation" : "Open"}
-                                </button>
-                              ) : null}
-                              {copies ? (
-                                <span className={`${openNotice || runNow || retry ? "" : "ml-auto "}flex shrink-0`}>
-                                  <CopyButton
-                                    iconOnly
-                                    pinName
-                                    label="Copy error details"
-                                    testId={`sent-notice-${notice.noticeId}-copy`}
-                                    getText={() => failureDetails(notice)}
-                                  />
-                                </span>
-                              ) : null}
-                              {dismissNotice ? (
-                                <button
-                                  type="button"
-                                  data-testid={`sent-notice-${notice.noticeId}-dismiss`}
-                                  aria-label="Dismiss notice"
-                                  onClick={(event) => {
-                                    focusPastRow(event.currentTarget);
-                                    dismissNotice();
-                                  }}
-                                  className={`${openNotice || runNow || retry || copies ? "" : "ml-auto "}grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink`}
-                                >
-                                  <X size={11} aria-hidden />
-                                </button>
-                              ) : null}
-                            </div>
-                            {notice.body ? (
-                              <p className="m-0 mt-0.5 line-clamp-3 text-[11px] leading-snug text-muted">
-                                {notice.body}
-                              </p>
-                            ) : null}
-                            <p className="m-0 mt-1 flex min-w-0 gap-2 font-mono text-[10px] text-subtle">
-                              <time dateTime={new Date(notice.createdAtMs).toISOString()}>
-                                {relativeTime(notice.createdAtMs)}
-                              </time>
-                              {folder ? <span className="truncate">{folder}</span> : null}
-                            </p>
-                            {note ? (
-                              <p role="status" className="m-0 mt-1 text-[11px] leading-snug text-ink">
-                                {note}
-                              </p>
-                            ) : null}
-                          </div>
+                          <UnreadMark unread={unread} testId={`sent-notice-${notice.noticeId}-unread`} />
+                          <span className="flex h-6 w-4 shrink-0 items-center justify-center">
+                            <SenderMark kind={notice.senderKind} className="shrink-0" />
+                          </span>
+                          <NoticeText
+                            title={notice.title}
+                            titleClass={unread ? "font-medium text-ink" : "text-muted"}
+                            body={notice.body}
+                            testId={`sent-notice-${notice.noticeId}`}
+                          >
+                            {(text) => (
+                              <div className="min-w-0 flex-1">
+                                <div className="flex min-w-0 items-start gap-2">
+                                  {text.title}
+                                  <span className={ROW_CONTROLS_CLASS}>
+                                    {runNow ? (
+                                      <button
+                                        type="button"
+                                        data-testid={`sent-notice-${notice.noticeId}-run-now`}
+                                        aria-busy={running || undefined}
+                                        disabled={runningKey !== null}
+                                        onClick={runNow}
+                                        className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
+                                      >
+                                        {running ? "Starting…" : "Run now"}
+                                      </button>
+                                    ) : null}
+                                    {retry ? (
+                                      <button
+                                        type="button"
+                                        data-testid={`sent-notice-${notice.noticeId}-retry`}
+                                        onClick={retry}
+                                        className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                                      >
+                                        Try again
+                                      </button>
+                                    ) : null}
+                                    {openNotice ? (
+                                      <button
+                                        type="button"
+                                        data-testid={`sent-notice-${notice.noticeId}-open`}
+                                        aria-busy={busy || undefined}
+                                        onClick={openNotice}
+                                        className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink aria-busy:opacity-50"
+                                      >
+                                        {busy ? "Opening…" : AUTOMATION_NOTICE_KINDS.has(notice.kind) ? "Open automation" : "Open"}
+                                      </button>
+                                    ) : null}
+                                    {copies ? (
+                                      <CopyButton
+                                        iconOnly
+                                        pinName
+                                        label="Copy error details"
+                                        testId={`sent-notice-${notice.noticeId}-copy`}
+                                        getText={() => failureDetails(notice)}
+                                      />
+                                    ) : null}
+                                    {dismissNotice ? (
+                                      <button
+                                        type="button"
+                                        data-testid={`sent-notice-${notice.noticeId}-dismiss`}
+                                        aria-label="Dismiss notice"
+                                        onClick={(event) => {
+                                          focusPastRow(event.currentTarget);
+                                          dismissNotice();
+                                        }}
+                                        className="grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
+                                      >
+                                        <X size={11} aria-hidden />
+                                      </button>
+                                    ) : null}
+                                  </span>
+                                </div>
+                                {text.body}
+                                <p className="m-0 mt-1 flex min-w-0 gap-2 font-mono text-[10px] text-subtle">
+                                  <time dateTime={new Date(notice.createdAtMs).toISOString()}>
+                                    {relativeTime(notice.createdAtMs)}
+                                  </time>
+                                  {folder ? <span className="truncate">{folder}</span> : null}
+                                </p>
+                                {note ? (
+                                  <p role="status" className="m-0 mt-1 text-[11px] leading-snug text-ink">
+                                    {note}
+                                  </p>
+                                ) : null}
+                              </div>
+                            )}
+                          </NoticeText>
                         </li>
                       );
                     })}
