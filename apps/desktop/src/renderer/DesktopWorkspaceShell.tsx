@@ -1960,8 +1960,11 @@ export function DesktopWorkspaceShell(props: {
       latestMomentRequest.current = token;
       if (!shareView) latestMomentLane.settle(
         token,
-        readNewestMomentOrder(workspaceId, () =>
-          latestMomentRequest.current === token && !workspaceAdmission.superseded),
+        readNewestMomentOrder(
+          workspaceId,
+          () => latestMomentRequest.current === token && !workspaceAdmission.superseded,
+          () => syncStatusLane.latest()?.historyCaptureFailed === true,
+        ),
         (order) => order ?? latestMomentLane.latest(),
         (error) =>
           reportLaneFailure("dohc could not check whether open files changed.", error, askAgain),
