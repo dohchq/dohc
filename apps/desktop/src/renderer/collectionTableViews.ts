@@ -30,7 +30,6 @@ export function validateTableView(view:CollectionTableView,dataset:DatasetDescri
     const field=fields.find(field=>field.fieldId===view.groupBy);
     if(!field||!supportsSort(field))throw Error("Choose a readable field to group this board.");
   }
-  if(view.kind==="calendar"&&!fields.some(field=>field.fieldId===view.dateField&&field.type==="date"))throw Error("Choose a readable date field for this calendar.");
   for(const filter of view.filters) {
     const field=fields.find(field=>field.fieldId===filter.fieldId);
     if(!field)throw Error("This view uses a field you cannot read. Edit the view before opening it.");

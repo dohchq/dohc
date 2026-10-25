@@ -34,6 +34,36 @@ function setup(overrides: Partial<React.ComponentProps<typeof TransactionalColle
 }
 afterEach(cleanup);
 
+it("offers a calendar before the Collection has a date field, and asks for one", async () => {
+  const onAddDateField = vi.fn();
+  const { props, rerender } = setup({ onAddDateField });
+  await screen.findByText("Alice");
+  const layout = screen.getByLabelText("Collection layout");
+  expect((within(layout).getByRole("option", { name: "Calendar" }) as HTMLOptionElement).disabled).toBe(false);
+  fireEvent.change(layout, { target: { value: "calendar" } });
+  expect(await screen.findByText("A calendar needs a date field.")).toBeTruthy();
+  expect(screen.queryByLabelText("Calendar date")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Add a date field" }));
+  expect(onAddDateField).toHaveBeenCalledOnce();
+
+  // Once the Collection has a date field, the calendar uses it.
+  const dated = dataset(), visit = id(7);
+  dated.revision = 2; dated.revisionSha256 = "b".repeat(64);
+  dated.tables[0]!.fields.push({ fieldId: visit, name: "Visit on", type: "date", required: false, unique: false });
+  dated.operations.find(operation => operation.operationId === read)!.fieldIds.push(visit);
+  rerender(<TransactionalCollectionPage {...props} dataset={dated} />);
+  expect((screen.getByLabelText("Calendar date") as HTMLSelectElement).value).toBe(visit);
+  expect(screen.queryByText("A calendar needs a date field.")).toBeNull();
+});
+
+it("asks for a date field without a button for someone who cannot change fields", async () => {
+  setup();
+  await screen.findByText("Alice");
+  fireEvent.change(screen.getByLabelText("Collection layout"), { target: { value: "calendar" } });
+  expect(await screen.findByText("A calendar needs a date field.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Add a date field" })).toBeNull();
+});
+
 it.each(["Record ID", "Membership number"])("hides only the generated primary key column (%s)", async primaryName => {
   const definition = datasetDefinitionFromDrafts({ name: "People", schemaPath: "schema.sql", operationsPath: "operations.js",
     fields: [{ name: "Name", type: "text", required: true, unique: false }] });

@@ -2491,3 +2491,51 @@ describe("Button fields", () => {
     expect((within(panel).getByRole("combobox", { name: "Button" }) as HTMLSelectElement).value).toBe("Archive");
   });
 });
+
+describe("a calendar view without a date field", () => {
+  const schema: CollectionSchema = { ...CALENDAR_SCHEMA, fields: [{ name: "title", type: "text" }],
+    views: [{ ...CALENDAR_SCHEMA.views[0]!, dateField: null }] };
+
+  it("asks for one and opens Fields on a new Date field", async () => {
+    renderPage(makeBridge([record("rec-1", "Plan")], schema));
+
+    expect(await screen.findByText("A calendar needs a date field.")).toBeDefined();
+    expect(screen.queryByRole("grid")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Add a date field" }));
+    const dialog = await screen.findByTestId("collection-fields-dialog");
+    expect((within(dialog).getByLabelText("Field type") as HTMLSelectElement).value).toBe("date");
+    expect(document.activeElement).toBe(within(dialog).getByLabelText("Field name"));
+  });
+
+  it("uses the Collection's first date field once it has one", async () => {
+    const plan = record("rec-1", "Plan");
+    const dated: CollectionRecord = { ...plan, values: [...plan.values, { field: "due", value: localToday(), validation: { status: "valid" }, resolvedRelations: [] }] };
+    renderPage(makeBridge([dated], { ...schema, fields: CALENDAR_SCHEMA.fields }));
+
+    expect(await screen.findByText("Plan")).toBeDefined();
+    expect(document.querySelector(".rbc-month-view")).not.toBeNull();
+    expect(screen.queryByText("A calendar needs a date field.")).toBeNull();
+  });
+
+  it("treats a date field that is no longer a date as missing", async () => {
+    renderPage(makeBridge([record("rec-1", "Plan")], { ...schema, views: [{ ...schema.views[0]!, dateField: "title" }] }));
+
+    expect(await screen.findByText("A calendar needs a date field.")).toBeDefined();
+  });
+
+  it("uses the first date field when its own is no longer a date", async () => {
+    const plan = record("rec-1", "Plan");
+    const dated: CollectionRecord = { ...plan, values: [...plan.values, { field: "due", value: localToday(), validation: { status: "valid" }, resolvedRelations: [] }] };
+    renderPage(makeBridge([dated], { ...CALENDAR_SCHEMA, views: [{ ...CALENDAR_SCHEMA.views[0]!, dateField: "title" }] }));
+
+    expect(await screen.findByText("Plan")).toBeDefined();
+    expect(document.querySelector(".rbc-month-view")).not.toBeNull();
+  });
+
+  it("leaves the button out for someone who cannot change fields", async () => {
+    renderPage(makeBridge([record("rec-1", "Plan")], schema), undefined, undefined, { readOnly: true });
+
+    expect(await screen.findByText("A calendar needs a date field.")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Add a date field" })).toBeNull();
+  });
+});
