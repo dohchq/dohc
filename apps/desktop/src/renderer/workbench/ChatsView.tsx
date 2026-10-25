@@ -4539,7 +4539,7 @@ export function ChatsView(props: {
               <span
                 data-testid="chats-agent-screen-reach"
                 title={props.workspacePath}
-                className="hidden shrink-0 truncate text-[10px] text-subtle sm:inline"
+                className="hidden shrink-0 truncate text-[10px] tabular-nums text-subtle sm:inline"
               >
                 reaches {reachName(props.workspacePath)}
               </span>
