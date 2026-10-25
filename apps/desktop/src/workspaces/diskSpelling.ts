@@ -3,7 +3,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import { isInside } from "../security/pathContainment";
 
-// Resolve links, then read every name below the root from its folder. Linux
+// Resolve links, then identify every name below the root from its folder. Linux
 // realpath keeps lookup case even when the disk ignores it. Missing or escaped
 // entries return null; unknown identities throw so callers cannot infer absence.
 export async function diskSpelling(root: string, path: string): Promise<string | null> {
@@ -20,16 +20,36 @@ export async function diskSpelling(root: string, path: string): Promise<string |
   if (!isInside(realRoot, file)) return null;
   if (file === realRoot) return realRoot;
   let stored = realRoot;
+  let ignoresCase = false;
   for (const leaf of relative(realRoot, file).split(sep)) {
     const folder = stored;
     const lookup = await lstat(join(folder, leaf), { bigint: true }).catch(absentAsNull);
     if (lookup === null) return null;
+    if (!ignoresCase && /^[\x20-\x7e]+$/u.test(leaf) && !/~\d/u.test(leaf)) {
+      const swapped = swapAsciiCase(leaf);
+      if (swapped === leaf) {
+        stored = join(folder, leaf);
+        continue;
+      }
+      try {
+        await lstat(join(folder, swapped), { bigint: true });
+        ignoresCase = true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          stored = join(folder, leaf);
+          continue;
+        }
+      }
+    }
     let names: string[];
     try {
       names = await readdir(folder);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "EACCES" && code !== "EPERM") throw error;
+      if (process.platform === "linux") {
+        throw new Error(`Could not identify the stored name: ${join(folder, leaf)}`);
+      }
       const real = await realpath(join(folder, leaf)).catch(absentAsNull);
       if (real === null) return null;
       const name = basename(real);
@@ -47,6 +67,10 @@ export async function diskSpelling(root: string, path: string): Promise<string |
     stored = join(folder, name);
   }
   return stored;
+}
+
+function swapAsciiCase(name: string): string {
+  return name.replace(/[A-Za-z]/gu, letter => letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase());
 }
 
 export function absentAsNull(error: unknown): null {

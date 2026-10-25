@@ -1,8 +1,9 @@
 import * as fsPromises from "node:fs/promises";
 import { link, lstat, mkdir, readdir, realpath, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { diskSpelling, storedNameAmong } from "./diskSpelling";
+import { storedEntryPath } from "./storedEntryPath";
 import { createTestScratch } from "./testTemp";
 
 vi.mock("node:fs/promises", async (importOriginal) => ({
@@ -48,6 +49,107 @@ describe("storedNameAmong", () => {
 });
 
 describe("diskSpelling", () => {
+  it("skips listings when every swapped ASCII name is absent", async () => {
+    const root = await createTestScratch("dohc-disk-spelling-");
+    await mkdir(join(root, "a", "b", "c"), { recursive: true });
+    const file = join(root, "a", "b", "c", "target.md");
+    await writeFile(file, "body");
+    const swaps = [join(root, "A"), join(root, "a", "B"), join(root, "a", "b", "C"), join(root, "a", "b", "c", "TARGET.MD")];
+    const original = fsPromises.lstat.bind(fsPromises);
+    const lookup = vi.spyOn(fsPromises, "lstat").mockImplementation((path, options) => {
+      if (swaps.includes(String(path))) throw Object.assign(new Error("absent"), { code: "ENOENT" });
+      return original(path, options);
+    });
+    const listing = vi.spyOn(fsPromises, "readdir");
+    expect(await diskSpelling(root, file)).toBe(file);
+    expect(listing).not.toHaveBeenCalled();
+    expect(lookup.mock.calls.map(([path]) => String(path)).filter(path => swaps.includes(path))).toEqual(swaps);
+  });
+
+  it.each(["café.md", "NOTES~1.MD"])("still lists a %s leaf after skipping a case-sensitive parent", async leaf => {
+    const root = await createTestScratch("dohc-disk-spelling-");
+    await mkdir(join(root, "parent"));
+    const file = join(root, "parent", leaf);
+    await writeFile(file, "body");
+    const original = fsPromises.lstat.bind(fsPromises);
+    vi.spyOn(fsPromises, "lstat").mockImplementation((path, options) => {
+      if (String(path) === join(root, "PARENT")) throw Object.assign(new Error("absent"), { code: "ENOENT" });
+      return original(path, options);
+    });
+    const listing = vi.spyOn(fsPromises, "readdir");
+    expect(await diskSpelling(root, file)).toBe(file);
+    expect(listing.mock.calls.map(([path]) => String(path))).toEqual([join(root, "parent")]);
+  });
+
+  it("stops swap lookups after finding the first case-insensitive folder", async () => {
+    const root = await createTestScratch("dohc-disk-spelling-");
+    await mkdir(join(root, "a", "b"), { recursive: true });
+    const file = join(root, "a", "b", "file.md");
+    await writeFile(file, "body");
+    const original = fsPromises.lstat.bind(fsPromises);
+    const lookup = vi.spyOn(fsPromises, "lstat").mockImplementation((path, options) => original(
+      String(path) === join(root, "A") ? join(root, "a") : path, options));
+    const listing = vi.spyOn(fsPromises, "readdir");
+    expect(await diskSpelling(root, file)).toBe(file);
+    expect(lookup.mock.calls.map(([path]) => String(path)).filter(path => [join(root, "A"), join(root, "a", "B"), join(root, "a", "b", "FILE.MD")].includes(path))).toEqual([join(root, "A")]);
+    expect(listing.mock.calls.map(([path]) => String(path))).toEqual([root, join(root, "a"), join(root, "a", "b")]);
+  });
+
+  it("keeps a printable ASCII leaf without letters without listing", async () => {
+    const root = await createTestScratch("dohc-disk-spelling-");
+    const file = join(root, "123-456");
+    await writeFile(file, "body");
+    const listing = vi.spyOn(fsPromises, "readdir");
+    expect(await diskSpelling(root, file)).toBe(file);
+    expect(listing).not.toHaveBeenCalled();
+  });
+
+  it.each(["EACCES", "ENOTDIR", "EIO"])("lists when a swapped lookup fails with %s", async code => {
+    const root = await createTestScratch("dohc-disk-spelling-");
+    const file = join(root, "notes.md");
+    await writeFile(file, "body");
+    const original = fsPromises.lstat.bind(fsPromises);
+    const lookup = vi.spyOn(fsPromises, "lstat").mockImplementation((path, options) => {
+      if (String(path) === join(root, "NOTES.MD")) throw Object.assign(new Error("unknown"), { code });
+      return original(path, options);
+    });
+    const listing = vi.spyOn(fsPromises, "readdir");
+    expect(await diskSpelling(root, file)).toBe(file);
+    expect(lookup.mock.calls.map(([path]) => String(path))).toContain(join(root, "NOTES.MD"));
+    expect(listing).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not list on a real disk that keeps case apart", async context => {
+    const root = await createTestScratch("dohc-disk-spelling-");
+    await writeFile(join(root, "probe.md"), "body");
+    if (await lstat(join(root, "PROBE.MD")).then(() => true, () => false)) context.skip("this disk ignores case");
+    await mkdir(join(root, "a", "b", "c"), { recursive: true });
+    const file = join(root, "a", "b", "c", "target.md");
+    await writeFile(file, "body");
+    const listing = vi.spyOn(fsPromises, "readdir");
+    expect(await diskSpelling(root, file)).toBe(file);
+    expect(listing).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("names the relative entry when its stored identity is unavailable (missing=%s)", async missing => {
+    const root = await createTestScratch("dohc-disk-spelling-");
+    await mkdir(join(root, "Docs"));
+    const file = join(root, "Docs", "notes.md");
+    await writeFile(file, "body");
+    if (missing) {
+      const original = fsPromises.lstat.bind(fsPromises);
+      vi.spyOn(fsPromises, "lstat").mockImplementation((path, options) => {
+        if (options?.bigint) throw Object.assign(new Error("absent"), { code: "ENOENT" });
+        return original(path, options);
+      });
+    } else vi.spyOn(fsPromises, "readdir").mockRejectedValue(Object.assign(new Error("unknown"), { code: "EIO" }));
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: "linux" });
+    try {
+      await expect(storedEntryPath(root, file)).rejects.toThrow("dohc could not tell which file or folder on disk Docs/notes.md is. Check it in your file manager before trying again.");
+    } finally { Object.defineProperty(process, "platform", platform); }
+  });
+
   it.each(["EIO", "EMFILE"])("throws when a folder listing fails with %s", async (code) => {
     const root = await createTestScratch("dohc-disk-spelling-");
     await writeFile(join(root, "notes.md"), "body");
@@ -72,18 +174,45 @@ describe("diskSpelling", () => {
       if (String(path) === join(root, "d")) throw Object.assign(new Error("listing denied"), { code: "EACCES" });
       return originalReaddir(path, options);
     });
-    await expect(diskSpelling(root, file)).rejects.toThrow();
+    await expect(diskSpelling(root, file)).rejects.toThrow("Could not identify the stored name");
   });
 
-  it("keeps realpath's stored names when a folder cannot be listed", async (context) => {
+  it.each(["EACCES", "EPERM"])("refuses an unlistable Linux folder (%s)", async code => {
+    const root = await createTestScratch("dohc-disk-spelling-");
+    await writeFile(join(root, "notes.md"), "body");
+    const original = fsPromises.realpath.bind(fsPromises);
+    vi.spyOn(fsPromises, "realpath").mockImplementation(async path => {
+      const resolved = await original(path);
+      return String(path).startsWith(`${root}${sep}`) ? String(path) : resolved;
+    });
+    vi.spyOn(fsPromises, "readdir").mockRejectedValue(Object.assign(new Error("listing denied"), { code }));
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: "linux" });
+    try {
+      await expect(diskSpelling(root, join(root, "notes.md"))).rejects.toThrow("Could not identify the stored name");
+    } finally { Object.defineProperty(process, "platform", platform); }
+  });
+
+  it.each(["win32", "darwin"])("keeps realpath's stored names in an unlistable folder on %s", async simulatedPlatform => {
     const root = await createTestScratch("dohc-disk-spelling-");
     await mkdir(join(root, "Docs"));
     await writeFile(join(root, "Docs", "notes.md"), "body");
     const lookup = join(root, "docs", "Notes.md");
-    if (!(await lstat(lookup).then(() => true, () => false))) context.skip("this disk keeps case apart");
-    const expected = await realpath(lookup);
+    const lookups = [lookup, join(root, "Docs", "Notes.md")];
+    const expected = join(await realpath(root), "Docs", "notes.md");
+    const originalLstat = fsPromises.lstat.bind(fsPromises);
+    vi.spyOn(fsPromises, "lstat").mockImplementation((path, options) => originalLstat(lookups.includes(String(path)) ? expected : path, options));
+    const originalRealpath = fsPromises.realpath.bind(fsPromises);
+    vi.spyOn(fsPromises, "realpath").mockImplementation(path => {
+      if (lookups.includes(String(path))) return Promise.resolve(expected);
+      return originalRealpath(String(path) === join(root, "docs") ? join(root, "Docs") : path);
+    });
     vi.spyOn(fsPromises, "readdir").mockRejectedValue(Object.assign(new Error("listing denied"), { code: "EACCES" }));
-    expect(await diskSpelling(root, lookup)).toBe(expected);
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: simulatedPlatform });
+    try {
+      expect(await diskSpelling(root, lookup)).toBe(expected);
+    } finally { Object.defineProperty(process, "platform", platform); }
   });
 
   it.each(["EACCES", "EIO", "EMFILE"])("throws for an unknown lstat answer (%s)", async (code) => {

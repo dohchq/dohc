@@ -50,7 +50,8 @@ import {
   IMPORT_SKIPS_LISTED,
 } from "../ipc/channels";
 import { isInside } from "../security/pathContainment";
-import { diskSpelling } from "./diskSpelling";
+import { absentAsNull, diskSpelling } from "./diskSpelling";
+import { storedEntryPath } from "./storedEntryPath";
 import type { LocalStateWorkspace } from "./workspaceLocalState";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { refuseOnlyInICloud } from "./workspaceICloudOnly";
@@ -1345,8 +1346,8 @@ export async function removeEmptyWorkspaceFolder(rootPath: string, relativePath:
 //   4. Destination parent: existingAncestor containment before mkdir -p,
 //      re-checked after (the createFile sandwich, verbatim).
 //   5. Overwrite refused: an existing destination throws — except when
-//      realpath(dest) === realpath(source), the case-only rename on a
-//      case-insensitive filesystem (on Linux this branch never triggers).
+//      both paths name the same stored entry, the case-only rename on a
+//      case-insensitive filesystem.
 //      No merge semantics this phase: dir-onto-dir with the same name fails.
 //   6. One fs.rename (atomic on the same device). POSIX rename silently
 //      clobbers, so step 5 is the only overwrite guard; the check→rename
@@ -1398,10 +1399,41 @@ interface InspectedWorkspaceMove extends PreparedWorkspaceMove {
   realFrom: string;
 }
 
-function moveIdentityUnavailable(fromPath: string, toPath: string): Error {
+export function moveIdentityUnavailable(fromPath: string, toPath: string): Error {
   return new Error(
     `dohc did not move ${fromPath} to ${toPath}. dohc could not tell which files or folders on disk they are. Check both paths in your file manager before trying again.`,
   );
+}
+
+export function deleteIdentityUnavailable(path: string): Error {
+  return new Error(
+    `dohc did not delete ${path}. dohc could not tell which file or folder on disk it is. Check it in your file manager before trying again.`,
+  );
+}
+
+export async function assertMoveParentCase(realRoot: string, paths: WorkspaceMovePaths): Promise<void> {
+  const fromParent = dirname(paths.fromPath), toParent = dirname(paths.toPath);
+  if (fromParent === toParent || pathCollisionKey(fromParent) !== pathCollisionKey(toParent)) return;
+  const destinationParent = await lstat(join(realRoot, toParent)).catch(absentAsNull)
+    .catch(() => { throw moveIdentityUnavailable(paths.fromPath, paths.toPath); });
+  if (destinationParent === null) return;
+  const [from, to] = await Promise.all([
+    storedEntryPath(realRoot, join(realRoot, fromParent)),
+    storedEntryPath(realRoot, join(realRoot, toParent)),
+  ]).catch(() => { throw moveIdentityUnavailable(paths.fromPath, paths.toPath); });
+  if (from === to) {
+    const folders = fromParent.split(/[\\/]/u), renamed = toParent.split(/[\\/]/u);
+    const index = folders.findIndex((folder, index) => folder !== renamed[index]);
+    throw new Error(
+      `dohc did not move ${paths.fromPath} to ${paths.toPath}. This move can't rename the folder ${folders[index]} to ${renamed[index]}. Rename that folder first.`,
+    );
+  }
+}
+
+export function checkCaseRename(spelling: string | null, to: string, paths: WorkspaceMovePaths): void {
+  if (spelling !== null && basename(spelling).normalize("NFC") !== basename(to).normalize("NFC")) {
+    throw new Error(`dohc did not rename ${paths.fromPath} to ${paths.toPath}. This disk kept the name ${basename(spelling)}. Rename it to another name first, then to ${basename(paths.toPath)}.`);
+  }
 }
 
 async function compareStoredMovePaths(
@@ -1453,6 +1485,7 @@ async function inspectWorkspaceMove(
 ): Promise<InspectedWorkspaceMove> {
   const normalized = normalizeWorkspaceMovePaths(fromPath, toPath);
   const realRoot = await realpath(rootPath);
+  await assertMoveParentCase(realRoot, normalized);
   const absFrom = join(rootPath, normalized.fromPath);
   const absTo = join(rootPath, normalized.toPath);
   // A move leaks both ways through an alias: `meta/manifest.json -> leak.json`
@@ -1493,6 +1526,8 @@ async function inspectWorkspaceMove(
   }
   // The source is not a symlink, so realpath resolves ancestor links only.
   const realFrom = await realpath(from);
+  const physicalFromPath = await storedEntryPath(realRoot, realFrom)
+    .catch(() => { throw moveIdentityUnavailable(fromPath, toPath); });
   const realDestAncestor = await existingAncestor(dirname(to));
   if (!isInside(realRoot, realDestAncestor)) {
     throw new Error(`Invalid move destination (escapes workspace): ${toPath}`);
@@ -1504,14 +1539,17 @@ async function inspectWorkspaceMove(
     () => true,
     () => false,
   );
-  if (destExists && !(await sameMoveEntry(realRoot, realFrom, await realpath(to), { fromPath, toPath }))) {
+  const sameDestination = !destExists ? false : process.platform === "linux"
+    ? physicalFromPath === await storedEntryPath(realRoot, to).catch(() => { throw moveIdentityUnavailable(fromPath, toPath); })
+    : await sameMoveEntry(realRoot, realFrom, await realpath(to), { fromPath, toPath });
+  if (destExists && !sameDestination) {
     throw new Error(`Destination already exists: ${toPath}`);
   }
   return {
     // The source already exists, so give engine coordination its physical
     // spelling. On Windows, an IPC case alias still reaches the same entry,
     // but the engine keys stable objects by their canonical workspace path.
-    physicalFromPath: relative(realRoot, realFrom).replaceAll("\\", "/"),
+    physicalFromPath,
     physicalToPath: resolvedToPath.replaceAll("\\", "/"),
     visibleResultPath: normalized.toPath,
     realRoot,
@@ -1563,8 +1601,9 @@ export async function prepareWorkspaceDelete(
     return resolvedPath.replaceAll("\\", "/");
   }
   const realRoot = await realpath(rootPath);
-  const realEntry = await realpath(resolvedAbsolute);
-  return relative(realRoot, realEntry).replaceAll("\\", "/");
+  return storedEntryPath(realRoot, resolvedAbsolute).catch(() => {
+    throw deleteIdentityUnavailable(relativePath);
+  });
 }
 
 export async function movePath(
@@ -1613,10 +1652,7 @@ export async function movePath(
   // RENAME_NOREPLACE. The watcher records whatever actually landed.
   await rename(from, to);
   if (renamesInPlace && from !== to) {
-    const spelling = await diskSpelling(rootPath, to).catch(() => null);
-    if (spelling !== null && basename(spelling).normalize("NFC") !== basename(to).normalize("NFC")) {
-      throw new Error(`dohc did not rename ${fromPath} to ${toPath}. This disk kept the name ${basename(spelling)}. Rename it to another name first, then to ${basename(toPath)}.`);
-    }
+    checkCaseRename(await diskSpelling(realRoot, to).catch(() => null), to, { fromPath, toPath });
   }
   return visibleResultPath;
 }

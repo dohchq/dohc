@@ -2049,10 +2049,22 @@ describe("shared view refresh", () => {
     }
   });
 
-  it("keeps a protected owner's file and delete debt when its folder cannot be listed", async (context) => {
+  it("stops a Linux refresh and keeps a protected owner's file and delete debt when its folder cannot be listed", async (context) => {
     const view = await caseFoldingView(context, "edit");
     const harness = daemonHarness(view.relay);
     const target = { workspaceId: WORKSPACE, rootPath: view.rootDir };
+    const hostPlatform = process.platform;
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    const originalOpen = fsPromises.open.bind(fsPromises);
+    const open = vi.spyOn(fsPromises, "open").mockImplementation(async (...args) => {
+      const handle = await originalOpen(...args);
+      if (hostPlatform === "win32" && (await handle.stat()).isDirectory()) {
+        vi.spyOn(handle, "sync").mockResolvedValue(undefined);
+      }
+      return handle;
+    });
+    Object.defineProperty(process, "platform", { ...platform, value: "linux" });
+    realpathOverride = (path) => path.startsWith(`${view.rootDir}${sep}`) ? path : null;
     try {
       view.relay.addWrite("docs/notes.md", "old\n");
       await view.reconcile();
@@ -2062,15 +2074,18 @@ describe("shared view refresh", () => {
       view.relay.addDelete("docs/notes.md");
       failReaddirPathOnce = { path: join(view.rootDir, "docs"), error: Object.assign(new Error("listing denied"), { code: "EACCES" }) };
       const protectedPaths = new Set(["docs/Notes.md"]);
-      await refreshSharedViewOnceWithPull({
+      await expect(refreshSharedViewOnceWithPull({
         rootDir: view.rootDir, workspaceId: WORKSPACE, relay: harness.relay,
         shareId: SHARE_ID, pull: harness.pullFor(target),
         pinnedSelector: { ...PINNED_SELECTOR, access: "edit" }, recordRefusals: async () => undefined,
         store: view.store, excludeFromMaterialization: protectedPaths, protectedPaths, trackPendingMaterialization: true,
-      });
+      })).rejects.toThrow("Could not identify the stored name");
+      expect(failReaddirPathOnce).toBeNull();
       expect(await readFile(join(view.rootDir, "docs", "notes.md"), "utf8")).toBe("local bytes\n");
       expect((await readSharedViewProjectionDebt(view.rootDir, SHARE_ID)).pendingPaths).toContain("docs/notes.md");
     } finally {
+      Object.defineProperty(process, "platform", platform);
+      open.mockRestore();
       await view.store.close();
     }
   });

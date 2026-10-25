@@ -12,7 +12,8 @@ import type { WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import type { AuthoredPathChanges, WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { historyExcludesSubtree, historyPathAdmission, type WorkspaceEnginePolicySnapshot } from "./workspaceEnginePolicyFile";
-import { deletePath, moveIntoWorkspaceTrash, movePath, prepareWorkspaceMove, prepareWorkspaceDelete, removeEmptyWorkspaceFolder } from "./workspaceFiles";
+import { assertMoveParentCase, checkCaseRename, deleteIdentityUnavailable, deletePath, moveIdentityUnavailable, moveIntoWorkspaceTrash, movePath, prepareWorkspaceMove, prepareWorkspaceDelete, removeEmptyWorkspaceFolder } from "./workspaceFiles";
+import { storedEntryPath, StoredEntryIdentityUnavailable } from "./storedEntryPath";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { beginPendingRecovery, finishDeleteRecovery, stageDeleteRecovery, type OperationRecovery, type DeleteRecoveryPlan } from "./workspaceDeleteRecovery";
 
@@ -104,7 +105,7 @@ export async function admitPath(rootPath: string, path: string): Promise<Admitte
     spelled: path, label: "Path", access: "entry" });
   const info = await lstat(target.resolvedAbsolute).catch(() => null);
   const physical = info && !info.isSymbolicLink()
-    ? relative(await realpath(rootPath), await realpath(target.resolvedAbsolute)).split(sep).join("/")
+    ? await storedEntryPath(await realpath(rootPath), target.resolvedAbsolute)
     : target.relative;
   return { path: normalized, relative: target.relative, physical };
 }
@@ -292,6 +293,7 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
     assertWritable(operation);
     const change = async (markChanged: () => void) => {
       let gone: string[] = [];
+      await assertMoveParentCase(await realpath(rootPath), { fromPath: checkedPath(input.fromPath), toPath: checkedPath(input.toPath) });
       // The capture settles, closes and checks these endpoints before the hold.
       const prepared = options.prepared;
       if (prepared && options.capture) assertMoveDocumentKind(prepared.physicalFromPath, prepared.physicalToPath, "rename");
@@ -306,6 +308,7 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
           const allowed = engine ? historyAdmission(engine.policy) : () => false;
           const to = await admitPath(rootPath, input.toPath);
           const spelledFrom = await admitPath(rootPath, input.fromPath);
+          await assertMoveParentCase(await realpath(rootPath), { fromPath: spelledFrom.path, toPath: to.path });
           if (spelledFrom.physical !== endpoints[0] || (options.byHand ? to.relative : to.physical) !== endpoints[1]) {
             throw new Error(`${input.fromPath} or ${input.toPath} now leads somewhere else. Check both paths, then try again.`);
           }
@@ -398,6 +401,10 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
             }
             change.moved = true;
             markChanged();
+            if (caseOnly && !options.byHand) {
+              const spelling = await realpath(rootPath).then(root => storedEntryPath(root, target)).catch(() => null);
+              checkCaseRename(spelling, target, input);
+            }
             for (const file of fromFiles) {
               if (!recorded.has(file)) continue;
               await engine!.rename(file, rebase(file));
@@ -457,6 +464,7 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
           ...(replaced.trashed || staged === undefined ? {} : { trashPath: workspaceTrashPath(staged) }) } }) };
     };
   } catch (error) {
+    if (error instanceof StoredEntryIdentityUnavailable) error = moveIdentityUnavailable(input.fromPath, input.toPath);
     return async () => ({ ok: false, path: input.fromPath, reason: reason(error, failed) });
   }
 }
@@ -639,6 +647,7 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
     };
   } catch (error) {
     releaseRecovery();
+    if (error instanceof StoredEntryIdentityUnavailable) error = deleteIdentityUnavailable(path);
     return async () => ({ ok: false, deleted: [], path, reason: reason(error, failed) });
   }
 }
