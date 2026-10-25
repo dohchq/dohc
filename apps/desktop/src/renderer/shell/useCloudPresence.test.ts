@@ -9,6 +9,10 @@ const bridgeMock = {
   cloudStatus: vi.fn<(payload: { workspaceId: string }) => Promise<CloudStatusResult>>(),
   onCloudSessionChanged: vi.fn<(listener: () => void) => () => void>(),
 };
+// What main says while the engine is still taking in a new workspace's files.
+const stillUpdating = () => new Error(
+  "Error invoking remote method 'desktop:cloud-status': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+);
 const onStatusUnavailable = vi.fn<(retry: () => void) => void>();
 
 vi.mock("../bridge", () => ({ bridge: () => bridgeMock }));
@@ -90,6 +94,53 @@ it("reports a failed read and retries the current workspace", async () => {
   await act(async () => onStatusUnavailable.mock.calls[0]![0]());
   await waitFor(() => expect(result.current.workspaceSynced).toBe(true));
   expect(bridgeMock.cloudStatus).toHaveBeenNthCalledWith(2, { workspaceId: "ws-1" });
+});
+
+// Busy is not broken: a workspace still taking in files keeps what the
+// person saw, says nothing, and is read again on the next activity.
+it("says nothing while the workspace is still updating, then reads again", async () => {
+  bridgeMock.cloudStatus
+    .mockResolvedValueOnce({ connected: true, workspaceSynced: true })
+    .mockRejectedValueOnce(stillUpdating())
+    .mockResolvedValue({ connected: true, workspaceSynced: false });
+  const { result } = renderHook(() => useCloudPresence("ws-1", onStatusUnavailable, true));
+  await waitFor(() => expect(result.current.workspaceSynced).toBe(true));
+
+  await act(async () => result.current.refreshCloudStatus());
+  expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(2);
+  expect(onStatusUnavailable).not.toHaveBeenCalled();
+  expect(result.current.workspaceSynced).toBe(true);
+  expect(result.current.cloudStatusUnreadable).toBe(false);
+
+  await act(async () => result.current.readCloudStatusAgainIfBusy());
+  await waitFor(() => expect(result.current.workspaceSynced).toBe(false));
+  expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(3);
+
+  // Once answered, activity does not read the status again.
+  await act(async () => result.current.readCloudStatusAgainIfBusy());
+  expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(3);
+  expect(onStatusUnavailable).not.toHaveBeenCalled();
+});
+
+it("keeps a still-updating answer workspace A asked for out of workspace B", async () => {
+  const slow = deferred<CloudStatusResult>();
+  bridgeMock.cloudStatus.mockImplementation(async (payload) =>
+    payload.workspaceId === "ws-a"
+      ? await slow.promise
+      : { connected: true, workspaceSynced: true },
+  );
+  const { result, rerender } = renderHook(
+    ({ workspaceId }) => useCloudPresence(workspaceId, onStatusUnavailable, true),
+    { initialProps: { workspaceId: "ws-a" } },
+  );
+  rerender({ workspaceId: "ws-b" });
+  await waitFor(() => expect(result.current.workspaceSynced).toBe(true));
+  await act(async () => slow.reject(stillUpdating()));
+
+  await act(async () => result.current.readCloudStatusAgainIfBusy());
+  expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(2);
+  expect(result.current.workspaceSynced).toBe(true);
+  expect(onStatusUnavailable).not.toHaveBeenCalled();
 });
 
 // About tells a status still being read from one that could not be read.

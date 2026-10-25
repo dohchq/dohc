@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
+import { isWorkspaceUpdatingError } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { buildChatCollaboration } from "../collab/chatCollaboration";
 
@@ -31,6 +32,9 @@ export function useCloudPresence(
   // to B. `refreshCloudStatus` is also called when the cloud dialog closes so a
   // fresh sign-in lights presence up without waiting for a workspace switch.
   const cloudStatusToken = useRef(0);
+  // A workspace still taking in files is busy, not unreadable: its refusal
+  // keeps the last status, and the next workspace activity reads again.
+  const readAgainOnActivity = useRef(false);
   const refreshCloudStatus = useCallback(() => {
     const token = ++cloudStatusToken.current;
     if (!workspaceIsReady) return;
@@ -42,8 +46,12 @@ export function useCloudPresence(
           setUnreadableFor(null);
         }
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         if (token !== cloudStatusToken.current) return;
+        if (isWorkspaceUpdatingError(error)) {
+          readAgainOnActivity.current = true;
+          return;
+        }
         setScopedStatus(null);
         setUnreadableFor(workspaceId);
         onStatusUnavailable(() => {
@@ -53,6 +61,7 @@ export function useCloudPresence(
   }, [workspaceId, onStatusUnavailable, workspaceIsReady]);
   useEffect(() => {
     setScopedStatus(null);
+    readAgainOnActivity.current = false;
     refreshCloudStatus();
     return () => {
       // A pending response after unmount / switch must never repaint.
@@ -71,6 +80,11 @@ export function useCloudPresence(
       setScopedStatus(null);
       refreshCloudStatus();
     });
+  }, [refreshCloudStatus]);
+  const readCloudStatusAgainIfBusy = useCallback(() => {
+    if (!readAgainOnActivity.current) return;
+    readAgainOnActivity.current = false;
+    refreshCloudStatus();
   }, [refreshCloudStatus]);
 
   // The presence collaboration for the active workspace, rebuilt per workspace
@@ -96,5 +110,12 @@ export function useCloudPresence(
 
   const workspaceSynced = cloudStatus?.workspaceSynced === true;
 
-  return { chatCollaboration, refreshCloudStatus, workspaceSynced, cloudStatus, cloudStatusUnreadable };
+  return {
+    chatCollaboration,
+    refreshCloudStatus,
+    readCloudStatusAgainIfBusy,
+    workspaceSynced,
+    cloudStatus,
+    cloudStatusUnreadable,
+  };
 }

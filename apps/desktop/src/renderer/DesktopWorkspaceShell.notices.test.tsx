@@ -2439,6 +2439,28 @@ describe("owner live documents", () => {
     expect(await screen.findByTestId("settings-row-live-documents")).toBeTruthy();
   });
 
+  // Busy is not broken: a workspace still taking in files says nothing about
+  // its server connection, and the next activity reads it again.
+  it("says nothing while the workspace is still updating, then reads the server status again", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn()
+      .mockRejectedValueOnce(new Error(
+        "Error invoking remote method 'desktop:cloud-status': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+      ))
+      .mockResolvedValue({ connected: true, workspaceSynced: true });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(1));
+    await act(async () => {});
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId, pathSetChanged: false }));
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(2));
+    await openCloudSettings(user);
+    expect(await screen.findByTestId("settings-row-live-documents")).toBeTruthy();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
   // The list is a call to this workspace's own server, which main refuses for
   // a workspace that has none. Local-only work gets no action that can only
   // fail — the section still offers the way to turn sync on.
