@@ -4000,6 +4000,11 @@ export function DesktopWorkspaceShell(props: {
     }
   }, [props.onSwitchWorkspace, reportShellError]);
 
+  // The file Share… shares: the active editor's, wherever it draws Share file.
+  const activeSharePath =
+    activeDocumentPath && !shareView && !isMountedSharePath(activeDocumentPath)
+      ? activeDocumentPath
+      : null;
   // The command registry: the palette renders it and the application menu
   // routes through it (onMenuCommand below) — one definition per action.
   const commandContext = useMemo<CommandContext>(
@@ -4011,9 +4016,10 @@ export function DesktopWorkspaceShell(props: {
         ? { access: shareViewDamaged ? null : shareAccess ?? null, ended: shareViewEnded }
         : null,
       activeDocumentKind: activeDocumentPath ? fileKindForPath(activeDocumentPath).displayKind : null,
+      activeDocumentShareable: activeSharePath !== null,
       pinnedApps,
     }),
-    [isShareView, shareViewDamaged, shareAccess, shareViewEnded, activeDocumentPath, pinnedApps],
+    [isShareView, shareViewDamaged, shareAccess, shareViewEnded, activeDocumentPath, activeSharePath, pinnedApps],
   );
   const commandHandlers = useMemo<CommandHandlers>(
     () => ({
@@ -4034,6 +4040,9 @@ export function DesktopWorkspaceShell(props: {
       "previous-tab": () => showAdjacentTab(-1),
       "new-editor-group-right": () => openEditorGroupRight(),
       "toggle-markdown-source": () => toggleSource(wbRef.current.activeEditorGroup),
+      "share-file": () => {
+        if (activeSharePath) onSharePath(activeSharePath);
+      },
       "toggle-about": () => mutateWb(toggleAbout),
       "show-explorer": () => mutateWb((state) => showView(state, "explorer")),
       "show-chats": () => mutateWb((state) => showView(state, "chats")),
@@ -4067,6 +4076,8 @@ export function DesktopWorkspaceShell(props: {
     }),
     [
       commandContext,
+      activeSharePath,
+      onSharePath,
       toggleSidePanel,
       createUntitledDrawing,
       openWorkspaceFolder,
