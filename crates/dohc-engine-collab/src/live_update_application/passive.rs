@@ -483,11 +483,14 @@ fn apply_cancellation(
         rows.collect::<Result<Vec<_>, _>>().map_err(read_sql)?
     };
     if !saved.is_empty() {
-        return if saved.iter().all(|saved| *saved == json) {
-            Ok(Control::Skipped)
-        } else {
-            Err(ApplicationError::Conflict)
-        };
+        for saved in &saved {
+            let saved: ReplicaRestoreCancellation =
+                serde_json::from_str(saved).map_err(|_| ApplicationError::Corrupt)?;
+            if saved != *record {
+                return Err(ApplicationError::Conflict);
+            }
+        }
+        return Ok(Control::Skipped);
     }
     let key = DocKey::new(workspace, &b.main_version_id, &b.object_id)?;
     let matches = durable::read_marker_in(tx, &key)?

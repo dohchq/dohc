@@ -416,8 +416,7 @@ const UNPUBLISHED_SETTLEMENT_MOMENTS: &str = "SELECT EXISTS(SELECT 1 FROM sync_i
 // answer them. A generation is settled once its restore resumed or its
 // cancellation ended it.
 const CURRENT_GENERATION: &str = "SELECT new_generation,resume_receipt_json IS NOT NULL,cancelled_json IS NOT NULL,relay_database_namespace FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 ORDER BY new_generation DESC LIMIT 1";
-const RESUMED_REGISTRATION: &str = "SELECT relay_database_namespace,resume_receipt_json,cancelled_json IS NOT NULL FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND new_generation=?4";
-const RESUMED_BINDING: &str = "SELECT relay_database_namespace,resume_receipt_json,cancelled_json IS NOT NULL FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND new_generation=?4 AND (resume_receipt_json IS NOT NULL OR cancelled_json IS NOT NULL)";
+const RESUMED: &str = "SELECT resume_receipt_json FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND new_generation=?4";
 
 // A document's cancelled fence rows from generation ?4 through ?5 in
 // namespace ?6, found in the generation reads' index. A cancelled row holds
@@ -533,49 +532,69 @@ pub(super) fn cancelled_at(
     Ok(found)
 }
 
+/// The leading bytes of an accepted event's metadata that hold its receipt,
+/// or of a checkpoint's terminal: the enclosing keys, and a receipt whose
+/// delivery ID of at most 512 bytes may escape to twice that.
+const RECEIPT_BYTES: i64 = 2048;
+
 /// Whether `b`'s lineage holds accepted history ending at `endpoint`: its
-/// event at that count, or a checkpoint there.
+/// event at that count, or a checkpoint there. The receipt is read from the
+/// metadata's leading bytes, which serialization puts first.
 fn holds_endpoint(
     conn: &Connection,
     namespace: &str,
     b: &LiveObjectBinding,
     endpoint: &RetainedPrefixBody,
 ) -> Result<bool, ApplicationError> {
-    let held: Option<(String, String)> = conn.query_row(
-        "SELECT evidence_digest,json_extract(metadata_json,'$.accepted.receipt') FROM live_accepted_updates WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND event_count=?6
-         UNION ALL SELECT evidence_digest,terminal_json FROM live_accepted_checkpoints WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND event_count=?6 LIMIT 1",
-        params![namespace, b.workspace_id, b.main_version_id, b.object_id, b.lineage_claim_id, endpoint.event_count],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+    let held: Option<(String, Vec<u8>, bool)> = conn.query_row(
+        "SELECT evidence_digest,substr(CAST(metadata_json AS BLOB),1,?7),1 FROM live_accepted_updates WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND event_count=?6
+         UNION ALL SELECT evidence_digest,substr(CAST(terminal_json AS BLOB),1,?7),0 FROM live_accepted_checkpoints WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND event_count=?6 LIMIT 1",
+        params![namespace, b.workspace_id, b.main_version_id, b.object_id, b.lineage_claim_id, endpoint.event_count, RECEIPT_BYTES],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     ).optional().map_err(read_sql)?;
-    let Some((evidence, terminal)) = held else {
+    let Some((evidence, head, accepted)) = held else {
         return Ok(false);
     };
-    let terminal: Option<LiveUpdateReceipt> =
-        serde_json::from_str(&terminal).map_err(|_| ApplicationError::Corrupt)?;
+    let terminal: Option<LiveUpdateReceipt> = if accepted {
+        let receipt = head
+            .strip_prefix(br#"{"accepted":{"receipt":"#)
+            .ok_or(ApplicationError::Corrupt)?;
+        let mut decoder = serde_json::Deserializer::from_slice(receipt);
+        Some(
+            <LiveUpdateReceipt as serde::Deserialize>::deserialize(&mut decoder)
+                .map_err(|_| ApplicationError::Corrupt)?,
+        )
+    } else {
+        serde_json::from_slice(&head).map_err(|_| ApplicationError::Corrupt)?
+    };
     Ok(evidence == endpoint.history_evidence_digest && terminal == endpoint.terminal_receipt)
 }
 
-/// The binding a settled generation names: its resumed restore's, or the
-/// terminal binding of its cancellation of `lineage`, or of the row's own
-/// lineage when none is named.
+/// The binding a settled generation names: the terminal binding of the
+/// cancellation already read, or its resumed restore's.
 fn settled_binding(
     conn: &Connection,
-    namespace: &str,
     key: &DocKey,
-    generation: i64,
-    lineage: Option<&str>,
-    (resumed, cancelled): (Option<String>, bool),
-) -> Result<Option<LiveObjectBinding>, ApplicationError> {
-    match (resumed, cancelled) {
-        (Some(json), false) => serde_json::from_str::<NativeRestoreResumeReceipt>(&json)
-            .map(|receipt| Some(receipt.binding))
-            .map_err(|_| ApplicationError::Corrupt),
-        (None, true) => Ok(
-            cancelled_at(conn, namespace, key, lineage, generation, None)?
-                .map(|receipt| receipt.binding),
-        ),
-        _ => Err(ApplicationError::Corrupt),
+    latest: Latest,
+) -> Result<LiveObjectBinding, ApplicationError> {
+    if let Some(receipt) = latest.cancelled {
+        return Ok(receipt.binding);
     }
+    let json: Option<String> = conn
+        .query_row(
+            RESUMED,
+            params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                latest.generation
+            ],
+            |r| r.get(0),
+        )
+        .map_err(read_sql)?;
+    serde_json::from_str::<NativeRestoreResumeReceipt>(&json.ok_or(ApplicationError::Corrupt)?)
+        .map(|receipt| receipt.binding)
+        .map_err(|_| ApplicationError::Corrupt)
 }
 
 pub fn require_open(conn: &Connection, key: &DocKey) -> Result<(), CollabError> {
@@ -590,12 +609,16 @@ pub fn require_open(conn: &Connection, key: &DocKey) -> Result<(), CollabError> 
     }
 }
 
-/// The document's latest fenced generation, and whether it is settled: its
-/// restore resumed, or a cancellation that [`cancellations`] accepts ended it.
-pub(crate) fn latest_generation(
-    conn: &Connection,
-    key: &DocKey,
-) -> Result<Option<(i64, bool)>, CollabError> {
+/// A document's latest fenced generation, in its namespace: resumed, or
+/// ended by the cancellation [`cancellations`] accepts, or neither yet.
+struct Latest {
+    generation: i64,
+    namespace: String,
+    resumed: bool,
+    cancelled: Option<NativeRestoreCancellationReceipt>,
+}
+
+fn latest(conn: &Connection, key: &DocKey) -> Result<Option<Latest>, CollabError> {
     let latest: Option<(i64, bool, bool, String)> = conn
         .query_row(
             CURRENT_GENERATION,
@@ -607,14 +630,49 @@ pub(crate) fn latest_generation(
     let Some((generation, resumed, cancelled, namespace)) = latest else {
         return Ok(None);
     };
-    if !cancelled {
-        return Ok(Some((generation, resumed)));
-    }
-    match cancelled_at(conn, &namespace, key, None, generation, None) {
-        Ok(Some(_)) if !resumed => Ok(Some((generation, true))),
-        Err(ApplicationError::Storage(error)) => Err(CollabError::Storage(error)),
-        Err(ApplicationError::Collab(error)) => Err(error),
-        _ => Err(CollabError::RestoreFenced),
+    let cancelled = match cancelled {
+        false => None,
+        true => match cancelled_at(conn, &namespace, key, None, generation, None) {
+            Ok(Some(receipt)) if !resumed => Some(receipt),
+            Err(ApplicationError::Storage(error)) => return Err(CollabError::Storage(error)),
+            Err(ApplicationError::Collab(error)) => return Err(error),
+            _ => return Err(CollabError::RestoreFenced),
+        },
+    };
+    Ok(Some(Latest {
+        generation,
+        namespace,
+        resumed,
+        cancelled,
+    }))
+}
+
+/// The document's latest fenced generation, and whether it is settled: its
+/// restore resumed, or a cancellation that [`cancellations`] accepts ended it.
+pub(crate) fn latest_generation(
+    conn: &Connection,
+    key: &DocKey,
+) -> Result<Option<(i64, bool)>, CollabError> {
+    Ok(latest(conn, key)?.map(|latest| {
+        (
+            latest.generation,
+            latest.resumed || latest.cancelled.is_some(),
+        )
+    }))
+}
+
+/// The latest generation, which must be settled, as [`current_generation`]
+/// answers it.
+fn settled(conn: &Connection, key: &DocKey) -> Result<Option<Latest>, CollabError> {
+    match latest(conn, key)? {
+        None => Ok(None),
+        Some(latest)
+            if (latest.resumed || latest.cancelled.is_some())
+                && (1..=SAFE).contains(&latest.generation) =>
+        {
+            Ok(Some(latest))
+        }
+        Some(_) => Err(CollabError::RestoreFenced),
     }
 }
 
@@ -634,7 +692,28 @@ pub(super) fn require_cancelled(
         &held.namespace,
         &held.binding,
         (from, through),
-        tip,
+        Some(tip),
+        |_| (),
+    )
+}
+
+/// The restores cancelled after their fences that carried `b`'s lineage in
+/// `namespace` from generation `from` to `b`'s own, one for each generation.
+/// Accepted events may lie between them: a cancellation applied nothing, so
+/// the history from `from` stays this binding's. A genuine restore between
+/// them refuses.
+pub fn require_crossed(
+    conn: &Connection,
+    namespace: &str,
+    b: &LiveObjectBinding,
+    from: i64,
+) -> Result<(), ApplicationError> {
+    cancelled_chain(
+        conn,
+        namespace,
+        b,
+        (from, b.restore_fence_generation),
+        None,
         |_| (),
     )
 }
@@ -665,19 +744,21 @@ pub fn cancelled_restores(
             namespace,
             binding,
             (from, through),
-            &tip,
+            Some(&tip),
             |cancelled| chain.push(cancelled),
         )?;
     }
     Ok(chain)
 }
 
+/// The cancellations from `from` to `through`, each checked by
+/// [`cancellations`], and each ending at `tip` when one is named.
 fn cancelled_chain(
     conn: &Connection,
     namespace: &str,
     b: &LiveObjectBinding,
     (from, through): (i64, i64),
-    tip: &accepted_history::Tip<'_>,
+    tip: Option<&accepted_history::Tip<'_>>,
     mut keep: impl FnMut(NativeRestoreCancellationReceipt),
 ) -> Result<(), ApplicationError> {
     if through <= from || through - from > accepted_history::CHECKPOINT_EVENTS {
@@ -695,9 +776,11 @@ fn cancelled_chain(
         |cancelled| {
             let endpoint = &cancelled.endpoint;
             if cancelled.binding.restore_fence_generation != next
-                || endpoint.terminal_receipt.as_ref() != tip.terminal
-                || endpoint.event_count != tip.count
-                || endpoint.history_evidence_digest != tip.evidence
+                || tip.is_some_and(|tip| {
+                    endpoint.terminal_receipt.as_ref() != tip.terminal
+                        || endpoint.event_count != tip.count
+                        || endpoint.history_evidence_digest != tip.evidence
+                })
             {
                 return Err(ApplicationError::Conflict);
             }
@@ -738,12 +821,7 @@ pub(super) fn require_chain_room(
 
 /// Fresh sessions capture this value; queued work must retain its original value.
 pub fn current_generation(conn: &Connection, key: &DocKey) -> Result<Option<i64>, CollabError> {
-    let row = latest_generation(conn, key)?;
-    match row {
-        None => Ok(None),
-        Some((generation, true)) if (1..=SAFE).contains(&generation) => Ok(Some(generation)),
-        _ => Err(CollabError::RestoreFenced),
-    }
+    Ok(settled(conn, key)?.map(|latest| latest.generation))
 }
 
 pub fn require_generation(
@@ -766,31 +844,13 @@ pub(crate) fn require_registration(
     namespace: &str,
     binding: &LiveObjectBinding,
 ) -> Result<(), ApplicationError> {
-    let Some(generation) = current_generation(conn, key)? else {
+    let Some(latest) = settled(conn, key)? else {
         return Ok(());
     };
-    if generation != binding.restore_fence_generation {
+    if latest.generation != binding.restore_fence_generation || latest.namespace != namespace {
         return Err(ApplicationError::Conflict);
     };
-    let (saved_namespace, resumed, cancelled): (String, Option<String>, bool) = conn
-        .query_row(
-            RESUMED_REGISTRATION,
-            params![key.workspace_id, key.version_id, key.object_id, generation],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .map_err(read_sql)?;
-    if saved_namespace != namespace
-        || settled_binding(
-            conn,
-            namespace,
-            key,
-            generation,
-            Some(&binding.lineage_claim_id),
-            (resumed, cancelled),
-        )?
-        .as_ref()
-            != Some(binding)
-    {
+    if settled_binding(conn, key, latest)? != *binding {
         return Err(ApplicationError::Conflict);
     };
     Ok(())
@@ -1121,27 +1181,14 @@ pub(crate) fn resumed_binding(
     conn: &Connection,
     key: &DocKey,
 ) -> Result<Option<LiveObjectBinding>, CollabError> {
-    let Some(generation) = current_generation(conn, key)? else {
+    let Some(latest) = settled(conn, key)? else {
         return Ok(None);
     };
-    let (namespace, resumed, cancelled): (String, Option<String>, bool) = conn
-        .query_row(
-            RESUMED_BINDING,
-            params![key.workspace_id, key.version_id, key.object_id, generation],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .map_err(|e| CollabError::Storage(StorageError::corrupt_public(e)))?;
-    let b = settled_binding(
-        conn,
-        &namespace,
-        key,
-        generation,
-        None,
-        (resumed, cancelled),
-    )
-    .ok()
-    .flatten()
-    .ok_or(CollabError::RestoreFenced)?;
+    let generation = latest.generation;
+    let b = settled_binding(conn, key, latest).map_err(|error| match error {
+        ApplicationError::Storage(error) => CollabError::Storage(error),
+        _ => CollabError::RestoreFenced,
+    })?;
     if b.workspace_id != key.workspace_id
         || b.main_version_id != key.version_id
         || b.object_id != key.object_id
@@ -1196,11 +1243,7 @@ mod tests {
                     .prepare("SELECT name FROM pragma_index_info('live_restore_resumed')")?
                     .query_map([], |row| row.get(0))?
                     .collect::<Result<_, _>>()?;
-                for sql in [
-                    CURRENT_GENERATION,
-                    RESUMED_REGISTRATION,
-                    RESUMED_BINDING,
-                ] {
+                for sql in [CURRENT_GENERATION, RESUMED] {
                     let (columns, plan) = inspect(conn, sql)?;
                     assert!(
                         columns.iter().all(|column| indexed.contains(column)),

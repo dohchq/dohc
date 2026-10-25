@@ -590,6 +590,37 @@ fn a_cancellation_its_fence_row_disagrees_with_refuses_every_reader() {
     }
 }
 
+/// A cancellation's endpoint receipt is read from the leading bytes of its
+/// event's metadata, so a long metadata tail does not change the answer, and
+/// a receipt that differs there refuses every generation read.
+#[test]
+fn a_cancellation_endpoint_receipt_is_read_exactly_from_its_metadata_head() {
+    let mut f = imported_fixture();
+    adopt_root(&mut f);
+    let event = remote_event(&mut f, 11);
+    apply_event(&mut f, event).unwrap();
+    fence_next(&mut f, "restore").unwrap();
+    cancel_fenced(&mut f, "restore");
+    f.binding.restore_fence_generation = 1;
+    let reads = |f: &Fixture| {
+        f.store.read_with(|conn| {
+            super::super::restore_fence::require_registration(conn, &f.key, "namespace", &f.binding)?;
+            assert_eq!(super::super::restore_fence::resumed_binding(conn, &f.key)?, Some(f.binding.clone()));
+            Ok::<_, ApplicationError>(())
+        })
+    };
+    for (case, sql) in [
+        ("padded", "UPDATE live_accepted_updates SET metadata_json=substr(metadata_json,1,length(metadata_json)-1)||printf('%600000s','')||'}'"),
+        ("epoch", "UPDATE live_accepted_updates SET metadata_json=json_set(metadata_json,'$.accepted.receipt.acceptingHostEpoch',2)"),
+    ] {
+        write(&mut f, sql);
+        match case {
+            "padded" => reads(&f).unwrap(),
+            _ => assert!(reads(&f).is_err(), "{case}"),
+        }
+    }
+}
+
 /// Sol 4 and Opus 5: a fence that would leave its lineage a cancelled chain longer
 /// than an event can cross refuses at admission. The chain counts from the
 /// generation of the lineage's accepted tip.
