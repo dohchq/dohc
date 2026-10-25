@@ -64,10 +64,10 @@ export function SettingRow(props: {
         text
       )}
       <div className={`ml-auto flex max-w-full shrink-0 flex-wrap gap-2 ${props.top ? "items-start" : "items-center"}`}>
-        {/* Reset appears left of the controls, so they share the right edge
-            and stay under the pointer when it does, also when they wrap
-            under the text. */}
-        {props.modified && props.onReset ? (
+        {/* A row that can reset keeps Reset's place left of the controls, so
+            they share the right edge and never move or wrap when it appears. */}
+        {props.onReset && !props.modified ? <span aria-hidden className="size-6 shrink-0" /> : null}
+        {props.onReset && props.modified ? (
           <button
             type="button"
             aria-label="Reset"

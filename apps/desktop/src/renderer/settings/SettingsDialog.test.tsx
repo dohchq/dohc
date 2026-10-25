@@ -555,11 +555,11 @@ describe("SettingsDialog", () => {
     const larger = within(row).getByRole("button", { name: "Larger editor text" });
     const controls = larger.closest("div.rounded-md")!.parentElement!;
     const slots = () => [...controls.children].map((child) => `${child.tagName}${child.getAttribute("aria-hidden") === "true" ? ":hidden" : ""}.${child.className.includes("size-6") ? "24" : "control"}`);
-    // Unchanged, the row holds no empty place for a reset.
-    expect(slots()).toEqual(["DIV.control"]);
+    // Unchanged, the row keeps Reset's place left of the stepper, so nothing moves or wraps when it appears.
+    expect(slots()).toEqual(["SPAN:hidden.24", "DIV.control"]);
     expect(within(row).queryByRole("button", { name: "Reset" })).toBeNull();
 
-    // Reset appears left of the stepper, which keeps the right edge.
+    // Reset takes that place, and the stepper keeps the right edge.
     await user.click(larger);
     await waitFor(() => expect(within(row).getByRole("button", { name: "Reset" })).toBeTruthy());
     expect(slots()).toEqual(["BUTTON.24", "DIV.control"]);
