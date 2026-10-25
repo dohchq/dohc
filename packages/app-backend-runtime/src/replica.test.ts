@@ -3,7 +3,7 @@ import { privateFolder } from "./private-folder.test-helper";
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
@@ -16,7 +16,7 @@ import type { AppRuntimeLauncher } from "./protocol.js";
 
 vi.mock("node:fs/promises", async importOriginal => {
  const actual = await importOriginal<typeof import("node:fs/promises")>();
- return { ...actual, mkdtemp: vi.fn(actual.mkdtemp) };
+ return { ...actual, mkdtemp: vi.fn(actual.mkdtemp), rm: vi.fn(actual.rm) };
 });
 
 const hash=(v:string|Uint8Array)=>createHash("sha256").update(v).digest("hex");
@@ -109,6 +109,21 @@ it("removes the folder of a worker that fails to start at a writer checkpoint",a
  const replica=await f.open({launch});await replica.catchUp(f.remote);await f.transition();f.add("second");
  await expect(replica.catchUp(f.remote)).rejects.toThrow("The worker did not start.");
  expect(launches).toBe(3);
+ expect((await readdir(copy)).filter(name=>/^work(er)?-/.test(name))).toEqual([]);
+});
+it("closes the new worker and removes its folder when a checkpoint switch fails after it starts",async()=>{
+ const actual=await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+ // The second download a catch-up removes is the checkpoint switch's.
+ let downloads=0;
+ vi.mocked(rm).mockImplementation(async(path,options)=>{
+  const name=String(path);
+  if(/^work-/.test(basename(dirname(name)))&&/^[a-f0-9-]{36}\.sqlite$/.test(basename(name))&&++downloads===2)throw Error("The download is busy.");
+  return actual.rm(path,options);
+ });
+ cleanups.push(async()=>{vi.mocked(rm).mockImplementation(actual.rm);});
+ const f=await fixture(),copy=join(f.directory,"copy");f.add("first");
+ const replica=await f.open();await replica.catchUp(f.remote);await f.transition();f.add("second");
+ await expect(replica.catchUp(f.remote)).rejects.toThrow("The download is busy.");
  expect((await readdir(copy)).filter(name=>/^work(er)?-/.test(name))).toEqual([]);
 });
 

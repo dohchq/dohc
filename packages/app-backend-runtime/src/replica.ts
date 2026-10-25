@@ -152,9 +152,9 @@ export async function createDatasetReplica(options: {
                 let next:PersistentAppBackend;
                 try { next=await worker(record,record.cursor,path,directory); }
                 catch(error) { await rm(directory,{recursive:true,force:true}); throw error; }
-                await rm(path,{force:true});await active.close();
-                const previousDirectory=activeDirectory;active=next;activeDirectory=directory;checkpoint=record;
-                if(previousDirectory)await rm(previousDirectory,{recursive:true,force:true});
+                // The new worker is the active one before anything else can fail, so the finally closes it.
+                const previous=active,previousDirectory=activeDirectory;active=next;activeDirectory=directory;checkpoint=record;
+                await previous.close();if(previousDirectory)await rm(previousDirectory,{recursive:true,force:true});await rm(path,{force:true});
               } else {
                 if(!sameEpoch(record.cursor,cursor)||record.previousDigest!==cursor.digest) throw Error("The Collection moved to another host. Download it again.");
                 const bytes=new Uint8Array(record.byteLength);let offset=0;
