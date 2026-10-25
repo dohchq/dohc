@@ -491,6 +491,22 @@ describe("desktop user settings store", () => {
     expect(JSON.parse(await readFile(path, "utf8")).agents).toEqual({ default: broken });
   });
 
+  it("refuses to add an agent over agents dohc cannot use, and saves other settings around them", async () => {
+    const root = await createTestScratch("dohc-user-settings-");
+    const path = join(root, USER_SETTINGS_FILE);
+    const agents = [testAgent({ name: "Nova" })];
+    await writeFile(path, JSON.stringify({ ...DEFAULT_USER_SETTINGS, agents }));
+    const before = await readFile(path, "utf8");
+    const seen = await readUserSettingsFile(root);
+    const added = withFirstAgent(seen.settings, (current) => current ?? testAgent({ name: "Atlas" }));
+    await expect(writeUserSettingsFile(root, added, seen.settings)).rejects.toThrow(
+      `dohc did not save settings. ${path} has an "agents" value dohc can't use. Fix or remove it in the file, then try again.`,
+    );
+    expect(await readFile(path, "utf8")).toBe(before);
+    await writeUserSettingsFile(root, { ...seen.settings, editor: { ...seen.settings.editor, fontSize: 16 } }, seen.settings);
+    expect(JSON.parse(await readFile(path, "utf8")).agents).toEqual(agents);
+  });
+
   it("refuses to save over a file dohc cannot use, and reset replaces it", async () => {
     const root = await createTestScratch("dohc-user-settings-");
     const path = join(root, USER_SETTINGS_FILE);

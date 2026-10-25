@@ -41,12 +41,16 @@ function version1Agent(raw: Record<string, unknown>): Record<string, unknown> | 
 /** A version 1 settings file as version 2. Every other key stays as the person wrote it. */
 export function migrateVersion1(raw: Record<string, unknown>): Record<string, unknown> {
   const agent = version1Agent(raw);
+  const agents = raw.agents ?? {};
+  // Agents the person wrote in the file stay. When the version 1 agent has
+  // no place among them, its keys stay too, so a save cannot lose it.
+  if (agent && (!isSettingsObject(agents) || Object.hasOwn(agents, DEFAULT_AGENT_ID))) return { ...raw, version: 2 };
   const { runner: _runner, ...rest } = raw;
   return {
     ...rest,
     version: 2,
     ...("profile" in raw ? { profile: without(raw.profile, "agentName") } : {}),
     ...("appearance" in raw ? { appearance: without(raw.appearance, "yourAgentColor") } : {}),
-    ...(agent ? { agents: { [DEFAULT_AGENT_ID]: agent } } : {}),
+    ...(agent ? { agents: { [DEFAULT_AGENT_ID]: agent, ...agents } } : {}),
   };
 }

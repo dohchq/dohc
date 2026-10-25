@@ -93,9 +93,7 @@ function isModified(value: unknown, defaultValue: unknown): boolean {
 }
 
 // The document chip's "your edits are still here" is false here: a failed
-// save rolls the control back. The title promises nothing about which value
-// it shows, because two overlapping saves that both fail leave the later
-// one's optimistic value on screen, not the value on disk.
+// save goes back to the settings the file holds.
 export const SETTINGS_SAVE_ERROR_TITLE =
   "dohc could not save this setting. Try changing it again.";
 

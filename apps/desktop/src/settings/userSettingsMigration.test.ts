@@ -145,6 +145,32 @@ it("reads a file without a version the way version 1 did", async () => {
   });
 });
 
+it("keeps the agents a file without a version already lists", async () => {
+  const root = await createTestScratch("dohc-settings-migration-");
+  const path = join(root, USER_SETTINGS_FILE);
+  const writer = testAgent({ name: "Writer" });
+  await writeFile(path, JSON.stringify({
+    profile: { agentName: "Nova" },
+    runner: { enabled: true, command: "agent run", timeoutMinutes: 30 },
+    agents: { writer },
+  }));
+  const read = await readUserSettingsFile(root);
+  const agents = {
+    default: testAgent({ name: "Nova", launch: { command: "agent run" }, nameBeforeMigration: "Nova" }),
+    writer,
+  };
+  expect(read.settings.agents).toEqual(agents);
+  await writeUserSettingsFile(root, { ...read.settings, editor: { ...read.settings.editor, fontSize: 16 } }, read.settings);
+  expect(JSON.parse(await readFile(path, "utf8")).agents).toEqual(agents);
+});
+
+it("leaves version 1's agent where it is when the file's own agents have no place for it", () => {
+  const version1 = { profile: { agentName: "Nova" }, runner: { enabled: true, command: "agent run" } };
+  for (const agents of [{ default: testAgent({ name: "Writer" }) }, ["Writer"]]) {
+    expect(migrateVersion1({ ...version1, agents })).toEqual({ ...version1, agents, version: 2 });
+  }
+});
+
 describe("an agent entry dohc cannot use", () => {
   it("turns off only that agent, and keeps its id, its name and what is wrong", async () => {
     const root = await createTestScratch("dohc-settings-agents-");
