@@ -29,7 +29,7 @@ it("offers only the five working demo panels, then Notices, each titled as in th
     const button = rail.getByRole("button", { name });
     fireEvent.click(button);
     expect(button.getAttribute("aria-current")).toBe("page");
-    expect(container.querySelector('[data-testid="side-panel"] header .dohc-section-label')?.textContent).toBe(name);
+    expect(container.querySelector('[data-testid="side-panel"] > header > .dohc-section-label')?.textContent).toBe(name);
   }
 });
 
