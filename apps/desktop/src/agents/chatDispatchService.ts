@@ -173,6 +173,7 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   // channel this message landed in instead of waiting for the sync rotation.
   onMessagePosted(workspace: ChatDispatchWorkspace, threadId: string): void;
   onRunUpdated?(workspace: ChatDispatchWorkspace): void;
+  onPausedChanged?(paused: boolean): void;
   onDispatchNotice?(workspace: ChatDispatchWorkspace, notice: Omit<ChatDispatchNotice, "id">): void;
   // Every write the agent makes while the run holds the slot is the run's,
   // at the run's chain depth, for the person main names.
@@ -1412,7 +1413,15 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   }
 
   function setPaused(next: boolean): void {
+    const changed = paused !== next;
     paused = next;
+    if (changed) {
+      try {
+        options.onPausedChanged?.(paused);
+      } catch (error) {
+        reportError(error);
+      }
+    }
     if (!paused && !stopped) {
       for (const workspace of options.listOpenWorkspaces()) {
         void scanWorkspace(workspace.workspaceId).catch(reportError);

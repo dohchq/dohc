@@ -114,6 +114,9 @@ const bridge = {
     runActive = false;
   }),
   runnerSelfTest: vi.fn(async () => ({ ok: true, detail: "self-test ok" })),
+  readChatDispatchPaused: vi.fn(async () => ({ paused: false })),
+  setChatDispatchPaused: vi.fn(async () => undefined),
+  onChatDispatchPaused: vi.fn(() => () => undefined),
   getUpdateState: vi.fn(async () => (updateReady ? readyUpdateState : idleUpdateState)),
   checkForUpdates: vi.fn(async (): Promise<{
     checked: boolean;
