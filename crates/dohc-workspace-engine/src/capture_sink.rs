@@ -675,7 +675,7 @@ impl StoreCaptureSink {
         };
         let result = self.batch_retry.run_single(|| {
             self.actor.capture_ingest_with_search_policy_blocking(
-                input.clone(),
+                &input,
                 captured_root.canonical_path.clone(),
                 Arc::clone(&self.search_policy),
                 self.leases.clone(),
@@ -825,18 +825,19 @@ impl StoreCaptureSink {
                 self.ensure_secret_key()?;
                 let key = self.secret_key.clone().expect("key ensured just above");
                 self.require_captured_root()?;
+                let input = Arc::new(CaptureSecret {
+                    workspace_id: self.workspace_id.clone(),
+                    version_id: self.version_id.clone(),
+                    path: path.to_owned(),
+                    text,
+                    metadata_origin: SECRET_CAPTURE_ORIGIN.to_owned(),
+                    metadata_correlation_id: self.provenance.correlation_id.clone(),
+                    now_ms: self.now_ms,
+                    claim_foreign_head,
+                });
                 let result = self.batch_retry.run_single(|| {
                     self.actor.capture_secret_blocking(
-                        CaptureSecret {
-                            workspace_id: self.workspace_id.clone(),
-                            version_id: self.version_id.clone(),
-                            path: path.to_owned(),
-                            text: text.clone(),
-                            metadata_origin: SECRET_CAPTURE_ORIGIN.to_owned(),
-                            metadata_correlation_id: self.provenance.correlation_id.clone(),
-                            now_ms: self.now_ms,
-                            claim_foreign_head,
-                        },
+                        Arc::clone(&input),
                         key.clone(),
                         Arc::new(NoFaults),
                     )
