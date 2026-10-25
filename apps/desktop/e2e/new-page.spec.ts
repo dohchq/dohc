@@ -79,7 +79,25 @@ test("text, Enter, Backspace and a paste typed right after the title's Enter lan
     await expect(page.getByLabel("Page title")).toHaveValue("Lisbon");
     await expect(explorerRow(page, "Lisbon.md")).toBeVisible();
     await expect(page.getByTestId(editorTabTestId("Lisbon.md"))).toHaveAttribute("data-active", "true");
+    await expect(page.getByTestId("open-editor-row")).toHaveText("Lisbon.md");
     await expectSettledFile(page, temp, "Lisbon.md", /^---\r?\ntitle: Lisbon\r?\n---\r?\n\r?\nDay one\r?\n\r?\nTram 28 and pastéis\.\s*$/);
+  });
+});
+
+test("the tab and Open editors follow the title as it is typed", async () => {
+  await withDesktop([], async (page) => {
+    const tab = page.getByTestId("editor-tabs").getByRole("tab");
+    const openEditor = page.getByTestId("open-editor-row");
+    await openNewPage(page);
+    await expect(tab).toHaveText("Untitled");
+    await expect(openEditor).toHaveText("Untitled");
+    await page.keyboard.type("Lisbon");
+    await expect(tab).toHaveText("Lisbon");
+    await expect(openEditor).toHaveText("Lisbon");
+    await page.keyboard.press("ControlOrMeta+a");
+    await page.keyboard.press("Backspace");
+    await expect(tab).toHaveText("Untitled");
+    await expect(openEditor).toHaveText("Untitled");
   });
 });
 
@@ -133,6 +151,36 @@ test("closing a new page writes a typed title and leaves nothing for an untouche
     await expect(explorerRow(page, "Groceries.md")).toBeVisible();
     await expect.poll(() => fileText(temp, "Groceries.md")).toMatch(/^---\r?\ntitle: Groceries\r?\n---\r?\n/);
     expect(await markdownFiles(temp)).toEqual(["Groceries.md"]);
+  });
+});
+
+test("a page left empty closes without an error and opens again for editing", async () => {
+  await withDesktop([], async (page, temp) => {
+    await openNewPage(page);
+    await page.keyboard.press("Enter");
+    await expect(explorerRow(page, "Untitled.md")).toBeVisible();
+    await expect(page.getByTestId("new-page")).toHaveCount(0);
+    await page.keyboard.press("ControlOrMeta+w");
+    await expect(page.getByTestId("markdown-editor")).toHaveCount(0);
+
+    await explorerRow(page, "Untitled.md").click();
+    const editor = page.getByTestId("markdown-editor");
+    await expect(editor).toHaveAttribute("contenteditable", "true");
+    await editor.click();
+    await page.keyboard.type("Still editable");
+    await expectSettledFile(page, temp, "Untitled.md", /^Still editable\s*$/);
+    await expect(page.getByTestId("workspace-shell-error")).toHaveCount(0);
+  });
+});
+
+test("quitting writes a typed title that was never left", async () => {
+  await withDesktop([], async (page, temp, desktop) => {
+    await openNewPage(page);
+    await page.keyboard.type("Itinerary");
+    const quit = desktop.app.waitForEvent("close");
+    await desktop.app.evaluate(({ app }) => { app.quit(); });
+    await quit;
+    expect(await fileText(temp, "Itinerary.md")).toMatch(/^---\r?\ntitle: Itinerary\r?\n---\r?\n/);
   });
 });
 

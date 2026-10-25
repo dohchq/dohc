@@ -1,19 +1,19 @@
-import { setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
 import { useCallback, useRef, useState, type ReactNode } from "react";
 import { displayFrontmatterValue, parseFrontmatter } from "./markdown/frontmatter";
-import type { LiveEditor } from "./MarkdownView";
+import type { PageEditor } from "./MarkdownView";
 import { PageIdentity } from "./PageIdentity";
 import { PROPERTIES_LINE, PROPERTIES_PANEL } from "./pageTopmatter";
 
-export type NewPageFile = (onEditorReady: ((editor: LiveEditor) => void) | undefined) => ReactNode;
+export type NewPageFile = (onEditorReady: ((editor: PageEditor | null) => void) | undefined) => ReactNode;
 
 // A page whose file does not exist yet. It opens at once with the cursor in
 // its title, drawn as the empty document it will be, and nothing is written
 // until the person leaves the title. The shell then creates the file and
 // renders it here, hidden and inert, while what is typed waits in the body.
-// When the file's live editor is ready, the page gives it the title, the
-// icon and the body, caret included, and steps aside, all in one task, so no
-// keystroke lands between them.
+// When the file's editor is ready, the page gives it the title, the icon and
+// the body, caret included, and steps aside, all in one task, so no
+// keystroke lands between them. A file that opens with no editor, read-only
+// or unreadable, shows itself at once.
 export function NewPage(props: {
   // The title and icon so far, as frontmatter.
   draft: string;
@@ -33,33 +33,33 @@ export function NewPage(props: {
   const onHandedOffRef = useRef(props.onHandedOff);
   onHandedOffRef.current = props.onHandedOff;
   const pageRef = useRef<HTMLDivElement | null>(null);
+  const identityRef = useRef<HTMLDivElement | null>(null);
   const bodyRef = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLDivElement | null>(null);
   // An input method's text reaches the body only when its composition ends,
   // so an editor ready mid-composition waits for it.
   const composing = useRef(false);
-  const waitingEditor = useRef<LiveEditor | null>(null);
+  const waitingEditor = useRef<PageEditor | null>(null);
 
-  const handOff = useCallback((live: LiveEditor) => {
+  const handOff = useCallback((page: PageEditor | null) => {
     if (handedOffRef.current) return;
-    if (composing.current) {
-      waitingEditor.current = live;
+    if (page && composing.current) {
+      waitingEditor.current = page;
       return;
     }
     handedOffRef.current = true;
-    const { meta } = parseFrontmatter(draftRef.current);
-    for (const key of ["title", "icon"] as const) {
-      const value = displayFrontmatterValue(meta[key]);
-      if (value) setFrontmatterValue(live.ydoc, key, value);
-    }
-    const body = bodyRef.current;
-    const text = body?.value ?? "";
-    const focused = pageRef.current?.contains(document.activeElement) ?? false;
-    live.editor.insertTypedText(text, body?.selectionEnd ?? text.length);
     // Focus cannot enter an inert subtree, and React clears it only when it
     // renders again.
     if (fileRef.current) fileRef.current.inert = false;
-    if (focused) live.editor.focus(text ? undefined : "start");
+    if (page) {
+      const { meta } = parseFrontmatter(draftRef.current);
+      page.setIdentity({ title: displayFrontmatterValue(meta.title), icon: displayFrontmatterValue(meta.icon) });
+      const body = bodyRef.current;
+      const text = body?.value ?? "";
+      const focused = pageRef.current?.contains(document.activeElement) ?? false;
+      page.editor.insertTypedText(text, body?.selectionEnd ?? text.length);
+      if (focused) page.editor.focus(text ? undefined : "start");
+    }
     setHandedOff(true);
     onHandedOffRef.current();
   }, []);
@@ -82,36 +82,37 @@ export function NewPage(props: {
       </div>
       {handedOff ? null : (
         // The document pane's own frame (MarkdownView), so nothing moves when
-        // the editor takes over.
+        // the editor takes over. A press anywhere below the title leaves it,
+        // as Enter does.
         <div
           ref={pageRef}
           data-testid="new-page"
           className="absolute inset-0 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
+          onPointerDown={(event) => {
+            if (event.button !== 0 || event.target === bodyRef.current || identityRef.current?.contains(event.target as Node)) return;
+            event.preventDefault();
+            focusBodyEnd();
+          }}
         >
           <div className="group/topmatter">
-            <PageIdentity
-              body={draft}
-              onChange={(next) => {
-                draftRef.current = next;
-                setDraft(next);
-                props.onDraftChange(next);
-              }}
-              filenameStem="Untitled"
-              autoFocus
-              onEnterBody={() => bodyRef.current?.focus()}
-            />
+            <div ref={identityRef} className="contents">
+              <PageIdentity
+                body={draft}
+                onChange={(next) => {
+                  draftRef.current = next;
+                  setDraft(next);
+                  props.onDraftChange(next);
+                }}
+                filenameStem="Untitled"
+                autoFocus
+                onEnterBody={() => bodyRef.current?.focus()}
+              />
+            </div>
             <div className={PROPERTIES_PANEL}>
               <div className={PROPERTIES_LINE} />
             </div>
           </div>
-          <div
-            className="dohc-notion-editor"
-            onPointerDown={(event) => {
-              if (event.target === bodyRef.current) return;
-              event.preventDefault();
-              focusBodyEnd();
-            }}
-          >
+          <div className="dohc-notion-editor">
             <textarea
               ref={bodyRef}
               aria-label="Page body"
@@ -123,11 +124,11 @@ export function NewPage(props: {
               }}
               onCompositionEnd={() => {
                 composing.current = false;
-                const live = waitingEditor.current;
+                const waiting = waitingEditor.current;
                 waitingEditor.current = null;
-                if (live) handOff(live);
+                if (waiting) handOff(waiting);
               }}
-              className="block w-full resize-none overflow-hidden border-0 bg-transparent p-0 field-sizing-content [font:inherit] tracking-[inherit] text-ink outline-none placeholder:text-transparent focus:placeholder:text-subtle"
+              className="block w-full resize-none overflow-hidden border-0 bg-transparent p-0 field-sizing-content [font:inherit] tracking-[inherit] text-ink outline-none placeholder:text-transparent focus:shadow-none! focus:placeholder:text-subtle"
             />
           </div>
         </div>

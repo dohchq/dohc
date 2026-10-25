@@ -34,7 +34,7 @@ import { reportTextSave } from "./shell/useDocumentSaveNotices";
 import { CopyButton } from "./ui/CopyButton";
 import { captureHeldLiveMessage, outsideVersionWaitingMessage } from "../ipc/errorWords";
 import { sameFrontmatterValue } from "@dohc/ydoc-projection/frontmatter";
-import { frontmatterMapValues } from "@dohc/ydoc-projection/frontmatter-map";
+import { frontmatterMapValues, setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import {
   Suspense,
@@ -55,8 +55,11 @@ import type { DocumentGoneCause } from "./collab/engineDocLease";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import type { LossyNoteCheck } from "./editor/lossyNote";
 import {
+  applyFrontmatter,
   markdownEditorBody,
   mergeMarkdownEditorBody,
+  orderFrontmatter,
+  parseFrontmatter,
 } from "./markdown/frontmatter";
 import type {
   BlockNavigationTarget,
@@ -223,7 +226,12 @@ function PropertiesFallback() {
   );
 }
 
-export type LiveEditor = { ydoc: Y.Doc; editor: MarkdownEditorHandle };
+// A document's editor, as a new page hands it what the person typed.
+export type PageEditor = {
+  editor: MarkdownEditorHandle;
+  // Writes the title and icon into the document, skipping an empty one.
+  setIdentity: (identity: { title: string; icon: string }) => void;
+};
 
 function MarkdownRenderCommitted(props: { onRendered: () => void }) {
   useEffect(() => props.onRendered(), [props.onRendered]);
@@ -315,9 +323,10 @@ export function MarkdownView(props: {
   // unmounts this component, with no child render to fold into `readOnly`.
   writesRefusedRef: { current: boolean };
   localBuffer: SharedLocalDocument;
-  // A new page waits here for the live editor to take the keystrokes it held.
-  // Called each time an editable live editor mounts.
-  onEditorReady?: (editor: LiveEditor) => void;
+  // A new page waits here for the editor to take the keystrokes it held.
+  // Called each time an editable editor mounts, and with null once the
+  // document opens with none.
+  onEditorReady?: (editor: PageEditor | null) => void;
 }) {
   const [mode, setMode] = useState<"read" | "wysiwyg" | "source">(() =>
     props.truncated || exceedsUtf8Bytes(props.body, WYSIWYG_MARKDOWN_THRESHOLD_BYTES)
@@ -986,19 +995,40 @@ export function MarkdownView(props: {
   // the flip. See writeDraftNow and the unmount flush.
   const readOnlyRef = useRef(readOnly);
   readOnlyRef.current = readOnly;
-  // The live editor's handle is kept as state only while a new page waits
+  // The rich editor's handle is kept as state only while a new page waits
   // for it, so no other document renders again when its editor mounts.
   const { onEditorReady } = props;
   const onEditorReadyRef = useRef(onEditorReady);
   onEditorReadyRef.current = onEditorReady;
-  const [liveEditor, setLiveEditor] = useState<MarkdownEditorHandle | null>(null);
-  const attachLiveEditor = useCallback((handle: MarkdownEditorHandle | null) => {
+  const [pageEditor, setPageEditor] = useState<MarkdownEditorHandle | null>(null);
+  const attachEditor = useCallback((handle: MarkdownEditorHandle | null) => {
     wysiwygRef.current = handle;
-    if (onEditorReadyRef.current) setLiveEditor(handle);
+    if (onEditorReadyRef.current) setPageEditor(handle);
   }, []);
   useEffect(() => {
-    if (liveEditor && displayDoc && !readOnly) onEditorReady?.({ ydoc: displayDoc, editor: liveEditor });
-  }, [displayDoc, liveEditor, onEditorReady, readOnly]);
+    if (!onEditorReady || opening) return;
+    if (readOnly || (!displayDoc && surfaceMode !== "wysiwyg")) {
+      onEditorReady(null);
+      return;
+    }
+    if (!pageEditor) return;
+    onEditorReady({
+      editor: pageEditor,
+      setIdentity: (identity) => {
+        const values = Object.entries(identity).filter(([, value]) => value !== "");
+        if (displayDoc) {
+          for (const [key, value] of values) setFrontmatterValue(displayDoc, key, value);
+        } else if (values.length > 0) {
+          // Without a live session the title field writes the draft, so the
+          // page's title does too.
+          const { meta } = parseFrontmatter(latestDraft.current);
+          onPropertiesDraft(applyFrontmatter(latestDraft.current, orderFrontmatter({ ...meta, ...Object.fromEntries(values) })));
+        }
+      },
+    });
+    // onPropertiesDraft reads refs and this render's readOnly, checked above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayDoc, onEditorReady, opening, pageEditor, readOnly, surfaceMode]);
   // A record's properties show the ⚡ of the automations that set them. An
   // editable file in a folder asks; main answers none for a folder that is
   // not a document Collection. A shared file's automations run on its
@@ -2211,7 +2241,7 @@ export function MarkdownView(props: {
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:engine`}
           >
             <LazyMarkdownEditor
-              ref={attachLiveEditor}
+              ref={attachEditor}
               value={props.body}
               onDirty={() => undefined}
               workspaceId={props.workspaceId}
@@ -2392,7 +2422,7 @@ export function MarkdownView(props: {
           >
             <LazyMarkdownEditor
               key={wysiwygResyncEpoch}
-              ref={wysiwygRef}
+              ref={attachEditor}
               value={markdownEditorBody(draft)}
               onDirty={(materialize) =>
                 scheduleSave("wysiwyg", materialize)

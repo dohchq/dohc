@@ -111,8 +111,9 @@ function useLiveOpensWithH1(ydoc: Y.Doc | null): boolean {
 }
 
 const TITLE_FIELD = "block resize-none overflow-hidden border-0 bg-transparent field-sizing-content read-only:cursor-default";
-// Its own line under the icon, as large as the drawing's title.
-const TITLE_OPEN = `${TITLE_FIELD} w-full basis-full p-0 font-sans text-[2em] font-bold leading-[1.15] tracking-[-0.02em] text-ink placeholder:text-subtle`;
+// Its own line under the icon, as large as the drawing's title. Like the
+// body, it shows focus by its caret alone, so it draws no field edge.
+const TITLE_OPEN = `${TITLE_FIELD} w-full basis-full p-0 font-sans text-[2em] font-bold leading-[1.15] tracking-[-0.02em] text-ink placeholder:text-subtle focus:shadow-none!`;
 // Folded beside "Add icon", and shown with it while the pointer is over the
 // page's identity or the field has focus. A read-only page has nothing to
 // add, so it stays hidden. Square corners keep its focus underline straight,

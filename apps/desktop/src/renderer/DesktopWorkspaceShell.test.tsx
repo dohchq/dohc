@@ -15,6 +15,7 @@ import { WORKSPACE_ACTIVITY_REFRESH_DELAY_MS, WORKSPACE_ACTIVITY_REFRESH_MAX_WAI
 import { OPEN_EDITORS_DEFAULT_HEIGHT, OPEN_EDITORS_MIN_HEIGHT } from "./workbench/workbenchState";
 import { documentVersionKey } from "./documentVersionKey";
 import { basenameOf } from "./path";
+import { hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEditorDrafts";
 import { deferred } from "../testing/deferred";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { DesktopWorkspaceShell, WORKSPACE, STORED_STATE, STORED_CHATS_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
@@ -1242,6 +1243,28 @@ describe("open editors", () => {
         relativePath: "docs/assets",
       }),
     );
+  });
+
+  it("writes a new page's typed title when the app quits, and shows its file", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    await user.click(screen.getByLabelText("New file"));
+    await user.keyboard("Itinerary");
+    expect(hasPendingEditorDrafts()).toBe(true);
+
+    await expect(settlePendingEditorDrafts()).resolves.toBe(true);
+
+    expect(bridge.createWorkspaceFile).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "ws-shell-test",
+      relativePath: "Itinerary.md",
+      initialText: expect.stringMatching(/^---\ntitle: Itinerary\n---\n/),
+      exclusive: true,
+    });
+    expect(hasPendingEditorDrafts()).toBe(false);
+    await waitFor(() => expect(screen.queryByTestId("new-page")).toBeNull());
   });
 
   it("collapses all expanded folders from the files title action", async () => {
