@@ -38,15 +38,3 @@
   background-color: var(--color-accent);
   color: var(--color-bg);
 }
-
-.dohc-collection-calendar .rbc-toolbar button {
-  border-color: var(--color-line);
-  border-radius: 6px;
-  color: var(--color-muted);
-}
-
-.dohc-collection-calendar .rbc-toolbar button:hover,
-.dohc-collection-calendar .rbc-toolbar button.rbc-active {
-  background: var(--color-panel-2);
-  color: var(--color-ink);
-}
