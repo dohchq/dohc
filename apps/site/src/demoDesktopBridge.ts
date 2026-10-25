@@ -274,6 +274,8 @@ type DemoDesktopBridge = Pick<
   | "listChatThreadAttachments"
   | "chatRunRecordsForThread"
   | "chatDispatchStateForThread"
+  | "readChatDispatchPaused"
+  | "onChatDispatchPaused"
   | "markChatThreadRead"
   | "createChatChannel"
   | "startChannelThread"
@@ -671,6 +673,12 @@ const demoBridge = {
   },
   async chatDispatchStateForThread() {
     return { liveRunId: null, pendingCount: 0, paused: false };
+  },
+  async readChatDispatchPaused() {
+    return { paused: false };
+  },
+  onChatDispatchPaused() {
+    return () => {};
   },
   async markChatThreadRead() {
     return { lastReadSequence: 2, revision: 1 };
