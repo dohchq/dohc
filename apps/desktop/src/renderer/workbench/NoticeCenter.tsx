@@ -237,10 +237,14 @@ function NoticeText(props: {
     const title = titleRef.current;
     const body = bodyRef.current;
     // A pixel of slack: rounding alone can make fitting text look a pixel over.
-    const measure = () => setClipped(
-      (title !== null && title.scrollHeight > title.clientHeight + 1) ||
-      (clamp && body !== null && body.scrollHeight > body.clientHeight + 1),
-    );
+    // Hidden text has no height, so it keeps what it last showed.
+    const measure = () => {
+      if (title?.clientHeight === 0) return;
+      setClipped(
+        (title !== null && title.scrollHeight > title.clientHeight + 1) ||
+        (clamp && body !== null && body.scrollHeight > body.clientHeight + 1),
+      );
+    };
     measure();
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(measure);

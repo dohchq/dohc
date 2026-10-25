@@ -2143,9 +2143,31 @@ describe("notices sent to you", () => {
     });
 
     it("offers Show more only for clipped text", () => {
+      vi.spyOn(Element.prototype, "scrollHeight", "get").mockReturnValue(32);
+      vi.spyOn(Element.prototype, "clientHeight", "get").mockReturnValue(32);
       renderNotices(errorProps());
       fireEvent.click(screen.getByTestId("notice-center-toggle"));
       expect(screen.queryByTestId("notice-e1-more")).toBeNull();
+    });
+
+    it("keeps Show more while the text is hidden", () => {
+      const resized = new Set<() => void>();
+      vi.stubGlobal("ResizeObserver", class {
+        constructor(private readonly callback: () => void) {}
+        observe() { resized.add(this.callback); }
+        disconnect() { resized.delete(this.callback); }
+      });
+      const scroll = vi.spyOn(Element.prototype, "scrollHeight", "get").mockReturnValue(64);
+      const client = vi.spyOn(Element.prototype, "clientHeight", "get").mockReturnValue(32);
+      renderNotices(errorProps());
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.getByTestId("notice-e1-more")).toBeTruthy();
+
+      // Hidden text lays out at no height; it is not text that fits.
+      scroll.mockReturnValue(0);
+      client.mockReturnValue(0);
+      act(() => resized.forEach((callback) => callback()));
+      expect(screen.getByTestId("notice-e1-more")).toBeTruthy();
     });
   });
 
