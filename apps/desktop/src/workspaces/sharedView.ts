@@ -16,6 +16,7 @@ import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import { readOwnedFile } from "@dohc/workspace-core/owned-file";
 import { isInside } from "../security/pathContainment";
 import { existingAncestor } from "./workspaceFiles";
+import { diskSpelling } from "./diskSpelling";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
   ShareUnavailableError,
@@ -298,7 +299,7 @@ async function spellingSharingFile(
 ): Promise<string | null> {
   const others = (spellings.get(pathCollisionKey(path)) ?? []).filter((other) => other !== path && owns(other)).sort();
   if (others.length === 0) return null;
-  const fileAt = (at: string) => lstat(at).then((entry) => entry.isFile() ? realpath(at) : null, () => null);
+  const fileAt = (at: string) => lstat(at).then((entry) => entry.isFile() ? diskSpelling(rootDir, at) : null, () => null);
   const file = await fileAt(target);
   if (file === null) return null;
   for (const other of others) {
@@ -374,8 +375,10 @@ async function materializeSharedViewPaths(
   async function ownerWrite(owner: string, target: string): Promise<ShareViewChangedPath | null> {
     const head = await store.readTextFile({ workspaceId, versionId: main.id, path: owner });
     if (head === null) return null;
-    if (diskMatchesSnapshot(await readDiskContent(target), head)
-      && basename(await realpath(target)) === basename(owner)) return null;
+    if (diskMatchesSnapshot(await readDiskContent(target), head)) {
+      const spelling = await diskSpelling(rootDir, target);
+      if (spelling !== null && basename(spelling) === basename(owner)) return null;
+    }
     return { path: owner, operation: "write", contentKind: head.contentKind === "binary" ? "binary" : "text" };
   }
   // Every delete before every write. On a disk that ignores case or Unicode

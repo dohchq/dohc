@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
 import { lstat, readdir, realpath, type FileHandle } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   validateUserMaterializePath,
   validateUserWritePath,
@@ -43,6 +43,7 @@ import { readDiskContent, readOpenedDiskContent, type DiskTextState } from "./wo
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 import { isEngineTransportFailure } from "./shareViewEngineFailure";
+import { diskSpelling } from "./diskSpelling";
 
 // Internal file-change primitives for ShareViewFiles. Authority, lifecycle, and
 // workspace scheduling belong to that owner. This module handles only the
@@ -1105,8 +1106,8 @@ async function sameProjectionEntry(
   right: string,
 ): Promise<boolean> {
   const [leftReal, rightReal] = await Promise.all([
-    realpath(join(rootPath, left)).catch(() => null),
-    realpath(join(rootPath, right)).catch(() => null),
+    diskSpelling(rootPath, join(rootPath, left)),
+    diskSpelling(rootPath, join(rootPath, right)),
   ]);
   return leftReal !== null && rightReal !== null && leftReal === rightReal;
 }
@@ -1130,9 +1131,8 @@ async function preflightProjectionMoveIdentity(
     input.rootPath,
     from,
   );
-  let source: string;
   try {
-    source = await realpath(sourceTarget);
+    await realpath(sourceTarget);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT" || code === "ENOTDIR") {
@@ -1142,21 +1142,36 @@ async function preflightProjectionMoveIdentity(
     }
     throw error;
   }
+  const identityUnavailable = () => new Error(
+    `dohc did not rename ${from} to ${to}. dohc could not read their names on disk. Refresh the shared view and try again.`,
+  );
+  const source = await diskSpelling(input.rootPath, sourceTarget);
+  if (source === null) throw identityUnavailable();
 
   const destinationTarget = await input.projection.resolvedTarget(
     input.rootPath,
     to,
   );
-  let destination: string;
-  try {
-    destination = await realpath(destinationTarget);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
-    // resolvedTarget already canonicalized every existing ancestor. The
-    // unresolved tail can therefore participate directly in containment.
-    destination = destinationTarget;
+  let ancestor = destinationTarget;
+  const missing: string[] = [];
+  for (;;) {
+    try {
+      await realpath(ancestor);
+      break;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+      const parent = dirname(ancestor);
+      if (parent === ancestor) throw identityUnavailable();
+      missing.unshift(basename(ancestor));
+      ancestor = parent;
+    }
   }
+  // resolvedTarget resolves links in the existing ancestors, but Linux can
+  // keep their lookup case. Only the missing tail keeps its given spelling.
+  const storedAncestor = await diskSpelling(input.rootPath, ancestor);
+  if (storedAncestor === null) throw identityUnavailable();
+  const destination = join(storedAncestor, ...missing);
   const renamesInPlace = source === destination;
   if (!renamesInPlace && isInside(source, destination)) {
     throw new Error(`Cannot move a path into itself: ${from}`);

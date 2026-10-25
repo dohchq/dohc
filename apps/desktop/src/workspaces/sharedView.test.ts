@@ -15,7 +15,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { userInfo } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createShareViewDaemonHarness,
@@ -1830,6 +1830,8 @@ describe("shared view refresh", () => {
     const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
     await rm(join(rootDir, "probe.md"));
     if (!ignoresCase) context.skip("this disk keeps case apart");
+    // Linux resolves links but keeps the lookup's case, even on this disk.
+    realpathOverride = (path) => path.startsWith(`${rootDir}${sep}`) ? path : null;
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const refresh = () => refreshSharedViewOnce(harness, { rootDir, workspaceId: WORKSPACE, shareId: SHARE_ID });
@@ -1920,6 +1922,48 @@ describe("shared view refresh", () => {
     } finally {
       await store.close();
     }
+  });
+
+  it("gives an identical held head its stored spelling when realpath keeps lookup case", async (context) => {
+    const view = await caseFoldingView(context, "view");
+    realpathOverride = (path) => path.startsWith(`${view.rootDir}${sep}`) ? path : null;
+    try {
+      view.relay.addWrite("notes.md", "same\n");
+      view.relay.addWrite("Notes.md", "same\n");
+      await view.reconcile();
+      view.relay.addDelete("notes.md");
+      await view.reconcile();
+
+      expect(await view.names()).toEqual(["Notes.md"]);
+      expect(await readFile(join(view.rootDir, "Notes.md"), "utf8")).toBe("same\n");
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  it("keeps an owner's identical head in place when realpath keeps lookup case", async (context) => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    await writeFile(join(rootDir, "probe.md"), "");
+    const ignoresCase = await stat(join(rootDir, "PROBE.md")).then(() => true, () => false);
+    await rm(join(rootDir, "probe.md"));
+    if (!ignoresCase) context.skip("this disk keeps case apart");
+    realpathOverride = (path) => path.startsWith(`${rootDir}${sep}`) ? path : null;
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const refresh = () => refreshSharedViewOnce(harness, { rootDir, workspaceId: WORKSPACE, shareId: SHARE_ID });
+    relay.addWrite("notes.md", "same\n");
+    await refresh();
+    relay.addWrite("Notes.md", "same\n");
+    await refresh();
+    const backup = join(await createTestScratch("dohc-share-owner-link-"), "backup.md");
+    await link(join(rootDir, "Notes.md"), backup);
+    const original = await lstat(backup, { bigint: true });
+    relay.addDelete("notes.md");
+    await refresh();
+
+    expect((await readdir(rootDir)).filter((name) => !name.startsWith("."))).toEqual(["Notes.md"]);
+    const kept = await lstat(join(rootDir, "Notes.md"), { bigint: true });
+    expect([kept.dev, kept.ino]).toEqual([original.dev, original.ino]);
   });
 
   // A spelling the refresh protects, here a preserved path holding local
