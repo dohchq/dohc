@@ -177,11 +177,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const currentQuery = useRef(query); currentQuery.current = query;
   const loadedVersion = useRef(props.recordsVersion), changedVersion = useRef(props.recordsChanged);
   useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; sequence.current++; active.current?.abort(); readActive.current?.abort(); openRecordRead.current?.abort(); }; }, []);
-  useLayoutEffect(() => {
-    if (editor) (createRow.current ?? editorForm.current)?.querySelector<HTMLElement>("input, select, button")?.focus();
-    // Closing the table's New record row remounts its button, so focus moves to the new button when the opener is gone.
-    else if (trigger.current) { (trigger.current.isConnected ? trigger.current : addRow.current)?.focus(); trigger.current = null; }
-  }, [editor]);
+  useLayoutEffect(() => { if (editor) (createRow.current ?? editorForm.current)?.querySelector<HTMLElement>("input, select, button")?.focus(); }, [editor]);
 
   function request(operation: DatasetOperation, input: AppBackendJson, key: string): TransactionalInvoke {
     return { workspaceId, datasetId: dataset.datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256, operationId: operation.operationId, input, idempotencyKey: key };
@@ -388,6 +384,17 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const readDisabled = busy || visualBusy || resourceBusy;
   // Records that could not load take no changes until a read shows them; Search and Refresh still read again.
   const writeDisabled = disabled || failure !== null;
+  // A closed editor returns focus to its opener once that is enabled again, unless the person has moved on.
+  // Closing the table's New record row remounts its button, so focus goes to the new button.
+  const returningFocus = useRef(false);
+  useLayoutEffect(() => {
+    if (editor) { returningFocus.current = true; return; }
+    if (!returningFocus.current) return;
+    const target = trigger.current?.isConnected ? trigger.current : addRow.current;
+    if (target?.matches(":disabled")) return;
+    returningFocus.current = false;
+    if (document.activeElement === null || document.activeElement === document.body) target?.focus();
+  }, [editor, writeDisabled]);
   if (!table || !read) return <section aria-label="Collection" className="p-4 text-sm text-muted">This collection is unavailable. Ask its owner for access.</section>;
   const editorFields = editor?.kind === "edit" ? [editor.field] : createFields;
   const createInRow = editor?.kind === "create" && !visual && page !== null && createsInRow;

@@ -395,6 +395,25 @@ describe("transactional Collection page", () => {
     await waitFor(() => expect(document.activeElement).toBe(within(table).getByRole("button", { name: "New record" })));
   });
 
+  it("returns focus to the table's New record button once the read after a create lets it take focus", async () => {
+    const reread = deferred<{ result: AppBackendJson }>();
+    let reads = 0;
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId !== read) return { result: { id: 1, version: 1 } };
+      return ++reads === 1 ? { result: { rows: [], nextCursor: null } } : reread.promise;
+    });
+    setup({ invoke });
+    const table = await screen.findByRole("table");
+    fireEvent.click(within(table).getByRole("button", { name: "New record" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bob" } });
+    fireEvent.keyDown(screen.getByLabelText("Name"), { key: "Enter" });
+    const button = await within(table).findByRole<HTMLButtonElement>("button", { name: "New record" });
+    await waitFor(() => expect(reads).toBe(2));
+    expect(button.disabled).toBe(true);
+    await act(async () => reread.resolve({ result: { rows: [{ id: 1, version: 1, values: { [name]: "Bob" } }], nextCursor: null } }));
+    expect(document.activeElement).toBe(within(table).getByRole("button", { name: "New record" }));
+  });
+
   it("keeps the New record row open when the browser rejects a value, such as a half-typed number", async () => {
     const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({ result: request.operationId === read ? { rows: [], nextCursor: null } : { id: 1, version: 1 } }));
     setup({ invoke });
