@@ -5808,6 +5808,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     create: () => trackWorkspaceWindow(
       createMainWindow({
         beforeRendererReload: prepareAfterRendererCrash,
+        currentRendererDocumentId: (sender) => rendererWorkspaceSessions.currentDocumentId(sender),
+        prepareForRendererReload,
         afterRendererCrashLoop,
         preloadArguments,
       }),
