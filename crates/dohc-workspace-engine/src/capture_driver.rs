@@ -2387,14 +2387,16 @@ impl DriverEnv for RealEnv {
 
         // The startup baseline is one pass: one correlation id and one
         // summary tie its per-file moments together, retries included, since
-        // they finish the same pass. A workspace the store has no record of can
-        // only be taking in the files its folder already had; any other
-        // baseline reconciles edits made while dohc was closed. A new layer
+        // they finish the same pass. Only the pass that opens the workspace,
+        // with a readable seed, knows where its changes came from: no record
+        // of the workspace means the folder's own files, a record means edits
+        // made while dohc was closed. A rebuild while open (lost watch,
+        // policy edit) or an unreadable seed only found changes. A new layer
         // also performs one collection reconciliation: its in-memory retry
         // bit cannot preserve a failed request across a daemon restart, and a
         // rehydrated manifest may make this plan empty.
         self.status.request_collection_reconcile();
-        let provenance = startup_provenance(workspace_missing);
+        let provenance = startup_provenance(initial_start && seed_loaded, workspace_missing);
         #[cfg(feature = "harness")]
         fence_phase.field(
             "correlation",
@@ -2837,15 +2839,16 @@ struct CaptureThreadOutcome {
 
 const OFFLINE_RECONCILE_SUMMARY: &str = "Changed while dohc was closed";
 const FIRST_IMPORT_SUMMARY: &str = "Added existing files";
+const RESCAN_SUMMARY: &str = "Found changes in the folder";
 
 /// TS parity (`reconcile-${createId()}`): one actor-neutral correlation id
 /// ties a startup pass's per-file moments together as a group without
 /// inventing an author.
-fn startup_provenance(workspace_missing: bool) -> CaptureProvenance {
-    let summary = if workspace_missing {
-        FIRST_IMPORT_SUMMARY
-    } else {
-        OFFLINE_RECONCILE_SUMMARY
+fn startup_provenance(opening: bool, workspace_missing: bool) -> CaptureProvenance {
+    let summary = match (opening, workspace_missing) {
+        (true, true) => FIRST_IMPORT_SUMMARY,
+        (true, false) => OFFLINE_RECONCILE_SUMMARY,
+        (false, _) => RESCAN_SUMMARY,
     };
     CaptureProvenance {
         summary: Some(summary.to_owned()),
