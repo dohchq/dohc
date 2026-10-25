@@ -106,7 +106,7 @@ export function EmptyEditorGroup(props: {
                 type="button"
                 aria-keyshortcuts={tile.shortcut ? ariaShortcut(tile.shortcut, props.platform) : undefined}
                 onClick={() => run(tile.create)}
-                className="group flex min-w-0 flex-col gap-2.5 rounded-lg text-left"
+                className="group flex min-w-0 flex-col gap-2.5 rounded-lg text-left focus-visible:outline-offset-4"
               >
                 <span aria-hidden className="relative block h-28 overflow-hidden rounded-lg border border-line bg-panel transition-colors duration-100 group-hover:border-ink/30 group-hover:bg-panel-2">
                   {START_TILE_ART[tile.kind]}
