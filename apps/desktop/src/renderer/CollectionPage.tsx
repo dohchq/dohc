@@ -642,7 +642,8 @@ export function CollectionPage({
   const kind = activeView?.kind ?? "table";
   const boardReady =
     kind === "board" && activeView?.groupBy && state.groups !== null;
-  const calendarReady = kind === "calendar" && activeView?.dateField;
+  // A calendar uses its date field, or the first one when that is gone or was never named, so adding a date field shows it.
+  const calendarReady = kind === "calendar" && (activeView?.dateField ?? schema.fields.find((field) => field.type === "date")?.name);
 
   return (
     <div
@@ -734,7 +735,7 @@ export function CollectionPage({
           <CalendarView
             schema={schema}
             records={state.records}
-            dateField={activeView?.dateField ?? ""}
+            dateField={calendarReady}
             visibleFields={activeView?.visibleFields ?? null}
             onCellChange={readOnly ? undefined : onCellChange}
             onOpenRecord={openRecord}

@@ -2507,6 +2507,16 @@ describe("a calendar view without a date field", () => {
     expect(document.activeElement).toBe(within(dialog).getByLabelText("Field name"));
   });
 
+  it("uses the Collection's first date field once it has one", async () => {
+    const plan = record("rec-1", "Plan");
+    const dated: CollectionRecord = { ...plan, values: [...plan.values, { field: "due", value: localToday(), validation: { status: "valid" }, resolvedRelations: [] }] };
+    renderPage(makeBridge([dated], { ...schema, fields: CALENDAR_SCHEMA.fields }));
+
+    expect(await screen.findByText("Plan")).toBeDefined();
+    expect(document.querySelector(".rbc-month-view")).not.toBeNull();
+    expect(screen.queryByText("A calendar needs a date field.")).toBeNull();
+  });
+
   it("leaves the button out for someone who cannot change fields", async () => {
     renderPage(makeBridge([record("rec-1", "Plan")], schema), undefined, undefined, { readOnly: true });
 
