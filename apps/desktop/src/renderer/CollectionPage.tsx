@@ -642,8 +642,9 @@ export function CollectionPage({
   const kind = activeView?.kind ?? "table";
   const boardReady =
     kind === "board" && activeView?.groupBy && state.groups !== null;
-  // A calendar uses its date field, or the first one when that is gone or was never named, so adding a date field shows it.
-  const calendarReady = kind === "calendar" && (activeView?.dateField ?? schema.fields.find((field) => field.type === "date")?.name);
+  // A calendar uses its date field, or the first one when that is gone, no longer a date, or was never named, so adding a date field shows it.
+  const dateFields = schema.fields.filter((field) => field.type === "date");
+  const calendarReady = kind === "calendar" && (dateFields.find((field) => field.name === activeView?.dateField) ?? dateFields[0])?.name;
 
   return (
     <div

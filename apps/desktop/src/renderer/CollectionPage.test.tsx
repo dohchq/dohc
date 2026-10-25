@@ -2517,6 +2517,21 @@ describe("a calendar view without a date field", () => {
     expect(screen.queryByText("A calendar needs a date field.")).toBeNull();
   });
 
+  it("treats a date field that is no longer a date as missing", async () => {
+    renderPage(makeBridge([record("rec-1", "Plan")], { ...schema, views: [{ ...schema.views[0]!, dateField: "title" }] }));
+
+    expect(await screen.findByText("A calendar needs a date field.")).toBeDefined();
+  });
+
+  it("uses the first date field when its own is no longer a date", async () => {
+    const plan = record("rec-1", "Plan");
+    const dated: CollectionRecord = { ...plan, values: [...plan.values, { field: "due", value: localToday(), validation: { status: "valid" }, resolvedRelations: [] }] };
+    renderPage(makeBridge([dated], { ...CALENDAR_SCHEMA, views: [{ ...CALENDAR_SCHEMA.views[0]!, dateField: "title" }] }));
+
+    expect(await screen.findByText("Plan")).toBeDefined();
+    expect(document.querySelector(".rbc-month-view")).not.toBeNull();
+  });
+
   it("leaves the button out for someone who cannot change fields", async () => {
     renderPage(makeBridge([record("rec-1", "Plan")], schema), undefined, undefined, { readOnly: true });
 
