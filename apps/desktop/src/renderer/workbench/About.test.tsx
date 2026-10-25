@@ -1327,6 +1327,7 @@ function HistorySection(props: {
   objectId?: string;
   file?: AboutFile;
   revision?: number;
+  paused?: boolean;
   onOpenMoment?: (id: string, path: string) => void;
 }) {
   const [open, setOpen] = useState(true);
@@ -1336,6 +1337,7 @@ function HistorySection(props: {
       path="docs/plan.md"
       file={props.file ?? { status: "ready", objectId: props.objectId ?? "object-1" }}
       revision={props.revision ?? 0}
+      paused={props.paused ?? false}
       expanded={open}
       onToggle={() => setOpen((current) => !current)}
       onOpenMoment={props.onOpenMoment ?? (() => undefined)}
@@ -1427,6 +1429,28 @@ describe("About History", () => {
       await next.promise;
     });
     expect(await screen.findAllByTestId("about-history-open")).toHaveLength(1);
+  });
+
+  // A paused History may be missing changes: its line replaces taking in
+  // changes, heads the rows a read still answers, and stands in for none.
+  it("says History is paused in place of updating, then above the rows a paused read answers", async () => {
+    bridgeMock.listEngineMoments.mockResolvedValueOnce({ status: "updating" }).mockResolvedValue(page([moment()]));
+    render(<HistorySection paused />);
+    const line = await screen.findByTestId("about-history-paused");
+    expect(line.textContent).toBe("History paused");
+    expect(screen.queryByTestId("about-history-updating")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+    const [row] = await screen.findAllByTestId("about-history-open");
+    const heading = screen.getByTestId("about-history-paused");
+    expect(heading.compareDocumentPosition(row!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(notices.report).not.toHaveBeenCalled();
+  });
+
+  it("says History is paused, not that the file has no changes, when a paused read answers none", async () => {
+    bridgeMock.listEngineMoments.mockResolvedValue(page([]));
+    render(<HistorySection paused />);
+    expect(await screen.findByTestId("about-history-paused")).toBeTruthy();
+    expect(screen.queryByTestId("about-history-empty")).toBeNull();
   });
 
   // A read History's growth starts replaces the one an updating answer

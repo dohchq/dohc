@@ -37,7 +37,7 @@ import { PresenceFaces } from "../collab/PresenceIndicators";
 import type { AboutConversation } from "./aboutConversation";
 import { ChatAvatar, LinkMark } from "./ChatAvatar";
 import { neutralPresentation, ownPresentation, ownAgentPresentation, relayPresentation } from "./actorPresentation";
-import { HistoryUpdating, MomentAuthor, engineMomentSourceLabel, engineMomentSummary } from "./EngineHistory";
+import { HistoryPaused, HistoryUpdating, MomentAuthor, engineMomentSourceLabel, engineMomentSummary } from "./EngineHistory";
 import { historyHiddenWords } from "./HistoryPolicyStates";
 
 // The About tab: everything about the open file or chat, one section each. A
@@ -880,6 +880,8 @@ export function AboutHistory(props: {
   file: AboutFile;
   // Changes when the workspace's history grows, so the rows follow edits.
   revision: number;
+  // History stopped recording, so its answers may be missing changes.
+  paused: boolean;
   expanded: boolean;
   onToggle: () => void;
   onOpenMoment: (momentId: string, filePath: string) => void;
@@ -933,17 +935,23 @@ export function AboutHistory(props: {
     : file.status === "failed" ? { status: "failed", retry: file.retry }
     : file.objectId === null ? { status: "untracked" }
     : read.view;
-  return <AboutHistoryView view={view} expanded={props.expanded} onToggle={props.onToggle} onOpenMoment={props.onOpenMoment} />;
+  return (
+    <AboutHistoryView view={view} paused={props.paused} expanded={props.expanded} onToggle={props.onToggle} onOpenMoment={props.onOpenMoment} />
+  );
 }
 
 // The History section for an answer already in hand. The states page draws it.
 export function AboutHistoryView(props: {
   view: HistoryView;
+  // History stopped recording: the line replaces taking in changes and heads
+  // any rows, which may be missing changes.
+  paused?: boolean;
   expanded: boolean;
   onToggle: () => void;
   onOpenMoment: (momentId: string, filePath: string) => void;
 }) {
   const { view } = props;
+  const paused = props.paused ? <HistoryPaused testId="about-history-paused" className="px-2 py-1" /> : null;
   return (
     <AboutSection
       id="history"
@@ -960,16 +968,17 @@ export function AboutHistoryView(props: {
       ) : view.status === "untracked" ? (
         <AboutNote testId="about-history-untracked">History does not track this file yet.</AboutNote>
       ) : view.status === "updating" ? (
-        <HistoryUpdating testId="about-history-updating" className="px-2 py-1" />
+        paused ?? <HistoryUpdating testId="about-history-updating" className="px-2 py-1" />
       ) : view.status === "held" ? (
         // The words end in "try again", so the control they name is here.
         <AboutNote testId="about-history-held" icon={EyeOff} action={{ label: "Try again", run: view.retry }}>
           {view.words}
         </AboutNote>
       ) : view.moments.length === 0 ? (
-        <AboutNote testId="about-history-empty">History has no changes to this file yet.</AboutNote>
+        paused ?? <AboutNote testId="about-history-empty">History has no changes to this file yet.</AboutNote>
       ) : (
         <ul className="m-0 list-none p-0">
+          {paused ? <li>{paused}</li> : null}
           {view.moments.map((moment) => {
             const when = formatChatTime(moment.recordedAtMs);
             const source = engineMomentSourceLabel(moment);

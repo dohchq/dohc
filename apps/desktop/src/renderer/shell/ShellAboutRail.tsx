@@ -68,6 +68,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
   reportFailureMessage: LinkedChatsPanelProps["onError"];
   onAgentWaitsForTrust?: LinkedChatsPanelProps["onAgentWaitsForTrust"];
   historyRevision: number;
+  historyPaused: boolean;
   openMoment: NonNullable<LinkedChatsPanelProps["history"]>["onOpenMoment"];
   // Changes whenever the open file re-reads: history growth, a version
   // switch, or a share mount's pull.
@@ -96,6 +97,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
     reportFailureMessage,
     onAgentWaitsForTrust,
     historyRevision,
+    historyPaused,
     openMoment,
     linksRevision,
     openPathAtLine,
@@ -185,7 +187,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
               aboutTabOpen={aboutTabOpen}
               {...(shareView
                 ? { shareReadOnly: true }
-                : { history: { revision: historyRevision, onOpenMoment: openMoment } })}
+                : { history: { revision: historyRevision, paused: historyPaused, onOpenMoment: openMoment } })}
               // Chats that link here are a Chats call, refused without capture.
               links={{
                 revision: linksRevision,

@@ -56,6 +56,18 @@ export function HistoryUpdating(props: { testId: string; className?: string }) {
   );
 }
 
+// History stopped recording: main's status says capture failed, and the
+// Notices row says why. Rereading doesn't end it, so it offers no control. It
+// also heads a page read during the pause, which may be missing changes.
+export function HistoryPaused(props: { testId: string; className?: string }) {
+  return (
+    <p role="status" data-testid={props.testId} className={`m-0 flex items-center gap-2 text-xs text-muted ${props.className ?? ""}`}>
+      <span aria-hidden className="size-2 shrink-0 rounded-full bg-warning" />
+      History paused
+    </p>
+  );
+}
+
 // The list label for one moment: its real engine summary when it has one,
 // else calm product copy derived from the operation.
 export function engineMomentSummary(
@@ -820,6 +832,8 @@ export function EngineHistoryView(props: {
   collections?: HistoryCollections;
   // Reads the newest page again, which starts a new source chain.
   onRetry?: () => void;
+  // History stopped recording, so this page may be missing changes.
+  paused?: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(new Set());
@@ -886,8 +900,8 @@ export function EngineHistoryView(props: {
   // A known page with no rows. The caller renders this view only when it
   // has a page: "No changes yet" states something about the workspace,
   // and a read still in flight or a read that failed may not state it.
-  // Neither may a page that is missing Collections: their changes are
-  // unknown, not absent.
+  // Neither may a page that is missing Collections, or one read while
+  // History is paused: their changes are unknown, not absent.
   if (props.entries.length === 0 && !props.hasMore) {
     if (partial) {
       return (
@@ -907,6 +921,13 @@ export function EngineHistoryView(props: {
               Try again
             </button>
           ) : null}
+        </div>
+      );
+    }
+    if (props.paused) {
+      return (
+        <div className="flex flex-1 items-center justify-center px-4">
+          <HistoryPaused testId="history-paused" />
         </div>
       );
     }
@@ -947,6 +968,9 @@ export function EngineHistoryView(props: {
         </label>
       </div>
       {partial ? <HistorySourcesNotice words={words} onRetry={retry} /> : null}
+      {props.paused ? (
+        <HistoryPaused testId="history-paused" className="shrink-0 border-b border-line bg-panel px-3 py-2" />
+      ) : null}
       <LegendList
         role="list"
         data-testid="engine-history-list"

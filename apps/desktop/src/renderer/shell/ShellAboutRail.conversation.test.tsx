@@ -111,6 +111,7 @@ function Rail(props: Partial<ComponentProps<typeof ShellAboutRail>>) {
         onChatsThreadRead={() => undefined}
         reportFailureMessage={() => undefined}
         historyRevision={0}
+        historyPaused={false}
         openMoment={() => undefined}
         linksRevision={0}
         openPathAtLine={() => undefined}

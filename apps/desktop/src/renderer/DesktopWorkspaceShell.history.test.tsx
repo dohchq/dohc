@@ -820,6 +820,46 @@ describe("history page", () => {
     }
   });
 
+  // While main's status says History is paused, the panel says so: in place
+  // of taking in changes, and above the rows a read still answers, which may
+  // be missing changes. The line goes with the pause.
+  it("says History is paused in place of updating and above a paused page's rows", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const bridge = makeBridge(Promise.resolve(null));
+      const paused = { ...SYNC_STATUS, historyCaptureFailed: true as const, engineStoreRefused: null };
+      bridge.openWorkspace = vi.fn(async () => paused);
+      bridge.getSyncStatus = vi.fn(async () => paused);
+      bridge.listHistory = vi.fn(
+        async (): Promise<ListHistoryResult> => ({ status: "updating" }),
+      );
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      renderShell(bridge);
+
+      await user.click(screen.getByTestId("activity-history"));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+      const line = await screen.findByTestId("history-paused");
+      expect(line.textContent).toBe("History paused");
+      expect(screen.queryByTestId("history-updating")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+
+      bridge.listHistory.mockResolvedValue(historyPage([historyMoment("m-1", "Wrote the plan")]));
+      act(() => bridge.emitWorkspaceActivity());
+      const row = await screen.findByTestId("engine-moment-open");
+      const heading = screen.getByTestId("history-paused");
+      expect(heading.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+      bridge.getSyncStatus.mockResolvedValue(SYNC_STATUS);
+      act(() => bridge.emitWorkspaceActivity());
+      await waitFor(() => expect(screen.queryByTestId("history-paused")).toBeNull());
+      expect(screen.getByTestId("engine-moment-open")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("shows complete protected paging without a truncation banner", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listHistory = vi.fn(async () => ({

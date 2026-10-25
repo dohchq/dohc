@@ -167,7 +167,7 @@ describe("LinkedChatsPanel with no file focused", () => {
         workspaceId="workspace-1"
         filePath={null}
         aboutTabOpen={aboutTabOpen}
-        {...(shared ? { shareReadOnly: true } : { history: { revision: 0, onOpenMoment: () => undefined } })}
+        {...(shared ? { shareReadOnly: true } : { history: { revision: 0, paused: false, onOpenMoment: () => undefined } })}
         onError={() => undefined}
       />,
     );
@@ -752,7 +752,7 @@ describe("LinkedChatsPanel thread and file reads", () => {
         workspaceId="workspace-1"
         filePath="docs/plan.md"
         initialThread={searchThread}
-        history={{ revision: 0, onOpenMoment: () => undefined }}
+        history={{ revision: 0, paused: false, onOpenMoment: () => undefined }}
         onError={() => undefined}
       />,
     );

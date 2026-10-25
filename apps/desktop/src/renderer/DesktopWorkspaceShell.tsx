@@ -218,6 +218,7 @@ import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
   EngineHistoryView,
   fileMomentSteps,
+  HistoryPaused,
   HistoryUpdating,
   type HistoryCollections,
 } from "./workbench/EngineHistory";
@@ -4770,6 +4771,9 @@ export function DesktopWorkspaceShell(props: {
   // or, for a shared view, the registry capability and the share's live
   // state — never from the renderer's own capability read.
   const historyOffCopy = historyOffPlaceholderCopy(syncStatus);
+  // The status behind the Notices row "History paused": History stopped
+  // recording, so the panel and About say so in place of taking in changes.
+  const historyPaused = syncStatus?.historyCaptureFailed === true && !syncStatus.engineStoreRefused;
   // The rail needs no capture-decision clause of its own, unlike the surfaces
   // that call on mount. Only `refreshHistory` and the open effect
   // commit a status, and both now answer after the decision, so a null status
@@ -4801,6 +4805,7 @@ export function DesktopWorkspaceShell(props: {
             reportShellError("Could not refresh history.", error),
           )
         }
+        paused={historyPaused}
       />
     ) : engineHistoryReadState === "failed" && engineHistoryPolicyError ? (
       <HistoryHiddenState
@@ -4815,7 +4820,7 @@ export function DesktopWorkspaceShell(props: {
     ) : engineHistoryReadState === "updating" ? (
       // The next capture's activity reads again, so the line asks nothing.
       <div className="flex flex-1 items-center justify-center px-4">
-        <HistoryUpdating testId="history-updating" />
+        {historyPaused ? <HistoryPaused testId="history-paused" /> : <HistoryUpdating testId="history-updating" />}
       </div>
     ) : engineHistoryReadState === "failed" ? (
       // The same state its two siblings render — ChatsView and LinkedChats
@@ -6157,6 +6162,7 @@ export function DesktopWorkspaceShell(props: {
             reportFailureMessage={reportFailureMessage}
             onAgentWaitsForTrust={trustForHeldAgent}
             historyRevision={historyRefreshCounter}
+            historyPaused={historyPaused}
             openMoment={openMomentDiffTab}
             linksRevision={historyRefreshCounter + versionEpoch + mountContentEpoch}
             openPathAtLine={openPathAtLine}
