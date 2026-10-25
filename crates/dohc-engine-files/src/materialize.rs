@@ -2581,10 +2581,7 @@ fn pending_respelled_delete(
     job: &MaterializationJob,
     current_sha256: &str,
 ) -> Result<Option<MaterializationJob>, MaterializeError> {
-    let Some(file) = std::fs::canonicalize(target)
-        .ok()
-        .filter(|file| file.starts_with(root))
-    else {
+    let Some(file) = crate::reconcile::disk_spelling_in(root, target) else {
         return Ok(None);
     };
     Ok(store
@@ -2595,7 +2592,7 @@ fn pending_respelled_delete(
                 && resolve_target(root, &delete.target_path)
                     .ok()
                     .filter(|path| ensure_target_symlink_free(root, path).is_ok())
-                    .and_then(|path| std::fs::canonicalize(path).ok())
+                    .and_then(|path| crate::reconcile::disk_spelling_in(root, &path))
                     .is_some_and(|path| path == file)
         }))
 }

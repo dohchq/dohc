@@ -262,7 +262,28 @@ fn a_case_variant_hard_link_is_not_another_spelling() {
             !dohc_engine_files::stored_under_other_spelling(ws.path(), probed),
             "{probed}"
         );
+        assert_eq!(
+            dohc_engine_files::disk_spelling(ws.path(), probed).as_deref(),
+            Some(probed)
+        );
     }
+}
+
+/// Each name comes back as the disk stores it, also where a lookup finds the
+/// file through another spelling. In a folder that ignores case Linux keeps
+/// the spelling it was given, so the folder's own entry names the file.
+#[test]
+fn disk_spelling_names_each_entry_as_the_disk_stores_it() {
+    let ws = Scratch::new();
+    ws.write("Notes/a.md", b"a");
+    let stored = |path| dohc_engine_files::disk_spelling(ws.path(), path);
+    assert_eq!(stored("Notes/a.md").as_deref(), Some("Notes/a.md"));
+    let ignores_case = ws.path().join("notes/A.md").exists();
+    assert_eq!(
+        stored("notes/A.md").as_deref(),
+        ignores_case.then_some("Notes/a.md")
+    );
+    assert_eq!(stored("missing.md"), None);
 }
 
 /// A link to a folder whose name differs only in case is not a rename, even
