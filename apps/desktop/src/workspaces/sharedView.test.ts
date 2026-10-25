@@ -1877,6 +1877,18 @@ describe("shared view refresh", () => {
 
   it("refreshes a remote case-only folder rename without listing the source when realpath keeps lookup case", async (context) => {
     const view = await caseFoldingView(context, "edit");
+    const hostPlatform = process.platform;
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    // Linux is simulated with host handles; Windows cannot sync directories.
+    const originalOpen = fsPromises.open.bind(fsPromises);
+    const open = vi.spyOn(fsPromises, "open").mockImplementation(async (...args) => {
+      const handle = await originalOpen(...args);
+      if (hostPlatform === "win32" && (await handle.stat()).isDirectory()) {
+        vi.spyOn(handle, "sync").mockResolvedValue(undefined);
+      }
+      return handle;
+    });
+    Object.defineProperty(process, "platform", { ...platform, value: "linux" });
     realpathOverride = (path) => path.startsWith(`${view.rootDir}${sep}`) ? path : null;
     try {
       for (let index = 0; index < 12; index += 1) view.relay.addWrite(`docs/plans/${index}.md`, `body ${index}\n`);
@@ -1888,7 +1900,57 @@ describe("shared view refresh", () => {
       expect(readdirCalls).toEqual([]);
       for (let index = 0; index < 12; index += 1) expect(await readFile(join(view.rootDir, "docs", "Plans", `${index}.md`), "utf8")).toBe(`body ${index}\n`);
     } finally {
+      Object.defineProperty(process, "platform", platform);
+      open.mockRestore();
       await view.store.close();
+    }
+  });
+
+  it.for([
+    { name: "Windows with colliding folder IDs", platform: "win32", ino: 42n },
+    { name: "Linux with zero folder inodes", platform: "linux", ino: 0n },
+  ])("deletes only its own normalization spelling on $name", async ({ platform: simulatedPlatform, ino }, context) => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    const composed = "café/notes.md";
+    const decomposed = composed.normalize("NFD");
+    await mkdir(dirname(join(rootDir, decomposed)), { recursive: true });
+    if (await stat(dirname(join(rootDir, composed))).then(() => true, () => false)) context.skip("this disk folds normalization");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const refresh = () => refreshSharedViewOnce(harness, { rootDir, workspaceId: WORKSPACE, shareId: SHARE_ID });
+    relay.addWrite(composed, "composed\n");
+    relay.addWrite(decomposed, "decomposed\n");
+    await refresh();
+    expect(await readFile(join(rootDir, composed), "utf8")).toBe("composed\n");
+    expect(await readFile(join(rootDir, decomposed), "utf8")).toBe("decomposed\n");
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    const parents = new Set([dirname(join(rootDir, composed)), dirname(join(rootDir, decomposed))]);
+    const folderStat = vi.spyOn(fsPromises, "stat").mockImplementation((async (path: Parameters<typeof stat>[0], options?: unknown) => {
+      const info = await actual.stat(path, options as never);
+      if (!parents.has(String(path))) return info;
+      return new Proxy(info, {
+        get(target, key, receiver) {
+          if (key === "dev") return typeof target.dev === "bigint" ? 1n : 1;
+          if (key === "ino") return typeof target.ino === "bigint" ? ino : Number(ino);
+          return Reflect.get(target, key, receiver);
+        },
+      });
+    }) as typeof stat);
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: simulatedPlatform });
+    try {
+      relay.addDelete(composed);
+      readdirCalls = [];
+      await refresh();
+      await expect(lstat(join(rootDir, composed))).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await readFile(join(rootDir, decomposed), "utf8")).toBe("decomposed\n");
+      expect(readdirCalls).toContain(rootDir);
+      if (simulatedPlatform === "linux") {
+        expect(folderStat.mock.calls.map(([path]) => String(path))).toEqual(expect.arrayContaining([...parents]));
+      }
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+      folderStat.mockRestore();
     }
   });
 
