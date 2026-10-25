@@ -113,6 +113,7 @@ class FakeRunnerProcess implements RunnerProcess {
 }
 
 interface FixtureOptions {
+  packaged?: boolean;
   workspaceAttachmentId?: symbol;
   platform?: NodeJS.Platform;
   runner?: Partial<RunnerSettings>;
@@ -607,7 +608,8 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       },
     stateDir: () => stateRoot,
     appRoot: () => appRoot,
-    isPackaged: () => false,
+    isPackaged: () => options.packaged ?? false,
+    resourcesPath: () => join(appRoot, "resources"),
     queueSync: async (dispatchWorkspace) => {
       syncWorkspaces.push(dispatchWorkspace);
       syncRequests.push(dispatchWorkspace.workspaceId);
@@ -824,6 +826,37 @@ async function restrictWorkspace(fixture: Fixture): Promise<void> {
 }
 
 describe("chatDispatchService", () => {
+  it("the connection test exposes the missing packaged runtime repair instruction", async () => {
+    const fixture = await createFixture({ packaged: true, platform: "win32", runner: { command: `"${process.execPath}"` } });
+    const result = await fixture.service.runnerSelfTest(WORKSPACE_ID);
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("dohc is missing a file it needs to run agents. Reinstall dohc, then try again.");
+    expect(result.detail).not.toContain("runner failed to start: runner failed to start:");
+    expect(fixture.spawnCalls).toHaveLength(0);
+  });
+  it.each([0, 7])("a packaged run with its own Node does not recommend installing Node, exit %s", async (exitCode) => {
+    const fixture = await createFixture({ packaged: true, platform: "win32", runner: { command: `"${process.execPath}"` } });
+    const compiler = join(fixture.appRoot, "resources", "app-compiler");
+    await mkdir(compiler, { recursive: true });
+    await writeFile(join(compiler, "node.exe"), "runtime");
+    vi.stubEnv("PATH", "");
+    await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
+    await activate(fixture);
+    fixture.spawnCalls[0]!.process.emitExit(exitCode);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(fixture.notices).toHaveLength(1);
+    expect(fixture.notices[0]!.body).toBe("");
+  });
+
+  it("shows the missing packaged runtime repair instruction in Notices", async () => {
+    const fixture = await createFixture({ packaged: true, platform: "win32", runner: { command: `"${process.execPath}"` } });
+    await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
+    await activate(fixture);
+    expect(fixture.spawnCalls).toHaveLength(0);
+    expect(fixture.notices).toEqual([expect.objectContaining({
+      body: "dohc is missing a file it needs to run agents. Reinstall dohc, then try again.",
+    })]);
+  });
   it.each([
     { nodePresent: false, exitCode: 7, replied: false },
     { nodePresent: false, exitCode: 0, replied: false },

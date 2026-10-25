@@ -1,8 +1,144 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, accessSync, constants } from "node:fs";
+import { cp, copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, join, isAbsolute, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
+export function agentResourceFailures(resources, { platform = process.platform, arch = process.arch } = {}) {
+  const files = ["dohc", "dohc.cmd", "dohc.mjs", "dohc-mcp", "dohc-mcp.cmd", "dohc-mcp.mjs"].map(name => `cli-bin/${name}`);
+  if (platform === "win32" && arch === "x64" || platform === "darwin" && arch === "arm64") {
+    files.push(`app-compiler/${platform === "win32" ? "node.exe" : "node"}`);
+  } else if (!(platform === "linux" && ["arm64", "x64"].includes(arch))) {
+    return [`Unsupported agent launcher target: ${platform}-${arch}`];
+  }
+  return files.filter(file => {
+    try {
+      const path = join(resources, file);
+      if (!statSync(path).isFile() || statSync(path).size === 0) return true;
+      if (platform !== "win32" && (file.endsWith("/node") || file === "cli-bin/dohc" || file === "cli-bin/dohc-mcp")) accessSync(path, constants.X_OK);
+      return false;
+    } catch { return true; }
+  }).map(file => `Missing or unusable agent resource: ${file}`);
+}
+
+function launcherCommand(resources, name, args, shell) {
+  const path = join(resources, "cli-bin", name + (process.platform === "win32" ? ".cmd" : ""));
+  return process.platform === "win32"
+    ? { command: shell, args: ["/d", "/s", "/c", `""${path}" ${args.map(arg => `"${arg}"`).join(" ")}"`], windowsVerbatimArguments: true }
+    : { command: shell, args: [path, ...args] };
+}
+
+async function probeMcp(resources, cwd, home, shell, env) {
+  const command = launcherCommand(resources, "dohc-mcp", ["--workspace", cwd, "--home", home, "--tool", "dohc_reply_to_chat"], shell);
+  const child = spawn(command.command, command.args, { cwd, env, windowsHide: true, windowsVerbatimArguments: command.windowsVerbatimArguments, stdio: "pipe" });
+  let output = "", stderr = "";
+  const responses = new Map();
+  let resolveResponse, rejectResponse;
+  let waiting;
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", chunk => { stderr += chunk; });
+  child.stdout.on("data", chunk => {
+    output += chunk;
+    let newline;
+    while ((newline = output.indexOf("\n")) !== -1) {
+      const line = output.slice(0, newline); output = output.slice(newline + 1);
+      try {
+        const response = JSON.parse(line);
+        if (response.id !== undefined) responses.set(response.id, response);
+        if (response.id === waiting) resolveResponse?.(response);
+      } catch (error) { rejectResponse?.(error); }
+    }
+  });
+  child.on("error", error => rejectResponse?.(error));
+  child.stdin.on("error", error => rejectResponse?.(error));
+  const closed = new Promise(resolveClose => child.once("close", resolveClose));
+  child.once("exit", code => rejectResponse?.(new Error(`MCP exited ${code}: ${stderr}`)));
+  async function request(id, method, params) {
+    const response = new Promise((resolveResult, rejectResult) => { waiting = id; resolveResponse = resolveResult; rejectResponse = rejectResult; });
+    const timer = setTimeout(() => rejectResponse?.(new Error(`MCP ${method} timed out: ${stderr}`)), 20000);
+    try {
+      child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+      if (responses.has(id)) resolveResponse(responses.get(id));
+      const result = await response;
+      assert.ok(!result.error, JSON.stringify(result.error));
+      return result.result;
+    } finally { clearTimeout(timer); }
+  }
+  try {
+    const initialized = await request(1, "initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "dohc-package-smoke", version: "1" } });
+    assert.ok(initialized.serverInfo);
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+    const tools = await request(2, "tools/list", {});
+    assert.ok(tools.tools.some(tool => tool.name === "dohc_reply_to_chat"));
+    console.log("ok  unmodified packaged MCP initialize/tools-list");
+  } finally {
+    child.stdin.end();
+    const timer = setTimeout(() => child.kill(), 2000);
+    await closed;
+    clearTimeout(timer);
+  }
+}
+
+export async function probeAgentLaunchers(resources) {
+  if (!isAbsolute(resources)) throw new Error("--resources must be absolute");
+  assert.deepEqual(agentResourceFailures(resources), []);
+  // Resolve the shell before testing an environment without system Node.
+  const shell = process.platform === "win32" ? process.env.ComSpec : "/bin/sh";
+  assert.ok(shell && isAbsolute(shell), "The shell must have an absolute path");
+  const scratch = await mkdtemp(join(tmpdir(), "dohc-packaged-launchers-"));
+  try {
+    const probe = join(scratch, "probe.mjs");
+    await writeFile(probe, `import fs from 'node:fs'; console.log(JSON.stringify({execPath:process.execPath, args:process.argv.slice(2), stdin:[...fs.readFileSync(0)]})); console.error('probe-stderr'); process.exit(37);`);
+    const competing = join(scratch, "competing");
+    await mkdir(competing);
+    await copyFile(process.execPath, join(competing, process.platform === "win32" ? "node.exe" : "node"));
+    const args = ["", "two words", "Icé 雪"];
+    const bundled = process.platform !== "linux";
+    const input = Buffer.from([0, 10, 13, 255, 65]);
+    for (const label of ["Ice Test", "Icé"]) {
+      const copied = join(scratch, label, "resources");
+      const cwd = join(scratch, label, "workspace", label);
+      await mkdir(cwd, { recursive: true });
+      await cp(join(resources, "cli-bin"), join(copied, "cli-bin"), { recursive: true });
+      await mkdir(join(copied, "app-compiler"), { recursive: true });
+      const nodeName = process.platform === "win32" ? "node.exe" : "node";
+      if (existsSync(join(resources, "app-compiler", nodeName))) await copyFile(join(resources, "app-compiler", nodeName), join(copied, "app-compiler", nodeName));
+      await copyFile(process.execPath, join(cwd, nodeName));
+      await writeFile(join(cwd, "node.cmd"), "@echo WORKSPACE-NODE-RAN\r\nexit /b 98\r\n");
+      for (const selected of [resources, copied]) {
+        for (const path of [join(scratch, "empty-path"), competing]) {
+          for (const name of ["dohc", "dohc-mcp"]) {
+            const command = launcherCommand(selected, name, args, shell);
+            const result = spawnSync(command.command, command.args, { cwd, input, encoding: "utf8", timeout: 20000,
+              env: { ...process.env, PATH: path, Path: path, NODE_OPTIONS: `--import=${pathToFileURL(probe).href}` },
+              windowsVerbatimArguments: command.windowsVerbatimArguments, windowsHide: true });
+            if (!bundled && path !== competing) {
+              assert.equal(result.status, 127);
+              assert.match(result.stderr, /Node\.js/);
+              continue;
+            }
+            assert.equal(result.status, 37, result.stderr || String(result.error));
+            const recorded = JSON.parse(result.stdout);
+            assert.equal(resolve(recorded.execPath), bundled ? resolve(selected, "app-compiler", nodeName) : resolve(competing, nodeName));
+            assert.deepEqual(recorded.args, args);
+            assert.deepEqual(recorded.stdin, [...input]);
+            assert.equal(result.stderr.trim(), "probe-stderr");
+            console.log(`ok  ${name}; cwd=${cwd}; PATH=${path}; process.execPath=${recorded.execPath}`);
+          }
+        }
+      }
+    }
+    const cwd = join(scratch, "mcp-workspace");
+    await mkdir(cwd);
+    await probeMcp(resources, cwd, join(scratch, "home"), shell, { ...process.env, NODE_OPTIONS: "", PATH: competing, Path: competing });
+  } finally { await rm(scratch, { recursive: true, force: true }); }
+}
+
+export function staticPackageSmoke() {
 // Static packaging gate: asserts the built tree and electron-builder config
 // are release-ready without running electron-builder (no network, no heavy
 // packaging). Run after `electron-vite build`.
@@ -32,12 +168,13 @@ check(
   existsSync(join(desktopDir, "resources/cli-bin/dohc")),
   "bundled dohc chat CLI exists",
 );
-for (const file of ["dohc-mcp", "dohc-mcp.cmd", "dohc-mcp.mjs"]) {
+for (const file of ["dohc.mjs", "dohc.cmd", "dohc-mcp", "dohc-mcp.cmd", "dohc-mcp.mjs"]) {
   check(
     existsSync(join(desktopDir, `resources/cli-bin/${file}`)),
     `bundled dohc-mcp launcher part exists: ${file}`,
   );
 }
+for (const failure of agentResourceFailures(join(desktopDir, "resources"))) check(false, failure);
 const engineBinary = `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`;
 check(
   existsSync(join(desktopDir, "resources/workspace-engine", engineBinary)),
@@ -114,7 +251,7 @@ if (config) {
   // resolveDohcMcpCommand points packaged chat session configs at these two
   // files by absolute path -- a filter that omits them ships sessions with
   // no dohc MCP tools.
-  for (const launcher of ["dohc", "dohc.cmd", "dohc-mcp", "dohc-mcp.cmd", "dohc-mcp.mjs"]) {
+  for (const launcher of ["dohc", "dohc.cmd", "dohc.mjs", "dohc-mcp", "dohc-mcp.cmd", "dohc-mcp.mjs"]) {
     check(
       cliBinResource?.filter?.includes(launcher) === true,
       `cli-bin extraResource ships ${launcher}`,
@@ -229,3 +366,11 @@ if (failures.length > 0) {
   process.exit(1);
 }
 console.log("\nPackage smoke passed.");
+
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  if (process.argv.length === 2) staticPackageSmoke();
+  else if (process.argv.length === 5 && process.argv[2] === "--resources" && process.argv[4] === "--agent-launchers") await probeAgentLaunchers(process.argv[3]);
+  else throw new Error("Usage: package-smoke.mjs [--resources <absolute-directory> --agent-launchers]");
+}
