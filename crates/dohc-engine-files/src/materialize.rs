@@ -2581,20 +2581,21 @@ fn pending_respelled_delete(
     job: &MaterializationJob,
     current_sha256: &str,
 ) -> Result<Option<MaterializationJob>, MaterializeError> {
+    let deletes = store.pending_merge_deletes_expecting(&job.workspace_id, current_sha256)?;
+    if deletes.is_empty() {
+        return Ok(None);
+    }
     let Some(file) = crate::reconcile::disk_spelling_in(root, target) else {
         return Ok(None);
     };
-    Ok(store
-        .pending_merge_deletes_expecting(&job.workspace_id, current_sha256)?
-        .into_iter()
-        .find(|delete| {
-            delete.target_path != job.target_path
-                && resolve_target(root, &delete.target_path)
-                    .ok()
-                    .filter(|path| ensure_target_symlink_free(root, path).is_ok())
-                    .and_then(|path| crate::reconcile::disk_spelling_in(root, &path))
-                    .is_some_and(|path| path == file)
-        }))
+    Ok(deletes.into_iter().find(|delete| {
+        delete.target_path != job.target_path
+            && resolve_target(root, &delete.target_path)
+                .ok()
+                .filter(|path| ensure_target_symlink_free(root, path).is_ok())
+                .and_then(|path| crate::reconcile::disk_spelling_in(root, &path))
+                .is_some_and(|path| path == file)
+    }))
 }
 
 /// Rename the temp to the name staging emptied. `false` when a program

@@ -381,7 +381,9 @@ pub(crate) fn disk_spelling_in(root: &Path, path: &Path) -> Option<String> {
     Some(names.join("/"))
 }
 
-/// The name `path`'s folder stores its entry under.
+/// The name `path`'s folder stores its entry under. A folder that can be
+/// searched but not listed keeps the name `canonicalize` gave, which macOS
+/// already reports as stored.
 #[cfg(unix)]
 fn stored_leaf_name(path: &Path) -> std::io::Result<std::ffi::OsString> {
     use std::os::unix::fs::MetadataExt;
@@ -389,9 +391,13 @@ fn stored_leaf_name(path: &Path) -> std::io::Result<std::ffi::OsString> {
         return Err(ErrorKind::InvalidInput.into());
     };
     let file = std::fs::symlink_metadata(path)?;
-    let names = std::fs::read_dir(folder)?
-        .map(|entry| entry.map(|entry| entry.file_name()))
-        .collect::<std::io::Result<Vec<_>>>()?;
+    let Ok(names) = std::fs::read_dir(folder).and_then(|entries| {
+        entries
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<Vec<_>>>()
+    }) else {
+        return Ok(leaf.to_owned());
+    };
     let folded = leaf.to_str().map(crate::floor::fold_segment);
     stored_name_among(
         leaf,
