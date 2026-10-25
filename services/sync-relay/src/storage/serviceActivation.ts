@@ -1,4 +1,4 @@
-import { requireResumedBinding } from "./liveRestoreLifecycleStorage";
+import { requireFinishedRestoreBinding } from "./liveRestoreLifecycleStorage";
 import { parseNativeOwnerActivationSource } from "@dohc/workspace-engine-client/daemon";
 import { registerLiveHostInTransaction } from "./hostControl";
 import { createHash } from "node:crypto";
@@ -22,6 +22,7 @@ import { LIVE_DELIVERY_OWNER_HISTORY, SERVICE_ACTIVATIONS } from "./serviceActiv
 import { readServiceActivation, serviceActivationAccess, serviceActivationState, type ServiceActivationAccess } from "./serviceActivationAccess";
 import { LIVE_JOURNAL_TABLE } from "./schema";
 import { SETTLEMENT_BINDINGS } from "./hostedSettlementSchema";
+import { LIVE_RESTORE_OPERATIONS } from "./liveRestoreOperationSchema";
 
 const digest = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 function retirementKey(value: RetirementKey): RetirementKey {
@@ -76,7 +77,7 @@ export class ServiceActivationStore {
       }
       const original=parseLiveObjectBinding(JSON.parse(String(row.binding_json)));
       if(row.completion_json===null && !isDeepStrictEqual(current.binding,original))throw new Error("Pending service activation binding changed.");
-      requireResumedBinding(this.storage.db,this.history.namespace,original,current.binding);
+      requireFinishedRestoreBinding(this.storage.db,this.history.namespace,original,current.binding);
       return {access, binding:current.binding, completed: row.completion_json !== null};
     });
   }
@@ -224,13 +225,15 @@ export class ServiceActivationStore {
     });
   }
 
+  // The restore publishes at its own fence. A later restore declined after its fence moves the key's generation past it.
   #carriedRestorePublished(document: LiveDocumentKey, key: RetirementKey): boolean {
     const params = [document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId];
-    const row = this.storage.db.prepare(`SELECT restore_operation_id FROM ${LIVE_JOURNAL_TABLE}
-      WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND journal_cursor=?`).get(...params, key.acceptedThrough);
+    const row = this.storage.db.prepare(`SELECT j.restore_operation_id,o.new_fence FROM ${LIVE_JOURNAL_TABLE} j
+      LEFT JOIN ${LIVE_RESTORE_OPERATIONS} o ON o.relay_database_namespace=j.relay_database_namespace AND o.operation_id=j.restore_operation_id
+      WHERE j.workspace_id=? AND j.main_version_id=? AND j.object_id=? AND j.lineage_claim_id=? AND j.journal_cursor=?`).get(...params, key.acceptedThrough);
     if (!row || row.restore_operation_id === null) return true;
     return this.storage.db.prepare(`SELECT 1 FROM ${SETTLEMENT_BINDINGS} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?
-      AND namespace=? AND restore_fence=? AND terminal_cursor>=?`).get(...params, this.history.namespace, key.restoreFenceGeneration, key.acceptedThrough) !== undefined;
+      AND namespace=? AND restore_fence=? AND terminal_cursor>=?`).get(...params, this.history.namespace, authorityInteger(row.new_fence, 2), key.acceptedThrough) !== undefined;
   }
 
   // The boundary must end the lineage's real accepted history at or before F.

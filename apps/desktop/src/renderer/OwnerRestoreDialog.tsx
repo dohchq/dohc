@@ -11,7 +11,7 @@ import type {OwnerRestoreOptions, OwnerRestorePhase, OwnerRestorePlan, OwnerRest
 
 type State = {kind: "loading"} | {kind: "options"; options: OwnerRestoreOptions}
   | {kind: "stop"; plan: OwnerRestorePlan} | {kind: "review"; review: OwnerRestoreReview}
-  | {kind: "pending"; message: string} | {kind: "error"; message: string} | {kind: "complete"} | {kind: "declined"};
+  | {kind: "pending"; message: string} | {kind: "error"; message: string} | {kind: "complete"; moved: boolean} | {kind: "declined"} | {kind: "refused"};
 
 // Where an unfinished restore waits: for the owner's decision while it can
 // still be declined, for the host once live editing of the file stopped, and
@@ -34,8 +34,8 @@ const STAGE_MESSAGES: Record<UnfinishedRestoreStage, string> = {
 };
 const QUOTA_MESSAGE = "This workspace has reached its limit on the server. Free some space, then retry the restore.";
 const DECLINING_MESSAGE = "Declining has not finished. Live editing of this file stays stopped until it does. Retry to finish declining.";
-/** Why a Decline the server keeps cannot end: it refused the answer that ends the restore. */
-export const DECLINE_REFUSED_MESSAGE = "The server refused the answer that ends this restore. Live editing of this file stays stopped.";
+/** A Decline the relay refused to end. Asking again gets the same refusal. */
+export const DECLINE_REFUSED_MESSAGE = "Declining did not finish, and trying again will not finish it. Live editing of this file stays stopped.";
 type Authority = OwnerRestoreReview["acceptedEvents"][number]["metadata"]["accepted"]["authority"];
 // Account emails the relay resolved for this file's grants and authors, by account ID.
 type Emails = ReadonlyMap<string, string>;
@@ -108,15 +108,17 @@ function Review({review, emails}: {review: OwnerRestoreReview; emails: Emails}) 
   </>;
 }
 
-export function OwnerRestoreDialog({workspaceId, path, operationId, onClose, onBeforeRestore, onRestored, onError, onSettled, onChanged}: {
+export function OwnerRestoreDialog({workspaceId, path, operationId, onClose, onBeforeRestore, onRestored, onError, onDeclineRefused, onSettled, onChanged}: {
   workspaceId: string; path: string;
   /** Opens this saved restore by its own status, without the choices for a new one. */
   operationId?: string;
   /** Closes the dialog with the restore it knows of, so an unfinished one stays in Notices. */
   onClose(operation: OwnerRestoreStatus | null): void;
   onBeforeRestore(): Promise<() => void>; onRestored(): void;
-  /** Reports a refused start or Decline through the shell. The choice stays on screen. */
+  /** Reports a refused start through the shell. The choice stays on screen. */
   onError(fallback: string, error: unknown): void;
+  /** The relay refused to end this restore's Decline, so the shell offers no retry. */
+  onDeclineRefused(operation: OwnerRestoreStatus): void;
   /** A start went through, so an earlier refusal no longer holds. */
   onSettled(): void;
   /** The restore began, was declined, or finished, even after the dialog closed. */
@@ -218,12 +220,13 @@ export function OwnerRestoreDialog({workspaceId, path, operationId, onClose, onB
     try {
       if (!current(token)) return;
       const result = await bridge().ownerRestore({workspaceId, action: "confirm", operationId: saved.operationId, proposalDigest});
-      const finished = result.result.kind === "resumed" && result.status.phase === "resumed" && result.result.proposalDigest === proposalDigest;
+      const resumed = result.result.kind === "resumed" ? result.result : null;
+      const finished = resumed !== null && result.status.phase === "resumed" && resumed.proposalDigest === proposalDigest;
       if (finished) onChanged();
       if (!current(token)) return;
       operation.current = result.status;
       if (finished) {
-        setState({kind: "complete"}); onRestored();
+        setState({kind: "complete", moved: resumed.moved}); onRestored();
       } else setState({kind: "pending", message: result.result.kind !== "resumed" && result.result.cause === "quota" ? QUOTA_MESSAGE
         : result.result.kind === "review-required" ? "The restore needs a new review. Retry to review it again."
         : STAGE_MESSAGES.finishing});
@@ -238,17 +241,16 @@ export function OwnerRestoreDialog({workspaceId, path, operationId, onClose, onB
       if (!current(token)) return;
       operation.current = status;
       if (result.kind === "declined") {setState({kind: "declined"}); return;}
-      // The server keeps the Decline and the fence. The shell reports the refusal.
-      setState({kind: "pending", message: DECLINING_MESSAGE});
-      onError(`dohc could not decline the restore of ${path}.`, new Error(DECLINE_REFUSED_MESSAGE));
+      // The relay keeps the Decline and the fence. The shell files the refusal.
+      setState({kind: "refused"});
+      onDeclineRefused(status);
     } catch (error) {
       // The restore may have moved on in another window. Show where it stands.
       const latest = await bridge().ownerRestore({workspaceId, action: "status", operationId: saved.operationId}).catch(() => null);
-      if (latest && current(token)) {
-        operation.current = latest;
-        if (!beforeAdmission(latest.phase)) setDeclining(false);
-      }
-      throw error;
+      if (!latest || !current(token)) throw error;
+      operation.current = latest;
+      if (!beforeAdmission(latest.phase)) {setDeclining(false); throw error;}
+      setState({kind: "pending", message: DECLINING_MESSAGE});
     }
   }
   // Decline is offered until the restore is admitted, wherever the dialog stopped.
@@ -257,7 +259,7 @@ export function OwnerRestoreDialog({workspaceId, path, operationId, onClose, onB
   const labels = useMemo(() => state.kind === "options" ? pointLabels(state.options.points, emails) : new Map<number, string>(), [state, emails]);
   return <Overlay onClose={close} panelProps={{role: "dialog", "aria-modal": true, "aria-labelledby": "owner-restore-title", "data-testid": "owner-restore-dialog",
     className: "dohc-elevated dohc-pop-in w-[min(760px,calc(100vw-32px))] rounded-xl border border-line bg-panel p-5"}}>
-    <h2 id="owner-restore-title" className="m-0 text-sm font-semibold text-ink">{state.kind === "stop" ? "Stop access before restoring?" : state.kind === "complete" ? "File restored"
+    <h2 id="owner-restore-title" className="m-0 text-sm font-semibold text-ink">{state.kind === "stop" ? "Stop access before restoring?" : state.kind === "complete" ? state.moved ? "File moved before restoring" : "File restored"
       : state.kind === "declined" ? "Restore declined" : "Restore shared file"}</h2>
     <p className="break-all font-mono text-[12px] text-muted">{path}</p>
     {/* While the choices load, the lines show it and the status words are for the screen reader. */}
@@ -280,10 +282,13 @@ export function OwnerRestoreDialog({workspaceId, path, operationId, onClose, onB
     </>}
     {state.kind === "review" && <Review key={state.review.proposalDigest} review={state.review} emails={emails} />}
     {state.kind === "pending" || state.kind === "error" ? <p role="alert" className="text-[13px] text-muted">{state.message}</p> : null}
+    {state.kind === "refused" && <p role="alert" className="text-[13px] text-muted">{DECLINE_REFUSED_MESSAGE}</p>}
     {operation.current && state.kind !== "complete" && state.kind !== "declined" && <p className="text-[12px] text-muted">{declinable
       ? "Access has stopped. Declining keeps the file unchanged. Live editing through this access stays stopped until you share the file again."
       : "Access has stopped. Closing this review does not restore the old access."}</p>}
-    {state.kind === "complete" && <p className="text-[13px] text-muted">The file has been restored. Share again when you want to give access.</p>}
+    {state.kind === "complete" && <p className="text-[13px] text-muted">{state.moved
+      ? "The file moved before the restore finished, so the renamed file is unchanged. Share again when you want to give access."
+      : "The file has been restored. Share again when you want to give access."}</p>}
     {state.kind === "declined" && <p className="text-[13px] text-muted">The file stays unchanged. Live editing through this access stays stopped until you share the file again.</p>}
     <div className="mt-4 flex justify-end gap-2">
       <SecondaryButton onClick={close}>{state.kind === "stop" ? "Cancel" : "Close"}</SecondaryButton>

@@ -1,6 +1,7 @@
 import {describe,expect,it,vi} from "vitest";
 import {DaemonRefusalError} from "@dohc/workspace-engine-client";
 import {cancelStopRestore, deliverStopRestore} from "./liveRestoreDelivery";
+import {StopRestoreCancellationRefused} from "./storage/liveRestoreOperation";
 
 const binding={workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"b".repeat(64),currentPath:"file.md",selectorPaths:["file.md"],restoreFenceGeneration:0};
 const operation={operationId:"operation",relayDatabaseNamespace:"relay",oldBinding:binding,hostId:"service",newFence:1,
@@ -201,14 +202,26 @@ it.each([[{status:"fenced",receipt}],[{status:"pending",reason:"native-fence-pen
   expect(f.store.acknowledgeStopRestoreCancellation).not.toHaveBeenCalled();
 });
 
-// An answer the relay will not record stays refused on every attempt, so
-// it is not left pending.
-it("refuses a Decline answer the relay will not record",async()=>{
+// An answer that does not prove the restore's end stays refused on every
+// attempt, so it is not left pending.
+it("refuses a Decline answer that does not prove the restore's end",async()=>{
   const answer={status:"cancelled",hostId:"service",generation:0,binding};
   const f=decline(answer);
-  f.store.acknowledgeStopRestoreCancellation.mockImplementation(()=>{throw new Error("Restore cancellation answer does not match the restore.");});
-  await expect(f.declined).resolves.toEqual({kind:"refused",reason:"Restore cancellation answer does not match the restore."});
+  f.store.acknowledgeStopRestoreCancellation.mockImplementation(()=>{throw new StopRestoreCancellationRefused();});
+  await expect(f.declined).resolves.toEqual({kind:"refused",reason:"The host's cancellation answer does not prove this restore ended."});
   expect(f.store.acknowledgeStopRestoreCancellation).toHaveBeenCalledTimes(1);
+});
+
+// A failure to record the answer can pass, so the Decline stays pending and
+// the relay log keeps its cause.
+it("keeps a Decline pending when its answer cannot be recorded",async()=>{
+  const log=vi.spyOn(console,"error").mockImplementation(()=>{});
+  try {
+    const f=decline({status:"cancelled",hostId:"service",generation:0,binding}), cause=new Error("database or disk is full");
+    f.store.acknowledgeStopRestoreCancellation.mockImplementation(()=>{throw cause;});
+    await expect(f.declined).resolves.toEqual({kind:"pending",reason:"The host's cancellation answer was not recorded."});
+    expect(log).toHaveBeenCalledWith("[sync-relay] restore cancellation not recorded:",cause);
+  } finally {log.mockRestore();}
 });
 
 it("asks nothing once the Decline is answered",async()=>{

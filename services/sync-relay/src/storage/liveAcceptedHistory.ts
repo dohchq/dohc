@@ -127,7 +127,8 @@ function captureAcceptedHistory(storage: StorageContext, input: {
   for (const row of headers) budget.chargeBytes(authorityInteger(row.update_bytes, 1));
   chargeStoredMetadata(storage, `${documentWhere} AND journal_cursor>=? AND journal_cursor<=?`, [...params, floor, through], budget);
   let checkpoint = {cursor: 0, bytes: header ? input.baseline : new Uint8Array(input.baseline), digest: input.baselineDigest};
-  let c: NativeRestoreHistoryProof["checkpoint"] = {eventCount: 0, terminal: null, binding: structuredClone(input.originBinding),
+  // History with no checkpoint starts where the lineage registered, at generation 1. A restore declined after its fence moves the generation without one.
+  let c: NativeRestoreHistoryProof["checkpoint"] = {eventCount: 0, terminal: null, binding: {...structuredClone(input.originBinding), restoreFenceGeneration: 1},
     stateDigest: input.baselineDigest, evidenceDigest: initialAcceptedHistoryDigest(namespace, document)};
   if (header) {
     const raw = storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${documentWhere} AND journal_cursor=?`).get(...params, floor)!;

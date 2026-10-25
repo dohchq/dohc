@@ -1,5 +1,5 @@
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
-import {requireResumedBinding,retainedRestoreLifecycle} from "./liveRestoreLifecycleStorage";
+import {finishedRestoreBinding,requireFinishedRestoreBinding} from "./liveRestoreLifecycleStorage";
 import {readServiceActivationOrigin} from "./serviceActivationOrigin";
 import {readServiceActivation,serviceActivationState} from "./serviceActivationAccess";
 import {moveServiceActivationRetirement} from "./serviceActivationRetirement";
@@ -101,6 +101,11 @@ const integer = (value: number, minimum = 0, maximum = Number.MAX_SAFE_INTEGER):
 };
 const key = (document: LiveDocumentKey) => [document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId];
 function refuse(): never { throw new Error("Live restore operation conflicts with current authority."); }
+/** The fencing host's cancellation answer does not prove the restore's end. Asking again gets the same answer. */
+export class StopRestoreCancellationRefused extends Error {
+  constructor() { super("The host's cancellation answer does not prove this restore ended."); }
+}
+function refuseAnswer(): never { throw new StopRestoreCancellationRefused(); }
 function snapshot(input: StopRestoreIntent): StopRestoreIntent {
   if (input.deliveryKind !== "bootstrap" && input.deliveryKind !== "owner") throw new TypeError("Restore delivery kind is required at initiation.");
   const dependents = input.expectedDependentGrantIds.map(value => parseLiveUpdateIdentifier(value)).sort();
@@ -171,7 +176,7 @@ export function requireStopRestoreOwnerOrigin(storage: StorageContext, basis: St
   parseLiveUpdateDigest(origin?.originHistoryEvidenceDigest);
   integer(origin?.originEventCount);
   const originalBinding=parseLiveObjectBinding(origin.originalBinding);
-  requireResumedBinding(storage.db,basis.namespace,originalBinding,basis.ownerBinding);
+  requireFinishedRestoreBinding(storage.db,basis.namespace,originalBinding,basis.ownerBinding);
   const activation = readServiceActivationOrigin(storage,basis.namespace,basis.binding,origin.adoptionId);
   const source = activation ? activation.source : storage.db.prepare("SELECT moment_id AS sourceMomentId FROM sync_relay_object_moments WHERE workspace_id=? AND object_id=? AND relay_seq=?")
     .get(basis.binding.workspaceId,basis.binding.objectId,basis.baselineSequence);
@@ -192,6 +197,24 @@ function authority(storage: StorageContext, intent: StopRestoreIntent, checkedBa
   const saved = decodeLiveDocumentAuthorityStructure(storage.db,intent.document,checkedBaseline ? {...row,baseline_bytes:checkedBaseline} : row);
   if (!checkedBaseline && createHash("sha256").update(saved.baselineBytes).digest("hex") !== saved.baselineDigest) refuse();
   return saved;
+}
+/**
+ * The restore whose fence the document's generation follows, or null before
+ * the first. One declined before its fence left the generation as it was. A
+ * resumed restore reopened admission; one declined after its fence left it
+ * closed at the binding its host stopped at, and the next restore goes on
+ * from there.
+ */
+function previousRestore(storage: StorageContext, document: LiveDocumentKey, generation: number, open: boolean): string | null {
+  const namespace = liveJournalHistoryNamespace(storage);
+  const previous = storage.db.prepare(`SELECT operation_id,new_fence,lineage_claim_id,phase FROM ${table} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? AND new_fence IS NOT NULL ORDER BY new_fence DESC LIMIT 1`)
+    .get(namespace, ...key(document).slice(0, 3));
+  if (!previous) { if (!open) refuse(); return null; }
+  const operationId = parseLiveUpdateIdentifier(previous.operation_id);
+  const binding = finishedRestoreBinding(storage.db, namespace, operationId, previous.phase);
+  if (!binding || previous.new_fence !== generation || previous.lineage_claim_id !== document.lineageClaimId || (previous.phase === "declined") === open ||
+    binding.restoreFenceGeneration !== generation || !isDeepStrictEqual(key(binding), key(document))) refuse();
+  return operationId;
 }
 function requireAvailableJournalCursor(storage: StorageContext): void {
   const rows = storage.db.prepare("SELECT seq FROM sqlite_sequence WHERE name='sync_relay_live_update_journal'").all();
@@ -267,9 +290,10 @@ export function readStopRestorePlan(storage: StorageContext, input: StopRestoreP
     if (!current || current.share.shareId !== input.shareId || current.share.workspaceId !== document.workspaceId ||
       current.share.granterUserId !== input.ownerUserId) refuse();
     const {share, grant} = current;
-    const row = storage.db.prepare(`SELECT restore_fence_generation,baseline_digest,current_path FROM sync_relay_live_documents
-      WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND lineage_state='current' AND admission_state='open'`).get(...key(document));
+    const row = storage.db.prepare(`SELECT restore_fence_generation,baseline_digest,current_path,admission_state FROM sync_relay_live_documents
+      WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND lineage_state='current'`).get(...key(document));
     if (!row) refuse();
+    if (row.admission_state !== "open") previousRestore(storage, document, Number(row.restore_fence_generation), false);
     requireUnretiredEnrollment(storage, document);
     requireNoPendingActivation(storage, document);
     const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
@@ -319,25 +343,15 @@ export function beginStopRestore(storage: StorageContext, input: StopRestoreInte
     const namespace=liveJournalHistoryNamespace(storage);
     if (storage.db.prepare(`SELECT 1 FROM ${table} WHERE relay_database_namespace=? AND operation_id=?`).get(namespace,intent.operationId)) refuse();
     requireAvailableJournalCursor(storage);
-    const document = storage.db.prepare(`SELECT restore_fence_generation,baseline_digest,baseline_moment_relay_seq,current_path FROM sync_relay_live_documents
-      WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND lineage_state='current' AND admission_state='open'`).get(...key(intent.document));
+    const document = storage.db.prepare(`SELECT restore_fence_generation,baseline_digest,baseline_moment_relay_seq,current_path,admission_state FROM sync_relay_live_documents
+      WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND lineage_state='current'`).get(...key(intent.document));
     if (!document || document.restore_fence_generation !== intent.expectedFence ||
       Number(document.baseline_moment_relay_seq) <= storage.getEpochLogFloor(intent.document.workspaceId) ||
       !currentLiveDocumentMoment(storage, intent.document, String(document.current_path))) refuse();
+    const previousOperationId = previousRestore(storage, intent.document, intent.expectedFence, document.admission_state === "open");
     requireNoPendingActivation(storage, intent.document);
     const existing = storage.db.prepare(`SELECT 1 FROM ${table} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND ${UNFINISHED_RESTORE}`).get(...key(intent.document).slice(0, 3));
     if (existing) refuse();
-    // The chain follows the fences restores advanced. One declined before its
-    // fence left the document's generation as it was.
-    const previous=storage.db.prepare(`SELECT operation_id,new_fence,lineage_claim_id,phase FROM ${table} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? AND new_fence IS NOT NULL ORDER BY new_fence DESC LIMIT 1`)
-      .get(namespace,...key(intent.document).slice(0,3));
-    if (previous && (previous.phase!=="resumed" || previous.new_fence!==intent.expectedFence || previous.lineage_claim_id!==intent.document.lineageClaimId)) refuse();
-    const previousOperationId=previous?parseLiveUpdateIdentifier(previous.operation_id):null;
-    if (previousOperationId) {
-      const completed=retainedRestoreLifecycle(storage.db,namespace,previousOperationId);
-      if (!completed?.lifecycle.resume || completed.lifecycle.resume.binding.restoreFenceGeneration!==intent.expectedFence ||
-        !isDeepStrictEqual(key(completed.lifecycle.resume.binding),key(intent.document))) refuse();
-    }
     const current = readCurrentShareGrant(storage, {grantId: intent.grantId, generation: intent.expectedGrantGeneration});
     if (!current || current.share.shareId !== intent.shareId || current.share.workspaceId !== intent.document.workspaceId ||
       current.share.granterUserId !== intent.ownerUserId) refuse();
@@ -397,12 +411,13 @@ export function advanceStopRestoreFence(storage: StorageContext, input: { operat
     if (continueStopRestoreInTransaction(storage, saved, at) === "declined") return read(storage, operationId, workspaceId)!;
     requireAvailableJournalCursor(storage);
     const current = authority(storage,intent);
-    if (!current.current || !current.open || !isDeepStrictEqual(basis(storage,intent,current),saved.basis)) refuse();
+    if (!current.current || previousRestore(storage, intent.document, saved.oldFence, current.open) !== saved.previousOperationId ||
+      !isDeepStrictEqual(basis(storage,intent,current),saved.basis)) refuse();
     const cutover = integer(Number(storage.db.prepare(`SELECT COALESCE(MAX(journal_cursor),0) AS cursor FROM sync_relay_live_update_journal
       WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?`).get(...key(intent.document))!.cursor), 0, Number.MAX_SAFE_INTEGER - 1);
     const changed = storage.db.prepare(`UPDATE sync_relay_live_documents SET admission_state='closed',restore_fence_generation=?
-      WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND lineage_state='current' AND admission_state='open' AND restore_fence_generation=?`)
-      .run(saved.oldFence + 1, ...key(intent.document), saved.oldFence);
+      WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND lineage_state='current' AND admission_state=? AND restore_fence_generation=?`)
+      .run(saved.oldFence + 1, ...key(intent.document), current.open ? "open" : "closed", saved.oldFence);
     if (Number(changed.changes) !== 1) refuse();
     moveServiceActivationRetirement(storage, intent.document, saved.oldFence, saved.oldFence + 1, cutover);
     const raw = cutover === 0 ? null : storage.db.prepare("SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(cutover);
@@ -464,12 +479,20 @@ export function stopRestoreIdentityHolds(storage: StorageContext, operation: Sto
  * document cannot use, such as one with invalid evidence, still holds the path.
  */
 function departedFrozenPath(storage: StorageContext, operation: StopRestoreOperation): boolean {
-  const {document} = operation.intent, path = operation.basis.binding.currentPath;
   if (!stopRestoreIdentityHolds(storage, operation)) refuse();
+  return !objectHoldsFrozenPath(storage, operation);
+}
+function objectHoldsFrozenPath(storage: StorageContext, operation: StopRestoreOperation): boolean {
+  const {document} = operation.intent, path = operation.basis.binding.currentPath;
   const latest = storage.db.prepare(`SELECT path FROM sync_relay_object_moments WHERE workspace_id=? AND object_id=? AND version_id='main' ORDER BY relay_seq DESC LIMIT 1`)
     .get(document.workspaceId, document.objectId);
   if (!latest) refuse();
-  return latest.path !== path || storage.objectIdAtPathInVersion({workspaceId: document.workspaceId, versionId: "main", path}) !== document.objectId;
+  return latest.path === path && storage.objectIdAtPathInVersion({workspaceId: document.workspaceId, versionId: "main", path}) === document.objectId;
+}
+/** Whether a resumed restore's object has left the path it finished at, which leaves the renamed file's content as it was. */
+export function stopRestoreFinishedAtMovedPath(storage: StorageContext, operation: StopRestoreOperation): boolean {
+  if (operation.phase !== "resumed") refuse();
+  return !objectHoldsFrozenPath(storage, operation);
 }
 /** Whether the restore's object still holds its frozen path. Admission refuses otherwise. */
 export function stopRestoreHoldsFrozenPath(storage: StorageContext, operation: StopRestoreOperation): boolean {
@@ -573,18 +596,19 @@ export function acknowledgeStopRestoreCancellation(storage: StorageContext, inpu
   const requested = cancellation(storage, saved);
   if (!requested) refuse();
   if (requested.outcome !== null) {
-    if (!isDeepStrictEqual(JSON.parse(requested.acknowledgmentJson!), answer)) refuse();
+    if (!isDeepStrictEqual(JSON.parse(requested.acknowledgmentJson!), answer)) refuseAnswer();
     return saved;
   }
   const {document} = saved.intent, newFence = saved.newFence!, cutover = saved.cutoverCursor!;
-  if (answer.hostId !== saved.basis.hostId || at < saved.invalidatedAtMs) refuse();
+  if (answer.hostId !== saved.basis.hostId) refuseAnswer();
+  if (at < saved.invalidatedAtMs) refuse();
   const generation = storage.db.prepare(`SELECT 1 FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?
     AND restore_fence_generation=? AND lineage_state='current' AND admission_state='closed'`).get(...key(document), newFence);
   if (!generation) refuse();
   const where = `relay_database_namespace=? AND operation_id=? AND phase=?`, params = [saved.basis.namespace, saved.intent.operationId, saved.phase];
   let journalCursor: number | null = null;
   if (answer.status === "cancelled") {
-    if (saved.nativeReceipt || answer.generation !== saved.oldFence || !isDeepStrictEqual(answer.binding, nativeBinding(saved))) refuse();
+    if (saved.nativeReceipt || answer.generation !== saved.oldFence || !isDeepStrictEqual(answer.binding, nativeBinding(saved))) refuseAnswer();
     if (Number(storage.db.prepare(`UPDATE sync_relay_live_documents SET restore_fence_generation=? WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND restore_fence_generation=?`)
       .run(saved.oldFence, ...key(document), newFence).changes) !== 1) refuse();
     moveServiceActivationRetirement(storage, document, newFence, saved.oldFence, cutover);
@@ -594,13 +618,13 @@ export function acknowledgeStopRestoreCancellation(storage: StorageContext, inpu
     const {receipt} = answer;
     if (!saved.applied || !isDeepStrictEqual(receipt.fence.operation, nativeRestoreFence(saved.applied, newFence)) ||
       !isDeepStrictEqual(receipt.binding, {...nativeBinding(saved), restoreFenceGeneration: newFence}) ||
-      (saved.nativeReceipt && !isDeepStrictEqual(receipt.fence, saved.nativeReceipt))) refuse();
+      (saved.nativeReceipt && !isDeepStrictEqual(receipt.fence, saved.nativeReceipt))) refuseAnswer();
     // The endpoint the host froze is the relay's accepted history through the cutover.
     const terminal = cutover === 0 ? null : storage.db.prepare(`SELECT accepted_event_count,accepted_evidence_digest FROM sync_relay_live_update_journal WHERE journal_cursor=?
       AND workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?`).get(cutover, ...key(document));
     const digest = terminal ? terminal.accepted_evidence_digest : initialAcceptedHistoryDigest(saved.basis.namespace, document);
-    if ((cutover !== 0 && !terminal) || receipt.endpoint.eventCount !== (terminal ? Number(terminal.accepted_event_count) : 0) ||
-      receipt.endpoint.historyEvidenceDigest !== digest) refuse();
+    if (cutover !== 0 && !terminal) refuse();
+    if (receipt.endpoint.eventCount !== (terminal ? Number(terminal.accepted_event_count) : 0) || receipt.endpoint.historyEvidenceDigest !== digest) refuseAnswer();
     journalCursor = allocateJournalCursor(storage);
     if (Number(storage.db.prepare(`UPDATE ${table} SET phase='declined',declined_at_ms=?,native_receipt_json=? WHERE ${where}`)
       .run(at, JSON.stringify(receipt.fence), ...params).changes) !== 1) refuse();

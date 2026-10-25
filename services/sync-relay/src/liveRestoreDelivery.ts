@@ -3,7 +3,7 @@ import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
 import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
 import type {LiveHostConnectionCoordinate} from "./storage";
 import type {LiveCommittedDeliveryStore, StopRestoreCutCapture} from "./storage/liveCommittedDelivery";
-import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
+import {StopRestoreCancellationRefused, type StopRestoreLookup} from "./storage/liveRestoreOperation";
 import {parseNativeRestoreCancellationAnswer, parseNativeRestoreFenceReceipt, type NativeRestoreFenceReceipt} from "./liveRestoreFence";
 import {configRecord} from "./deviceLiveHostConfig";
 import {authorityInteger} from "./storage/liveDocumentAuthority";
@@ -18,9 +18,11 @@ export type StopRestoreCancellationOutcome = {kind: "pending"; reason: string} |
 
 /**
  * Asks the fencing host to end a restore whose Decline the relay recorded,
- * and records its durable answer. A lost reply, an unreadable answer or one
- * that holds no binding leaves the restore pending for the next attempt. An
- * answer the relay will not record is refused: asking again gets the same answer.
+ * and records its durable answer. A lost reply, an unreadable answer, one
+ * that holds no binding, or a failure to record it, such as a storage error
+ * or this host losing its standing meanwhile, leaves the restore pending for
+ * the next attempt. Only an answer that does not prove the restore's end is
+ * refused: asking again gets the same answer.
  * The consumer holds its normal document exclusion for this entire call.
  */
 export async function cancelStopRestore(options: {
@@ -40,7 +42,11 @@ export async function cancelStopRestore(options: {
   // The host holds no binding at that generation now, so its answer proves nothing about this restore.
   if (answer.status === "cancelled" && answer.binding === null) return {kind: "pending", reason: "The host holds no binding at the restore's generation."};
   try {store.acknowledgeStopRestoreCancellation(input, answer, Date.now());}
-  catch (error) {return {kind: "refused", reason: error instanceof Error ? error.message : "The relay refused the host's cancellation answer."};}
+  catch (error) {
+    if (error instanceof StopRestoreCancellationRefused) return {kind: "refused", reason: error.message};
+    console.error("[sync-relay] restore cancellation not recorded:", error);
+    return {kind: "pending", reason: "The host's cancellation answer was not recorded."};
+  }
   return {kind: "declined"};
 }
 

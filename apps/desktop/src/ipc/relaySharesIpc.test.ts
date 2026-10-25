@@ -437,7 +437,7 @@ describe("registered owner restore handler", () => {
         : [{status, result: {kind: "pending"}}, {status, result: {kind: "review-required"}},
           ...(action === "prepare" ? [{status, result: {kind: "prepared", proposalDigest: "b".repeat(64), candidateDigest: "c".repeat(64), recordedAtMs: 1, replayed: false}}]
             : action === "review" ? [{status, result: null}, {status, result: review}]
-            : [{status, result: {kind: "resumed", proposalDigest: "b".repeat(64), receipt: {accepted: true}}}])];
+            : [false, true].map(moved => ({status, result: {kind: "resumed", proposalDigest: "b".repeat(64), receipt: {accepted: true}, moved}})))];
       for (const response of responses) {
         const h = harness();
         h.request.mockResolvedValue({...response, ignored: "stripped"});

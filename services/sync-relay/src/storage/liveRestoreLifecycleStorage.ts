@@ -4,6 +4,8 @@ import {parseNativeRestoreApplicationReceipt,parseNativeRestoreSettlementReceipt
 import {readRestoreAdmission,restoreIntegrity as require,type RestoreAdmission} from "./liveRestoreCheckpoint";
 import {LIVE_RESTORE_LIFECYCLES as table,LIVE_RESTORE_OPERATIONS as operations} from "./liveRestoreOperationSchema";
 import {authorityInteger} from "./liveDocumentAuthority";
+import {LIVE_RESTORE_CANCELLATIONS} from "./liveRestoreCancellationSchema";
+import {parseNativeRestoreCancellationAnswer} from "../liveRestoreFence";
 import type {SqliteDb} from "./types";
 
 export function validateRestoreLifecycle(admission: RestoreAdmission, value: RestoreLifecycle): void {
@@ -49,14 +51,29 @@ export function retainedRestoreLifecycle(db: SqliteDb, namespace: string, operat
   return {admission,lifecycle,row};
 }
 
-export function requireResumedBinding(db:SqliteDb,namespace:string,original:LiveObjectBinding,current:LiveObjectBinding):void {
+/**
+ * The binding a finished restore left at its new fence: its resume's, or the
+ * one its host stopped at when the owner declined it after the fence. Null
+ * for any other phase.
+ */
+export function finishedRestoreBinding(db:SqliteDb,namespace:string,operationId:string,phase:unknown):LiveObjectBinding|null {
+  if (phase==="resumed") return retainedRestoreLifecycle(db,namespace,operationId)?.lifecycle.resume?.binding ?? null;
+  if (phase!=="declined") return null;
+  const row=db.prepare(`SELECT acknowledgment_json FROM ${LIVE_RESTORE_CANCELLATIONS} WHERE relay_database_namespace=? AND operation_id=? AND outcome='fence-cancelled'`)
+    .get(namespace,operationId);
+  if (!row) return null;
+  const answer=parseNativeRestoreCancellationAnswer(JSON.parse(String(row.acknowledgment_json)));
+  require(answer.status==="fenceCancelled");
+  return answer.binding;
+}
+
+export function requireFinishedRestoreBinding(db:SqliteDb,namespace:string,original:LiveObjectBinding,current:LiveObjectBinding):void {
   require(isDeepStrictEqual({...original,restoreFenceGeneration:current.restoreFenceGeneration},current));
   if (original.restoreFenceGeneration===current.restoreFenceGeneration) return;
   require(original.restoreFenceGeneration<current.restoreFenceGeneration);
-  const row=db.prepare(`SELECT operation_id FROM ${operations} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? AND new_fence=? AND phase='resumed'`)
+  const row=db.prepare(`SELECT operation_id,phase FROM ${operations} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? AND new_fence=?`)
     .get(namespace,current.workspaceId,current.mainVersionId,current.objectId,current.restoreFenceGeneration);
   require(row);
-  const saved=retainedRestoreLifecycle(db,namespace,String(row.operation_id));
-  require(saved?.lifecycle.resume && isDeepStrictEqual(saved.lifecycle.resume.binding,current));
+  require(isDeepStrictEqual(finishedRestoreBinding(db,namespace,String(row.operation_id),row.phase),current));
   parseLiveObjectBinding(original);
 }

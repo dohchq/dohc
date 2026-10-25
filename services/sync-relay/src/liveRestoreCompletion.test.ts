@@ -27,6 +27,7 @@ function fixture(phase: "relay-admitted" | "native-applied" | "settled" | "resum
     acknowledgeStopRestoreReplacement: vi.fn(() => save("native-applied")),
     acknowledgeStopRestoreSettlement: vi.fn(() => save("settled")),
     acknowledgeStopRestoreResume: vi.fn(() => save("resumed")),
+    stopRestoreFinishedAtMovedPath: vi.fn(() => false),
   };
   const send = vi.fn(async (_request: unknown, operation: string, _bytes: Uint8Array, _limit: number, _signal?: AbortSignal) => ({
     response: {result: {status: operation}}, bytes: Buffer.from(JSON.stringify(operation === "resume" ? resume : operation === "settle" ? settlement : {applied: true})),
@@ -155,7 +156,7 @@ describe("private restore continuation", () => {
     ["resumed", []],
   ] as const)("continues from durable %s without repeating recorded phases", async (phase, operations) => {
     const f = fixture(phase);
-    await expect(f.run()).resolves.toEqual({kind: "resumed", proposalDigest: digest, receipt: f.base.resume});
+    await expect(f.run()).resolves.toEqual({kind: "resumed", proposalDigest: digest, receipt: f.base.resume, moved: false});
     expect(f.send.mock.calls.map(call => call[1])).toEqual(operations);
     expect(f.store.admitStopRestoreProposal).toHaveBeenCalledTimes(phase === null ? 1 : 0);
     for (const [, operation, bytes, limit] of f.send.mock.calls) {

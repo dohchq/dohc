@@ -5,7 +5,7 @@ import type { ServiceActivationAccess } from "./serviceActivationAccess";
 import {readServiceActivationOrigin} from "./serviceActivationOrigin";
 import {carryServiceActivationRetirement} from "./serviceActivationRetirement";
 import {readRestoreAdmission,verifyRestoreCheckpoint,restoreDigest,type RestoreAdmission,type RestoreSourceRange} from "./liveRestoreCheckpoint";
-import {retainedRestoreLifecycle,validateRestoreLifecycle,requireResumedBinding} from "./liveRestoreLifecycleStorage";
+import {retainedRestoreLifecycle,validateRestoreLifecycle,requireFinishedRestoreBinding} from "./liveRestoreLifecycleStorage";
 import { randomUUID, createHash } from "node:crypto";
 import {revalidateAcceptedHistoryDelivery,readAcceptedHistory, readAcceptedHistoryDelivery, requireAcceptedHistoryProof, RestoreHistoryBudget} from "./liveAcceptedHistory";
 import {captureSqliteReadRevision} from "./readRevision";
@@ -69,7 +69,7 @@ import {
 } from "./liveUpdateJournal";
 import { bindLiveDeliveryHostNamespace, consumeLiveDeliveryReservation } from "./liveDeliveryReservations";
 import { acknowledgeStopRestoreCancellation, continueStopRestoreInTransaction, nativeRestoreFence, readStopRestoreCancellation, requireStopRestoreCut, requireStopRestoreOwnerOrigin, readStopRestoreInTransaction,
-  stopRestoreDeclineRecorded, stopRestoreHoldsFrozenPath, stopRestoreIdentityHolds, stopRestoreRevocationHolds, type StopRestoreContinuation, type StopRestoreLookup, type StopRestoreOperation, type StopRestoreApplied } from "./liveRestoreOperation";
+  stopRestoreDeclineRecorded, stopRestoreFinishedAtMovedPath, stopRestoreHoldsFrozenPath, stopRestoreIdentityHolds, stopRestoreRevocationHolds, type StopRestoreContinuation, type StopRestoreLookup, type StopRestoreOperation, type StopRestoreApplied } from "./liveRestoreOperation";
 import {parseNativeRestoreFenceReceipt, type NativeRestoreCancellation, type NativeRestoreCancellationAnswer, type NativeRestoreFenceReceipt} from "../liveRestoreFence";
 import {parseNativeRestoreProposalReceipt, decodeNativeRestoreProposal, type RestoreProofBudget} from "../liveRestoreProposal";
 import {validateLiveRestoreProposal, type OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/restore-proof";
@@ -340,7 +340,7 @@ export class LiveCommittedDeliveryStore {
       const hostState = this.#storage.getLiveHostControl(); integrity(hostState);
       const current = authorizeLiveDocument(this.#storage,{document,actor: input.actor},hostState,{binding,current: true,open: true,baselineSequence: authorityInteger(row.baseline_moment_relay_seq,1)},this.activation);
       integrity(current.kind === "current" && isDeepStrictEqual(current.host,host));
-      requireResumedBinding(this.#storage.db,this.#history.namespace,originalBinding,current.binding);
+      requireFinishedRestoreBinding(this.#storage.db,this.#history.namespace,originalBinding,current.binding);
       return {row,origin: String(owner.origin_json),binding: current.binding,source};
     };
     const initial = this.#storage.readTx(read);
@@ -421,7 +421,7 @@ export class LiveCommittedDeliveryStore {
     integrity(origin.adoptionId === adoptionId);
     // Without live authority the adoption's own binding stands, at the document's current restore generation.
     const binding = parseLiveObjectBinding({...originalBinding,currentPath: row.current_path,restoreFenceGeneration: row.restore_fence_generation});
-    requireResumedBinding(this.#storage.db,this.#history.namespace,originalBinding,binding);
+    requireFinishedRestoreBinding(this.#storage.db,this.#history.namespace,originalBinding,binding);
     const tip = this.#ownerTip(owner);
     const raw = this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor>? ORDER BY journal_cursor LIMIT 1`)
       .get(...documentParams(document),tip?.journalCursor ?? 0);
@@ -662,7 +662,7 @@ export class LiveCommittedDeliveryStore {
       );
     integrity(row);
     const b = capture.baseline;
-    requireResumedBinding(this.#storage.db,this.#history.namespace,parseLiveObjectBinding(JSON.parse(String(row.binding_json))),b.binding);
+    requireFinishedRestoreBinding(this.#storage.db,this.#history.namespace,parseLiveObjectBinding(JSON.parse(String(row.binding_json))),b.binding);
     integrity(
       row.bootstrap_id === b.bootstrapId &&
         row.bootstrap_moment_id === b.bootstrapMomentId &&
@@ -1285,7 +1285,7 @@ export class LiveCommittedDeliveryStore {
         const b = this.#storage.db.prepare(`SELECT * FROM ${BOOTSTRAPS} WHERE bootstrap_id=?`).get(operation.applied!.sourceId);
         integrity(b && b.relay_database_namespace === operation.basis.namespace && b.workspace_id === lookup.workspaceId &&
           b.object_id === document.objectId && b.lineage_claim_id === document.lineageClaimId && b.host_id === host.hostId);
-        requireResumedBinding(this.#storage.db,this.#history.namespace,parseLiveObjectBinding(JSON.parse(String(b.binding_json))),receipt.fence.operation.oldBinding);
+        requireFinishedRestoreBinding(this.#storage.db,this.#history.namespace,parseLiveObjectBinding(JSON.parse(String(b.binding_json))),receipt.fence.operation.oldBinding);
         origin = {bootstrapId: b.bootstrap_id, bootstrapMomentId: b.bootstrap_moment_id,
           baselineMomentRelaySequence: b.baseline_moment_relay_seq, baselineRegisteredAtMs: b.baseline_registered_at_ms,
           baselineDigest: b.baseline_digest, baselineByteLength: b.baseline_byte_length,
@@ -1628,6 +1628,13 @@ export class LiveCommittedDeliveryStore {
     return this.#storage.tx(() => {
       this.#cancellingHost(input, host);
       return acknowledgeStopRestoreCancellation(this.#storage, input, answer, now);
+    });
+  }
+  /** Whether this resumed restore's file moved before it finished, so it finished at the path the file left. */
+  stopRestoreFinishedAtMovedPath(input: StopRestoreLookup): boolean {
+    return this.#storage.readTx(() => {
+      const operation = readStopRestoreInTransaction(this.#storage, input); integrity(operation);
+      return stopRestoreFinishedAtMovedPath(this.#storage, operation);
     });
   }
   /** Whether this host goes on with the restore, or ends it through its cancellation because Decline or a departed path ended it. */

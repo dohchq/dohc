@@ -200,7 +200,7 @@ export class LiveRestorePreparation {
       }
       verify();
       if (current.phase !== "resumed" || !current.resume) throw new Error("Restore continuation did not resume.");
-      return {kind: "resumed" as const, proposalDigest, receipt: current.resume};
+      return {kind: "resumed" as const, proposalDigest, receipt: current.resume, moved: store.stopRestoreFinishedAtMovedPath(input)};
     });
   }
 }

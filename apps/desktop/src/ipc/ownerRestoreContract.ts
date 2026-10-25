@@ -85,14 +85,15 @@ export const OwnerRestoreActionResponse = {
   plan: OwnerRestorePlan,
   begin: OwnerRestoreStatus,
   status: OwnerRestoreStatus,
-  // Refused: the server would not record the answer that ends the restore.
+  // Refused: the host's answer does not prove the restore ended, and asking again gets the same answer.
   decline: z.object({status: OwnerRestoreStatus, result: z.object({kind: z.enum(["declined", "refused"])})}),
   unfinished: OwnerUnfinishedRestores,
   prepare: z.object({status: OwnerRestoreStatus, result: z.union([pending,
     z.object({kind: z.literal("prepared"), proposalDigest: digest, candidateDigest: digest, recordedAtMs: integer, replayed: z.boolean()})])}),
   review: z.object({status: OwnerRestoreStatus, result: z.union([OwnerRestoreReview, pending, z.null()])}),
   confirm: z.object({status: OwnerRestoreStatus, result: z.union([pending,
-    z.object({kind: z.literal("resumed"), proposalDigest: digest, receipt: z.unknown()})])}),
+    // Moved: the file left the restore's path before it finished, and the renamed file kept its content.
+    z.object({kind: z.literal("resumed"), proposalDigest: digest, receipt: z.unknown(), moved: z.boolean()})])}),
 };
 export type OwnerRestoreAction = keyof typeof OwnerRestoreActionResponse;
 export type OwnerRestoreResult<Action extends OwnerRestoreAction = OwnerRestoreAction> = z.infer<(typeof OwnerRestoreActionResponse)[Action]>;

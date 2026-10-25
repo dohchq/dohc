@@ -3,6 +3,7 @@ import { withErrorWords } from "../../ipc/errorWords";
 import type { OwnerRestorePhase, OwnerRestoreStatus } from "../../ipc/ownerRestoreContract";
 import { bridge } from "../bridge";
 import { DECLINE_REFUSED_MESSAGE, OwnerRestoreDialog, unfinishedRestoreStage, type UnfinishedRestoreStage } from "../OwnerRestoreDialog";
+import type { ErrorDetailField } from "./copyDetails";
 import type { useShellError } from "./useShellError";
 
 type Shell = ReturnType<typeof useShellError>;
@@ -64,6 +65,8 @@ export function useSharedRestore(input: {
   // Files whose Decline failed, by the listing count then. A listing begun
   // earlier leaves their row alone.
   const unanswered = useRef(new Map<string, number>());
+  // Restores whose Decline the relay refused to end. Their row offers no retry.
+  const refused = useRef(new Set<string>());
 
   const restores = useMemo(() => {
     let attempts = 0;
@@ -95,6 +98,12 @@ export function useSharedRestore(input: {
         return;
       }
       filed.current.add(restore.path);
+      const details: ErrorDetailField[] = [["File", restore.path, restore.path.length], ["Restore", restore.operationId]];
+      if (refused.current.has(restore.operationId)) {
+        latest.current.reportShellFailure({ repeat: true, identity: sharedRestoreIdentity(restore.path), title: "Restore not declined",
+          message: `dohc could not decline the restore of ${restore.path}. ${DECLINE_REFUSED_MESSAGE}`, details });
+        return;
+      }
       const review = inWorkspace(() => open(restore.path, { operationId: restore.operationId }));
       latest.current.reportShellFailure({
         tone: "warning",
@@ -102,19 +111,23 @@ export function useSharedRestore(input: {
         identity: sharedRestoreIdentity(restore.path),
         title: ROW[stage].title,
         message: ROW[stage].message(restore.path),
-        details: [["File", restore.path, restore.path.length], ["Restore", restore.operationId]],
+        details,
         ...(stage === "decide"
           ? { action: { label: "Review restore", run: review, additional: [{ label: "Decline restore", run: inWorkspace(() => void decline(restore)) }] } }
           : { retry: review }),
       });
     };
+    const refuse = (restore: Restore) => {
+      refused.current.add(restore.operationId);
+      file(restore);
+    };
     const decline = async (restore: Restore) => {
       const workspaceId = latest.current.workspaceId;
       try {
         const { status, result } = await bridge().ownerRestore({ workspaceId, action: "decline", operationId: restore.operationId });
-        if (result.kind === "refused") throw new Error(DECLINE_REFUSED_MESSAGE);
         if (latest.current.workspaceId !== workspaceId) return;
-        file({ ...restore, phase: status.phase });
+        if (result.kind === "refused") refuse({ ...restore, phase: status.phase });
+        else file({ ...restore, phase: status.phase });
         if (status.phase === "declined") {
           latest.current.showSuccessNotice(`Declined the restore of ${restore.path}. The file is unchanged. ` +
             "Live editing through that access stays stopped until you share the file again.");
@@ -184,12 +197,13 @@ export function useSharedRestore(input: {
       if (showing.current === from) invalidate();
       else if (latest.current.workspaceId === from.workspaceId) void refresh();
     };
-    return { show, open, inWorkspace, settle, file, refresh, changed };
+    return { show, open, inWorkspace, settle, file, refuse, refresh, changed };
   }, []);
 
   useEffect(() => {
     filed.current = new Set();
     unanswered.current = new Map();
+    refused.current = new Set();
     restores.show(null);
   }, [input.workspaceId, restores]);
   useEffect(() => {
@@ -213,6 +227,7 @@ export function useSharedRestore(input: {
         restores.settle(shown.path);
         latest.current.onRestored();
       }}
+      onDeclineRefused={(operation) => restores.refuse({ operationId: operation.operationId, path: shown.path, phase: operation.phase })}
       onSettled={() => restores.settle(shown.path)}
       onChanged={() => restores.changed(shown)}
       onError={(fallback, error) => {
