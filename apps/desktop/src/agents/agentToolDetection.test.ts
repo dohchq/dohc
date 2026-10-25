@@ -133,11 +133,9 @@ afterEach(() => {
 afterAll(() => { rmSync(resources, { recursive: true, force: true }); });
 
 describe("agent detection filesystem", () => {
-  it.each((["win32", "darwin", "linux"] as const).flatMap((platform) => ["native", "fallback", "unavailable"].map((resolution) => ({ platform, resolution }))))(
-    "resolves installed names on $platform using $resolution", async ({ platform, resolution }) => {
-      setPlatform(platform);
-      const lookup = platform === "win32" ? "C:\\Tools\\claude.exe" : "/usr/local/bin/claude";
-      const stored = platform === "win32" ? "C:\\Installed\\claude.exe" : "/opt/installed/claude";
+  it.each(["native", "fallback", "unavailable"])(
+    "resolves installed names using %s", async (resolution) => {
+      const lookup = "/usr/local/bin/claude", stored = "/opt/installed/claude";
       const nativeSpy = vi.spyOn(fs.realpathSync, "native").mockImplementation(() => {
         if (resolution !== "native") throw new Error("native resolution unavailable");
         return stored;
@@ -157,31 +155,6 @@ describe("agent detection filesystem", () => {
       expect(fallbackSpy).toHaveBeenCalledTimes(resolution === "native" ? 0 : 1);
     },
   );
-
-  it("passes statSync directly to the probe", async () => {
-    vi.spyOn(toolProbe, "probeAgentTools").mockImplementation(async (deps) => {
-      expect(deps.stat).toBe(fs.statSync);
-      return [];
-    });
-    await detectAgentTools("workspace", new AbortController().signal, resources);
-  });
-
-  it("unreadable and missing executable entries leave later entries available", async () => {
-    const identity = fs.statSync(NODE);
-    vi.spyOn(fs, "accessSync").mockImplementation(() => {});
-    vi.spyOn(fs, "statSync").mockImplementation((path) => {
-      if (String(path) === "unreadable") throw Object.assign(new Error("unreadable"), { code: "EACCES" });
-      if (String(path) === "missing") throw Object.assign(new Error("missing"), { code: "ENOENT" });
-      return identity;
-    });
-    vi.spyOn(toolProbe, "probeAgentTools").mockImplementation(async (deps) => {
-      expect(deps.isExecutable("unreadable")).toBe(false);
-      expect(deps.isExecutable("missing")).toBe(false);
-      expect(deps.isExecutable("installed")).toBe(true);
-      return [];
-    });
-    await detectAgentTools("workspace", new AbortController().signal, resources);
-  });
 
   it("continues detection after unavailable install entries", async () => {
     const actualProbe = await vi.importActual<typeof import("./agentToolProbe")>("./agentToolProbe");

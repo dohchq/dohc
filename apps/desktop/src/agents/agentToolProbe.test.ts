@@ -4,7 +4,7 @@ import { join, posix, win32 } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { deferred, type Deferred } from "../testing/deferred";
 import { agentExecutableCandidates, parseAgentAuth, probeAgentTools, type AgentProbeDependencies, type ProbeOutput } from "./agentToolProbe";
-import { folderIdentities, shortNamePairs } from "../testing/containmentCases";
+import { fakeFolderStat, folderIdentities, shortNamePairs } from "../testing/containmentCases";
 
 function fixture(overrides: Partial<AgentProbeDependencies> = {}): AgentProbeDependencies {
   return { platform: "win32", home: "C:\\Users\\ice", workspaceRoot: "C:\\Workspace", realPath: (path) => path,
@@ -42,21 +42,19 @@ describe("read-only agent detection", () => {
 
   describe.each(shortNamePairs("/folders", "LongFolderName", posix))("$name", ({ parent, child }) => {
     describe.each([false, true])("resolved: %s", (resolved) => {
-    it.each(folderIdentities)("keeps the detection result for $name", async ({ inside, fails, same }) => {
-      const target = posix.join(child, "bin", "codex");
-      const candidate = resolved ? "/links/codex" : target;
-      const deps = fixture({ platform: "linux", workspaceRoot: parent, home: "/home/test",
-        env: { PATH: posix.dirname(candidate) }, realPath: (value) => value === candidate ? target : value,
-        isExecutable: (value) => value === candidate,
-        stat: vi.fn((value) => {
-          if (fails) throw new Error("identity unavailable");
-          return { dev: 2n, ino: value === parent || same ? 3n : 4n };
-        }),
+      it.each(folderIdentities)("keeps the detection result for $name", async ({ identity }) => {
+        const inside = identity !== "different";
+        const target = posix.join(child, "bin", "codex");
+        const candidate = resolved ? "/links/codex" : target;
+        const deps = fixture({ platform: "linux", workspaceRoot: parent, home: "/home/test",
+          env: { PATH: posix.dirname(candidate) }, realPath: (value) => value === candidate ? target : value,
+          isExecutable: (value) => value === candidate,
+          stat: vi.fn(fakeFolderStat(identity, parent, { dev: 2n, ino: 3n }, { dev: 2n, ino: 4n })),
+        });
+        expect((await probeAgentTools(deps)).find((tool) => tool.tool === "codex")?.probe).toBe(inside ? "not-found" : "detected");
+        expect(deps.stat).toHaveBeenCalled();
+        expect(deps.run).toHaveBeenCalledTimes(inside ? 0 : 2);
       });
-      expect((await probeAgentTools(deps)).find((tool) => tool.tool === "codex")?.probe).toBe(inside ? "not-found" : "detected");
-      expect(deps.stat).toHaveBeenCalled();
-      expect(deps.run).toHaveBeenCalledTimes(inside ? 0 : 2);
-    });
     });
   });
 

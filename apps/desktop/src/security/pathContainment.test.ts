@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, posix, sep, win32 } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { isInside, isInsideOrUnknown, isInsideOrUnknownSync, type ContainmentStat } from "./pathContainment";
-import { folderIdentities, shortNamePairs } from "../testing/containmentCases";
+import { fakeFolderStat, folderIdentities, shortNamePairs } from "../testing/containmentCases";
 
 const root = join(process.cwd(), "containment-root");
 
@@ -67,17 +67,14 @@ describe.each(["sync", "async"] as const)("isInsideOrUnknown (%s)", (mode) => {
   });
 
   describe.each(shortNamePairs(root, "LongFolderName"))("$name", ({ parent, child }) => {
-    it.each(folderIdentities)("decides containment for $name", async ({ inside, fails, same }) => {
-      const statPath = vi.fn<ContainmentStat>((value) => {
-        if (fails) throw new Error("identity unavailable");
-        return { dev: 2n, ino: value === parent || same ? 3n : 4n };
-      });
+    it.each(folderIdentities)("decides containment for $name", async ({ identity }) => {
+      const statPath = vi.fn<ContainmentStat>(fakeFolderStat(identity, parent, { dev: 2n, ino: 3n }, { dev: 2n, ino: 4n }));
       const result = mode === "sync"
         ? isInsideOrUnknownSync(parent, join(child, "file"), statPath)
         : await isInsideOrUnknown(parent, join(child, "file"), async (value, options) => statPath(value, options));
-      expect(result).toBe(inside);
+      expect(result).toBe(identity !== "different");
       expect(statPath).toHaveBeenCalledWith(parent, { bigint: true });
-      if (!fails) expect(statPath).toHaveBeenCalledWith(child, { bigint: true });
+      if (identity !== "unavailable") expect(statPath).toHaveBeenCalledWith(child, { bigint: true });
     });
   });
 

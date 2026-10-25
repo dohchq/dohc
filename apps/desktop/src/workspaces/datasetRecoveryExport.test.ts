@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import * as fsPromises from "node:fs/promises";
 import { afterEach, expect, it, vi } from "vitest";
 import { DATASET_RECOVERY_EXTENSION, writeDatasetRecoveryExport } from "./datasetRecoveryExport";
-import { folderIdentities, shortNamePairs } from "../testing/containmentCases";
+import { fakeFolderStat, folderIdentities, shortNamePairs } from "../testing/containmentCases";
 
 vi.mock("node:fs/promises", async (importOriginal) => ({ ...await importOriginal<typeof import("node:fs/promises")>() }));
 
@@ -35,20 +35,19 @@ it("differently capitalized folders keep their export destination result", async
 });
 
 for (const { name, parent, child } of shortNamePairs(join(process.cwd(), "containment-folders"), "LongFolderName")) {
-  it.each(folderIdentities)(`${name} keeps the export destination result for $name`, async ({ inside, fails, same }) => {
+  it.each(folderIdentities)(`${name} keeps the export destination result for $name`, async ({ identity }) => {
+    const inside = identity !== "different";
     const root = await fixture(), registered = join(root, "registered"), path = join(root, "selection", "archive.dohc-recovery");
     await mkdir(dirname(path));
-    const identity = await fsPromises.stat(root, { bigint: true }), other = await fsPromises.stat(dirname(path), { bigint: true });
+    const parentStat = await fsPromises.stat(root, { bigint: true }), otherStat = await fsPromises.stat(dirname(path), { bigint: true });
     const originalRealpath = fsPromises.realpath;
     const realpathSpy = vi.spyOn(fsPromises, "realpath").mockImplementation(async (value) => {
       if (String(value) === registered) return parent;
       if (String(value) === dirname(path)) return child;
       return originalRealpath(value);
     });
-    const statSpy = vi.spyOn(fsPromises, "stat").mockImplementation(async (value) => {
-      if (fails) throw new Error("identity unavailable");
-      return String(value) === parent || same ? identity : other;
-    });
+    const statPath = fakeFolderStat(identity, parent, parentStat, otherStat);
+    const statSpy = vi.spyOn(fsPromises, "stat").mockImplementation(async (value) => statPath(value));
     const openSpy = vi.spyOn(fsPromises, "open").mockRejectedValue(new Error("destination ready"));
     try {
       await expect(writeDatasetRecoveryExport({ workspaceRoots: [registered], path, stream: chunks("data"), maxBytes: 1024,

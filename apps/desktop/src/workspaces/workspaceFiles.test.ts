@@ -52,7 +52,7 @@ import { datalessCandidates, withICloudCheck } from "../testing/iCloudCheck";
 import { readLocalStateFrom } from "./workspaceLocalState";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaceTextLimits";
 import { deferred } from "../testing/deferred";
-import { folderIdentities, shortNamePairs } from "../testing/containmentCases";
+import { fakeFolderStat, folderIdentities, shortNamePairs } from "../testing/containmentCases";
 
 let root: string;
 
@@ -1639,12 +1639,13 @@ describe("importDroppedPaths", () => {
     } finally { spy.mockRestore(); }
   });
   describe.each(shortNamePairs(join(process.cwd(), "containment-folders"), ".dohc"))("$name", ({ parent, child }) => {
-    it.each(folderIdentities)("keeps the screening result for $name", async ({ inside, fails, same }) => {
+    it.each(folderIdentities)("keeps the screening result for $name", async ({ identity }) => {
+      const inside = identity !== "different";
       const fsPromises = await import("node:fs/promises");
       const source = join(root, "source", "credentials.json"), registered = join(root, "registered");
       await mkdir(dirname(source));
       await writeFile(source, "data");
-      const identity = await stat(root, { bigint: true }), other = await stat(dirname(source), { bigint: true });
+      const parentStat = await stat(root, { bigint: true }), otherStat = await stat(dirname(source), { bigint: true });
       const originalRealpath = fsPromises.realpath;
       const realpathSpy = vi.spyOn(fsPromises, "realpath").mockImplementation(async (path) => {
         if (String(path) === registered) return registered;
@@ -1652,10 +1653,8 @@ describe("importDroppedPaths", () => {
         if (String(path) === source) return join(child, "credentials.json");
         return originalRealpath(path);
       });
-      const statSpy = vi.spyOn(fsPromises, "stat").mockImplementation(async (path) => {
-        if (fails) throw new Error("identity unavailable");
-        return String(path) === parent || same ? identity : other;
-      });
+      const statPath = fakeFolderStat(identity, parent, parentStat, otherStat);
+      const statSpy = vi.spyOn(fsPromises, "stat").mockImplementation(async (path) => statPath(path));
       try {
         const result = await screenDroppedPaths([source], [registered], "");
         expect(result.skips.outcome()).toEqual(inside ? { skipped: 1, skippedSources: [{ path: "credentials.json", reason: "workspace-data" }] } : { skipped: 0 });

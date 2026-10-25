@@ -10,7 +10,14 @@ export function shortNamePairs(base: string, leaf: string, path: Pick<typeof nat
 }
 
 export const folderIdentities = [
-  { name: "same folder", inside: true, fails: false, same: true },
-  { name: "different folder", inside: false, fails: false, same: false },
-  { name: "unavailable identity", inside: true, fails: true, same: true },
-];
+  { name: "same folder", identity: "same" },
+  { name: "different folder", identity: "different" },
+  { name: "unavailable identity", identity: "unavailable" },
+] as const;
+
+export function fakeFolderStat<T>(identity: (typeof folderIdentities)[number]["identity"], parent: string, parentStat: T, otherStat: T) {
+  return (path: unknown): T => {
+    if (identity === "unavailable") throw new Error("identity unavailable");
+    return String(path) === parent || identity === "same" ? parentStat : otherStat;
+  };
+}
