@@ -15,7 +15,7 @@ import {assessLiveAuthorWindow} from "./liveAuthorWindow";
 import type {NativeRestoreHistoryProof} from "../liveRestoreProposal";
 export type {RestoreLifecycle} from "../liveRestoreLifecycle";
 import type { LiveOwnerAdoptionCut, NativeOwnerActivationSource, RetainedPrefix, RetainedPrefixBody } from "@dohc/workspace-engine-client/daemon";
-import { SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
+import { LIVE_DELIVERY_OWNER_HISTORY, SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
 import { isDeepStrictEqual } from "node:util";
 import {
   parseLiveUpdateDigest,
@@ -67,7 +67,7 @@ import {
   verifyJournalRow,
   assertJournalCheckpointPosition,
 } from "./liveUpdateJournal";
-import { bindLiveDeliveryHostNamespace, consumeLiveDeliveryReservation } from "./liveDeliveryReservations";
+import { adoptLiveDeliveryPrefix, bindLiveDeliveryHostNamespace, consumeLiveDeliveryReservation } from "./liveDeliveryReservations";
 import { nativeRestoreFence, requireStopRestoreCut, requireStopRestoreOwnerOrigin, readStopRestoreInTransaction, type StopRestoreLookup, type StopRestoreOperation, type StopRestoreApplied } from "./liveRestoreOperation";
 import {parseNativeRestoreFenceReceipt, type NativeRestoreFenceReceipt} from "../liveRestoreFence";
 import {parseNativeRestoreProposalReceipt, decodeNativeRestoreProposal, type RestoreProofBudget} from "../liveRestoreProposal";
@@ -525,8 +525,9 @@ export class LiveCommittedDeliveryStore {
       const authority = result.cut.authorityHistory.find(row => row.current)!;
       const authorized = input.actor ? currentLiveDocumentBinding(this.#storage,{document,actor: input.actor},this.activation) : undefined;
       if (authorized && (authorized.kind !== "current" || !isDeepStrictEqual(authorized.host,host))) throw new Error("Owner standing changed.");
-      const binding = authorized?.kind === "current" ? authorized.binding : authority.binding;
       const source = this.#ownerSource(document,adoptionId,authority);
+      // Without an actor, as when a retirement recovers an adoption whose ACK was lost, a service activation keeps the binding it was granted.
+      const binding = authorized?.kind === "current" ? authorized.binding : source.activation?.binding ?? authority.binding;
       integrity(!source.activation || source.activation.source.nativeHeadSequence === sequence);
       const prefix = this.#retainedPrefix(source.activation?.source);
       const events: AdmittedLiveUpdate[] = [];
@@ -616,6 +617,7 @@ export class LiveCommittedDeliveryStore {
       const values = [this.#history.namespace,...documentParams(document),host.hostId,origin,tip,cursor,cut.expectedLocalSequence,cut.expectedLocalSequence];
       const charge = Buffer.byteLength(JSON.stringify(values));
       consumeLiveDeliveryReservation(this.#storage,document,host.hostId,0,charge,true);
+      if (prefix) adoptLiveDeliveryPrefix(this.#storage,document,host.hostId,cursor);
       for (const event of cut.events) {
         consumeLiveDeliveryReservation(this.#storage,document,host.hostId,event.metadata.accepted.receipt.journalCursor,1,true);
         this.#refundOwner(document.workspaceId,1);
@@ -806,6 +808,10 @@ export class LiveCommittedDeliveryStore {
           return;
         }
         if (!createBootstrap) throw new Error("Committed delivery must finish before settlement.");
+        // A retired owner adoption on this host consumed the lineage's adoption reservation and covers what it applied.
+        if (this.#storage.db.prepare(`SELECT 1 FROM ${LIVE_DELIVERY_OWNER_HISTORY} WHERE ${WHERE_DOCUMENT} AND host_id=?`).get(...documentParams(document),host.hostId)) {
+          throw new Error("Committed delivery follows a retired owner adoption.");
+        }
         const values = [
           baseline.bootstrapId,
           baseline.bootstrapMomentId,

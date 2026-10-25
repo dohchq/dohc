@@ -1,3 +1,4 @@
+import {parseLiveUpdateReceipt, type LiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
 import type {StorageContext} from "./context";
 import {SERVICE_ACTIVATIONS} from "./serviceActivationSchema";
 import {LIVE_JOURNAL_TABLE} from "./schema";
@@ -71,6 +72,24 @@ export function readServiceActivationRetirement(storage: StorageContext, documen
 export function serviceActivationRetirementOpen(storage: StorageContext, document: {workspaceId: string; objectId: string}): boolean {
   return storage.db.prepare(`SELECT EXISTS(SELECT 1 FROM ${SERVICE_ACTIVATIONS}
     WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND ${OPEN_RETIREMENT}) AS open`).get(document.workspaceId, document.objectId)!.open === 1;
+}
+
+/**
+ * The live journal's answer for the deliveries a retirement's reconciliation
+ * names: the receipt of each it accepted in the retiring lineage through F.
+ * Any other is absent.
+ */
+export function retirementJournalEvidence(storage: StorageContext, retirement: ServiceActivationRetirement, deliveryIds: readonly string[]) {
+  const read = storage.db.prepare(`SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch FROM ${LIVE_JOURNAL_TABLE}
+    WHERE delivery_id=? AND relay_database_namespace=? AND workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=? AND journal_cursor<=?`);
+  const receipts: LiveUpdateReceipt[] = [], absent: string[] = [];
+  for (const deliveryId of new Set(deliveryIds)) {
+    const row = read.get(deliveryId, retirement.relayDatabaseNamespace, retirement.workspaceId, retirement.objectId, retirement.lineageClaimId, retirement.acceptedThrough);
+    if (!row) absent.push(deliveryId);
+    else receipts.push(parseLiveUpdateReceipt({deliveryId: row.delivery_id, updateDigest: row.update_digest,
+      journalCursor: row.journal_cursor, acceptingHostEpoch: row.accepting_host_epoch}));
+  }
+  return {receipts, absent};
 }
 
 /** The workspace's open retirement obligations, by object. */

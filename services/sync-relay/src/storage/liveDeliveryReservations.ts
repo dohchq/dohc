@@ -5,6 +5,7 @@ import type { StorageContext } from "./context";
 import { assertWorkspaceQuota } from "./workspaces";
 import { LIVE_DELIVERY_BOOTSTRAPS, LIVE_DELIVERY_EDGES, LIVE_DELIVERY_HOSTS, LIVE_DELIVERY_RESERVATIONS, LIVE_DELIVERY_DOCUMENTS, LIVE_DELIVERY_OWNERS } from "./liveCommittedDeliverySchema";
 import { LIVE_DELIVERY_OWNER_HISTORY } from "./serviceActivationSchema";
+import { readServiceActivation, serviceActivationState } from "./serviceActivationAccess";
 
 const WHERE_DOCUMENT = "workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?";
 const parameters = (document: LiveDocumentKey) => [document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId];
@@ -63,9 +64,41 @@ function reserveLiveDeliveryEvent(storage: StorageContext, document: LiveDocumen
     row.accepting_host_epoch, maximum, "service", maximum, hostIdentifier, hostIdentifier]);
   reserve(storage, document, hostId, Number(row.journal_cursor), amount);
 }
-/** The next owner adoption, in the transaction that archives the retired owner row whose adoption consumed the last. */
-export function reserveLiveDeliverySuccessor(storage: StorageContext, document: LiveDocumentKey, hostId: string): void {
-  reserveLiveDeliveryBaseline(storage, document, hostId);
+/**
+ * A successor's owner adoption on every host the workspace funds, as for a
+ * newly registered document, in the transaction that prepares it. Its quota
+ * decision is Resume's.
+ */
+export function reserveLiveDeliverySuccessor(storage: StorageContext, document: LiveDocumentKey): void {
+  for (const row of storage.db.prepare(`SELECT host_id FROM ${LIVE_DELIVERY_HOSTS} WHERE workspace_id=? AND host_id NOT IN
+    (SELECT host_id FROM ${LIVE_DELIVERY_BOOTSTRAPS} WHERE ${WHERE_DOCUMENT}) ORDER BY host_id`).all(document.workspaceId, ...parameters(document))) {
+    reserveLiveDeliveryBaseline(storage, document, String(row.host_id));
+  }
+}
+// Deletes the lineage's reservations `condition` selects, refunding each whole.
+function releaseReservations(storage: StorageContext, document: LiveDocumentKey, condition: string, values: readonly unknown[]): void {
+  const where = `${WHERE_DOCUMENT} AND ${condition}`, params = [...parameters(document), ...values];
+  const bytes = storage.db.prepare(`SELECT COALESCE(SUM(reserved_bytes+accounted_bytes),0) AS bytes FROM ${LIVE_DELIVERY_RESERVATIONS} WHERE ${where}`).get(...params)?.bytes;
+  integrity(typeof bytes === "number" && Number.isSafeInteger(bytes) && bytes >= 0);
+  if (bytes === 0) return;
+  storage.db.prepare(`DELETE FROM ${LIVE_DELIVERY_RESERVATIONS} WHERE ${where}`).run(...params);
+  integrity(storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-? WHERE workspace_id=? AND usage_bytes>=?").run(bytes, document.workspaceId, bytes).changes === 1);
+}
+/**
+ * A retired chain tail adopts nothing until a successor reserves its own
+ * adoption, so retirement releases every host's unconsumed adoption
+ * reservation, as a never-adopted release leaves. A bootstrap keeps its own.
+ */
+export function releaseLiveDeliveryAdoptions(storage: StorageContext, document: LiveDocumentKey): void {
+  releaseReservations(storage, document, `journal_cursor=0 AND host_id NOT IN (SELECT host_id FROM ${LIVE_DELIVERY_BOOTSTRAPS} WHERE ${WHERE_DOCUMENT})`, parameters(document));
+}
+/**
+ * A successor adopted on `hostId` at its predecessor's released terminal
+ * needs no delivery through it there. Other hosts keep their funding, so
+ * either may become the configured host again.
+ */
+export function adoptLiveDeliveryPrefix(storage: StorageContext, document: LiveDocumentKey, hostId: string, terminalCursor: number): void {
+  releaseReservations(storage, document, "host_id=? AND journal_cursor BETWEEN 1 AND ?", [hostId, terminalCursor]);
 }
 export function registerLiveDeliveryBaseline(storage: StorageContext, document: LiveDocumentKey, hostId: string): void {
   const overhead = bytes([maximum, ...parameters(document)]);
@@ -120,7 +153,10 @@ function provisionWorkspaceHost(storage: StorageContext, hostId: string, workspa
     // A retired owner's archived tip still covers what it applied: its successor adopts there.
     const applied = owner[0]?.tip_cursor ?? (bootstrap.length ? null : storage.db.prepare(`SELECT MAX(tip_cursor) AS tip FROM ${LIVE_DELIVERY_OWNER_HISTORY}
       WHERE ${WHERE_DOCUMENT} AND host_id=?`).get(...parameters(document),hostId)?.tip ?? null);
-    if ((!bootstrap[0] || bootstrap[0].local_ydoc_sequence === null) && !owner.length) {
+    // A retired chain tail that no successor follows yet has no adoption to fund.
+    const retired = !owner.length && !bootstrap.length && serviceActivationState(readServiceActivation(storage, document)) === "retired";
+    if (retired) integrity(!cursors.has(0));
+    else if ((!bootstrap[0] || bootstrap[0].local_ydoc_sequence === null) && !owner.length) {
       if (!cursors.has(0)) {
         integrity(documentSequence > fundedDocument);
         reserveLiveDeliveryBaseline(storage, document, hostId);

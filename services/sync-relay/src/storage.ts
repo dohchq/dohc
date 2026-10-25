@@ -7,6 +7,7 @@ import {nextReplicaHistoryPinAt, type ReplicaHistoryObservation} from "./storage
 import {prepareLiveApplications} from "./storage/liveApplicationAuthorship";
 import {prepareHostedSettlements, prepareSettlementAudits} from "./storage/hostedSettlement";
 import * as serviceActivationPublication from "./storage/serviceActivationPublication";
+import * as serviceActivationRetirementStorage from "./storage/serviceActivationRetirement";
 import type { ServiceActivationRetirement } from "./storage/serviceActivationRetirement";
 import * as shareLabelsStorage from "./storage/shareLabels";
 import * as replicaReads from "./storage/replicaReads";
@@ -446,6 +447,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
   serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}) {
     return serviceHostEnrollmentStorage.serviceHostDocumentEnabled(this, document);
+  }
+  serviceActivationRetirement(document: {workspaceId: string; objectId: string}) {
+    return serviceActivationRetirementStorage.readServiceActivationRetirement(this, document);
+  }
+  retirementJournalEvidence(retirement: ServiceActivationRetirement, deliveryIds: readonly string[]) {
+    return serviceActivationRetirementStorage.retirementJournalEvidence(this, retirement, deliveryIds);
   }
   releaseServiceHostEnrollment(input: {workspaceId: string; objectId: string; nowMs: number}) {
     const result = serviceHostEnrollmentStorage.releaseServiceHostEnrollment(this, input);

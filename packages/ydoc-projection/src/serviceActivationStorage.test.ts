@@ -16,6 +16,7 @@ import {createLiveMarkdownRegistrationValidator,createLiveMarkdownJournalValidat
 import {openSyncRelayStorage} from '../../../services/sync-relay/src/storage.js'
 import {createLiveJournalHistoryAuthority} from '../../../services/sync-relay/src/storage/liveJournalHistory.js'
 import {ServiceActivationStaleCut} from '../../../services/sync-relay/src/storage/serviceActivation.js'
+import {SyncRelayQuotaExceededError} from '../../../services/sync-relay/src/storage/errors.js'
 import {verifyOrdinaryActivationCut} from '../../../services/sync-relay/src/storage/ordinaryActivationSource.js'
 import {selfHostLiveProfile} from '../../../services/sync-relay/src/selfHostLiveProfile.js'
 import {requireStopRestoreOwnerOrigin,type StopRestoreBasis,type StopRestoreIntent} from '../../../services/sync-relay/src/storage/liveRestoreOperation.js'
@@ -40,11 +41,11 @@ const host={mode:'service' as const,hostId:'service',hostEpoch:parseHostEpoch(1)
 const actor={kind:'owner' as const,userId:'owner',shareId:'share'}
 const bounds={maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000}
 const stop={operationId:'restore',workspaceId:'workspace',ownerUserId:'owner'}
-function fixture(text='Original'){
+function fixture(text='Original',clientID?:number){
   const root=mkdtempSync(join(tmpdir(),'dohc-service-activation-')),path=join(root,'relay.sqlite')
   const storage=openSyncRelayStorage(path),raw=new DatabaseSync(path)
   const history=createLiveJournalHistoryAuthority({namespace:'history',reconciled:true}),store=storage.createServiceActivationStore(history)
-  const doc=markdownToYDoc(text),baselineBytes=Buffer.from(Y.encodeStateAsUpdate(doc))
+  const doc=markdownToYDoc(text,{clientID}),baselineBytes=Buffer.from(Y.encodeStateAsUpdate(doc))
   doc.getMap('frontmatter').set('title','Edited')
   const fullState=Buffer.from(Y.encodeStateAsUpdate(doc));doc.destroy()
   const document={workspaceId:'workspace',mainVersionId:'main' as const,objectId:'object',lineageClaimId:hash(baselineBytes)}
@@ -1266,11 +1267,9 @@ it('completes a retirement once: archives the owner row, refunds the retained st
     expect(origin()).not.toBeNull()
     expect(complete()).toEqual({status:'retired',replayed:false})
     const boundaryJson=JSON.stringify(endpoint(tip)),refund=f.capture.fullState.length-Buffer.byteLength(boundaryJson)
-    // The archived owner row's place holds the next adoption's reservation.
-    const reserved=f.raw.prepare("SELECT reserved_bytes+accounted_bytes AS bytes FROM sync_relay_live_delivery_reservations WHERE journal_cursor=0").all()
-    expect(reserved).toHaveLength(1)
-    const reservation=Number(reserved[0]!.bytes)
-    expect(usage()).toBe(before.usage-refund+reservation)
+    // Only a successor's prepare reserves the next adoption.
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_delivery_reservations WHERE journal_cursor=0').all()).toEqual([])
+    expect(usage()).toBe(before.usage-refund)
     expect(activation()).toEqual({state_bytes:null,accounted_bytes:before.accounted-refund,retired_at_ms:20,retired_boundary_json:boundaryJson})
     expect(f.raw.prepare('SELECT * FROM sync_relay_live_delivery_owners').all()).toEqual([])
     expect(f.raw.prepare('SELECT * FROM sync_relay_live_delivery_owner_history').all()).toEqual([{...owner,activation_id:f.capture.activationId}])
@@ -1287,7 +1286,7 @@ it('completes a retirement once: archives the owner row, refunds the retained st
     f.raw.prepare(`INSERT INTO sync_relay_live_delivery_owners(${Object.keys(successor).join(',')}) VALUES (${Object.keys(successor).map(()=>'?').join(',')})`)
       .run(...Object.values(successor) as never[])
     expect(complete()).toEqual({status:'retired',replayed:true})
-    expect(usage()).toBe(before.usage-refund+reservation)
+    expect(usage()).toBe(before.usage-refund)
     expect(f.raw.prepare('SELECT * FROM sync_relay_live_delivery_owners').all()).toEqual([successor])
     expect(()=>complete({...endpoint(tip),eventCount:endpoint(tip).eventCount+1})).toThrow('another boundary')
   }finally{f.close()}
@@ -1420,11 +1419,11 @@ it('refuses a successor beside a current activation or a sibling successor',()=>
     retirePredecessor(f)
     const columns=`relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,predecessor_activation_id,source_json,binding_json,
       state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes,retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor,retired_at_ms,retired_boundary_json`
-    // A sibling of the tail that retired before it.
+    // A successor that already followed the tail, and retired before it, is the tail now.
     f.raw.exec(`INSERT INTO sync_relay_service_activations(${columns}) SELECT relay_database_namespace,'ordinary-activation-${'c'.repeat(64)}',workspace_id,main_version_id,
       object_id,lineage_claim_id,activation_id,source_json,binding_json,state_digest,NULL,owner_user_id,share_id,completion_json,accounted_bytes,10,retire_restore_generation,
       retire_accepted_cursor,10,retired_boundary_json FROM sync_relay_service_activations`)
-    expect(()=>prepareSuccessor(f)).toThrow('predecessor already has a successor')
+    expect(()=>prepareSuccessor(f)).toThrow('names another predecessor')
     f.raw.exec(`DELETE FROM sync_relay_service_activations WHERE activation_id='ordinary-activation-${'c'.repeat(64)}'`)
     // An activation of the document's other lineage that has not retired.
     const other='d'.repeat(64)
@@ -1538,6 +1537,113 @@ it("records a held Resume's obligation for a pending successor",()=>{
     expect(f.storage.enrollServiceHostDocument({...enrollment,nowMs:30,
       held:{activationId:SUCCESSOR,replicationEpoch:'epoch',streamIdentity:'stream',assertHeld(){}}})).toMatchObject({enabled:true})
     expect(retirement(f.storage)).toMatchObject({activationId:SUCCESSOR,acceptedThrough:edit.journalCursor,requestedAtMs:30})
+  }finally{f.close()}
+})
+
+const NEXT=`ordinary-activation-${'c'.repeat(64)}`
+// Proves: the chain tail is the retired activation no other follows, however
+// its retirement time compares with its predecessor's.
+it.each([['the same',20],['an earlier',5]])('follows a successor that retired at %s time as its predecessor',(_,retiredAtMs)=>{
+  const f=fixture();try{
+    const {boundary}=retirePredecessor(f)
+    const adopted=adoptSuccessor(f,boundary);adopted.apply();adopted.complete()
+    stopDocument(f,20);resumeDocument(f,20)
+    expect(f.store.completeRetirement({workspaceId:'workspace',key:keyOf(retirement(f.storage)!),boundary:ownerBoundary(f),host,registeredAtMs:20,nowMs:20,guard(){}}))
+      .toEqual({status:'retired',replayed:false})
+    f.raw.prepare('UPDATE sync_relay_service_activations SET retire_requested_at_ms=?,retired_at_ms=? WHERE activation_id=?').run(retiredAtMs,retiredAtMs,SUCCESSOR)
+    const next={...f.capture,activationId:NEXT,source:{...f.capture.source,predecessorActivationId:SUCCESSOR}}
+    expect(()=>prepareSuccessor(f)).toThrow('names another predecessor')
+    expect(prepareSuccessor(f,next)).toEqual({document:f.document,replayed:false,completed:false})
+    expect(activations(f)).toEqual([{activation_id:f.capture.activationId,predecessor_activation_id:null},
+      {activation_id:SUCCESSOR,predecessor_activation_id:f.capture.activationId},{activation_id:NEXT,predecessor_activation_id:SUCCESSOR}])
+  }finally{f.close()}
+})
+
+const optionsOf=(f:ReturnType<typeof fixture>)=>(f.storage as StorageContext).options
+const usageOf=(f:ReturnType<typeof fixture>)=>Number(f.raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()!.usage_bytes)
+// Workspace usage less what the live delivery and activation rows account for. A step that writes only those rows keeps it.
+const unaccounted=(f:ReturnType<typeof fixture>)=>usageOf(f)-Number(f.raw.prepare(`SELECT
+  (SELECT COALESCE(SUM(reserved_bytes+accounted_bytes),0) FROM sync_relay_live_delivery_reservations)+(SELECT COALESCE(SUM(accounted_bytes),0) FROM sync_relay_service_activations)+
+  ${['owners','owner_history','hosts','documents','bootstraps','edges'].map(table=>`(SELECT COALESCE(SUM(accounted_bytes),0) FROM sync_relay_live_delivery_${table})`).join('+')} AS bytes`).get()!.bytes)
+const adoptionReservations=(f:ReturnType<typeof fixture>)=>f.raw.prepare('SELECT host_id FROM sync_relay_live_delivery_reservations WHERE journal_cursor=0 ORDER BY host_id').all()
+
+// Proves: Stop and retirement make no quota decision, and a retired tail no
+// Resume followed holds no adoption reservation, through a later registration.
+it('retires a document in a workspace at its quota, holding no adoption reservation without a Resume',()=>{
+  const f=fixture();try{
+    enroll(f);completeActivation(f);commitEdit(f)
+    const ledger=unaccounted(f)
+    optionsOf(f).workspaceQuotaBytes=usageOf(f)
+    stopDocument(f,10)
+    expect(f.store.completeRetirement({workspaceId:'workspace',key:keyOf(retirement(f.storage)!),boundary:ownerBoundary(f),host,registeredAtMs:20,nowMs:20,guard(){}}))
+      .toEqual({status:'retired',replayed:false})
+    expect(adoptionReservations(f)).toEqual([])
+    expect(unaccounted(f)).toBe(ledger)
+    expect(f.storage.registerLiveHost({...host,updatedAtMs:30,guard(){}}).ok).toBe(true)
+    expect(adoptionReservations(f)).toEqual([])
+    expect(unaccounted(f)).toBe(ledger)
+  }finally{f.close()}
+})
+
+// Proves: Resume makes the successor's quota decision. Refused, it leaves the
+// retired tail and its accounting as they were; once space is freed it
+// prepares the successor with its adoption reservation.
+it('refuses a successor at quota retryably, then prepares it with its adoption reservation once space is freed',()=>{
+  // One client ID gives both fixtures the same bytes, so `sized` measures f.
+  const sized=fixture('Original',1),f=fixture('Original',1);try{
+    retirePredecessor(sized);const free=usageOf(sized);prepareSuccessor(sized)
+    const needed=usageOf(sized)-free,reservation=Number(sized.raw.prepare('SELECT reserved_bytes+accounted_bytes AS bytes FROM sync_relay_live_delivery_reservations WHERE journal_cursor=0').get()!.bytes)
+    retirePredecessor(f)
+    const ledger=unaccounted(f),retired=f.raw.prepare('SELECT * FROM sync_relay_service_activations').all()
+    // Room for the successor's activation, not its adoption.
+    optionsOf(f).workspaceQuotaBytes=usageOf(f)+needed-reservation
+    expect(()=>prepareSuccessor(f)).toThrow(SyncRelayQuotaExceededError)
+    expect(f.raw.prepare('SELECT * FROM sync_relay_service_activations').all()).toEqual(retired)
+    expect(adoptionReservations(f)).toEqual([])
+    expect(unaccounted(f)).toBe(ledger)
+    optionsOf(f).workspaceQuotaBytes+=reservation
+    expect(prepareSuccessor(f)).toEqual({document:f.document,replayed:false,completed:false})
+    expect(usageOf(f)).toBe(optionsOf(f).workspaceQuotaBytes)
+    expect(adoptionReservations(f)).toEqual([{host_id:'service'}])
+    expect(unaccounted(f)).toBe(ledger)
+  }finally{f.close();sized.close()}
+})
+
+function transitionHost(f:ReturnType<typeof fixture>,from:typeof host|{mode:'device'|'service';hostId:string;hostEpoch:ReturnType<typeof parseHostEpoch>;instanceId:string;connectionId:string},
+  toMode:'device'|'service',toHostId:string){
+  const transitionId=`transition-${from.hostEpoch}`
+  const begin=f.storage.beginLiveHostTransition({from,toMode,toHostId,transitionId,startedAtMs:40,guard(){}})
+  if(!begin.ok||!begin.snapshot.transition)throw new Error('transition refused')
+  const transitionGeneration=begin.snapshot.transition.transitionGeneration
+  if(!f.storage.commitLiveHostTransitionEpoch({transitionId,transitionGeneration,updatedAtMs:41}).ok)throw new Error('transition commit refused')
+  const coordinate={mode:toMode,hostId:toHostId,hostEpoch:parseHostEpoch(from.hostEpoch+1),instanceId:`instance-${toHostId}`,connectionId:`connection-${toHostId}`}
+  if(!f.storage.activateLiveHostTransition({...coordinate,transitionId,transitionGeneration,transitionFromEpoch:from.hostEpoch,updatedAtMs:42,guard(){}}).ok)throw new Error('activation refused')
+  return coordinate
+}
+
+// Proves: a successor adopting on another host than its predecessor's needs
+// no delivery through the prefix there, every host keeps funding for the
+// lineage, and the host registers again.
+it("adopts a successor on another host than its predecessor's and registers that host again",()=>{
+  const f=fixture();try{
+    const {edit,boundary}=retirePredecessor(f)
+    const ledger=unaccounted(f)
+    const device=transitionHost(f,host,'device','device'),other=transitionHost(f,device,'service','other') as typeof host
+    expect(unaccounted(f)).toBe(ledger)
+    f.store.prepare({capture:successor(f),host:other,shareId:'share',registeredAtMs:50,guard(){},validateBaseline,validateHistory,bounds})
+    expect(adoptionReservations(f)).toEqual([{host_id:'device'},{host_id:'other'},{host_id:'service'}])
+    const access=f.store.pending(f.document,other),delivery=f.storage.createLiveCommittedDeliveryStore(f.history,access)
+    const adoption=delivery.captureOwnerCut({host:other,document:f.document,actor,adoptionId:SUCCESSOR,expectedLocalSequence:2,maxBytes:1_000_000,maxEvents:100,throughCursor:0})
+    const terminal=boundary.terminalReceipt.journalCursor
+    delivery.acknowledgeOwnerAdoption(adoption,{adoptionId:SUCCESSOR,localYDocSequence:2,terminalCursor:terminal,adoptionReplayed:false})
+    const reserved=(hostId:string)=>f.raw.prepare('SELECT journal_cursor AS cursor FROM sync_relay_live_delivery_reservations WHERE host_id=? ORDER BY journal_cursor').all(hostId).map(row=>Number(row.cursor))
+    const cursors=f.raw.prepare('SELECT journal_cursor AS cursor FROM sync_relay_live_update_journal ORDER BY journal_cursor').all().map(row=>Number(row.cursor))
+    expect(reserved('other')).toEqual([edit.journalCursor])
+    expect(reserved('device')).toEqual([0,...cursors])
+    expect(reserved('service')).toEqual([0,...cursors.filter(cursor=>cursor>terminal)])
+    expect(unaccounted(f)).toBe(ledger)
+    expect(f.storage.registerLiveHost({...other,updatedAtMs:60,guard(){}}).ok).toBe(true)
+    expect(unaccounted(f)).toBe(ledger)
   }finally{f.close()}
 })
 

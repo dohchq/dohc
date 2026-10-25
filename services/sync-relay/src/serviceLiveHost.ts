@@ -481,8 +481,9 @@ export async function startServiceLiveHost(options: {
       for (const [key, document] of hosted) if (document.target.workspaceId === workspaceId) forget(key);
       changes?.notifyHost([workspaceId]);
     };
-    const forget = (key: string) => {
-      activation!.removeTarget(hosted.get(key)!.target); hosted.delete(key); leaving.delete(key); recovering.delete(key); parking.delete(key); idle.delete(key); unloading.delete(key);
+    const forget = (key: string) => {activation!.removeTarget(hosted.get(key)!.target); unhost(key);};
+    const unhost = (key: string) => {
+      hosted.delete(key); leaving.delete(key); recovering.delete(key); parking.delete(key); idle.delete(key); unloading.delete(key);
     };
     // The engine's reason while it holds unfinished work for the document, or undefined once nothing of it is loaded.
     // The unload names the activation the relay retains, so it cannot end another one's state.
@@ -518,6 +519,22 @@ export async function startServiceLiveHost(options: {
       activation!.removeTarget(row.target);
       return PARKING;
     };
+    // A document whose activation retires leaves through its retirement alone,
+    // whatever this daemon loaded, so it never waits on an ordinary unload. Once
+    // it retired, its successor activates when its document is hosted again.
+    // Null while no retirement is open.
+    const retire = async (key: string, joined: AbortSignal): Promise<string | undefined | null> => {
+      const row = hosted.get(key);
+      if (!row) return null;
+      const attached = attachments.get(row.target.workspaceId), required = attached?.announced.get(row.objectId);
+      const step = await activation!.retire(row.target, row.objectId, joined, {
+        departed: () => required !== undefined && reachedSince(attached!, row.objectId, required),
+        parked: () => required !== undefined && goneSince(attached!, row.objectId, required)});
+      if (!step) return null;
+      if (step.kind === "pending") return step.reason;
+      unhost(key);
+      return undefined;
+    };
     // Unloads a document that left the hosted set once it settled and its
     // output reached the relay; its workspace stays attached, so its hosted
     // replica can retire it. Resolves to why it stays loaded, or undefined
@@ -529,6 +546,8 @@ export async function startServiceLiveHost(options: {
     // daemon loaded the document. Its work is pushed before the unload, where
     // the engine can prove it, so the relay refuses it at its coordinates.
     const depart = async (key: string, joined: AbortSignal) => {
+      const retirement = await retire(key, joined);
+      if (retirement !== null) return retirement;
       await resolveUnload(key, joined);
       const row = hosted.get(key);
       if (!row) return undefined;
@@ -805,6 +824,7 @@ export async function startServiceLiveHost(options: {
       for(const workspaceId of [...attachments.keys()])yield* Effect.promise(()=>checkOrigin(workspaceId,signal).catch(()=>{}));
       activation=new ServiceActivationDriver({trustedAccount:options.trustedAccount,storage,history,client,host:coordinate,workspace:checked,config:config.activation,
         adoption:config.adoption!,restore,nextRequestId,deadlineMs:config.client.requestDeadlineMs,assertCurrent:checkPreparing,
+        maxApplications:config.settlement?.maxApplicationsPerSettlement,
         registered(){registered=true;},runDocument:(document,signal,operation)=>runDocument(document,signal,operation)});
       registerRetained();
       let index=0,lastError:string|undefined,lastIdleError:string|undefined;
@@ -833,9 +853,11 @@ export async function startServiceLiveHost(options: {
         });
         // A document whose owner lost live authority but that has not left, as right after Stop, records
         // what the engine applied before anything publishes, so its output does not hold back its workspace's.
+        // One whose activation retires reconciles, settles and publishes here until it leaves.
         for(const [key,row] of [...hosted]){
-          if(leaving.has(key) || unloading.has(key) || !checked(row.target.workspaceId) || !authorityLost(row))continue;
+          if(leaving.has(key) || !checked(row.target.workspaceId))continue;
           await step(async()=>{
+            if(await retire(key,passSignal)!==null || unloading.has(key) || !authorityLost(row))return;
             const document=activation!.departing(row.target,passSignal);
             if(document)await runDocument(document,passSignal,operation=>activation!.reconcileDeparted(row.target,document,operation));
           });

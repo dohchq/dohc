@@ -374,6 +374,31 @@ it("drains a stopped last document, then detaches the workspace and releases it,
   expect(await readFile(join(store, "replica.sqlite"), "utf8")).toBe("hosted");
 });
 
+// Proves: a document its owner resumes before its stopped activation retired
+// stays departing, so the host only retires that activation. Once the
+// retirement closes, the document is hosted again, where its successor activates.
+it("keeps a document resumed before its activation retired departing until that retirement closes", async () => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  let open = true;
+  const read = f.storage.serviceActivationRetirement.bind(f.storage);
+  vi.spyOn(f.storage, "serviceActivationRetirement").mockImplementation(document => open && document.objectId === binding.objectId
+    ? {relayDatabaseNamespace: namespace, activationId: `ordinary-activation-${"a".repeat(64)}`, workspaceId: scope.workspaceId, mainVersionId: "main",
+      objectId: binding.objectId, lineageClaimId: binding.lineageClaimId, path: binding.currentPath, restoreFenceGeneration: 0, acceptedThrough: 0, requestedAtMs: 20}
+    : read(document));
+  f.pending.add(binding.objectId);
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration});
+  await f.waitUpdate([]);
+  f.storage.enrollServiceHostDocument({...f.input, nowMs: 40});
+  await f.waitPasses();
+  expect(f.enrollment()).toMatchObject({enabled: true, retired: false, ownerStop: null});
+  expect(f.updates.at(-1)!.documents).toEqual([]);
+  expect(f.updates.at(-1)!.departing.map(row => row.objectId)).toEqual([binding.objectId]);
+  open = false;
+  f.host.reconcile();
+  await f.waitUpdate(["docs/a.md"]);
+  expect(f.updates.at(-1)!.departing).toEqual([]);
+});
+
 it("retires the last document without stopping the daemon", async () => {
   const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
   expect(f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 20}).ok).toBe(true);
