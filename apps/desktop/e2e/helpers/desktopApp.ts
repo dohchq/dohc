@@ -116,6 +116,8 @@ function launchEnv(input: {
     ...appDataFolders(input.workspace.homeDir),
     PATH: testSearchPath,
     Path: testSearchPath,
+    // Detection looks for the fakes' .cmd files only when PATHEXT lists .CMD.
+    ...(process.platform === "win32" ? { PATHEXT: ".COM;.EXE;.BAT;.CMD" } : {}),
     CLAUDE_CONFIG_DIR: undefined,
     CODEX_HOME: undefined,
     XDG_CACHE_HOME: undefined,
