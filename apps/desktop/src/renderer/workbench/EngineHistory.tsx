@@ -360,7 +360,7 @@ export function missingSourcesWords(
 const MARK_BOX = "grid size-[18px] shrink-0 place-items-center";
 const ROW = "h-[30px] w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent";
 const rowTone = (selected: boolean) => (selected ? "bg-selected text-ink" : "text-muted hover:bg-hover hover:text-ink");
-const COUNT = "shrink-0 rounded border border-line px-1 font-mono text-[10px] leading-[14px] text-muted";
+const COUNT = "shrink-0 rounded border border-line px-1 text-[10px] tabular-nums leading-[14px] text-muted";
 
 // Who made a change, as chats draw them: an agent's square, a person's face,
 // an automation's mark, a share link's ring. A change with no one author,
@@ -540,7 +540,7 @@ export function MomentRow(props: {
           data-testid="engine-moment-recorded-at"
           dateTime={recordedAt.iso}
           title={recordedAt.iso}
-          className={`shrink-0 font-mono text-[11px] text-subtle ${fold ? "col-start-3" : ""}`}
+          className={`shrink-0 text-[11px] tabular-nums text-subtle ${fold ? "col-start-3" : ""}`}
         >
           {formatClock(moment.recordedAtMs)}
         </time>
@@ -650,7 +650,7 @@ function GroupRow(props: {
           {group.moments.length}
           <span className="sr-only"> files</span>
         </span>
-        <time dateTime={recordedAt.iso} title={recordedAt.iso} className="shrink-0 font-mono text-[11px] text-subtle">
+        <time dateTime={recordedAt.iso} title={recordedAt.iso} className="shrink-0 text-[11px] tabular-nums text-subtle">
           {formatClock(group.recordedAtMs)}
         </time>
       </button>
@@ -682,7 +682,7 @@ function VersionMarkerRow(props: { version: VersionEntry["version"] }) {
         <Layers size={14} aria-hidden />
       </span>
       <span className="min-w-0 flex-1 truncate text-muted">{versionMarkerTitle(props.version)}</span>
-      <time dateTime={createdAt.iso} title={createdAt.iso} className="shrink-0 font-mono text-[11px] text-subtle">
+      <time dateTime={createdAt.iso} title={createdAt.iso} className="shrink-0 text-[11px] tabular-nums text-subtle">
         {formatClock(props.version.createdAtMs)}
       </time>
     </div>
@@ -728,7 +728,7 @@ function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; op
             </>
           ) : null}
           {recordedAt ? (
-            <time dateTime={recordedAt.iso} title={recordedAt.iso} className="font-mono">
+            <time dateTime={recordedAt.iso} title={recordedAt.iso} className="tabular-nums">
               {recordedAt.label}
             </time>
           ) : (
