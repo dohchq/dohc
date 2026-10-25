@@ -265,12 +265,12 @@ function liveDeliveryCopy(
       Icon: AlertTriangle,
     };
   }
-  // The server's copy misses an edit made while live editing was off. Resume
-  // in Live documents gives it that edit, as it does for a refused document.
+  // The server's copy is missing an owner edit. Resume in Live documents
+  // retries it, as it does for a refused document.
   if (reason === "live-edit-unadmitted") {
     return {
       title: "Live editing stopped",
-      body: "A document in this workspace changed while live editing was off, and the server's copy doesn't have that change. You can keep editing it in dohc. People you shared it with can't edit it live for now. Open Live documents to resume live editing.",
+      body: "The server hasn't applied an edit to a document in this workspace. You can keep editing it in dohc. People you shared it with can't edit it live. Open Live documents to resume live editing.",
       recovery: "live-documents",
       Icon: AlertTriangle,
     };

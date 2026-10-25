@@ -605,13 +605,13 @@ it("tells the operator a document without lineage must be opened on a desktop fi
   expect(f.onError).toHaveBeenCalledTimes(1);
 });
 
-// Proves: a document whose host copy misses an edit made while live editing
-// was off tells the operator, once, that it is held until its owner resumes it.
-it("tells the operator a document edited while live editing was off is held until its owner resumes it", async () => {
+// Proves: a document whose host copy is missing an owner edit tells the
+// operator, once, that it is held until its owner resumes it.
+it("tells the operator a document missing an owner edit is held until its owner resumes it", async () => {
   const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
   f.block(binding.objectId, "live-edit-unadmitted");
   await vi.waitFor(() => {f.host.reconcile(); expect(f.onError).toHaveBeenCalled();}, {timeout: 10_000});
-  expect(f.onError.mock.calls).toEqual([[expect.objectContaining({message: `Live editing of docs/a.md in workspace ${scope.workspaceId} is held: the document changed while live editing was off, and the session host's copy is missing that edit. It resumes once its owner resumes live editing in dohc. Its store is kept at ${join(f.data, storeName(scope.workspaceId))}.`})]]);
+  expect(f.onError.mock.calls).toEqual([[expect.objectContaining({message: `Live editing of docs/a.md in workspace ${scope.workspaceId} is held: the session host hasn't applied an edit to the document. Its owner can resume live editing in dohc to try again. Its store is kept at ${join(f.data, storeName(scope.workspaceId))}.`})]]);
   expect(f.host.blocked(binding)).toBe("live-edit-unadmitted");
   await f.waitPasses();
   expect(f.onError).toHaveBeenCalledTimes(1);

@@ -110,9 +110,9 @@ describe("LiveDocumentsDialog", () => {
       expect(actions(path)).toEqual([]);
     }
   });
-  // Proves: a document whose server copy misses an edit made while live editing
-  // was off offers Resume, alone and with a deferred Stop, through the same path.
-  it("offers Resume on a document whose server copy misses an edit, with and without a deferred Stop", async () => {
+  // Proves: a document whose server copy is missing an owner edit offers Resume,
+  // alone and with a deferred Stop, through the same path, with one Resume sentence each.
+  it("offers Resume on a document whose server copy is missing an edit, with and without a deferred Stop", async () => {
     const h=harness(), reason="live-edit-unadmitted" as const;
     h.load.mockResolvedValue(page([
       row("deferred.md",{status:"unavailable",reason,canResume:true,deferredStop:{unsentEdits:2,editable:true}}),
@@ -121,10 +121,13 @@ describe("LiveDocumentsDialog", () => {
     render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
     const deferred=await screen.findByTestId("live-document-row-deferred.md");
     expect(deferred.textContent).toContain("Live editing stopped. 2 unsent edits remain on this computer. Resume live editing to try sending them. You can keep editing.");
+    const held="The server hasn't applied an edit to this file. Resume live editing to try again.";
+    expect(screen.getAllByText(held)).toHaveLength(1);
+    expect(screen.getByTestId("live-document-row-edited.md").textContent).toContain(held);
     for (const path of ["deferred.md","edited.md"]) {
       const document=screen.getByTestId(`live-document-row-${path}`);
-      expect(document.children[1]?.textContent).toBe("Server copy misses an edit");
-      expect(document.textContent).toContain("This file changed while live editing was off, and the server's copy doesn't have that change. Resume live editing to add it.");
+      expect(document.children[1]?.textContent).toBe("Server copy is missing an edit");
+      expect(document.textContent!.split("Resume live editing to").length-1).toBe(1);
     }
     // A deferred Stop has already run, so only the other row still offers Stop.
     expect(actions("deferred.md")).toEqual(["Resume live editing"]);
@@ -305,14 +308,14 @@ describe("LiveDocumentsDialog", () => {
       "Stopped by the server",
       "Not started",
       "Server copy doesn't match",
-      "Server copy misses an edit",
+      "Server copy is missing an edit",
       "Stopped",
       "Stopped",
     ]);
-    // Only a document edited while live editing was off says the server's copy
-    // misses that edit, and that a Resume adds it.
+    // Only a document whose server copy is missing an owner edit says so, and
+    // that a Resume tries it again.
     const edited =
-      "This file changed while live editing was off, and the server's copy doesn't have that change. Resume live editing to add it.";
+      "The server hasn't applied an edit to this file. Resume live editing to try again.";
     expect(screen.getAllByText(edited)).toHaveLength(1);
     expect(screen.getByTestId("live-document-row-docs/edited.md").textContent).toContain(edited);
     expect(actions("docs/edited.md")).toEqual([

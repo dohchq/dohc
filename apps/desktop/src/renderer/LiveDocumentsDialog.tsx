@@ -141,7 +141,7 @@ function statusLabel(row: LiveDocumentRow): string {
   if (row.reason === "session-host-refused") return "Stopped by the server";
   if (row.reason === "session-host-diverged") return "Server copy doesn't match";
   if (row.reason === "live-document-without-lineage") return "Not started";
-  if (row.reason === "live-edit-unadmitted") return "Server copy misses an edit";
+  if (row.reason === "live-edit-unadmitted") return "Server copy is missing an edit";
   switch (row.status) {
     case "ready":
       return "Live";
@@ -557,10 +557,10 @@ export function LiveDocumentsDialog({
                     Live editing can't start until you open this document once in dohc. After you open it, resume live editing.
                   </p>
                 ) : null}
-                {/* A Resume replaces the server's held copy with one that has the edit. */}
-                {row.reason === "live-edit-unadmitted" ? (
+                {/* A Resume retries the edit. One that would remove live work stays held. A deferred Stop's note already offers Resume. */}
+                {row.reason === "live-edit-unadmitted" && !row.deferredStop ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
-                    This file changed while live editing was off, and the server's copy doesn't have that change. Resume live editing to add it.
+                    The server hasn't applied an edit to this file. Resume live editing to try again.
                   </p>
                 ) : null}
                 {/* Resume and Stop can't help here, so the row offers neither. */}

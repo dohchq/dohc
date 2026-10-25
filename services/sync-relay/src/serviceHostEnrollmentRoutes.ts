@@ -93,7 +93,7 @@ export function createServiceHostEnrollmentRoutes(options: {
     if (storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) !== row.objectId) return {...base, status: "unavailable", reason: "document-unavailable"};
     // Only the owner's Resume lets the host try a document it could not continue.
     // One with no live-editing history needs its owner to open it first. A Resume of one whose
-    // host copy misses an edit made while live editing was off retires its held activation.
+    // host copy is missing an owner edit retires its held activation.
     const block = host.blocked(row);
     if (block) return {...base, status: "unavailable", reason: block === "without-lineage" ? "live-document-without-lineage" :
       block === "live-edit-unadmitted" ? "live-edit-unadmitted" : "session-host-refused"};

@@ -1009,12 +1009,17 @@ it.skipIf(engine.missing).each([
       }, relayShareOperations, ownerHandlers);
       const stop = () => Promise.resolve(handlers.get(relayShareOperations.stopOwnerLiveDocument.channel)!({sender: {id: 1}}, {workspaceId, path}));
       const resume = () => Promise.resolve(handlers.get(relayShareOperations.resumeOwnerLiveDocument.channel)!({sender: {id: 1}}, {workspaceId, path}));
-      // The document's state in the session host's store.
-      const hostDocumentState = async () => {
+      // The session host's store, once it has one.
+      const hostStore = async () => {
         const stores = join(relayRoot, "relay-deployment", "live-host");
         const store = (await readdir(stores)).find(entry => /^[0-9a-f]{64}$/u.test(entry));
+        return store === undefined ? undefined : join(stores, store);
+      };
+      // The document's state in the session host's store.
+      const hostDocumentState = async () => {
+        const store = await hostStore();
         if (!store) return undefined;
-        const db = new DatabaseSync(join(stores, store, SECRET_FILE_STORE_RELATIVE_PATH), {readOnly: true});
+        const db = new DatabaseSync(join(store, SECRET_FILE_STORE_RELATIVE_PATH), {readOnly: true});
         try {return (db.prepare("SELECT state FROM hosted_documents WHERE object_id=?").get(document.binding.objectId) as {state: string} | undefined)?.state;}
         finally {db.close();}
       };
@@ -1098,10 +1103,9 @@ it.skipIf(engine.missing).each([
         const row = (discoveryPayload as {documents: Array<{path: string}>}).documents.find(row => row.path === path);
         return {ready, row};
       };
-      const unadmitted = {ready: false, row: {path, status: "unavailable", reason: "live-edit-unadmitted"}};
-      // The operator's reports that the host's copy misses the owner's edit.
-      const reports = () => relayServer!.diagnostics().stderr
-        .split(`Live editing of ${path} in workspace ${workspaceId} is held: the document changed while live editing was off`).length - 1;
+      const ready = {ready: true, row: expect.objectContaining({path, status: "ready"})};
+      // The operator's reports that the session host holds the document.
+      const reports = () => relayServer!.diagnostics().stderr.split(`Live editing of ${path} in workspace ${workspaceId} is held`).length - 1;
       await resume();
       if (preStopFeed) {
         // Finish the pre-Stop pass, then hold the fresh feed before it can fence the stale copy.
@@ -1117,35 +1121,24 @@ it.skipIf(engine.missing).each([
         resumedFeed.release();
         await waitForHostedLog(resumedFeed, resumedFeed.delivered, "resumed delivery");
       }
-      await expect.poll(liveRow, {timeout: 120_000}).toEqual(unadmitted);
-      expect(await hostDocumentState()).toBe("held");
-      await expect.poll(reports, {timeout: 60_000}).toBe(1);
-      // A Resume tries once more and blocks again. The copy is never ready.
-      await resume();
+      // A successor captures the stopped edit, and the session host's copy has it.
+      await expect.poll(liveRow, {timeout: 120_000}).toEqual(ready);
+      expect(await hostDocumentState()).toBe("ready");
+      expect(reports()).toBe(0);
+      // The settlement commits before the engine writes the file.
+      await expect.poll(async () => readFile(join((await hostStore())!, path), "utf8"), {timeout: 10_000}).toContain("Name: Local after stop");
       await expect.poll(async () => {
-        expect((await liveRow()).ready).toBe(false);
-        return reports();
-      }, {timeout: 120_000}).toBe(2);
-      expect(await liveRow()).toEqual(unadmitted);
-      // The owner keeps editing the file, and the peer gets each edit through ordinary sync.
-      await editOrdinary("Local while blocked", "while-blocked");
-      // A relay restart starts the session host from its store, which still holds the document.
+        await peer!.capture.runRelaySync(page => peer!.relay.pull(page));
+        return readFile(join(rootB, path), "utf8");
+      }, {timeout: 120_000}).toContain("Name: Local after stop");
+      // A relay restart starts the session host from its store, and the document is ready again.
       await relayServer.stop();
       relayServer = await spawnSyncRelay(relayOptions);
       proxy.routeRelayTo(relayServer.baseUrl);
-      await expect.poll(async () => {
-        expect((await liveRow()).ready).toBe(false);
-        return reports();
-      }, {timeout: 120_000}).toBe(1);
-      expect(await liveRow()).toEqual(unadmitted);
-      expect(await hostDocumentState()).toBe("held");
-      await resume();
-      await expect.poll(async () => {
-        expect((await liveRow()).ready).toBe(false);
-        return reports();
-      }, {timeout: 120_000}).toBe(2);
-      expect(await liveRow()).toEqual(unadmitted);
-      // Another document of the workspace still starts live editing.
+      await expect.poll(liveRow, {timeout: 120_000}).toEqual(ready);
+      expect(await hostDocumentState()).toBe("ready");
+      expect(reports()).toBe(0);
+      // Another document of the workspace also starts live editing.
       const other = "notes/other.md";
       await adapter.writeTextFile({workspaceId, versionId: "main", path: other, text: "# Other\n",
         publish: true, metadata: {origin: "api"}, author: {kind: "human", humanId: "local-person"}});
@@ -1160,8 +1153,9 @@ it.skipIf(engine.missing).each([
         headers: {authorization: `Bearer ${relayConnection.token}`, "content-type": "application/json"},
         body: JSON.stringify({shareId: (await otherShare.json() as {shareId: string}).shareId})});
       expect([200, 202]).toContain(otherEnrollment.status);
-      await expect.poll(async () => (await discovery()).map(row => row.binding.currentPath), {timeout: 120_000}).toEqual([other]);
-      expect(await liveRow()).toEqual(unadmitted);
+      // Discovery lists documents by path.
+      await expect.poll(async () => (await discovery()).map(row => row.binding.currentPath), {timeout: 120_000}).toEqual([other, path]);
+      expect(await liveRow()).toEqual(ready);
     }
     await session.close({settle: false});
   } finally {

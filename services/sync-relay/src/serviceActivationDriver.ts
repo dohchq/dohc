@@ -54,8 +54,8 @@ export function parseServiceActivationConfig(value:unknown){
 }
 export type ServiceActivationConfig=NonNullable<ReturnType<typeof parseServiceActivationConfig>>;
 /**
- * Why a document waits for its owner: the engine refused it, its copy here misses an edit made while live
- * editing was off, or it has no Y.Doc lineage to activate.
+ * Why a document waits for its owner: the engine refused it, its copy here is missing an owner edit, or it
+ * has no Y.Doc lineage to activate.
  */
 export type ServiceActivationBlock="refused"|"live-edit-unadmitted"|"without-lineage";
 type Owner={consumer:OwnerCommittedDelivery;transport:ReturnType<typeof serviceOwnerTransport>;completed:boolean;activationPending:boolean;

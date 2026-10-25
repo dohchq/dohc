@@ -230,7 +230,7 @@ export async function startSelfHostedLiveHost(options: {
         options.onError?.(new Error(block === "without-lineage"
           ? `Live editing of ${row.path} in workspace ${row.workspaceId} cannot start: the document has no live-editing history. It starts once its owner opens it in dohc on a desktop. ${store}`
           : block === "live-edit-unadmitted"
-            ? `Live editing of ${row.path} in workspace ${row.workspaceId} is held: the document changed while live editing was off, and the session host's copy is missing that edit. It resumes once its owner resumes live editing in dohc. ${store}`
+            ? `Live editing of ${row.path} in workspace ${row.workspaceId} is held: the session host hasn't applied an edit to the document. Its owner can resume live editing in dohc to try again. ${store}`
             : `Live editing of ${row.path} in workspace ${row.workspaceId} stopped until its owner tries again. ${store}`));
       }
       // A workspace with no documents detaches once its replica drained, then

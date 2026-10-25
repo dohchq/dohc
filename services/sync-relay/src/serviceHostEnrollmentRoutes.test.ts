@@ -149,10 +149,10 @@ it("reports a document without live-editing history apart from other refusals", 
   expect(await documents()).toEqual([{path: binding.currentPath, status: "unavailable", reason: "session-host-refused"}]);
 });
 
-// Proves: a document whose host copy misses an edit made while live editing
-// was off reads as its own reason. A Resume still asks for one more attempt,
-// which blocks it again with the same reason.
-it("reports a document edited while live editing was off apart from other refusals", async () => {
+// Proves: a document whose host copy is missing an owner edit reads as its
+// own reason. A Resume still asks for one more attempt, which blocks it again
+// with the same reason.
+it("reports a document missing an owner edit apart from other refusals", async () => {
   const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
   const documents = async () => (await (await f.handle(f.request())).json()).documents;
   const unadmitted = {path: binding.currentPath, status: "unavailable", reason: "live-edit-unadmitted"};

@@ -1332,7 +1332,8 @@ it("converges on the next pull after the reply to a hosted commit is lost, and a
   expect(converged.moments.slice(0, committed.moments.length)).toEqual(committed.moments);
   expect(new Set(converged.moments).size).toBe(converged.moments.length);
   expect(proof.hosted(objectId)?.state).toBe("ready");
-  expect(readFileSync(join(proof.store, "docs/b.md"), "utf8")).toBe(second.markdown());
+  // The settlement commits before the engine writes the file.
+  await vi.waitFor(() => expect(readFileSync(join(proof.store, "docs/b.md"), "utf8")).toBe(second.markdown()), {timeout: 10000});
   return {commit, relayed, committed, converged, pullsAfterReconnect: harness.pulls.slice(pulls)};
 }), 120000);
 
@@ -1349,7 +1350,8 @@ it("resumes a document its owner edited while live editing was stopped as a succ
   expect(proof.activation()!.source.predecessorActivationId).toBe(saved.activationId);
   const markdown = "---\nbeforeActivation: ordinary-owner\nwhileStopped: ordinary-owner\n---\n\nHello";
   expect((await proof.hostState()).markdown).toBe(markdown);
-  expect(readFileSync(join(proof.store, "docs/a.md"), "utf8")).toBe(markdown);
+  // The settlement commits before the engine writes the file.
+  await vi.waitFor(() => expect(readFileSync(join(proof.store, "docs/a.md"), "utf8")).toBe(markdown), {timeout: 10000});
   expect(proof.hosted()).toEqual({state: "ready", reason: null});
   expect(readdirSync(proof.hostRoot)).toEqual([basename(proof.store)]);
   // Later passes capture nothing more, while its workspace keeps pulling. Each
@@ -1403,7 +1405,7 @@ it("holds a document its owner edited while paused, and Resume retires the held 
   expect(held).toBeGreaterThan(captured);
   await vi.waitFor(() => expect(harness.pulls.length).toBeGreaterThan(pulls + 12), {timeout: 30000});
   expect(attempts()).toBe(held);
-  expect(proof.reports.filter(report => report.startsWith("Live editing of docs/a.md"))).toEqual([`Live editing of docs/a.md in workspace workspace is held: the document changed while live editing was off, and the session host's copy is missing that edit. It resumes once its owner resumes live editing in dohc. Its store is kept at ${proof.store}.`]);
+  expect(proof.reports.filter(report => report.startsWith("Live editing of docs/a.md"))).toEqual([`Live editing of docs/a.md in workspace workspace is held: the session host hasn't applied an edit to the document. Its owner can resume live editing in dohc to try again. Its store is kept at ${proof.store}.`]);
   expect(proof.activations()).toEqual([completed]);
 
   // Resume again: the enrollment route retires the held activation at its seed, and the relay keeps its owner delivery in history.

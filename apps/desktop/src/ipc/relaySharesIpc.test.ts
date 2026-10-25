@@ -206,8 +206,8 @@ describe("owner live document enrollment", () => {
     ],nextCursor:null});
   });
   // Proves: a deferred Stop offers Resume on a document whose server copy
-  // misses an edit made while live editing was off, since a Resume adds it.
-  it("offers Resume for a deferred Stop on a document edited while live editing was off",async () => {
+  // is missing an owner edit, since a Resume retries it.
+  it("offers Resume for a deferred Stop on a document whose server copy is missing an edit",async () => {
     const h=harness();
     h.localStops.mockResolvedValue([{state:"released",binding:null,document:{mainVersionId:"main",objectId:"object",currentPath:"edited.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:1,editable:true}}]);
     h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1")

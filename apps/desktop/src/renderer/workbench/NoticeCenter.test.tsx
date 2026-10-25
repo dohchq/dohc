@@ -1489,12 +1489,12 @@ describe("notice center", () => {
       title: "Live editing stopped",
       body: "The server stopped live editing because its copy of this workspace no longer matches the synced one. Edits people made live may not have reached your files. People you shared its documents with can't edit them live. Contact the server's operator.",
     },
-    // A document edited while live editing was off resumes there too: its
-    // Resume gives the server's copy that edit.
+    // A document whose server copy is missing an owner edit resumes there too:
+    // its Resume tries that edit again.
     {
       reason: "live-edit-unadmitted" as const,
       title: "Live editing stopped",
-      body: "A document in this workspace changed while live editing was off, and the server's copy doesn't have that change. You can keep editing it in dohc. People you shared it with can't edit it live for now. Open Live documents to resume live editing.",
+      body: "The server hasn't applied an edit to a document in this workspace. You can keep editing it in dohc. People you shared it with can't edit it live. Open Live documents to resume live editing.",
     },
   ])("sends a $reason document to the live documents list", async ({ reason, title, body }) => {
     const onOpenLiveDocuments = vi.fn();

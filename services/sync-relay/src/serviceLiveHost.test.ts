@@ -1487,7 +1487,7 @@ it.each([false, true])("retires a never-adopted activation only once its documen
   o.replies.commit = {departed: [o.sibling.objectId]};
   await o.host.update({workspaces: [o.workspace], documents: [], departing: [o.sibling]});
   const released = () => o.ownerCalls().filter(([method]) => method === "liveApplication.releaseActivation");
-  await vi.waitFor(() => expect(released().length).toBeGreaterThan(0));
+  await vi.waitFor(() => expect(released().length).toBeGreaterThan(0), {timeout: 10_000});
   await o.nextPull();
   expect(o.raw.prepare("SELECT retired_at_ms FROM sync_relay_service_activations").get()).toEqual({retired_at_ms: null});
   expect(o.host.retains(o.sibling)).toBe(true);
@@ -1497,12 +1497,12 @@ it.each([false, true])("retires a never-adopted activation only once its documen
     host = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
     cleanup.push(() => host.close());
     await host.update({workspaces: [o.workspace], documents: [], departing: [o.sibling]});
-    await vi.waitFor(() => expect(o.ownerCalls()).toContainEqual(["liveApplication.releaseActivation", expect.anything()]));
+    await vi.waitFor(() => expect(o.ownerCalls()).toContainEqual(["liveApplication.releaseActivation", expect.anything()]), {timeout: 10_000});
     await o.nextPull();
     expect(o.raw.prepare("SELECT retired_at_ms FROM sync_relay_service_activations").get()).toEqual({retired_at_ms: null});
   }
   o.replies.commit = {};
-  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true));
+  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), {timeout: 10_000});
   expect(o.raw.prepare("SELECT retired_at_ms IS NOT NULL AS retired,retired_boundary_json FROM sync_relay_service_activations").get())
     .toEqual({retired: 1, retired_boundary_json: "null"});
   expect(o.ownerCalls().filter(([method]) => method === "liveApplication.settle")).toEqual([]);

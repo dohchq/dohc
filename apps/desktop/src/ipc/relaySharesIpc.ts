@@ -168,8 +168,8 @@ export function createRelaySharesIpcHandlers<
       // enrollment wins; all bindings and server-only credentials stay in main.
       // Resume is also how the owner tries again a document the server refused,
       // one it could not start until the owner opened it, or one whose server
-      // copy misses an edit made while live editing was off: Resume retires the
-      // held session so the edit applies.
+      // copy is missing an owner edit: Resume retires the held session so the
+      // edit can apply.
       const documents = new Map([...stopped.documents, ...current.documents].map(document => [document.path, {
         ...document, canResume: document.reason === "session-host-refused" || document.reason === "live-document-without-lineage" ||
           document.reason === "live-edit-unadmitted" || (!document.reason && (document.status === "retired" || document.status === "paused")),
