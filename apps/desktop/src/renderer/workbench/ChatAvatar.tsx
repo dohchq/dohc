@@ -32,6 +32,9 @@ const SIZES = {
 
 const ICON = { post: 16, row: 14, comment: 12, strip: 10 } as const;
 
+// A strip shows one initial: two wide letters, such as "WW", overflow 18px.
+const INITIALS = { post: 2, row: 2, comment: 2, strip: 1 } as const;
+
 // An agent is a rounded square and a person is round, whatever their colors.
 // The drawing rounds a 28px square by 8px; an 18px strip takes 4px.
 const AGENT_RADIUS = { post: "rounded-lg", row: "rounded-lg", comment: "rounded-lg", strip: "rounded" } as const;
@@ -46,9 +49,9 @@ function firstGrapheme(word: string): string | undefined {
     : Array.from(word)[0];
 }
 
-// The first letter of the first two words. One word gives one letter.
-function initials(name: string): string {
-  const letters = name.trim().split(/\s+/, 2).flatMap((word) => firstGrapheme(word) ?? []);
+// The first letter of each of the first `count` words. One word gives one letter.
+function initials(name: string, count: number): string {
+  const letters = name.trim().split(/\s+/, count).flatMap((word) => firstGrapheme(word) ?? []);
   return letters.length ? letters.join("").toUpperCase() : "?";
 }
 
@@ -74,7 +77,7 @@ export function ChatAvatar(props: {
           SIZES[size]
         } ${props.className ?? ""}`}
       >
-        {initials(props.name)}
+        {initials(props.name, INITIALS[size])}
       </span>
     );
   }
@@ -103,7 +106,7 @@ export function ChatAvatar(props: {
           : `rounded-full border-line ${classes}`
       } ${props.className ?? ""}`}
     >
-      {agent ? <Sparkles size={ICON[size]} strokeWidth={1.9} aria-hidden /> : initials(props.name)}
+      {agent ? <Sparkles size={ICON[size]} strokeWidth={1.9} aria-hidden /> : initials(props.name, INITIALS[size])}
     </span>
   );
 }

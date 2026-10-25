@@ -5106,7 +5106,7 @@ export function ChatsView(props: {
                         labelTestId="chats-other-agent-name"
                         muted
                         trailing={
-                          <span className="shrink-0 truncate text-[10px] text-subtle">
+                          <span className="max-w-[50%] shrink-0 truncate text-[10px] tabular-nums text-subtle">
                             via {agent.owner}
                           </span>
                         }
