@@ -170,8 +170,23 @@ impl OriginRecord {
         host_id: &str,
         evidence: &str,
     ) -> Result<bool, SyncError> {
+        Ok(self.names(origin, host_id)
+            && match self {
+                Self::Bootstrap { source, .. } => {
+                    hex_sha256(&serde_json::to_vec(source).map_err(SyncError::corrupt)?) == evidence
+                }
+                Self::Owner { source } => source.evidence_digest == evidence,
+            })
+    }
+
+    /// Whether a restore of the lineage names this origin, on its host.
+    pub(super) fn names(
+        &self,
+        origin: &dohc_engine_collab::live_update_application::RestoreDeliveryOrigin,
+        host_id: &str,
+    ) -> bool {
         use dohc_engine_collab::live_update_application::RestoreDeliveryOrigin;
-        Ok(match (self, origin) {
+        match (self, origin) {
             (
                 Self::Bootstrap {
                     source,
@@ -179,18 +194,11 @@ impl OriginRecord {
                     ..
                 },
                 RestoreDeliveryOrigin::Bootstrap { id },
-            ) => {
-                source.bootstrap_id == *id
-                    && host_coordinate.host_id == host_id
-                    && hex_sha256(&serde_json::to_vec(source).map_err(SyncError::corrupt)?)
-                        == evidence
-            }
+            ) => source.bootstrap_id == *id && host_coordinate.host_id == host_id,
             (Self::Owner { source }, RestoreDeliveryOrigin::Owner { id }) => {
-                source.adoption_id == *id
-                    && source.host_coordinate.host_id == host_id
-                    && source.evidence_digest == evidence
+                source.adoption_id == *id && source.host_coordinate.host_id == host_id
             }
             _ => false,
-        })
+        }
     }
 }

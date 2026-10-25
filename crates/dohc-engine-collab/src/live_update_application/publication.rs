@@ -126,7 +126,7 @@ pub(crate) fn require_restore_registration_in(
 
 /// The text restore_fence::require_registration reads from the document's newest fence.
 fn fence_registration(document: &str) -> String {
-    format!("coalesce((SELECT length(CAST(relay_database_namespace AS BLOB))+coalesce(length(CAST(resume_receipt_json AS BLOB)),0)+coalesce(length(CAST(cancelled_json AS BLOB)),0) FROM live_restore_fences WHERE {document} ORDER BY new_generation DESC LIMIT 1),0)")
+    format!("coalesce((SELECT length(CAST(relay_database_namespace AS BLOB))+coalesce(length(CAST(resume_receipt_json AS BLOB)),0)+CASE WHEN cancelled_json IS NULL THEN 0 ELSE length(CAST(cancelled_json AS BLOB))+length(CAST(input_json AS BLOB))+length(CAST(receipt_json AS BLOB)) END FROM live_restore_fences WHERE {document} ORDER BY new_generation DESC LIMIT 1),0)")
 }
 
 fn charge_sql(

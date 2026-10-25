@@ -2787,14 +2787,24 @@ fn accept_authored(
 /// interval admitted, with the proof that publishes it. Returns the settled
 /// moment's authors.
 fn settle_interval(f: &mut Fixture, terminal: i64, moment_id: &str) -> serde_json::Value {
-    use dohc_engine_collab::live_update_application::{LiveUpdateReceipt, with_settlement};
-    use dohc_engine_storage::TxnOutcome;
-    let receipt = LiveUpdateReceipt {
+    let receipt = dohc_engine_collab::live_update_application::LiveUpdateReceipt {
         delivery_id: format!("delivery-{terminal}"),
         update_digest: hex_sha256(&f.bytes),
         journal_cursor: terminal,
         accepting_host_epoch: 1,
     };
+    settle_through(f, receipt, moment_id);
+    moment_authors(&f.store, moment_id).expect("the host credits its interval")
+}
+
+/// Settle through `receipt` as the host does and journal the settlement.
+fn settle_through(
+    f: &mut Fixture,
+    receipt: dohc_engine_collab::live_update_application::LiveUpdateReceipt,
+    moment_id: &str,
+) {
+    use dohc_engine_collab::live_update_application::with_settlement;
+    use dohc_engine_storage::TxnOutcome;
     with_settlement::<Box<dyn std::error::Error>, _>(
         &mut f.store,
         &f.handle,
@@ -2846,7 +2856,6 @@ fn settle_interval(f: &mut Fixture, terminal: i64, moment_id: &str) -> serde_jso
         },
     )
     .unwrap();
-    moment_authors(&f.store, moment_id).expect("the host credits its interval")
 }
 
 fn moment_authors(store: &EngineStore, moment_id: &str) -> Option<serde_json::Value> {
@@ -4163,7 +4172,7 @@ fn malformed_restore_receipt_pull(field: &str, value: serde_json::Value) {
     })).unwrap();
     // Serialize through the native metadata and restore types, in native record order.
     let bytes = format!(
-        "{{\"kind\":\"application\",\"relayDatabaseNamespace\":\"relay\",\"eventCount\":1,\"evidenceDigest\":\"{evidence}\",\"updateByteLength\":{},\"metadata\":{},\"sourceApplication\":{{\"localYDocSequence\":2,\"hostCoordinate\":{{\"hostId\":\"host\",\"hostEpoch\":1,\"instanceId\":\"instance\",\"connectionId\":\"connection\"}}}},\"sourceRestore\":{},\"contentCoordinate\":{}}}",
+        "{{\"kind\":\"application\",\"relayDatabaseNamespace\":\"relay\",\"eventCount\":1,\"evidenceDigest\":\"{evidence}\",\"updateByteLength\":{},\"metadata\":{},\"sourceApplication\":{{\"localYDocSequence\":2,\"hostCoordinate\":{{\"hostId\":\"host\",\"hostEpoch\":1,\"instanceId\":\"instance\",\"connectionId\":\"connection\"}}}},\"sourceRestore\":{},\"cancelledRestores\":[],\"contentCoordinate\":{}}}",
         f.bytes.len(),
         serde_json::to_string(&metadata).unwrap(),
         serde_json::to_string(&restore).unwrap(),

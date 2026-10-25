@@ -2367,13 +2367,14 @@ fn resumed_generations(
     let b = &held.binding;
     let mut query = conn
         .prepare(
-            "WITH RECURSIVE resumed(generation) AS (SELECT ?6 UNION ALL
-               SELECT f.old_generation FROM live_restore_fences f JOIN resumed r ON f.new_generation=r.generation
+            "WITH RECURSIVE resumed(generation,cancelled) AS (SELECT ?6,0 UNION ALL
+               SELECT f.old_generation,f.cancelled_json IS NOT NULL FROM live_restore_fences f JOIN resumed r ON f.new_generation=r.generation
                WHERE f.relay_database_namespace=?1 AND f.workspace_id=?2 AND f.main_version_id=?3 AND f.object_id=?4
                  AND f.lineage_claim_id=?5 AND (f.resume_receipt_json IS NOT NULL OR f.cancelled_json IS NOT NULL) LIMIT ?7)
-             SELECT generation FROM resumed",
+             SELECT generation,cancelled FROM resumed",
         )
         .map_err(read_sql)?;
+    let doc = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
     let limit = i64::try_from(max_events)
         .map_err(|_| ApplicationError::Corrupt)?
         .saturating_add(1);
@@ -2388,14 +2389,28 @@ fn resumed_generations(
                 b.restore_fence_generation,
                 limit
             ],
-            |row| row.get::<_, i64>(0),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
         )
         .map_err(read_sql)?;
     let mut generations = std::collections::HashSet::new();
-    for (visited, generation) in rows.enumerate() {
-        let generation = generation.map_err(read_sql)?;
+    for (visited, row) in rows.enumerate() {
+        let (generation, cancelled) = row.map_err(read_sql)?;
         if visited >= max_events {
             return Err(over_budget());
+        }
+        // A cancellation carried the lineage from this generation to the next.
+        if cancelled
+            && restore_fence::cancelled_at(
+                conn,
+                &held.namespace,
+                &doc,
+                Some(&b.lineage_claim_id),
+                generation + 1,
+                None,
+            )?
+            .is_none()
+        {
+            return Err(ApplicationError::Corrupt);
         }
         generations.insert(generation);
     }

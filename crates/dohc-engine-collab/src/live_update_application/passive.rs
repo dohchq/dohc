@@ -42,7 +42,10 @@ pub struct ReplicaJournalRow {
 /// the accepted endpoint the fence froze. A replica at exactly the fence's
 /// old generation and that endpoint advances its generation; its document
 /// state and accepted history stay, and no retained work arrives with it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Before the lineage's first accepted event that endpoint is event zero at
+/// the lineage's initial digest. The replica keeps the record it applied, and
+/// a replay must be that record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReplicaRestoreCancellation {
     pub relay_database_namespace: String,
@@ -88,102 +91,130 @@ pub fn apply_page(
     let mut appended = std::collections::HashMap::<DocKey, i64>::new();
     #[cfg(any(test, feature = "test-support"))]
     let mut timings = page_timings::PhaseTimer::default();
-    let result = store.write_with(faults, |tx| -> Result<ReplicaPageResult, ApplicationError> {
-        let mut cache = durable::TransactionDocCache::new(tx);
-        let mut touched = std::collections::HashSet::new();
-        let frontier = read_frontiers(tx, workspace)?;
-        if after > frontier.journal_cursor { return Err(ApplicationError::Conflict); }
-        let mut result = ReplicaPageResult {revision:frontier.revision, log_cursor:frontier.log_cursor,
-            journal_cursor:frontier.journal_cursor, applied:0, skipped:0, blocked_cursor:None};
-        let mut previous_cursor = after;
-        #[cfg(any(test, feature = "test-support"))]
-        timings.start_rows();
-        for entry in rows {
-            let row = match entry {
-                ReplicaJournalEntry::Update(row) => row,
-                ReplicaJournalEntry::Cancellation(record) => {
-                    if record.journal_cursor <= previous_cursor {
+    let result = store.write_with(
+        faults,
+        |tx| -> Result<ReplicaPageResult, ApplicationError> {
+            let mut cache = durable::TransactionDocCache::new(tx);
+            let mut touched = std::collections::HashSet::new();
+            let frontier = read_frontiers(tx, workspace)?;
+            if after > frontier.journal_cursor {
+                return Err(ApplicationError::Conflict);
+            }
+            let mut result = ReplicaPageResult {
+                revision: frontier.revision,
+                log_cursor: frontier.log_cursor,
+                journal_cursor: frontier.journal_cursor,
+                applied: 0,
+                skipped: 0,
+                blocked_cursor: None,
+            };
+            let mut previous_cursor = after;
+            #[cfg(any(test, feature = "test-support"))]
+            timings.start_rows();
+            for entry in rows {
+                let row = match entry {
+                    ReplicaJournalEntry::Update(row) => row,
+                    ReplicaJournalEntry::Cancellation(record) => {
+                        if record.journal_cursor <= previous_cursor {
+                            return Err(ApplicationError::Conflict);
+                        }
+                        previous_cursor = record.journal_cursor;
+                        match apply_cancellation(tx, workspace, record)? {
+                            Control::Applied => result.applied += 1,
+                            Control::Skipped => result.skipped += 1,
+                            Control::Blocked => {
+                                result.blocked_cursor = Some(record.journal_cursor);
+                                break;
+                            }
+                        }
+                        if faults.poll(FaultPoint::SyncBeforeApplyCommit) == FaultAction::Crash {
+                            return Err(ApplicationError::Interrupted);
+                        }
+                        result.journal_cursor = result.journal_cursor.max(record.journal_cursor);
+                        continue;
+                    }
+                };
+                row.admitted.validate()?;
+                identifier(&row.relay_database_namespace, 512)?;
+                digest(&row.evidence_digest)?;
+                let event = &row.admitted;
+                let b = &event.metadata.accepted.binding;
+                let receipt = &event.metadata.accepted.receipt;
+                if let Some(authority) = &row.authority {
+                    digest(&authority.lineage_claim_id)?;
+                    integer(authority.baseline_sequence, 0, SAFE)?;
+                    integer(authority.restore_fence_generation, 0, SAFE)?;
+                    if authority.lineage_claim_id == b.lineage_claim_id
+                        && authority.restore_fence_generation < b.restore_fence_generation
+                    {
                         return Err(ApplicationError::Conflict);
                     }
-                    previous_cursor = record.journal_cursor;
-                    match apply_cancellation(tx, workspace, frontier.journal_cursor, record)? {
-                        Control::Applied => result.applied += 1,
-                        Control::Skipped => result.skipped += 1,
-                        Control::Blocked => {
-                            result.blocked_cursor = Some(record.journal_cursor);
-                            break;
-                        }
-                    }
-                    if faults.poll(FaultPoint::SyncBeforeApplyCommit)==FaultAction::Crash { return Err(ApplicationError::Interrupted); }
-                    result.journal_cursor = result.journal_cursor.max(record.journal_cursor);
-                    continue;
                 }
-            };
-            row.admitted.validate()?;
-            identifier(&row.relay_database_namespace, 512)?;
-            digest(&row.evidence_digest)?;
-            let event = &row.admitted;
-            let b = &event.metadata.accepted.binding;
-            let receipt = &event.metadata.accepted.receipt;
-            if let Some(authority) = &row.authority {
-                digest(&authority.lineage_claim_id)?;
-                integer(authority.baseline_sequence, 0, SAFE)?;
-                integer(authority.restore_fence_generation, 0, SAFE)?;
-                if authority.lineage_claim_id == b.lineage_claim_id && authority.restore_fence_generation < b.restore_fence_generation {
+                if b.workspace_id != workspace {
+                    return Err(ApplicationError::WorkspaceMismatch);
+                }
+                if row.journal_cursor != receipt.journal_cursor
+                    || row.journal_cursor <= previous_cursor
+                {
+                    return Err(ApplicationError::Conflict);
+                }
+                previous_cursor = row.journal_cursor;
+                let retained = retained_delivery(tx, row)?;
+                let key = DocKey::new(workspace, &b.main_version_id, &b.object_id)?;
+                let marker = durable::read_marker_in(tx, &key)?;
+                let matches = marker
+                    .as_ref()
+                    .is_some_and(|m| m.lineage_claim_id.as_deref() == Some(&b.lineage_claim_id));
+                let retired = !matches && retired_lineage(tx, b)?;
+                let retired_by_authority = row
+                    .authority
+                    .as_ref()
+                    .is_none_or(|a| a.lineage_claim_id != b.lineage_claim_id)
+                    && !matches
+                    && row
+                        .authority
+                        .as_ref()
+                        .is_none_or(|a| frontier.log_cursor >= a.baseline_sequence);
+                // Epoch-floor skips depend on the relay refusing sessions at/below the floor
+                // and refusing re-registration with a different baseline for the same lineage.
+                let retired_by_epoch = !matches
+                    && row
+                        .authority
+                        .as_ref()
+                        .is_some_and(|a| a.baseline_sequence <= epoch_log_floor);
+                if retained.replay || retired || retired_by_authority || retired_by_epoch {
+                    result.skipped += 1;
+                } else if !matches {
+                    result.blocked_cursor = Some(row.journal_cursor);
+                    break;
+                } else {
+                    let did_append = apply_row(tx, row, &key, retained.audit, &mut cache)?;
+                    touched.insert(key.clone());
+                    if did_append {
+                        appended.insert(key, event.metadata.accepted.received_at_ms);
+                    }
+                    result.applied += 1;
+                }
+                if faults.poll(FaultPoint::SyncBeforeApplyCommit) == FaultAction::Crash {
+                    return Err(ApplicationError::Interrupted);
+                }
+                result.journal_cursor = result.journal_cursor.max(row.journal_cursor);
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            timings.start_check();
+            for key in touched {
+                if cache.has_missing_updates(&key)? {
                     return Err(ApplicationError::Conflict);
                 }
             }
-            if b.workspace_id != workspace { return Err(ApplicationError::WorkspaceMismatch); }
-            if row.journal_cursor != receipt.journal_cursor || row.journal_cursor <= previous_cursor {
-                return Err(ApplicationError::Conflict);
-            }
-            previous_cursor = row.journal_cursor;
-            let retained = retained_delivery(tx, row)?;
-            let key = DocKey::new(workspace, &b.main_version_id, &b.object_id)?;
-            let marker = durable::read_marker_in(tx, &key)?;
-            let matches = marker.as_ref().is_some_and(|m| m.lineage_claim_id.as_deref()==Some(&b.lineage_claim_id));
-            let retired: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_inactive_lineages WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)",
-                params![workspace,b.main_version_id,b.object_id,b.lineage_claim_id], |r| r.get(0)).map_err(read_sql)?;
-            // Delete removes rich-document markers rather than archiving them.
-            // An applied base proves this missing lineage was already present.
-            let retired = !matches && (retired || tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM replication_log WHERE workspace_id=?1 AND op_kind='ydoc.update' AND apply_disposition='applied' \
-                 AND json_extract(payload_json,'$.versionId')=?2 AND json_extract(payload_json,'$.objectId')=?3 \
-                 AND json_extract(payload_json,'$.lineageClaimId')=?4 AND json_extract(payload_json,'$.isBaseState')=1)",
-                params![workspace,b.main_version_id,b.object_id,b.lineage_claim_id], |r|r.get::<_,bool>(0)).map_err(read_sql)?);
-            let retired_by_authority = row.authority.as_ref().is_none_or(|a| a.lineage_claim_id != b.lineage_claim_id)
-                && !matches && row.authority.as_ref().is_none_or(|a| frontier.log_cursor >= a.baseline_sequence);
-            // Epoch-floor skips depend on the relay refusing sessions at/below the floor
-            // and refusing re-registration with a different baseline for the same lineage.
-            let retired_by_epoch = !matches && row.authority.as_ref().is_some_and(|a| a.baseline_sequence <= epoch_log_floor);
-            if retained.replay || retired || retired_by_authority || retired_by_epoch {
-                result.skipped += 1;
-            } else if !matches {
-                result.blocked_cursor = Some(row.journal_cursor);
-                break;
-            } else {
-                let did_append = apply_row(tx, row, &key, retained.audit, &mut cache)?;
-                touched.insert(key.clone());
-                if did_append {
-                    appended.insert(key, event.metadata.accepted.received_at_ms);
-                }
-                result.applied += 1;
-            }
-            if faults.poll(FaultPoint::SyncBeforeApplyCommit)==FaultAction::Crash { return Err(ApplicationError::Interrupted); }
-            result.journal_cursor = result.journal_cursor.max(row.journal_cursor);
-        }
-        #[cfg(any(test, feature = "test-support"))]
-        timings.start_check();
-        for key in touched {
-            if cache.has_missing_updates(&key)? { return Err(ApplicationError::Conflict); }
-        }
-        #[cfg(any(test, feature = "test-support"))]
-        timings.finish_check();
-        advance_frontiers(tx, workspace, frontier.log_cursor, result.journal_cursor)?;
-        let frontier = read_frontiers(tx, workspace)?;
-        result.revision = frontier.revision;
-        Ok(result)
-    })?;
+            #[cfg(any(test, feature = "test-support"))]
+            timings.finish_check();
+            advance_frontiers(tx, workspace, frontier.log_cursor, result.journal_cursor)?;
+            let frontier = read_frontiers(tx, workspace)?;
+            result.revision = frontier.revision;
+            Ok(result)
+        },
+    )?;
     #[cfg(any(test, feature = "test-support"))]
     timings.publish();
     match result {
@@ -279,23 +310,7 @@ fn apply_row(
     let b = &event.metadata.accepted.binding;
     let receipt = &event.metadata.accepted.receipt;
     let namespace = &row.relay_database_namespace;
-    type Position = (String, i64, i64, String, i64);
-    let previous: Option<Position> = tx.query_row(
-        "SELECT relay_database_namespace,restore_generation,event_count,evidence_digest,journal_cursor FROM replica_documents WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
-        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(read_sql)?;
-    let (generation, count, evidence, cursor) = match previous {
-        Some((saved_namespace, generation, count, evidence, cursor)) => {
-            if saved_namespace != *namespace {
-                return Err(ApplicationError::Conflict);
-            }
-            (generation, count, evidence, cursor)
-        }
-        None => {
-            let initial = accepted_history::initial_digest(namespace, b)?;
-            // The relay registers every new lineage at restore generation one.
-            (1, 0, initial, 0)
-        }
-    };
+    let (generation, count, evidence, cursor) = position(tx, namespace, b)?;
     if receipt.journal_cursor <= cursor || b.restore_fence_generation < generation {
         return Err(ApplicationError::Conflict);
     }
@@ -358,16 +373,69 @@ enum Control {
     Blocked,
 }
 
+/// Where the replica holds `binding`'s lineage in `namespace`: its
+/// generation, then the event count, evidence digest and cursor of its last
+/// accepted event. Before the first event the lineage stands at event zero
+/// and its initial digest, at the generation its last cancelled restore
+/// reached, else at one, where the relay registers every new lineage.
+fn position(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    b: &LiveObjectBinding,
+) -> Result<(i64, i64, String, i64), ApplicationError> {
+    let document = params![
+        b.workspace_id,
+        b.main_version_id,
+        b.object_id,
+        b.lineage_claim_id
+    ];
+    let saved: Option<(String, i64, i64, String, i64)> = tx.query_row(
+        "SELECT relay_database_namespace,restore_generation,event_count,evidence_digest,journal_cursor FROM replica_documents WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
+        document, |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(read_sql)?;
+    let (saved_namespace, position) = match saved {
+        Some((saved, generation, count, evidence, cursor)) => {
+            (Some(saved), (generation, count, evidence, cursor))
+        }
+        None => {
+            let cancelled: Option<(String, i64)> = tx.query_row(
+                "SELECT relay_database_namespace,restore_generation FROM replica_restore_cancellations WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 ORDER BY restore_generation DESC LIMIT 1",
+                document, |r| Ok((r.get(0)?, r.get(1)?))).optional().map_err(read_sql)?;
+            let initial = accepted_history::initial_digest(namespace, b)?;
+            match cancelled {
+                Some((saved, generation)) => (Some(saved), (generation, 0, initial, 0)),
+                None => (None, (1, 0, initial, 0)),
+            }
+        }
+    };
+    if saved_namespace.is_some_and(|saved| saved != namespace) {
+        return Err(ApplicationError::Conflict);
+    }
+    Ok(position)
+}
+
+/// Whether a lineage this replica no longer marks was present before: its
+/// archive, or an applied base. Delete removes rich-document markers rather
+/// than archiving them.
+fn retired_lineage(tx: &Transaction<'_>, b: &LiveObjectBinding) -> Result<bool, ApplicationError> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ydoc_inactive_lineages WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4) \
+         OR EXISTS(SELECT 1 FROM replication_log WHERE workspace_id=?1 AND op_kind='ydoc.update' AND apply_disposition='applied' \
+         AND json_extract(payload_json,'$.versionId')=?2 AND json_extract(payload_json,'$.objectId')=?3 \
+         AND json_extract(payload_json,'$.lineageClaimId')=?4 AND json_extract(payload_json,'$.isBaseState')=1)",
+        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |r|r.get(0)).map_err(read_sql)
+}
+
 /// Advance the replica's lineage past a cancelled restore. The record must
 /// agree with itself and name this namespace, and the replica must stand at
 /// exactly the fence's old generation and the endpoint the cancellation
-/// kept: its event count, evidence digest and cursor. Anything else refuses.
-/// A record at or below the frontier was handled before; a retired lineage
-/// skips it, as its deliveries skip.
+/// kept: its event count, evidence digest and cursor. The replica keeps the
+/// record with the generation it moved; a record sharing its cursor,
+/// operation or lineage generation skips only when it is that record.
+/// Anything else refuses. A lineage the replica once held and no longer
+/// marks skips the record, as its deliveries skip; one it never saw blocks.
 fn apply_cancellation(
     tx: &Transaction<'_>,
     workspace: &str,
-    frontier: i64,
     record: &ReplicaRestoreCancellation,
 ) -> Result<Control, ApplicationError> {
     identifier(&record.relay_database_namespace, 512)?;
@@ -391,31 +459,50 @@ fn apply_cancellation(
     {
         return Err(ApplicationError::Conflict);
     }
+    let json = serde_json::to_string(record).map_err(|_| ApplicationError::Corrupt)?;
+    let saved = {
+        let mut query = tx.prepare(
+            "SELECT record_json FROM replica_restore_cancellations WHERE (relay_database_namespace=?1 AND (journal_cursor=?2 OR operation_id=?3)) \
+             OR (workspace_id=?4 AND main_version_id=?5 AND object_id=?6 AND lineage_claim_id=?7 AND restore_generation=?8)",
+        ).map_err(read_sql)?;
+        let rows = query
+            .query_map(
+                params![
+                    record.relay_database_namespace,
+                    record.journal_cursor,
+                    operation.operation_id,
+                    b.workspace_id,
+                    b.main_version_id,
+                    b.object_id,
+                    b.lineage_claim_id,
+                    b.restore_fence_generation
+                ],
+                |r| r.get::<_, String>(0),
+            )
+            .map_err(read_sql)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(read_sql)?
+    };
+    if !saved.is_empty() {
+        return if saved.iter().all(|saved| *saved == json) {
+            Ok(Control::Skipped)
+        } else {
+            Err(ApplicationError::Conflict)
+        };
+    }
     let key = DocKey::new(workspace, &b.main_version_id, &b.object_id)?;
     let matches = durable::read_marker_in(tx, &key)?
         .is_some_and(|m| m.lineage_claim_id.as_deref() == Some(&b.lineage_claim_id));
     if !matches {
-        let retired: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_inactive_lineages WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)",
-            params![workspace,b.main_version_id,b.object_id,b.lineage_claim_id], |r| r.get(0)).map_err(read_sql)?;
-        return Ok(if retired {
+        let held: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM replica_documents WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)",
+            params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |r| r.get(0)).map_err(read_sql)?;
+        return Ok(if held || retired_lineage(tx, b)? {
             Control::Skipped
         } else {
             Control::Blocked
         });
     }
-    type Position = (String, i64, i64, String, i64);
-    // A replica keeps no position before its lineage's first accepted event,
-    // so it can prove no cancellation there.
-    let (namespace, generation, count, evidence, cursor): Position = tx.query_row(
-        "SELECT relay_database_namespace,restore_generation,event_count,evidence_digest,journal_cursor FROM replica_documents WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
-        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(read_sql)?
-        .ok_or(ApplicationError::Conflict)?;
-    if namespace != record.relay_database_namespace {
-        return Err(ApplicationError::Conflict);
-    }
-    if record.journal_cursor <= frontier && generation >= operation.new_fence {
-        return Ok(Control::Skipped);
-    }
+    let (generation, count, evidence, cursor) = position(tx, &record.relay_database_namespace, b)?;
     if generation != operation.old_binding.restore_fence_generation
         || count != endpoint.event_count
         || evidence != endpoint.history_evidence_digest
@@ -423,13 +510,19 @@ fn apply_cancellation(
     {
         return Err(ApplicationError::Conflict);
     }
+    // A lineage with no accepted event yet has no position row; its record
+    // alone holds the generation.
     let changed = tx.execute(
         "UPDATE replica_documents SET restore_generation=?5 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_generation=?6",
         params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,operation.new_fence,generation],
     ).map_err(write_sql)?;
-    if changed != 1 {
+    if changed != usize::from(count > 0) {
         return Err(ApplicationError::Corrupt);
     }
+    tx.execute(
+        "INSERT INTO replica_restore_cancellations(relay_database_namespace,journal_cursor,operation_id,workspace_id,main_version_id,object_id,lineage_claim_id,restore_generation,record_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        params![record.relay_database_namespace,record.journal_cursor,operation.operation_id,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,operation.new_fence,json],
+    ).map_err(write_sql)?;
     Ok(Control::Applied)
 }
 

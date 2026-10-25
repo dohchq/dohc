@@ -34,7 +34,10 @@ export interface ReplicaJournalRow {
  * A restore the relay declined after the host's native fence committed. The journal keeps it at its own
  * cursor, between deliveries; it is no delivery and carries no bytes. `cancellation` is the host's
  * `fenceCancelled` receipt from `liveApplication.cancelRestoreFence`, unchanged. A replica at exactly the
- * fence's old generation and the receipt's endpoint advances its generation and nothing else.
+ * fence's old generation and the receipt's endpoint advances its generation and nothing else. Before the
+ * lineage's first accepted event that endpoint is event zero at the lineage's initial digest. The replica
+ * keeps the record it applied; a replay at its cursor, of its operation or of its generation must be that
+ * record. A lineage the replica held and no longer marks skips the record; one it never saw blocks.
  */
 export interface ReplicaRestoreCancellation {
   readonly relayDatabaseNamespace: string;

@@ -360,10 +360,6 @@ pub(super) fn settled(
     generation_with(conn, held, None)
 }
 
-// The generation reads' index holds each cancellation, so this never walks
-// a fence row's restore proof.
-pub(super) const CANCELLED: &str = "SELECT length(CAST(cancelled_json AS BLOB)),cancelled_json FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND new_generation=?4 AND relay_database_namespace=?5 AND cancelled_json IS NOT NULL";
-
 /// The cancellation that ended the restore fenced into the registration's
 /// exact generation and binding, if one did.
 fn cancellation(
@@ -372,41 +368,20 @@ fn cancellation(
     budget: Option<&mut Budget>,
 ) -> Result<Option<NativeRestoreCancellationReceipt>, ApplicationError> {
     let b = &held.binding;
-    let mut query = conn.prepare(CANCELLED).map_err(read_sql)?;
-    let mut rows = query
-        .query(params![
-            b.workspace_id,
-            b.main_version_id,
-            b.object_id,
-            b.restore_fence_generation,
-            held.namespace
-        ])
-        .map_err(read_sql)?;
-    let mut budget = budget;
-    while let Some(row) = rows.next().map_err(read_sql)? {
-        let length: i64 = row.get(0).map_err(read_sql)?;
-        match budget.as_deref_mut() {
-            Some(budget) => {
-                budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?
-            }
-            None if (1..=NativeHistoryReconstruction::HEADER_BYTES as i64).contains(&length) => {}
-            None => return Err(ApplicationError::Corrupt),
-        }
-        let receipt: NativeRestoreCancellationReceipt =
-            serde_json::from_str(&row.get::<_, String>(1).map_err(read_sql)?)
-                .map_err(|_| ApplicationError::Corrupt)?;
-        // Another lineage of the document can reach the same generation.
-        if receipt.binding.lineage_claim_id != b.lineage_claim_id {
-            continue;
-        }
-        receipt.validate().map_err(|_| ApplicationError::Corrupt)?;
-        if receipt.fence.operation.relay_database_namespace != held.namespace {
-            return Err(ApplicationError::Corrupt);
-        }
-        settlement::validate_historical_binding(&receipt.binding, b)?;
-        return Ok(Some(receipt));
-    }
-    Ok(None)
+    let doc = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
+    let Some(receipt) = restore_fence::cancelled_at(
+        conn,
+        &held.namespace,
+        &doc,
+        Some(&b.lineage_claim_id),
+        b.restore_fence_generation,
+        budget,
+    )?
+    else {
+        return Ok(None);
+    };
+    settlement::validate_historical_binding(&receipt.binding, b)?;
+    Ok(Some(receipt))
 }
 
 /// Native generation reads bounded committed associations. An explicit budget

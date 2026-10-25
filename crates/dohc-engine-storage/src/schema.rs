@@ -71,6 +71,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "replica_frontiers",
     "replica_documents",
     "replica_first_seen",
+    "replica_restore_cancellations",
     "live_audit_base_publications",
     "live_audit_bases",
     "live_audit_base_conflicts",
