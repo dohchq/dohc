@@ -55,7 +55,7 @@ function renderTabs(activeTab: string) {
 describe("EditorTabs strip scrolling", () => {
   it.each([
     [siteTabPath("apps/trip"), "trip", "apps/trip"],
-    [collectionTabPath("notes/旅"), "notes%2F%E6%97%85", collectionTabPath("notes/旅")],
+    [collectionTabPath("notes/旅"), "旅", "notes/旅"],
   ])("keeps the tab-strip title and tooltip for %s", (path, title, tooltip) => {
     render(
       <EditorTabs

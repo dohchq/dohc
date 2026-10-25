@@ -16,7 +16,7 @@ const rows = [
   ["site", "tab://app/apps%2Ftrip", ["trip", "apps/trip", "trip"], ["trip", "apps/trip", "trip"]],
   ["momentDiff", "tab://moment-diff/moment%20one", ["History change", "History change", "History change"], ["Diff: Label", "History diff: folder/Label", "Diff: Label"]],
   ["versionCompare", "tab://versions/compare/try%2Fone", ["Compare with Main", "Compare this Version with Main", "Compare with Main"], ["Compare with Main", "Compare this Version with Main", "Compare with Main"]],
-  ["collection", "tab://collection/notes%2F%E6%97%85", ["notes%2F%E6%97%85", "tab://collection/notes%2F%E6%97%85", "旅"], ["notes%2F%E6%97%85", "tab://collection/notes%2F%E6%97%85", "旅"]],
+  ["collection", "tab://collection/notes%2F%E6%97%85", ["旅", "notes/旅", "旅"], ["旅", "notes/旅", "旅"]],
   ["transactionalCollection", dataset, ["Collection", "Collection", "Collection"], ["folder/Label", "Collection: folder/Label", "folder/Label"]],
 ] as const;
 

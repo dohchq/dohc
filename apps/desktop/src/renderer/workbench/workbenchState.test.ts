@@ -606,6 +606,9 @@ describe("tabs", () => {
     expect(parseTab(path).kind).toBe("collection");
     expect(TAB_KINDS[parseTab(path).kind].virtual).toBe(true);
     expect(parseTab(path)).toEqual({ kind: "collection", path, collectionPath: "projects/road trips" });
+    expect(TAB_KINDS.collection.title(parseTab(path))).toBe("road trips");
+    expect(TAB_KINDS.collection.tooltip(parseTab(path))).toBe("projects/road trips");
+    expect(TAB_KINDS.collection.explorerTitle(parseTab(path))).toBe("road trips");
     expect(parseTab("tab://collection/")).toEqual({ kind: "collection", path: "tab://collection/", collectionPath: null });
     expect(parseTab("tab://collection/%ZZ")).toEqual({ kind: "collection", path: "tab://collection/%ZZ", collectionPath: null });
     expect(parseTab("notes/today.md")).toEqual({ kind: "file", path: "notes/today.md" });
