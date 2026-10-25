@@ -161,12 +161,10 @@ export class ServiceActivationStore {
    * another host, keeps that boundary, and drops its retained state, refunding
    * those bytes once. It needs no quota. An activation that adopted retires
    * only on the host it adopted on. Exact replay changes nothing, so it never
-   * touches a successor's owner row. Pending, with nothing changed, while the
-   * document's restore is unfinished.
+   * touches a successor's owner row.
    */
   completeRetirement(input: {workspaceId: string; key: RetirementKey; boundary: RetainedPrefixBody | null;
-    host: LiveHostConnectionCoordinate; registeredAtMs: number; nowMs: number; guard(): void}):
-    {status: "retired"; replayed: boolean} | {status: "pending"; reason: "restore"} {
+    host: LiveHostConnectionCoordinate; registeredAtMs: number; nowMs: number; guard(): void}): {status: "retired"; replayed: boolean} {
     const key = retirementKey(input.key), boundary = retainedBoundary(input.boundary), boundaryJson = JSON.stringify(boundary);
     const nowMs = authorityInteger(input.nowMs);
     return this.storage.tx(() => {
@@ -193,8 +191,8 @@ export class ServiceActivationStore {
           row.replication_epoch !== identity.replicationEpoch || row.stream_identity !== identity.streamIdentity) {
         throw new Error("Service activation retirement owner changed.");
       }
-      // A restore moves the generation the key names, so retirement waits for it.
-      if (restoreInProgress(this.storage, document.workspaceId, document.objectId)) return {status: "pending", reason: "restore"};
+      // Stop and a restore refuse each other.
+      if (restoreInProgress(this.storage, document.workspaceId, document.objectId)) throw new Error("Service activation retirement overlaps a restore.");
       const current = this.storage.db.prepare(`SELECT lineage_claim_id,restore_fence_generation FROM sync_relay_live_documents
         WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current'`).get(document.workspaceId, document.objectId);
       if (current?.lineage_claim_id !== key.lineageClaimId || current.restore_fence_generation !== key.restoreFenceGeneration) {

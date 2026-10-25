@@ -471,10 +471,9 @@ export class ServiceActivationDriver {
     }
     // An activation that never adopted may release before its document parks; it retires only once it has.
     if(!owned && !scope.parked())return {kind:"pending",reason:"Waiting for its hosted replica to confirm the document parked."};
-    const completed=this.#store.completeRetirement({workspaceId:open.workspaceId,key,boundary:released.boundary as RetainedPrefixBody|null,
+    this.#store.completeRetirement({workspaceId:open.workspaceId,key,boundary:released.boundary as RetainedPrefixBody|null,
       host:o.host,registeredAtMs:Date.now(),nowMs:Date.now(),guard:check});
     o.registered();check();
-    if(completed.status==="pending")return {kind:"pending",reason:"Waiting for the document's restore to finish."};
     this.#keepReleasedHold(slot,()=>this.removeTarget(target));
     return {kind:"retired"};
   }

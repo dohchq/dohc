@@ -1840,10 +1840,6 @@ const waits: Record<string, {hold(o: Enrolled): void; clear(o: Enrolled): void}>
   "Waiting for its hosted replica to confirm the document left.": {hold() {}, clear() {}},
   "Waiting for its hosted replica to confirm the document parked.": {hold: o => {o.replies.commit = {departed: [o.sibling.objectId]};}, clear: o => {o.replies.commit = {};}},
   "Retirement reconciliation is unfinished.": {hold: o => {o.engine.releasePending = "reconciliation";}, clear: o => {o.engine.releasePending = undefined;}},
-  // Stop and a restore refuse each other, so the store's answer stands in for a restore that is unfinished.
-  "Waiting for the document's restore to finish.": {
-    hold() {vi.spyOn(ServiceActivationStore.prototype, "completeRetirement").mockReturnValue({status: "pending", reason: "restore"});},
-    clear() {vi.mocked(ServiceActivationStore.prototype.completeRetirement).mockRestore();}},
 };
 it.each(Object.keys(waits))("resumes a retirement waiting at %j on a restarted daemon", async reason => {
   const o = await enrolledServiceHost();
@@ -1860,7 +1856,7 @@ it.each(Object.keys(waits))("resumes a retirement waiting at %j on a restarted d
     await vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting(reason)));
   }
   await o.host.close();
-  expect(o.calls(sent).includes("liveApplication.releaseActivation")).toBe(/parked|unfinished|restore/.test(reason));
+  expect(o.calls(sent).includes("liveApplication.releaseActivation")).toBe(/parked|unfinished/.test(reason));
   expect(retiredRow(o).retired).toBe(false);
   expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toMatchObject({activationId: ACTIVATION});
   wait.clear(o);

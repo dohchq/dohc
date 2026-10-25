@@ -535,21 +535,7 @@ pub(super) fn apply_settlement_envelope(
     faults: &dyn FaultInjector,
 ) -> Result<ApplyOutcome<()>, SyncError> {
     apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, op| {
-        let payload: SettlementPayload = serde_json::from_value(op.payload.clone())
-            .map_err(|_| invalid("invalid historical settlement payload"))?;
-        if payload.format_version != 1
-            || serde_json::to_value(&payload).map_err(SyncError::corrupt)? != op.payload
-        {
-            return Err(invalid("noncanonical historical settlement payload"));
-        }
-        let record = payload.record;
-        record.validate(&op.workspace_id)?;
-        let json =
-            serde_json::to_string(&serde_json::to_value(&record).map_err(SyncError::corrupt)?)
-                .map_err(SyncError::corrupt)?;
-        if hex_sha256(json.as_bytes()) != payload.record_digest {
-            return Err(invalid("historical settlement digest differs"));
-        }
+        let (record, json, record_digest) = imported_record(&op.payload, &op.workspace_id)?;
         if accepted_interval(
             tx,
             &record.relay_database_namespace,
@@ -573,17 +559,48 @@ pub(super) fn apply_settlement_envelope(
             .optional()
             .map_err(SyncError::corrupt)?;
         if let Some(prior) = prior {
-            if prior == payload.record_digest {
+            if prior == record_digest {
                 return Ok(MutationOutcome::Applied(()));
             }
-            tx.execute("INSERT INTO live_audit_settlement_conflicts(workspace_id,origin_id,origin_seq,record_digest,record_json,markdown_digest) VALUES (?1,?2,?3,?4,?5,?6)",params![op.workspace_id,op.origin_id,op.origin_seq,payload.record_digest,json,record.markdown_digest]).map_err(SyncError::persist)?;
+            tx.execute("INSERT INTO live_audit_settlement_conflicts(workspace_id,origin_id,origin_seq,record_digest,record_json,markdown_digest) VALUES (?1,?2,?3,?4,?5,?6)",params![op.workspace_id,op.origin_id,op.origin_seq,record_digest,json,record.markdown_digest]).map_err(SyncError::persist)?;
             return Ok(MutationOutcome::RefusedRetainingMutation {
                 reason: "historical settlement identity contains different evidence".into(),
             });
         }
-        tx.execute("INSERT INTO live_audit_settlements(settlement_id,workspace_id,record_digest,record_json,markdown_digest) VALUES (?1,?2,?3,?4,?5)",params![record.settlement_id,op.workspace_id,payload.record_digest,json,record.markdown_digest]).map_err(SyncError::persist)?;
+        tx.execute("INSERT INTO live_audit_settlements(settlement_id,workspace_id,record_digest,record_json,markdown_digest) VALUES (?1,?2,?3,?4,?5)",params![record.settlement_id,op.workspace_id,record_digest,json,record.markdown_digest]).map_err(SyncError::persist)?;
         Ok(MutationOutcome::Applied(()))
     })
+}
+
+/// Import's checks that need no store: a canonical current-format payload
+/// whose record carries its own ID, and the digest of its record JSON.
+fn imported_record(
+    payload: &serde_json::Value,
+    workspace: &str,
+) -> Result<(SettlementRecord, String, String), SyncError> {
+    let parsed: SettlementPayload = serde_json::from_value(payload.clone())
+        .map_err(|_| invalid("invalid historical settlement payload"))?;
+    if parsed.format_version != 1
+        || serde_json::to_value(&parsed).map_err(SyncError::corrupt)? != *payload
+    {
+        return Err(invalid("noncanonical historical settlement payload"));
+    }
+    let record = parsed.record;
+    record.validate(workspace)?;
+    let json = serde_json::to_string(&serde_json::to_value(&record).map_err(SyncError::corrupt)?)
+        .map_err(SyncError::corrupt)?;
+    if hex_sha256(json.as_bytes()) != parsed.record_digest {
+        return Err(invalid("historical settlement digest differs"));
+    }
+    Ok((record, json, parsed.record_digest))
+}
+
+#[cfg(test)]
+pub(super) fn check_imported_payload(
+    payload: &serde_json::Value,
+    workspace: &str,
+) -> Result<(), SyncError> {
+    imported_record(payload, workspace).map(|_| ())
 }
 
 fn portable_before_from_row(

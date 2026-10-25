@@ -31,6 +31,9 @@ import {canonicalVersionedAcceptedMetadata,initialAcceptedHistoryDigest} from '.
 import {stableJsonStringify} from '../../../services/sync-relay/src/canonicalJson.js'
 import {nativeSettlementId,settlementRecordDigest} from '../../../services/sync-relay/src/storage/hostedSettlement.js'
 import {liveValidation} from '../../../services/sync-relay/src/liveValidation.js'
+import {nativeBaseRecord} from '../../../services/sync-relay/src/storage/serviceActivationPublication.js'
+import type {SqliteDb} from '../../../services/sync-relay/src/storage/types.js'
+import nativeAuthoredSettlement from '../../../services/sync-relay/src/testing/fixtures/nativeAuthoredSettlement.json'
 
 const {DatabaseSync}=createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite')
 const hash=(bytes:Uint8Array)=>createHash('sha256').update(bytes).digest('hex')
@@ -1314,8 +1317,8 @@ it('keeps the hosted credential and settling scope through the release of a stop
 
 // Proves: completion checks the document's current generation, not only the
 // one saved with the obligation. A restore that advanced it after the
-// obligation opened defers completion, and nothing is archived or refunded.
-it('defers completing a retirement while a restore that advanced its generation is unfinished',()=>{
+// obligation opened refuses completion, and nothing is archived or refunded.
+it('refuses completing a retirement while a restore that advanced its generation is unfinished',()=>{
   const f=fixture();try{
     enroll(f);completeActivation(f)
     const fence=generation(f)
@@ -1329,8 +1332,8 @@ it('defers completing a retirement while a restore that advanced its generation 
     const rows=()=>f.raw.prepare(`SELECT (SELECT usage_bytes FROM sync_relay_workspace_usage) AS usage,(SELECT count(*) FROM sync_relay_live_delivery_owners) AS owners,
       (SELECT count(*) FROM sync_relay_live_delivery_owner_history) AS archived,(SELECT retired_at_ms FROM sync_relay_service_activations) AS retired`).get()
     const before=rows()
-    expect(f.store.completeRetirement({workspaceId:'workspace',key:keyOf(open),boundary:ownerBoundary(f),host,registeredAtMs:50,nowMs:50,guard(){}}))
-      .toEqual({status:'pending',reason:'restore'})
+    expect(()=>f.store.completeRetirement({workspaceId:'workspace',key:keyOf(open),boundary:ownerBoundary(f),host,registeredAtMs:50,nowMs:50,guard(){}}))
+      .toThrow('Service activation retirement overlaps a restore.')
     expect(rows()).toEqual({...before,owners:1,archived:0,retired:null})
     expect(retirement(f.storage)).toEqual(open)
   }finally{f.close()}
@@ -1714,6 +1717,57 @@ it("funds a lineage only on the host its successor uses, and again on a known ho
     expect(f.storage.registerLiveHost({...back,updatedAtMs:63,guard(){}}).ok).toBe(true)
     expect(unaccounted(f)).toBe(ledger)
   }finally{f.close();sized.close()}
+})
+
+// Proves: a pending successor keeps its retired predecessor's boundary as the
+// delivery floor on a host with no owner row. The driver's Resume and the
+// host's registration on B, between the successor's preparation and its
+// adoption, find nothing missing, and B holds nothing at or below the boundary.
+it("resumes and registers a successor prepared on a host a transition funded after its predecessor retired, before it adopts",()=>{
+  const f=fixture();try{
+    const {edit,boundary}=retirePredecessor(f)
+    const ledger=unaccounted(f),terminal=boundary.terminalReceipt.journalCursor,suffix=journalCursors(f).filter(cursor=>cursor>terminal)
+    const b=transitionHost(f,host,'device','other-b')
+    f.store.prepare({capture:successor(f),host:b,shareId:'share',registeredAtMs:50,guard(){},validateBaseline,validateHistory,bounds})
+    expect(reservedOn(f,'other-b')).toEqual([0,...suffix])
+    expect(f.store.resume({document:f.document,activationId:SUCCESSOR,host:b,registeredAtMs:51,guard(){}})).toMatchObject({completed:false})
+    expect(f.storage.registerLiveHost({...b,updatedAtMs:52,guard(){}}).ok).toBe(true)
+    expect(reservedOn(f,'other-b')).toEqual([0,...suffix])
+    expect(unaccounted(f)).toBe(ledger)
+    const {access,delivery}=adoptSuccessorOn(f,b,boundary)
+    expect(reservedOn(f,'other-b')).toEqual([edit.journalCursor])
+    const owner=delivery.openOwnerDelivery({host:b,document:f.document,actor}),event=delivery.nextOwnerApplication(owner)!
+    delivery.acknowledgeOwnerDeliveryApplication(owner,{...event.metadata.accepted.receipt,localYDocSequence:3,applicationReplayed:false})
+    f.store.complete({document:f.document,host:b,access,nativeState:{adoptionId:SUCCESSOR,pendingBytes:0},guard(){}})
+    stopDocument(f,60)
+    expect(f.store.completeRetirement({workspaceId:'workspace',key:keyOf(retirement(f.storage)!),boundary:ownerBoundary(f),host:b,registeredAtMs:70,nowMs:70,guard(){}}))
+      .toEqual({status:'retired',replayed:false})
+    expect(f.raw.prepare('SELECT host_id,journal_cursor FROM sync_relay_live_delivery_reservations').all()).toEqual([])
+    expect(f.storage.registerLiveHost({...b,updatedAtMs:80,guard(){}}).ok).toBe(true)
+    expect(unaccounted(f)).toBe(ledger)
+  }finally{f.close()}
+})
+
+// Proves: a transition while a successor is pending funds the new host only
+// above the predecessor's boundary, so the successor's never-adopted
+// retirement there leaves that host nothing at or below it, and it registers again.
+it("registers a host where a successor prepared on another retired never-adopted at its predecessor's boundary",()=>{
+  const f=fixture();try{
+    const {boundary}=retirePredecessor(f)
+    const ledger=unaccounted(f),terminal=boundary.terminalReceipt.journalCursor,suffix=journalCursors(f).filter(cursor=>cursor>terminal)
+    prepareSuccessor(f)
+    const b=transitionHost(f,host,'device','other-b')
+    expect(reservedOn(f,'other-b')).toEqual([0,...suffix])
+    stopDocument(f,50)
+    expect(retirement(f.storage)).toMatchObject({activationId:SUCCESSOR})
+    expect(f.store.completeRetirement({workspaceId:'workspace',key:keyOf(retirement(f.storage)!),boundary,host:b,registeredAtMs:60,nowMs:60,guard(){}}))
+      .toEqual({status:'retired',replayed:false})
+    expect(f.raw.prepare('SELECT host_id,journal_cursor FROM sync_relay_live_delivery_reservations ORDER BY host_id,journal_cursor').all())
+      .toEqual(suffix.map(cursor=>({host_id:'other-b',journal_cursor:cursor})))
+    expect(f.storage.registerLiveHost({...b,updatedAtMs:70,guard(){}}).ok).toBe(true)
+    expect(reservedOn(f,'other-b')).toEqual(suffix)
+    expect(unaccounted(f)).toBe(ledger)
+  }finally{f.close()}
 })
 
 // Proves: an activation that adopted on A never retires as never-adopted on
@@ -2121,6 +2175,17 @@ it("admits a retiring document's event-zero audit only with its root origin, sta
     expect(answer.body).toMatchObject({inserted:14,refusals:r.refusals(...[3,4,5,6,8,9,10,11,12,13].map(seq=>[seq,'live.audit.base','unproved-retirement-output'] as [number,string,string]))})
     for(const seq of [1,2])expect(r.coordinate(seq)).toEqual(departed('live.audit.base'))
   }finally{f.close()}
+})
+
+// Proves: the relay reads the engine's own event-zero audit bytes, which the
+// engine's `update_native_audit_fixture` writes, in native's field order,
+// with native's record digest and origin stamp, and refuses one field changed.
+it("verifies the engine's own event-zero audit record digest and origin stamp",()=>{
+  const db=new DatabaseSync(':memory:');try{
+    const {payload}=nativeAuthoredSettlement.find(op=>op.opKind==='live.audit.base') as unknown as {payload:{record:Record<string,unknown>}}
+    expect(nativeBaseRecord(db as unknown as SqliteDb,payload).record).toEqual(payload.record)
+    expect(()=>nativeBaseRecord(db as unknown as SqliteDb,{...payload,record:{...payload.record,baseByteLength:Number(payload.record.baseByteLength)+1}})).toThrow()
+  }finally{db.close()}
 })
 
 // Proves: while its document settles, the host may ask after and upload bytes
