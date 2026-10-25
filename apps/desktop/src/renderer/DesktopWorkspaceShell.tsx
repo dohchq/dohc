@@ -2346,11 +2346,13 @@ export function DesktopWorkspaceShell(props: {
       const folders = outcome.folders ?? [];
       const skippedSuffix =
         outcome.skipped > 0 ? ` (${outcome.skipped} skipped)` : "";
+      // A stopped import's notice is about the stop, and Copy names the skips.
+      const skipDetails = importSkipLines(outcome.skipped, outcome.skippedSources ?? []).details;
       // The first copy failed, so nothing landed.
       if (outcome.stop && !outcome.interrupted) {
         reportShellFailure({
           message: fitImportMessage(`Could not import files${skippedSuffix}. `, importStopSentence(outcome.stop), ""),
-          details: outcome.stop.detail ? [["Cause", outcome.stop.detail]] : [],
+          details: [...(outcome.stop.detail ? [["Cause", outcome.stop.detail] as const] : []), ...skipDetails],
           retry,
           kind: "import-files",
         });
@@ -2380,6 +2382,7 @@ export function DesktopWorkspaceShell(props: {
           details: [
             ...(outcome.stop?.detail ? [["Cause", outcome.stop.detail] as const] : []),
             ...importedPathDetails(outcome.imported),
+            ...skipDetails,
           ],
           retry,
           kind: "import-files",

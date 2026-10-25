@@ -120,6 +120,12 @@ export const IMPORT_SKIP_REASONS = [
   "too-large-text",
 ] as const;
 export const IMPORT_SKIPS_LISTED = 100;
+// The longest path Windows can name, so a skip from deep in a dropped
+// folder still fits.
+export const IMPORT_SKIPPED_PATH_MAX_CHARS = 32_767;
+// Past this many "name (N).ext" copies, a name collision skips the source
+// instead of probing forever.
+export const IMPORT_COLLISION_RENAMES = 99;
 
 // Workspace content search streams batches main→renderer. The bounds mirror
 // workspaceSearch.ts (the producer); bridgeContract's SearchResultsEvent

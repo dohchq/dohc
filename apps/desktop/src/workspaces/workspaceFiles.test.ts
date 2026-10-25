@@ -1365,6 +1365,15 @@ describe("importDroppedPaths", () => {
     });
   });
 
+  // The validator reads these as .git, .dohc and .DS_Store, but the file is
+  // named with the encoded spelling, so renaming it is the fix.
+  it("says an encoded spelling of a reserved name can't be saved", () => {
+    expect(nameSkip("cfg%2f.git")).toBe("name");
+    expect(nameSkip("%2edohc")).toBe("name");
+    expect(nameSkip("Trip/%2eDS_Store")).toBe("name");
+    expect(nameSkip("Trip/.git")).toBe("left-out");
+  });
+
   it.runIf(process.platform === "win32")("says which names Windows can't use", () => {
     expect(nameSkip("Trip/CON.md")).toBe("windows-name");
     expect(nameSkip("Trip/a:b.md")).toBe("windows-name");

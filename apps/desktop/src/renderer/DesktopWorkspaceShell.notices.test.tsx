@@ -2489,11 +2489,12 @@ describe("file transfers", () => {
     expect(await navigator.clipboard.readText()).toContain(`Imported: ${deep}\n`);
   });
 
-  it("keeps the skipped count when the first copy fails", async () => {
+  it("keeps the skipped count when the first copy fails, and copies the skipped files", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.importWorkspaceFiles.mockResolvedValueOnce({
       imported: [],
       skipped: 2,
+      skippedSources: [{ path: "key.txt", reason: "link" }, { path: ".DS_Store", reason: "system-file" }],
       stop: { file: "three.md", code: "ENOSPC", detail: "ENOSPC: no space left on device, copyfile 'three.md'" },
     });
     const user = userEvent.setup();
@@ -2501,9 +2502,12 @@ describe("file transfers", () => {
 
     await user.keyboard("{Control>}k{/Control}");
     await user.click(await screen.findByText("Import files"));
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
-      "Could not import files (2 skipped). The disk is full.",
-    );
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("Could not import files (2 skipped). The disk is full.");
+    await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
+    const copied = await navigator.clipboard.readText();
+    expect(copied).toContain("Skipped: key.txt is a link. Drop the file it leads to.");
+    expect(copied).toContain("Skipped: .DS_Store is a file the system makes.");
   });
 
   // Try again removes the row before it runs. When the shared view cannot

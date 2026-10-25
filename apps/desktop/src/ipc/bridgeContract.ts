@@ -107,6 +107,7 @@ import {
   DROP_IMPORT_LIMITS,
   EXPLORER_MENU_COMMANDS,
   IMPORT_SKIP_REASONS,
+  IMPORT_SKIPPED_PATH_MAX_CHARS,
   IMPORT_SKIPS_LISTED,
   MENU_COMMANDS,
   ENGINE_YDOC_SESSION_ID_MAX_CHARS,
@@ -1017,7 +1018,7 @@ export type ImportWorkspaceFilesPayload = z.infer<
 export const SkippedImportSource = z.object({
   // The path from what the person handed over, such as Trip/photos/key.txt
   // for a file inside a dropped folder.
-  path: PATH_STRING,
+  path: z.string().min(1).max(IMPORT_SKIPPED_PATH_MAX_CHARS),
   reason: z.enum(IMPORT_SKIP_REASONS),
 });
 export type SkippedImportSource = z.infer<typeof SkippedImportSource>;

@@ -42,7 +42,12 @@ import {
 import { basename, dirname, isAbsolute, join, parse, relative, sep } from "node:path";
 import { atomicCreateFile } from "../atomicReplaceFile";
 import { isOsMetadataSegment } from "@dohc/workspace-contracts/path-floor";
-import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, IMPORT_SKIPS_LISTED } from "../ipc/channels";
+import {
+  DROP_IMPORT_LIMITS,
+  DROP_IMPORT_REFUSALS,
+  IMPORT_COLLISION_RENAMES,
+  IMPORT_SKIPS_LISTED,
+} from "../ipc/channels";
 import { isInside } from "../security/pathContainment";
 import type { LocalStateWorkspace } from "./workspaceLocalState";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
@@ -521,10 +526,6 @@ export async function resolveImportDestination(
   return { absDir: realDir, relDir: validated.normalized };
 }
 
-// Collision budget: past this many "name (N).ext" variants the source counts
-// as skipped instead of probing forever.
-const MAX_COLLISION_RENAMES = 99;
-
 // "report.md" + attempt 2 -> "report (2).md", longest first. The naming rule
 // is shared with the trash, because it is the same rule: fit the component in
 // the platform's unit, and keep a shorter candidate for the composed-path
@@ -563,7 +564,7 @@ export async function importNameFor(
   taken: (candidate: string) => Promise<boolean>,
 ): Promise<string | null> {
   const maxEntryChars = entryCharBudget(absDir, process.platform);
-  for (let attempt = 1; attempt <= MAX_COLLISION_RENAMES + 1; attempt += 1) {
+  for (let attempt = 1; attempt <= IMPORT_COLLISION_RENAMES + 1; attempt += 1) {
     const candidates =
       attempt === 1 ? [name] : collisionVariants(name, attempt, maxEntryChars);
     for (const candidate of candidates) {
@@ -766,7 +767,7 @@ async function copyWithoutOverwrite(
   // One budget, used both to shape the candidates and to classify a failure.
   // Two copies of this fact can disagree, and did.
   const maxEntryChars = entryCharBudget(absDir, process.platform);
-  for (let attempt = 1; attempt <= MAX_COLLISION_RENAMES + 1; attempt += 1) {
+  for (let attempt = 1; attempt <= IMPORT_COLLISION_RENAMES + 1; attempt += 1) {
     // Longest first, exactly as the trash ladder does: a shorter name is used
     // only once the platform has actually refused the longer one for length.
     const candidates =
@@ -911,7 +912,10 @@ export function nameSkip(path: string): ImportSkipReason | null {
   if (validated.reason === "unsupported-name") return "windows-name";
   if (validated.reason !== "reserved") return "name";
   if (isReservedPath(path)) return "dohc-name";
-  return isOsMetadataSegment(path.slice(path.lastIndexOf("/") + 1)) ? "system-file" : "left-out";
+  // A name reserved only once rewritten, such as cfg%2f.git, is a spelling.
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  if (!hasEngineIgnoredSegment(name, process.platform)) return "name";
+  return isOsMetadataSegment(name) ? "system-file" : "left-out";
 }
 
 // An entry of a dropped folder: its path below the folder, and the identities

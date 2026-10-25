@@ -1,16 +1,19 @@
 import type { SkippedImportSource } from "../../ipc/bridgeContract";
+import { IMPORT_COLLISION_RENAMES, IMPORT_SKIPPED_PATH_MAX_CHARS } from "../../ipc/channels";
 import {
-  formatSize,
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
   MAX_ENGINE_CAPTURE_TEXT_BYTES,
 } from "../../workspaces/workspaceEngineCaptureLimits";
 import type { ErrorDetailField } from "./copyDetails";
 import { SHELL_ERROR_MAX_CHARS } from "./useShellError";
 
-// A path from a drop can run to 4096 characters. A line shows its end, where
+// A path from a drop can run to 32,767 characters. A line shows its end, where
 // the file's name is; Copy keeps it whole.
 const SHOWN_PATH_MAX_CHARS = 80;
-const COPIED_LINE_MAX_CHARS = 4096 + 120;
+const COPIED_LINE_MAX_CHARS = IMPORT_SKIPPED_PATH_MAX_CHARS + 120;
+
+// A limit reads as a round number: 5 MB, not a measured 5.0 MB.
+const megabytes = (bytes: number) => `${bytes / (1024 * 1024)} MB`;
 
 // What a skipped source is, and what to do when there is something to do.
 export function skipSentence(reason: SkippedImportSource["reason"], name: string): string {
@@ -26,23 +29,23 @@ export function skipSentence(reason: SkippedImportSource["reason"], name: string
     case "system-file":
       return `${name} is a file the system makes.`;
     case "left-out":
-      return `${name} is a name dohc leaves out of workspaces.`;
+      return `${name} is left out of every workspace.`;
     case "dohc-name":
       return `${name} is a name dohc keeps for itself. Rename it, then import it.`;
     case "windows-name":
       return `${name} has a name Windows can't use. Rename it, then import it.`;
     case "name":
-      return `${name} has a name dohc can't save as it is. Rename it, then import it.`;
+      return `${name} can't be saved under that name. Rename it, then import it.`;
     case "too-long":
       return `${name} has a name too long to save here. Shorten it, then import it.`;
     case "taken":
-      return `${name} and 99 numbered copies of it are already here. Rename it, then import it.`;
+      return `${name} and ${IMPORT_COLLISION_RENAMES} numbered copies are already here. Rename it, then import it.`;
     case "no-files":
       return `${name} has no files, and a shared view holds only files.`;
     case "too-large":
-      return `${name} is larger than a shared view's ${formatSize(MAX_ENGINE_CAPTURE_BINARY_BYTES)} limit.`;
+      return `${name} is over the ${megabytes(MAX_ENGINE_CAPTURE_BINARY_BYTES)} limit for files in a shared view. Make it smaller, then import it.`;
     case "too-large-text":
-      return `${name} is larger than a shared view's ${formatSize(MAX_ENGINE_CAPTURE_TEXT_BYTES)} limit for text.`;
+      return `${name} is over the ${megabytes(MAX_ENGINE_CAPTURE_TEXT_BYTES)} limit for text in a shared view. Make it smaller, then import it.`;
   }
 }
 
