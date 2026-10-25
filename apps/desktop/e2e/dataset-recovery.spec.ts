@@ -31,8 +31,8 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
     await create.getByTestId("new-collection-create").click();
     await expect(create).toBeHidden();
     const collection = page.getByRole("region", { name: "Recovery proof", exact: true });
-    await collection.getByRole("button", { name: "New record", exact: true }).click();
-    const newRecord = collection.getByRole("form", { name: "New record" });
+    await collection.getByRole("button", { name: "New record", exact: true }).first().click();
+    const newRecord = collection.getByRole("row", { name: "New record" });
     await newRecord.getByLabel("Name", { exact: true }).fill("Before agent edit");
     await newRecord.getByLabel("Receipt", { exact: true }).setInputFiles({ name: "receipt.txt", mimeType: "text/plain", buffer: receipt });
     await expect(newRecord.getByText(/receipt\.txt.*Save to attach/)).toBeVisible();
