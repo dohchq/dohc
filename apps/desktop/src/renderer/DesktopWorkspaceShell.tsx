@@ -2163,7 +2163,7 @@ export function DesktopWorkspaceShell(props: {
   // sources were skipped — never a silent shrink.
   const importFiles = useCallback(
     async (from: "explorer" | "palette", droppedPaths?: string[], targetDir?: string) => {
-      const reveal = ++revealRequest.current;
+      const reveal = from === "explorer" ? ++revealRequest.current : 0;
       // Try again on a failed import refreshes the shared view first, since
       // some files may have landed, then asks for files for the same folder.
       // Try again already removed the row, so a refresh that leaves the view

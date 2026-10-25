@@ -1845,6 +1845,33 @@ describe("file transfers", () => {
     expect((document.activeElement as HTMLElement | null)?.dataset.path).toBe("notes/c.md");
   });
 
+  it("still selects an Explorer import's files after a palette import starts and is cancelled", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const listing = (files: string[]) => ({
+      visibility: { status: "ready" as const, rules: [] },
+      files: files.map((path) => ({ path, kind: "file" as const })),
+      folders: ["notes"],
+    });
+    bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes/a.md"]));
+    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    let finishExplorer!: (result: { imported: string[]; skipped: number }) => void;
+    bridge.importWorkspaceFiles
+      .mockImplementationOnce(() => new Promise((resolve) => { finishExplorer = resolve; }))
+      .mockResolvedValueOnce({ imported: [], skipped: 0 });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await importIntoNotes(bridge);
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    await waitFor(() => expect(bridge.importWorkspaceFiles).toHaveBeenCalledTimes(2));
+
+    bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes/a.md", "notes/b.md"]));
+    finishExplorer({ imported: ["notes/b.md"], skipped: 0 });
+    await waitFor(() => expect((document.activeElement as HTMLElement | null)?.dataset.path).toBe("notes/b.md"));
+    expect((document.activeElement as HTMLElement).getAttribute("aria-selected")).toBe("true");
+  });
+
   const SHARED_VIEW = { shareId: "share-1", granterEmail: "granter@dohc.test", access: "edit" as const };
 
   // Picking the same files again would land second copies under collision
