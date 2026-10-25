@@ -1107,7 +1107,7 @@ it.skipIf(engine.missing).each([
         const row = (discoveryPayload as {documents: Array<{path: string}>}).documents.find(row => row.path === path);
         return {ready, row};
       };
-      const unadmitted = {ready: false, row: expect.objectContaining({path, status: "unavailable", reason: "live-edit-unadmitted"})};
+      const unadmitted = {ready: false, row: {path, objectId: document.binding.objectId, status: "unavailable", reason: "live-edit-unadmitted"}};
       // The operator's reports that the host's copy misses the owner's edit.
       const reports = () => relayServer!.diagnostics().stderr
         .split(`Live editing of ${path} in workspace ${workspaceId} cannot resume: the document changed while live editing was off`).length - 1;
