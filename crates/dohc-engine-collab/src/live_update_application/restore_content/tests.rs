@@ -118,10 +118,14 @@ fn assert_refusal<T: std::fmt::Debug>(
     assert_eq!(refusal.reason, expected);
 }
 
-fn watch_fence_writes(f: &Fixture) -> Arc<std::sync::atomic::AtomicUsize> {
+fn watch_fence_writes(f: &Fixture) -> Arc<[std::sync::atomic::AtomicUsize; 3]> {
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    let writes = Arc::new(AtomicUsize::new(0));
+    let writes = Arc::new([
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+    ]);
     let seen = writes.clone();
     f.store
         .read_with(|conn| {
@@ -132,7 +136,23 @@ fn watch_fence_writes(f: &Fixture) -> Arc<std::sync::atomic::AtomicUsize> {
                         table_name: "live_restore_fences"
                     }
                 ) {
-                    seen.fetch_add(1, Ordering::SeqCst);
+                    seen[0].fetch_add(1, Ordering::SeqCst);
+                }
+                if matches!(
+                    context.action,
+                    AuthAction::Insert {
+                        table_name: "live_restore_refusals"
+                    }
+                ) {
+                    seen[1].fetch_add(1, Ordering::SeqCst);
+                }
+                if let AuthAction::Insert { table_name }
+                | AuthAction::Update { table_name, .. }
+                | AuthAction::Delete { table_name } = context.action
+                {
+                    if table_name != "live_restore_refusals" {
+                        seen[2].fetch_add(1, Ordering::SeqCst);
+                    }
                 }
                 Authorization::Allow
             }))
@@ -141,15 +161,28 @@ fn watch_fence_writes(f: &Fixture) -> Arc<std::sync::atomic::AtomicUsize> {
     writes
 }
 
-fn stop_watching_fence_writes(f: &Fixture, writes: &std::sync::atomic::AtomicUsize) {
+fn stop_watching_fence_writes(
+    f: &Fixture,
+    writes: &[std::sync::atomic::AtomicUsize; 3],
+    refusals: usize,
+) {
     use rusqlite::hooks::{AuthContext, Authorization};
     f.store
         .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
         .unwrap();
     assert_eq!(
-        writes.load(std::sync::atomic::Ordering::SeqCst),
+        writes[0].load(std::sync::atomic::Ordering::SeqCst),
         0,
         "a pre-fence refusal must precede even a rolled-back fence write"
+    );
+    assert_eq!(
+        writes[1].load(std::sync::atomic::Ordering::SeqCst),
+        refusals
+    );
+    assert_eq!(
+        writes[2].load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a refusal changes no other table"
     );
 }
 
@@ -176,11 +209,12 @@ fn binding_refusal_precedes_all_writes_and_saved_fences_stay_retryable() {
             90,
             &NoFaults,
         );
-        stop_watching_fence_writes(&f, &writes);
+        stop_watching_fence_writes(&f, &writes, usize::from(!committed));
         if let Some(saved) = saved {
             assert_eq!(result.unwrap(), saved);
         } else {
             assert_refusal(result, &operation, "binding");
+            assert_saved_refusal(&mut f, &operation, "binding");
         }
         assert_eq!(binding_state(&f), before);
         assert_eq!(f.canonical().encode_full_state(), bytes);
@@ -188,6 +222,53 @@ fn binding_refusal_precedes_all_writes_and_saved_fences_stay_retryable() {
             f.store.table_row_count("live_restore_fences").unwrap(),
             i64::from(committed)
         );
+    }
+}
+
+#[test]
+fn durable_refusal_survives_crashes_before_commit_and_before_ack() {
+    for (fault, committed) in [
+        (FaultPoint::StorageBeforePersist, false),
+        (FaultPoint::StorageAfterCommitBeforeAck, true),
+    ] {
+        let mut f = Fixture::new("original\n");
+        let operation = f.fence_input();
+        damage(
+            &f,
+            "UPDATE live_device_application_bindings SET available=0",
+        );
+        let result = f.owner.fence_restore(
+            &mut f.store,
+            None,
+            operation.clone(),
+            f.host.clone(),
+            90,
+            &CrashAt(fault),
+        );
+        assert!(
+            matches!(result, Err(ApplicationError::Interrupted)),
+            "{result:?}"
+        );
+        f.store = EngineStore::open(&f.dir.join("engine.db"), 100).unwrap();
+        f.owner = ApplicationOwner::new("workspace".into()).unwrap();
+        assert_eq!(
+            f.store.table_row_count("live_restore_refusals").unwrap(),
+            i64::from(committed)
+        );
+        let result = f.owner.fence_restore_after_reconnect(
+            &mut f.store,
+            None,
+            operation.clone(),
+            f.host.clone(),
+            190,
+            &NoFaults,
+        );
+        let Err(ApplicationError::RestoreRefused(receipt)) = result else {
+            panic!("{result:?}");
+        };
+        assert_eq!(receipt.recorded_at_ms, if committed { 90 } else { 190 });
+        assert_eq!(f.store.table_row_count("live_restore_refusals").unwrap(), 1);
+        assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
     }
 }
 
@@ -273,6 +354,7 @@ fn impossible_prefix_refuses_before_fencing(case: &str) {
         "SELECT json_array(current_path,lineage_claim_id,available,restore_fence_generation,host_id,host_epoch,instance_id,connection_id,selector_paths_json) FROM live_device_application_bindings", [], |row| row.get(0))).unwrap();
     let input = f.fence_input();
     let expected_operation = input.clone();
+    let writes = watch_fence_writes(&f);
     let result = f.owner.fence_restore(
         &mut f.store,
         f.resolver.as_ref(),
@@ -282,6 +364,7 @@ fn impossible_prefix_refuses_before_fencing(case: &str) {
         &NoFaults,
     );
     assert_refusal(result, &expected_operation, case);
+    stop_watching_fence_writes(&f, &writes, 1);
     assert_eq!(
         f.store.table_row_count("live_restore_fences").unwrap(),
         0,
@@ -290,6 +373,7 @@ fn impossible_prefix_refuses_before_fencing(case: &str) {
     let after: String = f.store.read_with(|conn| conn.query_row(
         "SELECT json_array(current_path,lineage_claim_id,available,restore_fence_generation,host_id,host_epoch,instance_id,connection_id,selector_paths_json) FROM live_device_application_bindings", [], |row| row.get(0))).unwrap();
     assert_eq!(before, after, "{case}");
+    assert_saved_refusal(&mut f, &expected_operation, case);
 }
 
 #[test]
@@ -2246,6 +2330,7 @@ fn interrupted_fences_replay_after_restart_instead_of_becoming_refusals() {
         assert_eq!(receipt.operation, operation);
         assert_eq!(receipt.recorded_at_ms, if committed { 50 } else { 70 });
         assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 1);
+        assert_eq!(f.store.table_row_count("live_restore_refusals").unwrap(), 0);
         assert_eq!(f.canonical().encode_full_state(), bytes);
     }
 }
@@ -5145,6 +5230,7 @@ fn assert_preflight_refusal(f: &mut Fixture, operation: NativeRestoreFence, case
         f.canonical().state_vector(),
     );
     let expected_operation = operation.clone();
+    let writes = watch_fence_writes(f);
     let result = f.owner.fence_restore(
         &mut f.store,
         f.resolver.as_ref(),
@@ -5154,6 +5240,7 @@ fn assert_preflight_refusal(f: &mut Fixture, operation: NativeRestoreFence, case
         &NoFaults,
     );
     assert_refusal(result, &expected_operation, case);
+    stop_watching_fence_writes(f, &writes, 1);
     assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
     assert_eq!(binding_state(f), binding);
     assert_eq!(
@@ -5164,6 +5251,83 @@ fn assert_preflight_refusal(f: &mut Fixture, operation: NativeRestoreFence, case
         head
     );
     assert_eq!(reader.dispatch_count(), 0);
+    assert_saved_refusal(f, &expected_operation, case);
+}
+
+fn assert_saved_refusal(f: &mut Fixture, operation: &NativeRestoreFence, case: &str) {
+    let available: bool = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT available FROM live_device_application_bindings",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(f.store.table_row_count("live_restore_refusals").unwrap(), 1);
+    let replay = |f: &mut Fixture, now| {
+        let result = f.owner.fence_restore_after_reconnect(
+            &mut f.store,
+            f.resolver.as_ref(),
+            operation.clone(),
+            f.host.clone(),
+            now,
+            &NoFaults,
+        );
+        let Err(ApplicationError::RestoreRefused(receipt)) = result else {
+            panic!("lost refusal must replay: {result:?}");
+        };
+        assert_refusal::<()>(
+            Err(ApplicationError::RestoreRefused(receipt.clone())),
+            operation,
+            case,
+        );
+        serde_json::to_value(receipt).unwrap()
+    };
+    let first = replay(f, 100);
+    assert_eq!(
+        first["recordedAtMs"],
+        if case == "binding" { 90 } else { 50 }
+    );
+    // Current checks now disagree: the immutable refusal must take precedence.
+    damage(
+        f,
+        if case == "binding" {
+            "UPDATE live_device_application_bindings SET available=1"
+        } else {
+            "UPDATE live_device_application_bindings SET available=0"
+        },
+    );
+    let writes = watch_fence_writes(f);
+    assert_eq!(replay(f, 200), first);
+    stop_watching_fence_writes(f, &writes, 0);
+    let mut changed = operation.clone();
+    changed.point.receipt_digest = "e".repeat(64);
+    assert!(matches!(
+        f.owner.fence_restore_after_reconnect(
+            &mut f.store,
+            f.resolver.as_ref(),
+            changed,
+            f.host.clone(),
+            300,
+            &NoFaults,
+        ),
+        Err(ApplicationError::Conflict)
+    ));
+    let reopened = EngineStore::open(&f.dir.join("engine.db"), 400).unwrap();
+    f.store = reopened;
+    f.owner = ApplicationOwner::new("workspace".into()).unwrap();
+    assert_eq!(replay(f, 500), first);
+    assert_eq!(f.store.table_row_count("live_restore_refusals").unwrap(), 1);
+    damage(
+        f,
+        if available {
+            "UPDATE live_device_application_bindings SET available=1"
+        } else {
+            "UPDATE live_device_application_bindings SET available=0"
+        },
+    );
 }
 #[test]
 #[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]

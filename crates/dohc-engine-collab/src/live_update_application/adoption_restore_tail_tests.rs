@@ -2284,3 +2284,326 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
     assert!(matches!(retry, ApplicationResult::Applied(..)));
     mark("complete");
 }
+
+fn complete_owner_restore(f: &mut Fixture, prep: NativeRestorePreparation, cursor: i64) {
+    let proposal = native_tail_prepare(f, prep.clone()).unwrap();
+    let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
+    let mut binding = f.binding.clone();
+    binding.restore_fence_generation = prep.fence.operation.new_fence;
+    let input = NativeRestoreApplication {
+        preparation: prep,
+        candidate_digest: proposal.receipt().candidate_digest.clone(),
+        native_source_manifest_digest: proposal.receipt().native_source_manifest_digest.clone(),
+        admitted: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: format!("complete-{cursor}"),
+                    update_digest: proposal.receipt().candidate_digest.clone(),
+                    journal_cursor: cursor,
+                    accepting_host_epoch: 2,
+                },
+                binding: binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
+                },
+                received_at_ms: 80,
+            },
+            first_seen: proposal.receipt().replacement_ranges.clone(),
+            canonical_version: Some(2),
+            author_snapshot: Some(vec![]),
+            first_seen_deletes: Some(vec![]),
+            checkpoint_coverage: None,
+        },
+    };
+    f._owner
+        .apply_restore(
+            &mut f.store,
+            None,
+            &mut WriterDocCache::new(),
+            input.clone(),
+            coordinate.clone(),
+            2_000_000,
+            100,
+            90,
+            &NoFaults,
+            |_, _, _, _| Ok(()),
+        )
+        .unwrap();
+    let settlement = f
+        ._owner
+        .with_restore_settlement(
+            &mut f.store,
+            None,
+            input.clone(),
+            coordinate.clone(),
+            2_000_000,
+            100,
+            |store, audit| {
+                restore_content::tests::record_test_projection(
+                    store,
+                    audit,
+                    &format!("complete-{cursor}"),
+                )
+            },
+        )
+        .unwrap();
+    f._owner
+        .resume_restore(
+            &mut f.store,
+            None,
+            NativeRestoreResume {
+                application: input,
+                settlement_id: settlement.settlement_id,
+            },
+            coordinate.clone(),
+            2_000_000,
+            100,
+            100,
+            &NoFaults,
+            |_, _, _, _| Ok(()),
+        )
+        .unwrap();
+    f.binding = binding;
+    f.doc = f
+        .store
+        .read_with(|conn| durable::load_doc_in(conn, &f.key))
+        .unwrap();
+    f.handle = f
+        ._owner
+        .register(
+            &mut f.store,
+            "namespace".into(),
+            coordinate,
+            f.binding.clone(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn durable_refusal_preserves_pending_owner_edits_and_the_next_restore_at_each_generation() {
+    use crate::owner_outbox::publication::{contains_in, PublicationContentKind, PublicationProof};
+    use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
+    for resumed in [false, true] {
+        let mut f = Fixture::new();
+        f.adopt().unwrap();
+        if resumed {
+            let prep = native_tail_input(&mut f, None, 0);
+            complete_owner_restore(&mut f, prep, 71);
+        }
+        let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
+        let generation = f.binding.restore_fence_generation;
+        for (index, kind) in [
+            ChangeActorKind::Human,
+            ChangeActorKind::Agent,
+            ChangeActorKind::Automation,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let text = format!("pending-{index}");
+            let update = f.doc.richdoc_append_paragraph(&text);
+            let attribution = ChangeAttribution {
+                actor_kind: kind,
+                on_behalf_of: Some("owner".into()),
+                depth: 0,
+                run: None,
+            };
+            crate::record_local_update(
+                &mut f.store,
+                &mut WriterDocCache::new(),
+                &f.key,
+                &update,
+                crate::LocalAppend {
+                    restore_generation: (generation > 0).then_some(generation),
+                    actor_origin_id: Some(if index == 1 {
+                        "agent"
+                    } else if index == 2 {
+                        "automation"
+                    } else {
+                        "owner"
+                    }),
+                    attribution: Some(&attribution),
+                    ..Default::default()
+                },
+                &NoFaults,
+                120 + index as i64,
+                |tx, outcome, _| {
+                    owner_outbox::append_adopted_local_update_in_tx(
+                        tx,
+                        &f.key,
+                        "owner.md",
+                        outcome.seq,
+                        &update,
+                        120 + index as i64,
+                    )
+                },
+            )
+            .unwrap();
+        }
+        let outbox: String = f
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT outbox_id FROM owner_ydoc_outboxes WHERE restore_fence_generation=?1",
+                    [generation],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        let pending = owner_outbox::read_pending(&f.store, "workspace", &outbox).unwrap();
+        assert_eq!(pending.entries.len(), 3);
+        let inventory = native_tail_inventory(&f.store);
+        let bytes = f.doc.encode_full_state();
+        let mut operation = NativeRestoreFence {
+            point: NativeRestoreSelection {
+                journal_cursor: 0,
+                receipt_digest: f.binding.lineage_claim_id.clone(),
+            },
+            operation_id: format!("refused-{generation}"),
+            relay_database_namespace: "namespace".into(),
+            old_binding: f.binding.clone(),
+            host_id: "host".into(),
+            new_fence: generation + 1,
+            origin: RestoreDeliveryOrigin::Owner {
+                id: f.cut.adoption_id.clone(),
+            },
+            terminal: None,
+            applied_sequence: 0,
+        };
+        // A stale connection is one of the binding-changed checks. It changes no stored binding.
+        let mut stale = coordinate.clone();
+        stale.connection_id = "stale".into();
+        let result =
+            f._owner
+                .fence_restore(&mut f.store, None, operation.clone(), stale, 130, &NoFaults);
+        let Err(ApplicationError::RestoreRefused(refusal)) = result else {
+            panic!("{result:?}");
+        };
+        assert_eq!(refusal.reason, NativeRestoreRefusalReason::BindingChanged);
+        assert_eq!(native_tail_inventory(&f.store), inventory);
+        assert_eq!(f.doc.encode_full_state(), bytes);
+        assert_eq!(f.store.table_row_count("live_restore_refusals").unwrap(), 1);
+        let mut terminal = None;
+        let mut sequence = 0;
+        for (index, entry) in pending.entries.iter().enumerate() {
+            let ack = native_tail_apply(
+                &mut f,
+                entry.update.clone(),
+                entry.delivery_id.clone(),
+                82 + index as i64,
+            );
+            terminal = Some(LiveUpdateReceipt {
+                delivery_id: ack.delivery_id,
+                update_digest: ack.update_digest,
+                journal_cursor: ack.journal_cursor,
+                accepting_host_epoch: ack.accepting_host_epoch,
+            });
+            sequence = ack.local_ydoc_sequence;
+            owner_outbox::acknowledge(
+                &mut f.store,
+                "workspace",
+                &outbox,
+                &[owner_outbox::OwnerDeliveryReceipt {
+                    delivery_id: entry.delivery_id.clone(),
+                    update_digest: entry.update_digest.clone(),
+                    journal_cursor: 82 + index as i64,
+                    accepting_host_epoch: 1,
+                }],
+            )
+            .unwrap();
+        }
+        assert!(owner_outbox::read_pending(&f.store, "workspace", &outbox)
+            .unwrap()
+            .entries
+            .is_empty());
+        let settled = with_settlement(
+            &mut f.store,
+            &f.handle,
+            terminal.clone(),
+            150,
+            NativeHistoryReconstruction {
+                working_reserve_bytes: 8 * 1024 * 1024,
+            },
+            |store, audit| {
+                restore_content::tests::record_test_projection(store, audit, "after-refusal")
+            },
+        )
+        .unwrap();
+        f.store
+            .read_with(|conn| {
+                assert_eq!(
+                    restore_fence::current_generation(conn, &f.key).unwrap(),
+                    (generation > 0).then_some(generation)
+                );
+                assert_eq!(
+                    contains_in(
+                        conn,
+                        &f.key,
+                        "owner.md",
+                        Some(&f.binding.lineage_claim_id),
+                        PublicationContentKind::Projection,
+                        &settled.markdown_digest,
+                        &mut 4_000_000
+                    )
+                    .unwrap(),
+                    PublicationProof::Contained
+                );
+                let text: String = conn
+                    .query_row(
+                        "SELECT text FROM blobs WHERE sha256=?1",
+                        [&settled.markdown_digest],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                for index in 0..3 {
+                    assert!(text.contains(&format!("pending-{index}")), "{text}");
+                }
+                Ok::<_, rusqlite::Error>(())
+            })
+            .unwrap();
+        // This same operation is terminal, even with the original live connection.
+        assert!(matches!(
+            f._owner.fence_restore(
+                &mut f.store,
+                None,
+                operation.clone(),
+                coordinate.clone(),
+                160,
+                &NoFaults
+            ),
+            Err(ApplicationError::RestoreRefused(_))
+        ));
+        operation.operation_id = format!("fresh-{generation}");
+        operation.terminal = terminal.clone();
+        operation.applied_sequence = sequence;
+        let fence = f
+            ._owner
+            .fence_restore(&mut f.store, None, operation, coordinate, 170, &NoFaults)
+            .unwrap();
+        let baseline = Ydoc::wire();
+        baseline.apply(&f.cut.baseline_bytes).unwrap();
+        let projection = baseline.project(ContentKind::Richdoc).unwrap().content;
+        let source = baseline
+            .preserved_markdown_source(&projection)
+            .unwrap_or_else(|| projection.clone());
+        let prep = NativeRestorePreparation {
+            fence,
+            point: NativeRestorePoint {
+                journal_cursor: 0,
+                receipt_digest: f.binding.lineage_claim_id.clone(),
+                markdown_digest: hex_sha256(source.as_bytes()),
+                projection_digest: hex_sha256(projection.as_bytes()),
+            },
+        };
+        let next = native_tail_prepare(&mut f, prep.clone()).unwrap();
+        assert!(next.receipt().accepted_history.event_count >= 3);
+        let frozen = Ydoc::wire();
+        frozen.apply(next.frozen_state_bytes()).unwrap();
+        let text = frozen.project(ContentKind::Richdoc).unwrap().content;
+        for index in 0..3 {
+            assert!(text.contains(&format!("pending-{index}")), "{text}");
+        }
+        complete_owner_restore(&mut f, prep, 100);
+        assert_eq!(f.binding.restore_fence_generation, generation + 1);
+    }
+}

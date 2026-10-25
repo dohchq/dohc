@@ -38,7 +38,7 @@ pub struct NativeRestoreFenceReceipt {
     pub recorded_at_ms: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum NativeRestoreRefusalReason {
     BindingChanged,
@@ -48,12 +48,13 @@ pub enum NativeRestoreRefusalReason {
     IncompleteWitness,
 }
 
-/// The writer found no saved fence and refused before its first fence write.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A terminal decision committed before this operation could write a fence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeRestoreRefusal {
     pub operation: NativeRestoreFence,
     pub reason: NativeRestoreRefusalReason,
+    pub recorded_at_ms: i64,
 }
 
 const SELECTED_POINT_REPLAY_BYTES: usize = crate::limits::MAX_YDOC_UPDATE_BYTES * 5;
@@ -331,6 +332,11 @@ impl ApplicationOwner {
             Err(error) => (None, Some(error)),
         };
         let input_json = serde_json::to_string(&input).map_err(|_| ApplicationError::Corrupt)?;
+        // Canonical identifiers and at most 100 selector paths bound the JSON,
+        // including six-byte JSON escaping, below this stored-input limit.
+        if input_json.len() > 1_048_576 {
+            return Err(ApplicationError::ConfiguredByteBudgetExceeded);
+        }
         let outcome = store.write_with(faults, |tx| {
             require_workspace(tx, &held)?;
             let saved: Option<(String, String)> = tx.query_row(
@@ -353,16 +359,42 @@ impl ApplicationOwner {
                 }) || marker(tx, b)?.head_update_seq != restore_content::application::fence_replay_head(tx,&held,&receipt)? {
                     return Err(ApplicationError::Corrupt);
                 }
-                return Ok(receipt);
+                return Ok(Ok(receipt));
+            }
+            let saved: Option<(String, String, i64)> = tx.query_row(
+                "SELECT input_json,reason,recorded_at_ms FROM live_restore_refusals WHERE relay_database_namespace=?1 AND operation_id=?2",
+                params![held.namespace,input.operation_id],
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+            ).optional().map_err(read_sql)?;
+            if let Some((saved_input, reason, recorded_at_ms)) = saved {
+                if saved_input != input_json { return Err(ApplicationError::Conflict); }
+                let reason = match reason.as_str() {
+                    "binding-changed" => NativeRestoreRefusalReason::BindingChanged,
+                    "reader-unavailable" => NativeRestoreRefusalReason::ReaderUnavailable,
+                    "source-unavailable" => NativeRestoreRefusalReason::SourceUnavailable,
+                    "source-too-large" => NativeRestoreRefusalReason::SourceTooLarge,
+                    "incomplete-witness" => NativeRestoreRefusalReason::IncompleteWitness,
+                    _ => return Err(ApplicationError::Corrupt),
+                };
+                integer(recorded_at_ms, 0, SAFE)?;
+                return Ok(Err(Box::new(NativeRestoreRefusal { operation: input.clone(), reason, recorded_at_ms })));
             }
             let collision: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2)",
                 params![held.namespace,input.operation_id], |r| r.get(0),
             ).map_err(read_sql)?;
             if collision { return Err(ApplicationError::Conflict); }
-            let refused = |reason| ApplicationError::RestoreRefused(Box::new(NativeRestoreRefusal {
-                operation: input.clone(), reason,
-            }));
+            let refused = |reason| {
+                let refusal = Box::new(NativeRestoreRefusal {
+                    operation: input.clone(), reason, recorded_at_ms: now_ms,
+                });
+                let reason = serde_json::to_value(&refusal.reason).map_err(|_| ApplicationError::Corrupt)?;
+                tx.execute(
+                    "INSERT INTO live_restore_refusals(relay_database_namespace,operation_id,workspace_id,input_json,reason,recorded_at_ms) VALUES(?1,?2,?3,?4,?5,?6)",
+                    params![held.namespace,input.operation_id,b.workspace_id,input_json,reason.as_str().ok_or(ApplicationError::Corrupt)?,now_ms],
+                ).map_err(write_sql)?;
+                Ok(Err(refusal))
+            };
             let key = DocKey::new(&b.workspace_id,&b.main_version_id,&b.object_id)?;
             require_hosted_ready(tx, &key)?;
             require_registration(tx,&key,&held.namespace,b)?;
@@ -371,7 +403,7 @@ impl ApplicationOwner {
                 binding == *b && available && (coordinate == held.coordinate
                     || (after_reconnect && coordinate.host_id == held.coordinate.host_id))
             }) {
-                return Err(refused(NativeRestoreRefusalReason::BindingChanged));
+                return refused(NativeRestoreRefusalReason::BindingChanged);
             }
             // A settlement moment's before-image is publishable only while its
             // generation is current. Refuse until the relay acknowledged this
@@ -399,19 +431,21 @@ impl ApplicationOwner {
             let needed = if selected.as_ref().is_some_and(|doc| doc.has_reader_source()) { selected.as_ref() }
                 else if current.has_reader_source() { Some(&current) } else { None };
             if let Some(doc) = needed {
-                let reference = doc.markdown_source_reference().ok_or_else(|| refused(NativeRestoreRefusalReason::IncompleteWitness))?;
+                let Some(reference) = doc.markdown_source_reference() else {
+                    return refused(NativeRestoreRefusalReason::IncompleteWitness);
+                };
                 if doc.markdown_source(&reference).is_none() {
-                    return Err(refused(NativeRestoreRefusalReason::IncompleteWitness));
+                    return refused(NativeRestoreRefusalReason::IncompleteWitness);
                 }
                 if resolver.is_none() {
-                    return Err(refused(NativeRestoreRefusalReason::ReaderUnavailable));
+                    return refused(NativeRestoreRefusalReason::ReaderUnavailable);
                 }
-                crate::reader_snapshot::history_artifact(tx, &key, &b.current_path, &reference.source_sha256, crate::limits::MAX_PUBLIC_MARKDOWN_BYTES)
-                    .map_err(|error| match error {
-                        CollabError::MarkdownReaderUnavailable => refused(NativeRestoreRefusalReason::SourceUnavailable),
-                        CollabError::ConfiguredByteBudgetExceeded => refused(NativeRestoreRefusalReason::SourceTooLarge),
-                        error => error.into(),
-                    })?;
+                let Some((_, length)) = crate::reader_snapshot::history_artifact_header(tx, &key, &b.current_path, &reference.source_sha256)? else {
+                    return refused(NativeRestoreRefusalReason::SourceUnavailable);
+                };
+                if usize::try_from(length).ok().filter(|n| *n <= crate::limits::MAX_PUBLIC_MARKDOWN_BYTES).is_none() {
+                    return refused(NativeRestoreRefusalReason::SourceTooLarge);
+                }
             }
             let receipt = NativeRestoreFenceReceipt {
                 operation: input.clone(),
@@ -454,8 +488,15 @@ impl ApplicationOwner {
                     _ => ApplicationError::Corrupt,
                 })?;
             }
-            Ok(receipt)
+            Ok(Ok(receipt))
         })?;
+        let receipt = match outcome {
+            TxnOutcome::Committed(Ok(receipt)) => receipt,
+            TxnOutcome::Committed(Err(refusal)) => {
+                return Err(ApplicationError::RestoreRefused(refusal))
+            }
+            TxnOutcome::Crashed { .. } => return Err(ApplicationError::Interrupted),
+        };
         for current in &self.current {
             let mut current = current.lock().map_err(|_| ApplicationError::Interrupted)?;
             if current.binding.main_version_id == b.main_version_id
@@ -464,10 +505,7 @@ impl ApplicationOwner {
                 current.live = false;
             }
         }
-        match outcome {
-            TxnOutcome::Committed(receipt) => Ok(receipt),
-            TxnOutcome::Crashed { .. } => Err(ApplicationError::Interrupted),
-        }
+        Ok(receipt)
     }
 }
 

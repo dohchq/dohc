@@ -12,7 +12,7 @@ const operation: NativeRestoreFence = {
 
 it.each(["binding-changed", "reader-unavailable", "source-unavailable", "source-too-large", "incomplete-witness"])(
   "accepts only an identified pre-fence refusal: %s", reason => {
-    const refusal = {operation: structuredClone(operation), reason};
+    const refusal = {operation: structuredClone(operation), reason, recordedAtMs: 1};
     expect(parseNativeRestoreRefusal(refusal, operation)).toEqual(refusal);
     const parsed = parseNativeRestoreRefusal(refusal, operation);
     parsed.operation.oldBinding = {...parsed.operation.oldBinding, selectorPaths: ["a.md", "other"]};
@@ -21,7 +21,7 @@ it.each(["binding-changed", "reader-unavailable", "source-unavailable", "source-
 
 it.each(["interrupted", "timeout", "disconnected", "conflict", "unknown", "publication-pending"])(
   "does not turn %s into an abandonable refusal", reason => {
-    expect(() => parseNativeRestoreRefusal({operation, reason}, operation)).toThrow();
+    expect(() => parseNativeRestoreRefusal({operation, reason, recordedAtMs: 1}, operation)).toThrow();
   });
 
 it.each([
@@ -38,15 +38,16 @@ it.each([
   (value: NativeRestoreFence) => {value.terminal = {deliveryId: "delivery", updateDigest: "b".repeat(64), journalCursor: 1, acceptingHostEpoch: parseHostEpoch(1)};},
 ])("refuses another operation's identity %#", mutate => {
   const altered = structuredClone(operation); mutate(altered);
-  expect(() => parseNativeRestoreRefusal({operation: altered, reason: "binding-changed"}, operation)).toThrow();
+  expect(() => parseNativeRestoreRefusal({operation: altered, reason: "binding-changed", recordedAtMs: 1}, operation)).toThrow();
 });
 
 it.each([
   null, new Error("unknown"), {code: "native-restore-refused"},
-  {operation, reason: "binding-changed", committed: false},
-  {operation, reason: "binding-changed", receipt: {}},
-  {operation}, {reason: "binding-changed"},
-  {operation: {...operation, extra: true}, reason: "binding-changed"},
+  {operation, reason: "binding-changed", recordedAtMs: 1, committed: false},
+  {operation, reason: "binding-changed", recordedAtMs: 1, receipt: {}},
+  {operation}, {reason: "binding-changed"}, {operation, reason: "binding-changed"},
+  {operation, reason: "binding-changed", recordedAtMs: -1},
+  {operation: {...operation, extra: true}, reason: "binding-changed", recordedAtMs: 1},
 ])("refuses ambiguous and malformed answers %#", value => {
   expect(() => parseNativeRestoreRefusal(value, operation)).toThrow();
 });
