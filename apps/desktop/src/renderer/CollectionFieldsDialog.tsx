@@ -24,6 +24,8 @@ export interface CollectionFieldsDialogProps {
   onChooseButton?(field: string): void;
   /** A button named for an action was approved: the ⚡ builder opens on what it does. */
   onButtonAdded?(field: string): void;
+  /** The type a new field starts with. */
+  addType?: FieldType;
 }
 type FieldType = Extract<DatasetSchemaChange, { kind: "changeField" }>["type"];
 const types: Array<[FieldType, string]> = [["text", "Text"], ["number", "Number"], ["checkbox", "Checkbox"], ["date", "Date"],
@@ -37,7 +39,7 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
   // Buttons get their own controls. Names stay unique across every field.
   const columns = table ? datasetColumnFields(table) : [];
   const [kind, setKind] = useState<DatasetSchemaChange["kind"]>("addField"), [name, setName] = useState("");
-  const [fieldId, setFieldId] = useState(columns[0]?.fieldId ?? ""), [type, setType] = useState<FieldType>("text");
+  const [fieldId, setFieldId] = useState(columns[0]?.fieldId ?? ""), [type, setType] = useState<FieldType>(props.addType ?? "text");
   const [required, setRequired] = useState(false), [unique, setUnique] = useState(false), [hasDefault, setHasDefault] = useState(false);
   const [defaultText, setDefaultText] = useState(""), [options, setOptions] = useState("");
   const [review, setReview] = useState<{ preparation: DatasetMigrationPreparation; change: DatasetSchemaChange } | null>(null);
