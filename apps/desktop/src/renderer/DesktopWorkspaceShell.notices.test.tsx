@@ -1811,6 +1811,40 @@ describe("file transfers", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
+  it("keeps the newer import's selection when an older import finishes later", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const listing = (files: string[]) => ({
+      visibility: { status: "ready" as const, rules: [] },
+      files: files.map((path) => ({ path, kind: "file" as const })),
+      folders: ["notes"],
+    });
+    bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes/a.md"]));
+    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    let finishOlder!: (result: { imported: string[]; skipped: number }) => void;
+    bridge.importWorkspaceFiles
+      .mockImplementationOnce(() => new Promise((resolve) => { finishOlder = resolve; }))
+      .mockImplementationOnce(async () => {
+        bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes/a.md", "notes/b.md", "notes/c.md"]));
+        return { imported: ["notes/c.md"], skipped: 0 };
+      });
+    renderShell(bridge);
+
+    await importIntoNotes(bridge);
+    await importIntoNotes(bridge);
+    await waitFor(() => expect(bridge.importWorkspaceFiles).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect((document.activeElement as HTMLElement | null)?.dataset.path).toBe("notes/c.md"));
+    const listings = bridge.listWorkspaceFiles.mock.calls.length;
+
+    finishOlder({ imported: ["notes/b.md"], skipped: 0 });
+    await waitFor(() => expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(listings));
+    await act(async () => {});
+    const selected = screen.getAllByTestId("tree-row")
+      .filter((row) => row.getAttribute("aria-selected") === "true")
+      .map((row) => row.dataset.path);
+    expect(selected).toEqual(["notes/c.md"]);
+    expect((document.activeElement as HTMLElement | null)?.dataset.path).toBe("notes/c.md");
+  });
+
   const SHARED_VIEW = { shareId: "share-1", granterEmail: "granter@dohc.test", access: "edit" as const };
 
   // Picking the same files again would land second copies under collision

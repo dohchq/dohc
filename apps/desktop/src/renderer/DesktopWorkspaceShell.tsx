@@ -2148,9 +2148,11 @@ export function DesktopWorkspaceShell(props: {
       workspaceId,
     ],
   );
-  // The Explorer selects these paths once their rows render.
+  // The Explorer selects these paths once their rows render. The newest
+  // request wins, so a slow import cannot take the selection back.
   const [explorerReveal, setExplorerReveal] = useState<{ workspaceId: string; paths: readonly string[] } | null>(null);
   const clearExplorerReveal = useCallback(() => setExplorerReveal(null), []);
+  const revealRequest = useRef(0);
   // Set once refreshShareView exists below; a failed import's Try again
   // calls it.
   // One import seam for the dialog flow and the OS drag-in flow (the latter
@@ -2161,6 +2163,7 @@ export function DesktopWorkspaceShell(props: {
   // sources were skipped — never a silent shrink.
   const importFiles = useCallback(
     async (from: "explorer" | "palette", droppedPaths?: string[], targetDir?: string) => {
+      const reveal = ++revealRequest.current;
       // Try again on a failed import refreshes the shared view first, since
       // some files may have landed, then asks for files for the same folder.
       // Try again already removed the row, so a refresh that leaves the view
@@ -2274,7 +2277,7 @@ export function DesktopWorkspaceShell(props: {
         reportShellError("Files imported, but the explorer could not refresh.", error);
         return;
       }
-      if (from !== "explorer" || workspaceIdRef.current !== workspaceId) return;
+      if (from !== "explorer" || workspaceIdRef.current !== workspaceId || revealRequest.current !== reveal) return;
       // The target folder opens, and what landed in it is selected: each new
       // file, and each new folder that holds the rest.
       mutateWb((state) =>
@@ -3286,6 +3289,7 @@ export function DesktopWorkspaceShell(props: {
           { ...state, activeView: "explorer", sidebarVisible: true },
         ),
       );
+      revealRequest.current += 1;
       setExplorerReveal({ workspaceId, paths: [path] });
     },
     [mutateWb, workspaceId],
