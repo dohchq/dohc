@@ -88,7 +88,11 @@ const appDataFolders = (homeDir: string) => ({
 // detection finds only the fakes a spec installs. Node's own folder stays,
 // because runner commands and dohc's CLI shim run `node`.
 export const testSearchPath = (process.env.Path ?? process.env.PATH ?? "").split(delimiter)
-  .filter((dir) => dir !== "" && (resolve(dir) === dirname(process.execPath) || !holdsAgentTool(dir)))
+  .filter((entry) => {
+    // Detection reads a quoted entry without its quotes, so this does too.
+    const dir = entry.replace(/^"(.*)"$/u, "$1");
+    return dir !== "" && (resolve(dir) === dirname(process.execPath) || !holdsAgentTool(dir));
+  })
   .join(delimiter);
 
 function launchEnv(input: {
