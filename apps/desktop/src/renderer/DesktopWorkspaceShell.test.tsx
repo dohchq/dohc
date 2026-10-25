@@ -1319,14 +1319,15 @@ describe("open editors", () => {
     await expect(settlePendingEditorDrafts()).resolves.toBe(true);
 
     // Another window stopped the quit, so the page is still being typed in.
-    await user.keyboard(", tram 28");
+    // Blank lines alone are new text.
+    await user.keyboard("{Enter}{Enter}");
     expect(hasPendingEditorDrafts()).toBe(true);
     await user.click(screen.getAllByLabelText(/^Close Lisbon/)[0]!);
 
     await waitFor(() => expect(screen.queryByRole("tab", { name: /Lisbon/ })).toBeNull());
     expect(recovered()).toEqual([
       { path: "Lisbon.md", text: LISBON },
-      { path: "Lisbon.md", text: "---\ntitle: Lisbon\n---\n\nDay one, tram 28\n" },
+      { path: "Lisbon.md", text: "---\ntitle: Lisbon\n---\n\nDay one\n\n\n" },
     ]);
   });
 

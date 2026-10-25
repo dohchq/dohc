@@ -431,11 +431,10 @@ function typedNewPage(page: { draft: string; body: string }): boolean {
 }
 
 // A new page's text as its file would hold it: the title and icon, then the
-// body.
+// body as it was typed.
 function newPageText(page: { draft: string; body: string }): string {
   if (page.body === "") return page.draft;
-  const body = `${page.body.replace(/\n+$/, "")}\n`;
-  return page.draft === "" ? body : `${page.draft.replace(/\n+$/, "")}\n\n${body}`;
+  return page.draft === "" ? `${page.body}\n` : `${page.draft.replace(/\n+$/, "")}\n\n${page.body}\n`;
 }
 
 type EditorFocus = {
