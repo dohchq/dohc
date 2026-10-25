@@ -135,8 +135,8 @@ export function readServiceLiveHostConfig(configPath: string, keepWorkspace: (id
   const activation=parsedActivation ? {...parsedActivation, targets: parsedActivation.targets.filter(row => keepWorkspace(row.workspaceId))} : undefined;
   const sync=parseNativeLiveSyncConfig(value.sync,integer(ingress.aggregateBytes));
   checkServiceMembership(workspaces, activation?.targets ?? []);
-  if(activation && (!adoption || !sync || activation.maxCaptureBytes>Math.min(sync.policy.maxReadBytes,sync.policy.maxOutputBytes))){
-    throw new Error("Service activation requires bounded native adoption and sync.");
+  if(activation && (!adoption || !sync || !settlement || activation.maxCaptureBytes>Math.min(sync.policy.maxReadBytes,sync.policy.maxOutputBytes))){
+    throw new Error("Service activation requires bounded native adoption, sync and settlement.");
   }
   const applicationWorkingReserveBytes = integer(ingress.applicationWorkingReserveBytes, 0);
   if (applicationWorkingReserveBytes === 0) throw new TypeError("Live application requires a positive applicationWorkingReserveBytes limit.");

@@ -17,6 +17,8 @@ import type {LiveHostConnectionCoordinate} from "./storage.js";
 import type {StorageContext} from "./storage/context.js";
 import {readServiceActivationRetirement} from "./storage/serviceActivationRetirement.js";
 import {ServiceActivationStore} from "./storage/serviceActivation.js";
+import {LiveCommittedDeliveryStore} from "./storage/liveCommittedDelivery.js";
+import {initialAcceptedHistoryDigest} from "./liveAcceptedHistory.js";
 import {ServiceActivationDriver} from "./serviceActivationDriver.js";
 import {ServiceHostedReplication} from "./serviceHostedReplication.js";
 import {liveEditors} from "./liveEditors.js";
@@ -364,7 +366,7 @@ async function configureActivation(f: Awaited<ReturnType<typeof fixture>>,limits
   Object.assign(f.config.workspaces[0]!,{hostedReplication:{relay:{baseUrl:"https://relay.example",bearerToken:"service-token"},
     identity:{replicationEpoch:"epoch",streamIdentity:"stream"},maxPagesPerPull:1}});
   Object.assign(f.config,{adoption:{maxBytes:1_000_000,maxEvents:10,ownerOutbox:{maxPendingBytes:1_000_000,maxPendingAgeMs:60_000}},
-    sync:{policy:{maxReadBytes:1_000_000,maxOutputBytes:1_000_000,maxClientVectorBytes:1000,maxHostVectorBytes:1000},workingReserveBytes:1_000_000},
+    settlement:{maxApplicationsPerSettlement:8},sync:{policy:{maxReadBytes:1_000_000,maxOutputBytes:1_000_000,maxClientVectorBytes:1000,maxHostVectorBytes:1000},workingReserveBytes:1_000_000},
     activation:{targets:[{workspaceId:"workspace",path:"file.md",shareId:"share"}],maxCaptureBytes:1_000_000,
       maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,maxDocumentsPerPass:1,pollIntervalMs:60_000,passDeadlineMs:1000,
       idleUnloadMs:600_000,idleRetryMs:30_000,
@@ -372,6 +374,18 @@ async function configureActivation(f: Awaited<ReturnType<typeof fixture>>,limits
         maxDeleteClientGroupVisits:1000,maxDeleteIntervalVisits:1000,maxIndexOperations:1000},...limits}});
   await f.save();
 }
+
+// Proves: an activation host needs every bound its retirement uses, settlement
+// included, so a configuration that could never retire refuses to start
+// before it spawns or prepares anything.
+it.each(["adoption","sync","settlement"] as const)("refuses activation without %s before spawning",async missing=>{
+  const f=await fixture();
+  await configureActivation(f);
+  delete (f.config as Record<string,unknown>)[missing]; await f.save();
+  await expect(startServiceLiveHost(f)).rejects.toThrow("Service activation requires bounded native adoption, sync and settlement.");
+  expect(spawn).not.toHaveBeenCalled();
+  expect(f.storage.getLiveHostControl()?.registeredConnectionId).toBeNull();
+});
 
 it("runs a bounded hosted pull in the configured activation lifecycle and closes its pass",async()=>{
   const f=await fixture();let captured!:ReturnType<typeof clientFrom>;
@@ -492,7 +506,9 @@ const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
 // A service owner whose activation completed under an earlier connection, as
 // after a restart. The started host resumes it from real relay storage; only
 // the engine is mocked. `park` holds the next engine request for one method.
-async function completedServiceOwner(options: {empty?: boolean; frameChanges?: boolean; maxDocumentsPerPass?: number; polling?: boolean; adopted?: boolean} = {}) {
+// `maxApplications` is the settlement bound, which pages a retirement's applications.
+async function completedServiceOwner(options: {empty?: boolean; frameChanges?: boolean; maxDocumentsPerPass?: number; polling?: boolean; adopted?: boolean;
+  maxApplications?: number} = {}) {
   const adopted = options.adopted ?? true;
   const f = await fixture(), raw = new DatabaseSync(join(f.root, "relay", "relay.sqlite"));
   cleanup.push(async () => raw.close());
@@ -551,15 +567,16 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
     store.complete({document, host: earlier, access, nativeState: {adoptionId: capture.activationId, pendingBytes: 0}, guard() {}});
   }
 
-  Object.assign(f.config, {settlement: {maxApplicationsPerSettlement: 8}});
-  const target = {workspaceId: "workspace", path: "docs/a.md", shareId: "share"};
+  const target ={workspaceId: "workspace", path: "docs/a.md", shareId: "share"};
   // An empty host activates documents it gains on its next pass. It and a polling host pass every 20 ms.
   await configureActivation(f, {targets: options.empty ? [] : [target], passDeadlineMs: 10_000, validation: policy,
     ...(options.empty || options.polling ? {pollIntervalMs: 20} : {}),
     ...(options.maxDocumentsPerPass ? {maxDocumentsPerPass: options.maxDocumentsPerPass} : {})});
   // An empty host receives this workspace and document through `update`.
   const workspace = f.config.workspaces[0]! as ServiceWorkspace;
-  if (options.empty) {f.config.workspaces = []; await f.save();}
+  if (options.maxApplications) Object.assign(f.config, {settlement: {maxApplicationsPerSettlement: options.maxApplications}});
+  if (options.empty) f.config.workspaces = [];
+  await f.save();
 
   let parked: {method: string; entered: ReturnType<typeof deferred<void>>; release: ReturnType<typeof deferred<void>>} | undefined;
   // Queued unload replies, or errors that lose them. `replies` overrides every hosted pass, commit and push until a test changes it.
@@ -586,15 +603,20 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   const unavailable = (id: number) => new EngineRequestError(id, {code: "INVALID_PARAMS", message: "live-registration-unavailable", retry: "no"} as never);
   // Whether the engine's settlement reaches the file. Until it does, the same terminal settles again.
   const settlement = {materialized: true};
-  // The engine's side of a retirement. Reconciliation reports the adoption, if the activation adopted, and what it
-  // applied after the relay's tip, in journal order, and asks to settle until a retirement settled through it.
-  // `refusal` refuses it. Release keeps its first boundary, and waits while a commit lists the adopted document
-  // departed. Native capture returns `capture`, as a test sets for a successor, which adopts at its predecessor's
-  // boundary; `adoption` is what the engine last adopted.
-  const engine: {refusal?: Error; boundary?: unknown; settledThrough?: number; capture: NativeOwnerActivation;
-    adoption: {activationId: string; throughCursor: number | null}} = {capture, adoption: {activationId: capture.activationId, throughCursor: adopted ? 0 : null}};
+  // The engine's side of a retirement. Reconciliation first asks the journal for each delivery in `unproven`, and
+  // records each answer in `journals`. It then reports the adoption, if the activation adopted, and a page of what
+  // it applied after the relay's tip, in journal order, and asks to settle until a retirement settled through all
+  // of it. `refusal` refuses it. Release keeps its first boundary. An adopted activation releases only once its
+  // document parked, which a commit listing it departed or settled output still `unpushed` prevents, and then only
+  // once it settled through what it applied, unless `releasePending` names another reason. Native capture returns
+  // `capture`, as a test sets for a successor, which adopts at its predecessor's boundary; `adoption` is what the
+  // engine last adopted.
+  const engine: {refusal?: Error; boundary?: unknown; settledThrough?: number; reconciledThrough?: number; unproven: string[]; journals: unknown[];
+    unpushed: number; releasePending?: string; capture: NativeOwnerActivation; adoption: {activationId: string; throughCursor: number | null}} =
+    {capture, unproven: [], journals: [], unpushed: 0, adoption: {activationId: capture.activationId, throughCursor: adopted ? 0 : null}};
   const ownerBoundary = () => {
     const tip = JSON.parse(String(raw.prepare("SELECT tip_receipt_json FROM sync_relay_live_delivery_owners WHERE object_id='object'").get()!.tip_receipt_json));
+    if (!tip) return {terminalReceipt: null, eventCount: 0, historyEvidenceDigest: initialAcceptedHistoryDigest(f.history.namespace, document)};
     const endpoint = raw.prepare("SELECT accepted_event_count,accepted_evidence_digest FROM sync_relay_live_update_journal WHERE object_id='object' AND journal_cursor=?")
       .get(tip.journalCursor)!;
     return {terminalReceipt: tip, eventCount: endpoint.accepted_event_count, historyEvidenceDigest: endpoint.accepted_evidence_digest};
@@ -659,25 +681,33 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
           throughCursor: engine.adoption.throughCursor, outboxId: null, pendingBytes: 0, outboxState: "active"});
         case "liveApplication.reconcileActivation": {
           if (engine.refusal) throw engine.refusal;
+          if (request.params.journal) {engine.journals.push(request.params.journal); engine.unproven = [];}
+          if (engine.unproven.length) return reply({status: "pending", reason: "delivery", deliveries: engine.unproven});
           const after = (request.params.afterReceipt as {journalCursor: number} | null)?.journalCursor ?? 0;
           const cursor = (ack: Record<string, unknown>) => ack.journalCursor as number;
-          const applications = [...applied.values()].filter(ack => cursor(ack) > after && cursor(ack) <= (request.params.acceptedThrough as number))
+          const all = [...applied.values()].filter(ack => cursor(ack) > after && cursor(ack) <= (request.params.acceptedThrough as number))
             .sort((a, b) => cursor(a) - cursor(b)).map(ack => ({...ack, applicationReplayed: true}));
           const adoption = engine.adoption.throughCursor === null || engine.adoption.activationId !== request.params.activationId ? null
             : {adoptionId: engine.adoption.activationId, localYDocSequence: 2, terminalCursor: engine.adoption.throughCursor, adoptionReplayed: true};
-          const through = applications.length ? cursor(applications.at(-1)!) : after;
-          return reply({status: "reconciled", adoption, applications, hasMoreApplications: false, settle: adoption !== null && engine.settledThrough !== through});
+          const max = request.params.maxApplications as number;
+          engine.reconciledThrough = all.length ? cursor(all.at(-1)!) : after;
+          return reply({status: "reconciled", adoption, applications: all.slice(0, max), hasMoreApplications: all.length > max,
+            settle: adoption !== null && engine.settledThrough !== engine.reconciledThrough});
         }
         case "liveApplication.releaseActivation": {
-          const adoptedHere = engine.adoption.throughCursor !== null;
-          if (adoptedHere && ((replies.commit.departed ?? []) as string[]).includes(document.objectId)) return reply({status: "pending", reason: "parking"});
-          const replayed = engine.boundary !== undefined;
+          const adoptedHere = engine.adoption.throughCursor !== null, replayed = engine.boundary !== undefined;
+          if (adoptedHere && !replayed) {
+            if (engine.unpushed || ((replies.commit.departed ?? []) as string[]).includes(document.objectId)) return reply({status: "pending", reason: "parking"});
+            if (engine.releasePending) return reply({status: "pending", reason: engine.releasePending});
+            if (engine.unproven.length || engine.settledThrough !== engine.reconciledThrough) return reply({status: "pending", reason: "reconciliation"});
+          }
           engine.boundary ??= adoptedHere ? ownerBoundary() : null;
           return reply({status: "released", replayed, boundary: engine.boundary});
         }
         case "liveApplication.settle": {
           const terminal = request.params.terminalReceipt as {journalCursor: number} | null;
-          if (request.params.retirement && settlement.materialized) engine.settledThrough = terminal?.journalCursor ?? 0;
+          // A retirement's settlement that reached the file leaves output its replica must push before the document parks.
+          if (request.params.retirement && settlement.materialized) {engine.settledThrough = terminal?.journalCursor ?? 0; engine.unpushed++;}
           return reply({status: "settled", settlement: {settlementId: "settlement", previousCursor: 0, terminalCursor: terminal?.journalCursor ?? 0,
             applicationCount: 0, localYDocSequence: 2, momentId: "settled-moment", markdownDigest: "c".repeat(64), materialized: settlement.materialized,
             collectionReconcileRequired: false}});
@@ -686,7 +716,12 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
         case "sync.createHostedReplica":
           if (replies.create) throw replies.create === "diverged" ? divergence(request.id) : replies.create;
           return reply({hosted: true});
-        case "sync.push": pushed.resolve(); return reply({...pushReply, ...replies.push});
+        // A push waiting for owner admission pushes nothing.
+        case "sync.push": {
+          pushed.resolve();
+          if (!((replies.push.ownerAdmissionPending ?? []) as unknown[]).length) engine.unpushed = 0;
+          return reply({...pushReply, ...replies.push});
+        }
         case "sync.pullHosted": {
           if (replies.diverge) throw divergence(request.id);
           const pass = hostedPass(replies.pass), holds = pass.held as {objectId: string}[];
@@ -701,7 +736,10 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
           if (replies.loseCommit) {replies.loseCommit = false; throw new Error("Commit reply lost.");}
           const commit = hostedCommit(replies.commit);
           if (!commit.departed) return reply(commit);
-          const departed = page(commit.departed as string[], departedAfter, replies.departedPerPass);
+          // A document with output still unpushed cannot park, so its replica lists it departed.
+          const listed = commit.departed as string[];
+          const departed = page(engine.unpushed && !listed.includes(document.objectId) ? [...listed, document.objectId].sort() : listed,
+            departedAfter, replies.departedPerPass);
           return reply({...commit, departed: departed.listed, departedThrough: departed.through});
         }
       }
@@ -923,7 +961,7 @@ it("detaches a configured workspace as diverged at restart before a restore reac
 
 // An empty host whose sibling document activates for real. The other document
 // counts as loaded but never activates, so only its unload reaches the engine.
-async function emptyServiceHost(options: {frameChanges?: boolean; maxDocumentsPerPass?: number; adopted?: boolean} = {}) {
+async function emptyServiceHost(options: {frameChanges?: boolean; maxDocumentsPerPass?: number; adopted?: boolean; maxApplications?: number} = {}) {
   const o = await completedServiceOwner({empty: true, ...options});
   const sibling = {workspaceId: "workspace", objectId: "object", path: "docs/a.md", shareId: "share"};
   const other = {workspaceId: "workspace", objectId: "object-b", path: "docs/b.md", shareId: "share"};
@@ -1184,8 +1222,8 @@ it("keeps a workspace with no documents attached until its replica drains, then 
 });
 
 // An empty host with the document shared with Edit, enrolled and ready.
-async function enrolledServiceHost({freshRegistrations = false, frameChanges = false} = {}) {
-  const o = await emptyServiceHost({frameChanges});
+async function enrolledServiceHost({freshRegistrations = false, frameChanges = false, maxApplications = 8} = {}) {
+  const o = await emptyServiceHost({frameChanges, maxApplications});
   if (freshRegistrations) o.freshRegistrations();
   o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
   await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
@@ -1437,8 +1475,9 @@ it.each(["liveApplication.reconcileActivation", "liveApplication.settle", "liveA
 
 // Proves: an activation that never adopted retires with no boundary. Its
 // release may answer before its document parked, so the relay retires it
-// only once a pull confirms the document parked.
-it("retires a never-adopted activation only once its document parked, though the engine released it first", async () => {
+// only once a pull confirms the document parked, on this daemon or one started
+// after it stopped.
+it.each([false, true])("retires a never-adopted activation only once its document parked, though the engine released it first, after a restart: %s", async restart => {
   const o = await emptyServiceHost({adopted: false});
   vi.spyOn(console, "error").mockImplementation(() => {});
   o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
@@ -1452,8 +1491,18 @@ it("retires a never-adopted activation only once its document parked, though the
   await o.nextPull();
   expect(o.raw.prepare("SELECT retired_at_ms FROM sync_relay_service_activations").get()).toEqual({retired_at_ms: null});
   expect(o.host.retains(o.sibling)).toBe(true);
+  let host = o.host;
+  if (restart) {
+    await o.host.close();
+    host = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
+    cleanup.push(() => host.close());
+    await host.update({workspaces: [o.workspace], documents: [], departing: [o.sibling]});
+    await vi.waitFor(() => expect(o.ownerCalls()).toContainEqual(["liveApplication.releaseActivation", expect.anything()]));
+    await o.nextPull();
+    expect(o.raw.prepare("SELECT retired_at_ms FROM sync_relay_service_activations").get()).toEqual({retired_at_ms: null});
+  }
   o.replies.commit = {};
-  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true));
   expect(o.raw.prepare("SELECT retired_at_ms IS NOT NULL AS retired,retired_boundary_json FROM sync_relay_service_activations").get())
     .toEqual({retired: 1, retired_boundary_json: "null"});
   expect(o.ownerCalls().filter(([method]) => method === "liveApplication.settle")).toEqual([]);
@@ -1606,6 +1655,215 @@ it("retires a stopped document only once the engine released it after its replic
   const tries = releases();
   await o.nextPull();
   expect(releases()).toBe(tries);
+});
+
+type Enrolled = Awaited<ReturnType<typeof enrolledServiceHost>>;
+// Each engine request for `method` after the first `count` is never answered, as when its daemon stops first.
+const unansweredAfter = (o: Enrolled, method: string, count: number) => {
+  const reached = deferred<void>(), send = o.client().sendRequest, through = send.getMockImplementation()! as (...values: unknown[]) => Promise<unknown>;
+  let seen = 0;
+  send.mockImplementation(async (...args: unknown[]) => {
+    const request = args[0] as {method: string}, signal = args[1] as AbortSignal;
+    if (request.method !== method || ++seen <= count) return through(...args) as never;
+    reached.resolve();
+    return new Promise<never>((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), {once: true}));
+  });
+  return reached.promise;
+};
+const restartedHost = async (o: Enrolled) => {
+  const host = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
+  cleanup.push(() => host.close());
+  await o.depart(host);
+  return host;
+};
+const waiting = (reason: string) => ["Service activation pass failed.", `Departing live document is waiting: ${reason}`];
+
+// Proves: reconciliation that names deliveries the engine cannot prove gets the
+// journal's answer for each in its next request: the receipt of one the relay
+// accepted, and absence for one it never did. The retirement then completes.
+it("answers the engine's unproven deliveries from the journal during a retirement's reconciliation", async () => {
+  const o = await enrolledServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const tip = o.tip();
+  o.engine.unproven = [tip.deliveryId, "never-accepted"];
+  o.stop();
+  const sent = o.ownerCalls().length;
+  await o.depart();
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  const evidence = {receipts: [tip], absent: ["never-accepted"]};
+  expect(o.engine.journals).toEqual([evidence]);
+  const reconciles = o.ownerCalls().slice(sent).filter(([method]) => method === "liveApplication.reconcileActivation").map(([, params]) => params);
+  expect(reconciles[0]).not.toHaveProperty("journal");
+  expect(reconciles[1]).toMatchObject({journal: evidence});
+  expect(retiredRow(o)).toEqual({retired: true, boundary: {terminalReceipt: tip, eventCount: 1, historyEvidenceDigest: expect.any(String)}});
+});
+
+// Proves: an activation the engine adopted, but whose adoption reply the relay
+// lost before Stop, has no owner at the relay. Its retirement learns the
+// adoption from the engine's reconciliation, captures the owner's cut and
+// records the adoption, without adopting again, and retires at its boundary.
+// A daemon that stops between the capture and the record captures again.
+it.each([false, true])("records an adoption whose reply was lost before Stop during its retirement, after a restart: %s", async restart => {
+  const o = await emptyServiceHost({adopted: false});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
+  const adopt = o.client().sendLiveOwnerAdoption, adopted = adopt.getMockImplementation()! as (...values: unknown[]) => Promise<unknown>;
+  adopt.mockImplementationOnce(async (...args: unknown[]) => {
+    await adopted(...args);
+    expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
+      enabled: false, retire: true, nowMs: 20, guard() {}})).toMatchObject({retired: true});
+    throw new Error("Adoption reply lost.");
+  });
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(adopt).toHaveBeenCalled());
+  expect(o.raw.prepare("SELECT COUNT(*) AS owners FROM sync_relay_live_delivery_owners").get()).toEqual({owners: 0});
+  const cuts = vi.spyOn(LiveCommittedDeliveryStore.prototype, "captureOwnerCut");
+  const acknowledge = LiveCommittedDeliveryStore.prototype.acknowledgeOwnerAdoption;
+  let stopped = restart;
+  const acks = vi.spyOn(LiveCommittedDeliveryStore.prototype, "acknowledgeOwnerAdoption").mockImplementation(function (this: LiveCommittedDeliveryStore, ...args) {
+    if (stopped) throw new Error("Daemon stopped before the adoption was recorded.");
+    return acknowledge.apply(this, args);
+  });
+  await o.host.update({workspaces: [o.workspace], documents: [], departing: [o.sibling]});
+  let host = o.host, captured = 0;
+  if (restart) {
+    await vi.waitFor(() => expect(acks).toHaveBeenCalled());
+    await o.host.close();
+    captured = cuts.mock.calls.length;
+    expect(o.raw.prepare("SELECT COUNT(*) AS owners FROM sync_relay_live_delivery_owners").get()).toEqual({owners: 0});
+    stopped = false;
+    host = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
+    cleanup.push(() => host.close());
+    await host.update({workspaces: [o.workspace], documents: [], departing: [o.sibling]});
+  }
+  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true));
+  expect(o.raw.prepare("SELECT retired_at_ms IS NOT NULL AS retired,retired_boundary_json FROM sync_relay_service_activations").get()).toEqual({retired: 1,
+    retired_boundary_json: JSON.stringify({terminalReceipt: null, eventCount: 0, historyEvidenceDigest: initialAcceptedHistoryDigest(o.f.history.namespace, o.document)})});
+  expect(acks.mock.results.filter(result => result.type === "return")).toHaveLength(1);
+  expect(cuts).toHaveBeenCalledTimes(captured + 1);
+  expect(adopt).toHaveBeenCalledTimes(1);
+  if (restart) expect(o.client().sendLiveOwnerAdoption).not.toHaveBeenCalled();
+});
+
+// Proves: a retirement records what the engine applied a page at a time, at
+// most four pages a pass, and the next pass continues from the tip the last
+// one recorded, on this daemon or one started after it stopped. It settles
+// once, through the last page, and retires there.
+it.each([false, true])("records a retirement's applications a page at a time across passes and settles once through the last, after a restart: %s", async restart => {
+  const o = await enrolledServiceHost({maxApplications: 2});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const seed = o.tip();
+  o.lost.pending = true;
+  const edits = Array.from({length: 9}, (_, index) => o.acceptEdit(`page-${index}`));
+  // The engine applied each, though the relay recorded none.
+  for (const edit of edits) o.applied.set(edit.deliveryId, {...edit, localYDocSequence: edit.journalCursor + 1});
+  o.stop();
+  const sent = o.ownerCalls().length, from = o.client().sendRequest.mock.calls.length;
+  // A pass reconciles four pages; this daemon stops before the next pass's reconciliation is answered.
+  const stopped = restart ? unansweredAfter(o, "liveApplication.reconcileActivation", 4) : undefined;
+  await o.depart();
+  let host = o.host;
+  if (stopped) {
+    await stopped;
+    await o.host.close();
+    expect(o.tip()).toEqual(edits[7]);
+    expect(retiringSettles(o, sent)).toEqual([]);
+    host = await restartedHost(o);
+  }
+  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true));
+  const requests = o.client().sendRequest.mock.calls.slice(restart ? 0 : from).map(call => (call as unknown[])[0] as {method: string; params: {afterReceipt?: unknown}});
+  const reconciles = requests.filter(request => request.method === "liveApplication.reconcileActivation");
+  const pages = restart ? [edits[7]] : [seed, edits[1], edits[3], edits[5], edits[7]];
+  expect(reconciles.slice(0, pages.length).map(request => request.params.afterReceipt)).toEqual(pages);
+  expect(reconciles.slice(pages.length).every(request => JSON.stringify(request.params.afterReceipt) === JSON.stringify(edits[8]))).toBe(true);
+  expect(reconciles[0]!.params).toMatchObject({maxApplications: 2});
+  if (!restart) {
+    // The fifth page waits for the next pass, which pulls first.
+    const methods = o.client().sendRequest.mock.calls.map(call => ((call as unknown[])[0] as {method: string}).method);
+    const rounds = methods.flatMap((method, index) => method === "liveApplication.reconcileActivation" ? [index] : []);
+    expect(methods.slice(rounds[3]! + 1, rounds[4])).toContain("sync.pullHosted");
+  }
+  expect(retiringSettles(o, restart ? 0 : sent)).toEqual([["liveApplication.settle", {retirement: expect.objectContaining({acceptedThrough: edits[8]!.journalCursor}), terminalReceipt: edits[8]}]]);
+  expect(retiredRow(o).boundary.terminalReceipt).toEqual(edits[8]);
+});
+
+// Proves: a retirement waiting at any step resumes on a daemon started after
+// its own stopped, from its durable obligation, once what it waited for holds.
+// One whose departure had not reached the daemon waits for its hosted replica
+// to confirm the document left.
+const waits: Record<string, {hold(o: Enrolled): void; clear(o: Enrolled): void}> = {
+  "Settlement has not reached the file.": {hold: o => {o.settlement.materialized = false;}, clear: o => {o.settlement.materialized = true;}},
+  "Hosted publication has more pages.": {hold: o => {o.replies.push = {hasMore: true};}, clear: o => {o.replies.push = {};}},
+  "Waiting for its hosted replica to confirm the document left.": {hold() {}, clear() {}},
+  "Waiting for its hosted replica to confirm the document parked.": {hold: o => {o.replies.commit = {departed: [o.sibling.objectId]};}, clear: o => {o.replies.commit = {};}},
+  "Retirement reconciliation is unfinished.": {hold: o => {o.engine.releasePending = "reconciliation";}, clear: o => {o.engine.releasePending = undefined;}},
+};
+it.each(Object.keys(waits))("resumes a retirement waiting at %j on a restarted daemon", async reason => {
+  const o = await enrolledServiceHost();
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  const tip = o.tip(), wait = waits[reason]!;
+  wait.hold(o);
+  o.stop();
+  const sent = o.ownerCalls().length;
+  if (reason.endsWith("left.")) {
+    await vi.waitFor(() => expect(retiringSettles(o, sent).length).toBeGreaterThan(0));
+    await o.nextPull();
+  } else {
+    await o.depart();
+    await vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting(reason)));
+  }
+  await o.host.close();
+  expect(o.calls(sent).includes("liveApplication.releaseActivation")).toBe(reason.includes("parked") || reason.includes("unfinished"));
+  expect(retiredRow(o).retired).toBe(false);
+  wait.clear(o);
+  const host = await restartedHost(o);
+  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true));
+  expect(retiredRow(o)).toEqual({retired: true, boundary: {terminalReceipt: tip, eventCount: 1, historyEvidenceDigest: expect.any(String)}});
+  expect(departed(o.calls(0)).at(-1)).toBe("liveApplication.releaseActivation");
+  expect(o.client().captureOwnerActivation).not.toHaveBeenCalled();
+});
+
+// Proves: a retirement's settled output that publication cannot push, while
+// the relay has not admitted its owner, answers as no more pages. The document
+// cannot park with it unpushed, so though a pull confirmed it left, the engine
+// refuses the release and nothing retires until a later push takes it.
+it("retires a stopped document only once its settled output pushed, though its blocked publication reported no more pages", async () => {
+  const o = await enrolledServiceHost();
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  const tip = o.tip();
+  // A pull confirms it left while nothing it settled has reached the file.
+  o.settlement.materialized = false;
+  o.stop();
+  const sent = o.ownerCalls().length;
+  await o.depart();
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Settlement has not reached the file.")));
+  await o.nextPull();
+  o.replies.push = {ownerAdmissionPending: [{workspaceId: "workspace", originId: "origin", originSeq: 3, versionId: "main", objectId: "object", path: "docs/a.md"}]};
+  o.settlement.materialized = true;
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Waiting for its hosted replica to confirm the document parked.")));
+  expect(log).not.toHaveBeenCalledWith(...waiting("Hosted publication has more pages."));
+  expect(o.ownerCalls().slice(sent)).toContainEqual(["liveApplication.releaseActivation", expect.anything()]);
+  expect(o.engine.unpushed).toBeGreaterThan(0);
+  expect(o.engine.boundary).toBeUndefined();
+  expect(retiredRow(o).retired).toBe(false);
+  expect(o.host.retains(o.sibling)).toBe(true);
+  o.replies.push = {};
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  expect(retiredRow(o)).toEqual({retired: true, boundary: {terminalReceipt: tip, eventCount: 1, historyEvidenceDigest: expect.any(String)}});
+});
+
+// Proves: once an owner adoption retired on a host, ordinary committed
+// delivery there never starts a bootstrap for its lineage: the retired
+// adoption already consumed the lineage's adoption reservation.
+it("refuses ordinary committed delivery on a host where the lineage's owner adoption retired", async () => {
+  const o = await enrolledServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.stop();
+  await o.depart();
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  const store = o.f.storage.createLiveCommittedDeliveryStore(o.f.history);
+  expect(() => store.open({host: o.host.coordinate, document: o.document})).toThrow("Committed delivery follows a retired owner adoption.");
+  expect(o.raw.prepare("SELECT COUNT(*) AS bootstraps FROM sync_relay_live_delivery_bootstraps").get()).toEqual({bootstraps: 0});
 });
 
 // Proves: a retiring document fails closed when its binding no longer holds:

@@ -4,7 +4,7 @@ import { LIVE_OBJECT_BINDING_PATH_MAX_BYTES,LIVE_OBJECT_BINDING_SELECTOR_PATH_MA
 import type { StorageContext } from "./context";
 import { assertWorkspaceQuota } from "./workspaces";
 import { LIVE_DELIVERY_BOOTSTRAPS, LIVE_DELIVERY_EDGES, LIVE_DELIVERY_HOSTS, LIVE_DELIVERY_RESERVATIONS, LIVE_DELIVERY_DOCUMENTS, LIVE_DELIVERY_OWNERS } from "./liveCommittedDeliverySchema";
-import { LIVE_DELIVERY_OWNER_HISTORY } from "./serviceActivationSchema";
+import { LIVE_DELIVERY_OWNER_HISTORY, SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
 import { readServiceActivation, serviceActivationState } from "./serviceActivationAccess";
 
 const WHERE_DOCUMENT = "workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?";
@@ -65,15 +65,12 @@ function reserveLiveDeliveryEvent(storage: StorageContext, document: LiveDocumen
   reserve(storage, document, hostId, Number(row.journal_cursor), amount);
 }
 /**
- * A successor's owner adoption on every host the workspace funds, as for a
- * newly registered document, in the transaction that prepares it. Its quota
- * decision is Resume's.
+ * A successor's owner adoption on the configured host that prepares it, in
+ * the same transaction. Its quota decision is Resume's; another host is
+ * funded only when a transition makes it the configured host.
  */
-export function reserveLiveDeliverySuccessor(storage: StorageContext, document: LiveDocumentKey): void {
-  for (const row of storage.db.prepare(`SELECT host_id FROM ${LIVE_DELIVERY_HOSTS} WHERE workspace_id=? AND host_id NOT IN
-    (SELECT host_id FROM ${LIVE_DELIVERY_BOOTSTRAPS} WHERE ${WHERE_DOCUMENT}) ORDER BY host_id`).all(document.workspaceId, ...parameters(document))) {
-    reserveLiveDeliveryBaseline(storage, document, String(row.host_id));
-  }
+export function reserveLiveDeliverySuccessor(storage: StorageContext, document: LiveDocumentKey, hostId: string): void {
+  reserveLiveDeliveryBaseline(storage, document, hostId);
 }
 // Deletes the lineage's reservations `condition` selects, refunding each whole.
 function releaseReservations(storage: StorageContext, document: LiveDocumentKey, condition: string, values: readonly unknown[]): void {
@@ -86,17 +83,16 @@ function releaseReservations(storage: StorageContext, document: LiveDocumentKey,
 }
 /**
  * A retired chain tail adopts nothing until a successor reserves its own
- * adoption, so retirement releases every host's unconsumed adoption
- * reservation, as a never-adopted release leaves. A bootstrap keeps its own.
+ * adoption on the configured host, so retirement on `hostId` releases the
+ * unconsumed adoption reservation there, as a never-adopted release leaves,
+ * and every reservation the lineage holds on another host. A transition to
+ * another host funds it again. A bootstrap keeps its own.
  */
-export function releaseLiveDeliveryAdoptions(storage: StorageContext, document: LiveDocumentKey): void {
-  releaseReservations(storage, document, `journal_cursor=0 AND host_id NOT IN (SELECT host_id FROM ${LIVE_DELIVERY_BOOTSTRAPS} WHERE ${WHERE_DOCUMENT})`, parameters(document));
+export function releaseRetiredLiveDelivery(storage: StorageContext, document: LiveDocumentKey, hostId: string): void {
+  releaseReservations(storage, document, `(journal_cursor=0 OR host_id<>?) AND host_id NOT IN (SELECT host_id FROM ${LIVE_DELIVERY_BOOTSTRAPS} WHERE ${WHERE_DOCUMENT})`,
+    [hostId, ...parameters(document)]);
 }
-/**
- * A successor adopted on `hostId` at its predecessor's released terminal
- * needs no delivery through it there. Other hosts keep their funding, so
- * either may become the configured host again.
- */
+/** A successor adopted on `hostId` at its predecessor's released terminal needs no delivery through it there. */
 export function adoptLiveDeliveryPrefix(storage: StorageContext, document: LiveDocumentKey, hostId: string, terminalCursor: number): void {
   releaseReservations(storage, document, "host_id=? AND journal_cursor BETWEEN 1 AND ?", [hostId, terminalCursor]);
 }
@@ -117,16 +113,20 @@ export function registerLiveDeliveryEvent(storage: StorageContext, document: Liv
   integrity(advanced.changes === 1);
 }
 
-/** Runs in the transaction that provisions or changes the configured host. */
-export function provisionLiveDeliveryHost(storage: StorageContext, hostId: string, fundNewHost = false): void {
+/**
+ * Runs in the transaction that provisions or changes the configured host.
+ * Only that explicit change, `transition`, funds a new host, or a known one
+ * whose reservations for a lineage its retirement released.
+ */
+export function provisionLiveDeliveryHost(storage: StorageContext, hostId: string, transition = false): void {
   for (const workspace of storage.db.prepare("SELECT DISTINCT workspace_id FROM sync_relay_live_documents").all()) {
-    provisionWorkspaceHost(storage, hostId, String(workspace.workspace_id), fundNewHost);
+    provisionWorkspaceHost(storage, hostId, String(workspace.workspace_id), transition);
   }
 }
-function provisionWorkspaceHost(storage: StorageContext, hostId: string, workspaceId: string, fundNewHost = false): void {
+function provisionWorkspaceHost(storage: StorageContext, hostId: string, workspaceId: string, transition = false): void {
   const known = storage.db.prepare(`SELECT funded_document_sequence,funded_journal_cursor FROM ${LIVE_DELIVERY_HOSTS} WHERE host_id=? AND workspace_id=?`).get(hostId, workspaceId);
   if (!known) {
-    integrity(fundNewHost || !storage.db.prepare("SELECT 1 FROM sync_relay_live_documents WHERE workspace_id=? LIMIT 1").get(workspaceId));
+    integrity(transition || !storage.db.prepare("SELECT 1 FROM sync_relay_live_documents WHERE workspace_id=? LIMIT 1").get(workspaceId));
     integrity(!storage.db.prepare(`SELECT 1 FROM ${LIVE_DELIVERY_BOOTSTRAPS} WHERE workspace_id=? AND host_id=? LIMIT 1`).get(workspaceId, hostId));
     integrity(!storage.db.prepare(`SELECT 1 FROM ${LIVE_DELIVERY_OWNERS} WHERE workspace_id=? AND host_id=? LIMIT 1`).get(workspaceId,hostId));
     integrity(!storage.db.prepare(`SELECT 1 FROM ${LIVE_DELIVERY_RESERVATIONS} WHERE workspace_id=? AND host_id=? LIMIT 1`).get(workspaceId, hostId));
@@ -155,10 +155,13 @@ function provisionWorkspaceHost(storage: StorageContext, hostId: string, workspa
       WHERE ${WHERE_DOCUMENT} AND host_id=?`).get(...parameters(document),hostId)?.tip ?? null);
     // A retired chain tail that no successor follows yet has no adoption to fund.
     const retired = !owner.length && !bootstrap.length && serviceActivationState(readServiceActivation(storage, document)) === "retired";
+    // A transition funds again what a retirement of the lineage released below this host's watermarks.
+    const released = transition && !!storage.db.prepare(`SELECT 1 FROM ${SERVICE_ACTIVATIONS} WHERE ${WHERE_DOCUMENT} AND retired_at_ms IS NOT NULL LIMIT 1`)
+      .get(...parameters(document));
     if (retired) integrity(!cursors.has(0));
     else if ((!bootstrap[0] || bootstrap[0].local_ydoc_sequence === null) && !owner.length) {
       if (!cursors.has(0)) {
-        integrity(documentSequence > fundedDocument);
+        integrity(released || documentSequence > fundedDocument);
         reserveLiveDeliveryBaseline(storage, document, hostId);
       }
     } else integrity(!cursors.has(0));
@@ -170,7 +173,7 @@ function provisionWorkspaceHost(storage: StorageContext, hostId: string, workspa
       journalHighWater = Math.max(journalHighWater, cursor);
       if (acknowledged.has(cursor) || (applied !== null && cursor <= Number(applied))) { integrity(!cursors.has(cursor)); continue; }
       if (!cursors.has(cursor)) {
-        integrity(cursor > fundedCursor);
+        integrity(released || cursor > fundedCursor);
         reserveLiveDeliveryEvent(storage, document, hostId, event);
       }
     }

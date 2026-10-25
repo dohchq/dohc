@@ -1621,28 +1621,125 @@ function transitionHost(f:ReturnType<typeof fixture>,from:typeof host|{mode:'dev
   return coordinate
 }
 
+const reservedOn=(f:ReturnType<typeof fixture>,hostId:string)=>
+  f.raw.prepare('SELECT journal_cursor AS cursor FROM sync_relay_live_delivery_reservations WHERE host_id=? ORDER BY journal_cursor').all(hostId).map(row=>Number(row.cursor))
+const journalCursors=(f:ReturnType<typeof fixture>)=>f.raw.prepare('SELECT journal_cursor AS cursor FROM sync_relay_live_update_journal ORDER BY journal_cursor').all().map(row=>Number(row.cursor))
+// The pending successor's adoption on `on` at its predecessor's released boundary.
+function adoptSuccessorOn(f:ReturnType<typeof fixture>,on:ReturnType<typeof transitionHost>,boundary:ReturnType<typeof ownerBoundary>){
+  const access=f.store.pending(f.document,on),delivery=f.storage.createLiveCommittedDeliveryStore(f.history,access)
+  const adoption=delivery.captureOwnerCut({host:on,document:f.document,actor,adoptionId:SUCCESSOR,expectedLocalSequence:2,maxBytes:1_000_000,maxEvents:100,throughCursor:0})
+  delivery.acknowledgeOwnerAdoption(adoption,{adoptionId:SUCCESSOR,localYDocSequence:2,terminalCursor:boundary.terminalReceipt.journalCursor,adoptionReplayed:false})
+  return {access,delivery}
+}
+
 // Proves: a successor adopting on another host than its predecessor's needs
-// no delivery through the prefix there, every host keeps funding for the
-// lineage, and the host registers again.
-it("adopts a successor on another host than its predecessor's and registers that host again",()=>{
+// no delivery through the prefix there, and is funded only there. The hosts it
+// does not use keep what the earlier transitions funded until it retires,
+// which releases all of it, and the host registers again throughout.
+it("adopts a successor on another host than its predecessor's, funded only there until it retires",()=>{
   const f=fixture();try{
     const {edit,boundary}=retirePredecessor(f)
     const ledger=unaccounted(f)
     const device=transitionHost(f,host,'device','device'),other=transitionHost(f,device,'service','other') as typeof host
     expect(unaccounted(f)).toBe(ledger)
     f.store.prepare({capture:successor(f),host:other,shareId:'share',registeredAtMs:50,guard(){},validateBaseline,validateHistory,bounds})
-    expect(adoptionReservations(f)).toEqual([{host_id:'device'},{host_id:'other'},{host_id:'service'}])
-    const access=f.store.pending(f.document,other),delivery=f.storage.createLiveCommittedDeliveryStore(f.history,access)
-    const adoption=delivery.captureOwnerCut({host:other,document:f.document,actor,adoptionId:SUCCESSOR,expectedLocalSequence:2,maxBytes:1_000_000,maxEvents:100,throughCursor:0})
-    const terminal=boundary.terminalReceipt.journalCursor
-    delivery.acknowledgeOwnerAdoption(adoption,{adoptionId:SUCCESSOR,localYDocSequence:2,terminalCursor:terminal,adoptionReplayed:false})
-    const reserved=(hostId:string)=>f.raw.prepare('SELECT journal_cursor AS cursor FROM sync_relay_live_delivery_reservations WHERE host_id=? ORDER BY journal_cursor').all(hostId).map(row=>Number(row.cursor))
-    const cursors=f.raw.prepare('SELECT journal_cursor AS cursor FROM sync_relay_live_update_journal ORDER BY journal_cursor').all().map(row=>Number(row.cursor))
-    expect(reserved('other')).toEqual([edit.journalCursor])
-    expect(reserved('device')).toEqual([0,...cursors])
-    expect(reserved('service')).toEqual([0,...cursors.filter(cursor=>cursor>terminal)])
+    expect(adoptionReservations(f)).toEqual([{host_id:'other'}])
+    const {access,delivery}=adoptSuccessorOn(f,other,boundary)
+    const terminal=boundary.terminalReceipt.journalCursor,cursors=journalCursors(f)
+    expect(reservedOn(f,'other')).toEqual([edit.journalCursor])
+    expect(reservedOn(f,'device')).toEqual(cursors)
+    expect(reservedOn(f,'service')).toEqual(cursors.filter(cursor=>cursor>terminal))
     expect(unaccounted(f)).toBe(ledger)
     expect(f.storage.registerLiveHost({...other,updatedAtMs:60,guard(){}}).ok).toBe(true)
+    expect(unaccounted(f)).toBe(ledger)
+    const owner=delivery.openOwnerDelivery({host:other,document:f.document,actor}),event=delivery.nextOwnerApplication(owner)!
+    delivery.acknowledgeOwnerDeliveryApplication(owner,{...event.metadata.accepted.receipt,localYDocSequence:3,applicationReplayed:false})
+    f.store.complete({document:f.document,host:other,access,nativeState:{adoptionId:SUCCESSOR,pendingBytes:0},guard(){}})
+    stopDocument(f,60)
+    expect(f.store.completeRetirement({workspaceId:'workspace',key:keyOf(retirement(f.storage)!),boundary:ownerBoundary(f),host:other,registeredAtMs:70,nowMs:70,guard(){}}))
+      .toEqual({status:'retired',replayed:false})
+    expect(f.raw.prepare('SELECT host_id,journal_cursor FROM sync_relay_live_delivery_reservations').all()).toEqual([])
+    expect(unaccounted(f)).toBe(ledger)
+    expect(f.storage.registerLiveHost({...other,updatedAtMs:80,guard(){}}).ok).toBe(true)
+    expect(unaccounted(f)).toBe(ledger)
+  }finally{f.close()}
+})
+
+// Proves: Resume funds only the configured host. A -> B -> A: the transition
+// to B funds B, a quota with room for B's adoption alone admits Resume there,
+// and the transition back to A funds A's released adoption again, refused at
+// quota retryably with nothing changed. Usage matches the stored rows throughout.
+it("funds a lineage only on the host its successor uses, and again on a known host it moves back to",()=>{
+  // One client ID gives both fixtures the same bytes, and B's ID is as long as A's, so `sized` measures B's adoption.
+  const sized=fixture('Original',1),f=fixture('Original',1);try{
+    const {edit,boundary}=retirePredecessor(f)
+    const ledger=unaccounted(f),terminal=boundary.terminalReceipt.journalCursor
+    // A keeps only the suffix its successor would deliver there.
+    expect(reservedOn(f,'service')).toEqual(journalCursors(f).filter(cursor=>cursor>terminal))
+    const b=transitionHost(f,host,'device','other-b')
+    expect(reservedOn(f,'other-b')).toEqual(journalCursors(f))
+    expect(unaccounted(f)).toBe(ledger)
+    // Room for the successor's activation and its adoption on B alone.
+    retirePredecessor(sized);const free=usageOf(sized);prepareSuccessor(sized)
+    optionsOf(f).workspaceQuotaBytes=usageOf(f)+usageOf(sized)-free
+    f.store.prepare({capture:successor(f),host:b,shareId:'share',registeredAtMs:50,guard(){},validateBaseline,validateHistory,bounds})
+    expect(adoptionReservations(f)).toEqual([{host_id:'other-b'}])
+    expect(usageOf(f)).toBe(optionsOf(f).workspaceQuotaBytes)
+    expect(unaccounted(f)).toBe(ledger)
+    adoptSuccessorOn(f,b,boundary)
+    expect(reservedOn(f,'other-b')).toEqual([edit.journalCursor])
+    expect(unaccounted(f)).toBe(ledger)
+    // Back to A, which needs its adoption funded again.
+    optionsOf(f).workspaceQuotaBytes=usageOf(f)
+    const transitionId=`transition-${b.hostEpoch}`,state=()=>f.raw.prepare(`SELECT
+      (SELECT json_group_array(json_array(host_id,journal_cursor)) FROM sync_relay_live_delivery_reservations) AS reservations,
+      (SELECT usage_bytes FROM sync_relay_workspace_usage) AS usage,(SELECT configured_host_id FROM sync_relay_session_host_control) AS configured`).get()
+    const begin=f.storage.beginLiveHostTransition({from:b,toMode:'service',toHostId:'service',transitionId,startedAtMs:60,guard(){}})
+    if(!begin.ok||!begin.snapshot.transition)throw new Error('transition refused')
+    const commit=()=>f.storage.commitLiveHostTransitionEpoch({transitionId,transitionGeneration:begin.snapshot.transition!.transitionGeneration,updatedAtMs:61})
+    const refusedAt=state()
+    expect(commit).toThrow(SyncRelayQuotaExceededError)
+    expect(state()).toEqual(refusedAt)
+    optionsOf(f).workspaceQuotaBytes=Number.MAX_SAFE_INTEGER
+    expect(commit().ok).toBe(true)
+    expect(reservedOn(f,'service')).toEqual([0,...journalCursors(f).filter(cursor=>cursor>terminal)])
+    expect(unaccounted(f)).toBe(ledger)
+    const back={mode:'service' as const,hostId:'service',hostEpoch:parseHostEpoch(b.hostEpoch+1),instanceId:'instance-service',connectionId:'connection-service'}
+    expect(f.storage.activateLiveHostTransition({...back,transitionId,transitionGeneration:begin.snapshot.transition.transitionGeneration,
+      transitionFromEpoch:b.hostEpoch,updatedAtMs:62,guard(){}}).ok).toBe(true)
+    expect(f.storage.registerLiveHost({...back,updatedAtMs:63,guard(){}}).ok).toBe(true)
+    expect(unaccounted(f)).toBe(ledger)
+  }finally{f.close();sized.close()}
+})
+
+// Proves: an activation that adopted on A never retires as never-adopted on
+// the host its configuration moved to, whatever that host's engine releases.
+// The obligation stays open, and A's provisioning keeps working.
+it.each([false,true])("refuses a never-adopted retirement on another host of an activation that adopted (completed: %s)",completedHere=>{
+  const f=fixture();try{
+    enroll(f)
+    if(completedHere)completeActivation(f)
+    else{
+      f.prepare()
+      const delivery=f.storage.createLiveCommittedDeliveryStore(f.history,f.store.pending(f.document,host))
+      const adoption=delivery.captureOwnerCut({host,document:f.document,actor,adoptionId:f.capture.activationId,expectedLocalSequence:2,maxBytes:1_000_000,maxEvents:100,throughCursor:0})
+      delivery.acknowledgeOwnerAdoption(adoption,{adoptionId:f.capture.activationId,localYDocSequence:2,terminalCursor:0,adoptionReplayed:false})
+    }
+    const ledger=unaccounted(f)
+    const device=transitionHost(f,host,'device','device'),other=transitionHost(f,device,'service','other') as typeof host
+    stopDocument(f,50)
+    const open=retirement(f.storage)!,rows=()=>f.raw.prepare(`SELECT (SELECT json_group_array(host_id) FROM sync_relay_live_delivery_owners) AS owners,
+      (SELECT count(*) FROM sync_relay_live_delivery_reservations) AS reservations,(SELECT usage_bytes FROM sync_relay_workspace_usage) AS usage,
+      (SELECT retired_at_ms FROM sync_relay_service_activations) AS retired`).get()
+    const before=rows()
+    expect(()=>f.store.completeRetirement({workspaceId:'workspace',key:keyOf(open),boundary:null,host:other,registeredAtMs:60,nowMs:60,guard(){}}))
+      .toThrow('Retiring activation adopted on another host.')
+    expect(rows()).toEqual(before)
+    expect(retirement(f.storage)).toEqual(open)
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor})).toEqual(refused)
+    // Back on A, the configured host provisions and registers as before.
+    const again=transitionHost(f,transitionHost(f,other,'device','device'),'service','service') as typeof host
+    expect(f.storage.registerLiveHost({...again,updatedAtMs:70,guard(){}}).ok).toBe(true)
     expect(unaccounted(f)).toBe(ledger)
   }finally{f.close()}
 })

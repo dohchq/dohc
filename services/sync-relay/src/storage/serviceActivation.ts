@@ -11,7 +11,7 @@ import type { StorageContext } from "./context";
 import type { LiveHostConnectionCoordinate } from "./types";
 import { attachLiveJournalHistory, requireLiveJournalHistory, type LiveJournalHistoryAuthority } from "./liveJournalHistory";
 import { authorityInteger, currentLiveDocumentBinding, ownerLiveDocumentBinding, registerOrdinaryActivationBaselineInTransaction } from "./liveDocumentAuthority";
-import { releaseLiveDeliveryAdoptions, reserveLiveDeliverySuccessor } from "./liveDeliveryReservations";
+import { releaseRetiredLiveDelivery, reserveLiveDeliverySuccessor } from "./liveDeliveryReservations";
 import { initialAcceptedHistoryDigest } from "../liveAcceptedHistory";
 import { LIVE_DELIVERY_OWNERS } from "./liveCommittedDeliverySchema";
 import { forgetIdleServiceHostUploads, restoreInProgress, SERVICE_HOST_ENROLLMENTS } from "./serviceHostEnrollment";
@@ -157,10 +157,12 @@ export class ServiceActivationStore {
   /**
    * Retires the activation its open obligation names, once the engine released
    * it at `boundary` and its document parked. Archives its owner row, releases
-   * any adoption reservation the lineage still holds, keeps that boundary, and
-   * drops its retained state, refunding those bytes once. It needs no quota.
-   * Exact replay changes nothing, so it never touches a successor's owner row.
-   * Pending, with nothing changed, while the document's restore is unfinished.
+   * the lineage's adoption reservation here and every reservation it holds on
+   * another host, keeps that boundary, and drops its retained state, refunding
+   * those bytes once. It needs no quota. An activation that adopted retires
+   * only on the host it adopted on. Exact replay changes nothing, so it never
+   * touches a successor's owner row. Pending, with nothing changed, while the
+   * document's restore is unfinished.
    */
   completeRetirement(input: {workspaceId: string; key: RetirementKey; boundary: RetainedPrefixBody | null;
     host: LiveHostConnectionCoordinate; registeredAtMs: number; nowMs: number; guard(): void}):
@@ -172,7 +174,7 @@ export class ServiceActivationStore {
       const namespace = this.history.namespace;
       const row = this.storage.db.prepare(`SELECT workspace_id,object_id,lineage_claim_id,owner_user_id,predecessor_activation_id,length(state_bytes) AS state_length,
         json_extract(source_json,'$.replicationEpoch') AS replication_epoch,json_extract(source_json,'$.streamIdentity') AS stream_identity,
-        retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor,retired_at_ms,retired_boundary_json FROM ${SERVICE_ACTIVATIONS}
+        completion_json,retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor,retired_at_ms,retired_boundary_json FROM ${SERVICE_ACTIVATIONS}
         WHERE relay_database_namespace=? AND activation_id=?`).get(namespace, key.activationId);
       if (!row || row.workspace_id !== input.workspaceId || row.object_id !== key.objectId || row.lineage_claim_id !== key.lineageClaimId ||
           row.retire_requested_at_ms === null || row.retire_restore_generation !== key.restoreFenceGeneration || row.retire_accepted_cursor !== key.acceptedThrough) {
@@ -220,12 +222,17 @@ export class ServiceActivationStore {
           WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND host_id=?`).run(...ownerKey);
         if (archived.changes !== 1 || deleted.changes !== 1) throw new Error("Retiring owner delivery is damaged.");
       } else {
+        // An activation that adopted on another host retires only there.
+        const adopted = row.completion_json !== null || this.storage.db.prepare(`SELECT 1 FROM ${LIVE_DELIVERY_OWNERS}
+          WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?
+            AND json_extract(origin_json,'$.adoptionId')=? LIMIT 1`).get(...ownerKey.slice(0, 5), key.activationId);
+        if (adopted) throw new Error("Retiring activation adopted on another host.");
         // A never-adopted release keeps its released chain tail's boundary, or none.
         const inherited = row.predecessor_activation_id === null ? "null" : this.storage.db.prepare(`SELECT retired_boundary_json FROM ${SERVICE_ACTIVATIONS}
           WHERE relay_database_namespace=? AND activation_id=? AND retired_at_ms IS NOT NULL`).get(namespace, row.predecessor_activation_id)?.retired_boundary_json;
         if (boundaryJson !== inherited) throw new Error("Retiring owner delivery is missing.");
       }
-      releaseLiveDeliveryAdoptions(this.storage, document);
+      releaseRetiredLiveDelivery(this.storage, document, input.host.hostId);
       // The archived owner row keeps its charge. The boundary replaces the retained state.
       const charge = Buffer.byteLength(boundaryJson) - authorityInteger(row.state_length, 2);
       const retired = this.storage.db.prepare(`UPDATE ${SERVICE_ACTIVATIONS} SET retired_at_ms=?,retired_boundary_json=?,state_bytes=NULL,accounted_bytes=accounted_bytes+?
@@ -381,7 +388,7 @@ export class ServiceActivationStore {
       this.storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge,document.workspaceId);
       if (predecessor) {
         // Retirement released the lineage's adoption funding. Quota refuses this Resume, retryably, and leaves the retired tail as Stop left it.
-        reserveLiveDeliverySuccessor(this.storage, document);
+        reserveLiveDeliverySuccessor(this.storage, document, input.host.hostId);
         const pending = currentLiveDocumentBinding(this.storage,{document,actor},serviceActivationAccess(this.storage,activationId,binding,input.host));
         if (pending.kind !== "current" || !isDeepStrictEqual(pending.host,input.host) || !isDeepStrictEqual(pending.binding,binding)) {
           throw new Error("Service activation selector is unavailable.");

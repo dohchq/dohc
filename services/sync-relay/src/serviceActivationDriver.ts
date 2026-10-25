@@ -114,7 +114,7 @@ export class ServiceActivationDriver {
     /** An attached workspace whose replica checked its origin. Activation, restore and departures reach no other. */
     workspace(workspaceId:string):{handle:string;replica:ServiceActivationReplica}|undefined;config:ServiceActivationConfig;
     adoption:{maxBytes:number;maxEvents:number};restore?:LiveRestorePreparation;nextRequestId():number;deadlineMs:number;
-    /** The engine's settlement bound, which also bounds a retirement's applications. Without it nothing retires. */
+    /** The engine's settlement bound, which also bounds a retirement's applications. Configuration admission requires it. */
     maxApplications?:number;
     assertCurrent():void;registered():void;
     runDocument<T>(document:LiveDocumentKey,signal:AbortSignal,operation:()=>Promise<T>):Promise<T>;}){
