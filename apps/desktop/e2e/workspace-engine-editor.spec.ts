@@ -282,7 +282,8 @@ test("@restart-durability-overlapping-typing overlapping typing on an externally
     await page.getByTestId("markdown-editor").click();
     await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.type(human);
-    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "error");
+    // The outside-write signal can reach main before or after the refused save.
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", /^(error|changed-on-disk)$/);
     expect(await readFile(join(temp.rootPath, path), "utf8")).toContain(external);
     await expect(page.getByTestId("markdown-editor")).toContainText(human);
     await quitDesktop(desktop);
