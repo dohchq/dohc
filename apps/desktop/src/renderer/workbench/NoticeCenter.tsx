@@ -220,7 +220,8 @@ function UnreadMark(props: { unread: boolean; testId: string; className?: string
 
 // A notice's title and text, in its row or its toast, clipped to fit. A
 // click on clipped text, or Show more, shows all of it in place, wrapped
-// and selectable.
+// and selectable. A body with one fact per line shows its first 3 facts
+// whole, so none is cut in half; prose clamps at 3 lines.
 function NoticeText(props: {
   title: string;
   // The title's weight and color.
@@ -228,6 +229,8 @@ function NoticeText(props: {
   body: string;
   // Off for a body that is already shown whole.
   clamp?: boolean;
+  // A last line shown with the whole body, such as how many more files a
+  // list leaves out.
   after?: string;
   onOpenChange?: (open: boolean) => void;
   testId: string;
@@ -239,6 +242,8 @@ function NoticeText(props: {
   const [open, setOpen] = useState(false);
   const [clipped, setClipped] = useState(false);
   const clamp = props.clamp ?? true;
+  const facts = props.body.split("\n");
+  const byFacts = clamp && facts.length > 1;
   const { onOpenChange } = props;
   const show = (next: boolean) => {
     setOpen(next);
@@ -254,7 +259,7 @@ function NoticeText(props: {
       if (title?.clientHeight === 0) return;
       setClipped(
         (title !== null && title.scrollHeight > title.clientHeight + 1) ||
-        (clamp && body !== null && body.scrollHeight > body.clientHeight + 1),
+        (clamp && !byFacts && body !== null && body.scrollHeight > body.clientHeight + 1),
       );
     };
     measure();
@@ -263,9 +268,10 @@ function NoticeText(props: {
     if (title) observer.observe(title);
     if (body) observer.observe(body);
     return () => observer.disconnect();
-  }, [open, clamp, props.title, props.body]);
+  }, [open, clamp, byFacts, props.title, props.body]);
+  const hidden = clipped || (byFacts && facts.length > 3);
   // A click that ends a selection, or the second of a double click, opens nothing.
-  const openOnClick = clipped && !open
+  const openOnClick = hidden && !open
     ? (event: MouseEvent<HTMLElement>) => {
         if (event.detail > 1 || window.getSelection()?.isCollapsed === false) return;
         show(true);
@@ -291,15 +297,15 @@ function NoticeText(props: {
             ref={bodyRef}
             id={`${id}-body`}
             onClick={openOnClick}
-            className={`m-0 mt-0.5 whitespace-pre-line wrap-anywhere text-[11px] leading-snug text-muted${clamp && !open ? " line-clamp-3" : ""}${pointer}`}
+            className={`m-0 mt-0.5 whitespace-pre-line wrap-anywhere text-[11px] leading-snug text-muted${clamp && !byFacts && !open ? " line-clamp-3" : ""}${pointer}`}
           >
-            {props.body}
+            {byFacts && !open ? facts.slice(0, 3).join("\n") : props.body}
           </p>
         ) : null}
-        {props.after ? (
+        {props.after && (open || !hidden) ? (
           <p className="m-0 mt-0.5 whitespace-pre-line wrap-anywhere text-[11px] leading-snug text-muted">{props.after}</p>
         ) : null}
-        {clipped || open ? (
+        {hidden || open ? (
           <button
             type="button"
             data-testid={`${props.testId}-more`}

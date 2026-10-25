@@ -2600,15 +2600,24 @@ describe("notices sent to you", () => {
       expect(onHideWorkspaceError).toHaveBeenCalledWith("s1");
     });
 
-    it("keeps a list's last line out of the toast's clamp", () => {
+    // A list clamps by whole entries, so none is cut in half. Its count is
+    // true only beside the whole list, so it waits for Show more.
+    it("shows a list's first 3 entries whole, and its count only with the rest", async () => {
       renderNotices({
         workspaceErrors: [{
-          id: "e1", title: "250 files weren't imported", message: "a.md is a link. Drop the file it leads to.",
-          lastLine: "249 more weren't imported.", details: "d", atMs: 1, canRetry: false, seen: false,
+          id: "e1", title: "250 files weren't imported", message: "a.md is a link.\nb.md is a link.\nc.md is a link.\nd.md is a link.",
+          lastLine: "246 more weren't imported.", details: "d", atMs: 1, canRetry: false, seen: false,
         }],
       });
-      const last = within(screen.getByTestId("workspace-shell-error")).getByText("249 more weren't imported.");
-      expect(last.className).not.toContain("line-clamp");
+      const toast = screen.getByTestId("workspace-shell-error");
+      const body = () => toast.querySelector("p")!;
+      expect(body().textContent).toBe("a.md is a link.\nb.md is a link.\nc.md is a link.");
+      expect(body().className).not.toContain("line-clamp");
+      expect(within(toast).queryByText("246 more weren't imported.")).toBeNull();
+
+      await userEvent.click(within(toast).getByTestId("workspace-shell-toast-more"));
+      expect(body().textContent).toBe("a.md is a link.\nb.md is a link.\nc.md is a link.\nd.md is a link.");
+      within(toast).getByText("246 more weren't imported.");
     });
 
     it("opens from the toast or closes it", async () => {

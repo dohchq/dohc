@@ -2164,11 +2164,12 @@ describe("file transfers", () => {
     await user.keyboard("{Control>}k{/Control}");
     await user.click(await screen.findByText("Import files"));
     const toast = await screen.findByTestId("workspace-shell-error");
+    await user.click(within(toast).getByTestId("workspace-shell-toast-more"));
     const body = toast.querySelector("p")!.textContent!;
     const lines = body.split("\n");
     expect(lines[0]).toBe("Trip/photos/key-0.txt is a link. Drop the file it leads to.");
     expect(body.length).toBeLessThanOrEqual(500);
-    // The count is its own last line, which Show more's clamp never hides.
+    // The count sits after the whole list.
     within(toast).getByText(`${250 - lines.length} more weren't imported.`);
 
     await user.click(within(toast).getByTestId("workspace-shell-error-copy"));
