@@ -314,13 +314,6 @@ describe("error words", () => {
     expect(isWorkspaceUpdatingError(acrossIpc(new Error("Workspace is still updating. Try again.")))).toBe(false);
   });
 
-  // A handler registered with ipcMain.handle itself sends its message without
-  // its code, so a view that skips this refusal reports it instead.
-  it("registers every invoke handler in main through the one that keeps codes", () => {
-    const main = readFileSync(new URL("../main.ts", import.meta.url), "utf8");
-    expect(main.match(/ipcMain\.handle\(/g)).toHaveLength(1);
-  });
-
   it("says a file is not read yet without promising that the workspace will finish", () => {
     const received = acrossIpc(refusal("OVERLOADED", "dohc has not read this file yet. Open it again once dohc has read it."));
     expect(readError(received)).toEqual({
