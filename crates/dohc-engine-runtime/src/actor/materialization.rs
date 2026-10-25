@@ -433,6 +433,7 @@ pub(super) struct MaterializationReplaySummary {
     pub(super) parked: usize,
     pub(super) completed: usize,
     pub(super) failed: usize,
+    pub(super) file_locked: usize,
     pub(super) selected_seen: usize,
     pub(super) hard_errors: Vec<(String, String)>,
 }
@@ -701,6 +702,7 @@ fn replay_materializations(
             parked: 0,
             completed: 0,
             failed: 0,
+            file_locked: 0,
             selected_seen: 0,
             hard_errors: Vec::new(),
         });
@@ -764,6 +766,7 @@ fn replay_materializations(
             parked: 0,
             completed: 0,
             failed: 0,
+            file_locked: 0,
             selected_seen: 0,
             hard_errors: Vec::new(),
         };
@@ -1145,13 +1148,15 @@ fn replay_materializations(
                 Ok(JobOutcome::Crashed(_)) => summary.failed += 1,
                 Err(error) => {
                     summary.failed += 1;
-                    if !matches!(
+                    if matches!(
                         error,
                         dohc_engine_files::MaterializeError::FileLocked
                             | dohc_engine_files::MaterializeError::Storage(
                                 StorageError::FileLocked
                             )
                     ) {
+                        summary.file_locked += 1;
+                    } else {
                         summary
                             .hard_errors
                             .push((job.job_id.clone(), format!("{}: {error}", job.target_path)));

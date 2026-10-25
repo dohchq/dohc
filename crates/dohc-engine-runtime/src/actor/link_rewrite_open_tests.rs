@@ -695,7 +695,7 @@ async fn reopen_after_preflight_uses_the_live_inverse_without_retiring_lineage()
             .unwrap();
         lease
     };
-    let (result, lease) = tokio::join!(f.undo_open_with_busy_retry(), reopen);
+    let (result, lease) = tokio::join!(f.undo_open(), reopen);
     let doc = f.document("source-0000").await;
     let text = f.text("source-0000.md").await;
     drop(lease);
@@ -945,7 +945,7 @@ async fn unmappable_preflight_then_close_uses_the_disk_inverse() {
             .await
             .unwrap();
     };
-    let (result, ()) = tokio::join!(f.undo_open_with_busy_retry(), close);
+    let (result, ()) = tokio::join!(f.undo_open(), close);
     let text = f.text("source-0000.md").await;
     f.close().await;
     assert!(result.unwrap().not_restored.is_empty());

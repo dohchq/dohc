@@ -393,6 +393,100 @@ async fn run(
         )
         .await
 }
+
+async fn placement_waits_for_writer(member_count: usize, close_actor: bool) {
+    let (root, supervisor, actor) = setup(member_count);
+    let hold = actor.hold_link_drain();
+    let request = if close_actor {
+        "placement-close"
+    } else {
+        "placement-retry"
+    };
+    let undo = run(&actor, &root, request, Arc::new(NoFaults))
+        .await
+        .unwrap();
+    let count = undo.moments.len();
+    let [entered, release] = pause_checkpoint(&undo.compensation_operation_id);
+    let writer = rusqlite::Connection::open(engine_db_path(&root).unwrap()).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let placed_count = Arc::new(AtomicUsize::new(0));
+    let observed_count = Arc::clone(&placed_count);
+    let task_actor = actor.clone();
+    let path = root.to_path_buf();
+    let placement = tokio::spawn(async move {
+        task_actor
+            .history_undo_place(WS.into(), undo, path, Arc::new(()), 11, |members| {
+                observed_count.fetch_add(members.len(), Ordering::SeqCst);
+            })
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), entered.notified())
+        .await
+        .unwrap();
+    assert!(
+        !placement.is_finished(),
+        "busy placement must remain scheduled"
+    );
+    assert_eq!(
+        placed_count.load(Ordering::SeqCst),
+        0,
+        "keep leases until placement succeeds"
+    );
+    assert_eq!(
+        actor.active_version_id(WS.into()).await.unwrap(),
+        "main",
+        "backoff must release the actor"
+    );
+    if close_actor {
+        close(supervisor).await;
+        writer.execute_batch("ROLLBACK").unwrap();
+        release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(10), placement)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!result.materialized);
+        assert_eq!(placed_count.load(Ordering::SeqCst), 0);
+    } else {
+        writer.execute_batch("ROLLBACK").unwrap();
+        release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(10), placement)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.materialized);
+        assert_eq!(
+            placed_count.load(Ordering::SeqCst),
+            count,
+            "notify each member exactly once"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("old.md")).unwrap(),
+            "move body"
+        );
+        assert!(!root.join("new.md").exists());
+        for index in 1..member_count {
+            assert_eq!(
+                std::fs::read_to_string(root.join(format!("file-{index:04}.md"))).unwrap(),
+                "retained body"
+            );
+        }
+        close(supervisor).await;
+    }
+    drop(hold);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn history_undo_placement_retries_file_locked_outside_the_actor() {
+    placement_waits_for_writer(2, false).await;
+    placement_waits_for_writer(10, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn history_undo_placement_stops_retrying_when_the_actor_closes() {
+    placement_waits_for_writer(10, true).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn refuses_every_member_before_any_compensation() {
     let (root, supervisor, actor) = setup(3);

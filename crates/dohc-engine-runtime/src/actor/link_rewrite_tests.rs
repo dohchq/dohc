@@ -100,7 +100,7 @@ where
         let retries = attempts.len() - 1;
         eprintln!("LINK_UNDO_RETRIES request={ws}-undo retries={retries} attempt_ns={attempts:?}");
         match result {
-            Err(error) if error.code() == "file-locked" => {
+            Err(error) if error.is_file_locked() => {
                 let deadline = *deadline.get_or_insert_with(|| Instant::now() + budget);
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
