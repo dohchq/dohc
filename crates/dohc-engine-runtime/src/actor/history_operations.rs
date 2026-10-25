@@ -366,9 +366,14 @@ impl ActorHandle {
             return result;
         };
         result.materialized = true;
+        let mut busy_deadline = None;
         // Each actor turn finishes a bounded placement batch, then yields to other work.
         for members in result.moments.chunks(8) {
             loop {
+                if busy_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                    result.materialized = false;
+                    return result;
+                }
                 let selected = members.to_vec();
                 let ws = ws.clone();
                 let version = result.version_id.clone();
@@ -398,18 +403,29 @@ impl ActorHandle {
                         break;
                     }
                     Err(error) if error.is_file_locked() => {
+                        // Match the desktop's budget from its first busy answer.
+                        let deadline = *busy_deadline.get_or_insert_with(|| {
+                            tokio::time::Instant::now() + std::time::Duration::from_secs(10)
+                        });
                         #[cfg(test)]
                         turns::tests::checkpoint_wait(&result.compensation_operation_id).await;
                         // Committed placement keeps its leases while waiting outside the actor.
                         let checkpoint = Arc::clone(&checkpoint);
-                        if tokio::task::spawn_blocking(move || checkpoint())
-                            .await
-                            .is_err()
-                        {
+                        if !matches!(
+                            tokio::time::timeout_at(
+                                deadline,
+                                tokio::task::spawn_blocking(move || checkpoint())
+                            )
+                            .await,
+                            Ok(Ok(()))
+                        ) {
                             result.materialized = false;
                             return result;
                         }
-                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        tokio::time::sleep_until(deadline.min(
+                            tokio::time::Instant::now() + std::time::Duration::from_millis(50),
+                        ))
+                        .await;
                     }
                     Err(error) => {
                         eprintln!("engine: Undo committed; placement remains pending: {error}");
@@ -634,7 +650,7 @@ fn place_undo_members(
             false,
         )
     })?;
-    if summary.file_locked > 0 {
+    if summary.store_busy > 0 {
         return Err(StorageError::FileLocked.into());
     }
     for id in jobs {
