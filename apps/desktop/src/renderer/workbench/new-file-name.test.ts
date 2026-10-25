@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
 import { nextPagePath, pageFileStem, withMarkdownDefault, withRenameDefault } from "./new-file-name";
 
 describe("pageFileStem", () => {
@@ -40,6 +41,17 @@ describe("nextPagePath", () => {
   it("numbers the name past every taken one, ignoring case", () => {
     expect(nextPagePath("", "Untitled", new Set(["untitled.md"]))).toBe("Untitled 2.md");
     expect(nextPagePath("Trip", "Plan", new Set(["trip/plan.md", "trip/plan 2.md"]))).toBe("Trip/Plan 3.md");
+  });
+
+  it("cuts the name short so a path in a deep folder stays inside the engine's limit", () => {
+    const folder = Array.from({ length: 5 }, () => "f".repeat(200)).join("/");
+    const stem = pageFileStem("旅".repeat(120), "win32");
+    const path = nextPagePath(folder, stem, new Set());
+    expect(workspaceDestinationError(path, "win32")).toBeNull();
+    expect(path).toBe(`${folder}/${"旅".repeat(5)}.md`);
+    const next = nextPagePath(folder, stem, new Set([path.toLowerCase()]));
+    expect(workspaceDestinationError(next, "win32")).toBeNull();
+    expect(next).toBe(`${folder}/${"旅".repeat(4)} 2.md`);
   });
 });
 

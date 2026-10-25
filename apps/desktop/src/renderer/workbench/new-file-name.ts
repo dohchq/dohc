@@ -18,15 +18,30 @@ export function pageFileStem(title: string, platform: string): string {
   return stem && validateUserMaterializePath(`${stem}.md`, { platform }).ok ? stem : "Untitled";
 }
 
+// The engine takes paths of up to 1,024 bytes.
+const PATH_BYTE_LIMIT = 1_024;
+
 // The first of "Stem.md", "Stem 2.md", "Stem 3.md"… in `folder` that no path
-// in `occupied` holds. `occupied` is lowercase, because Windows and macOS
-// compare names without case.
+// in `occupied` holds. In a deep folder the stem is cut short so the path
+// fits. `occupied` is lowercase, because Windows and macOS compare names
+// without case.
 export function nextPagePath(folder: string, stem: string, occupied: ReadonlySet<string>): string {
   const prefix = folder ? `${folder}/` : "";
   for (let index = 1; ; index += 1) {
-    const path = `${prefix}${index === 1 ? stem : `${stem} ${index}`}.md`;
+    const ending = `${index === 1 ? "" : ` ${index}`}.md`;
+    const path = `${prefix}${fittedStem(stem, PATH_BYTE_LIMIT - byteLength(prefix + ending))}${ending}`;
     if (!occupied.has(path.toLowerCase())) return path;
   }
+}
+
+function fittedStem(stem: string, bytes: number): string {
+  const characters = Array.from(stem);
+  while (characters.length > 0 && byteLength(characters.join("")) > bytes) characters.pop();
+  return characters.join("").replace(/[. ]+$/, "") || "Untitled";
+}
+
+function byteLength(text: string): number {
+  return new TextEncoder().encode(text).byteLength;
 }
 
 // New files are markdown by default: a typed name whose leaf has no
