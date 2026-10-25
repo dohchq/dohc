@@ -55,6 +55,7 @@ import { TabGlyph, tabMark } from "./tabGlyph";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
 import { KEEPABLE_COLLECTIONS_REFUSALS, USE_THIS_COMPUTER, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
+import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
 
 // One Explorer disk operation, as the shell's onBeginChanges opens it.
 // `settle` is the deferred draft settlement runChanges awaits before it
@@ -96,9 +97,10 @@ export interface ExplorerProps {
   // Incrementing request to begin an inline create at the root (palette /
   // application-menu "New Folder" route).
   createRequest: { kind: "file" | "folder"; id: number } | null;
-  // A path to select and focus once its row renders ("Show in Explorer").
-  // The shell expands its folders first; onRevealed clears the request.
-  revealPath?: string | null;
+  // Paths to select once their rows render ("Show in Explorer", or what an
+  // import added). The first in the tree takes focus. The shell expands their
+  // folders first; onRevealed clears the request.
+  revealPaths?: readonly string[] | null;
   onRevealed?: () => void;
   onOpenFile: (path: string) => void;
   onActivateTab: (groupId: string, path: string) => void;
@@ -459,7 +461,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     onOpenFile,
     onOpenCollection,
     onTogglePin,
-    revealPath,
+    revealPaths,
     onRevealed,
   } = props;
   const activeTab =
@@ -528,6 +530,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   // twice (and the second rename would fail on the now-missing source).
   const editDone = useRef(false);
   const [editPending, setEditPending] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const editErrorRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (editError) editErrorRef.current?.scrollIntoView({ block: "nearest" });
+  }, [editError]);
   // Internal drag state: HTML5 DnD dataTransfer is unreadable during
   // dragover, so the dragged selection rides in a ref for the whole gesture.
   const dragSources = useRef<DragSource[] | null>(null);
@@ -786,6 +793,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         }
       }
       setEditValue("");
+      setEditError(null);
       editDone.current = false;
       setEditPending(false);
       setEditing({ mode: "create", kind, parentPath });
@@ -813,6 +821,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const beginRename = useCallback(
     (path: string, isFolder: boolean) => {
       setEditValue(basenameOf(path));
+      setEditError(null);
       editDone.current = false;
       setEditPending(false);
       setEditing({ mode: "rename", path, isFolder });
@@ -1031,20 +1040,22 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   }, []);
 
   useEffect(() => {
-    if (!revealPath) return;
+    if (!revealPaths) return;
     // A path the tree does not list never gets a row; drop the request so it
     // cannot take focus later when that path appears.
-    if (!fileByPath.has(revealPath) && !isFolderPath(revealPath)) {
+    if (!revealPaths.some((path) => fileByPath.has(path) || isFolderPath(path))) {
       onRevealed?.();
       return;
     }
-    if (!renderIndexByPath.has(revealPath)) return;
+    const shown = revealPaths.filter((path) => renderIndexByPath.has(path));
+    if (shown.length === 0) return;
+    const first = shown.reduce((a, b) => (renderIndexByPath.get(a)! <= renderIndexByPath.get(b)! ? a : b));
     setFilesExpanded(true);
-    setSelection(new Set([revealPath]));
-    setAnchorPath(revealPath);
-    focusRow(revealPath);
+    setSelection(new Set(shown));
+    setAnchorPath(first);
+    focusRow(first);
     onRevealed?.();
-  }, [fileByPath, focusRow, isFolderPath, onRevealed, renderIndexByPath, revealPath]);
+  }, [fileByPath, focusRow, isFolderPath, onRevealed, renderIndexByPath, revealPaths]);
 
   const onRowClick = useCallback(
     (path: string, event: MouseEvent) => {
@@ -1436,7 +1447,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     editing?.mode === "rename" && editing.isFolder && expandedSet.has(editing.path);
 
   const editRow = (depth: number): ReactNode => (
-    <li role="none" key="edit-row">
+    <li role="none" key="edit-row" className="relative">
       <div style={{ height: TREE_ROW_HEIGHT }} className="flex items-center gap-1.5 pr-2">
         <span aria-hidden className="w-1 shrink-0" />
         <IndentGuides depth={depth} />
@@ -1481,8 +1492,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 : "New file name"
           }
           value={editValue}
+          aria-invalid={editError ? true : undefined}
+          aria-describedby={editError ? "tree-name-error" : undefined}
           readOnly={editPending}
-          onChange={(event) => setEditValue(event.target.value)}
+          onChange={(event) => { setEditValue(event.target.value); setEditError(null); }}
           onKeyDown={(event) => {
             event.stopPropagation();
             if (isComposingKey(event)) return;
@@ -1499,14 +1512,31 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           // must not morph the label into a web-input pill — and the strong
           // border IS the focus affordance (the input is focused while open;
           // VS Code's rename input signals the same way with focusBorder).
-          className="min-w-0 flex-1 rounded-sm border border-ink/50 bg-bg px-1 py-0.5 text-[13px] text-ink outline-none"
+          className={`min-w-0 flex-1 rounded-sm border ${editError ? "border-danger focus:border-danger! focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]!" : "border-ink/50"} bg-bg px-1 py-0.5 text-[13px] text-ink outline-none`}
         />
       </div>
+      {editError && (
+        <div ref={editErrorRef} id="tree-name-error" role="alert" className="absolute left-6 right-2 top-full z-20 rounded-md border border-danger bg-panel px-2 py-1.5 text-[12px] text-danger">
+          {editError}
+        </div>
+      )}
     </li>
   );
 
   function finishEdit(commit: boolean, returnFocus = false): void {
     if (editDone.current || !editing) return;
+    if (commit && editValue.trim()) {
+      const platform = window.dohcDesktop?.platform ?? "";
+      const typed = resolveTypedPath(editValue, editing.mode === "rename" ? dirnameOf(editing.path) : editing.parentPath);
+      const destination = editing.mode === "rename"
+        ? editing.isFolder ? typed : withRenameDefault(editing.path, typed)
+        : editing.kind === "folder" ? typed : withMarkdownDefault(typed);
+      const error = workspaceDestinationError(editValue, platform) ?? workspaceDestinationError(destination, platform);
+      if (error) {
+        setEditError(error);
+        return;
+      }
+    }
     editDone.current = true;
     setEditPending(true);
     renameFocus.current = null;
@@ -1685,7 +1715,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 aria-hidden
                 className={`shrink-0 transition-transform ${openEditorsExpanded ? "rotate-90" : ""}`}
               />
-              <span className="min-w-0 flex-1 truncate">Open Editors</span>
+              <span className="min-w-0 flex-1 truncate">Open editors</span>
               {openEditorCount > 0 ? (
                 <span
                   aria-label={`${openEditorCount} open editor${openEditorCount === 1 ? "" : "s"}`}

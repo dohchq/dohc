@@ -13,7 +13,7 @@ import { matchShellShortcut, matchShellShortcutChord } from "../shortcuts/shortc
 import { hasBlockingModal } from "./modalFocus";
 import { SkeletonRows, SkeletonSlot } from "./ui/SkeletonRows";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
-import { Bot, Check, ChevronRight, CircleHelp, Copy, Eye, RefreshCw, Search, Send, User } from "lucide-react";
+import { Bot, Check, ChevronRight, CircleHelp, Copy, Eye, RefreshCw, Search, Send, User, X } from "lucide-react";
 import {
   Fragment,
   Suspense,
@@ -186,6 +186,7 @@ import { workspaceName } from "./Titlebar";
 import { toggleTheme } from "./theme";
 import { runUpdateCheck, runUpdateInstall } from "./appMenuCommands";
 import {
+  IconButton,
   PrimaryButton,
   SecondaryButton,
 } from "./ui/controls";
@@ -992,6 +993,13 @@ export function DesktopWorkspaceShell(props: {
     setSettingsSection(null);
     setSettingsFocus(null);
   }, [refreshCloudStatus, settingsOpen]);
+  const closeCloud = useCallback(() => {
+    setCloudOpen(false);
+    setCloudRetryServerUrl("");
+    // A sign-in/out inside the dialog changes the relay session —
+    // refresh so Chats presence lights up (or goes dormant) at once.
+    refreshCloudStatus();
+  }, [refreshCloudStatus]);
   // Connect server, wherever it is asked for. The account and the sync switch
   // are settings, so only a person known to be signed out gets the Cloud
   // dialog. A status still loading, or unreadable, opens Settings, which says
@@ -2140,16 +2148,22 @@ export function DesktopWorkspaceShell(props: {
       workspaceId,
     ],
   );
+  // The Explorer selects these paths once their rows render. The newest
+  // request wins, so a slow import cannot take the selection back.
+  const [explorerReveal, setExplorerReveal] = useState<{ workspaceId: string; paths: readonly string[] } | null>(null);
+  const clearExplorerReveal = useCallback(() => setExplorerReveal(null), []);
+  const revealRequest = useRef(0);
   // Set once refreshShareView exists below; a failed import's Try again
   // calls it.
   // One import seam for the dialog flow and the OS drag-in flow (the latter
   // passes the preload-resolved absolute paths; see the trust-delta note on
   // ImportWorkspaceFilesPayload). targetDir aims the import at a folder ("" /
   // absent = root) — the drop target, or the folder whose context menu ran
-  // "Import Files…". Every import ends with a visible summary: what landed,
-  // where, and how many sources were skipped — never a silent shrink.
+  // "Import Files…". Every import shows what landed, where, and how many
+  // sources were skipped — never a silent shrink.
   const importFiles = useCallback(
-    async (droppedPaths?: string[], targetDir?: string) => {
+    async (from: "explorer" | "palette", droppedPaths?: string[], targetDir?: string) => {
+      const reveal = from === "explorer" ? ++revealRequest.current : 0;
       // Try again on a failed import refreshes the shared view first, since
       // some files may have landed, then asks for files for the same folder.
       // Try again already removed the row, so a refresh that leaves the view
@@ -2158,7 +2172,7 @@ export function DesktopWorkspaceShell(props: {
       const retry = () => {
         void refreshShareViewRef.current().then((refresh) => {
           if (refresh === "current") {
-            void importFiles(undefined, targetDir);
+            void importFiles(from, undefined, targetDir);
             return;
           }
           reportShellFailure({
@@ -2236,28 +2250,51 @@ export function DesktopWorkspaceShell(props: {
         }
         return;
       }
-      if (count === 0 && folders === 0 && outcome.skipped === 0) return; // cancelled dialog
-      // Every file was skipped for its name or kind; the same files would be
-      // skipped again, so there is nothing to try again.
+      const skipped = outcome.skipped;
+      if (count === 0 && folders === 0 && skipped === 0) return; // cancelled dialog
+      // The same sources would be skipped again, so there is nothing to try again.
+      const notImported = `${skipped} ${skipped === 1 ? "file wasn't" : "files weren't"} imported.`;
       if (count === 0 && folders === 0) {
-        reportShellFailure({ message: `Nothing imported${skippedSuffix}.`, kind: "import-files" });
+        reportShellFailure({ message: notImported, kind: "import-files" });
         return;
       }
-      // A drop of empty folders lands folders and no file.
-      showSuccessNotice(
-        count > 0
-          ? `Imported ${count} ${count === 1 ? "file" : "files"}${targetDir ? ` into ${targetDir}` : ""}${skippedSuffix}.`
-          : `Created ${folders} ${folders === 1 ? "folder" : "folders"}${targetDir ? ` in ${targetDir}` : ""}${skippedSuffix}.`,
-        undefined,
-        "import-files",
-      );
+      // The Explorer shows what landed, so its message is only the skip.
+      if (from === "explorer") {
+        if (skipped > 0) reportShellFailure({ message: notImported, kind: "import-files" });
+        else clearKind("import-files");
+      } else {
+        // A drop of empty folders lands folders and no file.
+        const landed = count > 0
+          ? `Imported ${count} ${count === 1 ? "file" : "files"}${targetDir ? ` into ${targetDir}` : ""}.`
+          : `Created ${folders} ${folders === 1 ? "folder" : "folders"}${targetDir ? ` in ${targetDir}` : ""}.`;
+        if (skipped > 0) {
+          reportShellFailure({ message: `${landed} ${skipped} ${skipped === 1 ? "wasn't" : "weren't"} imported.`, kind: "import-files" });
+        } else showSuccessNotice(landed, undefined, "import-files");
+      }
       try {
         await refreshFiles();
       } catch (error) {
         reportShellError("Files imported, but the explorer could not refresh.", error);
+        return;
       }
+      if (from !== "explorer" || workspaceIdRef.current !== workspaceId || revealRequest.current !== reveal) return;
+      // The target folder opens, and what landed in it is selected: each new
+      // file, and each new folder that holds the rest.
+      mutateWb((state) =>
+        (targetDir ? [...ancestorDirs(targetDir), targetDir] : []).reduce<WorkbenchState>(
+          (acc, dir) => setFolderExpanded(acc, dir, true),
+          state,
+        ),
+      );
+      const prefix = targetDir ? `${targetDir}/` : "";
+      const items = [...new Set(outcome.imported.map((path) => prefix + path.slice(prefix.length).split("/")[0]))];
+      if (items.length > 0) setExplorerReveal({ workspaceId, paths: items });
     },
-    [workspaceId, refreshFiles, reportShellError, reportShellFailure, showSuccessNotice],
+    [workspaceId, refreshFiles, reportShellError, reportShellFailure, showSuccessNotice, clearKind, mutateWb],
+  );
+  const importFromExplorer = useCallback(
+    (droppedPaths?: string[], targetDir?: string) => void importFiles("explorer", droppedPaths, targetDir),
+    [importFiles],
   );
 
   // The one way a file opens (tree click, quick-open, tab activation): marks
@@ -3244,9 +3281,6 @@ export function DesktopWorkspaceShell(props: {
     ],
   );
 
-  // The Explorer selects and focuses this path once its row renders.
-  const [explorerReveal, setExplorerReveal] = useState<{ workspaceId: string; path: string } | null>(null);
-  const clearExplorerReveal = useCallback(() => setExplorerReveal(null), []);
   const showPathInExplorer = useCallback(
     (path: string, expandPath = false) => {
       mutateWb((state) =>
@@ -3255,7 +3289,8 @@ export function DesktopWorkspaceShell(props: {
           { ...state, activeView: "explorer", sidebarVisible: true },
         ),
       );
-      setExplorerReveal({ workspaceId, path });
+      revealRequest.current += 1;
+      setExplorerReveal({ workspaceId, paths: [path] });
     },
     [mutateWb, workspaceId],
   );
@@ -3988,7 +4023,7 @@ export function DesktopWorkspaceShell(props: {
       "new-collection": () => setNewCollectionFolder(""),
       "quick-open": () => setQuickOpenOpen(true),
       "open-workspace": () => void openWorkspaceFolder(),
-      "import-files": () => void importFiles(),
+      "import-files": () => void importFiles("palette"),
       "export-workspace": () =>
         void bridge().exportWorkspaceZip({ workspaceId }).catch((error) =>
           reportShellError("Could not export this workspace.", error),
@@ -4690,7 +4725,7 @@ export function DesktopWorkspaceShell(props: {
         openEditorsHeight={wb.openEditorsHeight}
         onOpenEditorsHeightChange={onOpenEditorsHeightChange}
         createRequest={createRequest}
-        revealPath={explorerReveal?.workspaceId === workspaceId ? explorerReveal.path : null}
+        revealPaths={explorerReveal?.workspaceId === workspaceId ? explorerReveal.paths : null}
         onRevealed={clearExplorerReveal}
         onOpenFile={openFile}
         onActivateTab={activateEditorTab}
@@ -4716,7 +4751,7 @@ export function DesktopWorkspaceShell(props: {
         onRetryCollections={retryCollectionsList}
         onBeginChanges={beginDraftOperation}
         onPathsChanged={onExplorerPathsChanged}
-        onImportFiles={importFiles}
+        onImportFiles={importFromExplorer}
         shareView={shareView}
         onRefreshShareMounts={onExplorerRefreshShareMounts}
         onUnmountShare={unmountShare}
@@ -6382,19 +6417,12 @@ export function DesktopWorkspaceShell(props: {
         />
       ) : null}
       {cloudOpen ? (
-        <Overlay
-          onClose={() => {
-            setCloudOpen(false);
-            setCloudRetryServerUrl("");
-            // A sign-in/out inside the dialog changes the relay session —
-            // refresh so Chats presence lights up (or goes dormant) at once.
-            refreshCloudStatus();
-          }}
-        >
+        <Overlay onClose={closeCloud}>
           {/* Once signed in, what is left is settings: the account and the
               sync switch. A session the dialog finds goes there too. */}
           <CloudLogin
             handOffSession
+            onClose={closeCloud}
             onConnected={() => {
               setCloudOpen(false);
               setCloudRetryServerUrl("");
@@ -6516,11 +6544,20 @@ export function DesktopWorkspaceShell(props: {
         <Overlay onClose={() => setShareTarget(null)}>
           <Suspense
             fallback={
-              // The share dialog's own card, so the dialog lands in its place.
-              <SkeletonRows
-                label="Loading share dialog..."
-                className="dohc-elevated w-105 rounded-xl border border-line bg-panel p-5"
-              />
+              // The share dialog's own card and X, so the dialog lands in its place.
+              <div className="relative">
+                <SkeletonRows
+                  label="Loading share dialog..."
+                  className="dohc-elevated w-105 rounded-xl border border-line bg-panel p-5"
+                />
+                <IconButton
+                  aria-label="Close"
+                  onClick={() => setShareTarget(null)}
+                  className="absolute right-5 top-5"
+                >
+                  <X size={13} aria-hidden />
+                </IconButton>
+              </div>
             }
           >
             <LazyRelayShareDialog

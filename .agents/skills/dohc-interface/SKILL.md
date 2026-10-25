@@ -135,22 +135,26 @@ A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `rol
 | --- | --- |
 | The whole workspace is unusable | A full-height state over the workbench, which goes inert |
 | One thing failed, and the workspace still works | A toast at the bottom right, above the update toast, then a row in Notices until it is retried or dismissed |
-| Something finished or became ready | A toast at the bottom right that fades, and a row in Notices |
+| Something finished out of sight, such as a background job | A toast at the bottom right that fades, and a row in Notices |
+| An action whose result the person can see | No toast and no row |
 | A control's own input is wrong | Inline, beside the control |
 
-- Use these four places. Do not add a new one for a new message.
+- Use these places. Do not add a new one for a new message.
+- Keep the toast and its row when it holds the only Undo for the change.
 - Keep the workbench still when a message arrives. No bar slides in across the top.
 - Give a message about something the person can retry a **Try again** control on the toast and the row.
 - Put a copy control beside text a person might need to report. Use an icon on the toast and the row, and a **Technical details** disclosure on a full-height state. Copy what the person reads, one line per fact, never a log.
 - Let a repeat of the same message, or the same kind, replace its earlier row.
 - Closing a toast keeps its row. Dismissing the row removes it.
+- A row in Notices stays unread until the pointer or keyboard focus rests on it for 0.6 s, or the person presses **Mark all read**. Reading a row closes its toast and keeps the row.
+- A row shows two lines of title and three of text. Offer **Show more** for the rest, and open it in place, wrapped and selectable.
 - Restarting or closing the app asks once, in one dialog.
 - Report errors through the shell's `reportError` callback instead of rendering them yourself.
 - For a list or section whose read failed, show `RetryRow`.
 
 ## Controls
 
-The look in one line: warm paper, quiet graphite, mono metadata, serif for brand moments, and color only for meaning.
+The look in one line: warm paper, quiet graphite, one sans for every word of the interface, serif for brand moments, and color only for meaning.
 
 Use `DohcMark` for the mark, `DohcWordmark` for the name, and `DohcLockup` for both. They live in `packages/brand/src/DohcLogo.tsx`.
 The mark is an SVG in `currentColor`, with no gradient, shadow, or badge.
@@ -186,13 +190,15 @@ Never write hex or Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`
 | --- | --- |
 | Body, rows, inputs | `text-[13px]` |
 | Dense secondary text | `text-[12px] text-muted` |
-| Hints, timestamps, kbd | `text-[11px] text-subtle`, often `font-mono` |
-| Section labels | `text-[10px] font-semibold uppercase tracking-wide text-subtle` |
+| Hints, timestamps, shortcuts | `text-[12px] text-subtle` |
+| Section labels | `dohc-section-label`: `text-[12px] font-medium text-subtle`, in sentence case |
 | Panel and dialog titles | `text-sm font-semibold text-ink` |
 | Brand moments, such as the first-run headline | `font-serif`, rarely |
-| Paths, counts, ids, keys | `font-mono` |
+| Code and Markdown source | `font-mono` |
 
 Set small text at 10, 11, 12, or 13px. Never write a fractional size such as `text-[10.5px]`.
+Paths, counts, times, and shortcuts use the interface font. `<kbd>` defaults to mono, so give it `font-sans`.
+Never uppercase a label.
 
 ### Radius and elevation
 
@@ -215,7 +221,7 @@ Flat panels get borders, not shadows.
 
 ### Recipes
 
-Text input: `w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink`. Add `font-mono` for mono content.
+Text input: `w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink`. Add `font-mono` for code.
 
 List row (menus, trees, results): `flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75`.
 
@@ -231,9 +237,15 @@ It draws the accent outline on the active option, where Enter acts, whether the 
 
 Card: `rounded-lg border border-line bg-panel p-3`. A modal card uses `rounded-xl p-5` and `dohc-elevated`.
 
+Dialog: build it on `Overlay`. Cancel, the X, and Escape close it.
+While closing would discard hand-written work, as with open merge conflicts, only the dialog's own buttons close it.
+A press outside a dialog does nothing, so a stray click cannot discard what a person typed.
+Only pickers and popovers close on a press outside: the command palette, quick open, menus, and an action's Run or Cancel question. They hold nothing worth keeping.
+Pass `closeOnBackdrop` to `Overlay` for a picker only.
+
 Segmented control: track `flex rounded-lg border border-line bg-panel-2 p-0.5`, segment `rounded-md px-2.5 py-1 text-xs transition-colors`, active `bg-bg text-ink shadow-sm`, rest `text-muted hover:text-ink`.
 
-Kbd chip: `rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle`.
+Kbd chip: `rounded border border-line bg-bg px-1 font-sans text-[11px] text-subtle`.
 
 Empty state: a centered column with `gap-4`, an optional `DohcMark` in `text-line`, one `text-sm text-muted` line, and actions as kbd-chip buttons.
 

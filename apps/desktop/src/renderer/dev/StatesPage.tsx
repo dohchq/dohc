@@ -128,7 +128,7 @@ const SAMPLE_SAM: ActorPresentation = { ...relayPresentation(SAM_PALETTE_SLOT), 
 const SAMPLE_NOVA: ActorPresentation = { group: "states-nova", hue: null, self: false };
 const SAMPLE_ORBIT: ActorPresentation = { group: "states-orbit", hue: "plum", self: false };
 
-const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
+const KBD = "rounded border border-line bg-bg px-1 font-sans text-[11px] text-subtle";
 
 // A floating part draws a shadow up to 41px below and 31px beside itself in
 // the dark theme, and its whole shadow must stay in its own capture, which
@@ -1093,6 +1093,18 @@ function notice(id: string, tone: "danger" | "success") {
   };
 }
 
+// A failure whose text runs past three lines: the row clips it and offers Show more.
+const LONG_NOTICE = {
+  id: "self-test",
+  tone: "danger" as const,
+  title: "The self-test did not finish",
+  body: "dohc stopped the self-test at its third step and kept the log at C:\\Users\\ana\\AppData\\Roaming\\dohc\\run-logs\\run_self_test_20261025T053512Z_4f8bd315.log. Open the log to see the step that stopped, then try again.",
+  Icon: AlertTriangle,
+  actions: [{ label: "Try again", onClick: noop }],
+  copyText: "The self-test did not finish",
+  onDismiss: noop,
+};
+
 function DialogSpecimen(props: { theme: "light" | "dark" }) {
   const panelRef = useRef<HTMLDivElement>(null);
   return (
@@ -1711,9 +1723,10 @@ function Pane(props: { theme: "light" | "dark" }) {
             On this computer
           </SectionLabel>
           <ul className="m-0 list-none p-0" data-force-state="focus-visible" data-force-target="li:nth-child(2)">
-            <LocalNoticeRow notice={notice("sync", "danger")} onKeyDown={noop} onAction={noop} onDismiss={noop} />
-            <LocalNoticeRow notice={notice("sync-focused", "danger")} onKeyDown={noop} onAction={noop} onDismiss={noop} />
-            <LocalNoticeRow notice={notice("moved", "success")} onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={notice("sync", "danger")} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={notice("sync-focused", "danger")} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={notice("moved", "success")} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={LONG_NOTICE} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
           </ul>
         </div>
       </Section>
@@ -2064,8 +2077,8 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="Notices: History Restore, then a shared live file">
           <div className="w-[360px] rounded-lg border border-line bg-panel text-xs text-ink">
             <ul className="m-0 list-none p-0">
-              <LocalNoticeRow notice={recoveryNotice("capture-recovery", false)} onKeyDown={noop} onAction={noop} onDismiss={noop} />
-              <LocalNoticeRow notice={recoveryNotice("capture-recovery-shared", true)} onKeyDown={noop} onAction={noop} onDismiss={noop} />
+              <LocalNoticeRow notice={recoveryNotice("capture-recovery", false)} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
+              <LocalNoticeRow notice={recoveryNotice("capture-recovery-shared", true)} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
             </ul>
           </div>
         </Specimen>

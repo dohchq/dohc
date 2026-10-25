@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -23,9 +24,9 @@ const runId = process.env.DOHC_RUN_ID;
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
 const prompt = Buffer.concat(chunks).toString("utf8");
-// A runner self-test ends its prompt with the one reply command to run.
-const selfTestCommand = prompt.includes("This is a dohc runner self-test.")
-  ? prompt.trim().split("\n").at(-1)
+// A runner self-test asks for one reply that carries its marker.
+const selfTestMarker = prompt.includes("This is a dohc runner self-test.")
+  ? /dohc-runner-self-test:[\w-]+/u.exec(prompt)?.[0] ?? null
   : null;
 
 if (!runId || prompt.trim().length === 0 || !threadId) {
@@ -45,41 +46,105 @@ if (mode === "silent-fail") {
 
 // Do what the prompt asks, as an installed tool would. The shell resolves dohc
 // from the runner's PATH, as installed tools must do.
-function runCommand(command, body) {
+function runCommand(command) {
   if (!/^dohc chat reply [\w-]+ --as-agent [^\r\n]*$/u.test(command)) {
     console.error("Unexpected runner command", command);
     process.exit(2);
   }
   const child = spawn(command, {
-    cwd: process.cwd(), env: process.env, stdio: [body === undefined ? "ignore" : "pipe", "inherit", "inherit"], windowsHide: true, shell: true,
+    cwd: process.cwd(), env: process.env, stdio: ["ignore", "inherit", "inherit"], windowsHide: true, shell: true,
   });
-  if (body !== undefined) child.stdin.end(body);
   child.on("error", (error) => { console.error(error); process.exit(1); });
   child.on("exit", (code) => process.exit(code ?? 1));
 }
 
-if (profileTool) {
-  const expected = profileTool === "claude"
-    ? ["-p", "--permission-prompts", "none", "--no-session-persistence", "--allowedTools", "Edit(/**)", "Bash(dohc chat reply:*)", "--disallowedTools", "Edit(/.dohc/**)"]
-    : ["exec", "--config", "approval_policy=never", "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-"];
-  if (JSON.stringify(process.argv.slice(3)) !== JSON.stringify(expected)) {
-    console.error("Unexpected profile arguments", process.argv.slice(3));
+// The values of a TOML string or array of strings in a Codex config entry.
+function tomlStrings(value) {
+  return [...value.matchAll(/'([^']*)'|("(?:[^"\\]|\\.)*")/gu)].map((match) => match[1] ?? JSON.parse(match[2]));
+}
+
+// The dohc MCP server a Codex launch names, after checking the launch.
+function codexReplyServer(args) {
+  const config = new Map(args.flatMap((arg, index) => args[index - 1] === "--config" ? [arg.split(/=(.*)/su).slice(0, 2)] : []));
+  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.enabled_tools", "mcp_servers.dohc.tools.dohc_reply_to_chat.approval_mode"];
+  const [command] = tomlStrings(config.get("mcp_servers.dohc.command") ?? "");
+  const [cwd] = tomlStrings(config.get("mcp_servers.dohc.cwd") ?? "");
+  if (args.length !== 3 + 12 + 5 ||
+    !command || cwd !== dirname(command) ||
+    config.get("mcp_servers.dohc.required") !== "true" ||
+    JSON.stringify(args.slice(0, 3)) !== JSON.stringify(["exec", "--config", "approval_policy=never"]) ||
+    JSON.stringify(args.slice(-5)) !== JSON.stringify(["--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-"]) ||
+    JSON.stringify([...config.keys()]) !== JSON.stringify(keys) ||
+    config.get("mcp_servers.dohc.enabled_tools") !== "['dohc_reply_to_chat']" ||
+    config.get("mcp_servers.dohc.tools.dohc_reply_to_chat.approval_mode") !== "'approve'") {
+    return null;
+  }
+  return { command, args: tomlStrings(config.get("mcp_servers.dohc.args") ?? ""), cwd };
+}
+
+// The dohc MCP server a Claude Code launch names, after checking the launch.
+// Claude Code starts its servers in its own working directory.
+function claudeReplyServer(args) {
+  const expected = ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", "--mcp-config", args[7], "--allowedTools", "Edit(/**)", "mcp__dohc__dohc_reply_to_chat", "--disallowedTools", "Edit(/.dohc/**)"];
+  if (JSON.stringify(args) !== JSON.stringify(expected) || !existsSync(args[7])) return null;
+  const servers = JSON.parse(readFileSync(args[7], "utf8")).mcpServers;
+  return Object.keys(servers).join() === "dohc" && servers.dohc.type === "stdio"
+    ? { command: servers.dohc.command, args: servers.dohc.args, cwd: process.cwd() }
+    : null;
+}
+
+// Reply as Claude Code and Codex do: start the dohc MCP server the launch
+// names, outside the runner's environment, and call the reply tool once.
+function replyThroughMcp(args, body) {
+  const launch = profileTool === "codex" ? codexReplyServer(args) : claudeReplyServer(args);
+  if (!launch || !existsSync(launch.command)) {
+    console.error("Unexpected profile arguments", args);
     process.exit(2);
   }
-  if (selfTestCommand) {
-    runCommand(selfTestCommand);
-  } else {
-    const expectedReply = profileTool === "claude"
-      ? `dohc chat reply ${threadId} --as-agent - <<'DOHC_REPORT'`
-      : `dohc chat reply ${threadId} --as-agent "<report>"`;
-    if (!prompt.includes(expectedReply)) {
-      console.error("Unexpected reply form in the report contract");
-      process.exit(2);
+  const server = resolve(dirname(fileURLToPath(import.meta.url)), "../../../../packages/mcp/bin/dohc-mcp.js");
+  const { DOHC_RUN_ID: _runId, DOHC_CHAT_THREAD: _thread, ...env } = process.env;
+  const child = spawn(process.execPath, [server, ...launch.args], { cwd: launch.cwd, env, stdio: ["pipe", "pipe", "inherit"], windowsHide: true });
+  const send = (message) => child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
+  let buffer = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk) => {
+    buffer += chunk;
+    for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
+      const message = JSON.parse(buffer.slice(0, newline));
+      buffer = buffer.slice(newline + 1);
+      if (message.id === 1) {
+        send({ method: "notifications/initialized" });
+        send({ id: 2, method: "tools/list" });
+      } else if (message.id === 2) {
+        // The run's server offers the reply tool and nothing else.
+        const names = message.result?.tools?.map((tool) => tool.name);
+        if (JSON.stringify(names) !== JSON.stringify(["dohc_reply_to_chat"])) {
+          console.error("Unexpected dohc tools", JSON.stringify(message));
+          child.kill();
+          process.exit(2);
+        }
+        send({ id: 3, method: "tools/call", params: { name: "dohc_reply_to_chat", arguments: { threadId, runId, body } } });
+      } else if (message.id === 3) {
+        if (message.error || message.result?.isError) console.error("dohc_reply_to_chat failed", JSON.stringify(message));
+        child.kill();
+        process.exit(message.error || message.result?.isError ? 1 : 0);
+      }
     }
-    runCommand(`dohc chat reply ${threadId} --as-agent -`, '# Done\n\ndone: checked the exports\n');
+  });
+  child.on("exit", (code) => { console.error(`dohc-mcp exited early: ${code}`); process.exit(1); });
+  send({ id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fake-codex", version: "0" } } });
+}
+
+if (profileTool) {
+  const args = process.argv.slice(3);
+  const body = selfTestMarker ?? "# Done\n\ndone: checked the exports";
+  // A profile's self-test asks for the same reply form as its runs.
+  if (!prompt.includes(`the \`dohc_reply_to_chat\` tool of the \`dohc\` MCP server with \`threadId\` \`${threadId}\` and \`runId\` \`${runId}\``)) {
+    console.error("Unexpected reply form in the prompt");
+    process.exit(2);
   }
-} else if (selfTestCommand) {
-  runCommand(selfTestCommand);
+  replyThroughMcp(args, body);
+} else if (selfTestMarker) {
+  runCommand(`dohc chat reply ${threadId} --as-agent "${selfTestMarker}"`);
 } else {
 
 if (mode !== "report" && mode !== "ask") {

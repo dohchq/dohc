@@ -31,7 +31,7 @@ interface Props {
   canMove(fieldId: string): boolean;
 }
 type Position = { after: TransactionalCursor | null; history: Array<TransactionalCursor | null> };
-type Loaded = { columns: Column[]; calendar: TransactionalPage | null; moreGroups: boolean; nextGroup: GroupCursor | null };
+type Loaded = { columns: Column[]; calendar: TransactionalPage | null; nearby: string[]; moreGroups: boolean; nextGroup: GroupCursor | null };
 const beginning = (): Position => ({ after: null, history: [] });
 
 /** A board requests each visible group; a calendar requests its visible date range. Neither reuses a table page. */
@@ -64,11 +64,22 @@ export function TransactionalCollectionViews(props: Props) {
       signal.throwIfAborted();
       return response.result;
     };
-    let columns: Column[] = [], calendar: TransactionalPage | null = null, moreGroups = false, nextGroup: GroupCursor | null = null;
+    let columns: Column[] = [], calendar: TransactionalPage | null = null, nearby: string[] = [], moreGroups = false, nextGroup: GroupCursor | null = null;
     if (view.kind === "calendar") {
       const range = calendarRange(view.dateField!,month);
       const result = await readPage({ ...base, limit: 50, range, ...(view.sort ? {sort:view.sort} : {}), ...(calendarPosition.after ? {after:{...calendarPosition.after}} : {}) });
       calendar = parseCalendarPage(result,fields.map(field=>field.fieldId),range);
+      // An empty month reads the nearest record on each side, so the calendar can offer to go there.
+      // If either read fails, the offer is left out, because that side might hold the closer record.
+      const nearest = async (start: string, end: string, direction: "asc" | "desc") => {
+        const outside = { fieldId: range.fieldId, start, end };
+        const value = parseCalendarPage(await readPage({ ...base, limit: 1, range: outside, sort: { fieldId: range.fieldId, direction } }),fields.map(field=>field.fieldId),outside).rows[0]?.values[range.fieldId];
+        return typeof value === "string" ? [value] : [];
+      };
+      if (!calendar.rows.length && !calendarPosition.after) {
+        try { nearby = (await Promise.all([nearest("0001-01-01",range.start,"desc"), nearest(range.end,"9999-12-31","asc")])).flat(); }
+        catch { signal.throwIfAborted(); }
+      }
     } else {
       const field = fields.find(field=>field.fieldId===view.groupBy);
       if (!field) throw Error("Choose a readable field for this board.");
@@ -98,7 +109,7 @@ export function TransactionalCollectionViews(props: Props) {
         columns.push({value,page});
       }
     }
-    return {columns,calendar,moreGroups,nextGroup};
+    return {columns,calendar,nearby,moreGroups,nextGroup};
   }
   const readLatest = useRef(readView); readLatest.current = readView;
   useEffect(() => {
@@ -159,7 +170,7 @@ export function TransactionalCollectionViews(props: Props) {
         <IconButton aria-label="Next groups" title="Next groups" disabled={disabled||!loaded.moreGroups} onClick={()=>{setOffset(offset+BOARD_GROUP_PAGE_SIZE);setGroupAfter(loaded.nextGroup);setGroupHistory([...groupHistory,groupAfter]);setPositions({});}}><ChevronRight size={16} strokeWidth={1.9} aria-hidden /></IconButton></footer>
     </> : <>
       <div className="min-h-80 flex-1"><CalendarView schema={schema} records={rows.map(row=>visualRecord(row,props.fields))} dateField={props.view.dateField!} visibleFields={visibleFields}
-        date={month} onNavigate={date=>{if(!disabled){setMonth(date);setCalendarPosition(beginning());}}}
+        date={month} nearbyDates={loaded.nearby} onNavigate={date=>{if(!disabled){setMonth(date);setCalendarPosition(beginning());}}}
         onCellChange={!disabled&&props.canMove(props.view.dateField!)?move:undefined} onOpenRecord={record=>{const row=indexed.get(record.id);if(row&&!disabled)props.onOpen(row);}} /></div>
       <span className="text-[12px] text-muted">Records without a date appear in the table.</span>
       {pageControls(calendarPosition,loaded.calendar!,setCalendarPosition,"this calendar")}

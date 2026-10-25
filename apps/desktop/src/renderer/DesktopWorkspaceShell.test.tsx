@@ -347,7 +347,7 @@ describe("collection folders", () => {
       return row!;
     });
     await user.click(row);
-    const button = await screen.findByRole("button", { name: "New record" }, { timeout: 15_000 });
+    const button = await screen.findByTestId("collection-new-record", undefined, { timeout: 15_000 });
     await user.click(button);
     await user.click(button);
     expect(bridge.createCollectionRecord.mock.calls[0]![0].name).toBe("Untitled");
@@ -362,7 +362,7 @@ describe("collection folders", () => {
     expect(bridge.createCollectionRecord.mock.calls[2]![0]).toMatchObject({ name: "Untitled", recordId });
   });
 
-  it("opens a collection folder as its views tab with the settled empty state", async () => {
+  it("opens a collection folder as its views tab with its columns and a New record row", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: [{ path: "tasks/one.md", kind: "file" as const }],
@@ -394,14 +394,9 @@ describe("collection folders", () => {
     // The surface is a lazy chunk (@dohc/collection-views pulls the table,
     // board, and calendar libraries) plus two bridge round trips; on a
     // loaded worker that cold load can outlast the default wait.
-    expect(
-      await screen.findByText("No records in this collection yet.", undefined, {
-        timeout: 15_000,
-      }),
-    ).toBeTruthy();
-    // The settled empty state is that line plus the New record action.
+    const grid = await screen.findByRole("grid", undefined, { timeout: 15_000 });
     // Activation is CollectionPage's own boundary, pinned in its tests.
-    expect(screen.getByRole("button", { name: "New record" })).toBeTruthy();
+    expect(within(grid).getByRole("button", { name: "New record" })).toBeTruthy();
     expect(bridge.getCollection).toHaveBeenCalledWith({
       workspaceId: WORKSPACE.workspaceId,
       collectionPath: "tasks",

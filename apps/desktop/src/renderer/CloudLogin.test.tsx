@@ -109,6 +109,13 @@ describe("CloudLogin", () => {
     );
   });
 
+  it("closes from the X beside its heading when a dialog hosts it", async () => {
+    const onClose = vi.fn();
+    render(<CloudLogin onClose={onClose} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Close" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("asks for one server address and links the setup guide", async () => {
     render(<CloudLogin />);
 

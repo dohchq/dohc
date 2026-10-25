@@ -7,6 +7,7 @@ import {
   type ComponentProps,
   type ComponentType,
 } from "react";
+import { X } from "lucide-react";
 import { ErrorBoundary } from "../ErrorBoundary";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import type { SettingsDialog } from "./SettingsDialog";
@@ -27,16 +28,32 @@ const loadDesktopSettings: DesktopSettingsLoader = () =>
     return { default: mod.SettingsDialog };
   });
 
-function SettingsLoading() {
+// Where loaded Settings puts its own X, so the way out never moves.
+function CloseSettings(props: { onClose: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-label="Close settings"
+      title="Close settings"
+      onClick={props.onClose}
+      className="absolute right-3 top-3 grid size-7 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
+    >
+      <X size={16} aria-hidden />
+    </button>
+  );
+}
+
+function SettingsLoading(props: { onClose: () => void }) {
   return (
     <div
       role="dialog"
       aria-modal="true"
       aria-label="Settings"
       data-testid="settings-loading"
-      className="dohc-elevated flex h-[min(760px,calc(100vh-112px))] w-[min(1040px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl border border-line bg-bg p-2"
+      className="dohc-elevated relative flex h-[min(760px,calc(100vh-112px))] w-[min(1040px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl border border-line bg-bg p-2"
     >
       <SkeletonRows layout="panel" label="Loading settings..." />
+      <CloseSettings onClose={props.onClose} />
     </div>
   );
 }
@@ -57,10 +74,11 @@ export function LazyDesktopSettings(
       scope="settings"
       resetKeys={[settingsProps.workspaceId, attempt]}
       onRetry={retry}
-      fallbackClassName="dohc-elevated h-[min(760px,calc(100vh-112px))] w-[min(1040px,calc(100vw-32px))] rounded-xl border border-line"
+      fallbackClassName="dohc-elevated relative h-[min(760px,calc(100vh-112px))] w-[min(1040px,calc(100vw-32px))] rounded-xl border border-line"
       recoveryMessage="The workspace is still available. Try again."
+      closeControl={<CloseSettings onClose={settingsProps.onClose} />}
     >
-      <Suspense fallback={<SettingsLoading />}>
+      <Suspense fallback={<SettingsLoading onClose={settingsProps.onClose} />}>
         <Settings {...settingsProps} />
       </Suspense>
     </ErrorBoundary>
