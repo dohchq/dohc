@@ -3223,11 +3223,12 @@ async fn a_document_without_lineage_refuses_its_first_capture_only_once_ready() 
     );
 }
 
-/// The ready hold. Stop leaves `doc-b`'s live binding on the session host,
-/// which then refuses the owner's ordinary edit of its lineage, so its copy
-/// here misses that edit. The refusal holds it before the pass commits: the
-/// pass reports it held, registration and capture say it is not ready, and a
-/// restart keeps all of that. A refused edit of another lineage holds nothing.
+/// The ready hold. Pause leaves `doc-b`'s live binding on the session host,
+/// which keeps the owner's ordinary edit of its lineage queued, so its copy
+/// here misses that edit. The queued edit holds it before the pass commits:
+/// the pass reports it held, registration and capture say it is not ready,
+/// and a restart keeps all of that. A refused edit of another lineage holds
+/// nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unadmitted_owner_edit_holds_a_ready_document_across_a_restart() {
     let ydoc = dohc_engine_collab::Ydoc::wire();
@@ -3259,16 +3260,16 @@ async fn an_unadmitted_owner_edit_holds_a_ready_document_across_a_restart() {
         "selectorPaths": ["b.md"], "restoreFenceGeneration": 0,
     });
     host.register(&binding).await.expect("register");
-    let refused = |scratch: &ScratchDir| -> i64 {
+    let rows = |scratch: &ScratchDir, table: &str| -> i64 {
         Connection::open(engine_db_path(scratch).expect("db path"))
             .expect("open db")
-            .query_row(
-                "SELECT COUNT(*) FROM replication_refused_ydoc_blobs",
-                [],
-                |row| row.get(0),
-            )
-            .expect("refusals")
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("rows")
     };
+    let refused = |scratch: &ScratchDir| rows(scratch, "replication_refused_ydoc_blobs");
+    let queued = |scratch: &ScratchDir| rows(scratch, "ydoc_deferred_updates");
     let unready = || Err((ErrorCode::Conflict, "hosted-document-unready".to_owned()));
 
     let elsewhere = dohc_engine_collab::Ydoc::wire().richdoc_append_paragraph("elsewhere");
@@ -3289,7 +3290,7 @@ async fn an_unadmitted_owner_edit_holds_a_ready_document_across_a_restart() {
         .expect("pull");
     let held = json!([{"objectId": "doc-b", "reason": "hosted-live-edit-unadmitted"}]);
     assert_eq!(pass["held"], held);
-    assert_eq!(refused(&scratch), 2);
+    assert_eq!((refused(&scratch), queued(&scratch)), (1, 1));
     assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("held"));
     assert_eq!(
         host.register(&binding)
@@ -3307,7 +3308,7 @@ async fn an_unadmitted_owner_edit_holds_a_ready_document_across_a_restart() {
     assert_eq!(again["held"], held);
     host.sync().await;
     assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("held"));
-    assert_eq!(refused(&scratch), 2);
+    assert_eq!((refused(&scratch), queued(&scratch)), (1, 1));
 }
 
 /// Part 5's held fence under the session host's real publication budget. The

@@ -1215,7 +1215,8 @@ it("retires a stopped document while another stays live, then resumes it as a su
   await vi.waitFor(() => expect(sibling()).toEqual({tip: [{tip_cursor: afterRestart.journalCursor}], applied: afterRestart.journalCursor, settled: afterRestart.journalCursor}), {timeout: 30000});
   expect(proof.journal(second.objectId)).toEqual([...secondJournal, journaled(during), journaled(afterRestart)]);
   const secondMarkdown = "---\nafterRestart: live\nbeforeActivation: ordinary-owner\nduringRetirement: live\n---\n\nSecond";
-  expect(readFileSync(join(proof.store, "docs/b.md"), "utf8")).toBe(secondMarkdown);
+  // The settlement commits before the engine writes the file.
+  await vi.waitFor(() => expect(readFileSync(join(proof.store, "docs/b.md"), "utf8")).toBe(secondMarkdown), {timeout: 10000});
   expect(proof.activations()).toEqual([retiring]);
 
   // Pushes reach the engine again. Its replica parks the document and the engine releases it, and that reply is lost.
@@ -1362,9 +1363,10 @@ it("resumes a document its owner edited while live editing was stopped as a succ
 
 // Pause keeps the document's activation, so its owner's ordinary edit made
 // while paused reaches the host's replica as an edit that activation never
-// admitted. The replica holds the document and capture stops. Resume through
-// the enrollment route then retires the held activation.
-it("holds a document its owner edited while paused, and Resume retires the held activation", () => withSelfHostProof("self-host-held", async proof => {
+// admitted. The replica keeps the edit queued, holds the document, and
+// capture stops. Resume through the enrollment route then retires the held
+// activation, the edit applies, and a successor holds it.
+it("holds a document its owner edited while paused, and Resume retires the held activation for a successor that holds the edit", () => withSelfHostProof("self-host-held", async proof => {
   const saved = proof.activation()!, P = saved.activationId, [seed] = proof.journal() as {journal_cursor: number; delivery_id: string; update_digest: string}[];
   expect(proof.journal()).toEqual([journaled({journalCursor: seed!.journal_cursor, deliveryId: seed!.delivery_id, updateDigest: seed!.update_digest})]);
   const completed = {activation_id: P, predecessor_activation_id: null, state_digest: saved.source.fullStateDigest, completed: 1,
@@ -1373,6 +1375,9 @@ it("holds a document its owner edited while paused, and Resume retires the held 
   const ownerUpdates = () => proof.relayRead.prepare(`SELECT origin_id,origin_seq,json_extract(payload_json,'$.updateBlobSha256') AS update_sha256 FROM sync_relay_log
     WHERE workspace_id='workspace' AND op_kind='ydoc.update' AND json_extract(payload_json,'$.objectId')=? AND origin_id NOT LIKE 'service-host:%' ORDER BY origin_id,origin_seq`).all(proof.objectId);
   const refused = () => proof.serviceRead(engine => engine.prepare("SELECT origin_id,origin_seq,update_sha256 FROM replication_refused_ydoc_blobs ORDER BY origin_id,origin_seq").all());
+  // The Y.Doc updates the replica keeps queued, with the feed each arrived on.
+  const queued = () => proof.serviceRead(engine => engine.prepare(`SELECT u.origin_id,u.origin_seq,json_extract(l.payload_json,'$.updateBlobSha256') AS update_sha256,u.ingress_kind
+    FROM ydoc_deferred_updates u JOIN replication_log l USING (workspace_id,origin_id,origin_seq) ORDER BY u.origin_id,u.origin_seq`).all());
   const attempts = () => proof.started("captureOwnerActivation");
 
   expect(await proof.route("DELETE", {path: "docs/a.md"})).toEqual({status: 200, body: {ok: true, path: "docs/a.md", status: "paused"}});
@@ -1386,12 +1391,13 @@ it("holds a document its owner edited while paused, and Resume retires the held 
   const edit = ownerUpdates().slice(before.length);
   expect(edit).toHaveLength(1);
 
-  // Resume: the replica refuses that edit and holds the document, and capture stops.
+  // Resume: the replica keeps that edit queued and holds the document, and capture stops.
   const captured = attempts();
   expect(await proof.route("POST", {path: "docs/a.md"})).toEqual({status: 202, body: {ok: true, path: "docs/a.md", status: "preparing"}});
   await vi.waitFor(async () => expect(await proof.documents()).toEqual([{path: "docs/a.md", status: "unavailable", reason: "live-edit-unadmitted"}]), {timeout: 30000});
   expect(proof.hosted()).toEqual({state: "held", reason: "hosted-live-edit-unadmitted"});
-  expect(refused()).toEqual(edit);
+  expect(queued()).toEqual(edit.map(row => ({...row, ingress_kind: "hosted"})));
+  expect(refused()).toEqual([]);
   const held = attempts(), pulls = harness.pulls.length;
   expect(held).toBeGreaterThan(captured);
   await vi.waitFor(() => expect(harness.pulls.length).toBeGreaterThan(pulls + 12), {timeout: 30000});
@@ -1400,17 +1406,65 @@ it("holds a document its owner edited while paused, and Resume retires the held 
   expect(proof.activations()).toEqual([completed]);
 
   // Resume again: the enrollment route retires the held activation at its seed, and the relay keeps its owner delivery in history.
+  // Once its binding goes, the replica applies the queued edit, and a successor of the retired activation holds it.
   expect(await proof.route("POST", {path: "docs/a.md"})).toEqual({status: 202, body: {ok: true, path: "docs/a.md", status: "preparing"}});
   const epoch = (proof.relayRead.prepare("SELECT accepting_host_epoch FROM sync_relay_live_update_journal WHERE workspace_id='workspace' AND object_id=? AND journal_cursor=?")
     .get(proof.objectId, seed!.journal_cursor) as {accepting_host_epoch: number}).accepting_host_epoch;
   const boundary = {terminalReceipt: {deliveryId: seed!.delivery_id, updateDigest: seed!.update_digest, journalCursor: seed!.journal_cursor, acceptingHostEpoch: epoch},
     eventCount: 1, historyEvidenceDigest: expect.stringMatching(/^[0-9a-f]{64}$/)};
-  await vi.waitFor(() => expect(proof.activations()).toEqual([{...completed, retire_accepted_cursor: seed!.journal_cursor, retired: 1, boundary, stateDropped: 1}]), {timeout: 30000});
-  expect(proof.ownerTips()).toEqual({current: [], retired: [{activation_id: P, tip_cursor: seed!.journal_cursor}]});
+  const retired = {...completed, retire_accepted_cursor: seed!.journal_cursor, retired: 1, boundary, stateDropped: 1};
+  await vi.waitFor(async () => {
+    expect(await proof.documents()).toEqual([proof.ready("docs/a.md")]);
+    expect(proof.activations()).toEqual([retired, expect.objectContaining({predecessor_activation_id: P, completed: 1})]);
+  }, {timeout: 30000});
   expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")).toMatchObject({ownerStop: null, enabled: true, retired: false});
-  expect(proof.journal()).toEqual([journaled({journalCursor: seed!.journal_cursor, deliveryId: seed!.delivery_id, updateDigest: seed!.update_digest})]);
-  return {activationId: P, refused: edit, attempts: held};
-}), 120000);
+  const successor = proof.activation()!, S = successor.activationId, resumed = await proof.hostState();
+  const markdown = "---\nbeforeActivation: ordinary-owner\nwhilePaused: ordinary-owner\n---\n\nHello";
+  expect(resumed).toEqual({digest: successor.source.fullStateDigest, markdown});
+  expect(S).not.toBe(P); expect(successor.completed).toBe(true); expect(successor.source.predecessorActivationId).toBe(P);
+  // Its full state holds the owner's edit.
+  const full = new Y.Doc();
+  try {
+    Y.applyUpdate(full, successor.fullState);
+    expect(full.getMap("frontmatter").toJSON()).toEqual({beforeActivation: "ordinary-owner", whilePaused: "ordinary-owner"});
+  } finally {full.destroy();}
+  const current = {activation_id: S, predecessor_activation_id: P, state_digest: resumed.digest, completed: 1, retire_accepted_cursor: null, retired: 0, boundary: null, stateDropped: 0};
+  expect(proof.activations()).toEqual([retired, current]);
+  // Its seed is the next row of the relay's journal: the owner's full state, which the session host applied and settled.
+  const next = seed!.journal_cursor + 1, seeded = proof.deliveryAt(next);
+  expect(seeded.accepted).toMatch(/^owner-delivery-[0-9a-f]{64}$/); expect(seeded.applied).toBe(seeded.accepted);
+  const first = journaled({journalCursor: seed!.journal_cursor, deliveryId: seed!.delivery_id, updateDigest: seed!.update_digest});
+  const seedRow = journaled({journalCursor: next, deliveryId: seeded.accepted!, updateDigest: resumed.digest});
+  expect(proof.journal()).toEqual([first, seedRow]);
+  expect(proof.ownerTips()).toEqual({current: [{tip_cursor: next}], retired: [{activation_id: P, tip_cursor: seed!.journal_cursor}]});
+  expect(proof.settlement()).toEqual({applied: next, settled: next});
+  expect(proof.hosted()).toEqual({state: "ready", reason: null});
+  expect(queued()).toEqual([]);
+  expect(refused()).toEqual([]);
+  expect(readFileSync(join(proof.store, "docs/a.md"), "utf8")).toBe(markdown);
+
+  // A later live edit settles through the successor.
+  const later = await proof.liveEdit("afterResume", "live");
+  await vi.waitFor(() => expect(proof.settlement()).toEqual({applied: later.journalCursor, settled: later.journalCursor}), {timeout: 30000});
+  const settled = "---\nafterResume: live\nbeforeActivation: ordinary-owner\nwhilePaused: ordinary-owner\n---\n\nHello";
+  expect((await proof.hostState()).markdown).toBe(settled);
+  // The settlement commits before the engine writes the file.
+  await vi.waitFor(() => expect(readFileSync(join(proof.store, "docs/a.md"), "utf8")).toBe(settled), {timeout: 10000});
+  expect(proof.journal()).toEqual([first, seedRow, journaled(later)]);
+
+  // The service host restarts, and the successor comes back holding the same content.
+  const captures = attempts();
+  await proof.stopSupervisor();
+  await proof.startSupervisor();
+  await vi.waitFor(async () => expect(await proof.documents()).toEqual([proof.ready("docs/a.md")]), {timeout: 30000});
+  expect((await proof.hostState()).markdown).toBe(settled);
+  expect(readFileSync(join(proof.store, "docs/a.md"), "utf8")).toBe(settled);
+  expect(proof.hosted()).toEqual({state: "ready", reason: null});
+  expect(proof.activations()).toEqual([retired, current]);
+  expect(proof.journal()).toEqual([first, seedRow, journaled(later)]);
+  expect(proof.settlement()).toEqual({applied: later.journalCursor, settled: later.journalCursor});
+  return {activationId: P, successor: S, queued: edit, attempts: held, capturesBeforeRestart: captures};
+}), 180000);
 
 // Until the session host starts a document's Y.Doc itself (#2069), a file only
 // written as text has nothing to activate, so it blocks instead of retrying.

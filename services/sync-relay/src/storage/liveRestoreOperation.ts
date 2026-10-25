@@ -12,6 +12,7 @@ import {
   parseLiveUpdateReceipt, type LiveUpdateReceipt, type LiveDocumentKey,
 } from "@dohc/live-session-contract/live-update-admission";
 import type { StorageContext } from "./context";
+import { relayError } from "../errors";
 import { revokeShareGrantInTransaction } from "./shares";
 import { readCurrentShareGrant } from "./currentShareGrant";
 import { assertWorkspaceQuota } from "./workspaces";
@@ -117,10 +118,22 @@ function requireNoPendingActivation(storage: StorageContext, document: LiveDocum
   const state = serviceActivationState(readServiceActivation(storage, document));
   if (state !== "absent" && state !== "completed") refuse();
 }
+const ownerOrigin = (storage: StorageContext, namespace: string, document: LiveDocumentKey, hostId: string): unknown =>
+  storage.db.prepare("SELECT origin_json FROM sync_relay_live_delivery_owners WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND host_id=?")
+    .get(namespace, ...key(document), hostId)?.origin_json;
 // Committed delivery refuses to bootstrap a service activation's lineage, so a
 // bootstrap restore of one could never apply its cut once the grant is revoked.
 function requireBootstrapRestorable(storage: StorageContext, document: LiveDocumentKey): void {
-  if (hasServiceActivation(storage, document)) refuse();
+  if (hasServiceActivation(storage, document)) {
+    throw relayError("conflict", "Stop access isn't available for this file on this session host. Access hasn't changed. Switch back to the session host this file used before, then try again.");
+  }
+}
+/** Refuses a document whose Stop restore needs a bootstrap that the configured session host can't deliver. */
+export function requireStopRestorable(storage: StorageContext, document: LiveDocumentKey): void {
+  const control = storage.getLiveHostControl();
+  if (!control || ownerOrigin(storage, liveJournalHistoryNamespace(storage), document, control.configuredHostId) === undefined) {
+    requireBootstrapRestorable(storage, document);
+  }
 }
 function requireUnretiredEnrollment(storage: StorageContext, document: LiveDocumentKey): void {
   // Enrollments are main-only and keyed by workspace/object, even after a path moves.
@@ -136,14 +149,13 @@ function basis(storage: StorageContext, intent: StopRestoreIntent, authority: St
     !currentLiveDocumentMoment(storage, intent.document, authority.binding.currentPath) ||
     authority.baselineSequence <= storage.getEpochLogFloor(intent.document.workspaceId)) refuse();
   const namespace = liveJournalHistoryNamespace(storage);
-  const ownerOrigin = storage.db.prepare("SELECT origin_json FROM sync_relay_live_delivery_owners WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND host_id=?")
-    .get(namespace,...key(intent.document),control.configuredHostId)?.origin_json;
-  if (ownerOrigin !== undefined && typeof ownerOrigin !== "string") refuse();
+  const origin = ownerOrigin(storage, namespace, intent.document, control.configuredHostId);
+  if (origin !== undefined && typeof origin !== "string") refuse();
   return { binding: authority.binding, ownerBinding: parseLiveObjectBinding({...authority.binding, selectorPaths: selector.paths}),
     baselineDigest: authority.baselineDigest, baselineByteLength: authority.baselineBytes.byteLength,
     projectedDigest: authority.projectedDigest, projectedLength: authority.projectedLength,
     baselineSequence: authority.baselineSequence, registeredAtMs: authority.registeredAtMs,
-    namespace, hostMode: control.configuredMode, hostId: control.configuredHostId,ownerOrigin: ownerOrigin ?? null };
+    namespace, hostMode: control.configuredMode, hostId: control.configuredHostId,ownerOrigin: origin ?? null };
 }
 function parseBasis(value: StopRestoreBasis): StopRestoreBasis {
   if (value.hostMode !== "service" && value.hostMode !== "device") refuse();

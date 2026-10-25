@@ -110,6 +110,23 @@ fn live_ordinary_classification(
     Ok(Some(applied))
 }
 
+/// Whether this replica keeps an ordinary update of `lineage` that `key`'s
+/// bound session never admitted queued, holding its document until the
+/// binding goes, instead of refusing it: a hosted replica does, for the
+/// document's current lineage, whose content here would otherwise miss it.
+fn keeps_unadmitted(conn: &Connection, key: &DocKey, lineage: &str) -> Result<bool, SyncError> {
+    if !crate::hosted::is_hosted(conn, &key.workspace_id)? {
+        return Ok(false);
+    }
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 \
+         AND object_id=?3 AND lineage_claim_id=?4)",
+        params![key.workspace_id, key.version_id, key.object_id, lineage],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
+
 pub(crate) fn retain_refused_ydoc_blob(
     tx: &rusqlite::Transaction<'_>,
     workspace: &str,
@@ -1098,6 +1115,7 @@ fn complete_drain_cleanup(
     if cleanup.coordinates.is_empty()
         && cleanup.off_head_refusals.is_empty()
         && cleanup.live_refusals.is_empty()
+        && !cleanup.unadmitted
         && cleanup.projection_refusal.is_none()
         && recovery.is_none()
     {
@@ -1118,12 +1136,9 @@ fn complete_drain_cleanup(
         }
         for refusal in &cleanup.live_refusals {
             retain_refused_ydoc_blob(tx, &refusal.workspace_id, &refusal.origin_id, refusal.origin_seq)?;
-            crate::hosted::hold_unadmitted_in_tx(
-                tx,
-                &refusal.workspace_id,
-                &refusal.origin_id,
-                refusal.origin_seq,
-            )?;
+        }
+        if cleanup.unadmitted {
+            crate::hosted::hold_unadmitted_in_tx(tx, &cleanup.key.workspace_id, &cleanup.key.object_id)?;
         }
         let consumed = cleanup.consumed();
         let workspace_id = &cleanup.key.workspace_id;
@@ -1355,10 +1370,13 @@ pub struct YdocDrainCleanup {
     /// Refusals of rows of another lineage than the head's that its archive
     /// would not take. Each persists as its row leaves.
     off_head_refusals: Vec<crate::ReplicationRefusal>,
-    /// Refusals of rows a live session never admitted. Each persists, keeps
-    /// its blob and holds its document as its row leaves, so until then the
-    /// row keeps the facts an earlier attempt parked on it.
+    /// Refusals of rows a device's live session never admitted. Each
+    /// persists and keeps its blob as its row leaves, so until then the row
+    /// keeps the facts an earlier attempt parked on it.
     live_refusals: Vec<crate::ReplicationRefusal>,
+    /// The drain stopped at a row [`keeps_unadmitted`] keeps queued, which
+    /// holds its document.
+    unadmitted: bool,
     /// What the rows it removes owe a pass that reports durably, with the
     /// drain's own report; `None` for a caller that reports the drain itself.
     report: Option<crate::drain_report::DrainExtras>,
@@ -1534,6 +1552,7 @@ fn drain_deferred_ydoc(
                 applied_refusals: Vec::new(),
                 off_head_refusals: Vec::new(),
                 live_refusals: Vec::new(),
+                unadmitted: false,
                 report: None,
                 projected: None,
                 released_hold: false,
@@ -1661,6 +1680,7 @@ fn drain_deferred_ydoc(
     let mut applied_refusals = Vec::new();
     let mut off_head_refusals = Vec::new();
     let mut live_refusals = Vec::new();
+    let mut unadmitted = false;
     let mut projected_lineage = None;
     let mut projected_moment = None;
     // Rows held for released retained work while the head waits for
@@ -1729,6 +1749,15 @@ fn drain_deferred_ydoc(
             return Err(SyncError::BlobInvalid);
         }
         if let Some(echo) = live_classification {
+            let parked = parked_refusal(store, key, &origin_id, origin_seq)?;
+            // What follows it stays queued too.
+            if !echo
+                && parked.is_none()
+                && store.read_with(|conn| keeps_unadmitted(conn, key, &lineage_claim_id))?
+            {
+                unadmitted = true;
+                break;
+            }
             record_facts.extend(read_parked_record_facts(
                 store, key, &origin_id, origin_seq,
             )?);
@@ -1737,7 +1766,7 @@ fn drain_deferred_ydoc(
             // whose bytes an earlier drain applied keeps the refusal that
             // apply was owed: a session that later binds neither replaces
             // nor discharges it, and the head already holds those bytes.
-            match parked_refusal(store, key, &origin_id, origin_seq)? {
+            match parked {
                 Some(reason) => {
                     let refusal = deferred_ydoc_refusal(key, &origin_id, origin_seq, reason);
                     refusals.push(refusal.clone());
@@ -2196,6 +2225,7 @@ fn drain_deferred_ydoc(
             applied_refusals,
             off_head_refusals,
             live_refusals,
+            unadmitted,
             report: None,
             projected: projected_lineage,
             released_hold: !held_rows.is_empty() || archived_held,
@@ -6308,7 +6338,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             store,
             envelope,
             faults,
-            |tx, _| {
+            |tx, op| {
                 if live_ordinary_classification(tx, &key, &payload, &bytes)? != Some(echo) {
                     return Err(SyncError::RetryableState {
                         reason: "native live binding changed",
@@ -6318,6 +6348,23 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                     Ok(crate::apply::MutationOutcome::Applied(YdocApplyResult {
                         deferred: false,
                         reason: Some("native-live-content-echo"),
+                        conflicts_opened: 0,
+                        lineage_replacement: None,
+                        record_facts: Vec::new(),
+                    }))
+                } else if keeps_unadmitted(tx, &key, &payload.lineage_claim_id)? {
+                    defer_ydoc_update_in_tx(
+                        tx,
+                        &key,
+                        op,
+                        &payload.lineage_claim_id,
+                        relay_seq,
+                        relay_namespace,
+                    )?;
+                    crate::hosted::hold_unadmitted_in_tx(tx, &key.workspace_id, &key.object_id)?;
+                    Ok(crate::apply::MutationOutcome::Applied(YdocApplyResult {
+                        deferred: true,
+                        reason: Some("ydoc-live-edit-unadmitted"),
                         conflicts_opened: 0,
                         lineage_replacement: None,
                         record_facts: Vec::new(),

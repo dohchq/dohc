@@ -6014,11 +6014,39 @@ fn peer_update(
     ));
 }
 
+/// The queued Y.Doc updates of `doc-b`, with the feed each recorded.
+fn queued_b(store: &EngineStore) -> String {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT json_group_array(json_array(origin_id,origin_seq,ingress_kind, \
+                   relay_namespace)) FROM (SELECT * FROM ydoc_deferred_updates \
+                   WHERE object_id='doc-b' ORDER BY origin_id,origin_seq)",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
+}
+
+/// The session's binding of `doc-b` goes, as at its release.
+fn release_b(store: &mut EngineStore) {
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "DELETE FROM live_device_application_bindings WHERE object_id='doc-b'",
+                [],
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+}
+
 /// Parking (G2): `doc-b` has a native live binding when it parks, and while
 /// it is parked a peer makes an ordinary edit its session never admitted.
-/// On its return the replica refuses that edit, so the content here would
-/// miss it: `doc-b` is held, every pass reports why, and it never becomes
-/// ready.
+/// On its return the replica keeps that edit queued, refusing nothing, so
+/// `doc-b` is held while the binding stands and every pass reports why.
+/// Once the binding goes, the edit applies and `doc-b` is ready with it.
 #[test]
 fn an_unadmitted_edit_made_while_parked_holds_the_returning_document() {
     let (_scratch, _path, mut store) = hosted_store();
@@ -6033,8 +6061,8 @@ fn an_unadmitted_edit_made_while_parked_holds_the_returning_document() {
     feed.share("doc-b", "a.md");
     sync(&client, &mut store);
     assert!(ready(&store, "doc-b"));
-    accept_live_work(&mut store, "doc-b");
-    settle_live_work(&mut store, "doc-b");
+    accept_live_update(&mut store, "doc-b", &lineage, b"live update");
+    settle_live_lineage(&mut store, "doc-b", &lineage);
     feed.unshare("doc-b");
     sync_parking(&client, &mut store);
     assert!(is_parked(&store, "doc-b"));
@@ -6049,8 +6077,9 @@ fn an_unadmitted_edit_made_while_parked_holds_the_returning_document() {
             &store,
             "SELECT COUNT(*) FROM replication_refused_ydoc_blobs"
         ),
-        1
+        0
     );
+    assert_eq!(queued_b(&store), r#"[["peer",1,"hosted","relay"]]"#);
     let again = pass(&client, &mut store, &NoFaults).unwrap();
     assert!(!again.has_more);
     assert_eq!(
@@ -6059,13 +6088,19 @@ fn an_unadmitted_edit_made_while_parked_holds_the_returning_document() {
     );
     assert!(commit(&client, &mut store, &again));
     assert_eq!(hold(&store, "doc-b"), Some(HostedHold::LiveEditUnadmitted));
+
+    release_b(&mut store);
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b and more")]));
+    assert_eq!(queued_b(&store), "[]");
 }
 
 /// Parking (G2), through native admission: `doc-b` is a richdoc whose native
 /// live binding accepted and settled `echo` before it parked. While it is
 /// parked, a peer sends `echo` back, or, if `!admitted`, an edit its session
 /// never saw. On its return the echo applies and `doc-b` is ready; the edit
-/// is refused, and `doc-b` is held.
+/// stays queued, and `doc-b` is held.
 fn richdoc_edit_made_while_parked(admitted: bool) {
     let (_scratch, _path, mut store) = hosted_store();
     let client = RelaySyncClient::new(HostedFeed::new());
@@ -6101,12 +6136,13 @@ fn richdoc_edit_made_while_parked(admitted: bool) {
         "SELECT COUNT(*) FROM replication_refused_ydoc_blobs",
     );
     assert!(coordinates(&store).contains(&("peer".to_owned(), 1)));
+    assert_eq!(refused, 0);
     if admitted {
         assert!(ready(&store, "doc-b"));
-        assert_eq!(refused, 0);
+        assert_eq!(queued_b(&store), "[]");
     } else {
         assert_eq!(hold(&store, "doc-b"), Some(HostedHold::LiveEditUnadmitted));
-        assert_eq!(refused, 1);
+        assert_eq!(queued_b(&store), r#"[["peer",1,"hosted","relay"]]"#);
         // Opus's second park review: a held document's pass writes none of
         // its heads.
         let again = pass(&client, &mut store, &NoFaults).unwrap();
@@ -6222,11 +6258,13 @@ fn ready_bound_b() -> (
 }
 
 /// The ready hold: an ordinary edit of `doc-b`'s current lineage that its
-/// session never admitted, as the owner's edit after Stop, reaches the
+/// session never admitted, as the owner's edit while paused, reaches the
 /// replica while `doc-b` is ready. Its content here would miss the edit, so
-/// the refusal holds it in its own transaction: the pass reports it held,
-/// a reopened store still holds it before any commit, and every pass after
-/// reports it again. The refusal row stays.
+/// the edit stays queued with its feed and holds `doc-b` in its own
+/// transaction: the pass reports it held, a reopened store still holds it
+/// before any commit, and every pass after reports it again. Nothing is
+/// refused. Once the binding goes, the next pass applies the edit and
+/// `doc-b` is ready with it.
 #[test]
 fn an_unadmitted_edit_of_the_current_lineage_holds_a_ready_document() {
     let (_scratch, path, mut store, client, ydoc, lineage) = ready_bound_b();
@@ -6240,11 +6278,12 @@ fn an_unadmitted_edit_of_the_current_lineage_holds_a_ready_document() {
         edit,
         &lineage,
     );
-    let refused = pass(&client, &mut store, &NoFaults).unwrap();
+    let queued = pass(&client, &mut store, &NoFaults).unwrap();
     assert_eq!(
-        refused.held,
+        queued.held,
         BTreeMap::from([("doc-b".to_owned(), HostedHold::LiveEditUnadmitted)])
     );
+    assert!(queued.refusals.is_empty());
     drop(store);
 
     let mut store = EngineStore::open(&path, 3_000).unwrap();
@@ -6262,21 +6301,84 @@ fn an_unadmitted_edit_of_the_current_lineage_holds_a_ready_document() {
             &store,
             "SELECT COUNT(*) FROM replication_refused_ydoc_blobs"
         ),
-        1
+        0
     );
+    assert_eq!(queued_b(&store), r#"[["peer",1,"hosted","relay"]]"#);
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b")]));
+
+    release_b(&mut store);
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b and more")]));
+    assert_eq!(queued_b(&store), "[]");
+}
+
+/// The drain arm: `doc-b`'s unadmitted edit was queued before its session
+/// bound, as one a live session kept queued. The drain that decides it
+/// keeps it queued, refusing nothing, and holds the ready `doc-b`; once the
+/// binding goes, the drain applies it.
+#[test]
+fn a_drain_keeps_an_unadmitted_edit_queued_on_a_hosted_replica() {
+    let (_scratch, _path, mut store, client, ydoc, lineage) = ready_bound_b();
+    let edit = ydoc.plaintext_insert(8, " and more");
+    let sha = store.put_binary_blob(&edit).unwrap();
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "doc-b").unwrap();
+    let op = envelope(
+        "peer",
+        1,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "doc-b",
+            "path": "a.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": sha,
+            "lineageClaimId": lineage,
+            "isBaseState": false
+        }),
+    );
+    crate::apply_envelope_with(&mut store, &op, &NoFaults, |tx, op| {
+        crate::ydoc_apply::defer_ydoc_update_in_tx(tx, &key, op, &lineage, 2, Some("relay"))
+    })
+    .unwrap();
+    assert!(ready(&store, "doc-b"));
+
+    let drained = crate::drain_deferred_ydoc_for_key(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .unwrap();
+    assert!(drained.refusals.is_empty());
+    assert_eq!(drained.drained, 0);
+    assert_eq!(hold(&store, "doc-b"), Some(HostedHold::LiveEditUnadmitted));
+    assert_eq!(queued_b(&store), r#"[["peer",1,"hosted","relay"]]"#);
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM replication_refused_ydoc_blobs"
+        ),
+        0
+    );
+
+    release_b(&mut store);
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b and more")]));
+    assert_eq!(queued_b(&store), "[]");
 }
 
 /// The ready hold holds only a ready document of the current scope. One the
 /// scope holds for another reason keeps that reason, and one that left the
-/// scope keeps its state; each meets its refusals when a read of it
+/// scope keeps its state; each meets its queued edit when a read of it
 /// completes.
 #[test]
 fn the_ready_hold_leaves_other_documents_as_they_are() {
-    // The coordinate of `doc-b`'s base, an update of its current lineage.
     let hold_b = |store: &mut EngineStore| {
         store
             .write_with(&NoFaults, |tx| {
-                crate::hosted::hold_unadmitted_in_tx(tx, "ws", "peer", 0)
+                crate::hosted::hold_unadmitted_in_tx(tx, "ws", "doc-b")
             })
             .unwrap();
     };

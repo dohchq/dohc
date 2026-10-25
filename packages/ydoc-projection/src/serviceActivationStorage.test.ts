@@ -33,6 +33,8 @@ import {nativeSettlementId,settlementRecordDigest} from '../../../services/sync-
 import {liveValidation} from '../../../services/sync-relay/src/liveValidation.js'
 import {nativeBaseRecord} from '../../../services/sync-relay/src/storage/serviceActivationPublication.js'
 import type {SqliteDb} from '../../../services/sync-relay/src/storage/types.js'
+import type {OwnerRestoreHost} from '../../../services/sync-relay/src/ownerRestoreRoutes.js'
+import {testHandler} from '../../../services/sync-relay/src/testing/index.js'
 import nativeAuthoredSettlement from '../../../services/sync-relay/src/testing/fixtures/nativeAuthoredSettlement.json'
 
 const {DatabaseSync}=createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite')
@@ -1819,21 +1821,40 @@ it("refuses a plain committed delivery's bootstrap of a service activation's lin
 // Proves: a Stop restore of a service activation's lineage on a host with no
 // owner adoption there is refused before it revokes anything. Committed
 // delivery refuses that lineage's bootstrap, so the operation could not finish.
-it("refuses a bootstrap Stop restore of a service activation's lineage before it revokes the grant",()=>{
+// The owner reads why in each step, and the choices are refused the same way.
+it("refuses a bootstrap Stop restore of a service activation's lineage before it revokes the grant",async()=>{
   const f=fixture();try{
     completeActivation(f)
+    f.raw.exec("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)")
+    const restoreHost:OwnerRestoreHost={restoreConfigured:true,prepareRestore:vi.fn(),reviewRestore:vi.fn(),confirmRestore:vi.fn()}
+    const handler=testHandler(f.storage,{ownerRestoreHost:()=>restoreHost,newId:()=>'restore'})
+    const post=(suffix:string,body:unknown)=>handler(new Request(`https://relay.test/sync/workspace/live-restores${suffix}`,{method:'POST',
+      headers:{authorization:'Bearer user:owner','content-type':'application/json'},body:JSON.stringify(body)}))
+    // The service host that adopted the lineage still offers Stop.
+    const offered=await post('/options',{path:'docs/a.md'})
+    expect(offered.status).toBe(200)
+    expect((await offered.json()).grants).toMatchObject([{grantId:'grant'}])
     const b=transitionHost(f,host,'device','other-b')
     expect(f.storage.registerLiveHost({...b,updatedAtMs:50,guard(){}}).ok).toBe(true)
-    f.raw.exec("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)")
+    const message="Stop access isn't available for this file on this session host. Access hasn't changed. Switch back to the session host this file used before, then try again."
     expect(()=>f.storage.readStopRestorePlan({document:f.document,ownerUserId:'owner',operationId:'restore',shareId:'share',grantId:'grant',
-      restorePointCursor:0,restorePointReceiptDigest:f.document.lineageClaimId,maxOutputBytes:1_000_000})).toThrow('conflicts with current authority')
+      restorePointCursor:0,restorePointReceiptDigest:f.document.lineageClaimId,maxOutputBytes:1_000_000})).toThrow(message)
     const intent:StopRestoreIntent={deliveryKind:'bootstrap',operationId:'restore',ownerUserId:'owner',document:f.document,
       shareId:'share',grantId:'grant',expectedGrantGeneration:1,expectedDependentGrantIds:[],expectedFence:1,restorePointCursor:0,
       restorePointReceiptDigest:f.document.lineageClaimId}
-    expect(()=>f.storage.beginStopRestore(intent,60)).toThrow('conflicts with current authority')
+    expect(()=>f.storage.beginStopRestore(intent,60)).toThrow(message)
+    const {ownerUserId:_owner,...publicIntent}=intent
+    for(const [suffix,body] of [['/options',{path:'docs/a.md'}],
+      ['/plan',{document:f.document,shareId:'share',grantId:'grant',restorePointCursor:0,restorePointReceiptDigest:f.document.lineageClaimId}],
+      ['',{intent:publicIntent}]] as const){
+      const refused=await post(suffix,body)
+      expect(refused.status).toBe(409)
+      expect(await refused.json()).toEqual({ok:false,code:'conflict',error:message})
+    }
     expect(f.storage.getShareGrant('grant')).toMatchObject({status:'active',generation:1})
     expect(f.raw.prepare('SELECT * FROM sync_relay_live_restore_operations').all()).toEqual([])
     expect(f.raw.prepare('SELECT admission_state,restore_fence_generation AS fence FROM sync_relay_live_documents').get()).toEqual({admission_state:'open',fence:1})
+    expect(restoreHost.prepareRestore).not.toHaveBeenCalled()
   }finally{f.close()}
 })
 

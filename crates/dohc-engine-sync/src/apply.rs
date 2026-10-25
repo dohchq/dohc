@@ -421,7 +421,6 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             && refusal.reason.message() == crate::ydoc_apply::LIVE_UNADMITTED_UPDATE
         {
             crate::ydoc_apply::retain_refused_ydoc_blob(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
-            crate::hosted::hold_unadmitted_in_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
         }
         crate::settlement_publication::refresh_in_tx(tx,envelope)?;
         if hosted {
