@@ -4054,6 +4054,22 @@ export function DesktopWorkspaceShell(props: {
     () => paletteCommandRows(commandContext).map((row) => ({ ...row, run: commandHandlers[row.id] })),
     [commandContext, commandHandlers],
   );
+  // The start surface's tiles: each kind's existing create action, where the
+  // workspace allows it. An app is a folder, so it needs folder creation.
+  const startActions = useMemo(
+    () => ({
+      ...(isCommandAvailable("new-file", commandContext) ? { markdown: commandHandlers["new-file"] } : {}),
+      ...(isCommandAvailable("new-collection", commandContext) ? { collection: commandHandlers["new-collection"] } : {}),
+      ...(isCommandAvailable("new-drawing", commandContext) ? { drawing: createUntitledDrawing } : {}),
+      ...(isCommandAvailable("new-folder", commandContext) ? { app: createFirstApp } : {}),
+    }),
+    [commandContext, commandHandlers, createUntitledDrawing, createFirstApp],
+  );
+  // Files dropped on the start surface import as on the Explorer's root.
+  const importDroppedFiles = useCallback((dropped: File[]) => {
+    const paths = bridge().getDroppedFilePaths(dropped);
+    if (paths.length > 0) void importFiles(paths);
+  }, [importFiles]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -5895,9 +5911,11 @@ export function DesktopWorkspaceShell(props: {
             ) : (
               <EmptyEditorGroup
                 platform={bridge().platform}
-                onNewFile={isCommandAvailable("new-file", commandContext) ? commandHandlers["new-file"] : undefined}
-                onOpenPalette={() => setPaletteOpen(true)}
-                onOpenQuickOpen={() => setQuickOpenOpen(true)}
+                create={startActions}
+                recent={wb.recentFiles}
+                files={fileListingCommit ? files : null}
+                onOpen={openFile}
+                onDropFiles={isCommandAvailable("import-files", commandContext) ? importDroppedFiles : undefined}
               />
             );
               }

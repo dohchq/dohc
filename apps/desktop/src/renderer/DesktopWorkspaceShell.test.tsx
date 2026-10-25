@@ -7,6 +7,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
+import { FILE_KIND_RECORDS } from "@dohc/workspace-contracts/kinds";
 import type { ChatChannelRecord, EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { rendererMarks } from "../performance/rendererMarks";
@@ -15,6 +16,7 @@ import { WORKSPACE_ACTIVITY_REFRESH_DELAY_MS, WORKSPACE_ACTIVITY_REFRESH_MAX_WAI
 import { OPEN_EDITORS_DEFAULT_HEIGHT, OPEN_EDITORS_MIN_HEIGHT } from "./workbench/workbenchState";
 import { documentVersionKey } from "./documentVersionKey";
 import { basenameOf } from "./path";
+import { editorTabTestId } from "../testPins";
 import { deferred } from "../testing/deferred";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { DesktopWorkspaceShell, WORKSPACE, STORED_STATE, STORED_CHATS_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
@@ -646,20 +648,93 @@ describe("collection folders", () => {
     expect(within(palette).queryByText("New folder")).toBeNull();
   });
 
-  it.each<[string, Workspace, boolean]>([
-    ["a local workspace", WORKSPACE, true],
-    ["a View share view", SHARE_VIEW, false],
-    ["a Comment share view", { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, access: "comment" } }, false],
-    ["an Edit share view", { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, access: "edit" } }, true],
-  ])("offers New file from the empty editor of %s only where the palette does", async (_name, workspace, offered) => {
+  const DOCUMENT = FILE_KIND_RECORDS.markdown.name;
+  const DRAWING = FILE_KIND_RECORDS.drawing.name;
+  it.each<[string, Workspace, string[]]>([
+    ["a local workspace", WORKSPACE, [DOCUMENT, "Collection", DRAWING, "App"]],
+    ["a View share view", SHARE_VIEW, []],
+    ["a Comment share view", { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, access: "comment" } }, []],
+    // An app is a folder, and a received share takes no new folder.
+    ["an Edit share view", { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, access: "edit" } }, [DOCUMENT, "Collection", DRAWING]],
+  ])("offers start tiles in the empty editor of %s only where the palette offers their command", async (_name, workspace, offered) => {
     renderShell(makeBridge(Promise.resolve(storedStateWithTabs([]))), workspace);
     await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
-    const pane = within(screen.getByTestId("editor-group-primary"));
+    const start = within(within(screen.getByTestId("editor-group-primary")).getByTestId("start-surface"));
 
-    expect(pane.getByText(offered ? "Select a file, or create one" : "Select a file")).toBeTruthy();
-    expect(pane.queryByRole("button", { name: /· new file$/ }) !== null).toBe(offered);
-    expect(pane.getByRole("button", { name: /· commands$/ })).toBeTruthy();
-    expect(pane.getByRole("button", { name: /· go to$/ })).toBeTruthy();
+    for (const label of [DOCUMENT, "Collection", DRAWING, "App"]) {
+      expect(start.queryByRole("button", { name: label }) !== null).toBe(offered.includes(label));
+    }
+    if (offered.length === 0) expect(start.getByText("Select a file")).toBeTruthy();
+  });
+});
+
+describe("start surface", () => {
+  async function startSurface(bridge = makeBridge(Promise.resolve(storedStateWithTabs([])))) {
+    renderShell(bridge);
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    return within(within(screen.getByTestId("editor-group-primary")).getByTestId("start-surface"));
+  }
+
+  it("opens the New file dialog from the document tile", async () => {
+    const start = await startSurface();
+    fireEvent.click(start.getByRole("button", { name: FILE_KIND_RECORDS.markdown.name }));
+    expect(await screen.findByRole("textbox", { name: "File name" })).toBeTruthy();
+  });
+
+  it("opens the New collection dialog from Collection", async () => {
+    const start = await startSurface();
+    fireEvent.click(start.getByRole("button", { name: "Collection" }));
+    expect(await screen.findByTestId("new-collection-dialog")).toBeTruthy();
+  });
+
+  it("creates and opens an untitled drawing from Drawing", async () => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
+    const start = await startSurface(bridge);
+    fireEvent.click(start.getByRole("button", { name: "Drawing" }));
+    await waitFor(() => expect(bridge.createWorkspaceFile).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: WORKSPACE.workspaceId, relativePath: "Untitled.excalidraw" }),
+    ));
+  });
+
+  it("creates one app from App, however often it is pressed", async () => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
+    const start = await startSurface(bridge);
+    const app = start.getByRole("button", { name: "App" });
+    fireEvent.click(app);
+    fireEvent.click(app);
+    await waitFor(() => expect(bridge.createWorkspaceFolder).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: WORKSPACE.workspaceId, relativePath: "app" }),
+    ));
+    expect(bridge.createWorkspaceFolder.mock.calls.filter(([payload]) => payload.relativePath === "app")).toHaveLength(1);
+  });
+
+  it("lists recent files that still exist and opens one", async () => {
+    const start = await startSurface(makeBridge(Promise.resolve({ ...storedStateWithTabs([]), recentFiles: ["b.md", "gone.md", "a.md"] })));
+    const recent = within(await start.findByRole("region", { name: "Recent" }));
+    expect(recent.getAllByRole("button").map((row) => row.textContent)).toEqual(["b.md", "a.md"]);
+
+    fireEvent.click(recent.getByRole("button", { name: "a.md" }));
+    expect(await screen.findByTestId(editorTabTestId("a.md"))).toBeTruthy();
+  });
+
+  it("imports files dropped on an empty workspace through the Explorer's import", async () => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready", rules: [] }, files: [], folders: [] });
+    bridge.getDroppedFilePaths.mockReturnValue(["/home/sam/Downloads/notes.md"]);
+    const start = await startSurface(bridge);
+
+    fireEvent.drop(await start.findByTestId("start-drop"), { dataTransfer: { files: [new File([], "notes.md")], types: ["Files"] } });
+    await waitFor(() => expect(bridge.importWorkspaceFiles).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+      droppedPaths: ["/home/sam/Downloads/notes.md"],
+    }));
+  });
+
+  it("offers no drop zone once the workspace has files", async () => {
+    const start = await startSurface(makeBridge(Promise.resolve({ ...storedStateWithTabs([]), recentFiles: ["a.md"] })));
+    // Recent shows only once the listing has landed.
+    await start.findByRole("region", { name: "Recent" });
+    expect(start.queryByTestId("start-drop")).toBeNull();
   });
 });
 
