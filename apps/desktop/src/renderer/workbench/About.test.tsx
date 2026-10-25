@@ -1450,6 +1450,16 @@ describe("About History", () => {
     expect(screen.getAllByTestId("about-history-open")).toHaveLength(1);
   });
 
+  it("keeps a real failure's Try again while History is paused", async () => {
+    bridgeMock.listEngineMoments.mockRejectedValueOnce(new Error("engine stopped")).mockResolvedValue(page([moment()]));
+    render(<HistorySection paused />);
+    const failed = await screen.findByTestId("about-history-failed");
+    expect(screen.queryByTestId("about-history-paused")).toBeNull();
+    await userEvent.setup().click(within(failed).getByText("Try again"));
+    expect(await screen.findAllByTestId("about-history-open")).toHaveLength(1);
+    expect(screen.getByTestId("about-history-paused")).toBeTruthy();
+  });
+
   it("says History is paused, not that the file has no changes, when a paused read answers none", async () => {
     bridgeMock.listEngineMoments.mockResolvedValue(page([]));
     render(<HistorySection paused />);
