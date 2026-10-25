@@ -108,7 +108,7 @@ const FileGroup = memo(function FileGroup(props: {
         )}
         {chatEntry ? (
           <>
-            <span className="inline-flex shrink-0 items-center gap-1 rounded bg-line px-1.5 text-[10px] font-semibold uppercase leading-4 text-muted">
+            <span className="inline-flex shrink-0 items-center gap-1 rounded bg-line px-1.5 text-[11px] font-medium leading-4 text-muted">
               <MessageSquare size={10} aria-hidden />
               Chat
             </span>

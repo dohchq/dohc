@@ -59,3 +59,17 @@ it("ignores a source response after leaving the workspace",async()=>{
   mounted.unmount();await act(async()=>pending.resolve({text:JSON.stringify({formatVersion:1,datasetId:id(1),tableId:id(2),views:[]}),contentHash:"a".repeat(64),truncated:false}));
   expect(onSelect).not.toHaveBeenCalled();expect(onError).not.toHaveBeenCalled();
 });
+it("opens a saved calendar whose date field is gone, but saves a calendar only with a date field",async()=>{
+  const view={viewId:id(7),name:"Visits",kind:"calendar" as const,search:"",filters:[],sort:null,dateField:id(8)};
+  backend.readWorkspaceText.mockResolvedValue({text:JSON.stringify({formatVersion:1,datasetId:id(1),tableId:id(2),views:[view]}),contentHash:"a".repeat(64),truncated:false});
+  localStorage.setItem(JSON.stringify(["dohc-collection-view","w",id(1),id(2)]),id(7));
+  const onSelect=vi.fn(),onError=vi.fn();
+  render(<CollectionTableViewsControl workspaceId="w" dataset={dataset} tableId={id(2)} onSelect={onSelect} onError={onError}/>);
+  await waitFor(()=>expect((screen.getByRole("button",{name:"Views"}) as HTMLButtonElement).disabled).toBe(false));
+  expect(onSelect).toHaveBeenLastCalledWith(view);expect((screen.getByLabelText("Saved Collection view") as HTMLSelectElement).value).toBe(id(7));
+  fireEvent.click(screen.getByRole("button",{name:"Views"}));fireEvent.click(screen.getByRole("button",{name:"Create view"}));
+  fireEvent.change(screen.getByLabelText("View name"),{target:{value:"Days"}});fireEvent.change(screen.getByLabelText("View layout"),{target:{value:"calendar"}});
+  fireEvent.click(screen.getByRole("button",{name:"Save view"}));
+  expect((await screen.findByRole("alert")).textContent).toBe("Choose a readable date field for this calendar.");
+  expect(backend.writeWorkspaceText).not.toHaveBeenCalled();expect(onError).not.toHaveBeenCalled();
+});

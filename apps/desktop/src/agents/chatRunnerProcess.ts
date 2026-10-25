@@ -149,23 +149,41 @@ function tomlString(value: string): string {
   return value.includes("'") ? `'''${value}'''` : `'${value}'`;
 }
 
-// Codex's sandbox cannot connect to the desktop app, so a Codex run replies
-// through the dohc MCP server, which Codex starts outside the sandbox. The
-// server offers only the reply tool, and that tool runs without approval.
+// A run replies through the dohc MCP server, which its agent starts outside
+// any sandbox; Codex's sandbox cannot connect to the desktop app, and Claude
+// Code's Bash needs Git Bash on Windows. The server offers only the reply
+// tool, and that tool runs without approval.
 // Codex waits for a required server before the first turn; it gives others one
-// second, after which the turn starts without their tools.
-// Codex starts the server without NoDefaultCurrentDirectoryInExePath, so the
-// launcher's bare `node` searches the server's working directory first. That
-// directory is dohc's own, never the workspace, where the sandbox can write.
-function codexReplyServerConfig(cliBin: string, platform: NodeJS.Platform, rootPath: string, stateDir: string): string[] {
+// second, after which the turn starts without their tools. Codex starts the
+// server without NoDefaultCurrentDirectoryInExePath, so the launcher's bare
+// `node` searches the server's working directory first. That directory is
+// dohc's own, never the workspace, where the sandbox can write.
+// Claude Code has no working directory setting and starts the server in the
+// workspace, with NoDefaultCurrentDirectoryInExePath set. Its config is a file
+// because a cmd.exe command line cannot carry JSON's double quotes.
+function replyServerArguments(input: {
+  tool: AgentLaunchProfile["tool"];
+  cliBin: string;
+  platform: NodeJS.Platform;
+  rootPath: string;
+  stateDir: string;
+  logPath: string;
+}): string[] {
+  const command = join(input.cliBin, input.platform === "win32" ? "dohc-mcp.cmd" : "dohc-mcp");
+  const args = ["--workspace", input.rootPath, "--home", input.stateDir, "--tool", "dohc_reply_to_chat"];
+  if (input.tool === "claude") {
+    const configPath = `${input.logPath}.mcp.json`;
+    writeFileSync(configPath, JSON.stringify({ mcpServers: { dohc: { type: "stdio", command, args } } }), { mode: 0o600 });
+    return ["--mcp-config", configPath];
+  }
   return [
-    `mcp_servers.dohc.command=${tomlString(join(cliBin, platform === "win32" ? "dohc-mcp.cmd" : "dohc-mcp"))}`,
-    `mcp_servers.dohc.args=[${["--workspace", rootPath, "--home", stateDir].map(tomlString).join(",")}]`,
-    `mcp_servers.dohc.cwd=${tomlString(cliBin)}`,
+    `mcp_servers.dohc.command=${tomlString(command)}`,
+    `mcp_servers.dohc.args=[${args.map(tomlString).join(",")}]`,
+    `mcp_servers.dohc.cwd=${tomlString(input.cliBin)}`,
     "mcp_servers.dohc.required=true",
     "mcp_servers.dohc.enabled_tools=['dohc_reply_to_chat']",
     "mcp_servers.dohc.tools.dohc_reply_to_chat.approval_mode='approve'",
-  ];
+  ].flatMap((entry) => ["--config", entry]);
 }
 
 export function tokenizeRunnerCommand(command: string): string[] {
@@ -301,11 +319,10 @@ export function createChatRunnerProcess(
       isPackaged: options.isPackaged(),
       resourcesPath: options.resourcesPath?.(),
     });
-    const codexConfig = input.profile?.tool === "codex"
-      ? codexReplyServerConfig(cliBin, platform, input.rootPath, options.stateDir())
-      : [];
     const commandParts = input.profile
-      ? [input.profile.executable, ...agentProfileArguments(input.profile, codexConfig)]
+      ? [input.profile.executable, ...agentProfileArguments(input.profile, replyServerArguments({
+        tool: input.profile.tool, cliBin, platform, rootPath: input.rootPath, stateDir: options.stateDir(), logPath: input.logPath,
+      }))]
       : tokenizeRunnerCommand(input.command);
     const executable = commandParts[0]!;
     // The prompt is DATA and rides stdin, never argv. It carries the rendered

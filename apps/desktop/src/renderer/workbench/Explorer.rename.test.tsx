@@ -7,12 +7,14 @@ import { Explorer, type ExplorerProps } from "./Explorer";
 
 const moveWorkspacePath = vi.fn();
 const showExplorerMenu = vi.fn();
+const createWorkspaceFile = vi.fn();
+const createWorkspaceFolder = vi.fn();
 
 beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn();
   moveWorkspacePath.mockResolvedValue({ path: "" });
   showExplorerMenu.mockResolvedValue(null);
-  window.dohcDesktop = { moveWorkspacePath, showExplorerMenu } as unknown as DohcDesktopBridge;
+  window.dohcDesktop = { moveWorkspacePath, showExplorerMenu, createWorkspaceFile, createWorkspaceFolder } as unknown as DohcDesktopBridge;
 });
 
 afterEach(() => {
@@ -81,6 +83,60 @@ async function renameTo(path: string, name: string): Promise<void> {
 }
 
 describe("Explorer rename", () => {
+  it.each(["a?b", "CON", "NUL.md", "tail.", "tail ", "a".repeat(253)])("keeps the refused Windows name %s beside its error", async name => {
+    window.dohcDesktop!.platform = "win32";
+    const props = { ...explorerProps(), onBeginChanges: vi.fn() };
+    render(<Explorer {...props} />);
+    const input = await beginRename("notes.md");
+    fireEvent.change(input, { target: { value: name } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.blur(input);
+    expect(screen.getByRole("alert").textContent).toBeTruthy();
+    expect((screen.getByTestId("tree-edit-input") as HTMLInputElement).value).toBe(name);
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(input.getAttribute("aria-describedby")).toBe(screen.getByRole("alert").id);
+    expect(input.classList.contains("border-danger")).toBe(true);
+    expect(moveWorkspacePath).not.toHaveBeenCalled();
+    expect(props.onBeginChanges).not.toHaveBeenCalled();
+    expect(props.onError).not.toHaveBeenCalled();
+    fireEvent.change(input, { target: { value: "valid" } });
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(input.hasAttribute("aria-invalid")).toBe(false);
+    expect(input.classList.contains("border-danger")).toBe(false);
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(moveWorkspacePath).toHaveBeenCalledOnce());
+  });
+
+  it.each(["file", "folder"] as const)("validates a Windows new %s inline before mutation", async kind => {
+    window.dohcDesktop!.platform = "win32";
+    render(<Explorer {...explorerProps()} createRequest={{ id: 1, kind }} />);
+    const input = await screen.findByTestId("tree-edit-input");
+    fireEvent.change(input, { target: { value: "a?b" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByRole("alert").textContent).toBe("A name cannot contain a question mark (?). Remove it.");
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(input.classList.contains("border-danger")).toBe(true);
+    expect((input as HTMLInputElement).value).toBe("a?b");
+    expect(createWorkspaceFile).not.toHaveBeenCalled();
+    expect(createWorkspaceFolder).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(screen.queryByTestId("tree-edit-input")).toBeNull();
+  });
+
+  it.each([".env", "旅.md", "NOTES.md", "folder/moved.md"])("allows Windows rename to %s", async name => {
+    window.dohcDesktop!.platform = "win32";
+    render(<Explorer {...explorerProps()} />);
+    await renameTo("notes.md", name);
+    await waitFor(() => expect(moveWorkspacePath).toHaveBeenCalledWith(expect.objectContaining({ toPath: name })));
+  });
+
+  it.each(["darwin", "linux"] as const)("keeps %s punctuation behavior", async platform => {
+    window.dohcDesktop!.platform = platform;
+    render(<Explorer {...explorerProps()} />);
+    await renameTo("notes.md", "a?b");
+    await waitFor(() => expect(moveWorkspacePath).toHaveBeenCalledWith(expect.objectContaining({ toPath: "a?b.md" })));
+  });
+
   it("keeps renaming through an Enter or Escape that an input method owns", async () => {
     render(<Explorer {...explorerProps()} />);
     const input = await beginRename("report.csv");

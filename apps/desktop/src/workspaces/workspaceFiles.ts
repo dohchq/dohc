@@ -19,6 +19,7 @@ import {
 // a pure string decision on fail-closed paths, called up to ~2,000 times per
 // interaction here -- an RPC would add a failure mode where today there is none.
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
+import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
@@ -325,6 +326,11 @@ export class CreatedFileWriteError extends Error {
   }
 }
 
+function assertWorkspaceDestination(path: string): void {
+  const error = workspaceDestinationError(path, process.platform);
+  if (error) throw new Error(error);
+}
+
 export async function createFile(
   rootPath: string,
   relativePath: string,
@@ -332,6 +338,7 @@ export async function createFile(
   options: { exclusive?: boolean } = {},
 ): Promise<string> {
   const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
+  if (validated.ok || validated.reason === "unsupported-name") assertWorkspaceDestination(relativePath);
   if (!validated.ok) {
     throw new Error(`Invalid file path (${validated.reason}): ${relativePath}`);
   }
@@ -1190,6 +1197,7 @@ export async function createFolder(
   options: { exclusive?: boolean } = {},
 ): Promise<string> {
   const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
+  if (validated.ok || validated.reason === "unsupported-name") assertWorkspaceDestination(relativePath);
   if (!validated.ok) {
     throw new Error(`Invalid folder path (${validated.reason}): ${relativePath}`);
   }
@@ -1274,6 +1282,7 @@ export function normalizeWorkspaceMovePaths(
     throw new Error(`Invalid move source (${fromValidated.reason}): ${fromPath}`);
   }
   const toValidated = validateUserMaterializePath(toPath, { platform: process.platform });
+  if (toValidated.ok || toValidated.reason === "unsupported-name") assertWorkspaceDestination(toPath);
   if (!toValidated.ok) {
     throw new Error(`Invalid move destination (${toValidated.reason}): ${toPath}`);
   }
