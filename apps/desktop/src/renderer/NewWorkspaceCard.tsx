@@ -1,4 +1,4 @@
-import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
+import { useTooltip } from "@dohc/collection-views/tooltip";
 import { workspaceNameError } from "@dohc/workspace-contracts/workspace-paths";
 import { Folder, Pencil } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -114,7 +114,8 @@ export function NewWorkspaceCard(props: {
     if (root === null) suggestDefaultRoot();
   }
 
-  const nameError = workspaceNameError(folderName.trim(), window.dohcDesktop?.platform ?? "");
+  // A blank name only leaves Create off; any other name is checked as typed.
+  const nameError = folderName.trim() ? workspaceNameError(folderName, window.dohcDesktop?.platform ?? "") : null;
   const canCreate = root !== null && !placing && !creating && !nameError && validFolderName(folderName);
 
   async function createWorkspace() {
@@ -134,6 +135,7 @@ export function NewWorkspaceCard(props: {
   }
 
   const path = root ? `${displayPath(root)}${isWindows() ? "\\" : "/"}${folderName.trim()}` : null;
+  const pathShown = locationTooltip.tooltipProps.open && path !== null;
 
   return (
     <form
@@ -165,11 +167,12 @@ export function NewWorkspaceCard(props: {
           spellCheck={false}
           autoCapitalize="off"
           autoCorrect="off"
-          className={`field-sizing-content min-w-0 border-0 bg-transparent p-0 text-sm font-medium text-ink placeholder:text-subtle ${nameError ? "shadow-[inset_0_-1px_0_var(--dohc-danger)] focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]!" : ""}`}
+          className={`field-sizing-content min-w-0 border-0 bg-transparent p-0 text-ellipsis text-sm font-medium text-ink placeholder:text-subtle ${nameError ? "shadow-[inset_0_-1px_0_var(--dohc-danger)] focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]!" : ""}`}
         />
         <Pencil size={13} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
       </label>
-      <div className="dohc-elevated relative z-2 flex flex-col gap-4 rounded-xl rounded-tl-none border border-line bg-panel p-5">
+      {/* The open path sits over the tab, so the card rises above it. */}
+      <div className={`dohc-elevated relative ${pathShown ? "z-4" : "z-2"} flex flex-col gap-4 rounded-xl rounded-tl-none border border-line bg-panel p-5`}>
         <div {...locationTooltip.hoverProps} className="relative flex min-w-0 items-center gap-2 text-subtle">
           <Folder size={13} strokeWidth={1.9} aria-hidden className="shrink-0" />
           <span data-testid="new-workspace-location" className="flex min-w-0 flex-1 text-[12px] leading-5 text-muted">
@@ -185,12 +188,19 @@ export function NewWorkspaceCard(props: {
           >
             Change
           </GhostButton>
-          {/* The path opens over Create, so clicks go through it, and it
-              closes once the pointer leaves the line. */}
-          <span className="pointer-events-none contents">
-            <Tooltip id={locationTooltip.tooltipProps.id} open={locationTooltip.tooltipProps.open && path !== null}>
-              <span className="block wrap-anywhere">{path}</span>
-            </Tooltip>
+          {/* The path opens above its line, as wide as the card, so a long
+              one takes few lines and covers only the tab. Clicks go through
+              it, and it closes once the pointer leaves the line. The shared
+              Tooltip opens below its holder, at most 16rem wide. */}
+          <span
+            id={locationTooltip.tooltipProps.id}
+            role="tooltip"
+            hidden={!pathShown}
+            className="pointer-events-none absolute -inset-x-5 bottom-full pb-1"
+          >
+            <span className="dohc-popover block rounded-lg border border-line bg-panel px-2 py-1 text-left text-[12px] text-ink wrap-anywhere">
+              {path}
+            </span>
           </span>
         </div>
 

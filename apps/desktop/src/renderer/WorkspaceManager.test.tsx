@@ -210,7 +210,13 @@ describe("workspace manager", () => {
     await user.keyboard(LONG_NAME);
     expect(location()).toBe(`/home/sam/dohc/${LONG_NAME}`);
     await user.hover(screen.getByTestId("new-workspace-location"));
-    expect(screen.getByRole("tooltip").textContent).toBe(`/home/sam/dohc/${LONG_NAME}`);
+    const tooltip = screen.getByRole("tooltip");
+    expect(tooltip.textContent).toBe(`/home/sam/dohc/${LONG_NAME}`);
+    await user.unhover(screen.getByTestId("new-workspace-location"));
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    await user.hover(screen.getByTestId("new-workspace-location"));
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("tooltip")).toBeNull();
     await user.keyboard("{Enter}");
     expect(bridge.createLocalWorkspace).toHaveBeenCalledWith(
       expect.objectContaining({ rootPath: `/home/sam/dohc/${LONG_NAME}` }),
@@ -270,6 +276,7 @@ describe("workspace manager", () => {
     ["Trip?", "A name cannot contain a question mark (?). Remove it."],
     ["CON", 'Windows keeps "CON" for itself. Choose another name.'],
     ["Trip.", "Windows removes dots and spaces at the end of a name. Remove the ending dot or space."],
+    ["Trip ", "Windows removes dots and spaces at the end of a name. Remove the ending dot or space."],
   ])("says as %s is typed why Windows refuses it, and creates nothing", async (typed, message) => {
     bridge.platform = "win32";
     try {
@@ -314,6 +321,21 @@ describe("workspace manager", () => {
       await user.keyboard("{Backspace>8/} Lisbon");
       expect(nameField().value).toBe("Trip Lisbon");
       expect(screen.queryByRole("alert")).toBeNull();
+    } finally {
+      bridge.platform = "linux";
+    }
+  });
+
+  it("treats a name of only spaces as empty on Windows: no message, no Create", async () => {
+    bridge.platform = "win32";
+    try {
+      const user = userEvent.setup();
+      render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+      await locationReads("\\home\\sam\\dohc\\Personal");
+      await user.keyboard("   ");
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(nameField().hasAttribute("aria-invalid")).toBe(false);
+      expect(screen.getByRole("button", { name: /create workspace/i })).toHaveProperty("disabled", true);
     } finally {
       bridge.platform = "linux";
     }
