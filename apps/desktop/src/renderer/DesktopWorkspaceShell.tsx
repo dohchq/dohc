@@ -288,7 +288,8 @@ import {
   type WorkbenchState,
   type WorkbenchTab,
 } from "./workbench/workbenchState";
-import type { AboutNotices, AccessContext } from "./workbench/About";
+import type { AboutNotices } from "./workbench/About";
+import type { AccessContext } from "./workbench/accessReason";
 import type { SharingFocus } from "./workbench/SharingView";
 import { usePinnedApps } from "./workbench/pinnedApps";
 import { pinnedAppsFor } from "../settings/pinnedApps";
@@ -6547,6 +6548,8 @@ export function DesktopWorkspaceShell(props: {
               target={shareTarget}
               onClose={() => setShareTarget(null)}
               shareRemovals={shareRemovals}
+              accessContext={accessContext}
+              server={cloudStatus?.workspaceServerUrl ?? null}
             />
           </Suspense>
         </Overlay>
