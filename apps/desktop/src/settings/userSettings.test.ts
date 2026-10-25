@@ -169,10 +169,12 @@ describe("desktop user settings model", () => {
       expect(AgentsSettings.safeParse({ default: { ...agent, name: first }, "agent-b": { ...agent, name: second } }).success, second).toBe(false);
     }
     // The default agent's old messages carry its old name, so nobody else takes it.
-    expect(AgentsSettings.safeParse({
-      default: { ...agent, name: "Atlas", nameBeforeMigration: "Nova" },
-      "agent-b": { ...agent, name: "Nova" },
-    }).success).toBe(false);
+    for (const name of ["Nova", "No va"]) {
+      expect(AgentsSettings.safeParse({
+        default: { ...agent, name: "Atlas", nameBeforeMigration: "Nova" },
+        "agent-b": { ...agent, name },
+      }).success, name).toBe(false);
+    }
     expect(AgentsSettings.safeParse({ default: { ...agent, name: "Nova", nameBeforeMigration: "Nova" } }).success).toBe(true);
   });
 

@@ -164,6 +164,18 @@ it("keeps the agents a file without a version already lists", async () => {
   expect(JSON.parse(await readFile(path, "utf8")).agents).toEqual(agents);
 });
 
+it("keeps a written agent whose name only the spaces set apart from version 1's", async () => {
+  const root = await createTestScratch("dohc-settings-migration-");
+  const path = join(root, USER_SETTINGS_FILE);
+  const writer = testAgent({ name: "ClaudeCode" });
+  await writeFile(path, JSON.stringify({ profile: { agentName: "Claude Code" }, agents: { writer } }));
+  const read = await readUserSettingsFile(root);
+  expect(Object.keys(read.settings.agents)).toEqual(["default"]);
+  expect(read.agentProblems).toEqual([{ id: "writer", name: "ClaudeCode", problem: "Another agent has this name." }]);
+  await writeUserSettingsFile(root, { ...read.settings, editor: { ...read.settings.editor, fontSize: 16 } }, read.settings);
+  expect(JSON.parse(await readFile(path, "utf8")).agents.writer).toEqual(writer);
+});
+
 it("leaves version 1's agent where it is when the file's own agents have no place for it", () => {
   const version1 = { profile: { agentName: "Nova" }, runner: { enabled: true, command: "agent run" } };
   for (const agents of [{ default: testAgent({ name: "Writer" }) }, ["Writer"], null]) {
