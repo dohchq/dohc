@@ -23,7 +23,6 @@ import {
   MENU_FRAME,
   MENU_ICON,
   MENU_LABEL,
-  MENU_PATH,
   MENU_ROW,
   MENU_ROW_TONE,
   MENU_SHORTCUT,
@@ -657,7 +656,7 @@ export function MentionComposer(props: {
                     <FileText size={14} aria-hidden />
                   </span>
                   <span className={MENU_TITLE}>Whole file</span>
-                  <span className={MENU_PATH}>{fileStage.path}</span>
+                  <span className={MENU_DETAIL}>{fileStage.path}</span>
                 </button>
               </li>
               {fileStage.loading ? (
@@ -753,7 +752,7 @@ export function MentionComposer(props: {
                     <FileText size={14} aria-hidden />
                   </span>
                   <span className={MENU_TITLE}>{candidate.label}</span>
-                  <span className={MENU_PATH}>{candidate.path}</span>
+                  <span className={MENU_DETAIL}>{candidate.path}</span>
                 </button>
               </li>
             );

@@ -191,9 +191,9 @@ export function Titlebar(props: {
                         <span className="w-3" aria-hidden />
                       )}
                       <span className="truncate">{workspaceName(candidate)}</span>
-                      <span className="ml-auto text-[10px] uppercase text-subtle">
-                        {candidate.kind}
-                      </span>
+                      {candidate.kind === "shared" ? (
+                        <span className="ml-auto text-[12px] text-subtle">Shared</span>
+                      ) : null}
                     </button>
                   </li>
                 ))}
@@ -246,7 +246,7 @@ export function Titlebar(props: {
         >
           <Search size={12} aria-hidden />
           <span className="truncate">Go to…</span>
-          <kbd className="ml-auto font-mono text-[10px]">{quickOpenShortcut}</kbd>
+          <kbd className="ml-auto font-sans text-[11px]">{quickOpenShortcut}</kbd>
         </button>
       ) : null}
 
