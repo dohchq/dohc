@@ -418,14 +418,19 @@ describe("error words", () => {
     expect(readError({})).toEqual({ words: null, mapped: false, cause: null });
   });
 
-  it("keeps data, a stack, and text too long to read for Copy, after the caller's sentence alone", () => {
+  it("keeps data and a stack for Copy, after the caller's sentence alone", () => {
     const invalid = z.uuid().safeParse("not-an-id").error!;
     const sentence = "dohc could not read this Collection's automations.";
     expect(readError(acrossIpc(invalid, "desktop:dataset"))).toEqual({ words: null, mapped: false, cause: invalid.message });
     expect(withErrorWords(sentence, acrossIpc(invalid, "desktop:dataset"))).toBe(sentence);
-    for (const dump of ['{"error":"bad"}', "Sync failed.\n    at run (main.js:1:1)", `Sync failed: ${"x".repeat(500)}`]) {
+    for (const dump of ['{"error":"bad"}', "Sync failed.\n    at run (main.js:1:1)"]) {
       expect(readError(acrossIpc(new Error(dump))), dump).toEqual({ words: null, mapped: false, cause: dump });
     }
+    // Words stay words when they start with a bracket or a path makes them long.
+    const pressed = "[Send] changed after it was pressed. Press it again.";
+    expect(readError(acrossIpc(new Error(pressed))).words).toBe(pressed);
+    const held = `dohc did not record the outside edit to "notes/${"a".repeat(500)}.md". Restore the file, then try again.`;
+    expect(readError(held).words).toBe(held);
   });
 
   it("shows a plain Collection reply as written, names and instructions included", () => {
