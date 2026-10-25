@@ -640,9 +640,10 @@ describe("history page", () => {
     await user.click(await screen.findByTestId("engine-diff-confirm-restore"));
 
     const toast = await screen.findByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain(
-      "dohc could not restore notes/plan.md. It can't read .dohc/visibility.toml. Fix the file, then try again.",
-    );
+    // What failed is the title and what to fix is the body, so the title's
+    // two-line clamp never hides the fix.
+    expect(within(toast).getByText("dohc could not restore notes/plan.md")).toBeTruthy();
+    expect(within(toast).getByText("It can't read .dohc/visibility.toml. Fix the file, then try again.")).toBeTruthy();
     expect(toast.textContent).not.toContain("TOML parse error");
     expect(screen.queryByTestId("engine-diff-restore-status")).toBeNull();
 

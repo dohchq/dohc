@@ -54,7 +54,7 @@ import {
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
-import { isPrivacyDenied, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
+import { isPrivacyDenied, isRestorePolicyRefusal, readError, shouldRecheckShareAccess } from "../ipc/errorWords";
 import {
   formatSize,
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
@@ -3093,13 +3093,18 @@ export function DesktopWorkspaceShell(props: {
   }, [captureRecoveries, refreshAfterHistoryRestore]);
   // One row per file in Notices: a newer failure for the file replaces it. A
   // shared live file's refusal goes to its kept typing's row instead, which
-  // then says to replace the file's text with the kept version.
+  // then says to replace the file's text with the kept version. A refusal by
+  // History's rules takes the sentence as its title and the rules' words as
+  // its body, so the clamp never hides what to fix.
   const reportRestoreError = useCallback(
     (fallback: string, error: unknown, retry: () => void, identity: string, path: string) => {
       if (captureRecoveries.restoreRefused(path, error)) return;
-      reportShellError(fallback, error, retry, undefined, identity);
+      const { words } = readError(error);
+      if (words && isRestorePolicyRefusal(error)) {
+        reportShellFailure({ title: fallback.replace(/\.$/u, ""), message: words, cause: error, retry, identity });
+      } else reportShellError(fallback, error, retry, undefined, identity);
     },
-    [captureRecoveries, reportShellError],
+    [captureRecoveries, reportShellError, reportShellFailure],
   );
   // Try again on a failed restore opens the change's tab, and that page asks
   // before it restores, with its Undo restore after.

@@ -23,7 +23,7 @@ import type {
   UsageRecordRow,
   WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
-import { collectionsElsewhereWords, readError, withErrorWords } from "../../ipc/errorWords";
+import { collectionsElsewhereWords, readError } from "../../ipc/errorWords";
 import { CsvPreviewBound, CsvTable, CsvViewActions, csvColumns } from "../CsvView";
 import { DatabaseGrid, DatabaseViewActions, editOf } from "../DatabaseStudioView";
 import { DocumentMenu } from "../DocumentMenu";
@@ -574,7 +574,8 @@ const REFUSED_RESTORE = new Error(
 );
 const REFUSED_RESTORE_TOAST = {
   id: "refused-restore",
-  message: withErrorWords("dohc could not restore notes/plan.md.", REFUSED_RESTORE),
+  title: "dohc could not restore notes/plan.md",
+  message: readError(REFUSED_RESTORE).words ?? "",
   details: `Cause: ${readError(REFUSED_RESTORE).cause ?? ""}`,
   atMs: 0,
   canRetry: true,
