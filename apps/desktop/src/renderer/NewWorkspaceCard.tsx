@@ -1,17 +1,19 @@
-import { FolderOpen, Pencil } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
+import { Folder, Pencil } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import type { Workspace } from "./DesktopWorkspaceShell";
+import { FolderSheets } from "./FolderSheets";
 import { ipcErrorMessage } from "./ipcError";
-import { PrimaryButton, SectionLabel } from "./ui/controls";
+import { PrimaryButton } from "./ui/controls";
 import { useRequestSequence } from "./useRequestSequence";
 
-// The folder card: where the new workspace goes and what it is called, then
-// Create. Drawn as a folder, with the tab as the label and the sheet holding
-// the two fields. First run shows it as the primary; the workspace switcher
-// shows the same card in an overlay.
+// The folder card: the new workspace's name on the folder's tab, where its
+// folder goes on one line in the card, then Create. Sheets of the kinds a
+// workspace holds stand in the folder behind the tab. First run shows it as
+// the primary; the workspace manager shows the same card beside its list.
 
-const DEFAULT_FOLDER_NAME = "personal";
+const DEFAULT_FOLDER_NAME = "Personal";
 
 function isWindows(): boolean {
   return bridge().platform === "win32";
@@ -30,14 +32,13 @@ function validFolderName(name: string): boolean {
 
 export function NewWorkspaceCard(props: {
   onWorkspaceReady: (workspace: Workspace) => void;
-  // Reported so a host that also offers "open a folder" can show one error
-  // slot for both routes.
-  onError?: (message: string | null) => void;
 }) {
   const [root, setRoot] = useState<string | null>(null);
   const [folderName, setFolderName] = useState(DEFAULT_FOLDER_NAME);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const nameField = useRef<HTMLInputElement>(null);
+  const locationTooltip = useTooltip();
   // The default suggestion and the picker race for the same field. The
   // newest request wins: a slow default must not overwrite a folder the
   // person already chose.
@@ -56,6 +57,9 @@ export function NewWorkspaceCard(props: {
   }
 
   useEffect(() => {
+    // The suggested name starts selected, so typing replaces it.
+    nameField.current?.focus();
+    nameField.current?.select();
     suggestDefaultRoot();
     // rootRequests is a stable ref holder.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -86,7 +90,6 @@ export function NewWorkspaceCard(props: {
     if (!root || !canCreate) return;
     setCreating(true);
     setError(null);
-    props.onError?.(null);
     try {
       const workspace = await bridge().createLocalWorkspace({
         rootPath: `${root}/${folderName.trim()}`,
@@ -100,63 +103,77 @@ export function NewWorkspaceCard(props: {
   }
 
   const separator = isWindows() ? "\\" : "/";
+  const parent = root ? displayPath(root) : error ? "Choose a folder" : "…";
+  const leaf = root ? `${separator}${folderName.trim()}` : "";
 
   return (
     <form
-      className="flex w-full flex-col"
+      className="relative isolate mt-5 flex w-full flex-col"
       onSubmit={(event) => {
         event.preventDefault();
         void createWorkspace();
       }}
     >
-      {/* The sheet's top-left corner is square so the tab sits on it, and
-          the tab's bottom edge matches the sheet fill to hide the seam. */}
-      <div className="relative z-10 -mb-px flex h-8 w-fit items-center rounded-t-lg border border-line border-b-panel bg-panel px-4">
-        <SectionLabel>New workspace</SectionLabel>
-      </div>
-      <div className="dohc-elevated flex flex-col gap-4 rounded-xl rounded-tl-none border border-line bg-panel p-5">
-        <div className="flex flex-col gap-2">
-          {/* The parent path is the picker: click it to move the new folder
-              somewhere else. It stays live when no default arrived, so the
-              person can still choose one by hand. */}
+      <FolderSheets />
+      {/* The card's top-left corner is square so the tab sits on it, and
+          the tab's bottom edge matches the card fill to hide the seam. The
+          tab stops at 60% of the card, so a long name scrolls inside it and
+          two sheets always show. */}
+      <label className="relative z-3 -mb-px flex h-8 w-fit max-w-[60%] cursor-text items-center gap-2 rounded-t-lg border border-line border-b-panel bg-panel pl-4 pr-3.5">
+        <input
+          ref={nameField}
+          aria-label="Workspace name"
+          value={folderName}
+          onChange={(event) => setFolderName(event.currentTarget.value)}
+          placeholder={DEFAULT_FOLDER_NAME}
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          className="field-sizing-content min-w-0 border-0 bg-transparent p-0 text-sm font-medium text-ink placeholder:text-subtle"
+        />
+        <Pencil size={13} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
+      </label>
+      <div className="dohc-elevated relative z-2 flex flex-col gap-4 rounded-xl rounded-tl-none border border-line bg-panel p-5">
+        <div {...locationTooltip.hoverProps} className="relative flex min-w-0 items-center gap-2 text-subtle">
+          <Folder size={13} strokeWidth={1.9} aria-hidden className="shrink-0" />
+          {/* Too long for the line, the parent folders give way first, so
+              the workspace's own folder stays at the end. A name longer than
+              the line keeps its end too: it is laid out from the right. */}
+          <span data-testid="new-workspace-location" className="flex min-w-0 flex-1 text-[12px] leading-5 text-muted">
+            <span className="min-w-0 truncate">{parent}</span>
+            <span dir="rtl" className="max-w-[calc(100%-3em)] shrink-0 truncate">
+              <bdi dir="ltr">{leaf}</bdi>
+            </span>
+          </span>
+          {/* It stays live when no default arrived, so the person can still
+              choose a folder by hand. */}
           <button
             type="button"
             aria-label="Change location"
+            {...locationTooltip.focusProps}
             onClick={() => void chooseFolder()}
-            className="group flex h-9 w-full items-center gap-2.5 rounded-md border border-line bg-bg px-3 text-left transition-colors hover:border-ink"
+            className="-mr-1 shrink-0 rounded px-1 py-0.5 text-[12px] leading-5 text-muted transition-colors hover:bg-hover hover:text-ink"
           >
-            <FolderOpen size={13} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
-            <code className="min-w-0 flex-1 truncate font-mono text-[13px] leading-snug text-muted group-hover:text-ink">
-              {root ? `${displayPath(root)}${separator}` : error ? "Choose a folder" : "…"}
-            </code>
-            <span aria-hidden className="shrink-0 text-[11px] text-subtle group-hover:text-ink">
-              Change
-            </span>
+            Change
           </button>
-          <label className="flex h-9 w-full items-center gap-2.5 rounded-md border border-line bg-bg px-3 transition-colors focus-within:border-ink">
-            <Pencil size={13} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
-            <input
-              aria-label="Folder name"
-              value={folderName}
-              onChange={(event) => setFolderName(event.currentTarget.value)}
-              placeholder={DEFAULT_FOLDER_NAME}
-              spellCheck={false}
-              autoCapitalize="off"
-              autoCorrect="off"
-              className="min-w-0 flex-1 border-0 bg-transparent p-0 font-mono text-[14px] leading-snug text-ink outline-none placeholder:text-subtle"
-            />
-          </label>
+          {/* The path opens over Create, so clicks go through it, and it
+              closes once the pointer leaves the line. */}
+          <span className="pointer-events-none contents">
+            <Tooltip id={locationTooltip.tooltipProps.id} open={locationTooltip.tooltipProps.open && root !== null}>
+              <span className="block wrap-anywhere">{root ? `${parent}${leaf}` : null}</span>
+            </Tooltip>
+          </span>
         </div>
+
+        {error ? (
+          <p role="alert" className="-mt-2 text-xs leading-relaxed text-danger">
+            {error}
+          </p>
+        ) : null}
 
         <PrimaryButton type="submit" disabled={!canCreate}>
           {creating ? "Creating…" : "Create workspace"}
         </PrimaryButton>
-
-        {error ? (
-          <p role="alert" className="m-0 text-xs leading-relaxed text-danger">
-            {error}
-          </p>
-        ) : null}
       </div>
     </form>
   );

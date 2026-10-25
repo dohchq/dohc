@@ -58,6 +58,12 @@ const bridge = {
   platform: "linux" as NodeJS.Platform,
 };
 
+// The location line: the parent folder, then the new workspace's own folder.
+const location = () => screen.getByTestId("new-workspace-location").textContent;
+const locationReads = (path: string) => waitFor(() => expect(location()).toBe(path));
+const nameField = () => screen.getByRole<HTMLInputElement>("textbox", { name: "Workspace name" });
+const LONG_NAME = "Family trip to Lisbon and Porto with my grandparents in 2027";
+
 const KNOWN = [
   { workspaceId: "ws-a", rootPath: "/home/sam/dohc/personal", kind: "personal" as const, mode: "local-first" as const },
   { workspaceId: "ws-b", rootPath: "/home/sam/dohc/team", kind: "personal" as const, mode: "local-first" as const },
@@ -131,14 +137,102 @@ describe("workspace manager", () => {
 
   it("suggests ~/dohc as the workspace location", async () => {
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
-    expect(await screen.findByText("/home/sam/dohc/")).toBeTruthy();
-    expect(screen.getByLabelText("Folder name")).toHaveProperty("value", "personal");
+    await locationReads("/home/sam/dohc/Personal");
+    expect(nameField().value).toBe("Personal");
+  });
+
+  it("opens with the name in the folder tab selected, so typing replaces it and Enter creates", async () => {
+    const user = userEvent.setup();
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    const name = nameField();
+    expect(document.activeElement).toBe(name);
+    expect([name.selectionStart, name.selectionEnd]).toEqual([0, "Personal".length]);
+    await locationReads("/home/sam/dohc/Personal");
+
+    await user.keyboard("Trip");
+    expect(name.value).toBe("Trip");
+    expect(location()).toBe("/home/sam/dohc/Trip");
+    await user.keyboard("{Enter}");
+    expect(bridge.createLocalWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({ rootPath: "/home/sam/dohc/Trip" }),
+    );
+  });
+
+  it("moves from the name to Change, Create workspace, then the three other ways in", async () => {
+    const user = userEvent.setup();
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    await locationReads("/home/sam/dohc/Personal");
+    expect(document.activeElement).toBe(nameField());
+    const order: string[] = [];
+    for (let step = 0; step < 5; step += 1) {
+      await user.tab();
+      const focused = document.activeElement;
+      order.push(focused?.getAttribute("aria-label") ?? focused?.textContent ?? "");
+    }
+    expect(order).toEqual([
+      "Change location",
+      "Create workspace",
+      "Open folder",
+      "Open a share",
+      "Join a synced workspace",
+    ]);
+  });
+
+  it("draws the sheets in the folder as a picture, with nothing to focus", async () => {
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    await locationReads("/home/sam/dohc/Personal");
+    const sheets = screen.getByTestId("folder-sheets");
+    expect(sheets.getAttribute("aria-hidden")).toBe("true");
+    expect(sheets.querySelectorAll("a, button, input, [tabindex]")).toHaveLength(0);
+  });
+
+  it.each([
+    ["Open folder", "Use a folder of files you already have."],
+    ["Open a share", "Open files someone shared with you."],
+    ["Join a synced workspace", "Bring over a workspace you sync through your server."],
+  ])("puts what %s does in its tooltip and description", async (label, detail) => {
+    const user = userEvent.setup();
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    const button = screen.getByRole("button", { name: label });
+    expect(document.getElementById(button.getAttribute("aria-describedby") ?? "")?.textContent).toBe(detail);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    await user.hover(button);
+    expect(screen.getByRole("tooltip").textContent).toBe(detail);
+    await user.unhover(button);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
+  it("keeps a long name whole and shows the full location in a tooltip", async () => {
+    const user = userEvent.setup();
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    await locationReads("/home/sam/dohc/Personal");
+    await user.keyboard(LONG_NAME);
+    expect(location()).toBe(`/home/sam/dohc/${LONG_NAME}`);
+    await user.hover(screen.getByTestId("new-workspace-location"));
+    expect(screen.getByRole("tooltip").textContent).toBe(`/home/sam/dohc/${LONG_NAME}`);
+    await user.keyboard("{Enter}");
+    expect(bridge.createLocalWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({ rootPath: `/home/sam/dohc/${LONG_NAME}` }),
+    );
+  });
+
+  it("shows a refused create beside the location and keeps the typed name", async () => {
+    const user = userEvent.setup();
+    bridge.createLocalWorkspace.mockRejectedValueOnce(new Error("That folder name is not allowed."));
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    await locationReads("/home/sam/dohc/Personal");
+    await user.keyboard("Trip? Lisbon{Enter}");
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toBe("That folder name is not allowed.");
+    expect(alert.previousElementSibling?.contains(screen.getByTestId("new-workspace-location"))).toBe(true);
+    expect(nameField().value).toBe("Trip? Lisbon");
+    expect(screen.getByRole("button", { name: /create workspace/i })).toHaveProperty("disabled", false);
   });
 
   it("creates the folder under the name the user typed", async () => {
     const user = userEvent.setup();
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
-    const name = await screen.findByLabelText("Folder name");
+    const name = nameField();
     await user.clear(name);
     await user.type(name, "research{Enter}");
     expect(bridge.createLocalWorkspace).toHaveBeenCalledWith(
@@ -149,7 +243,7 @@ describe("workspace manager", () => {
   it("refuses an empty or nested folder name", async () => {
     const user = userEvent.setup();
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
-    const name = await screen.findByLabelText("Folder name");
+    const name = nameField();
     const create = screen.getByRole("button", { name: /create workspace/i });
     await user.clear(name);
     expect(create).toHaveProperty("disabled", true);
@@ -164,7 +258,7 @@ describe("workspace manager", () => {
       await screen.findByRole("button", { name: "Change location" }),
     );
     expect(bridge.pickWorkspaceRoot).toHaveBeenCalledOnce();
-    expect(await screen.findByText("/home/sam/projects/research/")).toBeTruthy();
+    await locationReads("/home/sam/projects/research/Personal");
   });
 
   it("creates a personal workspace and hands it to the shell", async () => {
@@ -177,7 +271,7 @@ describe("workspace manager", () => {
     expect(bridge.createLocalWorkspace).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: "personal",
-        rootPath: "/home/sam/dohc/personal",
+        rootPath: "/home/sam/dohc/Personal",
       }),
     );
     expect(onReady).toHaveBeenCalledWith(
@@ -192,12 +286,13 @@ describe("workspace manager", () => {
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
 
     expect(await screen.findByText("No home dir")).toBeTruthy();
+    expect(location()).toBe("Choose a folder");
     const change = screen.getByRole("button", { name: "Change location" });
     expect(change).toHaveProperty("disabled", false);
     expect(screen.getByRole("button", { name: /create workspace/i })).toHaveProperty("disabled", true);
 
     await user.click(change);
-    expect(await screen.findByText("/home/sam/projects/research/")).toBeTruthy();
+    await locationReads("/home/sam/projects/research/Personal");
     expect(screen.queryByText("No home dir")).toBeNull();
     expect(screen.getByRole("button", { name: /create workspace/i })).toHaveProperty("disabled", false);
   });
@@ -214,10 +309,9 @@ describe("workspace manager", () => {
     expect(await screen.findByText("Dialog unavailable")).toBeTruthy();
 
     await user.click(change);
-    expect(await screen.findByText("/home/sam/projects/research/")).toBeTruthy();
+    await locationReads("/home/sam/projects/research/Personal");
     await act(async () => slowDefault.resolve("/home/sam/dohc"));
-    expect(screen.getByText("/home/sam/projects/research/")).toBeTruthy();
-    expect(screen.queryByText("/home/sam/dohc/")).toBeNull();
+    expect(location()).toBe("/home/sam/projects/research/Personal");
   });
 
   it("asks for the default again when the picker is cancelled before any default arrived", async () => {
@@ -233,8 +327,8 @@ describe("workspace manager", () => {
     // The retired first answer lands and changes nothing; the second fills
     // the card.
     await act(async () => slowDefault.resolve("/home/sam/stale"));
-    expect(screen.queryByText("/home/sam/stale/")).toBeNull();
-    expect(await screen.findByText("/home/sam/dohc/")).toBeTruthy();
+    expect(location()).not.toContain("/home/sam/stale");
+    await locationReads("/home/sam/dohc/Personal");
     expect(screen.getByRole("button", { name: /create workspace/i })).toHaveProperty("disabled", false);
   });
 
@@ -246,7 +340,7 @@ describe("workspace manager", () => {
     const user = userEvent.setup();
     const onReady = vi.fn();
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={onReady} />);
-    await user.click(await screen.findByRole("button", { name: /open an existing folder/i }));
+    await user.click(await screen.findByRole("button", { name: "Open folder" }));
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(within(toast).getByText("dohc can't open this folder")).toBeTruthy();
     expect(within(toast).getByText(body)).toBeTruthy();
@@ -262,7 +356,7 @@ describe("workspace manager", () => {
     const onReady = vi.fn();
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={onReady} />);
     await user.click(
-      await screen.findByRole("button", { name: /open an existing folder/i }),
+      await screen.findByRole("button", { name: "Open folder" }),
     );
     expect(bridge.attachWorkspaceFolder).toHaveBeenCalledWith({
       rootPath: "/home/sam/projects/research",
@@ -274,7 +368,7 @@ describe("workspace manager", () => {
 
   it("never requires login and never renders auth fields", async () => {
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
-    await screen.findByText("/home/sam/dohc/");
+    await locationReads("/home/sam/dohc/Personal");
     expect(screen.queryByLabelText(/email|password/i)).toBeNull();
     expect(screen.queryByRole("button", { name: /sign in|log in|sign up/i }))
       .toBeNull();
@@ -283,7 +377,7 @@ describe("workspace manager", () => {
   it("offers joining a synced workspace, gated on sign-in", async () => {
     const user = userEvent.setup();
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
-    await screen.findByText("/home/sam/dohc/");
+    await locationReads("/home/sam/dohc/Personal");
     await user.click(
       screen.getByTestId("first-run-join-synced"),
     );
@@ -307,7 +401,7 @@ describe("workspace manager", () => {
       new Error("dohc found no dohc server at https://dohc.example.test."),
     );
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
-    await screen.findByText("/home/sam/dohc/");
+    await locationReads("/home/sam/dohc/Personal");
     await user.click(screen.getByTestId("first-run-join-synced"));
 
     fireEvent.change(await screen.findByTestId("cloud-server-url"), {
@@ -340,7 +434,7 @@ describe("workspace manager", () => {
     bridge.platform = platform;
     try {
       render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
-      await screen.findByText("/home/sam/dohc/");
+      await locationReads("/home/sam/dohc/Personal");
 
       bridge.checkForUpdates.mockResolvedValueOnce({
         checked: false, state: { status: "error", message: "This build does not update itself." },
@@ -383,7 +477,7 @@ describe("workspace manager", () => {
 
   it("reads like a desktop app, not a marketing page", async () => {
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
-    await screen.findByText("/home/sam/dohc/");
+    await locationReads("/home/sam/dohc/Personal");
     // No marketing tropes: pricing, testimonials, feature grids, sign-up CTAs.
     expect(
       screen.queryByText(/get started free|pricing|testimonial|trusted by/i),
@@ -561,7 +655,7 @@ describe("workspace manager with registered workspaces", () => {
 
   it("shows no list on first run", async () => {
     render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
-    await screen.findByText("/home/sam/dohc/");
+    await locationReads("/home/sam/dohc/Personal");
     expect(screen.queryByTestId("workspace-manager-row")).toBeNull();
   });
 });

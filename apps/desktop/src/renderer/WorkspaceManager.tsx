@@ -1,7 +1,7 @@
 import { DohcMark } from "@dohc/brand";
-import { FolderOpen, Inbox, Laptop, MoreHorizontal } from "lucide-react";
+import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
+import { FolderOpen, Laptop, Link, MoreHorizontal, type LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
 import type { ShareHandoffStatus } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import type { Workspace } from "./DesktopWorkspaceShell";
@@ -26,35 +26,30 @@ import { revealInFileManagerLabel } from "../workspaces/explorerMenu";
 // row showing the name and the path the dropdown cannot fit. Nothing new to
 // learn between the two states.
 
-// One route: what it is, one line on what it does, and the verb that does it.
-function RouteRow(props: {
-  icon: ReactNode;
-  title: string;
+// One other way in: its icon and verb, with the line on what it does in a
+// tooltip on hover or keyboard focus.
+function RouteButton(props: {
+  icon: LucideIcon;
+  label: string;
   detail: string;
-  action: string;
-  // Pinned accessible name where e2e matches on it; visible text stays short.
-  ariaLabel?: string;
   testId?: string;
   onClick: () => void;
 }) {
+  const tooltip = useTooltip();
+  const Icon = props.icon;
   return (
-    <div className="flex items-center gap-3 py-3.5">
-      <span className="grid size-8 shrink-0 place-items-center rounded-md border border-line bg-panel text-muted">
-        {props.icon}
-      </span>
-      <div className="flex min-w-0 flex-1 flex-col">
-        <span className="text-[13px] font-medium leading-5 text-ink">{props.title}</span>
-        <span className="text-[12px] leading-4 text-muted">{props.detail}</span>
-      </div>
+    <span {...tooltip.hoverProps} className="relative">
       <SecondaryButton
-        aria-label={props.ariaLabel}
+        {...tooltip.focusProps}
         data-testid={props.testId}
         onClick={props.onClick}
-        className="w-16 shrink-0 text-center"
+        className="inline-flex items-center gap-1.5 whitespace-nowrap"
       >
-        {props.action}
+        <Icon size={14} strokeWidth={1.9} aria-hidden className="shrink-0" />
+        {props.label}
       </SecondaryButton>
-    </div>
+      <Tooltip {...tooltip.tooltipProps}>{props.detail}</Tooltip>
+    </span>
   );
 }
 
@@ -305,32 +300,29 @@ export function WorkspaceManager(props: {
         initialServerUrl={retryServerUrl}
       />
     ) : (
-      <div className="flex w-full flex-col gap-5">
+      <div className="flex w-full flex-col items-center gap-5">
         <NewWorkspaceCard onWorkspaceReady={onWorkspaceReady} />
-        <div className="flex flex-col divide-y divide-line">
-          <RouteRow
-            icon={<FolderOpen size={15} strokeWidth={1.9} aria-hidden />}
-            title="Open an existing folder"
+        {/* A little wider than the card, so the three fit on one line. */}
+        <div className="-mx-4 flex flex-wrap justify-center gap-1.5 self-stretch">
+          <RouteButton
+            icon={FolderOpen}
+            label="Open folder"
             detail="Use a folder of files you already have."
-            action="Open"
-            ariaLabel="Open an existing folder as a workspace"
             onClick={() => void openExisting()}
           />
-          <RouteRow
-            icon={<Laptop size={15} strokeWidth={1.9} aria-hidden />}
-            title="Join from another machine"
-            detail="Bring over a workspace you sync through your server."
-            action="Join"
-            testId="first-run-join-synced"
-            onClick={() => setJoining(true)}
-          />
-          <RouteRow
-            icon={<Inbox size={15} strokeWidth={1.9} aria-hidden />}
-            title="Open a share"
+          <RouteButton
+            icon={Link}
+            label="Open a share"
             detail="Open files someone shared with you."
-            action="Open"
             testId="first-run-open-share"
             onClick={() => setOpeningShare(true)}
+          />
+          <RouteButton
+            icon={Laptop}
+            label="Join a synced workspace"
+            detail="Bring over a workspace you sync through your server."
+            testId="first-run-join-synced"
+            onClick={() => setJoining(true)}
           />
         </div>
       </div>

@@ -36,7 +36,7 @@ test("workspace manager creates another window and forgets a workspace without d
       await manager.emulateMedia({ reducedMotion: "reduce" });
       await manager.screenshot({ path: testInfo.outputPath(`manager-${theme}.png`) });
     }
-    await manager.getByRole("textbox", { name: "Folder name" }).fill("second");
+    await manager.getByRole("textbox", { name: "Workspace name" }).fill("second");
     const secondOpened = desktop.app.waitForEvent("window");
     await manager.getByRole("button", { name: "Create workspace", exact: true }).click();
     const second = await secondOpened;
