@@ -1,6 +1,6 @@
 import {describe,expect,it,vi} from "vitest";
 import {DaemonRefusalError} from "@dohc/workspace-engine-client";
-import {deliverStopRestore} from "./liveRestoreDelivery";
+import {cancelStopRestore, deliverStopRestore} from "./liveRestoreDelivery";
 
 const binding={workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"b".repeat(64),currentPath:"file.md",selectorPaths:["file.md"],restoreFenceGeneration:0};
 const operation={operationId:"operation",relayDatabaseNamespace:"relay",oldBinding:binding,hostId:"service",newFence:1,
@@ -165,6 +165,46 @@ describe.each(["owner","bootstrap"] as const)("%s restore cut on a full author i
     expect(f.settles()).toEqual([]);
     expect(f.fenced()).toBe(false);
   });
+});
+
+// A recorded Decline asks the fencing host once and records only an answer
+// that proves the restore's end.
+function decline(answer:unknown,pending:unknown={operationId:"operation",objectId:"object",lineageClaimId:"b".repeat(64),hostId:"service",newFence:1}){
+  const sendRequest=vi.fn(async(_request:{method:string;params:unknown})=>({result:answer}));
+  const store={pendingStopRestoreCancellation:vi.fn(()=>pending),acknowledgeStopRestoreCancellation:vi.fn()};
+  const declined=cancelStopRestore({store:store as never,lookup:{workspaceId:"workspace",ownerUserId:"owner",operationId:"operation"},
+    connection:{client:{sendRequest} as never,workspace:"native-workspace",
+      host:{mode:"service",hostId:"service",hostEpoch:1,instanceId:"instance",connectionId:"connection"} as never,deadlineMs:1000,nextRequestId:()=>1}});
+  return {declined,store,sendRequest};
+}
+
+it("records the fencing host's answer to a recorded Decline",async()=>{
+  const answer={status:"cancelled",hostId:"service",generation:0,binding};
+  const f=decline(answer);
+  await expect(f.declined).resolves.toEqual({kind:"declined"});
+  expect(f.sendRequest.mock.calls.map(([request])=>[request.method,request.params])).toEqual([["liveApplication.cancelRestoreFence",
+    {operationId:"operation",objectId:"object",lineageClaimId:"b".repeat(64),hostId:"service",newFence:1}]]);
+  expect(f.store.acknowledgeStopRestoreCancellation).toHaveBeenCalledWith(expect.objectContaining({operationId:"operation",host:expect.objectContaining({hostId:"service"})}),answer,expect.any(Number));
+});
+
+// A host that holds no binding at the restore's generation answers a replay
+// after a later restore; recording it would end this restore without proof.
+it("leaves a Decline pending when the host answers with no binding",async()=>{
+  const f=decline({status:"cancelled",hostId:"service",generation:0,binding:null});
+  await expect(f.declined).resolves.toEqual({kind:"pending",reason:"The host holds no binding at the restore's generation."});
+  expect(f.store.acknowledgeStopRestoreCancellation).not.toHaveBeenCalled();
+});
+
+it.each([[{status:"fenced",receipt}],[{status:"pending",reason:"native-fence-pending"}]])("leaves a Decline pending on a bare answer %o",async answer=>{
+  const f=decline(answer);
+  await expect(f.declined).rejects.toThrow();
+  expect(f.store.acknowledgeStopRestoreCancellation).not.toHaveBeenCalled();
+});
+
+it("asks nothing once the Decline is answered",async()=>{
+  const f=decline(undefined,null);
+  await expect(f.declined).resolves.toEqual({kind:"declined"});
+  expect(f.sendRequest).not.toHaveBeenCalled();
 });
 
 it("does not ask again for the fence once the caller cancels during publication",async()=>{

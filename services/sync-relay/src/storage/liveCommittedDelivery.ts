@@ -68,8 +68,9 @@ import {
   assertJournalCheckpointPosition,
 } from "./liveUpdateJournal";
 import { bindLiveDeliveryHostNamespace, consumeLiveDeliveryReservation } from "./liveDeliveryReservations";
-import { nativeRestoreFence, requireStopRestoreCut, requireStopRestoreOwnerOrigin, readStopRestoreInTransaction, stopRestoreRevocationHolds, type StopRestoreLookup, type StopRestoreOperation, type StopRestoreApplied } from "./liveRestoreOperation";
-import {parseNativeRestoreFenceReceipt, type NativeRestoreFenceReceipt} from "../liveRestoreFence";
+import { acknowledgeStopRestoreCancellation, nativeRestoreFence, readStopRestoreCancellation, requireStopRestoreCut, requireStopRestoreOwnerOrigin, readStopRestoreInTransaction,
+  stopRestoreDeclineRecorded, stopRestoreRevocationHolds, type StopRestoreLookup, type StopRestoreOperation, type StopRestoreApplied } from "./liveRestoreOperation";
+import {parseNativeRestoreFenceReceipt, type NativeRestoreCancellation, type NativeRestoreCancellationAnswer, type NativeRestoreFenceReceipt} from "../liveRestoreFence";
 import {parseNativeRestoreProposalReceipt, decodeNativeRestoreProposal, type RestoreProofBudget} from "../liveRestoreProposal";
 import {validateLiveRestoreProposal, type OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/restore-proof";
 import {readRestoreReviewHistory} from "./liveRestoreReview";
@@ -1454,7 +1455,8 @@ export class LiveCommittedDeliveryStore {
       assertProposalCurrent();
       assertCurrentInTransaction();
       const operation=readStopRestoreInTransaction(this.#storage,input);integrity(operation);
-      integrity(operation.phase==="native-fenced");
+      // The same writer records a Decline, so exactly one of them takes the fenced restore.
+      integrity(operation.phase==="native-fenced" && !stopRestoreDeclineRecorded(this.#storage,operation));
       const admitted=appendValidatedLiveJournal(this.#storage,{document,namespace:this.#history.namespace,host,
         current:{binding,authority:{principalKind:"owner",principalId:input.ownerUserId,grantId:null,grantGeneration:null}},metadata,
         updateBytes,receivedAtMs:at,firstSeen:validated.content.replacementRanges,firstSeenDeletes:validated.content.firstSeenDeletes,
@@ -1492,6 +1494,8 @@ export class LiveCommittedDeliveryStore {
       integrity(this.#storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(total,document.workspaceId).changes===1);
       integrity(this.#storage.db.prepare(`UPDATE ${LIVE_RESTORE_OPERATIONS} SET phase='relay-admitted' WHERE relay_database_namespace=? AND operation_id=? AND phase='native-fenced'`)
         .run(this.#history.namespace,input.operationId).changes===1);
+      // The fence carried the open retirement to this generation. It now names the restore's own accepted row.
+      carryServiceActivationRetirement(this.#storage,document,fence.operation.newFence,admitted.metadata.accepted.receipt.journalCursor);
       requireRestoreLifecycleBudget(this.#storage.db,this.#history.namespace,input.operationId,input.workspaceId,input.maxBytes);
     });
     return this.readStopRestoreLifecycle(input)!;
@@ -1545,9 +1549,6 @@ export class LiveCommittedDeliveryStore {
       if (stage==="resume") {
         integrity(this.#storage.db.prepare(`UPDATE sync_relay_live_documents SET admission_state='open' WHERE ${WHERE_DOCUMENT} AND restore_fence_generation=? AND admission_state='closed' AND lineage_state='current'`)
           .run(...documentParams(saved.operation.intent.document),saved.operation.newFence).changes===1);
-        // The fence carried the open retirement to this generation. It now names the restore's own accepted row.
-        carryServiceActivationRetirement(this.#storage,saved.operation.intent.document,saved.operation.newFence!,saved.operation.newFence!,
-          lifecycle.admitted.accepted.receipt.journalCursor);
       }
       requireRestoreLifecycleBudget(this.#storage.db,this.#history.namespace,input.operationId,input.workspaceId,input.maxBytes);
       return structuredClone(lifecycle);
@@ -1612,6 +1613,28 @@ export class LiveCommittedDeliveryStore {
       integrity(changed.changes === 1);
       return structuredClone(receipt);
     });
+  }
+  /** The native cancellation a recorded Decline needs from this host, or null once answered. */
+  pendingStopRestoreCancellation(input: StopRestoreLookup & {host: LiveHostConnectionCoordinate}): NativeRestoreCancellation | null {
+    const host = snapshotHostCoordinate(input.host);
+    return this.#storage.readTx(() => {
+      this.#cancellingHost(input, host);
+      return readStopRestoreCancellation(this.#storage, input);
+    });
+  }
+  acknowledgeStopRestoreCancellation(input: StopRestoreLookup & {host: LiveHostConnectionCoordinate}, answer: NativeRestoreCancellationAnswer, now: number): StopRestoreOperation {
+    const host = snapshotHostCoordinate(input.host);
+    return this.#storage.tx(() => {
+      this.#cancellingHost(input, host);
+      return acknowledgeStopRestoreCancellation(this.#storage, input, answer, now);
+    });
+  }
+  // Cancellation does not recheck the frozen cut: a Decline ends the restore
+  // even where that cut no longer describes the current file.
+  #cancellingHost(input: StopRestoreLookup, host: LiveHostConnectionCoordinate): void {
+    this.#standing(host);
+    const operation = readStopRestoreInTransaction(this.#storage, input); integrity(operation);
+    integrity(operation.basis.namespace === this.#history.namespace && operation.basis.hostId === host.hostId && operation.basis.hostMode === host.mode);
   }
   closeStopRestoreCut(capture: StopRestoreCutCapture): void {
     const saved = this.#restores.get(capture);

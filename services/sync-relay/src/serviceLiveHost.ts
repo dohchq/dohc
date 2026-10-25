@@ -1060,6 +1060,9 @@ export async function startServiceLiveHost(options: {
       async completeRestore(value: StopRestoreLookup, proposalDigest: string, callerSignal?: AbortSignal) {
         return restoring(value, callerSignal, (consumer, lookup, joined) => consumer.completeRestore(lookup, proposalDigest, joined));
       },
+      async declineRestore(value: StopRestoreLookup, callerSignal?: AbortSignal) {
+        return restoring(value, callerSignal, (consumer, lookup, joined) => consumer.declineRestore(lookup, joined));
+      },
       async stopRestore(value: StopRestoreLookup, callerSignal?: AbortSignal) {
         return restoring(value, callerSignal, (consumer, lookup, joined) => consumer.stopRestore(lookup, joined));
       },

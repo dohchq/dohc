@@ -9,7 +9,7 @@ import type {CommittedDeliveryOutcome} from "./liveCommittedDelivery.js";
 import {settlementResult,type CommittedSettlement} from "./liveSettlement.js";
 import {isDeepStrictEqual} from "node:util";
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
-import {deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelivery";
+import {cancelStopRestore, deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelivery";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
 import type {LiveRestorePreparation} from "./liveRestorePreparation";
 import {LiveHostRegistrations} from "./liveHostRegistration";
@@ -247,6 +247,15 @@ export class OwnerCommittedDelivery {
     if (this.#active.has(key)) throw new Error("A restore operation already owns this document.");
     this.#active.add(key);
     try {return await restore.confirm({store: this.#store, lookup, connection: this.connection, deliveryKind: "owner", signal}, proposalDigest);}
+    finally {this.#active.delete(key);}
+  }
+
+  async declineRestore(value: StopRestoreLookup, signal?: AbortSignal) {
+    const lookup = snapshotStopRestoreLookup(value), document = this.documentForRestore(lookup);
+    const key = JSON.stringify(document);
+    if (this.#active.has(key)) throw new Error("A restore operation already owns this document.");
+    this.#active.add(key);
+    try {return await cancelStopRestore({store: this.#store, lookup, connection: this.connection, signal});}
     finally {this.#active.delete(key);}
   }
 

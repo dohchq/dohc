@@ -126,7 +126,8 @@ it("declines a restore before its fence and keeps access revoked", () => {
 
 // Proves: Decline and the fence advance read and write the operation in the
 // same serialized writer, so when both answer one status only one takes it.
-// A decline after the fence is refused and changes nothing.
+// A decline after the fence leaves the fence in place and only records the
+// request the fencing host must answer.
 it.each(["decline", "fence"] as const)("lets exactly one of Decline and the fence take the restore: %s first", first => {
   const f = fixture();
   try {
@@ -136,8 +137,10 @@ it.each(["decline", "fence"] as const)("lets exactly one of Decline and the fenc
     const decline = () => declineStopRestore(f.context, f.lookup, 45), fence = () => advanceStopRestoreFence(f.context, f.lookup, 50);
     const won = (first === "decline" ? decline : fence)();
     const settled = f.rows();
-    expect(first === "decline" ? fence : decline).toThrow(first === "decline" ? "This restore was declined." : "can no longer be declined");
+    if (first === "decline") expect(fence).toThrow("This restore was declined.");
+    else expect(decline()).toEqual(won);
     expect(f.rows()).toEqual(settled);
+    expect(f.raw.prepare("SELECT outcome FROM sync_relay_live_restore_cancellations").all()).toEqual(first === "decline" ? [] : [{outcome: null}]);
     expect(readStopRestore(f.context, f.lookup)).toEqual(won);
     expect(won.phase).toBe(first === "decline" ? "declined" : "fenced");
     expect(f.rows().documents[0]).toMatchObject(first === "decline"

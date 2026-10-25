@@ -64,10 +64,11 @@ export function replicaPageResult(value: unknown): ReplicaPageResult {
     (r.blockedCursor !== null && (!Number.isSafeInteger(r.blockedCursor) || r.blockedCursor <= r.journalCursor))) throw new TypeError("Invalid replica page result.");
   return { ...frontiers, applied: r.applied, skipped: r.skipped, blockedCursor: r.blockedCursor };
 }
-/** Metadata, then each row's update and optional checkpoint, with u32 LE length prefixes. */
-export function encodeReplicaJournalPage(rows: readonly ReplicaJournalRow[]): Buffer {
-  if (rows.length > 500) throw new TypeError("Replica page exceeds row limit.");
-  const fields = [Buffer.from(JSON.stringify(rows.map(r => ({ ...r, admitted: { metadata: r.admitted.metadata, updateBytes: [] },
+/** Metadata, then each update row's update and optional checkpoint, with u32 LE length prefixes. A cancellation has no spans. */
+export function encodeReplicaJournalPage(entries: readonly ReplicaJournalEntry[]): Buffer {
+  if (entries.length > 500) throw new TypeError("Replica page exceeds row limit.");
+  const rows = entries.filter((entry): entry is ReplicaJournalRow => !("cancellation" in entry));
+  const fields = [Buffer.from(JSON.stringify(entries.map(r => "cancellation" in r ? r : ({ ...r, admitted: { metadata: r.admitted.metadata, updateBytes: [] },
     restore: r.restore ? { ...r.restore, checkpointBytes: [] } : null }))))];
   for (const r of rows) { fields.push(Buffer.from(r.admitted.updateBytes)); if (r.restore) fields.push(Buffer.from(r.restore.checkpointBytes)); }
   return Buffer.concat(fields.flatMap(bytes => {

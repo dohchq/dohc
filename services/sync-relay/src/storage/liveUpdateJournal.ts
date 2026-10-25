@@ -21,6 +21,8 @@ import type { StorageContext } from "./context";
 import type { SqliteDb, CurrentLiveBindingRequest, LiveHostConnectionCoordinate, LiveUpdateJournalCut, LiveUpdateJournalCutResult, LiveUpdateJournalCommitInput, RelayLiveUpdateJournalResult, CommittedLiveUpdateResult, LiveJournalValidation, StoredLiveDocumentAuthority } from "./types";
 import { LiveJournalAdmittedCapacityError } from "./errors";
 import {LIVE_RESTORE_OPERATIONS, LIVE_RESTORE_SOURCE_RANGES} from "./liveRestoreOperationSchema";
+import {LIVE_RESTORE_CANCELLATIONS} from "./liveRestoreCancellationSchema";
+import {parseNativeRestoreCancellationAnswer, type NativeRestoreCancellationReceipt} from "../liveRestoreFence";
 import { LIVE_JOURNAL_TABLE, LIVE_JOURNAL_PROVENANCE } from "./schema";
 import { snapshotHostCoordinate } from "../liveTicketInputs";
 import { readLiveHostControl } from "./hostControl";
@@ -280,8 +282,19 @@ export interface ReplicaLiveJournalRow {
   readonly authority: ReplicaLiveJournalAuthority | null;
 }
 
+/**
+ * A restore declined after its native fence committed, at the journal cursor
+ * the relay gave its host's receipt. It is no delivery and carries no bytes:
+ * a replica advances the document's generation and nothing else.
+ */
+export interface ReplicaLiveJournalCancellation {
+  readonly relayDatabaseNamespace: string;
+  readonly journalCursor: number;
+  readonly cancellation: NativeRestoreCancellationReceipt;
+}
+
 export interface ReplicaLiveJournalPage {
-  readonly rows: readonly ReplicaLiveJournalRow[];
+  readonly rows: readonly (ReplicaLiveJournalRow | ReplicaLiveJournalCancellation)[];
   readonly nextCursor: number;
   readonly hasMore: boolean;
 }
@@ -441,10 +454,29 @@ export async function readReplicaLiveJournal(storage: StorageContext, input: Rep
       nextCursor = projected.journalCursor;
     }
     const captured = captureReplicaJournalRows(storage, workspaceId, after, projectedRows, maxBytes);
-    return {captured, hasMore: hasMore || captured.length < projectedRows.length};
+    // Cancellation control entries take cursors between deliveries; one past the limit shows there are more.
+    const controls = storage.db.prepare(`SELECT relay_database_namespace,journal_cursor,acknowledgment_json FROM ${LIVE_RESTORE_CANCELLATIONS}
+      WHERE workspace_id=? AND journal_cursor IS NOT NULL AND journal_cursor>? ORDER BY journal_cursor LIMIT ?`).all(workspaceId, after, limit + 1).map(row => {
+      const answer = parseNativeRestoreCancellationAnswer(JSON.parse(String(row.acknowledgment_json)));
+      journalIntegrity(answer.status === "fenceCancelled");
+      return {relayDatabaseNamespace: parseLiveUpdateIdentifier(row.relay_database_namespace), journalCursor: authorityInteger(row.journal_cursor, 1),
+        cancellation: answer.receipt} satisfies ReplicaLiveJournalCancellation;
+    });
+    return {captured, controls, hasMore: hasMore || captured.length < projectedRows.length};
   });
-  const rows: ReplicaLiveJournalRow[] = [];
-  let workBytes = 0, rowBytes = 0, nextCursor = after, hasMore = snapshot.hasMore;
+  const rows: (ReplicaLiveJournalRow | ReplicaLiveJournalCancellation)[] = [];
+  let workBytes = 0, rowBytes = 0, nextCursor = after, hasMore = snapshot.hasMore, control = 0;
+  // Serves the control entries ordered before `cursor`. False once the page is full.
+  const serveControls = (cursor: number) => {
+    for (; control < snapshot.controls.length && snapshot.controls[control]!.journalCursor < cursor; control++) {
+      const entry = snapshot.controls[control]!, encodedBytes = Buffer.byteLength(JSON.stringify(entry));
+      if (rows.length === limit || (rows.length > 0 && replicaJournalResponseBytes(rowBytes + encodedBytes, rows.length + 1, entry.journalCursor, false) > maxBytes)) return false;
+      rows.push(entry);
+      rowBytes += encodedBytes;
+      nextCursor = entry.journalCursor;
+    }
+    return true;
+  };
   if (replicaJournalResponseBytes(0, 0, after, false) > maxBytes) throw new RangeError("Replica journal response exceeds the byte budget.");
   const yieldWork = async () => {await setImmediate(); check(); workBytes = 0;};
   // Keep intermediate chunks divisible by three, so only the last has base64 padding.
@@ -462,6 +494,7 @@ export async function readReplicaLiveJournal(storage: StorageContext, input: Rep
     return encoded.join("");
   };
   for (const [index, entry] of snapshot.captured.entries()) {
+    if (!serveControls(entry.projected.journalCursor) || rows.length === limit) {hasMore = true; break;}
     // Verification and encoding do not hold a SQLite transaction or monopolize pushes.
     if (index % 16 === 0) await yieldWork();
     const metadataBytes = replicaMetadataBytes(entry.raw);
@@ -488,6 +521,8 @@ export async function readReplicaLiveJournal(storage: StorageContext, input: Rep
     rowBytes += encodedBytes;
     nextCursor = row.journalCursor;
   }
+  // Entries after the last served delivery belong to this page only when no delivery was left for the next.
+  if (!hasMore && !serveControls(Number.MAX_SAFE_INTEGER)) hasMore = true;
   check();
   return {rows, nextCursor, hasMore};
 }

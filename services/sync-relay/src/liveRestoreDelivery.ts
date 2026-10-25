@@ -4,7 +4,7 @@ import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update
 import type {LiveHostConnectionCoordinate} from "./storage";
 import type {LiveCommittedDeliveryStore, StopRestoreCutCapture} from "./storage/liveCommittedDelivery";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
-import {parseNativeRestoreFenceReceipt, type NativeRestoreFenceReceipt} from "./liveRestoreFence";
+import {parseNativeRestoreCancellationAnswer, parseNativeRestoreFenceReceipt, type NativeRestoreFenceReceipt} from "./liveRestoreFence";
 import {configRecord} from "./deviceLiveHostConfig";
 import {authorityInteger} from "./storage/liveDocumentAuthority";
 import {settlementResult} from "./liveSettlement";
@@ -12,6 +12,34 @@ import {settlementResult} from "./liveSettlement";
 export type StopRestoreOutcome = {kind: "pending"; reason: string} | {kind: "done"; receipt: NativeRestoreFenceReceipt};
 export function snapshotStopRestoreLookup(input: StopRestoreLookup): StopRestoreLookup {
   return {operationId: parseLiveUpdateIdentifier(input.operationId), workspaceId: parseLiveUpdateIdentifier(input.workspaceId), ownerUserId: parseLiveUpdateIdentifier(input.ownerUserId)};
+}
+
+export type StopRestoreCancellationOutcome = {kind: "pending"; reason: string} | {kind: "declined"};
+
+/**
+ * Asks the fencing host to end a restore whose Decline the relay recorded,
+ * and records its durable answer. Any other answer, a refusal or a lost
+ * reply leaves the restore pending for the next attempt. The consumer holds
+ * its normal document exclusion for this entire call.
+ */
+export async function cancelStopRestore(options: {
+  store: LiveCommittedDeliveryStore;
+  lookup: StopRestoreLookup;
+  connection: {client: EngineClient; workspace: string; host: LiveHostConnectionCoordinate; deadlineMs: number; nextRequestId(): number};
+  signal?: AbortSignal;
+}): Promise<StopRestoreCancellationOutcome> {
+  const {store, connection: c, signal} = options, input = {...snapshotStopRestoreLookup(options.lookup), host: c.host};
+  signal?.throwIfAborted();
+  const params = store.pendingStopRestoreCancellation(input);
+  if (!params) return {kind: "declined"};
+  const response = await c.client.sendRequest({id: c.nextRequestId(), workspace: c.workspace, deadlineMs: c.deadlineMs,
+    method: "liveApplication.cancelRestoreFence", params: {...params}}, signal);
+  signal?.throwIfAborted();
+  const answer = parseNativeRestoreCancellationAnswer(response.result);
+  // The host holds no binding at that generation now, so its answer proves nothing about this restore.
+  if (answer.status === "cancelled" && answer.binding === null) return {kind: "pending", reason: "The host holds no binding at the restore's generation."};
+  store.acknowledgeStopRestoreCancellation(input, answer, Date.now());
+  return {kind: "declined"};
 }
 
 /** The consumer holds its normal document exclusion for this entire call. */

@@ -17,7 +17,8 @@ import { createLiveJournalHistoryAuthority } from "../../../services/sync-relay/
 import { beginStopRestore, advanceStopRestoreFence, declineStopRestore, readStopRestore } from "../../../services/sync-relay/src/storage/liveRestoreOperation.js";
 import type { StorageContext } from "../../../services/sync-relay/src/storage/context.js";
 import type { StopRestoreCutCapture, OwnerCutCapture } from "../../../services/sync-relay/src/storage/liveCommittedDelivery.js";
-import type {NativeRestoreFenceReceipt} from "../../../services/sync-relay/src/liveRestoreFence.js";
+import type {NativeRestoreCancellationAnswer, NativeRestoreFenceReceipt} from "../../../services/sync-relay/src/liveRestoreFence.js";
+import {admitRetirementPublication} from "../../../services/sync-relay/src/storage/serviceActivationPublication.js";
 import { openSyncRelayStorage } from "../../../services/sync-relay/src/storage.js";
 import {parseNativeRestoreProposalReceipt, encodeNativeRestoreProposal, decodeNativeRestoreProposal, nativeSourceAgentDeclaration} from "../../../services/sync-relay/src/liveRestoreProposal.js";
 import {initializeLiveRestoreOperationSchema, LIVE_RESTORE_ACTIVE_V1_SQL, LIVE_RESTORE_OPERATIONS_V1_SQL} from "../../../services/sync-relay/src/storage/liveRestoreOperationSchema.js";
@@ -1499,10 +1500,10 @@ function hostRestoredDocument(f: ReturnType<typeof fixture>, shareId: string) {
 // Proves: a retirement recorded while a restore is unfinished, by the
 // restore's own revocation of the last Edit grant or by Pause, keeps live
 // admission fenced. The fence carries one recorded before it to the fenced
-// generation, and once the restore resumes it names the restore's own journal
-// cursor, the key the engine accepts then: completion at that key retires the
-// activation, and at the old generation is refused. No other restore of the
-// document begins while it is open.
+// generation, and relay admission names the restore's own journal cursor, the
+// key the engine accepts once the restore resumes: completion at that key
+// retires the activation, and at the old generation is refused. No other
+// restore of the document begins while it is open.
 it.each(["revocation", "pause"] as const)("carries a retirement recorded during a restore to the restored generation: %s", cause => {
   const f = contentProposalFixture("bootstrap", "service", false, false, false, 0,
     hosted => hostRestoredDocument(hosted, cause === "revocation" ? hosted.intent.shareId : "other"));
@@ -1517,6 +1518,7 @@ it.each(["revocation", "pause"] as const)("carries a retirement recorded during 
     expect(retirement()).toEqual({...recorded, restoreFenceGeneration: 2, acceptedThrough: 2});
     const proposed = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
     const admitted = f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201);
+    expect(retirement()).toEqual({...recorded, restoreFenceGeneration: 2, acceptedThrough: admitted.admitted.accepted.receipt.journalCursor});
     const application = {fence: admitted.preparation.fence, candidateDigest: admitted.candidateDigest, nativeSourceManifestDigest: admitted.nativeSourceManifestDigest,
       admitted: admitted.admitted, localHeadSequence: admitted.preparation.fence.localHeadSequence + 1,
       hostCoordinate: {hostId: f.input.host.hostId, hostEpoch: f.input.host.hostEpoch, instanceId: f.input.host.instanceId, connectionId: f.input.host.connectionId}, recordedAtMs: 202};
@@ -1569,6 +1571,195 @@ it("keeps a retirement's pre-restore key when its restore is declined", () => {
     f.write(db => db.prepare("UPDATE sync_relay_share_grants SET status='active',generation=6,revoked_at_ms=NULL WHERE grant_id=?").run(f.intent.grantId));
     expect(() => beginStopRestore(f.context, {...f.intent, operationId: "after-decline", expectedGrantGeneration: 6}, 50))
       .toThrow("Live editing is still stopping.");
+  } finally {f.close();}
+});
+
+// Proves: the restore's own accepted update, published by the retiring host
+// after settlement and before resume, is output the retirement writer proves
+// for a retirement opened as the restore began, since relay admission already
+// named the restore's journal cursor as its accepted-through.
+it("proves a restore's accepted output for a retirement before the restore resumes", () => {
+  const f = admittedRestoreFixture("bootstrap", false, "service", hosted => hostRestoredDocument(hosted, hosted.intent.shareId));
+  try {
+    const receipt = f.admitted.admitted.accepted.receipt;
+    const retirement = () => readServiceActivationRetirement(f.context, f.document)!;
+    expect(retirement()).toMatchObject({activationId: hostedActivationId, restoreFenceGeneration: 2, acceptedThrough: receipt.journalCursor, requestedAtMs: 40});
+    f.store.acknowledgeStopRestoreReplacement(f.input, f.application);
+    expect(f.store.acknowledgeStopRestoreSettlement(f.input, f.settlement).phase).toBe("settled");
+    // The retiring activation's owner applied through the restore.
+    f.write(db => db.prepare(`INSERT INTO sync_relay_live_delivery_owners(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,host_id,
+        origin_json,tip_receipt_json,tip_cursor,tip_sequence,tip_application_sequence,accounted_bytes) VALUES ('restore-test',?,'main',?,?,?,?,?,?,1,1,1)`)
+      .run(f.document.workspaceId, f.document.objectId, f.document.lineageClaimId, f.input.host.hostId, JSON.stringify({adoptionId: hostedActivationId}),
+        JSON.stringify(receipt), receipt.journalCursor));
+    const op = {originSeq: 0, opKind: "ydoc.update", recordedAtMs: 1, payloadJson: stableJsonStringify({versionId: "main", objectId: f.document.objectId,
+      path: "docs/a.md", contentKind: "richdoc", updateBlobSha256: receipt.updateDigest, isBaseState: false, lineageClaimId: f.document.lineageClaimId})};
+    expect(f.context.readTx(() => admitRetirementPublication(f.context, retirement(), op, {originId: "host", ops: new Map([[0, op]]), batched: false}))).toBeNull();
+    expect(readStopRestore(f.context, f.lookup)?.phase).toBe("settled");
+  } finally {f.close();}
+});
+
+// Proves: the fence moves an open retirement to the fenced generation only
+// when its accepted-through is the fence's cutover. Any other value is damage,
+// and the fence changes nothing.
+it("refuses the fence when an open retirement's accepted-through is not its cutover", () => {
+  const f = fixture("bootstrap", "service");
+  try {
+    hostRestoredDocument(f, f.intent.shareId);
+    f.add("before-restore");
+    beginStopRestore(f.context, f.intent, 40);
+    const cutover = readServiceActivationRetirement(f.context, f.document)!.acceptedThrough;
+    const accepted = (cursor: number) => f.write(db => db.prepare("UPDATE sync_relay_service_activations SET retire_accepted_cursor=?").run(cursor));
+    const state = () => ({documents: f.rows().documents, operations: f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all()});
+    accepted(cutover - 1);
+    const before = state();
+    expect(() => advanceStopRestoreFence(f.context, f.lookup, 50)).toThrow("Service activation retirement is damaged.");
+    expect(state()).toEqual(before);
+    accepted(cutover);
+    expect(advanceStopRestoreFence(f.context, f.lookup, 50).cutoverCursor).toBe(cutover);
+    expect(readServiceActivationRetirement(f.context, f.document)).toMatchObject({restoreFenceGeneration: 2, acceptedThrough: cutover});
+  } finally {f.close();}
+});
+
+// A restore fenced on the service host, whose revocation opened a
+// retirement, declined after its fence, and after the native fence when
+// `native`. It carries the two answers its fencing host may give.
+function declinedFence(native: boolean) {
+  const f = readyNativeFence("bootstrap", "service", true, false, hosted => hostRestoredDocument(hosted, hosted.intent.shareId));
+  try {
+    if (native) f.store.acknowledgeStopRestoreFence(f.lookup, f.receipt);
+    const cutover = readStopRestore(f.context, f.lookup)!.cutoverCursor!;
+    expect(declineStopRestore(f.context, f.lookup, 150).phase).toBe(native ? "native-fenced" : "old-cut-applied");
+    const fence = f.receipt.operation, binding = {...fence.oldBinding, restoreFenceGeneration: fence.newFence};
+    const row = f.raw.prepare("SELECT accepted_event_count,accepted_evidence_digest FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(cutover)!;
+    const cancelled: NativeRestoreCancellationAnswer = {status: "cancelled", hostId: fence.hostId, generation: fence.newFence - 1, binding: fence.oldBinding};
+    const fenceCancelled: NativeRestoreCancellationAnswer & {status: "fenceCancelled"} = {status: "fenceCancelled", hostId: fence.hostId,
+      generation: fence.newFence, binding, receipt: {fence: f.receipt, binding, endpoint: {terminalReceipt: fence.terminal,
+        eventCount: Number(row.accepted_event_count), historyEvidenceDigest: String(row.accepted_evidence_digest)}, recordedAtMs: 160}};
+    const key = (restoreFenceGeneration: number) => ({objectId: f.document.objectId, lineageClaimId: f.document.lineageClaimId,
+      activationId: hostedActivationId, restoreFenceGeneration, acceptedThrough: cutover});
+    return {...f, cutover, cancelled, fenceCancelled, key};
+  } catch (error) {f.close(); throw error;}
+}
+type DeclinedFence = ReturnType<typeof declinedFence>;
+const completeRetirementAt = (f: Pick<DeclinedFence, "storage" | "history" | "document" | "lookup">, key: ReturnType<DeclinedFence["key"]>) =>
+  f.storage.createServiceActivationStore(f.history).completeRetirement({workspaceId: f.document.workspaceId, key, boundary: null,
+    host: f.lookup.host, registeredAtMs: 400, nowMs: 400, guard() {}});
+const documentState = (f: Pick<DeclinedFence, "raw">) => f.raw.prepare("SELECT restore_fence_generation,admission_state FROM sync_relay_live_documents").get();
+
+// Proves: when the fencing host answers that no native fence committed, the
+// Decline ends the restore with no fence. The document and its open
+// retirement go back to the old generation in the same write, access and
+// admission stay stopped, and the retirement completes at its old key only.
+it("ends a declined restore at the old generation when its host never fenced it", () => {
+  const f = declinedFence(false);
+  try {
+    expect(f.store.pendingStopRestoreCancellation(f.lookup)).toEqual({operationId: "restore", objectId: f.document.objectId,
+      lineageClaimId: f.document.lineageClaimId, hostId: f.receipt.operation.hostId, newFence: 2});
+    const declined = f.store.acknowledgeStopRestoreCancellation(f.lookup, f.cancelled, 170);
+    expect(declined).toMatchObject({phase: "declined", newFence: null, cutoverCursor: null, applied: null, nativeReceipt: null, declinedAtMs: 170});
+    expect(documentState(f)).toEqual({restore_fence_generation: 1, admission_state: "closed"});
+    expect(readServiceActivationRetirement(f.context, f.document)).toMatchObject({restoreFenceGeneration: 1, acceptedThrough: f.cutover, requestedAtMs: 40});
+    expect(f.raw.prepare("SELECT outcome,journal_cursor FROM sync_relay_live_restore_cancellations").all()).toEqual([{outcome: "cancelled", journal_cursor: null}]);
+    expect(f.store.pendingStopRestoreCancellation(f.lookup)).toBeNull();
+    // A lost reply replays; a different answer is refused.
+    const after = f.rows();
+    expect(f.store.acknowledgeStopRestoreCancellation(f.lookup, f.cancelled, 180)).toEqual(declined);
+    expect(() => f.store.acknowledgeStopRestoreCancellation(f.lookup, f.fenceCancelled, 180)).toThrow();
+    expect(f.rows()).toEqual(after);
+    expect(f.storage.getShareGrant("grant")).toMatchObject({status: "revoked"});
+    expect(() => completeRetirementAt(f, f.key(2))).toThrow("Service activation retirement is unavailable.");
+    expect(completeRetirementAt(f, f.key(1))).toEqual({status: "retired", replayed: false});
+  } finally {f.close();}
+});
+
+// Proves: when the fencing host answers with its terminal receipt, the
+// Decline ends the restore at the fenced generation, whether or not the relay
+// saved the native fence's reply. The receipt takes its own journal cursor,
+// served to replicas as a control entry, and survives a restart; the
+// retirement stays at the fenced generation with its accepted-through
+// unchanged, completes there, and the old key is refused.
+it.each([false, true])("ends a declined restore at the fenced generation with its host's receipt, native fence saved=%s", async native => {
+  const f = declinedFence(native);
+  let reopened: ReturnType<typeof openSyncRelayStorage> | undefined, closed = false;
+  try {
+    const sequence = () => Number(f.raw.prepare("SELECT seq FROM sqlite_sequence WHERE name='sync_relay_live_update_journal'").get()!.seq);
+    const control = sequence() + 1, operation = readStopRestore(f.context, f.lookup)!;
+    const declined = f.store.acknowledgeStopRestoreCancellation(f.lookup, f.fenceCancelled, 170);
+    expect(declined).toEqual({...operation, phase: "declined", declinedAtMs: 170, nativeReceipt: f.receipt});
+    expect(documentState(f)).toEqual({restore_fence_generation: 2, admission_state: "closed"});
+    expect(readServiceActivationRetirement(f.context, f.document)).toMatchObject({restoreFenceGeneration: 2, acceptedThrough: f.cutover, requestedAtMs: 40});
+    expect(f.raw.prepare("SELECT outcome,journal_cursor FROM sync_relay_live_restore_cancellations").all()).toEqual([{outcome: "fence-cancelled", journal_cursor: control}]);
+    expect(sequence()).toBe(control);
+    expect(await readReplicaLiveJournal(f.context, {workspaceId: "workspace", after: f.cutover, limit: 10}))
+      .toEqual({rows: [{relayDatabaseNamespace: "restore-test", journalCursor: control, cancellation: f.fenceCancelled.receipt}], nextCursor: control, hasMore: false});
+    const operations = () => f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all(), after = operations();
+    f.close(); closed = true;
+    reopened = openSyncRelayStorage(f.path);
+    const history = createLiveJournalHistoryAuthority({namespace: "restore-test", reconciled: true});
+    const store = reopened.createLiveCommittedDeliveryStore(history);
+    expect(store.pendingStopRestoreCancellation(f.lookup)).toBeNull();
+    expect(store.acknowledgeStopRestoreCancellation(f.lookup, f.fenceCancelled, 180)).toEqual(declined);
+    expect(() => store.acknowledgeStopRestoreCancellation(f.lookup, f.cancelled, 180)).toThrow();
+    expect(() => store.acknowledgeStopRestoreFence(f.lookup, f.receipt)).toThrow();
+    expect((reopened as StorageContext).db.prepare("SELECT * FROM sync_relay_live_restore_operations").all()).toEqual(after);
+    const reopenedFixture = {storage: reopened, history, document: f.document, lookup: f.lookup};
+    expect(() => completeRetirementAt(reopenedFixture, f.key(1))).toThrow("Service activation retirement is unavailable.");
+    expect(completeRetirementAt(reopenedFixture, f.key(2))).toEqual({status: "retired", replayed: false});
+  } finally {if (!closed) f.close(); reopened?.close();}
+});
+
+// Proves: a cancellation answer that does not prove this restore's end is
+// refused and changes nothing, and an answer with no binding, a replay after
+// a later restore, is not recorded. Once the relay saved the native fence's
+// reply, `cancelled` contradicts it and the fence receipt must match it.
+it.each([false, true])("refuses a missing or altered cancellation proof, native fence saved=%s", native => {
+  const f = declinedFence(native);
+  try {
+    const before = f.rows(), cancellations = () => f.raw.prepare("SELECT * FROM sync_relay_live_restore_cancellations").all(), requested = cancellations();
+    const receipt = f.fenceCancelled.receipt;
+    const altered: NativeRestoreCancellationAnswer[] = [
+      ...native ? [f.cancelled, {...f.fenceCancelled, receipt: {...receipt, fence: {...receipt.fence, recordedAtMs: 101}}}] : [],
+      {...f.cancelled, hostId: "other-host"},
+      {...f.cancelled, generation: 2},
+      {...f.cancelled, binding: {...f.receipt.operation.oldBinding, currentPath: "docs/other.md"}},
+      {...f.fenceCancelled, hostId: "other-host"},
+      {...f.fenceCancelled, receipt: {...receipt, fence: {...receipt.fence, operation: {...receipt.fence.operation, appliedSequence: 1}}}},
+      {...f.fenceCancelled, receipt: {...receipt, endpoint: {...receipt.endpoint, eventCount: receipt.endpoint.eventCount + 1}}},
+      {...f.fenceCancelled, receipt: {...receipt, endpoint: {...receipt.endpoint, historyEvidenceDigest: "f".repeat(64)}}},
+    ];
+    for (const answer of altered) expect(() => f.store.acknowledgeStopRestoreCancellation(f.lookup, answer, 170)).toThrow();
+    expect(() => f.store.acknowledgeStopRestoreCancellation(f.lookup, {...f.cancelled, binding: null}, 170)).toThrow();
+    expect(f.rows()).toEqual(before);
+    expect(cancellations()).toEqual(requested);
+    expect(f.store.pendingStopRestoreCancellation(f.lookup)).not.toBeNull();
+  } finally {f.close();}
+});
+
+// Proves: Decline and relay admission each take the restore under the same
+// writer, so exactly one wins. Once Decline is recorded, a late native fence,
+// preparation step, admission or application cannot revive the restore.
+it.each(["decline", "admission"] as const)("lets exactly one of Decline and admission take a fenced restore: %s first", first => {
+  const f = contentProposalFixture("bootstrap", "service");
+  try {
+    const proposed = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+    const admit = () => f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201);
+    if (first === "admission") {
+      expect(admit().phase).toBe("relay-admitted");
+      const after = f.rows();
+      expect(() => declineStopRestore(f.context, f.lookup, 202)).toThrow("The restore is already being applied, so it can no longer be declined.");
+      expect(f.rows()).toEqual(after);
+      expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_live_restore_cancellations").get()!.n).toBe(0);
+      return;
+    }
+    expect(declineStopRestore(f.context, f.lookup, 202).phase).toBe("native-fenced");
+    const after = f.journalRows();
+    expect(admit).toThrow();
+    expect(() => f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 203)).toThrow();
+    expect(() => f.store.captureStopRestorePoint(f.input)).toThrow();
+    expect(() => f.store.acknowledgeStopRestoreFence(f.lookup, f.receipt.fence)).toThrow();
+    expect(() => f.store.pendingStopRestoreFence(f.lookup)).toThrow();
+    expect(f.journalRows()).toEqual(after);
+    expect(readStopRestore(f.context, f.lookup)?.phase).toBe("native-fenced");
   } finally {f.close();}
 });
 
@@ -1650,8 +1841,8 @@ it("starts a fresh restore author window at the 960-identity checkpoint band", (
   } finally {f.close();}
 });
 
-function admittedRestoreFixture(kind:"owner"|"bootstrap"="owner",pending: boolean | "deleted"=true) {
-  const f=contentProposalFixture(kind,"device",pending),proposal=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200);
+function admittedRestoreFixture(kind:"owner"|"bootstrap"="owner",pending: boolean | "deleted"=true,mode:"service"|"device"="device",beforeFence?:Parameters<typeof readyNativeFence>[4]) {
+  const f=contentProposalFixture(kind,mode,pending,false,false,0,beforeFence),proposal=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200);
   const admitted=f.store.admitStopRestoreProposal(f.input,proposal.proposalDigest,policy,201);
   const application={fence:admitted.preparation.fence,candidateDigest:admitted.candidateDigest,nativeSourceManifestDigest:admitted.nativeSourceManifestDigest,
     admitted:admitted.admitted,localHeadSequence:admitted.preparation.fence.localHeadSequence+1,

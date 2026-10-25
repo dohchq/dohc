@@ -120,7 +120,8 @@ it.skipIf(binary.missing || process.platform !== "linux")("drains pre-epoch reti
 
 it.skipIf(binary.missing || process.platform !== "linux")("drains pre-floor journal rows whose stale authority is still current",async()=>{
   const f=await fixture(true,false);try {
-    expect((await f.f.storage.readReplicaLiveJournal({workspaceId:"workspace",after:0,limit:500})).rows[0]!.authority).not.toBeNull();
+    const first=(await f.f.storage.readReplicaLiveJournal({workspaceId:"workspace",after:0,limit:500})).rows[0]!;
+    expect("cancellation" in first?null:first.authority).not.toBeNull();
     await f.child.pull();
     f.read(db=>{
       expect(db.prepare("SELECT count(*) AS n FROM ydoc_docs").get()?.n).toBe(0);

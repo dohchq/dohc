@@ -8,7 +8,8 @@ import {LIVE_JOURNAL_TABLE} from "./schema";
 // activation as the engine retires it. Once recorded it stays, and admission
 // stays fenced, until the activation retires: Resume, a new share or a
 // restored grant leaves it in place. A restore that fences the document
-// carries it to the fenced generation. An authority-reducing change must
+// carries it to the fenced generation, and its admission to the restore's
+// accepted cursor. An authority-reducing change must
 // always commit, so it charges no quota; its three integers are fixed-size
 // row columns.
 export interface ServiceActivationRetirement {
@@ -110,15 +111,32 @@ export function openServiceActivationRetirement(storage: StorageContext, documen
   return retirement(recorded);
 }
 
+type LineageDocument = {workspaceId: string; objectId: string; lineageClaimId: string};
+
 /**
- * Inside the restore transaction that moves the lineage from generation
- * `from`, carries its open obligation to generation `to` and the journal
- * cursor the restore accepted through there, so the engine accepts its key.
- * The obligation keeps its activation and request time.
+ * Inside the transaction that moves the lineage's restore generation from
+ * `from` to `to`, a restore fence or a native cancellation proving that fence
+ * absent, moves its open obligation with it. Only the generation changes: an
+ * open obligation fences admission, so its accepted-through is still
+ * `acceptedThrough`, the journal cursor the fence closed at.
  */
-export function carryServiceActivationRetirement(storage: StorageContext, document: {workspaceId: string; objectId: string; lineageClaimId: string},
-  from: number, to: number, acceptedThrough: number): void {
-  storage.db.prepare(`UPDATE ${SERVICE_ACTIVATIONS} SET retire_restore_generation=?,retire_accepted_cursor=?
+export function moveServiceActivationRetirement(storage: StorageContext, document: LineageDocument, from: number, to: number, acceptedThrough: number): void {
+  const where = `workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=? AND retire_restore_generation=? AND ${OPEN_RETIREMENT}`;
+  const params = [document.workspaceId, document.objectId, document.lineageClaimId, integer(from)];
+  const open = storage.db.prepare(`SELECT retire_accepted_cursor FROM ${SERVICE_ACTIVATIONS} WHERE ${where}`).all(...params);
+  if (open.some(row => row.retire_accepted_cursor !== integer(acceptedThrough))) throw new Error("Service activation retirement is damaged.");
+  storage.db.prepare(`UPDATE ${SERVICE_ACTIVATIONS} SET retire_restore_generation=? WHERE ${where}`).run(integer(to), ...params);
+}
+
+/**
+ * Inside the transaction that admits a restore at `generation`, names the
+ * restore's own accepted journal cursor as the open obligation's
+ * accepted-through. An admitted restore always finishes, and its output up to
+ * that cursor is then publishable under the retirement before it resumes. The
+ * obligation keeps its activation, generation and request time.
+ */
+export function carryServiceActivationRetirement(storage: StorageContext, document: LineageDocument, generation: number, acceptedThrough: number): void {
+  storage.db.prepare(`UPDATE ${SERVICE_ACTIVATIONS} SET retire_accepted_cursor=?
     WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=? AND retire_restore_generation=? AND ${OPEN_RETIREMENT}`)
-    .run(integer(to), integer(acceptedThrough), document.workspaceId, document.objectId, document.lineageClaimId, integer(from));
+    .run(integer(acceptedThrough), document.workspaceId, document.objectId, document.lineageClaimId, integer(generation));
 }

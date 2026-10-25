@@ -17,6 +17,7 @@ function fixture() {
       review: null, close: vi.fn(), invalidated: new AbortController().signal, maxOutputBytes: 100_000,
     })),
     confirmRestore: vi.fn<OwnerRestoreHost["confirmRestore"]>().mockRejectedValue(Error("proposal missing")),
+    declineRestore: vi.fn<OwnerRestoreHost["declineRestore"]>().mockRejectedValue(Error("host offline")),
   };
   const handler = testHandler(f.storage, {ownerRestoreHost: () => host, newId: () => "restore"});
   const request = (suffix: string, body?: unknown, user = "owner", workspace = "workspace") => handler(new Request(
@@ -83,19 +84,24 @@ it("lists an unfinished restore and declines it before its fence", async () => {
   } finally {f.close();}
 });
 
-// Proves: once live editing of the file stopped for the restore, Decline says
-// why it is refused and changes nothing.
-it("refuses Decline after the fence with a conflict that says why", async () => {
+// Proves: after the fence, Decline asks the host that fenced the restore to
+// end it. While that host is away Decline says it is still pending, keeps the
+// fence and access stopped, and a retry asks again.
+it("asks the fencing host to end a fenced restore and waits for its answer", async () => {
   const f = fixture();
   try {
     const plan = await f.plan(); await f.request("", {intent: plan.intent});
     expect((await f.request("/restore/prepare", {})).status).toBe(409);
-    const before = f.rows();
-    const declined = await f.request("/restore/decline", {});
-    expect(declined.status).toBe(409);
-    expect(await declined.json()).toEqual({ok: false, code: "conflict",
-      error: "Live editing of this file stopped for the restore, so it can no longer be declined. Retry to finish it."});
-    expect(f.rows()).toEqual(before);
+    const before = f.rows().documents;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const declined = await f.request("/restore/decline", {});
+      expect(declined.status).toBe(409);
+      expect(await declined.json()).toEqual({ok: false, code: "conflict", error: "The restore is still being declined. Try again in a moment."});
+      expect(f.host.declineRestore).toHaveBeenCalledTimes(attempt);
+    }
+    expect(f.host.declineRestore).toHaveBeenCalledWith({workspaceId: "workspace", ownerUserId: "owner", operationId: "restore"}, expect.any(AbortSignal));
+    expect(f.rows().documents).toEqual(before);
+    expect(f.storage.getShareGrant("grant")).toMatchObject({status: "revoked"});
     expect(await (await f.request("/unfinished")).json()).toMatchObject({restores: [{operationId: "restore", phase: "fenced"}]});
   } finally {f.close();}
 });

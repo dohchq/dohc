@@ -13,6 +13,7 @@ import { initializeServiceHostFeedIndex } from "./serviceHostFeed";
 import { initializeRelayAdmissionColumn } from "./relayAdmission";
 import { initializeServiceHostUploadSchema } from "./serviceHostUploads";
 import { initializeLiveRestoreOperationSchema } from "./liveRestoreOperationSchema";
+import { initializeLiveRestoreCancellationSchema } from "./liveRestoreCancellationSchema";
 import { initializeNoticeSchema, initializeShareNoticeDeliverySchema } from "./noticeSchema";
 import { initializeAutomationHostSchema } from "./automationHostSchema";
 import {
@@ -1267,6 +1268,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeServiceHostEnrollmentSchema(db);
     initializeServiceHostUploadSchema(db);
     initializeLiveRestoreOperationSchema(db);
+    initializeLiveRestoreCancellationSchema(db);
     initializeLiveJournalSchema(db);
     initializeLiveJournalWorkspaceIndex(db);
     initializeLiveCommittedDeliverySchema(db);

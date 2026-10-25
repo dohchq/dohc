@@ -439,6 +439,25 @@ it("keeps a retiring document out of hosted reads and writes while its sibling s
   expect([stopped.hosted.size, stopped.shared.size, [...stopped.settling.keys()]]).toEqual([0, 0, [binding.objectId]]);
 });
 
+// Proves: Pause takes a document with an activation out of the host's hosted
+// documents and into settling, and Resume leaves it settling while its
+// retirement obligation is open.
+it("moves a paused document with an activation from hosted to settling and keeps it there on Resume", async () => {
+  const f = await fixture();
+  const activationId = retainServiceActivation(f.raw, namespace, true);
+  const documents = () => {
+    const current = f.storage.readServiceHostFeedScope(ws)!;
+    return {hosted: [...current.hosted.keys()], settling: [...current.settling.keys()]};
+  };
+  expect(documents()).toEqual({hosted: [binding.objectId], settling: []});
+  for (const enabled of [false, true]) {
+    f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled, nowMs: 20, guard() {}});
+    expect(f.storage.readServiceHostEnrollment(ws, "docs/a.md")).toMatchObject({ownerStop: enabled ? null : "pause"});
+    expect(documents()).toEqual({hosted: [], settling: [binding.objectId]});
+  }
+  expect(f.storage.readServiceHostFeedScope(ws)!.settling.get(binding.objectId)).toMatchObject({activationId, requestedAtMs: 20});
+});
+
 it("answers a write naming the owner's edits to a revoked document exactly like an absent digest", async () => {
   const f = await fixture();
   const own = blob("host edit"), edited = blob("edited after revocation"), away = blob("edited while moved away");

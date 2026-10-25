@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { parseHostControlIdentifier } from "@dohc/live-session-contract/host-control";
 import { parseLiveUpdateIdentifier, parseLiveUpdateReceipt, type LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
@@ -43,4 +44,53 @@ export function parseNativeRestoreFenceReceipt(value: unknown): NativeRestoreFen
   const localHeadSequence = integer(row.localHeadSequence);
   if (localHeadSequence < operation.appliedSequence) throw new TypeError("Native restore head precedes its acknowledged cut.");
   return {operation, localHeadSequence, recordedAtMs: integer(row.recordedAtMs)};
+}
+
+/** The params of `liveApplication.cancelRestoreFence`. The host fixes namespace and workspace. */
+export interface NativeRestoreCancellation {
+  operationId: string;
+  objectId: string;
+  lineageClaimId: string;
+  hostId: string;
+  newFence: number;
+}
+/**
+ * The host's terminal end of a restore cancelled after its fence committed:
+ * the fence, its stopped binding at the new generation, and the accepted
+ * endpoint the fence froze.
+ */
+export interface NativeRestoreCancellationReceipt {
+  fence: NativeRestoreFenceReceipt;
+  binding: LiveObjectBinding;
+  endpoint: {terminalReceipt: LiveUpdateReceipt | null; eventCount: number; historyEvidenceDigest: string};
+  recordedAtMs: number;
+}
+export type NativeRestoreCancellationAnswer =
+  | {status: "cancelled"; hostId: string; generation: number; binding: LiveObjectBinding | null}
+  | {status: "fenceCancelled"; hostId: string; generation: number; binding: LiveObjectBinding; receipt: NativeRestoreCancellationReceipt};
+
+export function parseNativeRestoreCancellationReceipt(value: unknown): NativeRestoreCancellationReceipt {
+  const row = record(value, ["fence", "binding", "endpoint", "recordedAtMs"]), fence = parseNativeRestoreFenceReceipt(row.fence);
+  const binding = parseLiveObjectBinding(row.binding), endpoint = record(row.endpoint, ["terminalReceipt", "eventCount", "historyEvidenceDigest"]);
+  const terminalReceipt = endpoint.terminalReceipt === null ? null : parseLiveUpdateReceipt(endpoint.terminalReceipt);
+  const eventCount = integer(endpoint.eventCount), operation = fence.operation;
+  if (typeof endpoint.historyEvidenceDigest !== "string" || !/^[0-9a-f]{64}$/.test(endpoint.historyEvidenceDigest) ||
+    !isDeepStrictEqual(binding, {...operation.oldBinding, restoreFenceGeneration: operation.newFence}) ||
+    !isDeepStrictEqual(terminalReceipt, operation.terminal) || (eventCount === 0) !== (terminalReceipt === null)) {
+    throw new TypeError("Invalid native restore cancellation.");
+  }
+  return {fence, binding, endpoint: {terminalReceipt, eventCount, historyEvidenceDigest: endpoint.historyEvidenceDigest}, recordedAtMs: integer(row.recordedAtMs)};
+}
+export function parseNativeRestoreCancellationAnswer(value: unknown): NativeRestoreCancellationAnswer {
+  const status = value !== null && typeof value === "object" ? (value as {status?: unknown}).status : undefined;
+  if (status === "cancelled") {
+    const row = record(value, ["status", "hostId", "generation", "binding"]);
+    return {status, hostId: parseHostControlIdentifier(row.hostId), generation: integer(row.generation),
+      binding: row.binding === null ? null : parseLiveObjectBinding(row.binding)};
+  }
+  const row = record(value, ["status", "hostId", "generation", "binding", "receipt"]), receipt = parseNativeRestoreCancellationReceipt(row.receipt);
+  if (status !== "fenceCancelled" || row.generation !== receipt.binding.restoreFenceGeneration || !isDeepStrictEqual(parseLiveObjectBinding(row.binding), receipt.binding)) {
+    throw new TypeError("Invalid native restore cancellation.");
+  }
+  return {status, hostId: parseHostControlIdentifier(row.hostId), generation: receipt.binding.restoreFenceGeneration, binding: receipt.binding, receipt};
 }

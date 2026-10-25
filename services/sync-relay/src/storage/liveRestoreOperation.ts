@@ -2,7 +2,7 @@ import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import {requireResumedBinding,retainedRestoreLifecycle} from "./liveRestoreLifecycleStorage";
 import {readServiceActivationOrigin} from "./serviceActivationOrigin";
 import {readServiceActivation,serviceActivationState} from "./serviceActivationAccess";
-import {carryServiceActivationRetirement} from "./serviceActivationRetirement";
+import {moveServiceActivationRetirement} from "./serviceActivationRetirement";
 import {SERVICE_HOST_ENROLLMENTS} from "./serviceHostEnrollment";
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
@@ -23,7 +23,10 @@ import { canonicalLiveSelector, currentLiveDocumentMoment, decodeLiveDocumentAut
 import { requireLiveJournalHistory, liveJournalHistoryNamespace } from "./liveJournalHistory";
 import type { StoredLiveDocumentAuthority } from "./types";
 import { decodeJournalRow, verifyJournalRow } from "./liveUpdateJournal";
-import { parseNativeRestoreFenceReceipt, type NativeRestoreFence, type NativeRestoreFenceReceipt } from "../liveRestoreFence";
+import { parseNativeRestoreFenceReceipt, type NativeRestoreCancellation, type NativeRestoreCancellationAnswer, type NativeRestoreFence,
+  type NativeRestoreFenceReceipt } from "../liveRestoreFence";
+import { initialAcceptedHistoryDigest } from "../liveAcceptedHistory";
+import { LIVE_RESTORE_CANCELLATIONS } from "./liveRestoreCancellationSchema";
 
 export type StopRestoreIntent = {
   deliveryKind: "bootstrap" | "owner";
@@ -381,7 +384,7 @@ export function advanceStopRestoreFence(storage: StorageContext, input: { operat
       WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND lineage_state='current' AND admission_state='open' AND restore_fence_generation=?`)
       .run(saved.oldFence + 1, ...key(intent.document), saved.oldFence);
     if (Number(changed.changes) !== 1) refuse();
-    carryServiceActivationRetirement(storage, intent.document, saved.oldFence, saved.oldFence + 1, cutover);
+    moveServiceActivationRetirement(storage, intent.document, saved.oldFence, saved.oldFence + 1, cutover);
     const raw = cutover === 0 ? null : storage.db.prepare("SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(cutover);
     const last = raw ? decodeJournalRow(storage.db,raw) : null;
     if (last) verifyJournalRow(last);
@@ -393,10 +396,43 @@ export function advanceStopRestoreFence(storage: StorageContext, input: { operat
   });
 }
 
+/** Phases a restore is fenced in but not admitted, where only the host's answer can end it. */
+const CANCELLABLE: readonly StopRestoreOperation["phase"][] = ["fenced", "old-cut-applied", "native-fenced"];
+type StopRestoreCancellationRow = {outcome: "cancelled" | "fence-cancelled" | null; acknowledgmentJson: string | null; journalCursor: number | null};
+function cancellation(storage: StorageContext, operation: StopRestoreOperation): StopRestoreCancellationRow | null {
+  const row = storage.db.prepare(`SELECT outcome,acknowledgment_json,journal_cursor FROM ${LIVE_RESTORE_CANCELLATIONS} WHERE relay_database_namespace=? AND operation_id=?`)
+    .get(operation.basis.namespace, operation.intent.operationId);
+  if (!row) return null;
+  // A host's answer leaves the operation declined; a request alone leaves it where the fence put it.
+  if ((row.outcome === null) !== CANCELLABLE.includes(operation.phase) || (row.outcome !== null && operation.phase !== "declined")) refuse();
+  return {outcome: row.outcome as StopRestoreCancellationRow["outcome"], acknowledgmentJson: row.acknowledgment_json === null ? null : String(row.acknowledgment_json),
+    journalCursor: row.journal_cursor === null ? null : integer(Number(row.journal_cursor), 1)};
+}
+/** Whether the owner declined this restore after its fence. Admission refuses from then on. */
+export function stopRestoreDeclineRecorded(storage: StorageContext, operation: StopRestoreOperation): boolean {
+  return cancellation(storage, operation) !== null;
+}
+/** The binding the host held for the operation at its old generation. */
+function nativeBinding(operation: StopRestoreOperation): LiveObjectBinding {
+  return operation.intent.deliveryKind === "owner" ? operation.basis.ownerBinding : operation.basis.binding;
+}
+// The journal cursor the next accepted delivery would take, consumed by a
+// control entry so it orders among deliveries without being one.
+function allocateJournalCursor(storage: StorageContext): number {
+  requireAvailableJournalCursor(storage);
+  const name = "sync_relay_live_update_journal";
+  if (storage.db.prepare("SELECT 1 FROM sqlite_sequence WHERE name=?").get(name)) storage.db.prepare("UPDATE sqlite_sequence SET seq=seq+1 WHERE name=?").run(name);
+  else storage.db.prepare("INSERT INTO sqlite_sequence(name,seq) VALUES (?,1)").run(name);
+  return integer(Number(storage.db.prepare("SELECT seq FROM sqlite_sequence WHERE name=?").get(name)!.seq), 1);
+}
+
 /**
- * Ends a restore before its fence, in the same serialized writer as the
- * fence, so at most one of them takes the operation. Access stays revoked,
- * and the document keeps its generation and its open retirement's key.
+ * Ends a restore the relay has not admitted. Before its fence this finishes
+ * Decline at once, in the same serialized writer as the fence, so at most
+ * one of them takes the operation; the document keeps its generation and its
+ * open retirement's key. After its fence this records the request, so relay
+ * admission refuses from then on, and the operation waits for the fencing
+ * host's answer. Access stays revoked either way.
  */
 export function declineStopRestore(storage: StorageContext, input: StopRestoreLookup, now: number): StopRestoreOperation {
   const operationId = parseLiveUpdateIdentifier(input.operationId), workspaceId = parseLiveUpdateIdentifier(input.workspaceId), userId = parseLiveUpdateIdentifier(input.ownerUserId), at = integer(now);
@@ -406,10 +442,15 @@ export function declineStopRestore(storage: StorageContext, input: StopRestoreLo
     const saved = read(storage, operationId, workspaceId);
     if (!saved) refuse();
     if (saved.phase === "declined") return saved;
-    if (saved.phase !== "authority-invalidated") {
-      throw relayError("conflict", "Live editing of this file stopped for the restore, so it can no longer be declined. Retry to finish it.");
-    }
     if (at < saved.invalidatedAtMs) refuse();
+    if (CANCELLABLE.includes(saved.phase)) {
+      if (!cancellation(storage, saved)) storage.db.prepare(`INSERT INTO ${LIVE_RESTORE_CANCELLATIONS}(relay_database_namespace,operation_id,workspace_id,requested_at_ms) VALUES (?,?,?,?)`)
+        .run(saved.basis.namespace, operationId, workspaceId, at);
+      return saved;
+    }
+    if (saved.phase !== "authority-invalidated") {
+      throw relayError("conflict", "The restore is already being applied, so it can no longer be declined. Retry to finish it.");
+    }
     const declined = storage.db.prepare(`UPDATE ${table} SET phase='declined',declined_at_ms=? WHERE relay_database_namespace=? AND operation_id=? AND phase='authority-invalidated'`)
       .run(at, saved.basis.namespace, operationId);
     if (Number(declined.changes) !== 1) refuse();
@@ -417,11 +458,77 @@ export function declineStopRestore(storage: StorageContext, input: StopRestoreLo
   });
 }
 
+/** The native cancellation a recorded Decline still needs from the fencing host, or null once it is answered. */
+export function readStopRestoreCancellation(storage: StorageContext, input: StopRestoreLookup): NativeRestoreCancellation | null {
+  owner(storage, input.workspaceId, input.ownerUserId);
+  const operation = read(storage, input.operationId, input.workspaceId);
+  if (!operation) refuse();
+  const requested = cancellation(storage, operation);
+  if (!requested) refuse();
+  if (requested.outcome !== null) return null;
+  const {document} = operation.intent;
+  return {operationId: operation.intent.operationId, objectId: document.objectId, lineageClaimId: document.lineageClaimId,
+    hostId: operation.basis.hostId, newFence: operation.newFence!};
+}
+
+/**
+ * Records the fencing host's durable answer to a recorded Decline, inside
+ * the caller's transaction. `cancelled` proves no native fence committed:
+ * the document and its open retirement go back to the old generation, and
+ * the operation keeps no fence. `fenceCancelled` proves the committed fence
+ * ended before any application: the document and its retirement stay at the
+ * new generation, and the receipt takes its own journal cursor ahead of any
+ * successor's delivery. Admission stays closed either way.
+ */
+export function acknowledgeStopRestoreCancellation(storage: StorageContext, input: StopRestoreLookup, answer: NativeRestoreCancellationAnswer, now: number): StopRestoreOperation {
+  owner(storage, input.workspaceId, input.ownerUserId);
+  const at = integer(now), saved = read(storage, input.operationId, input.workspaceId);
+  if (!saved) refuse();
+  const requested = cancellation(storage, saved);
+  if (!requested) refuse();
+  if (requested.outcome !== null) {
+    if (!isDeepStrictEqual(JSON.parse(requested.acknowledgmentJson!), answer)) refuse();
+    return saved;
+  }
+  const {document} = saved.intent, newFence = saved.newFence!, cutover = saved.cutoverCursor!;
+  if (answer.hostId !== saved.basis.hostId || at < saved.invalidatedAtMs) refuse();
+  const generation = storage.db.prepare(`SELECT 1 FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?
+    AND restore_fence_generation=? AND lineage_state='current' AND admission_state='closed'`).get(...key(document), newFence);
+  if (!generation) refuse();
+  const where = `relay_database_namespace=? AND operation_id=? AND phase=?`, params = [saved.basis.namespace, saved.intent.operationId, saved.phase];
+  let journalCursor: number | null = null;
+  if (answer.status === "cancelled") {
+    if (saved.nativeReceipt || answer.generation !== saved.oldFence || !isDeepStrictEqual(answer.binding, nativeBinding(saved))) refuse();
+    if (Number(storage.db.prepare(`UPDATE sync_relay_live_documents SET restore_fence_generation=? WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND restore_fence_generation=?`)
+      .run(saved.oldFence, ...key(document), newFence).changes) !== 1) refuse();
+    moveServiceActivationRetirement(storage, document, newFence, saved.oldFence, cutover);
+    if (Number(storage.db.prepare(`UPDATE ${table} SET phase='declined',declined_at_ms=?,new_fence=NULL,cutover_cursor=NULL,fenced_at_ms=NULL,terminal_json=NULL,applied_json=NULL,native_receipt_json=NULL WHERE ${where}`)
+      .run(at, ...params).changes) !== 1) refuse();
+  } else {
+    const {receipt} = answer;
+    if (!saved.applied || !isDeepStrictEqual(receipt.fence.operation, nativeRestoreFence(saved.applied, newFence)) ||
+      (saved.nativeReceipt && !isDeepStrictEqual(receipt.fence, saved.nativeReceipt))) refuse();
+    // The endpoint the host froze is the relay's accepted history through the cutover.
+    const terminal = cutover === 0 ? null : storage.db.prepare(`SELECT accepted_event_count,accepted_evidence_digest FROM sync_relay_live_update_journal WHERE journal_cursor=?
+      AND workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?`).get(cutover, ...key(document));
+    const digest = terminal ? terminal.accepted_evidence_digest : initialAcceptedHistoryDigest(saved.basis.namespace, document);
+    if ((cutover !== 0 && !terminal) || receipt.endpoint.eventCount !== (terminal ? Number(terminal.accepted_event_count) : 0) ||
+      receipt.endpoint.historyEvidenceDigest !== digest) refuse();
+    journalCursor = allocateJournalCursor(storage);
+    if (Number(storage.db.prepare(`UPDATE ${table} SET phase='declined',declined_at_ms=?,native_receipt_json=? WHERE ${where}`)
+      .run(at, JSON.stringify(receipt.fence), ...params).changes) !== 1) refuse();
+  }
+  if (Number(storage.db.prepare(`UPDATE ${LIVE_RESTORE_CANCELLATIONS} SET outcome=?,acknowledgment_json=?,journal_cursor=? WHERE relay_database_namespace=? AND operation_id=? AND outcome IS NULL`)
+    .run(answer.status === "cancelled" ? "cancelled" : "fence-cancelled", JSON.stringify(answer), journalCursor, saved.basis.namespace, saved.intent.operationId).changes) !== 1) refuse();
+  return read(storage, input.operationId, input.workspaceId)!;
+}
+
 // Called inside the delivery store's transaction. It grants no public historical authority.
 export function requireStopRestoreCut(storage: StorageContext, input: StopRestoreLookup, checkedBaseline?: Uint8Array): {operation: StopRestoreOperation; authority: StoredLiveDocumentAuthority} {
   owner(storage,input.workspaceId,input.ownerUserId);
   const operation = read(storage,input.operationId,input.workspaceId);
-  if (!operation || operation.phase === "authority-invalidated" || operation.phase === "declined") refuse();
+  // A recorded Decline holds the fence, preparation and admission until the host answers it.
+  if (!operation || operation.phase === "authority-invalidated" || operation.phase === "declined" || cancellation(storage,operation)) refuse();
   const current = authority(storage,operation.intent,checkedBaseline);
   if (!current.current || current.open || current.binding.restoreFenceGeneration !== operation.newFence) refuse();
   const historical = {...current,open: true,binding: {...current.binding,restoreFenceGeneration: operation.oldFence}};

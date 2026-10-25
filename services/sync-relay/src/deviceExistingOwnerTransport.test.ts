@@ -193,6 +193,18 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     singleton.sendRequest.mockResolvedValueOnce({result: {status: "fenced",receipt}});
     expect((await peer!.sendRequest({id: 13,method: "liveApplication.fenceRestore",workspace: "ws-ordinary",params: {operation: operation as never}})).result).toEqual({status: "fenced",receipt});
     expect(ownerFor).toHaveBeenCalledTimes(acquired);
+    // A Decline's cancellation names only this fencing host, and only an answer for its document returns.
+    const cancellation = {operationId: "stop",objectId: "object",lineageClaimId: "a".repeat(64),hostId: "host",newFence: 2};
+    const cancelled = {status: "cancelled",hostId: "host",generation: 1,binding};
+    const cancel = (id: number, params: object) => peer!.sendRequest({id,method: "liveApplication.cancelRestoreFence",workspace: "ws-ordinary",params: params as never});
+    const beforeCancel = singleton.sendRequest.mock.calls.length;
+    await expect(cancel(40,{...cancellation,hostId: "foreign"})).rejects.toThrow();
+    expect(singleton.sendRequest).toHaveBeenCalledTimes(beforeCancel);
+    singleton.sendRequest.mockResolvedValueOnce({result: {...cancelled,binding: {...binding,objectId: "other"}}});
+    await expect(cancel(41,cancellation)).rejects.toThrow();
+    singleton.sendRequest.mockResolvedValueOnce({result: cancelled});
+    expect((await cancel(42,cancellation)).result).toEqual(cancelled);
+    expect(singleton.sendRequest.mock.lastCall?.[0]).toMatchObject({method: "liveApplication.cancelRestoreFence",params: cancellation});
     const pending = await peer!.sendRequest({id: 14,method: "liveApplication.register",workspace: "ws-ordinary",params: {binding,resumeAdoptionId: "adoption"}});
     expect(pending.result).toMatchObject({status: "pending"});
     expect(singleton.forwardLiveOwnerAdoption).toHaveBeenCalledTimes(1);

@@ -210,13 +210,13 @@ it("shows a refused decline and where the restore stands", async () => {
   f.call.mockImplementation(input => input.action === "options" ? Promise.resolve({...f.options,
     pendingOperation: {operationId: "restore", phase: "authority-invalidated", proposalDigest: null}})
     : input.action === "status" ? Promise.resolve({...f.status(), phase})
-    : input.action === "decline" ? Promise.reject(Error("Live editing of this file stopped for the restore, so it can no longer be declined. Retry to finish it."))
+    : input.action === "decline" ? Promise.reject(Error("The restore is already being applied, so it can no longer be declined. Retry to finish it."))
     : original(input));
   render(<OwnerRestoreDialog {...f.props} />);
   const decline = await screen.findByRole("button", {name: "Decline restore"});
   phase = "fenced";
   fireEvent.click(decline);
-  await screen.findByText("Live editing of this file stopped for the restore, so it can no longer be declined. Retry to finish it.");
+  await screen.findByText("The restore is already being applied, so it can no longer be declined. Retry to finish it.");
   expect(screen.queryByRole("button", {name: "Decline restore"})).toBeNull();
   expect(screen.getByRole("button", {name: "Retry"})).toBeTruthy();
 });

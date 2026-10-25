@@ -119,7 +119,7 @@ export function serviceOwnerTransport(options: {
         params:{outboxId,...(reading?(params.cursor===undefined?{}:{cursor:params.cursor as never}):{receipts:params.receipts as never})}},signal);
       check(signal);return response;
     }
-    if(request.method!=="liveApplication.settle" && request.method!=="liveApplication.fenceRestore")throw new Error("Unsupported service owner request.");
+    if(request.method!=="liveApplication.settle" && request.method!=="liveApplication.fenceRestore" && request.method!=="liveApplication.cancelRestoreFence")throw new Error("Unsupported service owner request.");
     if(request.method==="liveApplication.settle")registration(configRecord(request.params,["registrationId","terminalReceipt"]).registrationId);
     const response=await client.sendRequest(request,signal);check(signal);return response;
   };

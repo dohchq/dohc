@@ -1,6 +1,7 @@
 import { readBoundedJson } from "@dohc/service-http";
 import { parseLiveDocumentKey, parseLiveUpdateDigest, parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveRestorePreparation } from "./liveRestorePreparation";
+import type { StopRestoreCancellationOutcome } from "./liveRestoreDelivery";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
 import { ticketRecord } from "./liveTicketInputs";
 import type { SyncRelayStorage } from "./storage";
@@ -14,6 +15,7 @@ export type OwnerRestoreHost = {
   prepareRestore(lookup: StopRestoreLookup, signal?: AbortSignal): ReturnType<LiveRestorePreparation["prepare"]>;
   reviewRestore(lookup: StopRestoreLookup, signal?: AbortSignal): ReturnType<LiveRestorePreparation["review"]>;
   confirmRestore(lookup: StopRestoreLookup, digest: string, signal?: AbortSignal): ReturnType<LiveRestorePreparation["confirm"]>;
+  declineRestore(lookup: StopRestoreLookup, signal?: AbortSignal): Promise<StopRestoreCancellationOutcome>;
 };
 export type OwnerRestoreRoute = {route: "owner-restore"; workspaceId: string} & (
   | {action: "options" | "plan" | "begin" | "unfinished"}
@@ -52,7 +54,7 @@ export function createOwnerRestoreRoutes(options: {
         ...(after === null ? {} : {after: parseLiveUpdateIdentifier(after)})}));
     }
     const host = options.host();
-    // Declining needs no host: it ends the restore before the host takes part.
+    // Declining before the fence needs no host: it ends the restore before the host takes part.
     if (route.action !== "decline" && !host?.restoreConfigured) throw notFound();
     const signal = AbortSignal.any([request.signal, storage.unavailable]);
     const raw = await readBoundedJson(request, MAX_PAYLOAD_JSON_BYTES, signal);
@@ -118,7 +120,11 @@ export function createOwnerRestoreRoutes(options: {
     read();
     if (route.action === "decline") {
       ticketRecord(raw, []);
-      storage.declineStopRestore(lookup!, options.nowMs());
+      // After the fence the request holds the restore until the host that fenced it answers.
+      if (storage.declineStopRestore(lookup!, options.nowMs()).phase !== "declined") {
+        const ended = await host?.declineRestore(lookup!, signal).catch(() => signal.throwIfAborted());
+        if (ended?.kind !== "declined") throw relayError("conflict", "The restore is still being declined. Try again in a moment.");
+      }
       return response(read());
     }
     if (!host) throw notFound();
