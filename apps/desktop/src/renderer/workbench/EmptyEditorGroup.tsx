@@ -97,7 +97,10 @@ export function EmptyEditorGroup(props: {
 
   return (
     <div data-testid="start-surface" className="@container flex min-h-0 flex-1 flex-col overflow-y-auto">
-      <div className="m-auto flex w-full max-w-176 flex-col gap-7 p-8">
+      {/* The cards sit at a share of the group's height, so what lands later
+          grows below them and never moves them. */}
+      <div aria-hidden className="max-h-64 min-h-8 shrink-0 basis-[22%]" />
+      <div className="mx-auto flex w-full max-w-176 flex-col gap-8 px-8 pb-8">
         {tiles.length > 0 ? (
           <div className="grid grid-cols-2 gap-4 @lg:grid-cols-4">
             {tiles.map((tile) => (
@@ -106,7 +109,7 @@ export function EmptyEditorGroup(props: {
                 type="button"
                 aria-keyshortcuts={tile.shortcut ? ariaShortcut(tile.shortcut, props.platform) : undefined}
                 onClick={() => run(tile.create)}
-                className="group flex min-w-0 flex-col gap-2.5 rounded-lg text-left focus-visible:outline-offset-4"
+                className="group flex min-w-0 flex-col gap-2 rounded-lg text-left focus-visible:outline-offset-4"
               >
                 <span aria-hidden className="relative block h-28 overflow-hidden rounded-lg border border-line bg-panel transition-colors duration-100 group-hover:border-ink/30 group-hover:bg-panel-2">
                   {START_TILE_ART[tile.kind]}
@@ -128,8 +131,9 @@ export function EmptyEditorGroup(props: {
         {onDropFiles ? <DropZone onDrop={onDropFiles} /> : null}
         {recent.length > 0 ? (
           <section aria-labelledby={recentId}>
-            <h2 id={recentId} className="px-2 pb-1 text-[12px] font-medium text-subtle">Recent</h2>
-            <ul>
+            <h2 id={recentId} className="pb-2 text-[12px] font-medium text-subtle">Recent</h2>
+            {/* A row's text starts on the cards' edge and its hover fill hangs outside it. */}
+            <ul className="-mx-2">
               {recent.map((file) => {
                 const kind = listedFileKind(file.path, file.kind);
                 return (

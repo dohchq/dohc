@@ -4103,7 +4103,7 @@ export function DesktopWorkspaceShell(props: {
   // Files dropped on the start surface import as on the Explorer's root.
   const importDroppedFiles = useCallback((dropped: File[]) => {
     const paths = bridge().getDroppedFilePaths(dropped);
-    if (paths.length > 0) void importFiles(paths);
+    if (paths.length > 0) void importFiles("explorer", paths);
   }, [importFiles]);
 
   useEffect(() => {
