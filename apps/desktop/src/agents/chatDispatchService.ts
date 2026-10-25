@@ -275,23 +275,17 @@ function signalExitCode(signal: NodeJS.Signals | null): number {
 }
 
 
-// How a runner posts its reply. Claude Code replies from Bash. Codex's sandbox
-// cannot reach the desktop app, so Codex replies through the dohc MCP server
-// that its launch starts outside the sandbox (chatRunnerProcess.ts codexReplyServerConfig).
-type ReplyForm = "argument" | "bash" | "mcp";
+// How a runner posts its reply. A tool profile's run replies through the dohc
+// MCP server that its launch starts (chatRunnerProcess.ts replyServerArguments).
+// A custom command replies through the dohc CLI.
+type ReplyForm = "argument" | "mcp";
 
 function replyFormFor(tool: AgentLaunchProfile["tool"] | undefined): ReplyForm {
-  return tool === "claude" ? "bash" : tool === "codex" ? "mcp" : "argument";
+  return tool ? "mcp" : "argument";
 }
 
-function replyCommand(form: "argument" | "bash", threadId: string, body: string): string {
-  return form === "argument"
-    ? `dohc chat reply ${threadId} --as-agent "${body}"`
-    : `\`\`\`sh
-dohc chat reply ${threadId} --as-agent - <<'DOHC_REPORT'
-${body}
-DOHC_REPORT
-\`\`\``;
+function replyCommand(threadId: string, body: string): string {
+  return `dohc chat reply ${threadId} --as-agent "${body}"`;
 }
 
 function replyToolCall(threadId: string, runId: string): string {
@@ -301,13 +295,7 @@ function replyToolCall(threadId: string, runId: string): string {
 function buildRunnerPrompt(threadMarkdown: string, threadId: string, runId: string, form: ReplyForm): string {
   const replyInstruction = form === "mcp"
     ? `Reply in-thread by calling ${replyToolCall(threadId, runId)}, with your Markdown report as \`body\`.`
-    : form === "argument"
-      ? `Reply in-thread with \`${replyCommand(form, threadId, "<report>")}\`.`
-      : `Reply with Markdown on stdin using a quoted here-document:
-
-${replyCommand(form, threadId, "<report>")}
-
-Choose a delimiter that does not appear on a line in your report. Keep the delimiter quoted to prevent shell expansion.`;
+    : `Reply in-thread with \`${replyCommand(threadId, "<report>")}\`.`;
   const decisionInstruction = form === "mcp"
     ? "If blocked on the user, set `needsDecision`. To ask them to pick, list the choices in `options`; their answer arrives as the next message with the chosen option. Your final text is not shown anywhere; only messages you post through `dohc_reply_to_chat` are shown."
     : "If blocked on the user, reply with `--needs-decision`. To ask them to pick, add `--option \"<choice>\"` once per choice; their answer arrives as the next message with the chosen option. Your final text is not shown anywhere; only messages you post through `dohc chat` are shown.";
@@ -1709,10 +1697,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           return { ok: false, detail: "A runner became active before the self-test could start." };
         }
         // The same reply form as a real run, so passing proves replies work.
-        const form = replyFormFor(runner.profile?.tool);
-        const prompt = form === "mcp"
+        const prompt = replyFormFor(runner.profile?.tool) === "mcp"
           ? `This is a dohc runner self-test. Call ${replyToolCall(threadId, runId)} once, with \`body\` \`${marker}\`, and do not post another message.`
-          : `This is a dohc runner self-test. Run exactly this command and do not post another message:\n\n${replyCommand(form, threadId, marker)}`;
+          : `This is a dohc runner self-test. Run exactly this command and do not post another message:\n\n${replyCommand(threadId, marker)}`;
         await options.setRunAttribution(workspace, {
           agentId: UNNAMED_AGENT_ID,
           agentRunId: runId,

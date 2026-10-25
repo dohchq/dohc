@@ -115,6 +115,23 @@ describe("share-level tool profiles", () => {
     );
   });
 
+  it("offers only the tools named with --tool", async () => {
+    const ctx = parseArgs(["--workspace", "/w", "--home", "/h", "--tool", "dohc_reply_to_chat"]);
+    expect(ctx.tools).toEqual(new Set(["dohc_reply_to_chat"]));
+    expect((await connectedToolNames(ctx)).names).toEqual(["dohc_reply_to_chat"]);
+    // The share level still decides: a view profile can't reply.
+    const view = parseArgs(["--share-access", "view", "--tool", "dohc_reply_to_chat", "--tool", "dohc_read_file"]);
+    expect((await connectedToolNames(view)).names).toEqual(["dohc_read_file"]);
+  });
+
+  it("refuses a --tool that names no dohc tool", () => {
+    expect(() => parseArgs(["--tool", "dohc_reply"])).toThrow(
+      '--tool must name a dohc tool, such as dohc_reply_to_chat. Received: "dohc_reply".',
+    );
+    expect(() => parseArgs(["--tool", "toString"])).toThrow(/Received: "toString"/u);
+    expect(() => parseArgs(["--tool"])).toThrow(/Received: no value/u);
+  });
+
   it("registers NO write tools for a view profile and keeps read tools", async () => {
     const { names } = await connectedToolNames({ ...base, shareAccess: "view" });
     for (const tool of [...DOCUMENT_WRITE_TOOLS, ...CHAT_WRITE_TOOLS]) {

@@ -77,15 +77,18 @@ export function parseArgs(argv: string[]): ToolContext {
   let root = nonEmptyArg(process.cwd(), "workspace root");
   let home = nonEmptyArg(process.env.HOME ?? process.cwd(), "home path");
   let shareAccess: ShareAccess | undefined;
+  const tools = new Set<keyof typeof MCP_TOOL_CAPABILITIES>();
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--workspace" && argv[i + 1]) root = nonEmptyArg(argv[++i], "--workspace");
     else if (argv[i] === "--home" && argv[i + 1]) home = nonEmptyArg(argv[++i], "--home");
     else if (argv[i] === "--share-access") shareAccess = shareAccessArg(argv[++i]);
+    else if (argv[i] === "--tool") tools.add(toolArg(argv[++i]));
   }
   return {
     root,
     home,
     ...(shareAccess ? { shareAccess } : {}),
+    ...(tools.size > 0 ? { tools } : {}),
   };
 }
 
@@ -105,6 +108,17 @@ function shareAccessArg(value: string | undefined): ShareAccess {
   );
 }
 
+function isToolName(value: string | undefined): value is keyof typeof MCP_TOOL_CAPABILITIES {
+  return value !== undefined && Object.hasOwn(MCP_TOOL_CAPABILITIES, value);
+}
+
+// A misspelled tool is refused, never read as offering every tool.
+function toolArg(value: string | undefined): keyof typeof MCP_TOOL_CAPABILITIES {
+  if (isToolName(value)) return value;
+  const received = value === undefined ? "no value" : JSON.stringify(value);
+  throw new Error(`--tool must name a dohc tool, such as dohc_reply_to_chat. Received: ${received}.`);
+}
+
 function text(structuredContent: Record<string, unknown> | null) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(structuredContent, null, 2) }],
@@ -122,7 +136,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     config: { description: string; inputSchema: InputArgs },
     handler: ToolCallback<InputArgs>,
   ) {
-    if (MCP_TOOL_LEVELS[name].includes(level)) server.registerTool(name, config, handler);
+    if (MCP_TOOL_LEVELS[name].includes(level) && (ctx.tools?.has(name) ?? true)) server.registerTool(name, config, handler);
   }
 
   register("dohc_read_share_copy", {

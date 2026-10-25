@@ -34,12 +34,12 @@ export const AGENT_TOOLS = [
     permissions: "No launch profile yet" },
 ] as const;
 
-// codexConfig adds `key=value` entries to a Codex launch.
-export function agentProfileArguments(profile: AgentLaunchProfile, codexConfig: readonly string[] = []): string[] {
+// replyServer holds the arguments that start the dohc MCP server a run replies through.
+export function agentProfileArguments(profile: AgentLaunchProfile, replyServer: readonly string[] = []): string[] {
   // In CLI rules, / anchors at the primary working directory. Bare Edit matches every path.
   return profile.tool === "claude"
-    ? ["-p", "--permission-prompts", "none", "--no-session-persistence", "--allowedTools", "Edit(/**)", "Bash(dohc chat reply:*)", "--disallowedTools", "Edit(/.dohc/**)"]
-    : ["exec", "--config", "approval_policy=never", ...codexConfig.flatMap((entry) => ["--config", entry]), "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-"];
+    ? ["-p", "--permission-prompts", "none", "--no-session-persistence", ...replyServer, "--allowedTools", "Edit(/**)", "mcp__dohc__dohc_reply_to_chat", "--disallowedTools", "Edit(/.dohc/**)"]
+    : ["exec", "--config", "approval_policy=never", ...replyServer, "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-"];
 }
 
 function quoteRunnerToken(value: string): string {
