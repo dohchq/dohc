@@ -229,7 +229,9 @@ export async function openEngineYdocProviderSession(
   // A state vector alone does not cover deletions. Replacements and pending
   // resyncs also withdraw proof, even when their bytes have not arrived yet.
   let documentRevision = 0;
-  let settledRevision = -1;
+  // An unseeded session with no head has no durable state to settle.
+  // Updates and resyncs below withdraw this no-work proof.
+  let settledRevision = session.head === "absent" && session.lineage === "absent" ? 0 : -1;
   let observedDoc = session.doc;
   const noteDocumentChange = (): void => { documentRevision += 1; };
   observedDoc.on("update", noteDocumentChange);

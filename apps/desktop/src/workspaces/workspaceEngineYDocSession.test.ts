@@ -1753,6 +1753,32 @@ it("refuses a live session for a path the entered version does not have", async 
   });
 });
 
+it.each(["Reading notes.md", "notes/Trip plan.md"])("closes an untouched uncaptured file without settling (%s)", async path => {
+  await writeFile(join(root, path), "", "utf8");
+  const before = await readFile(join(root, path));
+  const onSaveState = vi.fn();
+  const session = await capture.openYDocSession({
+    path,
+    contentKind: "richdoc",
+    onRemoteUpdate: () => undefined,
+    onSaveState,
+  });
+  settleRefusal = wireRefusal("workspace operation failed");
+
+  await expect(session.close()).resolves.toBeUndefined();
+
+  expect(methodCount(YDOC_METHOD.settle)).toBe(0);
+  expect(captureErrors).toEqual([]);
+  expect(onSaveState.mock.calls.map(([state]) => state)).not.toContain("error");
+  expect(await readFile(join(root, path))).toEqual(before);
+  const reopened = await capture.openYDocSession({
+    path,
+    contentKind: "richdoc",
+    onRemoteUpdate: () => undefined,
+  });
+  await expect(reopened.close()).resolves.toBeUndefined();
+});
+
 it("still opens a file the user just created that capture has not ingested", async () => {
   // Creation, verbatim: workspaceFiles.createFile writes the artifact to disk
   // with `wx` as an empty file and the editor opens it immediately. The version
