@@ -943,7 +943,8 @@ export function SettingsDialog(props: {
                       },
                     })
                   }
-                  className="h-8 w-64 rounded-md border border-line bg-bg px-2 text-[12px] text-ink focus:border-ink"
+                  // As wide as its longest option, which names the folder.
+                  className="h-8 max-w-full rounded-md border border-line bg-bg px-2 text-[12px] text-ink focus:border-ink"
                 >
                   <option value="per-document">
                     {`In a folder next to the document (${
