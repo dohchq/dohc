@@ -3121,7 +3121,7 @@ export function DesktopWorkspaceShell(props: {
       const initialText = open ? "" : newPageText(pending);
       const create = async (): Promise<string> => {
         for (;;) {
-          const relativePath = nextPagePath(page.folder, stem, occupied);
+          const relativePath = nextPagePath(page.folder, stem, occupied, bridge().platform);
           try {
             return (await bridge().createWorkspaceFile({ workspaceId, relativePath, initialText, exclusive: true })).path;
           } catch (error) {
