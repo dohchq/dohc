@@ -702,17 +702,26 @@ async function openSelfHostProof(name: string) {
     const bearer = (await auth.api.signInEmail({body: {email: ownerUser.email, password}})).token;
     const configPath = join(root, "deployment.json");
     initializeRelayDeployment({configPath, relayPath: join(root, "relay/relay.sqlite"), continuityDirectory: join(root, "continuity")});
-    deployment = openRelayDeployment(configPath, {liveTickets: {retainedTicketsPerPrincipalGrant: 4, expiredTicketCleanupBatchSize: 2, now: Date.now}});
-    const relayRead = new DatabaseSync(join(root, "relay/relay.sqlite"), {readOnly: true});
-    closes.push(async () => relayRead.close());
     const validation = createLiveValidationExecutor();
     closes.push(() => validation.close());
-    const {storage, history} = deployment, frameChanges = createNamedFrameChanges(profile.namedLive.maxListeners), validate = validation.validator(profile.validation);
-    const resolveActor = createSessionActorResolver(auth);
-    const serviceReplication = createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true,
-      authorize: input => authorizeServiceHostReplication(storage, {key: Buffer.from(ticketKey), namespace: history.namespace, ...input})});
-    const relayApp = createSyncRelayHandler({storage, shareWebOrigin: audience, relayExchangeKey: exchangeKey, resolveActor,
-      namedBrowserSessionLimits: profile.browserSessions, ownerRestoreHost: () => supervisor?.current()});
+    const validate = validation.validator(profile.validation), resolveActor = createSessionActorResolver(auth);
+    // The relay's storage and handlers, as one relay process opens them from its durable files.
+    let storage!: ReturnType<typeof openRelayDeployment>["storage"], history!: ReturnType<typeof openRelayDeployment>["history"];
+    let frameChanges!: ReturnType<typeof createNamedFrameChanges>, serviceReplication!: ReturnType<typeof createServiceHostReplication>;
+    let relayApp!: ReturnType<typeof createSyncRelayHandler>, activations!: ReturnType<typeof storage.createServiceActivationStore>;
+    const openRelay = () => {
+      deployment = openRelayDeployment(configPath, {liveTickets: {retainedTicketsPerPrincipalGrant: 4, expiredTicketCleanupBatchSize: 2, now: Date.now}});
+      ({storage, history} = deployment);
+      frameChanges = createNamedFrameChanges(profile.namedLive.maxListeners);
+      serviceReplication = createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true,
+        authorize: input => authorizeServiceHostReplication(storage, {key: Buffer.from(ticketKey), namespace: history.namespace, ...input})});
+      relayApp = createSyncRelayHandler({storage, shareWebOrigin: audience, relayExchangeKey: exchangeKey, resolveActor,
+        namedBrowserSessionLimits: profile.browserSessions, ownerRestoreHost: () => supervisor?.current()});
+      activations = storage.createServiceActivationStore(history);
+    };
+    openRelay();
+    const relayRead = new DatabaseSync(join(root, "relay/relay.sqlite"), {readOnly: true});
+    closes.push(async () => relayRead.close());
     let enrollment: ReturnType<typeof createServiceHostEnrollmentRoutes> | undefined;
     const relayHttp = serveFetchHandler({handler: request => request.headers.get("authorization")?.startsWith("Bearer dohc-service-v1.") ? serviceReplication(request)
       : new URL(request.url).pathname.endsWith("/live-host") ? enrollment!(request) : relayApp(request),
@@ -787,7 +796,7 @@ async function openSelfHostProof(name: string) {
         relayOrigin: "https://service-activation-relay.example.test", key: Buffer.from(ticketKey), onError: error => {reports.push(error instanceof Error ? error.message : String(error));}});
       enrollment = createServiceHostEnrollmentRoutes({storage, history, host: supervisor, resolveActor});
     };
-    const activations = storage.createServiceActivationStore(history), activation = (path = "docs/a.md") => activations.read("workspace", path, 1_000_000);
+    const activation = (path = "docs/a.md") => activations.read("workspace", path, 1_000_000);
     await startSupervisor();
     const live = () => {const host = supervisor?.current(); if (!host) throw new Error("No service daemon is running."); return host;};
     // A live view of a document through the session host: the owner's, or the
@@ -824,12 +833,18 @@ async function openSelfHostProof(name: string) {
       const engine = new DatabaseSync(toNamespacedPath(join(store, ".dohc/engine/engine.db")), {readOnly: true});
       try {return read(engine);} finally {engine.close();}
     };
-    const proof = {root, hostRoot, store, executable, expectedHash, storage, relayRead, reports, ownerDocument, ownerEdit: first.edit, objectId, ownerUserId: ownerUser.id,
-      route, serviceRead, activation, live, startSupervisor,
+    const stopSupervisor = async () => {const stopping = supervisor; supervisor = undefined; await stopping?.close();};
+    const proof = {root, hostRoot, store, executable, expectedHash, relayRead, reports, ownerDocument, ownerEdit: first.edit, objectId, ownerUserId: ownerUser.id,
+      route, serviceRead, activation, live, startSupervisor, stopSupervisor,
+      /** The relay storage the running relay opened. */
+      get storage() {return storage;},
       /** Stops the running daemon, as when it loses an engine reply. The supervisor starts another. */
       retire: () => live().close(),
-      /** Stops the supervisor and its daemon. Nothing runs until `startSupervisor`. */
-      stopSupervisor: async () => {const stopping = supervisor; supervisor = undefined; await stopping?.close();},
+      /**
+       * Restarts the relay process: stops the supervisor and its daemon, closes
+       * relay storage, reopens it from its durable files, and starts the supervisor again.
+       */
+      restartRelay: async () => {await stopSupervisor(); deployment!.storage.close(); openRelay(); await startSupervisor();},
       /** Whether browsers are told live editing of the document is unavailable, as the relay's `main.ts` decides it. */
       sessionHostBlocked: (document: {workspaceId: string; objectId: string}) =>
         storage.getLiveHostControl()?.configuredMode === "service" && supervisor!.stopped(document),
@@ -1113,11 +1128,13 @@ it("pushes a write the host accepted before it reconnected, while another docume
   await stopLiveEditing(proof);
   // While docs/a.md is stopped its owner edits it on their device, where no session host admits the edit.
   await proof.ownerEdit(doc => doc.getMap("frontmatter").set("whileStopped", "ordinary-owner"));
-  // The host accepts a live edit of docs/b.md. Its pushes fail before they reach the engine, so the write waits in its store.
+  // The host accepts and settles a live edit of docs/b.md. Its pushes fail before they reach the engine, so the write waits in its store.
   harness.unreachable.add("sync.push");
   const accepted = await proof.liveEdit("beforeReconnect", "accepted", second.document);
+  await vi.waitFor(() => expect(proof.settlement(second.objectId)).toEqual({applied: accepted.journalCursor, settled: accepted.journalCursor}), {timeout: 30000});
   const waiting = proof.unpushed();
-  expect(waiting.map(row => [row.op_kind, JSON.parse(row.payload_json).objectId])).toEqual([["ydoc.update", second.objectId], ["live.audit.application", second.objectId]]);
+  expect(waiting.map(row => [row.op_kind, JSON.parse(row.payload_json).objectId ?? null])).toEqual([["ydoc.update", second.objectId], ["live.audit.application", second.objectId],
+    ["live.audit.settlement", null], ["moment.append", second.objectId]]);
   expect((await proof.route("POST", {shareId: "share"})).status).toBe(202);
   // The daemon goes, and the supervisor reconnects with another. docs/a.md resumes as a successor holding the owner's edit.
   const before = proof.live().coordinate.connectionId;
@@ -1134,7 +1151,7 @@ it("pushes a write the host accepted before it reconnected, while another docume
   // Once pushes reach the engine again, the accepted write reaches the relay as it was written, not as refusals.
   harness.unreachable.delete("sync.push");
   await vi.waitFor(() => expect(proof.unpushed()).toEqual([]), {timeout: 30000});
-  expect(proof.relayed(waiting)).toEqual(["ydoc.update", "live.audit.application"]);
+  expect(proof.relayed(waiting)).toEqual(["ydoc.update", "live.audit.application", "live.audit.settlement", "moment.append"]);
   expect(proof.hosted()).toEqual({state: "ready", reason: null});
   expect(proof.hosted(second.objectId)).toEqual({state: "ready", reason: null});
   return {accepted, waiting: waiting.map(({origin_id, origin_seq, op_kind}) => ({origin_id, origin_seq, op_kind})), reconnected: proof.live().coordinate.connectionId};
@@ -1142,19 +1159,19 @@ it("pushes a write the host accepted before it reconnected, while another docume
 
 // Stop retires docs/a.md's activation while docs/b.md stays live. Its output
 // never reaches the relay, so its replica cannot park it and the engine will
-// not release it. The service host restarts inside that retirement, and the
-// reply to the release is lost. Once it retired, its owner edits it on their
+// not release it. The relay restarts inside that retirement, and the reply to
+// the release is lost. Once it retired, its owner edits it on their
 // device, and Resume activates a successor that holds that edit and takes the
 // collaborator's live edit.
 it("retires a stopped document while another stays live, then resumes it as a successor", () => withSelfHostProof("self-host-successor", async proof => {
   const second = await proof.ownerDocument("docs/b.md", "Second");
   await bothReady(proof);
-  const predecessor = proof.activation()!, P = predecessor.activationId, journal = proof.journal();
+  const predecessor = proof.activation()!, P = predecessor.activationId, journal = proof.journal(), secondJournal = proof.journal(second.objectId);
   const enrollment = (hostDrainedAtMs: unknown) => ({workspaceId: "workspace", objectId: proof.objectId, path: "docs/a.md", ownerUserId: proof.ownerUserId,
     shareId: "share", replicationEpoch: predecessor.source.replicationEpoch, streamIdentity: predecessor.source.streamIdentity, ownerStop: "retire",
     enabled: false, retired: true, createdAtMs: expect.any(Number), updatedAtMs: expect.any(Number), hostDrainedAtMs});
   const parking = {status: "pending", reason: "parking"}, onlyParking = () => expect(harness.releases).toEqual(harness.releases.map(() => parking));
-  const sibling = () => ({tip: proof.ownerTips(second.objectId).current, applied: proof.settlement(second.objectId).applied});
+  const sibling = () => ({tip: proof.ownerTips(second.objectId).current, ...proof.settlement(second.objectId)});
   expect(proof.activations()).toEqual([{activation_id: P, predecessor_activation_id: null, state_digest: predecessor.source.fullStateDigest, completed: 1,
     retire_accepted_cursor: null, retired: 0, boundary: null, stateDropped: 0}]);
 
@@ -1180,17 +1197,25 @@ it("retires a stopped document while another stays live, then resumes it as a su
 
   // Meanwhile docs/b.md accepts a live edit, and the host delivers it.
   const during = await proof.liveEdit("duringRetirement", "live", second.document);
-  await vi.waitFor(() => expect(sibling()).toEqual({tip: [{tip_cursor: during.journalCursor}], applied: during.journalCursor}), {timeout: 30000});
+  await vi.waitFor(() => expect(sibling()).toEqual({tip: [{tip_cursor: during.journalCursor}], applied: during.journalCursor, settled: during.journalCursor}), {timeout: 30000});
+  expect(proof.journal(second.objectId)).toEqual([...secondJournal, journaled(during)]);
   onlyParking();
   expect(proof.activations()).toEqual([retiring]);
 
-  // The service host restarts inside the retirement. The daemon after it reaches the same barrier, and docs/b.md stays live.
-  const beforeRestart = harness.releases.length;
-  await proof.stopSupervisor(); await proof.startSupervisor();
+  // The relay restarts inside the retirement and reopens its storage from its durable files. The retirement is still open,
+  // the daemon after it reaches the same barrier, and docs/b.md stays live.
+  const beforeRestart = harness.releases.length, relayBefore = proof.storage;
+  await proof.restartRelay();
+  expect(() => relayBefore.readServiceHostEnrollment("workspace", "docs/a.md")).toThrow("Relay storage is unavailable.");
+  expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")).toEqual(enrollment(null));
+  expect(proof.activations()).toEqual([retiring]);
   await vi.waitFor(() => expect(harness.releases.length).toBeGreaterThan(beforeRestart), {timeout: 30000});
   onlyParking();
   const afterRestart = await proof.liveEdit("afterRestart", "live", second.document);
-  await vi.waitFor(() => expect(sibling()).toEqual({tip: [{tip_cursor: afterRestart.journalCursor}], applied: afterRestart.journalCursor}), {timeout: 30000});
+  await vi.waitFor(() => expect(sibling()).toEqual({tip: [{tip_cursor: afterRestart.journalCursor}], applied: afterRestart.journalCursor, settled: afterRestart.journalCursor}), {timeout: 30000});
+  expect(proof.journal(second.objectId)).toEqual([...secondJournal, journaled(during), journaled(afterRestart)]);
+  const secondMarkdown = "---\nafterRestart: live\nbeforeActivation: ordinary-owner\nduringRetirement: live\n---\n\nSecond";
+  expect(readFileSync(join(proof.store, "docs/b.md"), "utf8")).toBe(secondMarkdown);
   expect(proof.activations()).toEqual([retiring]);
 
   // Pushes reach the engine again. Its replica parks the document and the engine releases it, and that reply is lost.
@@ -1236,7 +1261,7 @@ it("retires a stopped document while another stays live, then resumes it as a su
   expect(S).not.toBe(P); expect(successor.completed).toBe(true);
   expect(successor.source).toEqual({...predecessor.source, committedCursor: expect.any(Number), sourceMomentId: expect.stringMatching(/^moment-ydoc-apply-[0-9a-f]{64}$/),
     sourceDigest: hash(Buffer.from(markdown)), sourceByteLength: Buffer.byteLength(markdown), nativeHeadSequence: expect.any(Number),
-    fullStateDigest: resumed.digest, fullStateByteLength: expect.any(Number), predecessorActivationId: P});
+    fullStateDigest: resumed.digest, fullStateByteLength: successor.fullState.byteLength, predecessorActivationId: P});
   // One capture, which asked for no activation of its own.
   expect(harness.captures.slice(captures)).toEqual([{activationId: S, requestedActivationId: undefined, source: successor.source}]);
   const retired = {...retiring, retired: 1, boundary: lost!.boundary, stateDropped: 1};
@@ -1266,6 +1291,9 @@ it("retires a stopped document while another stays live, then resumes it as a su
   expect(readFileSync(join(proof.store, "docs/a.md"), "utf8")).toBe(edited);
   expect(proof.activations()).toEqual([retired, current]);
   expect(await proof.documents()).toEqual([proof.ready("docs/a.md"), proof.ready("docs/b.md")]);
+  // docs/b.md holds exactly its own live edits.
+  expect(proof.journal(second.objectId)).toEqual([...secondJournal, journaled(during), journaled(afterRestart)]);
+  expect(readFileSync(join(proof.store, "docs/b.md"), "utf8")).toBe(secondMarkdown);
   return {predecessor: P, successor: S, releases: harness.releases, accepted, seed, collaborated};
 }), 180000);
 
@@ -1330,6 +1358,58 @@ it("resumes a document its owner edited while live editing was stopped as a succ
   // The operator is told of nothing they need to do.
   expect(proof.reports.filter(report => report.startsWith("Live editing of docs/a.md"))).toEqual([]);
   return {attemptsBeforeResume: before, reports: proof.reports};
+}), 120000);
+
+// Pause keeps the document's activation, so its owner's ordinary edit made
+// while paused reaches the host's replica as an edit that activation never
+// admitted. The replica holds the document and capture stops. Resume through
+// the enrollment route then retires the held activation.
+it("holds a document its owner edited while paused, and Resume retires the held activation", () => withSelfHostProof("self-host-held", async proof => {
+  const saved = proof.activation()!, P = saved.activationId, [seed] = proof.journal() as {journal_cursor: number; delivery_id: string; update_digest: string}[];
+  expect(proof.journal()).toEqual([journaled({journalCursor: seed!.journal_cursor, deliveryId: seed!.delivery_id, updateDigest: seed!.update_digest})]);
+  const completed = {activation_id: P, predecessor_activation_id: null, state_digest: saved.source.fullStateDigest, completed: 1,
+    retire_accepted_cursor: null, retired: 0, boundary: null, stateDropped: 0};
+  // The owner's ordinary Y.Doc updates of docs/a.md the relay holds.
+  const ownerUpdates = () => proof.relayRead.prepare(`SELECT origin_id,origin_seq,json_extract(payload_json,'$.updateBlobSha256') AS update_sha256 FROM sync_relay_log
+    WHERE workspace_id='workspace' AND op_kind='ydoc.update' AND json_extract(payload_json,'$.objectId')=? AND origin_id NOT LIKE 'service-host:%' ORDER BY origin_id,origin_seq`).all(proof.objectId);
+  const refused = () => proof.serviceRead(engine => engine.prepare("SELECT origin_id,origin_seq,update_sha256 FROM replication_refused_ydoc_blobs ORDER BY origin_id,origin_seq").all());
+  const attempts = () => proof.started("captureOwnerActivation");
+
+  expect(await proof.route("DELETE", {path: "docs/a.md"})).toEqual({status: 200, body: {ok: true, path: "docs/a.md", status: "paused"}});
+  await vi.waitFor(() => {
+    expect(proof.hosted()).toEqual({state: "parked", reason: null});
+    expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")).toMatchObject({ownerStop: "pause", enabled: false, retired: false, hostDrainedAtMs: expect.any(Number)});
+  }, {timeout: 30000});
+  expect(proof.activations()).toEqual([completed]);
+  const before = ownerUpdates();
+  await proof.ownerEdit(doc => doc.getMap("frontmatter").set("whilePaused", "ordinary-owner"));
+  const edit = ownerUpdates().slice(before.length);
+  expect(edit).toHaveLength(1);
+
+  // Resume: the replica refuses that edit and holds the document, and capture stops.
+  const captured = attempts();
+  expect(await proof.route("POST", {path: "docs/a.md"})).toEqual({status: 202, body: {ok: true, path: "docs/a.md", status: "preparing"}});
+  await vi.waitFor(async () => expect(await proof.documents()).toEqual([{path: "docs/a.md", status: "unavailable", reason: "live-edit-unadmitted"}]), {timeout: 30000});
+  expect(proof.hosted()).toEqual({state: "held", reason: "hosted-live-edit-unadmitted"});
+  expect(refused()).toEqual(edit);
+  const held = attempts(), pulls = harness.pulls.length;
+  expect(held).toBeGreaterThan(captured);
+  await vi.waitFor(() => expect(harness.pulls.length).toBeGreaterThan(pulls + 12), {timeout: 30000});
+  expect(attempts()).toBe(held);
+  expect(proof.reports.filter(report => report.startsWith("Live editing of docs/a.md"))).toEqual([`Live editing of docs/a.md in workspace workspace cannot resume: the document changed while live editing was off, and the session host's copy is missing that edit. Its owner can keep editing it in dohc. Its store is kept at ${proof.store}.`]);
+  expect(proof.activations()).toEqual([completed]);
+
+  // Resume again: the enrollment route retires the held activation at its seed, and the relay keeps its owner delivery in history.
+  expect(await proof.route("POST", {path: "docs/a.md"})).toEqual({status: 202, body: {ok: true, path: "docs/a.md", status: "preparing"}});
+  const epoch = (proof.relayRead.prepare("SELECT accepting_host_epoch FROM sync_relay_live_update_journal WHERE workspace_id='workspace' AND object_id=? AND journal_cursor=?")
+    .get(proof.objectId, seed!.journal_cursor) as {accepting_host_epoch: number}).accepting_host_epoch;
+  const boundary = {terminalReceipt: {deliveryId: seed!.delivery_id, updateDigest: seed!.update_digest, journalCursor: seed!.journal_cursor, acceptingHostEpoch: epoch},
+    eventCount: 1, historyEvidenceDigest: expect.stringMatching(/^[0-9a-f]{64}$/)};
+  await vi.waitFor(() => expect(proof.activations()).toEqual([{...completed, retire_accepted_cursor: seed!.journal_cursor, retired: 1, boundary, stateDropped: 1}]), {timeout: 30000});
+  expect(proof.ownerTips()).toEqual({current: [], retired: [{activation_id: P, tip_cursor: seed!.journal_cursor}]});
+  expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")).toMatchObject({ownerStop: null, enabled: true, retired: false});
+  expect(proof.journal()).toEqual([journaled({journalCursor: seed!.journal_cursor, deliveryId: seed!.delivery_id, updateDigest: seed!.update_digest})]);
+  return {activationId: P, refused: edit, attempts: held};
 }), 120000);
 
 // Until the session host starts a document's Y.Doc itself (#2069), a file only

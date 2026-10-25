@@ -1,7 +1,7 @@
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import {requireResumedBinding,retainedRestoreLifecycle} from "./liveRestoreLifecycleStorage";
 import {readServiceActivationOrigin} from "./serviceActivationOrigin";
-import {readServiceActivation,serviceActivationState} from "./serviceActivationAccess";
+import {hasServiceActivation,readServiceActivation,serviceActivationState} from "./serviceActivationAccess";
 import {SERVICE_HOST_ENROLLMENTS} from "./serviceHostEnrollment";
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
@@ -116,6 +116,11 @@ function owner(storage: StorageContext, workspaceId: string, ownerUserId: string
 function requireNoPendingActivation(storage: StorageContext, document: LiveDocumentKey): void {
   const state = serviceActivationState(readServiceActivation(storage, document));
   if (state !== "absent" && state !== "completed") refuse();
+}
+// Committed delivery refuses to bootstrap a service activation's lineage, so a
+// bootstrap restore of one could never apply its cut once the grant is revoked.
+function requireBootstrapRestorable(storage: StorageContext, document: LiveDocumentKey): void {
+  if (hasServiceActivation(storage, document)) refuse();
 }
 function requireUnretiredEnrollment(storage: StorageContext, document: LiveDocumentKey): void {
   // Enrollments are main-only and keyed by workspace/object, even after a path moves.
@@ -264,6 +269,7 @@ export function readStopRestorePlan(storage: StorageContext, input: StopRestoreP
       restorePointCursor: cursor, restorePointReceiptDigest: parseLiveUpdateDigest(digest)});
     const savedBasis = basis(storage, intent, authority(storage, intent));
     if (savedBasis.ownerOrigin !== null) { requireStopRestoreOwnerOrigin(storage, savedBasis); intent = {...intent, deliveryKind: "owner"}; }
+    else requireBootstrapRestorable(storage, document);
     const plan = {intent, path: String(row.current_path), recipients};
     if (Buffer.byteLength(JSON.stringify(plan)) > limit) throw new Error("The complete affected access list exceeds its output budget.");
     return plan;
@@ -315,6 +321,7 @@ export function beginStopRestore(storage: StorageContext, input: StopRestoreInte
     const intentJson = JSON.stringify(intent);
     const initialBasis = basis(storage,intent,authority(storage,intent)), basisJson = JSON.stringify(initialBasis);
     if (intent.deliveryKind === "bootstrap" && initialBasis.ownerOrigin !== null) refuse();
+    if (intent.deliveryKind === "bootstrap") requireBootstrapRestorable(storage, intent.document);
     if (intent.deliveryKind === "owner") requireStopRestoreOwnerOrigin(storage,initialBasis);
     // Fund the final cutoff metadata before invalidation so fencing cannot run out of quota.
     const maximumReceipt = {deliveryId: "\\".repeat(512),updateDigest: "f".repeat(64),journalCursor: Number.MAX_SAFE_INTEGER,acceptingHostEpoch: Number.MAX_SAFE_INTEGER};

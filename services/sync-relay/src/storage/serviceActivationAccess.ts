@@ -25,6 +25,12 @@ export function readServiceActivation(storage: StorageContext, document: LiveDoc
     .get(document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId);
 }
 
+/** A lineage that ever had a service activation is delivered only through its owner adoption, never a plain bootstrap. */
+export function hasServiceActivation(storage: StorageContext, document: LiveDocumentKey): boolean {
+  return !!storage.db.prepare(`SELECT 1 FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? LIMIT 1`)
+    .get(document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId);
+}
+
 /**
  * Where the lineage's service activation stands. A retiring activation, and a
  * retired one no successor follows yet, admit no live update.

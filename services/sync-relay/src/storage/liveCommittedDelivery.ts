@@ -1,7 +1,7 @@
 import {SETTLEMENT_CUTS} from "./hostedSettlementSchema";
 import {nativeSourceAuthorMatches} from "./liveNativeSourceAuthors";
 import {parseNativeRestoreApplicationReceipt,parseNativeRestoreSettlementReceipt,parseNativeRestoreResumeReceipt,type RestoreLifecycle,type NativeRestoreApplicationReceipt,type NativeRestoreSettlementReceipt,type NativeRestoreResumeReceipt} from "../liveRestoreLifecycle";
-import type { ServiceActivationAccess } from "./serviceActivationAccess";
+import { hasServiceActivation, type ServiceActivationAccess } from "./serviceActivationAccess";
 import {readServiceActivationOrigin} from "./serviceActivationOrigin";
 import {readRestoreAdmission,verifyRestoreCheckpoint,restoreDigest,type RestoreAdmission,type RestoreSourceRange} from "./liveRestoreCheckpoint";
 import {retainedRestoreLifecycle,validateRestoreLifecycle,requireResumedBinding} from "./liveRestoreLifecycleStorage";
@@ -818,7 +818,7 @@ export class LiveCommittedDeliveryStore {
           throw new Error("Committed delivery follows a retired owner adoption.");
         }
         // A service activation's lineage is delivered only through its owner adoption, and is funded only for that.
-        if (this.#storage.db.prepare(`SELECT 1 FROM ${SERVICE_ACTIVATIONS} WHERE ${WHERE_DOCUMENT} LIMIT 1`).get(...documentParams(document))) {
+        if (hasServiceActivation(this.#storage, document)) {
           throw new Error("Committed delivery cannot bootstrap a service activation's lineage.");
         }
         const values = [

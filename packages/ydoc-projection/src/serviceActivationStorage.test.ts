@@ -1816,6 +1816,27 @@ it("refuses a plain committed delivery's bootstrap of a service activation's lin
   }finally{f.close()}
 })
 
+// Proves: a Stop restore of a service activation's lineage on a host with no
+// owner adoption there is refused before it revokes anything. Committed
+// delivery refuses that lineage's bootstrap, so the operation could not finish.
+it("refuses a bootstrap Stop restore of a service activation's lineage before it revokes the grant",()=>{
+  const f=fixture();try{
+    completeActivation(f)
+    const b=transitionHost(f,host,'device','other-b')
+    expect(f.storage.registerLiveHost({...b,updatedAtMs:50,guard(){}}).ok).toBe(true)
+    f.raw.exec("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)")
+    expect(()=>f.storage.readStopRestorePlan({document:f.document,ownerUserId:'owner',operationId:'restore',shareId:'share',grantId:'grant',
+      restorePointCursor:0,restorePointReceiptDigest:f.document.lineageClaimId,maxOutputBytes:1_000_000})).toThrow('conflicts with current authority')
+    const intent:StopRestoreIntent={deliveryKind:'bootstrap',operationId:'restore',ownerUserId:'owner',document:f.document,
+      shareId:'share',grantId:'grant',expectedGrantGeneration:1,expectedDependentGrantIds:[],expectedFence:1,restorePointCursor:0,
+      restorePointReceiptDigest:f.document.lineageClaimId}
+    expect(()=>f.storage.beginStopRestore(intent,60)).toThrow('conflicts with current authority')
+    expect(f.storage.getShareGrant('grant')).toMatchObject({status:'active',generation:1})
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_restore_operations').all()).toEqual([])
+    expect(f.raw.prepare('SELECT admission_state,restore_fence_generation AS fence FROM sync_relay_live_documents').get()).toEqual({admission_state:'open',fence:1})
+  }finally{f.close()}
+})
+
 // Proves: an activation that adopted on A never retires as never-adopted on
 // the host its configuration moved to, whatever that host's engine releases.
 // The obligation stays open, and A's provisioning keeps working. Back on A it

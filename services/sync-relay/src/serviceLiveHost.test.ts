@@ -1817,7 +1817,8 @@ it.each([false, true])("records a retirement's applications a page at a time acr
     expect(retiringSettles(o, sent)).toEqual([]);
     host = await restartedHost(o);
   }
-  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true));
+  // Five pages take several passes, each of which pulls first.
+  await vi.waitFor(() => expect(host.drained("workspace")).toBe(true), {timeout: 10_000});
   const requests = o.client().sendRequest.mock.calls.slice(restart ? 0 : from).map(call => (call as unknown[])[0] as {method: string; params: {afterReceipt?: unknown}});
   const reconciles = requests.filter(request => request.method === "liveApplication.reconcileActivation");
   const pages = restart ? [edits[7]] : [seed, edits[1], edits[3], edits[5], edits[7]];
