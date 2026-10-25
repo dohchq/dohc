@@ -20,13 +20,16 @@ export function SettingRow(props: {
   // Its title needs less room than a description, so the value stays beside it
   // in a narrower pane.
   compact?: boolean;
+  // For a control that is a list of 32 px rows: the title and Reset sit
+  // beside its first row, not its middle.
+  top?: boolean;
 }) {
   // The controls keep their size and the text takes what is left, from a
   // readable width: 15rem, or 8rem for a compact row's title. Controls that
   // don't fit beside that wrap under the text.
   const first = props.compact ? "min-w-0 flex-[1_1_8rem]" : "min-w-0 flex-[1_1_15rem]";
   const text = (
-    <div className={props.lead ? "min-w-0 flex-1" : first}>
+    <div className={`${props.lead ? "min-w-0 flex-1" : first}${props.top ? " pt-1.5" : ""}`}>
       {/* The dot hangs left of the title, so marking a row moves nothing in it. */}
       <div className="relative flex items-center">
         {props.modified ? (
@@ -48,7 +51,7 @@ export function SettingRow(props: {
       {...(props.highlighted
         ? { "data-highlighted": true, role: "group", "aria-label": props.title, tabIndex: -1 }
         : {})}
-      className={`flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-line last:border-b-0 ${
+      className={`flex flex-wrap ${props.top ? "items-start" : "items-center"} gap-x-6 gap-y-2 border-b border-line last:border-b-0 ${
         props.compact ? "py-2" : "py-4"
       } ${props.highlighted ? "-mx-2 rounded-md bg-selected px-2" : ""}`}
     >
@@ -60,7 +63,7 @@ export function SettingRow(props: {
       ) : (
         text
       )}
-      <div className="flex max-w-full shrink-0 flex-wrap items-center gap-2">
+      <div className={`flex max-w-full shrink-0 flex-wrap gap-2 ${props.top ? "items-start" : "items-center"}`}>
         {/* Reset appears left of the controls, so they share the right edge
             and stay under the pointer when it does. */}
         {props.modified && props.onReset ? (
@@ -69,7 +72,7 @@ export function SettingRow(props: {
             aria-label="Reset"
             title="Reset"
             onClick={props.onReset}
-            className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
+            className={`grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink ${props.top ? "mt-1" : ""}`}
           >
             <RotateCcw size={14} strokeWidth={1.9} aria-hidden />
           </button>

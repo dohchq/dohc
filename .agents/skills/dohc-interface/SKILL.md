@@ -283,7 +283,7 @@ Position:
 | Dialog that scrolls | Only a body that scrolls gets bands: header and footer `px-6 py-4` with a rule, body `p-6`. |
 | Settings page | `px-12 pt-10`, as wide as the page column. The page title is 24 px over the first section. |
 | Settings section | `SettingsSection`: a heading in the panel title role, 8 px over a card. Sections sit 32 px apart. A page with one group has one card and no heading. |
-| Settings row | `SettingRow`: `py-4` with a rule between rows. The name is `text-[13px] font-medium`; its description is `text-[12px] text-muted`, `mt-1` under it. Controls sit on the right and use the default button size. Reset appears left of them only when the value differs from its default, so they never move. |
+| Settings row | `SettingRow`: `py-4` with a rule between rows. The name is `text-[13px] font-medium`; its description is `text-[12px] text-muted`, `mt-1` under it. Controls sit on the right and use the default button size. Reset appears left of them only when the value differs from its default, so they never move. When the control is a list, its name and Reset sit beside the list's first row (`top`). |
 | Empty state | `EmptyState`: `gap-4 px-6`. Do not build your own. |
 | Toast and Notices row | `px-3 py-2`, `gap-2` |
 

@@ -693,6 +693,7 @@ export function SettingsDialog(props: {
               </SettingRow>
               <SettingRow
                 title="Sidebar"
+                top
                 modified={
                   isModified(userSettings.sidebar.order, DEFAULT_SIDEBAR_SETTINGS.order) ||
                   isModified(userSettings.sidebar.hidden, DEFAULT_SIDEBAR_SETTINGS.hidden)

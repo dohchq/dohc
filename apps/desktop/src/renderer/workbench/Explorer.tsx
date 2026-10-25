@@ -2,7 +2,8 @@ import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from "@dohc/w
 import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
 import { useFocusSurface } from "../ui/focusReturn";
 import { isComposingKey, isDeleteKey } from "../ui/keys";
-import { DangerButton, SecondaryButton, SectionLabel } from "../ui/controls";
+import { SecondaryButton, SectionLabel } from "../ui/controls";
+import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
 import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph } from "../ui/KindGlyph";
 import { basenameOf, dirnameOf } from "../path";
@@ -35,7 +36,6 @@ import {
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import type { DraftFlush } from "../useAutosavedTextDraft";
-import { Overlay } from "../Overlay";
 import { planDrop, type DragSource } from "./file-tree-dnd";
 import { navigateTree, type FlatRow } from "./file-tree-nav";
 import { withRenameDefault } from "./new-file-name";
@@ -1982,60 +1982,41 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       </nav>
 
       {confirmDelete ? (
-        <Overlay onClose={() => setConfirmDelete(null)}>
-          <div
-            data-testid="delete-confirm"
-            className="flex max-h-[calc(100vh-32px)] w-[min(420px,calc(100vw-32px))] flex-col overflow-hidden rounded-lg border border-line bg-panel shadow-lg"
-          >
-            <div className="min-h-0 overflow-auto p-4">
-              <p className="m-0 text-sm text-ink">
-                Delete{" "}
-                <span className="break-all font-medium">
-                  {confirmDelete.length === 1
-                    ? basenameOf(confirmDelete[0]!)
-                    : `${confirmDelete.length} items`}
-                </span>
-                ?
-              </p>
-              <p className="mb-0 mt-2 text-xs text-muted">
-                {props.shareView
-                  ? `${confirmDelete.length === 1 ? "It goes" : "They go"} from your copy now. There is no trash to restore ${
-                      confirmDelete.length === 1 ? "it" : "them"
-                    } from. ${
-                      props.shareView.granterEmail ?? "The person who shared it"
-                    } still ${confirmDelete.length === 1 ? "has it" : "has them"} until you send the change and they accept it. You can take the change back before then.`
-                  : `${confirmDelete.length === 1 ? "It moves" : "They move"} to the system trash, or to this workspace's .dohc/local/trash folder whenever the system trash refuses, and can be restored from there.`}
-              </p>
-              {confirmDelete.length > 1 ? (
-                <ul className="m-0 mt-3 max-h-36 list-none overflow-auto rounded border border-line bg-bg p-0">
-                  {confirmDelete.map((path) => (
-                    <li
-                      key={path}
-                      className="border-b border-line px-2 py-1 font-mono text-[11px] text-muted last:border-b-0"
-                    >
-                      <span className="break-all">{path}</span>
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
-            </div>
-            <div className="flex shrink-0 justify-end gap-2 border-t border-line p-3">
-              <SecondaryButton onClick={() => setConfirmDelete(null)}>
-                Cancel
-              </SecondaryButton>
-              <DangerButton
-                data-testid="confirm-delete"
-                onClick={() => {
-                  performDeletes(confirmDelete);
-                  setConfirmDelete(null);
-                }}
-                className="h-8 py-0 text-xs"
-              >
-                Delete
-              </DangerButton>
-            </div>
-          </div>
-        </Overlay>
+        <ConfirmDialog
+          title={`Delete ${confirmDelete.length === 1 ? basenameOf(confirmDelete[0]!) : `${confirmDelete.length} items`}?`}
+          confirmLabel="Delete"
+          intent="danger"
+          testId="delete-confirm"
+          cancelTestId="cancel-delete"
+          confirmTestId="confirm-delete"
+          onCancel={() => setConfirmDelete(null)}
+          onConfirm={() => {
+            performDeletes(confirmDelete);
+            setConfirmDelete(null);
+          }}
+        >
+          <p className="m-0 mt-2 text-[13px] text-muted">
+            {props.shareView
+              ? `${confirmDelete.length === 1 ? "It goes" : "They go"} from your copy now. There is no trash to restore ${
+                  confirmDelete.length === 1 ? "it" : "them"
+                } from. ${
+                  props.shareView.granterEmail ?? "The person who shared it"
+                } still ${confirmDelete.length === 1 ? "has it" : "has them"} until you send the change and they accept it. You can take the change back before then.`
+              : `${confirmDelete.length === 1 ? "It moves" : "They move"} to the system trash, or to this workspace's .dohc/local/trash folder whenever the system trash refuses, and can be restored from there.`}
+          </p>
+          {confirmDelete.length > 1 ? (
+            <ul className="m-0 mt-3 max-h-36 list-none overflow-auto rounded border border-line bg-bg p-0">
+              {confirmDelete.map((path) => (
+                <li
+                  key={path}
+                  className="border-b border-line px-2 py-1 font-mono text-[11px] text-muted last:border-b-0"
+                >
+                  <span className="break-all">{path}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </ConfirmDialog>
       ) : null}
     </>
   );

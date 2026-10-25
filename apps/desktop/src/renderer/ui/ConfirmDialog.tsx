@@ -31,7 +31,7 @@ export function ConfirmDialogCard(props: ConfirmDialogProps) {
       aria-labelledby={titleId}
     >
       <div>
-        <h3 id={titleId} className="m-0 text-base font-semibold text-ink">
+        <h3 id={titleId} className="m-0 break-words text-base font-semibold text-ink">
           {props.title}
         </h3>
         {props.children}
