@@ -2,11 +2,12 @@ import { lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { atomicReplaceFile } from "../atomicReplaceFile";
 import { join, resolve } from "node:path";
 import {
-  DEFAULT_USER_SETTINGS, type AgentColors,
+  AgentId, AgentsSettings, DEFAULT_USER_SETTINGS, type AgentColors, type AgentProblem,
   StoredUserSettings,
   settingsDeepEqual,
   type StoredUserSettingsResult,
 } from "./userSettings";
+import { migrateVersion1 } from "./userSettingsMigration";
 import {
   isSettingsObject,
   overlaySettings,
@@ -67,14 +68,35 @@ function unusable(
   };
 }
 
+// Why dohc could not use an agent entry, so Settings can still show it.
+function agentProblem(id: string, entry: unknown): string {
+  const badId = AgentId.safeParse(id);
+  if (!badId.success) return badId.error.issues[0]!.message;
+  const alone = AgentsSettings.safeParse({ [id]: entry });
+  if (alone.success) return "Another agent has this name.";
+  const issue = alone.error.issues[0]!;
+  const where = issue.path.slice(1).join(".");
+  return where ? `${where}: ${issue.message}` : issue.message;
+}
+
+function agentProblems(raw: Record<string, unknown>, settings: StoredUserSettings): AgentProblem[] {
+  if (!isSettingsObject(raw.agents)) return [];
+  return Object.entries(raw.agents).filter(([id]) => !Object.hasOwn(settings.agents, id)).slice(0, 50).map(([id, entry]) => {
+    const name = isSettingsObject(entry) && typeof entry.name === "string" ? entry.name.trim().slice(0, 200) : "";
+    return { id: id.slice(0, 200), ...(name ? { name } : {}), problem: agentProblem(id, entry).slice(0, 500) };
+  });
+}
+
 function snapshotOfText(path: string, text: string): UserSettingsSnapshot {
-  let raw: unknown;
+  let parsed: unknown;
   try {
-    raw = JSON.parse(text);
+    parsed = JSON.parse(text);
   } catch {
     return unusable(path, text, "it is not valid JSON");
   }
-  if (!isSettingsObject(raw)) return unusable(path, text, "it is not a JSON object");
+  if (!isSettingsObject(parsed)) return unusable(path, text, "it is not a JSON object");
+  // The first save writes the migrated file.
+  const raw = parsed.version === 1 ? migrateVersion1(parsed) : parsed;
   // Another version is a format this build cannot read, not one bad key.
   if (raw.version !== undefined && raw.version !== DEFAULT_USER_SETTINGS.version) {
     return unusable(path, text, `its version is not ${DEFAULT_USER_SETTINGS.version}`);
@@ -86,11 +108,16 @@ function snapshotOfText(path: string, text: string): UserSettingsSnapshot {
     parse: parseUserSettings,
     reportIgnored: path => !(path[0] === "appearance" && path[1] === "agentColors"),
   });
+  const problems = agentProblems(raw, settings);
   return {
     text,
     problem: null,
     raw,
-    result: { settings, source: "stored", ...(ignored.length > 0 ? { ignored } : {}) },
+    result: {
+      settings, source: "stored",
+      ...(ignored.length > 0 ? { ignored } : {}),
+      ...(problems.length > 0 ? { agentProblems: problems } : {}),
+    },
   };
 }
 

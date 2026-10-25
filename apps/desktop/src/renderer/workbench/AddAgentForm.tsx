@@ -1,18 +1,18 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { FlaskConical } from "lucide-react";
 import {
   MAX_PREFERRED_NAME_LENGTH,
   preferredNameFromInput,
 } from "@dohc/workspace-contracts/chat-identity-values";
-import type { DesktopUserSettings } from "../../settings/userSettings";
-import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
+import { firstAgent, newAgentDefaults, withFirstAgent, type DesktopUserSettings } from "../../settings/userSettings";
+import { launchCommand, launchFrom, launchProfile } from "../../agents/agentToolCatalog";
 import { AgentToolPicker } from "../settings/AgentToolPicker";
 import { useRequestSequence } from "../useRequestSequence";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { PrimaryButton, SecondaryButton } from "../ui/controls";
 import { ChatAvatar } from "./ChatAvatar";
-import { ownAgentPresentation } from "./actorPresentation";
+import { ownAgentPresentation, ownPresentation } from "./actorPresentation";
 import { Overlay } from "../Overlay";
 
 const COMMAND_PLACEHOLDER = "node agent.mjs";
@@ -37,22 +37,26 @@ export function AddAgentForm(props: {
   onCancel: () => void;
 }) {
   const { settings, onSave } = props;
-  const [agentName, setAgentName] = useState(settings.profile.agentName ?? "");
-  const [profile, setProfile] = useState(settings.runner.profile);
-  const [advanced, setAdvanced] = useState(!settings.runner.profile && settings.runner.command.length > 0);
+  const agent = firstAgent(settings);
+  const savedProfile = agent ? launchProfile(agent.launch) : undefined;
+  const savedCommand = agent && "command" in agent.launch ? agent.launch.command : "";
+  const [agentName, setAgentName] = useState(agent?.name ?? "");
+  const [profile, setProfile] = useState(savedProfile);
+  const [advanced, setAdvanced] = useState(savedCommand.length > 0);
   const requests = useRequestSequence([props.workspaceId]);
-  const [command, setCommand] = useState(settings.runner.command);
+  const [command, setCommand] = useState(savedCommand);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [check, setCheck] = useState<CheckState>({ status: "idle" });
 
   useEffect(() => {
-    setAgentName(settings.profile.agentName ?? "");
-    setCommand(settings.runner.command);
-    setProfile(settings.runner.profile);
-  }, [settings.profile.agentName, settings.runner.command, settings.runner.profile?.tool, settings.runner.profile?.executable]);
+    setAgentName(agent?.name ?? "");
+    setCommand(savedCommand);
+    setProfile(savedProfile);
+  }, [agent?.name, savedCommand, savedProfile?.tool, savedProfile?.executable]);
 
-  const trimmedCommand = configuredRunnerCommand({ command, profile });
+  const launch = useMemo(() => launchFrom(profile, command), [profile, command]);
+  const trimmedCommand = launch ? launchCommand(launch) : "";
   const preview = agentName.trim() || "Your agent";
 
   // Writes the name and the command, dispatch on. Returns false when the
@@ -69,7 +73,7 @@ export function AddAgentForm(props: {
       setError("Enter an agent name.");
       return false;
     }
-    if (trimmedCommand.length === 0) {
+    if (!launch) {
       setError("Enter the command that starts your agent.");
       return false;
     }
@@ -77,11 +81,12 @@ export function AddAgentForm(props: {
     setSaving(true);
     setError(null);
     try {
-      await onSave({
-        ...settings,
-        profile: { ...settings.profile, agentName: validAgentName },
-        runner: { ...settings.runner, command: command.trim(), profile, enabled: true },
-      }, settings);
+      await onSave(withFirstAgent(settings, (current) => ({
+        ...(current ?? newAgentDefaults(settings, settings.appearance.yourColor ?? ownPresentation.hue)),
+        name: validAgentName,
+        launch,
+        enabled: true,
+      })), settings);
       return requests.isCurrent(token);
     } catch (cause) {
       if (requests.isCurrent(token)) props.onError(ipcErrorMessage(cause, "Could not save the agent."), cause);
@@ -89,7 +94,7 @@ export function AddAgentForm(props: {
     } finally {
       if (requests.isCurrent(token)) setSaving(false);
     }
-  }, [agentName, onSave, settings, trimmedCommand, command, profile, requests, props.onError]);
+  }, [agentName, onSave, settings, launch, requests, props.onError]);
 
   const runCheck = useCallback(async () => {
     const token = requests.current();
@@ -167,7 +172,7 @@ export function AddAgentForm(props: {
           <input
             id="chats-add-agent-command"
             data-testid="chats-add-agent-command"
-            value={profile ? configuredRunnerCommand({ command, profile }) : command}
+            value={profile ? launchCommand(profile) : command}
             maxLength={4096}
             disabled={busy}
             spellCheck={false}

@@ -1,18 +1,19 @@
 import { AgentNameControl } from "./AgentNameControl";
 import { isComposingKey } from "../ui/keys";
-import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
+import { launchCommand, launchFrom, launchProfile, type AgentLaunch, type AgentLaunchProfile } from "../../agents/agentToolCatalog";
 import { AgentToolPicker } from "./AgentToolPicker";
 import { useRequestSequence } from "../useRequestSequence";
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent,
 } from "react";
 import { FlaskConical, Terminal } from "lucide-react";
 import type { RunnerSelfTestResult } from "../../ipc/bridgeContract";
-import type { RunnerSettings } from "../../settings/userSettings";
+import type { AgentSettings } from "../../settings/userSettings";
 import { bridge } from "../bridge";
 import { SwitchControl } from "./SettingRow";
 import { SecondaryButton } from "../ui/controls";
@@ -34,7 +35,19 @@ function validTimeoutMinutes(value: string, fallback: number): number {
     : fallback;
 }
 
-function runnerSettingsEqual(left: RunnerSettings, right: RunnerSettings): boolean {
+// The first agent's fields this card edits.
+type RunnerFields = { command: string; profile?: AgentLaunchProfile; enabled: boolean; timeoutMinutes: number };
+
+function runnerFields(agent: AgentSettings | null): RunnerFields {
+  return {
+    command: agent && "command" in agent.launch ? agent.launch.command : "",
+    ...(agent && launchProfile(agent.launch) ? { profile: launchProfile(agent.launch) } : {}),
+    enabled: agent?.enabled ?? false,
+    timeoutMinutes: agent?.timeoutMinutes ?? 30,
+  };
+}
+
+function runnerSettingsEqual(left: RunnerFields, right: RunnerFields): boolean {
   return (
     left.command === right.command &&
     left.profile?.tool === right.profile?.tool &&
@@ -68,7 +81,8 @@ function runnerEngineNote(
 export function RunnerSettingsCard(props: {
   workspaceId: string;
   onError?: (message: string, cause?: unknown) => void;
-  runner: RunnerSettings;
+  // The first agent, or null before there is one.
+  agent: AgentSettings | null;
   agentName?: string;
   onAgentNameChange?: (name: string) => Promise<void>;
   // Mirrors SettingsDialog's shared-view fact.
@@ -76,15 +90,15 @@ export function RunnerSettingsCard(props: {
   // Whether main built a recorder for this workspace in this app session.
   // Undefined until its status arrives. See `runnerEngineNote`.
   sessionRecorderOn: boolean | undefined;
-  onRunnerChange: (runner: RunnerSettings) => Promise<void>;
+  onAgentChange: (fields: Pick<AgentSettings, "launch" | "enabled" | "timeoutMinutes">) => Promise<void>;
 }) {
   const {
     workspaceId,
-    runner,
     sharedView,
     sessionRecorderOn,
-    onRunnerChange,
+    onAgentChange,
   } = props;
+  const runner = useMemo(() => runnerFields(props.agent), [props.agent]);
   const [commandDraft, setCommandDraft] = useState(runner.command);
   const [profile, setProfile] = useState(runner.profile);
   const [advanced, setAdvanced] = useState(!runner.profile && runner.command.length > 0);
@@ -119,14 +133,16 @@ export function RunnerSettingsCard(props: {
   }, [workspaceId]);
 
   const queueSave = useCallback(
-    (next: RunnerSettings): Promise<void> => {
+    (next: RunnerFields): Promise<void> => {
+      const launch: AgentLaunch | null = launchFrom(next.profile, next.command);
+      if (!launch) return saveQueueRef.current;
       const queued = saveQueueRef.current
         .catch(() => undefined)
-        .then(() => onRunnerChange(next));
+        .then(() => onAgentChange({ launch, enabled: next.enabled, timeoutMinutes: next.timeoutMinutes }));
       saveQueueRef.current = queued;
       return queued;
     },
-    [onRunnerChange],
+    [onAgentChange],
   );
 
   const commitDrafts = useCallback(
@@ -136,7 +152,15 @@ export function RunnerSettingsCard(props: {
         runner.timeoutMinutes,
       );
       const command = commandDraft.trim();
-      const next: RunnerSettings = {
+      // An agent always has a way to start, so a cleared command puts the saved one back.
+      if (!launchFrom(profile, command)) {
+        editedCommandRef.current = null;
+        setCommandDraft(runner.command);
+        setProfile(runner.profile);
+        setTimeoutDraft(String(timeoutMinutes));
+        return saveQueueRef.current;
+      }
+      const next: RunnerFields = {
         command,
         profile,
         enabled,
@@ -184,7 +208,7 @@ export function RunnerSettingsCard(props: {
     }
   }, [commitDrafts, workspaceId]);
 
-  const configured = configuredRunnerCommand({ command: commandDraft, profile }).length > 0 && Boolean(props.agentName?.trim());
+  const configured = launchFrom(profile, commandDraft) !== null;
   const selfTestRunning = selfTest.status === "running";
   const engineNote = runnerEngineNote(Boolean(sharedView), sessionRecorderOn);
 
@@ -234,13 +258,6 @@ export function RunnerSettingsCard(props: {
           }} />
         <details className="mt-3" open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)}>
         <summary className="cursor-pointer text-[12px] text-muted">Advanced</summary>
-        {profile && commandDraft.trim() ? <SecondaryButton size="compact" disabled={selfTestRunning} onClick={() => {
-          const timeoutMinutes = validTimeoutMinutes(timeoutDraft, runner.timeoutMinutes);
-          setProfile(undefined);
-          setTimeoutDraft(String(timeoutMinutes));
-          setSelfTest({ status: "idle" });
-          void queueSave({ ...runner, command: commandDraft.trim(), profile: undefined, timeoutMinutes }).catch((cause: unknown) => props.onError?.(ipcErrorMessage(cause, "Could not save the agent."), cause));
-        }}>Use saved command</SecondaryButton> : null}
         <label
           htmlFor="runner-command"
           className="text-[11px] font-medium text-ink"
@@ -250,7 +267,7 @@ export function RunnerSettingsCard(props: {
         <input
           id="runner-command"
           data-testid="runner-command-input"
-          value={profile ? configuredRunnerCommand({ command: commandDraft, profile }) : commandDraft}
+          value={profile ? launchCommand(profile) : commandDraft}
           maxLength={4096}
           spellCheck={false}
           autoCapitalize="none"

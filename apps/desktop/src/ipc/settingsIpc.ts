@@ -1,13 +1,12 @@
 import { agentKeyForGroup, agentColorChanges } from "../workspaces/actorPresentation";
 import type { AgentColorChangedEvent } from "./bridgeContract";
 import { join } from "node:path";
-import { configuredRunnerCommand } from "../agents/agentToolCatalog";
 import { DesktopUserSettingsResult, WorkspaceSettingsResult, GetWorkspaceUiStateResult } from "./bridgeContract";
 import type { settingsOperations } from "./settingsOperations";
 import type { OperationHandlers } from "./operationTable";
 import {
   DEFAULT_USER_SETTINGS,
-  AgentColors, StoredUserSettingsResult, rendererUserSettingsResult,
+  AgentColors, StoredUserSettingsResult, firstAgent, rendererUserSettingsResult,
   settingsDeepEqual,
   type DesktopUserSettings,
   type ThemeMode,
@@ -87,7 +86,7 @@ export function createSettingsIpc<
   // The windows must match whatever zoom level, theme and spellcheck are in
   // the file, however they got there.
   function takeEffect(settings: DesktopUserSettings): void {
-    setCachedPreferredName(settings.profile.preferredName, settings.profile.agentName);
+    setCachedPreferredName(settings.profile.preferredName, firstAgent(settings)?.name);
     applyZoomLevelToWindows(settings.appearance.zoomLevel);
     applyThemeMode(settings.appearance.themeMode);
     setSpellCheckerEnabled(settings.editor.spellcheck);
@@ -101,17 +100,12 @@ export function createSettingsIpc<
     if (settingsDeepEqual(rendererUserSettingsResult(previous), publicResult)) return;
     broadcastUserSettings(publicResult);
     await refreshDispatchTray();
-    const { runner, profile } = result.settings;
-    if (!runner.enabled || !configuredRunnerCommand(runner)) return;
-    // A scan finds messages that wait for the runner. Only a change to the
-    // runner or to the agent's name can make one due, so a zoom step does not
-    // scan every open workspace.
-    if (
-      settingsDeepEqual(previous.settings.runner, runner) &&
-      previous.settings.profile.agentName === profile.agentName
-    ) {
-      return;
-    }
+    const agent = firstAgent(result.settings);
+    if (!agent?.enabled) return;
+    // A scan finds messages that wait for the agent. Only a change to the
+    // agent that answers can make one due, so a zoom step does not scan
+    // every open workspace.
+    if (settingsDeepEqual(firstAgent(previous.settings), agent)) return;
     for (const workspace of openDispatchWorkspaces()) {
       void chatDispatchService.scanWorkspace(workspace.workspaceId).then(() => {
         notifyRenderer({ workspaceId: workspace.workspaceId });

@@ -16,6 +16,7 @@ import { formatShortTime } from "../time";
 import { AboutAccess, AboutHistory, AboutHistoryView, AboutHeader, AboutLinks, accessReasonFor, type AboutFile } from "./About";
 import type { AccessFacts } from "./accessReason";
 import { setChosenColors } from "./chosenColors";
+import { settingsWithAgent } from "../../testing/agentSettings";
 
 const bridgeMock = {
   getObjectAccess: vi.fn<(input: { workspaceId: string; ref: unknown; cursor?: string }) => Promise<AccessAnswer>>(),
@@ -1551,7 +1552,7 @@ describe("About History authors", () => {
       expanded onToggle={() => undefined} onOpenMoment={() => undefined} />);
     return screen.getByTestId("about-history-open");
   }
-  afterEach(() => setChosenColors(DEFAULT_USER_SETTINGS.appearance));
+  afterEach(() => setChosenColors(DEFAULT_USER_SETTINGS));
 
   it.each([
     ["a person you shared with", { namedAuthor: { userId: "sam", label: "Sam Rivera" }, authors: [{ kind: "named", userId: "sam", grantId: "g", grantGeneration: 1 }] }, "Sam Rivera"],
@@ -1566,7 +1567,7 @@ describe("About History authors", () => {
   });
 
   it("applies your chosen colour to your own moments only", () => {
-    setChosenColors({ ...DEFAULT_USER_SETTINGS.appearance, yourColor: "rose" });
+    setChosenColors({ ...DEFAULT_USER_SETTINGS, appearance: { ...DEFAULT_USER_SETTINGS.appearance, yourColor: "rose" } });
     const authors = [{ kind: "human" as const, humanId: "device" }];
     expect(row({ personAuthorName: "Ice", authors, authorPresentations: [token("teal", true)] }).querySelector('[title="Ice"]')?.className).toContain("text-hue-rose");
     cleanup();
@@ -1575,7 +1576,7 @@ describe("About History authors", () => {
   });
 
   it("keeps agents in the agent voice, automations bare, link holders marked, and several authors on the file mark", () => {
-    setChosenColors({ ...DEFAULT_USER_SETTINGS.appearance, yourAgentColor: "teal" });
+    setChosenColors(settingsWithAgent({ hue: "teal" }));
     const agent = { kind: "agent" as const, agentId: "nova", agentRunId: "run", onBehalfOf: "device" };
     expect(row({ agentAuthorName: "Nova", authors: [agent], authorPresentations: [token(null, true)] }).querySelector('[title="Nova"]')?.className).toContain("text-hue-teal");
     cleanup();

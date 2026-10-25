@@ -22,7 +22,11 @@ import type {
   LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { RunnerSettings } from "../settings/userSettings";
+import { launchFrom, type AgentLaunchProfile } from "./agentToolCatalog";
+import { testAgent } from "../testing/agentSettings";
+
+// The first agent's launch, switch and timeout, which a test changes in place.
+type RunnerSettings = { command: string; profile?: AgentLaunchProfile; enabled: boolean; timeoutMinutes: number };
 import type { PostNoticeInput } from "../notices/noticeStore";
 import { createOwedRunNotices, type OwedRunNotices } from "./owedRunNotices";
 import {
@@ -598,7 +602,10 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       storeResolves.dispatch += 1;
       return serviceDispatch;
     },
-    readRunnerSettings: async () => ({ ...runner }),
+    readDispatchAgent: async () => {
+      const launch = launchFrom(runner.profile, runner.command);
+      return launch ? { id: "default", ...testAgent({ launch, enabled: runner.enabled, timeoutMinutes: runner.timeoutMinutes }) } : null;
+    },
     identityFor: async () =>
       options.identity ?? {
         displayName: "Nova",

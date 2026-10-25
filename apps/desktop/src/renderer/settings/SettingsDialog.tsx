@@ -23,6 +23,10 @@ import {
   MIN_EDITOR_FONT_SIZE,
   MIN_ZOOM_LEVEL,
   type DesktopUserSettings,
+  firstAgent,
+  newAgentDefaults,
+  withAgent,
+  withFirstAgent,
   zoomPercent,
 } from "../../settings/userSettings";
 import {
@@ -544,6 +548,7 @@ export function SettingsDialog(props: {
   }, [acceptUpdateResult]);
 
   const userSettings = userResult?.settings ?? DEFAULT_USER_SETTINGS;
+  const agent = firstAgent(userSettings);
   const workspaceSettings = workspaceResult?.settings ?? DEFAULT_WORKSPACE_SETTINGS;
   const activeMeta =
     SETTINGS_SECTIONS.find((section) => section.id === activeSection) ??
@@ -697,20 +702,17 @@ export function SettingsDialog(props: {
                 onChange={(yourColor) => void saveAppearance({ yourColor })}
               />
             </SettingRow>
-            <SettingRow
-              title="Your agent's color"
-              modified={userSettings.appearance.yourAgentColor !== null}
-              onReset={() => void saveAppearance({ yourAgentColor: null })}
-              testId="settings-row-your-agent-color"
-            >
-              <ChatAvatar presentation={ownAgentPresentation} name={userSettings.profile.agentName ?? "Agent"} kind="agent" size="comment" />
-              <HueControl
-                label="Your agent's color"
-                shape="agent"
-                value={userSettings.appearance.yourAgentColor}
-                onChange={(yourAgentColor) => void saveAppearance({ yourAgentColor })}
-              />
-            </SettingRow>
+            {agent ? (
+              <SettingRow title="Your agent's color" testId="settings-row-your-agent-color">
+                <ChatAvatar presentation={ownAgentPresentation} name={agent.name} kind="agent" size="comment" />
+                <HueControl
+                  label="Your agent's color"
+                  shape="agent"
+                  value={agent.hue}
+                  onChange={(hue) => void saveUserSettings(withAgent(userSettings, agent.id, (current) => ({ ...current, hue })))}
+                />
+              </SettingRow>
+            ) : null}
             <SettingRow
               title="Editor font"
               modified={isModified(userSettings.editor.fontFamily, DEFAULT_USER_SETTINGS.editor.fontFamily)}
@@ -801,22 +803,27 @@ export function SettingsDialog(props: {
               workspaceId={props.workspaceId}
               workspacePath={props.workspacePath}
               preferredName={userSettings.profile.preferredName}
-              agentName={userSettings.profile.agentName}
-              onAgentNameChange={(agentName) => saveUserSettings({ ...userSettings, profile: { ...userSettings.profile, agentName } })}
+              agentName={agent?.name}
+              onAgentNameChange={agent
+                ? (name) => saveUserSettings(withAgent(userSettings, agent.id, (current) => ({ ...current, name })))
+                : undefined}
               onPreferredNameChange={(preferredName) =>
                 saveUserSettings({
                   ...userSettings,
                   profile: { ...userSettings.profile, preferredName },
                 })
               }
-              runner={userSettings.runner}
+              agent={agent}
               sharedView={props.sharedView}
               sessionRecorderOn={props.sessionRecorderOn}
-              onRunnerChange={(runner) =>
-                saveUserSettings({
-                  ...userSettings,
-                  runner,
-                })
+              onAgentChange={(fields) =>
+                saveUserSettings(withFirstAgent(userSettings, (current) => ({
+                  ...(current ?? {
+                    ...newAgentDefaults(userSettings, userSettings.appearance.yourColor ?? ownPresentation.hue),
+                    name: "Agent",
+                  }),
+                  ...fields,
+                })))
               }
             />
           </div>

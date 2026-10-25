@@ -88,6 +88,7 @@ import { useAgentSetup } from "./shell/useAgentSetup";
 import { useAgentRunActive } from "./shell/agentRunState";
 import {
   DEFAULT_SIDEBAR_SETTINGS,
+  firstAgent,
   type DesktopUserSettings,
 } from "../settings/userSettings";
 import { useCrashReport } from "./shell/useCrashReport";
@@ -1155,7 +1156,7 @@ export function DesktopWorkspaceShell(props: {
   // The renderer has no identity source yet, so the user shows as "You" —
   // the same fallback main uses for local authorship.
   const LOCAL_USER_LABEL = "You";
-  const localAgentName = props.userSettings?.settings.profile.agentName ?? "Your agent";
+  const localAgentName = (props.userSettings && firstAgent(props.userSettings.settings)?.name) ?? "Your agent";
   const localAgentEnabled = Boolean(agentSetup?.runnerEnabled || agentSetup?.agentRunActive);
   const mentionCandidates = useMemo<MentionCandidate[]>(
     () => [

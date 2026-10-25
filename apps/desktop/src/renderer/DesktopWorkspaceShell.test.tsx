@@ -17,6 +17,7 @@ import { OPEN_EDITORS_DEFAULT_HEIGHT, OPEN_EDITORS_MIN_HEIGHT } from "./workbenc
 import { documentVersionKey } from "./documentVersionKey";
 import { basenameOf } from "./path";
 import { editorTabTestId } from "../testPins";
+import { settingsWithAgent } from "../testing/agentSettings";
 import { deferred } from "../testing/deferred";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { DesktopWorkspaceShell, WORKSPACE, STORED_STATE, STORED_CHATS_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
@@ -1704,11 +1705,7 @@ describe("customize", () => {
       workspace={WORKSPACE}
       workspaces={[WORKSPACE]}
       {...shellBootstrapProps(bridge)}
-      userSettings={{ source: "stored", settings: {
-        ...DEFAULT_USER_SETTINGS,
-        profile: { agentName: "Nova" },
-        runner: { ...DEFAULT_USER_SETTINGS.runner, enabled: true, command: "node agent.mjs" },
-      } }}
+      userSettings={{ source: "stored", settings: settingsWithAgent({ name: "Nova" }) }}
       onSwitchWorkspace={() => {}}
     />);
 
@@ -1723,7 +1720,7 @@ describe("customize", () => {
     expect(await screen.findByTestId(`tab-dohc://chats/channel/${encodeURIComponent(agentChannel.id)}`)).toBeTruthy();
     const composer = await screen.findByTestId<HTMLTextAreaElement>("chats-new-thread-composer");
     await waitFor(() => expect(composer.value).toBe([
-      'Change my dohc chat colors settings. They are the "appearance.yourColor" and "appearance.yourAgentColor" keys in my dohc settings file, /state/dohc-settings.json.',
+      'Change my dohc chat colors settings. They are the "appearance.yourColor" and "agents.*.hue" keys in my dohc settings file, /state/dohc-settings.json.',
       "dohc applies the file when it is saved.",
       "What I want: ",
     ].join("\n")));

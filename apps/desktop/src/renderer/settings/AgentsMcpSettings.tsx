@@ -1,4 +1,3 @@
-import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
 import { useRequestSequence } from "../useRequestSequence";
 import { useCallback, useEffect, useState } from "react";
 import { Bot } from "lucide-react";
@@ -6,7 +5,7 @@ import type {
   AgentRunStatusResult,
   McpConfigResult,
 } from "../../ipc/bridgeContract";
-import type { RunnerSettings } from "../../settings/userSettings";
+import type { AgentSettings } from "../../settings/userSettings";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { CopyButton } from "../ui/CopyButton";
@@ -42,20 +41,21 @@ export function AgentsMcpSettings(props: {
   agentName?: string;
   onAgentNameChange?: (name: string) => Promise<void>;
   onPreferredNameChange: (preferredName: string | undefined) => Promise<void>;
-  runner: RunnerSettings;
+  // The first agent, or null before there is one.
+  agent: AgentSettings | null;
   sharedView?: boolean;
   sessionRecorderOn: boolean | undefined;
-  onRunnerChange: (runner: RunnerSettings) => Promise<void>;
+  onAgentChange: (fields: Pick<AgentSettings, "launch" | "enabled" | "timeoutMinutes">) => Promise<void>;
 }) {
   const {
     workspaceId,
     workspacePath,
     preferredName,
     onPreferredNameChange,
-    runner,
+    agent,
     sharedView,
     sessionRecorderOn,
-    onRunnerChange,
+    onAgentChange,
     onError,
   } = props;
   const [status, setStatus] = useState<AgentRunStatusResult | null>(null);
@@ -120,17 +120,13 @@ export function AgentsMcpSettings(props: {
   }, [loadSettings, workspaceId]);
 
   const runActive = Boolean(status?.activeRun);
-  const runnerConfigured = configuredRunnerCommand(runner).length > 0;
-  // Each way of connecting reports its own state; neither one is required. The
-  // runner dispatches only with an agent name to post as. An active agent run
-  // only marks changes as the agent's: no trusted signal proves that an
-  // external client copied the configuration, so this never claims one is
-  // connected.
-  const runnerState = runner.enabled
-    ? props.agentName
-      ? { state: "ready", label: "Dispatch ready" }
-      : { state: "unnamed", label: "Agent name needed" }
-    : runnerConfigured
+  // Each way of connecting reports its own state; neither one is required. An
+  // active agent run only marks changes as the agent's: no trusted signal
+  // proves that an external client copied the configuration, so this never
+  // claims one is connected.
+  const runnerState = agent?.enabled
+    ? { state: "ready", label: "Dispatch ready" }
+    : agent
       ? { state: "configured", label: "Configured · dispatch off" }
       : { state: "missing", label: "No runner command" };
 
@@ -256,12 +252,12 @@ export function AgentsMcpSettings(props: {
         key={workspaceId}
         onError={props.onError}
         workspaceId={workspaceId}
-        runner={runner}
+        agent={agent}
         agentName={props.agentName}
         onAgentNameChange={props.onAgentNameChange}
         sharedView={sharedView}
         sessionRecorderOn={sessionRecorderOn}
-        onRunnerChange={onRunnerChange}
+        onAgentChange={onAgentChange}
       />
 
       <SettingRow
