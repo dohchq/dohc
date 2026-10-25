@@ -128,6 +128,48 @@ describe("CalendarView", () => {
     expect(screen.getByText("No records in this collection yet.")).toBeDefined();
   });
 
+  it("moves a month at a time with the arrows and back with Today", () => {
+    const onNavigate = vi.fn<(date: Date) => void>();
+    render(<CalendarView schema={makeSchema()} records={makeRecords()} dateField="due" defaultDate={AUGUST} onNavigate={onNavigate} />);
+    expect(screen.getByText("August 2026")).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Next month" }));
+    expect(screen.getByText("September 2026")).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Previous month" }));
+    fireEvent.click(screen.getByRole("button", { name: "Previous month" }));
+    expect(screen.getByText("July 2026")).toBeDefined();
+    expect(onNavigate.mock.calls.map(([date]) => date.getMonth())).toEqual([8, 7, 6]);
+    fireEvent.click(screen.getByRole("button", { name: "Today" }));
+    expect(onNavigate.mock.calls.at(-1)?.[0].toDateString()).toBe(new Date().toDateString());
+  });
+
+  it("offers to go to the month of the nearest record from an empty month", () => {
+    const records = [
+      makeRecord("rec-may", [indexedValue("title", "May trip"), indexedValue("due", "2026-05-02")]),
+      makeRecord("rec-oct", [indexedValue("title", "October trip"), indexedValue("due", "2026-10-20")]),
+    ];
+    render(<CalendarView schema={makeSchema()} records={records} dateField="due" defaultDate={AUGUST} />);
+    fireEvent.click(screen.getByRole("button", { name: "Go to October 2026" }));
+    expect(screen.getByText("October trip")).toBeDefined();
+    expect(screen.queryByRole("button", { name: /^Go to/ })).toBeNull();
+  });
+
+  it("makes no offer when the month grid already shows a record", () => {
+    // 1 August 2026 is a Saturday, so the August grid starts on 26 July.
+    const records = [makeRecord("rec-july", [indexedValue("title", "Late July"), indexedValue("due", "2026-07-27")])];
+    render(<CalendarView schema={makeSchema()} records={records} dateField="due" defaultDate={AUGUST} />);
+    expect(screen.getByText("Late July")).toBeDefined();
+    expect(screen.queryByRole("button", { name: /^Go to/ })).toBeNull();
+  });
+
+  it("offers the nearest of the dates a querying host found outside the month", () => {
+    const onNavigate = vi.fn<(date: Date) => void>();
+    render(
+      <CalendarView schema={makeSchema()} records={[]} dateField="due" date={AUGUST} onNavigate={onNavigate} nearbyDates={["2025-12-30", "2026-11-03"]} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Go to November 2026" }));
+    expect(onNavigate.mock.calls[0]?.[0].toDateString()).toBe(new Date(2026, 10, 3).toDateString());
+  });
+
   it("emits the event's record when the event is selected", () => {
     const onOpenRecord = vi.fn();
     render(

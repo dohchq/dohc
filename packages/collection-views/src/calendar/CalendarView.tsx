@@ -1,13 +1,17 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type { ComponentType } from "react";
 import { Calendar, dateFnsLocalizer } from "react-big-calendar";
 import type { CalendarProps } from "react-big-calendar";
 import withDragAndDrop from "react-big-calendar/lib/addons/dragAndDrop";
 import type { EventInteractionArgs } from "react-big-calendar/lib/addons/dragAndDrop";
+import { addMonths } from "date-fns/addMonths";
+import { addWeeks } from "date-fns/addWeeks";
+import { endOfMonth } from "date-fns/endOfMonth";
 import { format } from "date-fns/format";
 import { getDay } from "date-fns/getDay";
 import { isValid } from "date-fns/isValid";
 import { parse } from "date-fns/parse";
+import { startOfMonth } from "date-fns/startOfMonth";
 import { startOfWeek } from "date-fns/startOfWeek";
 import { enUS } from "date-fns/locale/en-US";
 import type { CollectionRecord, CollectionSchema } from "@dohc/workspace-contracts";
@@ -46,6 +50,11 @@ export interface CalendarViewProps {
   /** A querying host controls the visible month and loads its full date range. */
   date?: Date;
   onNavigate?: (date: Date) => void;
+  /**
+   * For a host that reads only the visible month: the dates of the nearest
+   * records before and after it. An empty month offers to go to the closer one.
+   */
+  nearbyDates?: readonly string[];
 }
 
 export interface CalendarRecordEvent {
@@ -63,6 +72,37 @@ const localizer = dateFnsLocalizer({
   locales: { "en-US": enUS },
 });
 
+const textButtonClass =
+  "rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors hover:bg-hover hover:text-ink";
+const iconButtonClass =
+  "grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink";
+
+function Chevron({ next }: { next: boolean }) {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d={next ? "m9 18 6-6-6-6" : "m15 18-6-6 6-6"} />
+    </svg>
+  );
+}
+
+/** The day a record's date value names, or null when it names none. */
+function day(value: string): Date | null {
+  const parsed = parse(value, DATE_VALUE_FORMAT, new Date());
+  return isValid(parsed) ? parsed : null;
+}
+
+/** The record day closest to the month grid around `month`, or null when the grid shows one. */
+function nearestDay(month: Date, days: readonly Date[]): Date | null {
+  const start = startOfWeek(startOfMonth(month)), end = startOfWeek(addWeeks(endOfMonth(month), 1));
+  let nearest: Date | null = null, distance = Infinity;
+  for (const candidate of days) {
+    if (candidate >= start && candidate < end) return null;
+    const away = candidate < start ? start.getTime() - candidate.getTime() : candidate.getTime() - end.getTime();
+    if (away < distance) { nearest = candidate; distance = away; }
+  }
+  return nearest;
+}
+
 const DnDCalendar = withDragAndDrop<CalendarRecordEvent, object>(
   Calendar as ComponentType<CalendarProps<CalendarRecordEvent, object>>,
 );
@@ -78,7 +118,17 @@ export function CalendarView({
   defaultDate,
   date,
   onNavigate,
+  nearbyDates,
 }: CalendarViewProps) {
+  const [ownDate, setOwnDate] = useState(() => defaultDate ?? new Date());
+  const shown = date ?? ownDate;
+  const navigate = useCallback(
+    (next: Date) => {
+      if (date === undefined) setOwnDate(next);
+      onNavigate?.(next);
+    },
+    [date, onNavigate],
+  );
   const fields = useMemo(() => deriveColumns(schema, visibleFields), [schema, visibleFields]);
   const titleField = fields[0] ?? null;
 
@@ -88,8 +138,8 @@ export function CalendarView({
       const indexed = record.values.find((entry) => entry.field === dateField);
       if (!indexed || indexed.validation.status !== "valid") continue;
       if (typeof indexed.value !== "string") continue;
-      const start = parse(indexed.value, DATE_VALUE_FORMAT, new Date());
-      if (!isValid(start)) continue;
+      const start = day(indexed.value);
+      if (!start) continue;
       const title = titleField
         ? fieldDisplayText(
             titleField,
@@ -116,27 +166,51 @@ export function CalendarView({
     [dateField, onCellChange],
   );
 
+  const nearest = useMemo(
+    () => nearestDay(shown, [...events.map((event) => event.start), ...(nearbyDates ?? []).flatMap((value) => day(value) ?? [])]),
+    [shown, events, nearbyDates],
+  );
+
   if (records.length === 0 && !onNavigate) {
     return <div className="px-3 py-4 text-sm text-muted">No records in this collection yet.</div>;
   }
 
   return (
-    <div className="dohc-collection-calendar h-full">
-      <DnDCalendar
-        localizer={localizer}
-        events={events}
-        defaultDate={defaultDate}
-        date={date}
-        onNavigate={onNavigate}
-        defaultView="month"
-        views={["month"]}
-        resizable={false}
-        draggableAccessor={() => !!onCellChange}
-        onEventDrop={handleEventDrop}
-        onSelectEvent={
-          onOpenRecord ? (event) => onOpenRecord(event.record) : undefined
-        }
-      />
+    <div className="dohc-collection-calendar flex h-full flex-col gap-2">
+      <div className="flex shrink-0 items-center gap-2">
+        <button type="button" className={textButtonClass} onClick={() => navigate(new Date())}>
+          Today
+        </button>
+        <button type="button" aria-label="Previous month" title="Previous month" className={iconButtonClass} onClick={() => navigate(addMonths(shown, -1))}>
+          <Chevron next={false} />
+        </button>
+        <button type="button" aria-label="Next month" title="Next month" className={iconButtonClass} onClick={() => navigate(addMonths(shown, 1))}>
+          <Chevron next />
+        </button>
+        <span className="text-sm font-medium text-ink">{format(shown, "MMMM yyyy")}</span>
+        {nearest ? (
+          <button type="button" className={textButtonClass} onClick={() => navigate(nearest)}>
+            {`Go to ${format(nearest, "MMMM yyyy")}`}
+          </button>
+        ) : null}
+      </div>
+      <div className="min-h-0 flex-1">
+        <DnDCalendar
+          localizer={localizer}
+          events={events}
+          date={shown}
+          onNavigate={navigate}
+          toolbar={false}
+          defaultView="month"
+          views={["month"]}
+          resizable={false}
+          draggableAccessor={() => !!onCellChange}
+          onEventDrop={handleEventDrop}
+          onSelectEvent={
+            onOpenRecord ? (event) => onOpenRecord(event.record) : undefined
+          }
+        />
+      </div>
     </div>
   );
 }
