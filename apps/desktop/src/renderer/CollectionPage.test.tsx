@@ -2491,3 +2491,26 @@ describe("Button fields", () => {
     expect((within(panel).getByRole("combobox", { name: "Button" }) as HTMLSelectElement).value).toBe("Archive");
   });
 });
+
+describe("a calendar view without a date field", () => {
+  const schema: CollectionSchema = { ...CALENDAR_SCHEMA, fields: [{ name: "title", type: "text" }],
+    views: [{ ...CALENDAR_SCHEMA.views[0]!, dateField: null }] };
+
+  it("asks for one and opens Fields on a new Date field", async () => {
+    renderPage(makeBridge([record("rec-1", "Plan")], schema));
+
+    expect(await screen.findByText("A calendar needs a date field.")).toBeDefined();
+    expect(screen.queryByRole("grid")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Add a date field" }));
+    const dialog = await screen.findByTestId("collection-fields-dialog");
+    expect((within(dialog).getByLabelText("Field type") as HTMLSelectElement).value).toBe("date");
+    expect(document.activeElement).toBe(within(dialog).getByLabelText("Field name"));
+  });
+
+  it("leaves the button out for someone who cannot change fields", async () => {
+    renderPage(makeBridge([record("rec-1", "Plan")], schema), undefined, undefined, { readOnly: true });
+
+    expect(await screen.findByText("A calendar needs a date field.")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Add a date field" })).toBeNull();
+  });
+});

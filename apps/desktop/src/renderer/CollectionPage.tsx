@@ -53,6 +53,7 @@ import {
 import { buttonAutomation } from "./collections/automationDraft";
 import type { Automation } from "./collections/automationSentence";
 import { RecordButton } from "./collections/RecordButton";
+import { CalendarNeedsDateField } from "./collections/CalendarNeedsDateField";
 import { useAutomationButtons, useButtonStates } from "./collections/useAutomationButtons";
 
 // The collection surface behind a tab://collection/<path> tab uses the shared
@@ -446,7 +447,8 @@ export function CollectionPage({
   // through the authored write path (collections/schemaWrite). Returns a
   // user-facing sentence on failure, null on success, so both dialogs
   // share one contract.
-  const [fieldsOpen, setFieldsOpen] = useState(false);
+  // True, or the type of the new field the dialog opens on.
+  const [fieldsOpen, setFieldsOpen] = useState<boolean | "date">(false);
   // The Fields dialog shows what each button does; the page follows the
   // store only while it is open, so a press re-renders just its button.
   const buttonStates = useButtonStates(fieldsOpen ? buttons : null);
@@ -625,6 +627,7 @@ export function CollectionPage({
       schema={schema}
       relationTargets={relationTargets}
       apply={applySchemaChange}
+      addType={fieldsOpen === "date" ? "date" : undefined}
       buttonStates={buttonStates}
       onChooseButtonAutomation={(field) => {
         setFieldsOpen(false);
@@ -736,6 +739,8 @@ export function CollectionPage({
             onCellChange={readOnly ? undefined : onCellChange}
             onOpenRecord={openRecord}
           />
+        ) : kind === "calendar" ? (
+          <CalendarNeedsDateField onAddDateField={readOnly ? undefined : () => setFieldsOpen("date")} />
         ) : (
           <TableView
             schema={schema}
