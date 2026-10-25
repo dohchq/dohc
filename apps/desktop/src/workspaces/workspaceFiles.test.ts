@@ -1605,6 +1605,38 @@ describe("copyIntoWorkspace", () => {
 });
 
 describe("importDroppedPaths", () => {
+  it.for([false, true])("refuses case-aliased metadata with Linux realpath spelling (ancestor link: %s)", async (alias, context) => {
+    if (!(await caseInsensitiveFs())) context.skip();
+    const fsPromises = await import("node:fs/promises");
+    const work = join(root, "Work", "A"), lookupWork = join(root, "work", "A");
+    await mkdir(join(work, ".dohc"), { recursive: true });
+    await writeFile(join(work, ".dohc", "settings.json"), "private");
+    const sibling = join(root, "sibling");
+    await mkdir(sibling);
+    await writeFile(join(sibling, "notes.md"), "outside");
+    const target = join(root, "target");
+    await mkdir(target);
+    const link = join(root, "alias");
+    if (alias) await symlink(lookupWork, link, "junction");
+    const source = join(alias ? link : lookupWork, ".dohc", "settings.json");
+    const originalRealpath = fsPromises.realpath;
+    const spy = vi.spyOn(fsPromises, "realpath").mockImplementation(async (path) => {
+      const value = String(path);
+      if (value === source) return join(lookupWork, ".dohc", "settings.json");
+      await originalRealpath(path);
+      return value;
+    });
+    try {
+      const outcome = await importDroppedPaths(target, [source, join(sibling, "notes.md")], [work]);
+      expect(outcome).toEqual({
+        imported: ["notes.md"],
+        skipped: 1,
+        skippedSources: [{ path: "settings.json", reason: "workspace-data" }],
+      });
+      expect(existsSync(join(target, "settings.json"))).toBe(false);
+      expect(await readFile(join(target, "notes.md"), "utf8")).toBe("outside");
+    } finally { spy.mockRestore(); }
+  });
   it("imports regular files and folders, and skips symlinks and relative paths", async () => {
     const outside = await createTestScratch("dohc-drop-");
     await writeFile(join(outside, "doc.md"), "dropped");

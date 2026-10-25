@@ -1,3 +1,6 @@
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { deferred, type Deferred } from "../testing/deferred";
 import { agentExecutableCandidates, parseAgentAuth, probeAgentTools, type AgentProbeDependencies, type ProbeOutput } from "./agentToolProbe";
@@ -5,11 +8,36 @@ import { agentExecutableCandidates, parseAgentAuth, probeAgentTools, type AgentP
 function fixture(overrides: Partial<AgentProbeDependencies> = {}): AgentProbeDependencies {
   return { platform: "win32", home: "C:\\Users\\ice", workspaceRoot: "C:\\Workspace", realPath: (path) => path,
     env: { PATH: 'relative;.;"C:\\Tools"', APPDATA: "C:\\Users\\ice\\AppData\\Roaming" }, isExecutable: () => false,
+    stat: () => { throw new Error("identity unavailable"); },
     signal: new AbortController().signal, run: vi.fn(async () => ({ exitCode: 0, stdout: "1.2.3", stderr: "" })),
     codexMayRunWithoutLogin: () => false, ...overrides };
 }
 
 describe("read-only agent detection", () => {
+  it.for([false, true])("excludes Linux case aliases on disk (through realpath: %s)", async (alias, context) => {
+    const disk = mkdtempSync(join(tmpdir(), "dohc-probe-case-"));
+    try {
+      mkdirSync(join(disk, "Work", "bin"), { recursive: true });
+      writeFileSync(join(disk, "Work", "bin", "codex"), "workspace executable");
+      if (!existsSync(join(disk, "work", "bin", "codex"))) context.skip();
+      mkdirSync(join(disk, "outside"));
+      writeFileSync(join(disk, "outside", "codex"), "installed executable");
+      const lookup = (value: string) => join(disk, value.slice("/disk/".length));
+      const unsafe = alias ? "/disk/link/codex" : "/disk/work/bin/codex";
+      const deps = fixture({ platform: "linux", workspaceRoot: "/disk/Work", home: "/home/test",
+        env: { PATH: alias ? "/disk/link" : "/disk/work/bin" },
+        realPath: (value) => value === unsafe ? "/disk/work/bin/codex" : value,
+        isExecutable: (value) => value === unsafe,
+        stat: (value) => statSync(lookup(value), { bigint: true }),
+      });
+      expect((await probeAgentTools(deps)).find((tool) => tool.tool === "codex")).toMatchObject({ executable: null, probe: "not-found" });
+      expect(deps.run).not.toHaveBeenCalled();
+      deps.env.PATH += ":/disk/outside";
+      deps.isExecutable = (value) => value === unsafe || value === "/disk/outside/codex";
+      expect((await probeAgentTools(deps)).find((tool) => tool.tool === "codex")).toMatchObject({ executable: "/disk/outside/codex", probe: "detected" });
+      expect(deps.run).toHaveBeenCalledTimes(2);
+    } finally { rmSync(disk, { recursive: true, force: true }); }
+  });
   it("resolves Windows PATHEXT in order and never searches relative PATH or workspace", async () => {
     const deps = fixture({ isExecutable: (path) => path === "C:\\Tools\\claude.CMD" });
     expect(agentExecutableCandidates("claude", deps).slice(0, 4)).toEqual(["C:\\Tools\\claude.COM", "C:\\Tools\\claude.EXE", "C:\\Tools\\claude.BAT", "C:\\Tools\\claude.CMD"]);

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { link, lstat, open, realpath, rename, rm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join } from "node:path";
 
-import { isInside } from "../security/pathContainment";
+import { isInsideOrUnknown } from "../security/pathContainment";
 
 export const DATASET_RECOVERY_EXTENSION = ".dohc-recovery";
 
@@ -25,7 +25,9 @@ export async function writeDatasetRecoveryExport(input: {
       throw error;
     });
     current();
-    if (canonicalRoot && isInside(canonicalRoot, destination)) {
+    const inside = canonicalRoot && await isInsideOrUnknown(canonicalRoot, destination);
+    current();
+    if (inside) {
       throw new Error("Save the private recovery archive outside all workspaces.");
     }
   }

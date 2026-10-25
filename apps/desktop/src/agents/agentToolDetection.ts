@@ -15,6 +15,7 @@ export async function runProbe(executable: string, args: readonly string[], sign
 export function detectAgentTools(workspaceRoot: string, signal: AbortSignal, resourcesRoot: string) {
   return probeAgentTools({
     platform: process.platform, env: process.env, home: homedir(), workspaceRoot, signal,
+    stat: (path, options) => statSync(path, options),
     run: (executable, args, probeSignal) => runProbe(executable, args, probeSignal, resourcesRoot),
     codexMayRunWithoutLogin: () => codexMayRunWithoutLogin(process.env, codexConfigFiles(process.env, process.platform)),
     realPath: (path) => {

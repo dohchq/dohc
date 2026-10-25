@@ -1,4 +1,5 @@
 import { posix, win32 } from "node:path";
+import { isInsideOrUnknownSync, type ContainmentStat } from "../security/pathContainment";
 import { AGENT_TOOLS, type AgentToolDetection, type AgentToolId } from "./agentToolCatalog";
 
 export interface ProbeOutput { exitCode: number | null; stdout: string; stderr: string }
@@ -8,6 +9,7 @@ export interface AgentProbeDependencies {
   home: string;
   workspaceRoot: string;
   realPath(path: string): string | null;
+  stat: ContainmentStat;
   isExecutable(path: string): boolean;
   signal: AbortSignal;
   run(executable: string, args: readonly string[], signal: AbortSignal): Promise<ProbeOutput>;
@@ -80,8 +82,7 @@ export async function probeAgentTools(deps: AgentProbeDependencies): Promise<Age
   const path = deps.platform === "win32" ? win32 : posix;
   const canonicalWorkspace = deps.realPath(deps.workspaceRoot);
   const insideWorkspace = (candidate: string, root: string): boolean => {
-    const relative = path.relative(root, candidate);
-    return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
+    return isInsideOrUnknownSync(root, candidate, deps.stat, path);
   };
   const installedExecutable = (candidate: string): boolean => {
     if (!canonicalWorkspace || !path.isAbsolute(canonicalWorkspace)

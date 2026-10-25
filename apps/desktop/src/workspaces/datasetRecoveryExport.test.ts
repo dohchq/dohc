@@ -1,13 +1,37 @@
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import * as fsPromises from "node:fs/promises";
+import { afterEach, expect, it, vi } from "vitest";
 import { DATASET_RECOVERY_EXTENSION, writeDatasetRecoveryExport } from "./datasetRecoveryExport";
+
+vi.mock("node:fs/promises", async (importOriginal) => ({ ...await importOriginal<typeof import("node:fs/promises")>() }));
 
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 async function fixture() { const root = await mkdtemp(join(tmpdir(), "dohc-recovery-export-")); roots.push(root); return root; }
 async function* chunks(...values: string[]) { for (const value of values) yield Buffer.from(value); }
+
+it("refuses case-aliased Linux destinations before opening a temporary archive", async (context) => {
+  const root = await fixture(), work = join(root, "Work"), lookupWork = join(root, "work");
+  await mkdir(work);
+  if (!(await fsPromises.stat(lookupWork).catch(() => null))) context.skip();
+  const originalRealpath = fsPromises.realpath;
+  const realpathSpy = vi.spyOn(fsPromises, "realpath").mockImplementation(async (path) => {
+    await originalRealpath(path);
+    return String(path);
+  });
+  const openSpy = vi.spyOn(fsPromises, "open");
+  try {
+    await expect(writeDatasetRecoveryExport({ workspaceRoots: [work], path: join(lookupWork, "x.dohc-recovery"),
+      stream: chunks("private"), maxBytes: 1024, signal: new AbortController().signal, authorize() {} })).rejects.toThrow("Save the private recovery archive outside all workspaces.");
+    expect(openSpy).not.toHaveBeenCalled();
+    expect(await readdir(work)).toEqual([]);
+    const path = join(root, "outside.dohc-recovery");
+    await expect(writeDatasetRecoveryExport({ workspaceRoots: [work], path, stream: chunks("private"), maxBytes: 1024,
+      signal: new AbortController().signal, authorize() {} })).resolves.toEqual({ savedPath: path, byteLength: 7 });
+  } finally { openSpy.mockRestore(); realpathSpy.mockRestore(); }
+});
 
 it("streams a private recovery archive through a synced temp file and publishes atomically", async () => {
   const root = await fixture(), path = join(root, `fundraiser${DATASET_RECOVERY_EXTENSION}`); let checks = 0;
