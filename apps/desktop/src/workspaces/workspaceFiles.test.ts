@@ -35,8 +35,10 @@ import {
   extractFrontmatterIcon,
   getWorkspaceListingMetadata,
   importDroppedPaths,
+  ImportSkips,
   listFiles,
   movePath,
+  nameSkip,
   prepareWorkspaceDelete,
   screenDroppedPaths,
 } from "./workspaceFiles";
@@ -1292,9 +1294,15 @@ describe("importDroppedPaths", () => {
       [root],
     );
     // The symlink (refused before it follows to target.md) and the relative
-    // path are skipped, and the skip count says so instead of the batch
-    // silently shrinking. The empty folder lands, and the outcome counts it.
-    expect(outcome).toEqual({ imported: ["doc.md"], skipped: 2, folders: 1 });
+    // path are skipped, and the outcome says which and why instead of the
+    // batch silently shrinking. The empty folder lands, and the outcome
+    // names it.
+    expect(outcome).toEqual({
+      imported: ["doc.md"],
+      skipped: 2,
+      skippedSources: [{ path: "alias.md", reason: "link" }, { path: "relative.md", reason: "unreadable" }],
+      folders: ["folder"],
+    });
     expect((await stat(join(root, "folder"))).isDirectory()).toBe(true);
     expect(existsSync(join(root, "target.md"))).toBe(false);
   });
@@ -1320,14 +1328,56 @@ describe("importDroppedPaths", () => {
     const outcome = await importDroppedPaths(root, [trip], [root]);
     // Two links skipped; .DS_Store and .git are not workspace files at all.
     // The walk reads each folder in the order the disk lists it.
-    expect({ ...outcome, imported: outcome.imported.sort() }).toEqual({
+    const byPath = (a: { path: string }, b: { path: string }) => a.path.localeCompare(b.path);
+    expect({
+      ...outcome,
+      imported: outcome.imported.sort(),
+      skippedSources: outcome.skippedSources?.sort(byPath),
+    }).toEqual({
       imported: ["Trip/Report.rtfd/TXT.rtf", "Trip/photos/beach.jpg", "Trip/plan.md"],
       skipped: 2,
-      folders: 4,
+      skippedSources: [{ path: "Trip/key.txt", reason: "link" }, { path: "Trip/linked", reason: "link" }],
+      folders: ["Trip"],
     });
     expect(await readFile(join(root, "Trip", "photos", "beach.jpg"), "utf8")).toBe("jpg-bytes");
     expect((await readdir(join(root, "Trip"))).sort()).toEqual(["Report.rtfd", "empty", "photos", "plan.md"]);
     expect(await readdir(join(root, "Trip", "photos"))).toEqual(["beach.jpg"]);
+  });
+
+  // Inside a folder these are left behind without a word. Dropped on their
+  // own, the person handed them over, so each is named with its reason.
+  it("names each item a drop leaves out on its own, and why", async () => {
+    const outside = await createTestScratch("dohc-drop-");
+    await writeFile(join(outside, "ok.md"), "ok");
+    await writeFile(join(outside, ".DS_Store"), "finder");
+    await mkdir(join(outside, "node_modules"));
+    await mkdir(join(outside, ".dohc"));
+
+    const dropped = ["ok.md", ".DS_Store", "node_modules", ".dohc"].map((name) => join(outside, name));
+    expect(await importDroppedPaths(root, dropped, [root])).toEqual({
+      imported: ["ok.md"],
+      skipped: 3,
+      skippedSources: [
+        { path: ".DS_Store", reason: "system-file" },
+        { path: "node_modules", reason: "left-out" },
+        { path: ".dohc", reason: "dohc-name" },
+      ],
+    });
+  });
+
+  it.runIf(process.platform === "win32")("says which names Windows can't use", () => {
+    expect(nameSkip("Trip/CON.md")).toBe("windows-name");
+    expect(nameSkip("Trip/a:b.md")).toBe("windows-name");
+    expect(nameSkip("Trip/plan.md")).toBeNull();
+  });
+
+  it("lists the first 100 skips and counts them all", () => {
+    const skips = new ImportSkips();
+    for (let i = 0; i < 101; i += 1) skips.add(`f-${i}.md`, "link");
+    const outcome = skips.outcome();
+    expect(outcome.skipped).toBe(101);
+    expect(outcome.skippedSources).toHaveLength(100);
+    expect(outcome.skippedSources?.at(-1)).toEqual({ path: "f-99.md", reason: "link" });
   });
 
   it("lands a dropped folder beside one with its name, as a file would", async () => {
@@ -1349,7 +1399,7 @@ describe("importDroppedPaths", () => {
     expect(outcome).toEqual({
       imported: ["inbox/Trip (2)/plan.md", "inbox/Report (2).rtfd/TXT.rtf"],
       skipped: 0,
-      folders: 2,
+      folders: ["inbox/Trip (2)", "inbox/Report (2).rtfd"],
     });
     expect(await readFile(join(root, "inbox", "Trip", "plan.md"), "utf8")).toBe("existing");
     expect(await readFile(join(root, "inbox", "Trip (2)", "plan.md"), "utf8")).toBe("incoming");
@@ -1364,7 +1414,7 @@ describe("importDroppedPaths", () => {
     // The two folders and 998 files make 1,000.
     await Promise.all(Array.from({ length: 998 }, (_, i) => writeFile(join(fits, "inner", `f-${i}.md`), "x")));
     const landed = await importDroppedPaths(root, [fits], [root]);
-    expect([landed.imported.length, landed.folders]).toEqual([998, 2]);
+    expect([landed.imported.length, landed.folders]).toEqual([998, ["fits"]]);
 
     const over = join(outside, "over");
     await mkdir(over, { recursive: true });
@@ -1386,7 +1436,7 @@ describe("importDroppedPaths", () => {
     const stage = await createTestScratch("dohc-stage-");
     await symlink(join(secrets, "id_rsa"), join(stage, "innocent.txt"), "file");
     const outcome = await importDroppedPaths(root, [join(stage, "innocent.txt")], [root]);
-    expect(outcome).toEqual({ imported: [], skipped: 1 });
+    expect(outcome).toEqual({ imported: [], skipped: 1, skippedSources: [{ path: "innocent.txt", reason: "link" }] });
     expect(existsSync(join(root, "innocent.txt"))).toBe(false);
     // Nothing landed in the workspace — the secret never left its directory.
     expect(await readdir(root)).toEqual([]);
@@ -1429,10 +1479,20 @@ describe("importDroppedPaths", () => {
     }
 
     const outcome = await importDroppedPaths(root, dropped, [root]);
-    expect(outcome).toEqual({ imported: ["Trip/ok.md"], skipped: dropped.length, folders: 1 });
+    expect(outcome).toEqual({
+      imported: ["Trip/ok.md"],
+      skipped: dropped.length,
+      skippedSources: expect.arrayContaining([
+        { path: "cfg%2fevil", reason: "name" },
+        { path: "cfg%2Fdeep", reason: "name" },
+        { path: "Trip/x%2fy.md", reason: "name" },
+      ]),
+      folders: ["Trip"],
+    });
     expect(await readdir(elsewhere)).toEqual([]);
     // The file dialog's path takes the same check.
-    expect(await copyIntoWorkspace(root, [encodedFile])).toEqual({ imported: [], skipped: 1 });
+    expect(await copyIntoWorkspace(root, [encodedFile]))
+      .toEqual({ imported: [], skipped: 1, skippedSources: [{ path: "cfg%2fevil", reason: "name" }] });
     expect(await readdir(elsewhere)).toEqual([]);
   });
 
@@ -1447,9 +1507,14 @@ describe("importDroppedPaths", () => {
     await mkdir(join(root, "docs"));
 
     expect(await importDroppedPaths(root, [join(outside, "Trip"), join(outside, SHARED_WITH_ME_FOLDER)], [root]))
-      .toEqual({ imported: [`Trip/${SHARED_WITH_ME_FOLDER}/notes.md`], skipped: 1, folders: 2 });
+      .toEqual({
+        imported: [`Trip/${SHARED_WITH_ME_FOLDER}/notes.md`],
+        skipped: 1,
+        skippedSources: [{ path: SHARED_WITH_ME_FOLDER, reason: "dohc-name" }],
+        folders: ["Trip"],
+      });
     expect(await importDroppedPaths(root, [join(outside, SHARED_WITH_ME_FOLDER)], [root], "docs"))
-      .toEqual({ imported: [`docs/${SHARED_WITH_ME_FOLDER}/plan.md`], skipped: 0, folders: 1 });
+      .toEqual({ imported: [`docs/${SHARED_WITH_ME_FOLDER}/plan.md`], skipped: 0, folders: [`docs/${SHARED_WITH_ME_FOLDER}`] });
   });
 
   // Another process that can write the dropped folder, but not read the
@@ -1510,7 +1575,7 @@ describe("importDroppedPaths", () => {
     expect(await copyIntoWorkspace(root, screened.usable)).toMatchObject({
       imported: [],
       interrupted: true,
-      folders: 2,
+      folders: ["Trip"],
       stop: { file: "Trip/sub/a.md", refusal: "changed" },
     });
   });
@@ -1674,7 +1739,7 @@ describe("importDroppedPaths", () => {
       expect({ ...outcome, imported: outcome.imported.sort() }).toEqual({
         imported: ["Caf\u00e9/Cr\u00e8me/b.md", "Caf\u00e9/a.md"],
         skipped: 0,
-        folders: 2,
+        folders: ["Caf\u00e9"],
       });
       expect(await readFile(join(workspace, "Caf\u00e9", "Cr\u00e8me", "b.md"), "utf8")).toBe("b");
     } finally {
@@ -1691,7 +1756,11 @@ describe("importDroppedPaths", () => {
       [join(otherRoot, ".dohc", "credentials.json")],
       [root, otherRoot],
     );
-    expect(outcome).toEqual({ imported: [], skipped: 1 });
+    expect(outcome).toEqual({
+      imported: [],
+      skipped: 1,
+      skippedSources: [{ path: "credentials.json", reason: "workspace-data" }],
+    });
     expect(existsSync(join(root, "credentials.json"))).toBe(false);
   });
 
@@ -1710,7 +1779,11 @@ describe("importDroppedPaths", () => {
       [join(stage, "alias", "credentials.json")],
       [root, otherRoot],
     );
-    expect(outcome).toEqual({ imported: [], skipped: 1 });
+    expect(outcome).toEqual({
+      imported: [],
+      skipped: 1,
+      skippedSources: [{ path: "credentials.json", reason: "workspace-data" }],
+    });
     expect(existsSync(join(root, "credentials.json"))).toBe(false);
   });
 

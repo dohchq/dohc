@@ -121,6 +121,7 @@ import { useRetainedCopiesNotice } from "./shell/useRetainedCopiesNotice";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
 import { useNetworkShareNotice } from "./shell/useNetworkShareNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
+import { importSkipLines } from "./shell/importSkips";
 import { errorDetails, type ErrorDetailField } from "./shell/copyDetails";
 import { shareCaptureNoticeState } from "../workspaces/shareCaptureNotice";
 import { CopyButton } from "./ui/CopyButton";
@@ -861,6 +862,7 @@ export function DesktopWorkspaceShell(props: {
     reportDriveLimit,
     reportNetworkShare,
     reportKeptFiles,
+    reportImportSkips,
     showRetainedCopies,
     reportRecoveryUnavailable,
     showTabLimitError,
@@ -2341,7 +2343,7 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       const count = outcome.imported.length;
-      const folders = outcome.folders ?? 0;
+      const folders = outcome.folders ?? [];
       const skippedSuffix =
         outcome.skipped > 0 ? ` (${outcome.skipped} skipped)` : "";
       // The first copy failed, so nothing landed.
@@ -2367,9 +2369,9 @@ export function DesktopWorkspaceShell(props: {
                   stopSentence,
                   " Import only the files that are still missing.",
                 )
-              : folders > 0
+              : folders.length > 0
                 ? fitImportMessage(
-                    `Created ${folders} ${folders === 1 ? "folder" : "folders"} before the import stopped.`,
+                    `Created ${folders.length} ${folders.length === 1 ? "folder" : "folders"} before the import stopped.`,
                     stopSentence,
                     " Delete the empty folders before you import again.",
                   )
@@ -2393,25 +2395,25 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       const skipped = outcome.skipped;
-      if (count === 0 && folders === 0 && skipped === 0) return; // cancelled dialog
-      // The same sources would be skipped again, so there is nothing to try again.
-      const notImported = `${skipped} ${skipped === 1 ? "file wasn't" : "files weren't"} imported.`;
-      if (count === 0 && folders === 0) {
-        reportShellFailure({ message: notImported, kind: "import-files" });
+      if (count === 0 && folders.length === 0 && skipped === 0) return; // cancelled dialog
+      // Each skip names its file and why. The same sources would be skipped
+      // again, so there is nothing to try again.
+      const reportSkips = (title: string) =>
+        reportImportSkips({ title, ...importSkipLines(skipped, outcome.skippedSources ?? []) });
+      const notImported = `${skipped} ${skipped === 1 ? "file wasn't" : "files weren't"} imported`;
+      if (count === 0 && folders.length === 0) {
+        reportSkips(notImported);
         return;
       }
       // The Explorer shows what landed, so its message is only the skip.
       if (from === "explorer") {
-        if (skipped > 0) reportShellFailure({ message: notImported, kind: "import-files" });
+        if (skipped > 0) reportSkips(notImported);
         else clearKind("import-files");
       } else {
-        // A drop of empty folders lands folders and no file.
-        const landed = count > 0
-          ? `Imported ${count} ${count === 1 ? "file" : "files"}${targetDir ? ` into ${targetDir}` : ""}.`
-          : `Created ${folders} ${folders === 1 ? "folder" : "folders"}${targetDir ? ` in ${targetDir}` : ""}.`;
-        if (skipped > 0) {
-          reportShellFailure({ message: `${landed} ${skipped} ${skipped === 1 ? "wasn't" : "weren't"} imported.`, kind: "import-files" });
-        } else showSuccessNotice(landed, undefined, "import-files");
+        // The palette's dialog picks files, never folders.
+        const landed = `Imported ${count} ${count === 1 ? "file" : "files"}${targetDir ? ` into ${targetDir}` : ""}.`;
+        if (skipped > 0) reportSkips(`${landed} ${skipped} ${skipped === 1 ? "wasn't" : "weren't"} imported.`);
+        else showSuccessNotice(landed, undefined, "import-files");
       }
       try {
         await refreshFiles();
@@ -2429,10 +2431,13 @@ export function DesktopWorkspaceShell(props: {
         ),
       );
       const prefix = targetDir ? `${targetDir}/` : "";
-      const items = [...new Set(outcome.imported.map((path) => prefix + path.slice(prefix.length).split("/")[0]))];
+      const items = [...new Set([
+        ...folders,
+        ...outcome.imported.map((path) => prefix + path.slice(prefix.length).split("/")[0]),
+      ])];
       if (items.length > 0) setExplorerReveal({ workspaceId, paths: items });
     },
-    [workspaceId, refreshFiles, reportShellError, reportShellFailure, showSuccessNotice, clearKind, mutateWb],
+    [workspaceId, refreshFiles, reportShellError, reportShellFailure, reportImportSkips, showSuccessNotice, clearKind, mutateWb],
   );
   const importFromExplorer = useCallback(
     (droppedPaths?: string[], targetDir?: string) => void importFiles("explorer", droppedPaths, targetDir),

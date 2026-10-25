@@ -5210,6 +5210,27 @@ describe("shared view refresh", () => {
     }
   });
 
+  // A shared view holds files within its limits, so each skip says which
+  // limit it met.
+  it("names a folder with no files and a file past the limit, and why each was skipped", async () => {
+    const drop = await dropIntoDocs(async (sourceRoot) => {
+      await mkdir(join(sourceRoot, "Photos"));
+      await writeFile(join(sourceRoot, "movie.mp4"), Buffer.alloc(MAX_ENGINE_CAPTURE_BINARY_BYTES + 1));
+      await writeFile(join(sourceRoot, "ok.md"), "ok\n", "utf8");
+      return [join(sourceRoot, "Photos"), join(sourceRoot, "movie.mp4"), join(sourceRoot, "ok.md")];
+    });
+    try {
+      await expect(drop.importing).resolves.toEqual({
+        imported: ["docs/ok.md"],
+        skipped: 2,
+        skippedSources: [{ path: "Photos", reason: "no-files" }, { path: "movie.mp4", reason: "too-large" }],
+      });
+      expect(await drop.storePaths()).toEqual(["docs/ok.md", "docs/seed.md"]);
+    } finally {
+      await drop.close();
+    }
+  });
+
   // The validator decodes %2f, so the grant would check docs/Trip/x/y.md
   // while the store took the raw name.
   it("skips a nested name the destination would rewrite", async () => {
@@ -5220,7 +5241,11 @@ describe("shared view refresh", () => {
       return [join(sourceRoot, "Trip")];
     });
     try {
-      await expect(drop.importing).resolves.toEqual({ imported: ["docs/Trip/ok.md"], skipped: 1 });
+      await expect(drop.importing).resolves.toEqual({
+        imported: ["docs/Trip/ok.md"],
+        skipped: 1,
+        skippedSources: [{ path: "Trip/x%2fy.md", reason: "name" }],
+      });
       expect(await drop.storePaths()).toEqual(["docs/Trip/ok.md", "docs/seed.md"]);
     } finally {
       await drop.close();
@@ -5301,7 +5326,11 @@ describe("shared view refresh", () => {
       return [join(sourceRoot, "Trip")];
     });
     try {
-      await expect(drop.importing).resolves.toEqual({ imported: ["docs/Trip/ok.md"], skipped: 1 });
+      await expect(drop.importing).resolves.toEqual({
+        imported: ["docs/Trip/ok.md"],
+        skipped: 1,
+        skippedSources: [{ path: "Trip/locked.md", reason: "unreadable" }],
+      });
     } finally {
       await restoreRead(locked, 0o600);
       await drop.close();

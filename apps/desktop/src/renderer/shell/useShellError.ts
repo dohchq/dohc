@@ -497,6 +497,20 @@ export function useShellError(workspaceId: string) {
     },
     [clearKind, push],
   );
+  // An import that skipped sources: a title, then a line for each one. dohc
+  // wrote every line, so the lines are shown as they are.
+  const reportImportSkips = useCallback(
+    (notice: { title: string; lines: readonly string[]; details: ReadonlyArray<ErrorDetailField> }) => {
+      push({
+        title: notice.title,
+        message: notice.lines.join("\n"),
+        details: notice.details,
+        retry: null,
+        kind: "import-files",
+      });
+    },
+    [push],
+  );
   const reportKeptFiles = useCallback(
     (notice: { paths: readonly (readonly [string, string])[]; toast: boolean }, openFolder: () => void) => {
       if (!notice.paths.length) {
@@ -819,6 +833,7 @@ export function useShellError(workspaceId: string) {
     reportDriveLimit,
     reportNetworkShare,
     reportKeptFiles,
+    reportImportSkips,
     showRetainedCopies,
     reportRecoveryUnavailable,
     showTabLimitError,
