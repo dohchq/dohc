@@ -77,7 +77,10 @@ export const AgentSettings = z.object({
   // The name this agent's messages carried before agents had ids. Only the
   // migration writes it, so those messages stay this agent's after a rename.
   nameBeforeMigration: PreferredNameForIpc.optional(),
-}).strict();
+}).strict().refine((agent) => agent.launch !== undefined || !agent.enabled, {
+  message: "Choose how dohc starts this agent before turning it on.",
+  path: ["enabled"],
+});
 export type AgentSettings = z.infer<typeof AgentSettings>;
 export type Agent = AgentSettings & { id: string };
 

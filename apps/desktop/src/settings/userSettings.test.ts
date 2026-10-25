@@ -159,6 +159,9 @@ describe("desktop user settings model", () => {
       expect(AgentsSettings.safeParse({ [id]: agent }).success, id).toBe(false);
     }
     expect(AgentsSettings.safeParse({ default: { ...agent, launch: { command: " 	 " } } }).success).toBe(false);
+    const { launch: _launch, ...noLaunch } = agent;
+    expect(AgentsSettings.safeParse({ default: noLaunch }).success).toBe(false);
+    expect(AgentsSettings.safeParse({ default: { ...noLaunch, enabled: false } }).success).toBe(true);
     expect(AgentsSettings.safeParse({ default: agent, "agent-b": { ...agent, name: " agent " } }).success).toBe(false);
     expect(AgentsSettings.safeParse({ "agent-b": { ...agent, nameBeforeMigration: "Nova" } }).success).toBe(false);
     // Names that differ only in case or spacing look the same in a chat.
