@@ -1417,7 +1417,7 @@ impl ActorHandle {
     /// Capture a binary file on the actor's writer, blocking the caller.
     pub fn capture_ingest_binary_blocking(
         &self,
-        input: CaptureIngestBinary,
+        input: Arc<CaptureIngestBinary>,
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<CaptureIngestBinaryResult, RuntimeError> {
