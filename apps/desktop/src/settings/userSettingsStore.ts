@@ -231,16 +231,16 @@ const SAVE_ATTEMPTS = 5;
 
 /**
  * Saves a change into the file as it is now. `change` gets the settings the
- * file holds, and the agent entries in it dohc could not use, and answers
- * the settings to save. Only the settings that differ
+ * file holds and answers the settings to save. Only the settings that differ
  * are written, so keys dohc does not know, and values it could not use and
  * did not change, stay as the person wrote them. When the file changes
  * during the save, the change is merged again onto the new file. A file dohc
  * cannot use is refused rather than replaced: it may be an edit in progress.
+ * So is a change to an agent entry dohc could not use.
  */
 export async function updateUserSettingsFile(
   dir: string,
-  change: (current: StoredUserSettings, unusableAgents: readonly AgentProblem[]) => StoredUserSettings,
+  change: (current: StoredUserSettings) => Record<string, unknown>,
 ): Promise<StoredUserSettingsResult> {
   const root = resolve(dir);
   const path = settingsPath(root);
@@ -250,7 +250,16 @@ export async function updateUserSettingsFile(
       throw new Error(`dohc did not save settings. ${onDisk.result.warning}`);
     }
     const current = onDisk.result.settings;
-    const next = StoredUserSettings.parse(change(current, onDisk.result.agentProblems ?? []));
+    const changed = change(current);
+    // `current` leaves out the agents dohc could not use, so one in the
+    // change would be written over what the person wrote there.
+    const fileAgents = isSettingsObject(onDisk.raw?.agents) ? onDisk.raw.agents : {};
+    const changedAgents = isSettingsObject(changed.agents) ? changed.agents : {};
+    const replaced = Object.keys(changedAgents).find((id) => Object.hasOwn(fileAgents, id) && !Object.hasOwn(current.agents, id));
+    if (replaced !== undefined) {
+      throw new Error(`dohc did not save settings. ${path} has an agent "${replaced}" that dohc can't use. Fix or remove it in the file, then try again.`);
+    }
+    const next = StoredUserSettings.parse(changed);
     if (settingsDeepEqual(next, current)) {
       snapshots.set(root, Promise.resolve(rememberColors(root, onDisk)));
       return onDisk.result;
@@ -276,15 +285,7 @@ export function writeUserSettingsFile(
   base: StoredUserSettings,
 ): Promise<StoredUserSettingsResult> {
   const next = StoredUserSettings.parse(settings);
-  return updateUserSettingsFile(dir, (current, unusableAgents) => {
-    // A new agent under the id of an entry dohc can't use would replace what
-    // the person wrote there.
-    const replaced = unusableAgents.find(({ id }) => Object.hasOwn(next.agents, id) && !Object.hasOwn(base.agents, id));
-    if (replaced) {
-      throw new Error(`dohc did not save settings. ${settingsPath(resolve(dir))} has an agent "${replaced.id}" that dohc can't use. Fix or remove it in the file, then try again.`);
-    }
-    return StoredUserSettings.parse(overlaySettings(current, base, next, agentLaunch));
-  });
+  return updateUserSettingsFile(dir, (current) => overlaySettings(current, base, next, agentLaunch));
 }
 
 /** Replaces the whole file. Reset user settings is the one caller. */

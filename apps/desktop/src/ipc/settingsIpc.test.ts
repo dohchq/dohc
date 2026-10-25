@@ -393,6 +393,7 @@ describe("registered settings IPC", () => {
       settings: { appearance: { zoomLevel: 4 }, profile: { preferredName: "Ada" } },
     });
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
+      version: 2,
       appearance: { themeMode: "system", zoomLevel: 4 },
       profile: { preferredName: "Ada" },
     });

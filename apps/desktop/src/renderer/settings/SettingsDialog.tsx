@@ -335,11 +335,15 @@ export function SettingsDialog(props: {
       markSaved();
     } catch (cause) {
       if (!userSaveRequestRef.isCurrent(requestId)) return;
-      setUserResult(previous);
-      applyLookSettings(previous.settings);
       setSaveState("error");
       setError(ipcErrorMessage(cause));
       props.onError?.(ipcErrorMessage(cause, "dohc could not save your settings."), cause);
+      // `previous` can hold a change an earlier save failed to make, so the
+      // dialog goes back to the settings the file holds.
+      const restored = await bridge().getUserSettings().catch(() => previous);
+      if (!userSaveRequestRef.isCurrent(requestId)) return;
+      setUserResult(restored);
+      applyLookSettings(restored.settings);
     }
   }, [markSaved, markSaving, props.onError, userResult]);
 

@@ -946,6 +946,33 @@ describe("SettingsDialog", () => {
     );
   });
 
+  it("goes back to the saved settings when a save behind a failed one also fails", async () => {
+    const user = userEvent.setup();
+    let failFirst: (cause: Error) => void = () => {};
+    bridge.setUserSettings
+      .mockImplementationOnce(() => new Promise<never>((_, reject) => { failFirst = reject; }))
+      .mockRejectedValueOnce(new Error("Disk full"));
+    applyLookSettings(DEFAULT_USER_SETTINGS);
+    render(
+      <SettingsDialog workspaceIsReady
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+
+    await screen.findByRole("radio", { name: "System" });
+    await user.click(screen.getByRole("radio", { name: "Dark" }));
+    // This save starts from Dark, which the first save never wrote.
+    await user.click(screen.getByRole("radio", { name: "Light" }));
+    failFirst(new Error("Disk full"));
+    await waitFor(() =>
+      expect(screen.getByRole("radio", { name: "System" }).getAttribute("aria-checked")).toBe("true"),
+    );
+    expect(screen.getByTestId("settings-save-state").getAttribute("data-state")).toBe("error");
+  });
+
   it("supports arrow-key navigation inside segmented appearance controls", async () => {
     const user = userEvent.setup();
     render(

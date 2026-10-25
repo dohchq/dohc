@@ -460,21 +460,34 @@ describe("desktop user settings store", () => {
     expect(JSON.parse(await readFile(path, "utf8")).agents.default.launch).toEqual({ tool: "claude", executable: "D:\\claude.exe" });
   });
 
-  it("refuses to add an agent over an entry dohc cannot use, and leaves that entry as written", async () => {
+  it("refuses to save into an agent entry dohc cannot use, and leaves that entry as written", async () => {
     const root = await createTestScratch("dohc-user-settings-");
     const path = join(root, USER_SETTINGS_FILE);
+    const refusal = `dohc did not save settings. ${path} has an agent "default" that dohc can't use. Fix or remove it in the file, then try again.`;
     const broken = { ...testAgent({ name: "Nova" }), hue: "green" };
-    await writeFile(path, JSON.stringify({ ...DEFAULT_USER_SETTINGS, agents: { default: broken } }));
+    // More unusable entries than Settings lists, before the one in the way.
+    const others = Object.fromEntries(Array.from({ length: 50 }, (_, n) => [`other-${n}`, broken]));
+    const agents = { ...others, default: broken };
+    await writeFile(path, JSON.stringify({ ...DEFAULT_USER_SETTINGS, agents }));
     const before = await readFile(path, "utf8");
     const seen = await readUserSettingsFile(root);
-    expect(seen.agentProblems?.map(({ id }) => id)).toEqual(["default"]);
+    expect(seen.agentProblems?.map(({ id }) => id)).not.toContain("default");
     const added = withFirstAgent(seen.settings, (current) => current ?? testAgent({ name: "Atlas" }));
-    await expect(writeUserSettingsFile(root, added, seen.settings)).rejects.toThrow(
-      `dohc did not save settings. ${path} has an agent "default" that dohc can't use. Fix or remove it in the file, then try again.`,
-    );
+    await expect(writeUserSettingsFile(root, added, seen.settings)).rejects.toThrow(refusal);
+    // A save queued behind the refused one starts from the agent it added.
+    const toggled = withFirstAgent(added, (current) => ({ ...current!, enabled: !current!.enabled }));
+    await expect(writeUserSettingsFile(root, toggled, added)).rejects.toThrow(refusal);
     expect(await readFile(path, "utf8")).toBe(before);
     // Other settings still save around it.
     await writeUserSettingsFile(root, { ...seen.settings, editor: { ...seen.settings.editor, fontSize: 16 } }, seen.settings);
+    expect(JSON.parse(await readFile(path, "utf8")).agents).toEqual(agents);
+
+    // An agent Settings read before the person broke it in the file.
+    await writeFile(path, JSON.stringify({ ...DEFAULT_USER_SETTINGS, agents: { default: testAgent({ name: "Nova" }) } }));
+    const read = await readUserSettingsFile(root);
+    await writeFile(path, JSON.stringify({ ...DEFAULT_USER_SETTINGS, agents: { default: broken } }));
+    const renamed = withFirstAgent(read.settings, (current) => ({ ...current!, name: "Atlas" }));
+    await expect(writeUserSettingsFile(root, renamed, read.settings)).rejects.toThrow(refusal);
     expect(JSON.parse(await readFile(path, "utf8")).agents).toEqual({ default: broken });
   });
 
