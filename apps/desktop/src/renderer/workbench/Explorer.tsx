@@ -55,6 +55,7 @@ import { TabGlyph, tabMark } from "./tabGlyph";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
 import { KEEPABLE_COLLECTIONS_REFUSALS, USE_THIS_COMPUTER, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
+import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
 
 // One Explorer disk operation, as the shell's onBeginChanges opens it.
 // `settle` is the deferred draft settlement runChanges awaits before it
@@ -528,6 +529,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   // twice (and the second rename would fail on the now-missing source).
   const editDone = useRef(false);
   const [editPending, setEditPending] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const editErrorRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (editError) editErrorRef.current?.scrollIntoView({ block: "nearest" });
+  }, [editError]);
   // Internal drag state: HTML5 DnD dataTransfer is unreadable during
   // dragover, so the dragged selection rides in a ref for the whole gesture.
   const dragSources = useRef<DragSource[] | null>(null);
@@ -786,6 +792,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         }
       }
       setEditValue("");
+      setEditError(null);
       editDone.current = false;
       setEditPending(false);
       setEditing({ mode: "create", kind, parentPath });
@@ -813,6 +820,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const beginRename = useCallback(
     (path: string, isFolder: boolean) => {
       setEditValue(basenameOf(path));
+      setEditError(null);
       editDone.current = false;
       setEditPending(false);
       setEditing({ mode: "rename", path, isFolder });
@@ -1436,7 +1444,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     editing?.mode === "rename" && editing.isFolder && expandedSet.has(editing.path);
 
   const editRow = (depth: number): ReactNode => (
-    <li role="none" key="edit-row">
+    <li role="none" key="edit-row" className="relative">
       <div style={{ height: TREE_ROW_HEIGHT }} className="flex items-center gap-1.5 pr-2">
         <span aria-hidden className="w-1 shrink-0" />
         <IndentGuides depth={depth} />
@@ -1481,8 +1489,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 : "New file name"
           }
           value={editValue}
+          aria-invalid={editError ? true : undefined}
+          aria-describedby={editError ? "tree-name-error" : undefined}
           readOnly={editPending}
-          onChange={(event) => setEditValue(event.target.value)}
+          onChange={(event) => { setEditValue(event.target.value); setEditError(null); }}
           onKeyDown={(event) => {
             event.stopPropagation();
             if (isComposingKey(event)) return;
@@ -1502,11 +1512,28 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           className="min-w-0 flex-1 rounded-sm border border-ink/50 bg-bg px-1 py-0.5 text-[13px] text-ink outline-none"
         />
       </div>
+      {editError && (
+        <div ref={editErrorRef} id="tree-name-error" role="alert" className="absolute left-6 right-2 top-full z-20 rounded-md border border-danger bg-panel px-2 py-1.5 text-[12px] text-danger">
+          {editError}
+        </div>
+      )}
     </li>
   );
 
   function finishEdit(commit: boolean, returnFocus = false): void {
     if (editDone.current || !editing) return;
+    if (commit && editValue.trim()) {
+      const platform = window.dohcDesktop?.platform ?? "";
+      const typed = resolveTypedPath(editValue, editing.mode === "rename" ? dirnameOf(editing.path) : editing.parentPath);
+      const destination = editing.mode === "rename"
+        ? editing.isFolder ? typed : withRenameDefault(editing.path, typed)
+        : editing.kind === "folder" ? typed : withMarkdownDefault(typed);
+      const error = workspaceDestinationError(editValue, platform) ?? workspaceDestinationError(destination, platform);
+      if (error) {
+        setEditError(error);
+        return;
+      }
+    }
     editDone.current = true;
     setEditPending(true);
     renameFocus.current = null;

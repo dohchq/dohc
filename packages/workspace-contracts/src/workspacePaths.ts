@@ -85,6 +85,49 @@ function isWindowsDeviceSegment(segment: string): boolean {
   return WINDOWS_DEVICE_NAME_RE.test(stripWindowsAliasSuffix(base));
 }
 
+// Validate one final name. Path entry fields split their folder syntax first.
+export function workspaceNameError(name: string, platform: string): string | null {
+  if (platform !== "win32") return null;
+  const forbidden = name.match(/[<>:"/\\|?*]/u)?.[0];
+  if (forbidden) {
+    const character = {
+      "<": "a less-than sign (<)", ">": "a greater-than sign (>)",
+      ":": "a colon (:)", '"': 'a double quote (")',
+      "/": "a slash (/)", "\\": "a backslash (\\)",
+      "|": "a vertical bar (|)", "?": "a question mark (?)", "*": "an asterisk (*)",
+    }[forbidden];
+    return `File and folder names cannot contain ${character}. Remove it from the name.`;
+  }
+  if (/[\u0000-\u001f\u007f]/u.test(name)) {
+    return "File and folder names cannot contain control characters. Remove the control character.";
+  }
+  if (/[. ]$/u.test(name)) {
+    return "Windows removes dots and spaces at the end of a name. Remove the ending dot or space.";
+  }
+  if (isWindowsDeviceSegment(name)) {
+    const base = stripWindowsAliasSuffix(name.split(".", 1)[0] ?? name);
+    return `Windows reserves "${base}" for a device. Choose another file or folder name.`;
+  }
+  if (name.length > 255) {
+    return "This name is too long for Windows. Use a shorter name.";
+  }
+  return null;
+}
+
+export function workspaceDestinationError(path: string, platform: string): string | null {
+  if (platform !== "win32") return null;
+  const names = path.replaceAll("\\", "/").split("/").filter(name => name !== "" && name !== ".");
+  for (const name of names) {
+    if (name === "..") continue;
+    const error = workspaceNameError(name, platform);
+    if (error) return error;
+  }
+  if (new TextEncoder().encode(names.join("/")).byteLength > 1_024) {
+    return "This path is too long for dohc. Shorten the name or use fewer folders.";
+  }
+  return null;
+}
+
 // A generated-8.3-SHAPED segment that does not alias a reserved name (those
 // are caught by Check A). Used only by Check B below.
 const SHORT_NAME_ALIAS_RE = /^[^.\s]{1,8}~\d+(?:\.[^.\s]{1,3})?$/;
