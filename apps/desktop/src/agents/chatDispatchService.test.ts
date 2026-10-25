@@ -934,6 +934,20 @@ describe("chatDispatchService", () => {
     expect(fixture.spawnCalls).toHaveLength(0);
   });
 
+  it("reports each pause and resume once, wherever it came from", async () => {
+    const fixture = await createFixture();
+    const onPausedChanged = vi.fn<(paused: boolean) => void>();
+    const service = createChatDispatchService({ ...fixture.serviceOptions, onPausedChanged });
+
+    service.setPaused(true);
+    service.setPaused(true);
+    service.setPaused(false);
+    service.setPaused(false);
+
+    expect(onPausedChanged.mock.calls).toEqual([[true], [false]]);
+    expect(service.isPaused()).toBe(false);
+  });
+
   it("records exactly the human UI messages addressed to the agent", async () => {
     const fixture = await createFixture();
     const agentChannel = await fixture.chat.ensureAgentChannel({

@@ -114,6 +114,8 @@ import { extractChatFileReferences } from "./chatFileMentions";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
 import { usePresence } from "../collab/usePresence";
+import { useChatDispatchPaused } from "../useChatDispatchPaused";
+import { withErrorWords } from "../../ipc/errorWords";
 import { publishAboutConversation, type AboutConversationEntry } from "./aboutConversation";
 import type {
   PresenceTransport,
@@ -612,6 +614,8 @@ export function ChatsView(props: {
   const [runRecords, setRunRecords] = useState<Record<string, ChatRunRecord>>({});
   // The open thread's dispatch, null until read.
   const [dispatchState, setDispatchState] = useState<ChatDispatchStateForThreadResult | null>(null);
+  const computerDispatchPaused = useChatDispatchPaused((error) =>
+    props.onError(withErrorWords("dohc could not read whether agent dispatch is paused.", error), error));
   const [dispatchActionBusy, setDispatchActionBusy] = useState(false);
   const [composer, setComposer] = useState("");
   const [poll, setPoll] = useState<ThreadPollDraft | null>(null);
@@ -4206,7 +4210,27 @@ export function ChatsView(props: {
             </>
           }
         />
-        {dispatchState?.paused ? (
+        {computerDispatchPaused && dispatchState && dispatchState.pendingCount > 0 && liveRunId === null ? (
+          <div
+            data-testid="chats-dispatch-status"
+            className="flex h-7 shrink-0 items-center justify-center gap-1 border-b border-line bg-panel-2/35 px-3 font-mono text-[10px] text-subtle"
+          >
+            <span>dispatch paused on this computer — </span>
+            {!threadLocked ? (
+              <button
+                type="button"
+                data-testid="chats-resume-computer-dispatch"
+                onClick={() => void bridge().setChatDispatchPaused({ paused: false }).catch((error: unknown) =>
+                  props.onError(withErrorWords("dohc could not resume agent dispatch.", error), error))}
+                className="rounded px-1 text-muted underline decoration-line underline-offset-2 hover:text-ink dohc-focus-visible"
+              >
+                Resume
+              </button>
+            ) : (
+              <span>read-only</span>
+            )}
+          </div>
+        ) : dispatchState?.paused ? (
           <div
             data-testid="chats-dispatch-status"
             title={dispatchState.pausedReason}

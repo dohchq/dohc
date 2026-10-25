@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
+import { isLossyMarkdown } from "@dohc/ydoc-projection/lossy-markdown";
 import { saveProblem } from "@dohc/workspace-contracts/save-state";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
@@ -295,10 +296,14 @@ describe("FileInspector when an open note changed outside dohc", () => {
 
   // Panes on one note share its engine session, so one pane's reload hands
   // every pane the new bytes. Edit anyway covers only the bytes it confirmed.
-  it("asks for Edit anyway again in another pane when one pane reloads a large lossy note", async () => {
+  it.each([true, false])("rereads another pane before Edit anyway after a shared reload (lossy: %s)", async (lossy) => {
     const filler = "A paragraph that makes this note larger than read mode's limit.\n\n".repeat(1_100);
     const versionA = `# Readme\n\n<details>\n\nVersion A.\n</details>\n\n${filler}`;
-    const versionB = `# Readme\n\n<details>\n\nVersion B, from another app.\n</details>\n\n${filler}`;
+    const versionB = lossy
+      ? `# Readme\n\n<details>\n\nVersion B, from another app.\n</details>\n\n${filler}`
+      : `# Readme\n\nVersion B, from another app.\n\n* A list item.\n\n${filler}`;
+    expect(isLossyMarkdown(versionB)).toBe(lossy);
+    expect(versionB).not.toBe(`${yDocToMarkdown(markdownToYDoc(versionB))}\n`);
     expect(versionA.length).toBeGreaterThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
     let disk = { text: versionA, contentHash: "a".repeat(64) };
     const bridge = makeBridge();
@@ -328,8 +333,47 @@ describe("FileInspector when an open note changed outside dohc", () => {
     fireEvent.click(await pane1.findByRole("button", { name: "Reload" }));
     setEngine(engineState(seededFrom(versionB, "b".repeat(64)), null));
 
-    await pane2.findByTestId("lossy-note-notice");
-    expect(screen.getByTestId("pane-2").querySelector('[contenteditable="true"]')).toBeNull();
+    await waitFor(() => expect(pane2.getByTestId("view-markdown").textContent).toContain("Version B, from another app."));
+    if (lossy) {
+      expect(screen.getByTestId("pane-2").querySelector('[contenteditable="true"]')).toBeNull();
+      fireEvent.click(await pane2.findByTestId("lossy-note-edit-anyway"));
+      fireEvent.click(screen.getByTestId("lossy-note-edit-anyway-confirm"));
+    }
+    await waitFor(() => expect(pane2.queryByTestId("lossy-note-notice")).toBeNull());
+    await waitFor(() => expect(pane2.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("true"));
+    expect(pane2.getByTestId("markdown-editor").textContent).toContain("Version B, from another app.");
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it.each(["path", "workspace", "request"] as const)("drops a stale-pane reread after its %s changes", async (changed) => {
+    const versionA = "# Readme\n\n<details>\n\nVersion A.\n</details>\n";
+    const versionB = versionA.replace("Version A.", "Version B, from another app.");
+    const other = "# Other note\n\nCurrent text.\n";
+    const bridge = makeBridge();
+    vi.mocked(bridge.readWorkspaceText).mockResolvedValue({ text: versionA, contentHash: "a".repeat(64), truncated: false });
+    vi.stubGlobal("dohcDesktop", bridge);
+    engine.closedWhenDisabled = true;
+    engine.sharedLease = true;
+    engine.state = engineState(seededFrom(versionA, "a".repeat(64)), null);
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" refreshKey={0} />);
+    fireEvent.click(await screen.findByTestId("lossy-note-edit-anyway"));
+    fireEvent.click(screen.getByTestId("lossy-note-edit-anyway-confirm"));
+    await waitFor(() => expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("true"));
+
+    const readsBeforeReload = vi.mocked(bridge.readWorkspaceText).mock.calls.length;
+    let answer!: (read: Awaited<ReturnType<DohcDesktopBridge["readWorkspaceText"]>>) => void;
+    vi.mocked(bridge.readWorkspaceText).mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    setEngine(engineState(seededFrom(versionB, "b".repeat(64)), null));
+    await waitFor(() => expect(bridge.readWorkspaceText).toHaveBeenCalledTimes(readsBeforeReload + 1));
+    expect(screen.queryByTestId("lossy-note-edit-anyway")).toBeNull();
+
+    vi.mocked(bridge.readWorkspaceText).mockResolvedValue({ text: other, contentHash: "c".repeat(64), truncated: false });
+    setEngine(engineState(markdownToYDoc(other), null));
+    view.rerender(<FileInspector workspaceId={changed === "workspace" ? "ws-2" : "ws-1"} path={changed === "path" ? "b.md" : "a.md"} refreshKey={1} />);
+    await waitFor(() => expect(screen.getByTestId("view-markdown").textContent).toContain("Current text."));
+    await act(async () => { answer({ text: versionB, contentHash: "b".repeat(64), truncated: false }); });
+    expect(screen.getByTestId("view-markdown").textContent).toContain("Current text.");
+    expect(screen.getByTestId("view-markdown").textContent).not.toContain("Version B, from another app.");
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
   });
 });

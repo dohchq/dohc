@@ -509,6 +509,7 @@ export const FileInspector = memo(function FileInspector(
   // pane reloads a change made outside dohc into the shared session, needs
   // its own check and consent.
   const [editAnyway, setEditAnyway] = useState<{ open: string; source: string | null } | null>(null);
+  const [staleConsentRead, setStaleConsentRead] = useState<{ open: string; seq: number } | null>(null);
   const consented = editAnyway?.open === lossyOpen;
   // A session that binds a different note from the one checked, as when the
   // file changed before the open, closes once its own check says lossy. It
@@ -536,8 +537,13 @@ export const FileInspector = memo(function FileInspector(
   const boundSource = engine.doc?.getMap("meta").get("dohcMarkdownSourceSha256");
   const editingAnyway = consented && (typeof boundSource !== "string" || boundSource === editAnyway.source);
   useEffect(() => {
-    if (consented && !editingAnyway) setEditAnyway(null);
-  }, [consented, editingAnyway]);
+    if (consented && !editingAnyway) {
+      setEditAnyway(null);
+      // The shared session has other bytes. Read them before asking again.
+      setStaleConsentRead({ open: lossyOpen, seq: readSeq });
+      refreshAfterConflict();
+    }
+  }, [consented, editingAnyway, lossyOpen, readSeq, refreshAfterConflict]);
   const session = useBoundNoteCheck({
     open: lossyOpen,
     // Edit anyway already accepted what saving does.
@@ -549,7 +555,9 @@ export const FileInspector = memo(function FileInspector(
   }, [session, lossyOpen, contentHash]);
   // The render a large note's session binds in, before its check starts,
   // waits too, as does a bound session while its own check runs.
-  const lossyNote = editingAnyway ? "clear"
+  const rereadingConsent = staleConsentRead?.open === lossyOpen && staleConsentRead.seq === readSeq;
+  const lossyNote = rereadingConsent ? "checking"
+    : editingAnyway ? "clear"
     : session === "lossy" ? "lossy"
     : session === "checking" || (large && engine.available && !bound && allowed === "clear") ? "checking"
     : allowed;
