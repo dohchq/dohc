@@ -312,10 +312,10 @@ export function StateMark(props: {
   if (!props.truncate) return <>{chip}{retry}</>;
   // The tooltip sits beside the chip, not in it, so the chip's text stays its
   // label while the tooltip is open. Beside Try again, the chip keeps the
-  // header's 25px for its mark and an ellipsis.
+  // header's 28px for its mark and an ellipsis.
   const explained = (
     <span
-      className={`inline-flex max-w-full ${retry ? "min-w-[25px]" : "min-w-0"}`}
+      className={`inline-flex max-w-full ${retry ? "min-w-[28px]" : "min-w-0"}`}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={(event) => {
         if (!event.currentTarget.contains(document.activeElement)) setOpen(false);
