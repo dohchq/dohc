@@ -1372,6 +1372,34 @@ describe("open editors", () => {
     await waitFor(() => expect(screen.queryByRole("tab", { name: /Lisbon/ })).toBeNull());
   });
 
+  it.each([
+    ["writes a body typed alone into an Untitled file", "Day one", "Day one\n"],
+    ["writes nothing for a body of blank space alone", "  {Enter}", null],
+  ])("%s when its page is written as it closes", async (_name, typed, written) => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.createWorkspaceFile.mockRejectedValueOnce(new Error("The disk is full."));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    await user.click(screen.getByLabelText("New file"));
+    await user.keyboard(`{Enter}${typed}`);
+    await waitFor(() => expect(bridge.createWorkspaceFile).toHaveBeenCalledTimes(1));
+    await user.click(screen.getAllByLabelText("Close Untitled")[0]!);
+
+    await waitFor(() => expect(screen.queryByRole("tab", { name: /Untitled/ })).toBeNull());
+    if (written === null) {
+      expect(bridge.createWorkspaceFile).toHaveBeenCalledTimes(1);
+    } else {
+      expect(bridge.createWorkspaceFile).toHaveBeenLastCalledWith({
+        workspaceId: "ws-shell-test",
+        relativePath: "Untitled.md",
+        initialText: written,
+        exclusive: true,
+      });
+    }
+  });
+
   it("closes a new page whose file is being created, and keeps what was typed", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const created = deferred<{ path: string }>();

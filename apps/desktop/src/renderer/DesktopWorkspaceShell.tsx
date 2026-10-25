@@ -423,11 +423,11 @@ function uniqueUntitledPath(
   return `Untitled ${Date.now()}.${extension}`;
 }
 
-// A new page someone gave a title, an icon or a body. One that has none
-// leaves nothing behind.
+// A new page someone gave a title, an icon or a body. One that has none, or
+// only blank space in its body, leaves nothing behind.
 function typedNewPage(page: { draft: string; body: string }): boolean {
   const { meta } = parseFrontmatter(page.draft);
-  return displayFrontmatterValue(meta.title) !== "" || displayFrontmatterValue(meta.icon) !== "" || page.body !== "";
+  return displayFrontmatterValue(meta.title) !== "" || displayFrontmatterValue(meta.icon) !== "" || page.body.trim() !== "";
 }
 
 // A new page's text as its file would hold it: the title and icon, then the
