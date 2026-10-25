@@ -18,7 +18,9 @@
   --color-primary: var(--dohc-accent);
   --color-primary-darker: var(--dohc-accent);
   --color-primary-darkest: var(--dohc-accent);
-  --color-primary-hover: color-mix(in srgb, var(--dohc-accent) 90%, transparent);
+  /* Only follow mode reads it: the followed avatar's ring, the frame and the
+   * badge, whose text is --color-primary-light. */
+  --color-primary-hover: var(--dohc-accent);
   /* A selected fill on the islands, and the tick, add icon and count drawn
    * over --color-primary, so it is opaque. */
   --color-primary-light: color-mix(in srgb, var(--dohc-accent) 12%, var(--dohc-panel));

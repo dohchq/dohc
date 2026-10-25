@@ -21,16 +21,16 @@ const declarations = (css: string) =>
 const tokenKey = new Map(Object.entries(CSS_TOKEN_NAMES).map(([key, name]) => [name, key as keyof ThemeTokens]));
 
 // A dohc token, or an sRGB mix of two, as the hex color it paints.
-function resolve(value: string | undefined, mode: "light" | "dark"): string | undefined {
+function resolve(value: string | undefined, mode: "light" | "dark", accent = palette[mode].accent): string | undefined {
   const token = /^var\((--dohc-[a-z0-9-]+)\)$/.exec(value ?? "");
   if (token) {
     const key = tokenKey.get(token[1]!);
-    const color = key && palette[mode][key];
+    const color = key === "accent" ? accent : key && palette[mode][key];
     return color && /^#[0-9a-f]{6}$/i.test(color) ? color : undefined;
   }
   const mixed = /^color-mix\(in srgb, (var\([^)]+\)) (\d+)%, (var\([^)]+\))\)$/.exec(value ?? "");
   if (!mixed) return undefined;
-  const [top, bottom] = [resolve(mixed[1], mode), resolve(mixed[3], mode)];
+  const [top, bottom] = [resolve(mixed[1], mode, accent), resolve(mixed[3], mode, accent)];
   return top && bottom ? mix(top, bottom, Number(mixed[2]) / 100) : undefined;
 }
 
@@ -111,8 +111,6 @@ describe("Excalidraw's chrome in dohc's tokens", () => {
       ["--color-surface-primary-container", "--island-bg-color", 3],
       ["--color-slider-track", "--island-bg-color", 3],
       ["--color-on-surface", "--island-bg-color", 4.5],
-      // The library tick and the selected-items count draw it over the accent.
-      ["--color-primary-light", "--color-primary", 4.5],
       // As a fill, it stands off the island as a selected row does (tokens.test.ts).
       ["--color-primary-light", "--island-bg-color", 1.2],
     ] as const;
@@ -122,6 +120,26 @@ describe("Excalidraw's chrome in dohc's tokens", () => {
         expect(front, `${foreground} (${mode})`).toBeDefined();
         expect(back, `${background} (${mode})`).toBeDefined();
         expect(contrast(front!, back!), `${foreground} on ${background} (${mode})`).toBeGreaterThanOrEqual(minimum);
+      }
+    }
+  });
+
+  // The library tick, the selected-items count and the follow-mode badge's
+  // text, with any accent readableAccent lets a person choose. The listed
+  // accents were the weakest in a finer sweep.
+  it("keeps text on the accent readable with a custom accent", () => {
+    const set = declarations(block(":root .excalidraw"));
+    const steps = [0, 51, 102, 153, 204, 255];
+    const chosen = steps.flatMap((r) => steps.flatMap((g) => steps.map((b) => hexOf([r, g, b]))));
+    chosen.push("#585838", "#5a5a5a", "#96a50f", "#ff0ff0", "#ff4bc3");
+    for (const mode of ["light", "dark"] as const) {
+      for (const accent of [palette[mode].accent, ...chosen.map((hex) => readableAccent(hex, mode))]) {
+        const text = resolve(set.get("--color-primary-light"), mode, accent);
+        for (const background of ["--color-primary", "--color-primary-hover"]) {
+          const fill = resolve(set.get(background), mode, accent);
+          expect(text && fill, `${background} (${mode})`).toBeDefined();
+          expect(contrast(text!, fill!), `${accent} ${background} (${mode})`).toBeGreaterThanOrEqual(4.5);
+        }
       }
     }
   });
