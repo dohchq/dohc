@@ -1400,8 +1400,26 @@ interface InspectedWorkspaceMove extends PreparedWorkspaceMove {
 
 function moveIdentityUnavailable(fromPath: string, toPath: string): Error {
   return new Error(
-    `dohc did not move ${fromPath} to ${toPath}. dohc could not tell which files on disk they are. Check both paths in your file manager before trying again.`,
+    `dohc did not move ${fromPath} to ${toPath}. dohc could not tell which files or folders on disk they are. Check both paths in your file manager before trying again.`,
   );
+}
+
+async function compareStoredMovePaths(
+  realRoot: string,
+  source: string,
+  destination: string,
+  paths: WorkspaceMovePaths,
+  relation: "same" | "inside",
+): Promise<boolean> {
+  const [storedSource, storedDestination] = await Promise.all([
+    diskSpelling(realRoot, source),
+    diskSpelling(realRoot, destination),
+  ]).catch(() => { throw moveIdentityUnavailable(paths.fromPath, paths.toPath); });
+  if (storedSource === null || (storedDestination === null && relation === "inside")) {
+    throw moveIdentityUnavailable(paths.fromPath, paths.toPath);
+  }
+  if (storedDestination === null) return false;
+  return relation === "same" ? storedSource === storedDestination : isInside(storedSource, storedDestination);
 }
 
 async function movePathsNest(
@@ -1415,12 +1433,7 @@ async function movePathsNest(
   const parentKey = pathCollisionKey(relative(realRoot, parent).replaceAll("\\", "/"));
   if (parentKey !== sourceKey && !parentKey.startsWith(`${sourceKey}/`)) return false;
   // Only lookup-case aliases need a listing after realpath's containment check.
-  const [storedSource, storedParent] = await Promise.all([
-    diskSpelling(realRoot, source),
-    diskSpelling(realRoot, parent),
-  ]).catch(() => { throw moveIdentityUnavailable(paths.fromPath, paths.toPath); });
-  if (storedSource === null || storedParent === null) throw moveIdentityUnavailable(paths.fromPath, paths.toPath);
-  return isInside(storedSource, storedParent);
+  return compareStoredMovePaths(realRoot, source, parent, paths, "inside");
 }
 
 async function sameMoveEntry(
@@ -1430,12 +1443,7 @@ async function sameMoveEntry(
   paths: WorkspaceMovePaths,
 ): Promise<boolean> {
   if (source === destination) return true;
-  const [storedSource, storedDestination] = await Promise.all([
-    diskSpelling(realRoot, source),
-    diskSpelling(realRoot, destination),
-  ]).catch(() => { throw moveIdentityUnavailable(paths.fromPath, paths.toPath); });
-  if (storedSource === null) throw moveIdentityUnavailable(paths.fromPath, paths.toPath);
-  return storedSource === storedDestination;
+  return compareStoredMovePaths(realRoot, source, destination, paths, "same");
 }
 
 async function inspectWorkspaceMove(
@@ -1586,13 +1594,15 @@ export async function movePath(
     () => true,
     () => false,
   );
+  let renamesInPlace = false;
   if (destExists) {
     // Case-only rename carve-out: on a case-insensitive filesystem the
     // destination "exists" because it IS the source under another case.
     // Compare resolved paths so a genuinely distinct file that
     // case-collides still refuses — the carve-out must not reopen the
     // overwrite hole.
-    if (!(await sameMoveEntry(realRoot, realFrom, await realpath(to), { fromPath, toPath }))) {
+    renamesInPlace = await sameMoveEntry(realRoot, realFrom, await realpath(to), { fromPath, toPath });
+    if (!renamesInPlace) {
       throw new Error(`Destination already exists: ${toPath}`);
     }
   }
@@ -1602,6 +1612,12 @@ export async function movePath(
   // main is the single writer on this path and Node exposes no renameat2
   // RENAME_NOREPLACE. The watcher records whatever actually landed.
   await rename(from, to);
+  if (renamesInPlace && from !== to) {
+    const spelling = await diskSpelling(rootPath, to).catch(() => null);
+    if (spelling !== null && basename(spelling) !== basename(to)) {
+      throw new Error(`dohc did not rename ${fromPath} to ${toPath}. This disk kept the old capitals. Rename it to another name first, then to ${basename(toPath)}.`);
+    }
+  }
   return visibleResultPath;
 }
 

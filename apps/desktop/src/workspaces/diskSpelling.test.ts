@@ -48,6 +48,33 @@ describe("storedNameAmong", () => {
 });
 
 describe("diskSpelling", () => {
+  it.each(["EIO", "EMFILE"])("throws when a folder listing fails with %s", async (code) => {
+    const root = await createTestScratch("dohc-disk-spelling-");
+    await writeFile(join(root, "notes.md"), "body");
+    const failure = Object.assign(new Error("listing unavailable"), { code });
+    vi.spyOn(fsPromises, "readdir").mockRejectedValue(failure);
+    await expect(diskSpelling(root, join(root, "notes.md"))).rejects.toBe(failure);
+  });
+
+  it("refuses another hard link's unrelated leaf when the folder cannot be listed", async () => {
+    const root = await createTestScratch("dohc-disk-spelling-");
+    await mkdir(join(root, "d"));
+    await mkdir(join(root, "e"));
+    const file = join(root, "d", "x.md");
+    const otherLink = join(root, "e", "y.md");
+    await writeFile(file, "shared");
+    await link(file, otherLink);
+    await writeFile(join(root, "d", "y.md"), "untracked");
+    const originalRealpath = fsPromises.realpath.bind(fsPromises);
+    const originalReaddir = fsPromises.readdir.bind(fsPromises);
+    vi.spyOn(fsPromises, "realpath").mockImplementation(async (path) => originalRealpath(String(path) === file ? otherLink : path));
+    vi.spyOn(fsPromises, "readdir").mockImplementation((path, options) => {
+      if (String(path) === join(root, "d")) throw Object.assign(new Error("listing denied"), { code: "EACCES" });
+      return originalReaddir(path, options);
+    });
+    await expect(diskSpelling(root, file)).rejects.toThrow();
+  });
+
   it("keeps realpath's stored names when a folder cannot be listed", async (context) => {
     const root = await createTestScratch("dohc-disk-spelling-");
     await mkdir(join(root, "Docs"));

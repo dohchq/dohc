@@ -574,6 +574,22 @@ describe("createFolder", () => {
 });
 
 describe("movePath", () => {
+  it("refuses a case-only rename when the disk silently keeps the old capitals", async (context) => {
+    await mkdir(join(root, "docs", "plans"), { recursive: true });
+    await writeFile(join(root, "docs", "plans", "a.md"), "body");
+    if (!(await lstat(join(root, "docs", "Plans")).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    const noOp = vi.spyOn(fsPromises, "rename").mockResolvedValue(undefined);
+    try {
+      await expect(movePath(root, "docs/plans", "docs/Plans")).rejects.toThrow(
+        "dohc did not rename docs/plans to docs/Plans. This disk kept the old capitals. Rename it to another name first, then to Plans.",
+      );
+      expect(await readdir(join(root, "docs"))).toEqual(["plans"]);
+      expect(await readFile(join(root, "docs", "plans", "a.md"), "utf8")).toBe("body");
+    } finally {
+      noOp.mockRestore();
+    }
+  });
+
   it("prepares and commits an ordinary move without listing folders", async () => {
     await mkdir(join(root, "docs", "drafts"), { recursive: true });
     await writeFile(join(root, "docs", "drafts", "a.md"), "body");
@@ -588,17 +604,25 @@ describe("movePath", () => {
     }
   });
 
-  it("uses equal realpaths for a case-only rename without listing folders", async (context) => {
+  it("uses equal realpaths without listing folders until checking the renamed leaf", async (context) => {
     await mkdir(join(root, "docs", "plans"), { recursive: true });
     await writeFile(join(root, "docs", "plans", "a.md"), "body");
     if (!(await lstat(join(root, "docs", "Plans")).then(() => true, () => false))) context.skip("this disk keeps case apart");
     const listing = vi.spyOn(fsPromises, "readdir");
+    const originalRename = fsPromises.rename.bind(fsPromises);
+    let listingsBeforeRename: number | undefined;
+    const renaming = vi.spyOn(fsPromises, "rename").mockImplementation(async (from, to) => {
+      listingsBeforeRename = listing.mock.calls.length;
+      return originalRename(from, to);
+    });
     try {
       await prepareWorkspaceMove(root, "docs/plans", "docs/Plans");
       await expect(movePath(root, "docs/plans", "docs/Plans")).resolves.toBe("docs/Plans");
-      expect(listing).not.toHaveBeenCalled();
+      expect(listingsBeforeRename).toBe(0);
+      expect(listing).toHaveBeenCalledTimes(2);
       expect(await readFile(join(root, "docs", "Plans", "a.md"), "utf8")).toBe("body");
     } finally {
+      renaming.mockRestore();
       listing.mockRestore();
     }
   });
@@ -621,7 +645,7 @@ describe("movePath", () => {
       try {
         const operation = stage === "prepare" ? prepareWorkspaceMove : movePath;
         await expect(operation(root, "docs/plans", "docs/Plans")).rejects.toThrow(
-          "dohc did not move docs/plans to docs/Plans. dohc could not tell which files on disk they are. Check both paths in your file manager before trying again.",
+          "dohc did not move docs/plans to docs/Plans. dohc could not tell which files or folders on disk they are. Check both paths in your file manager before trying again.",
         );
         expect(await readFile(join(root, "docs", "plans", "a.md"), "utf8")).toBe("body");
       } finally {
@@ -643,7 +667,7 @@ describe("movePath", () => {
     const listing = vi.spyOn(fsPromises, "readdir").mockResolvedValue([]);
     try {
       await expect(prepareWorkspaceMove(root, "Team", "team/leads/sub")).rejects.toThrow(
-        "dohc did not move Team to team/leads/sub. dohc could not tell which files on disk they are. Check both paths in your file manager before trying again.",
+        "dohc did not move Team to team/leads/sub. dohc could not tell which files or folders on disk they are. Check both paths in your file manager before trying again.",
       );
       expect(await readFile(join(root, "Team", "leads", "a.md"), "utf8")).toBe("body");
     } finally {

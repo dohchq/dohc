@@ -299,11 +299,24 @@ async function spellingSharingFile(
 ): Promise<string | null> {
   const others = (spellings.get(pathCollisionKey(path)) ?? []).filter((other) => other !== path && owns(other)).sort();
   if (others.length === 0) return null;
-  const fileAt = (at: string) => lstat(at).then((entry) => entry.isFile() ? diskSpelling(rootDir, at) : null, absentAsNull);
-  const file = await fileAt(target);
-  if (file === null) return null;
+  const file = await lstat(target, { bigint: true }).catch(absentAsNull);
+  if (!file?.isFile()) return null;
   for (const other of others) {
-    if ((await fileAt(containedTarget(rootDir, other))) === file) return other;
+    const otherTarget = containedTarget(rootDir, other);
+    const otherFile = await lstat(otherTarget, { bigint: true }).catch(absentAsNull);
+    if (!otherFile?.isFile()) continue;
+    const [realFile, realOther] = await Promise.all([
+      realpath(target).catch(absentAsNull),
+      realpath(otherTarget).catch(absentAsNull),
+    ]);
+    if (realFile === null || realOther === null) continue;
+    if (realFile === realOther) return other;
+    if (file.dev !== otherFile.dev || file.ino !== otherFile.ino) continue;
+    const [storedFile, storedOther] = await Promise.all([
+      diskSpelling(rootDir, target),
+      diskSpelling(rootDir, otherTarget),
+    ]);
+    if (storedFile !== null && storedFile === storedOther) return other;
   }
   return null;
 }
@@ -352,8 +365,6 @@ async function materializeSharedViewPaths(
   // The view's live paths, grouped by how a disk that ignores case or Unicode
   // normalization names them. Read once, at the first delete that needs them.
   let aliases: Map<string, string[]> | undefined;
-  // A missing entry is an answer; any other failure at the delete's own target
-  // stops the refresh before it deletes.
   // The first other live path, by path, that reaches the regular file at
   // `target`: that path's head owns the file, as the engine decides for
   // workspace peers (#2157). A link or folder at the target has no owner; the
@@ -372,6 +383,8 @@ async function materializeSharedViewPaths(
     const head = await store.readTextFile({ workspaceId, versionId: main.id, path: owner });
     if (head === null) return null;
     if (diskMatchesSnapshot(await readDiskContent(target), head)) {
+      const real = await realpath(target).catch(() => null);
+      if (real !== null && basename(real) === basename(owner)) return null;
       const spelling = await diskSpelling(rootDir, target).catch(() => null);
       if (spelling !== null && basename(spelling) === basename(owner)) return null;
     }
@@ -2401,7 +2414,7 @@ async function refreshSharedViewOnce(input: {
     let spellings: Map<string, string[]> | undefined;
     const collisionEntry = async (path: string, target: string): Promise<UnjournalablePath> => {
       spellings ??= spellingGroups(preTrackedPaths);
-      const owner = await spellingSharingFile(input.rootDir, path, target, spellings, (other) => !collisionRecordedPaths.has(other));
+      const owner = await spellingSharingFile(input.rootDir, path, target, spellings, (other) => !collisionRecordedPaths.has(other)).catch(() => null);
       return owner === null ? { path, reason: "local-collision" } : { path, reason: "spelling-collision", owner };
     };
     for (const change of pull.changedPaths) {

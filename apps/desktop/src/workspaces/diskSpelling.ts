@@ -7,39 +7,46 @@ import { isInside } from "../security/pathContainment";
 // realpath keeps lookup case even when the disk ignores it. Missing or escaped
 // entries return null; unknown identities throw so callers cannot infer absence.
 export async function diskSpelling(root: string, path: string): Promise<string | null> {
-  try {
-    const realRoot = await realpath(root);
-    if (resolve(root) === resolve(path) || resolve(realRoot) === resolve(path)) return realRoot;
-    // A handle's final path can name another hard link on Windows. Keep the
-    // looked-up leaf unless it is itself a symlink; resolve its parent only.
-    const entry = await lstat(path);
-    const file = entry.isSymbolicLink()
-      ? await realpath(path)
-      : join(await realpath(dirname(path)), basename(path));
-    if (!isInside(realRoot, file)) return null;
-    if (file === realRoot) return realRoot;
-    let stored = realRoot;
-    for (const leaf of relative(realRoot, file).split(sep)) {
-      const folder = stored;
-      const lookup = await lstat(join(folder, leaf), { bigint: true });
-      let names: string[];
-      try {
-        names = await readdir(folder);
-      } catch {
-        stored = join(folder, basename(await realpath(join(folder, leaf))));
-        continue;
+  const realRoot = await realpath(root).catch(absentAsNull);
+  if (realRoot === null) return null;
+  if (resolve(root) === resolve(path) || resolve(realRoot) === resolve(path)) return realRoot;
+  // A handle's final path can name another hard link on Windows. Keep the
+  // looked-up leaf unless it is itself a symlink; resolve its parent only.
+  const entry = await lstat(path).catch(absentAsNull);
+  if (entry === null) return null;
+  const resolved = await realpath(entry.isSymbolicLink() ? path : dirname(path)).catch(absentAsNull);
+  if (resolved === null) return null;
+  const file = entry.isSymbolicLink() ? resolved : join(resolved, basename(path));
+  if (!isInside(realRoot, file)) return null;
+  if (file === realRoot) return realRoot;
+  let stored = realRoot;
+  for (const leaf of relative(realRoot, file).split(sep)) {
+    const folder = stored;
+    const lookup = await lstat(join(folder, leaf), { bigint: true }).catch(absentAsNull);
+    if (lookup === null) return null;
+    let names: string[];
+    try {
+      names = await readdir(folder);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EACCES" && code !== "EPERM") throw error;
+      const real = await realpath(join(folder, leaf)).catch(absentAsNull);
+      if (real === null) return null;
+      const name = basename(real);
+      if (pathCollisionKey(name) !== pathCollisionKey(leaf)) {
+        throw new Error(`Could not identify the stored name: ${join(folder, leaf)}`);
       }
-      const name = await storedNameAmong(leaf, names, async (candidate) => {
-        const other = await lstat(join(folder, candidate), { bigint: true }).catch(absentAsNull);
-        return other !== null && other.dev === lookup.dev && other.ino === lookup.ino;
-      });
-      if (name === null) throw new Error(`Could not identify the stored name: ${join(folder, leaf)}`);
       stored = join(folder, name);
+      continue;
     }
-    return stored;
-  } catch (error) {
-    return absentAsNull(error);
+    const name = await storedNameAmong(leaf, names, async (candidate) => {
+      const other = await lstat(join(folder, candidate), { bigint: true }).catch(absentAsNull);
+      return other !== null && other.dev === lookup.dev && other.ino === lookup.ino;
+    });
+    if (name === null) throw new Error(`Could not identify the stored name: ${join(folder, leaf)}`);
+    stored = join(folder, name);
   }
+  return stored;
 }
 
 export function absentAsNull(error: unknown): null {

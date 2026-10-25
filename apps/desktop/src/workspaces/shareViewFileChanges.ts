@@ -412,7 +412,7 @@ async function applyShareViewPathMove(
   // Every destination, before any of them is applied. A collision found half
   // way through would otherwise leave the files before it already moved.
   for (const move of moves) {
-    if (held.has(move.to) || (!renamesInPlace && (await projectionOccupies(input.rootPath, move)))) {
+    if (held.has(move.to) || (!renamesInPlace && (await projectionHolds(input.rootPath, move.to)))) {
       throw new Error(`Destination already exists: ${move.to}`);
     }
   }
@@ -1086,35 +1086,6 @@ async function projectionHolds(
 }
 
 /**
- * CASE IDENTITY IS THE FILESYSTEM'S ANSWER, NEVER A STRING'S.
- *
- * On a case-insensitive filesystem `docs/Plans` and `docs/plans` are one
- * directory, and `Note.md` and `note.md` are one file. Every seam here that
- * asks "is this the same entry?" or "is this name taken?" asks through this one
- * probe, because a string comparison answers those questions wrongly on exactly
- * the platform dohc ships on first — and two of the places that asked with
- * strings answered by destroying data.
- *
- * Both ends must resolve for them to BE the same entry. This helper serves only
- * per-file collision checks after the destination was proven occupied. A
- * missing or unreadable endpoint therefore returns false and keeps the
- * collision refusal closed.
- */
-async function sameProjectionEntry(
-  rootPath: string,
-  left: string,
-  right: string,
-): Promise<boolean> {
-  const identities = await Promise.all([
-    diskSpelling(rootPath, join(rootPath, left)),
-    diskSpelling(rootPath, join(rootPath, right)),
-  ]).catch(() => null);
-  if (identities === null) return false;
-  const [leftReal, rightReal] = identities;
-  return leftReal !== null && rightReal !== null && leftReal === rightReal;
-}
-
-/**
  * Resolve one physical identity snapshot for the whole top-level move.
  *
  * Relative path spelling cannot answer this on a case-insensitive filesystem
@@ -1145,7 +1116,7 @@ async function preflightProjectionMoveIdentity(
     throw error;
   }
   const identityUnavailable = () => new Error(
-    `dohc did not rename ${from} to ${to}. dohc could not tell which files on disk they are. Check both paths in your file manager before trying again.`,
+    `dohc did not rename ${from} to ${to}. dohc could not tell which files or folders on disk they are. Check both paths in your file manager before trying again.`,
   );
   const source = await diskSpelling(input.rootPath, sourceTarget).catch(() => null);
   if (source === null) throw identityUnavailable();
@@ -1179,21 +1150,6 @@ async function preflightProjectionMoveIdentity(
     throw new Error(`Cannot move a path into itself: ${from}`);
   }
   return { renamesInPlace };
-}
-
-/**
- * Would this move land on something the projection already holds?
- *
- * The case-only carve-out `movePath` makes, for the same reason: the
- * destination "exists" because it IS the source, and refusing there would block
- * a rename the user plainly meant.
- */
-async function projectionOccupies(
-  rootPath: string,
-  move: { from: string; to: string },
-): Promise<boolean> {
-  if (!(await projectionHolds(rootPath, move.to))) return false;
-  return !(await sameProjectionEntry(rootPath, move.from, move.to));
 }
 
 /** Every path the share view's store holds, with the kind its projection needs. */

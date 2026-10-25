@@ -3067,17 +3067,15 @@ describe("ShareViewFiles", () => {
     }
   });
 
-  it("lists folders a fixed number of times before a case-only folder rename", async (context) => {
+  it("lists folders a fixed number of times through a case-only folder rename and refresh", async (context) => {
     const rootPath = await workspaceRoot();
     await mkdir(join(rootPath, "docs", "plans"), { recursive: true });
     if (!(await lstat(join(rootPath, "docs", "Plans")).then(() => true, () => false))) context.skip("this disk keeps case apart");
     const initial = Array.from({ length: 12 }, (_, index) => ({ path: `docs/plans/${index}.md`, text: "body\n" }));
     for (const file of initial) await writeFile(join(rootPath, file.path), file.text);
     const listing = vi.spyOn(fsPromises, "readdir");
-    let beforeMutation = 0;
     const store = mutableTextStore({
       initial,
-      afterRename: () => { beforeMutation ||= listing.mock.calls.filter(([path]) => String(path) === rootPath).length; },
     });
     const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => target(rootPath), openStore: () => store });
     try {
@@ -3085,10 +3083,81 @@ describe("ShareViewFiles", () => {
         lease, { kind: "standalone", workspaceId: "workspace-a" },
         { kind: "move", fromPath: "docs/plans", toPath: "docs/Plans" },
       ));
-      expect(beforeMutation).toBe(2);
+      expect(listing.mock.calls.filter(([path]) => String(path) === rootPath)).toHaveLength(3);
+      expect(listing.mock.calls.filter(([path]) => String(path).toLowerCase() === join(rootPath, "docs", "plans").toLowerCase())).toHaveLength(1);
       expect(store.renameTextFile).toHaveBeenCalledTimes(initial.length);
     } finally {
       listing.mockRestore();
+    }
+  });
+
+  it("keeps store renames when the post-rename spelling is unknown", async (context) => {
+    const rootPath = await workspaceRoot();
+    const plans = join(rootPath, "docs", "plans");
+    const renamed = join(rootPath, "docs", "Plans");
+    await mkdir(plans, { recursive: true });
+    await writeFile(join(plans, "a.md"), "body\n");
+    if (!(await lstat(renamed).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    const store = mutableTextStore({ initial: [{ path: "docs/plans/a.md", text: "body\n" }] });
+    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => target(rootPath), openStore: () => store });
+    const listing = vi.spyOn(fsPromises, "readdir");
+    const originalRename = fsPromises.rename.bind(fsPromises);
+    let postRenameListingFailed = false;
+    const rename = vi.spyOn(fsPromises, "rename").mockImplementation(async (from, to) => {
+      await originalRename(from, to);
+      if (String(from) === plans && String(to) === renamed) {
+        listing.mockImplementationOnce(async () => {
+          postRenameListingFailed = true;
+          throw Object.assign(new Error("listing unavailable after rename"), { code: "EIO" });
+        });
+      }
+    });
+    try {
+      await withStaleSensitiveWorkspaceOperation(rootPath, (lease) => files.change(
+        lease, { kind: "standalone", workspaceId: "workspace-a" },
+        { kind: "move", fromPath: "docs/plans", toPath: "docs/Plans" },
+      ));
+      expect(postRenameListingFailed).toBe(true);
+      expect(await store.listTextFileMetadata({ workspaceId: "workspace-a", versionId: "main" })).toEqual([
+        expect.objectContaining({ path: "docs/Plans/a.md" }),
+      ]);
+      expect(store.renameTextFile).toHaveBeenCalledTimes(1);
+      expect(await readdir(join(rootPath, "docs"))).toEqual(["Plans"]);
+      expect(await readFile(join(renamed, "a.md"), "utf8")).toBe("body\n");
+      expect((await readSharedViewProjectionDebt(rootPath, "share-a")).pendingPaths).toEqual(new Set());
+    } finally {
+      rename.mockRestore();
+      listing.mockRestore();
+    }
+  });
+
+  it("puts back store renames when a case-only folder rename silently does nothing", async (context) => {
+    const rootPath = await workspaceRoot();
+    const plans = join(rootPath, "docs", "plans");
+    await mkdir(plans, { recursive: true });
+    await writeFile(join(plans, "a.md"), "body\n");
+    if (!(await lstat(join(rootPath, "docs", "Plans")).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    const store = mutableTextStore({ initial: [{ path: "docs/plans/a.md", text: "body\n" }] });
+    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => target(rootPath), openStore: () => store });
+    const originalRename = fsPromises.rename.bind(fsPromises);
+    const noOp = vi.spyOn(fsPromises, "rename").mockImplementation(async (from, to) => {
+      if (String(from) === plans && String(to) === join(rootPath, "docs", "Plans")) return;
+      return originalRename(from, to);
+    });
+    try {
+      await expect(withStaleSensitiveWorkspaceOperation(rootPath, (lease) => files.change(
+        lease, { kind: "standalone", workspaceId: "workspace-a" },
+        { kind: "move", fromPath: "docs/plans", toPath: "docs/Plans" },
+      ))).rejects.toThrow("This disk kept the old capitals");
+      expect(await store.listTextFileMetadata({ workspaceId: "workspace-a", versionId: "main" })).toEqual([
+        expect.objectContaining({ path: "docs/plans/a.md" }),
+      ]);
+      expect(store.renameTextFile).toHaveBeenCalledTimes(2);
+      expect(await readdir(join(rootPath, "docs"))).toEqual(["plans"]);
+      expect(await readFile(join(plans, "a.md"), "utf8")).toBe("body\n");
+      expect((await readSharedViewProjectionDebt(rootPath, "share-a")).pendingPaths).toEqual(new Set());
+    } finally {
+      noOp.mockRestore();
     }
   });
 
@@ -3203,7 +3272,7 @@ describe("ShareViewFiles", () => {
         lease,
         { kind: "standalone", workspaceId: "workspace-a" },
         { kind: "move", fromPath: "docs/before.md", toPath: "docs/after.md" },
-      ))).rejects.toThrow("dohc did not rename docs/before.md to docs/after.md. dohc could not tell which files on disk they are. Check both paths in your file manager before trying again.");
+      ))).rejects.toThrow("dohc did not rename docs/before.md to docs/after.md. dohc could not tell which files or folders on disk they are. Check both paths in your file manager before trying again.");
       expect(store.renameTextFile).not.toHaveBeenCalled();
       await expect(readFile(join(rootPath, "docs", "before.md"), "utf8")).resolves.toBe("body\n");
       await expect(readSharedViewProjectionDebt(rootPath, "share-a")).resolves.toMatchObject({ pendingPaths: new Set() });
