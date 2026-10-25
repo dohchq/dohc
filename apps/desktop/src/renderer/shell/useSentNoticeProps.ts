@@ -251,6 +251,8 @@ export function useSentNoticeProps(input: {
     [reportShellError, sentNotices],
   );
 
+  const onReadSentNotice = useCallback((notice: NoticeRow) => read([notice]), [read]);
+
   const onReadAllSentNotices = useCallback(
     () => read((sentNotices?.notices ?? []).filter((notice) => notice.readAtMs === null)),
     [read, sentNotices?.notices],
@@ -264,6 +266,7 @@ export function useSentNoticeProps(input: {
     onHideSentNoticeToast: sentNotices?.hideToast,
     onOpenSentNotice,
     onDismissSentNotice,
+    onReadSentNotice,
     onReadAllSentNotices,
     onRunSentNoticeNow: runNow,
     onRetrySentNotice: noticeRetry.retry,

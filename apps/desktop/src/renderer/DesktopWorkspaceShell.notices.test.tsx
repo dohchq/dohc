@@ -2113,13 +2113,26 @@ describe("file transfers", () => {
     await user.keyboard("{Control>}k{/Control}");
     await user.click(await screen.findByText("Import files"));
     const toast = await screen.findByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain("Nothing imported (2 skipped).");
+    expect(toast.textContent).toContain("2 files weren't imported.");
     expect(within(toast).queryByTestId("workspace-shell-error-retry")).toBeNull();
 
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notices = await screen.findByTestId("notice-center");
-    expect(notices.textContent).toContain("Nothing imported (2 skipped).");
+    expect(notices.textContent).toContain("2 files weren't imported.");
     expect(within(notices).queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
+  it("says what a palette import landed and what it skipped", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({ imported: ["a.md", "b.md", "c.md"], skipped: 2 });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("Imported 3 files. 2 weren't imported.");
+    expect(within(toast).queryByTestId("workspace-shell-error-retry")).toBeNull();
   });
 
   async function dropFromOs(bridge: ReturnType<typeof makeBridge>, paths: string[]) {
@@ -2128,16 +2141,20 @@ describe("file transfers", () => {
     fireEvent.drop(tree, { dataTransfer: { files: [new File([], "dropped")], types: ["Files"] } });
   }
 
-  it("says how many folders a drop of empty folders created", async () => {
+  // The Explorer shows what landed, so the only message is about the skip.
+  it("says only what a drop skipped", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.importWorkspaceFiles.mockResolvedValueOnce({ imported: [], skipped: 0, folders: 2 });
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({ imported: ["a.md"], skipped: 2 });
     renderShell(bridge);
 
-    await dropFromOs(bridge, ["/outside/Empty"]);
+    await dropFromOs(bridge, ["/outside/a.md", "/outside/b.lnk", "/outside/c.lnk"]);
     await waitFor(() => expect(bridge.importWorkspaceFiles).toHaveBeenCalledWith({
-      workspaceId: "ws-shell-test", droppedPaths: ["/outside/Empty"],
+      workspaceId: "ws-shell-test", droppedPaths: ["/outside/a.md", "/outside/b.lnk", "/outside/c.lnk"],
     }));
-    expect((await screen.findByTestId("workspace-shell-notice")).textContent).toContain("Created 2 folders.");
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("2 files weren't imported.");
+    expect(toast.textContent).not.toContain("Imported");
+    expect(within(toast).queryByTestId("workspace-shell-error-retry")).toBeNull();
   });
 
   // Folders that landed are progress: the same drop again would land beside
@@ -2212,6 +2229,92 @@ describe("file transfers", () => {
       expect(bridge.importWorkspaceFiles).toHaveBeenCalledWith({ workspaceId: "ws-shell-test", targetDir: "notes" }),
     );
   }
+
+  it("opens the folder an Explorer import landed in and selects the new files, with no toast", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const listing = (files: string[]) => ({
+      visibility: { status: "ready" as const, rules: [] },
+      files: files.map((path) => ({ path, kind: "file" as const })),
+      folders: ["notes"],
+    });
+    bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes/a.md"]));
+    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    bridge.importWorkspaceFiles.mockImplementationOnce(async () => {
+      bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes/a.md", "notes/b.md", "notes/c.md"]));
+      return { imported: ["notes/b.md", "notes/c.md"], skipped: 0 };
+    });
+    renderShell(bridge);
+
+    await importIntoNotes(bridge);
+    await waitFor(() => expect((document.activeElement as HTMLElement | null)?.dataset.path).toBe("notes/b.md"));
+    const selected = screen.getAllByTestId("tree-row")
+      .filter((row) => row.getAttribute("aria-selected") === "true")
+      .map((row) => row.dataset.path);
+    expect(selected).toEqual(["notes/b.md", "notes/c.md"]);
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  it("keeps the newer import's selection when an older import finishes later", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const listing = (files: string[]) => ({
+      visibility: { status: "ready" as const, rules: [] },
+      files: files.map((path) => ({ path, kind: "file" as const })),
+      folders: ["notes"],
+    });
+    bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes/a.md"]));
+    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    let finishOlder!: (result: { imported: string[]; skipped: number }) => void;
+    bridge.importWorkspaceFiles
+      .mockImplementationOnce(() => new Promise((resolve) => { finishOlder = resolve; }))
+      .mockImplementationOnce(async () => {
+        bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes/a.md", "notes/b.md", "notes/c.md"]));
+        return { imported: ["notes/c.md"], skipped: 0 };
+      });
+    renderShell(bridge);
+
+    await importIntoNotes(bridge);
+    await importIntoNotes(bridge);
+    await waitFor(() => expect(bridge.importWorkspaceFiles).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect((document.activeElement as HTMLElement | null)?.dataset.path).toBe("notes/c.md"));
+    const listings = bridge.listWorkspaceFiles.mock.calls.length;
+
+    finishOlder({ imported: ["notes/b.md"], skipped: 0 });
+    await waitFor(() => expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(listings));
+    await act(async () => {});
+    const selected = screen.getAllByTestId("tree-row")
+      .filter((row) => row.getAttribute("aria-selected") === "true")
+      .map((row) => row.dataset.path);
+    expect(selected).toEqual(["notes/c.md"]);
+    expect((document.activeElement as HTMLElement | null)?.dataset.path).toBe("notes/c.md");
+  });
+
+  it("still selects an Explorer import's files after a palette import starts and is cancelled", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const listing = (files: string[]) => ({
+      visibility: { status: "ready" as const, rules: [] },
+      files: files.map((path) => ({ path, kind: "file" as const })),
+      folders: ["notes"],
+    });
+    bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes/a.md"]));
+    bridge.showExplorerMenu.mockResolvedValue("import-files");
+    let finishExplorer!: (result: { imported: string[]; skipped: number }) => void;
+    bridge.importWorkspaceFiles
+      .mockImplementationOnce(() => new Promise((resolve) => { finishExplorer = resolve; }))
+      .mockResolvedValueOnce({ imported: [], skipped: 0 });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await importIntoNotes(bridge);
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+    await waitFor(() => expect(bridge.importWorkspaceFiles).toHaveBeenCalledTimes(2));
+
+    bridge.listWorkspaceFiles.mockResolvedValue(listing(["notes/a.md", "notes/b.md"]));
+    finishExplorer({ imported: ["notes/b.md"], skipped: 0 });
+    await waitFor(() => expect((document.activeElement as HTMLElement | null)?.dataset.path).toBe("notes/b.md"));
+    expect((document.activeElement as HTMLElement).getAttribute("aria-selected")).toBe("true");
+  });
 
   const SHARED_VIEW = { shareId: "share-1", granterEmail: "granter@dohc.test", access: "edit" as const };
 

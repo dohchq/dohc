@@ -1,3 +1,4 @@
+import {isDeepStrictEqual} from "node:util";
 import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { parseHostControlIdentifier } from "@dohc/live-session-contract/host-control";
 import { parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseLiveUpdateReceipt, type LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
@@ -17,6 +18,11 @@ export interface NativeRestoreFenceReceipt {
   operation: NativeRestoreFence;
   localHeadSequence: number;
   recordedAtMs: number;
+}
+const refusalReasons = ["binding-changed", "reader-unavailable", "source-unavailable", "source-too-large", "incomplete-witness"] as const;
+export interface NativeRestoreRefusal {
+  operation: NativeRestoreFence;
+  reason: typeof refusalReasons[number];
 }
 function record(value: unknown, keys: string[]): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value) ||
@@ -45,4 +51,12 @@ export function parseNativeRestoreFenceReceipt(value: unknown): NativeRestoreFen
   const localHeadSequence = integer(row.localHeadSequence);
   if (localHeadSequence < operation.appliedSequence) throw new TypeError("Native restore head precedes its acknowledged cut.");
   return {operation, localHeadSequence, recordedAtMs: integer(row.recordedAtMs)};
+}
+
+export function parseNativeRestoreRefusal(value: unknown, expectedOperation: NativeRestoreFence): NativeRestoreRefusal {
+  const row = record(value, ["operation", "reason"]);
+  if (!refusalReasons.some(reason => reason === row.reason)) throw new TypeError("Invalid native restore refusal.");
+  const operation = parseNativeRestoreFence(row.operation);
+  if (!isDeepStrictEqual(row.operation, expectedOperation)) throw new TypeError("Native restore refusal names a different operation.");
+  return {operation, reason: row.reason as NativeRestoreRefusal["reason"]};
 }
