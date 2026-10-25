@@ -1798,8 +1798,9 @@ describe("runner note reaches the card through the shell's own wiring", () => {
 
     // The docs send people to Agents to turn on MCP, so the palette finds it by "mcp".
     await user.keyboard("{Control>}k{/Control}");
-    await screen.findByTestId("command-palette");
-    await user.keyboard("mcp{Enter}");
+    const palette = await screen.findByTestId("command-palette");
+    await user.keyboard("mcp");
+    await user.click(within(palette).getByText("Settings: Open Agents (MCP)"));
 
     const note = await screen.findByTestId("runner-self-test-engine-note");
     await waitFor(() =>
