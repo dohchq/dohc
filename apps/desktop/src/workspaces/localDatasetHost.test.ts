@@ -265,6 +265,31 @@ describe("local dataset owner adapter", () => {
     expect(restarted.host.list().datasets).toEqual([]);
     await expect(activate(restarted.host)).rejects.toThrow("deleted");
   });
+  it.each([115, 141, 153])("restores a recovery file in a long workspace folder (%i characters)", async length => {
+    const parent = await mkdtemp(join(tmpdir(), "dohc-recovery-")); roots.push(parent);
+    const sourceRoot = join(parent, "s".repeat(length - parent.length - 1));
+    const workspaceRoot = join(parent, "w".repeat(length - parent.length - 1));
+    expect(sourceRoot).toHaveLength(length);
+    expect(workspaceRoot).toHaveLength(length);
+    await mkdir(sourceRoot); await mkdir(workspaceRoot);
+    const sourceHost = await open({ workspaceRoot: sourceRoot }), approved = await activate(sourceHost.host);
+    await sourceHost.host.action(call(approved, id(6), "saved", { name: "Preserved" }));
+    const archive = await sourceHost.host.prepareExport(id(1));
+    const sourcePath = join(sourceHost.workspaceRoot, "backup.dohc-recovery");
+    try {
+      await writeDatasetRecoveryExport({ workspaceRoots: [], path: sourcePath, stream: archive.stream(),
+        signal: new AbortController().signal, maxBytes: archive.maxBytes, authorize() {} });
+    } finally { await archive.dispose(); }
+    await sourceHost.host.close();
+
+    const target = await open({ workspaceRoot });
+    const prepared = await target.host.prepareRecovery({ sourcePath });
+    await target.host.claimRecovery({ ...prepared, oldHostStopped: true });
+    expect((await target.host.query(call(approved, id(5)))).result).toEqual([
+      { id: expect.any(String), name: "Preserved" },
+    ]);
+  });
+
   it("restores a chosen active backup only after owner claim and preserves files and retry history", async () => {
     const sourceHost = await open(), approved = await activate(sourceHost.host);
     const bytesBase64 = Buffer.from("%PDF-recovery-receipt").toString("base64");
