@@ -231,17 +231,25 @@ function settledInterval(workspaceId: string, payload: Record<string, unknown>) 
 /**
  * Whether admission bounded what this interval's proof reads: it ends at the
  * row of a restore whose publication is still funded, and starts no earlier
- * than the document's latest binding, as `restorePublicationFits` measured.
+ * than where `restorePublicationFits` measured from.
  */
 function publicationBounded(storage: StorageContext, interval: NonNullable<ReturnType<typeof settledInterval>>): boolean {
   const { namespace, binding, previous, terminal } = interval;
-  const funded = storage.db.prepare(`SELECT 1 FROM sync_relay_live_update_journal j JOIN ${LIVE_RESTORE_LIFECYCLES} l
+  const funded = storage.db.prepare(`SELECT j.restore_operation_id FROM sync_relay_live_update_journal j JOIN ${LIVE_RESTORE_LIFECYCLES} l
     ON l.relay_database_namespace=j.relay_database_namespace AND l.operation_id=j.restore_operation_id
     WHERE j.workspace_id=? AND j.main_version_id=? AND j.object_id=? AND j.lineage_claim_id=? AND j.journal_cursor=?
       AND j.relay_database_namespace=? AND l.publication_reservation_bytes>0`).get(...documentParams(binding), terminal, namespace);
-  const prior = storage.db.prepare(`SELECT terminal_cursor FROM ${SETTLEMENT_BINDINGS} WHERE ${where} ORDER BY terminal_cursor DESC LIMIT 1`)
-    .get(...documentParams(binding));
-  return funded !== undefined && previous >= Number(prior?.terminal_cursor ?? 0);
+  if (!funded) return false;
+  const budget = publicationBudget();
+  try {
+    const { oldBinding } = readRestoreAdmission(storage.db, namespace, String(funded.restore_operation_id), Number.MAX_SAFE_INTEGER,
+      (value) => budget.chargeBytes(value)).preparation.fence.operation;
+    return previous >= publicationStart(storage, namespace, oldBinding, terminal, budget);
+  } catch (error) {
+    if (error instanceof RestoreHistoryBudgetExceeded || error instanceof SettlementProofRefusal ||
+      (error instanceof Error && DAMAGED_HISTORY.includes(error.message))) return false;
+    throw error;
+  }
 }
 function refuseSettlement(op: SyncRelayLogInput, settlementId: string) {
   prepared.delete(op);
@@ -337,31 +345,40 @@ function restoreChecks(
   }
   return { initialBinding: expected, restores };
 }
+/** What one push has left to prove a restore's publication once its state blob is charged. */
+const publicationBudget = () =>
+  new RestoreHistoryBudget(SETTLEMENT_PUSH_MAX_BYTES - MAX_SETTLEMENT_STATE_BYTES, SETTLEMENT_PUSH_MAX_METADATA_EVENTS);
+/**
+ * The earliest cursor a proof of the restore row at `terminal` can start from.
+ * No binding commits at the old generation after the fence, and every event a
+ * proof reads after its base shares one binding, so it starts no earlier than
+ * the latest binding's terminal or the last row accepted at another binding.
+ */
+function publicationStart(storage: StorageContext, namespace: string, oldBinding: LiveObjectBinding, terminal: number,
+  budget: RestoreHistoryBudget): number {
+  const prior = storage.db.prepare(`SELECT terminal_cursor FROM ${SETTLEMENT_BINDINGS} WHERE ${where} ORDER BY terminal_cursor DESC LIMIT 1`)
+    .get(...documentParams(oldBinding));
+  const start = prior ? integer(prior.terminal_cursor) : 0;
+  const last = storage.db.prepare(`SELECT journal_cursor FROM sync_relay_live_update_journal WHERE ${where} AND journal_cursor<? ORDER BY journal_cursor DESC LIMIT 1`)
+    .get(...documentParams(oldBinding), terminal);
+  if (!last) return start;
+  const initial = acrossDeclinedRestores(storage.db, namespace, oldBinding, integer(last.journal_cursor), (value) => budget.chargeBytes(value));
+  require(initial);
+  const changed = storage.db.prepare(`SELECT journal_cursor FROM sync_relay_live_update_journal WHERE ${where} AND journal_cursor>? AND journal_cursor<?
+    AND (current_path<>? OR json(selector_paths_json)<>json(?) OR restore_fence_generation<>?) ORDER BY journal_cursor DESC LIMIT 1`)
+    .get(...documentParams(oldBinding), start, terminal, initial.currentPath, JSON.stringify(initial.selectorPaths), initial.restoreFenceGeneration);
+  return changed ? integer(changed.journal_cursor) : start;
+}
 /**
  * Under the admission writer, after the restore's row: whether one push can
- * prove its publication. No binding commits at the old generation after the
- * fence, and every event a proof reads after its base shares one binding, so
- * it reads back no further than the latest binding's terminal or the last row
- * accepted at another binding. Its state blob is within its bound. A
- * contradiction is the publication's to refuse.
+ * prove its publication from `publicationStart`. Its state blob is within its
+ * bound. A contradiction is the publication's to refuse.
  */
 export function restorePublicationFits(storage: StorageContext, namespace: string, oldBinding: LiveObjectBinding, binding: LiveObjectBinding,
   terminal: number): boolean {
-  const budget = new RestoreHistoryBudget(SETTLEMENT_PUSH_MAX_BYTES - MAX_SETTLEMENT_STATE_BYTES, SETTLEMENT_PUSH_MAX_METADATA_EVENTS);
+  const budget = publicationBudget();
   try {
-    const prior = storage.db.prepare(`SELECT terminal_cursor FROM ${SETTLEMENT_BINDINGS} WHERE ${where} ORDER BY terminal_cursor DESC LIMIT 1`)
-      .get(...documentParams(binding));
-    let previous = prior ? integer(prior.terminal_cursor) : 0;
-    const last = storage.db.prepare(`SELECT journal_cursor FROM sync_relay_live_update_journal WHERE ${where} AND journal_cursor<? ORDER BY journal_cursor DESC LIMIT 1`)
-      .get(...documentParams(binding), terminal);
-    if (last) {
-      const initial = acrossDeclinedRestores(storage.db, namespace, oldBinding, integer(last.journal_cursor), (value) => budget.chargeBytes(value));
-      require(initial);
-      const changed = storage.db.prepare(`SELECT journal_cursor FROM sync_relay_live_update_journal WHERE ${where} AND journal_cursor>? AND journal_cursor<?
-        AND (current_path<>? OR json(selector_paths_json)<>json(?) OR restore_fence_generation<>?) ORDER BY journal_cursor DESC LIMIT 1`)
-        .get(...documentParams(binding), previous, terminal, initial.currentPath, JSON.stringify(initial.selectorPaths), initial.restoreFenceGeneration);
-      if (changed) previous = integer(changed.journal_cursor);
-    }
+    const previous = publicationStart(storage, namespace, oldBinding, terminal, budget);
     const selected = endpoint(storage, binding, namespace, previous), accepted = endpoint(storage, binding, namespace, terminal);
     const events = readAcceptedHistoryInterval(storage, { document: binding, namespace, selected, accepted }, budget);
     restoreChecks(storage, namespace, binding, previous, events, budget);
@@ -593,7 +610,12 @@ async function proveSettlementRecord(
       checkpoint: bytes,
     },
     signal,
-  );
+  ).catch((error: unknown) => {
+    // A worker past its heap limit runs out the same way for the same state.
+    if (error instanceof Error && "code" in error && error.code === "ERR_WORKER_OUT_OF_MEMORY")
+      return { kind: "refused", reason: "capacity-refused", source: "call" } as const;
+    throw error;
+  });
   if (normalized.kind === "retry") throw relayError("settlement_proof_budget");
   if (normalized.kind === "refused" && normalized.reason === "capacity-refused") {
     if (batched) throw relayError("settlement_proof_budget");
@@ -905,9 +927,9 @@ function commitPreparedHostedSettlement(
   require(!conflict);
   const values = bindingValues(p, originId, op.originSeq);
   const storageBytes = Buffer.byteLength(JSON.stringify(values));
-  // Admission funded each restore's publication, which must charge no more than is held.
-  // A STRICT integer column, read before any release.
-  const reserved = p.restores.filter((restore) => restore.terminal > p.previous).map((restore) => ({
+  // Admission funded each restore's publication, which must charge no more than is held. A restore at the base
+  // can't publish once this lands, so it releases too. A STRICT integer column, read before any release.
+  const reserved = p.restores.map((restore) => ({
     ...restore,
     held: Number(storage.db
       .prepare(`SELECT publication_reservation_bytes FROM ${LIVE_RESTORE_LIFECYCLES} WHERE relay_database_namespace=? AND operation_id=?`)

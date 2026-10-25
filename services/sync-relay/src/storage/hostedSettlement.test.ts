@@ -1,4 +1,4 @@
-import { afterAll, afterEach, expect, it } from "vitest";
+import { afterAll, afterEach, expect, it, vi } from "vitest";
 import {
   registered,
   cleanupLiveDeliveryFixtures,
@@ -490,6 +490,28 @@ it("exhausts the shared per-push budget retryably without consuming a coordinate
     ).rejects.toMatchObject({ code: "settlement_proof_budget" });
     expect(f.storage.maxOriginSeq("workspace", "proof")).toBe(-1);
   } finally {
+    f.close();
+  }
+});
+// Proves: a worker that runs out of heap normalizing a single push's state
+// would on every retry, so the push is refused and the device's next op lands
+// behind it. A batch still answers retryably, so its host halves it.
+it("refuses a single push whose normalization runs its worker out of memory", async () => {
+  const f = registered({ deployment: true }), normalize = vi.spyOn(liveValidation, "normalizeSettlement");
+  const outOfMemory = Object.assign(new Error("The worker reached its memory limit."), { code: "ERR_WORKER_OUT_OF_MEMORY" });
+  try {
+    const first = publication(f, "first"), opaque = (originSeq: number) => ({originSeq,opKind:"opaque",payloadJson:"{}",recordedAtMs:1});
+    normalize.mockRejectedValueOnce(outOfMemory);
+    await prepare(f, [first.op]);
+    expect(append(f, [first.op])).toMatchObject({ inserted: 1, settlementRefusals: [{ originSeq: 0, momentId: "first" }] });
+    await prepare(f, [opaque(1)]);
+    expect(append(f, [opaque(1)])).toMatchObject({ inserted: 1, currentMaxOriginSeq: 1 });
+    const second = publication(f, "second", 0, undefined, 2);
+    normalize.mockRejectedValueOnce(outOfMemory);
+    await expect(prepare(f, [second.op, opaque(3)])).rejects.toMatchObject({ code: "settlement_proof_budget" });
+    expect(f.storage.maxOriginSeq("workspace", "proof")).toBe(1);
+  } finally {
+    normalize.mockRestore();
     f.close();
   }
 });

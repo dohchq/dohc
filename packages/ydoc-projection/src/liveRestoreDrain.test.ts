@@ -1964,6 +1964,68 @@ it("refuses an exhausted settlement across a restore whose publication was refus
   } finally {doc.destroy(); f.close();}
 });
 
+// Proves: an exhausted restore publication is retried only from where
+// admission measures it, the last row at another binding when one follows the
+// latest binding. Here the file's first row is set to another selector, or
+// another path, as if accepted before the change. Out of budget, a
+// publication starting at that row is asked to retry; one starting before it
+// is refused, and the device's next op lands behind it.
+it.each([["selector", "selector_paths_json", '["docs/a.md"]'], ["rename", "current_path", "docs/old.md"]] as const)(
+  "refuses an exhausted restore publication that starts before a %s change", async (_change, column, value) => {
+  const f = admittedRestoreFixture("owner", false);
+  try {
+    f.complete();
+    const restored = f.admitted.admitted.accepted.receipt.journalCursor;
+    const changed = Number(f.raw.prepare("SELECT MIN(journal_cursor) AS cursor FROM sync_relay_live_update_journal").get()!.cursor);
+    f.raw.prepare(`UPDATE sync_relay_live_update_journal SET ${column}=? WHERE journal_cursor=?`).run(value, changed);
+    const binding = (cursor: number) => f.raw.prepare("SELECT current_path,selector_paths_json FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(cursor);
+    expect(binding(changed)).not.toEqual(binding(restored));
+    const fromChange = restorePublication(f, restoredState(f, f.admitted), restored, "from-change-publication", changed);
+    await expect(prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [fromChange.op]}, new RestoreHistoryBudget(1, 65_536)))
+      .rejects.toMatchObject({code: "settlement_proof_budget"});
+    const beforeChange = restorePublication(f, restoredState(f, f.admitted), restored, "before-change-publication");
+    await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [beforeChange.op]}, new RestoreHistoryBudget(1, 65_536));
+    expect(beforeChange.op).toMatchObject({settlementAdmission: {status: "refused"}});
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [beforeChange.op]})).toMatchObject({inserted: 1});
+    const next = {originSeq: 1, opKind: "opaque", payloadJson: "{}", recordedAtMs: 1};
+    await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [next]});
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [next]})).toMatchObject({inserted: 1, currentMaxOriginSeq: 1});
+  } finally {f.close();}
+});
+
+// Proves: a refused restore publication's hold is released by the settlement
+// that later covers its row from the restore's own row, since the restore
+// can no longer publish. The hold, its lifecycle's charge and workspace usage
+// then match the stored rows.
+it("releases a refused restore publication's hold with the settlement that covers it", async () => {
+  const f = admittedRestoreFixture("owner", false), doc = new Y.Doc({gc: false});
+  try {
+    f.complete();
+    const restored = f.admitted.admitted.accepted.receipt.journalCursor;
+    const reservation = restorePublicationReservation("restore-test", f.admitted.admitted.accepted.binding);
+    const held = () => f.raw.prepare("SELECT publication_reservation_bytes AS bytes,accounted_bytes FROM sync_relay_live_restore_lifecycles").get()!;
+    const usage = () => Number(f.raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()!.usage_bytes);
+    const refused = restorePublication(f, restoredState(f, f.admitted), restored, "refused-restore-publication", 0, hash(Buffer.from("not the baseline")));
+    await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [refused.op]});
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [refused.op]})).toMatchObject({inserted: 1});
+    expect(Number(held().bytes)).toBe(reservation);
+    Y.applyUpdate(doc, restoredState(f, f.admitted)); doc.getMap("frontmatter").set("after", "continued work");
+    const edited = editAfterRestore(f, doc, "after-restore");
+    const restoredMarkdown = String(f.raw.prepare("SELECT markdown_sha256 FROM sync_relay_live_settlement_cuts WHERE journal_cursor=?").get(restored)!.markdown_sha256);
+    const covering = restorePublication(f, Y.encodeStateAsUpdate(doc), edited, "covering-publication", restored, restoredMarkdown, 1);
+    const before = {held: held(), usage: usage()};
+    await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [covering.op]});
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [covering.op]})).toMatchObject({inserted: 1});
+    expect(covering.op).toMatchObject({settlementAdmission: {status: "accepted"}});
+    const stored = Number(f.raw.prepare("SELECT storage_bytes FROM sync_relay_live_settlement_bindings").get()!.storage_bytes);
+    const log = f.storage.fetchLogCoordinate({workspaceId: "workspace", originId: "proof", originSeq: 1})!;
+    const logged = Buffer.byteLength(log.payloadJson) + Buffer.byteLength(JSON.stringify(log.admittedAuthorSnapshot)) + Buffer.byteLength(JSON.stringify(log.settlementAdmission));
+    expect(held()).toEqual({bytes: 0, accounted_bytes: Number(before.held.accounted_bytes) - reservation});
+    expect(usage()).toBe(before.usage - reservation + stored + logged);
+    expect(f.store.readStopRestoreLifecycle(f.input)!.phase).toBe("resumed");
+  } finally {doc.destroy(); f.close();}
+});
+
 // Proves: when the newest refused settlement at a resumed restore's
 // generation reaches its last row, beginning or fencing the next restore says
 // it needs repair, with no later edit and across a restart. A settlement the
