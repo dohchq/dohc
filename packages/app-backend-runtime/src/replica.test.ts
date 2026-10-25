@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { privateFolder } from "./private-folder.test-helper";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
@@ -13,6 +13,11 @@ import { createDatasetReplicaHost } from "./replica-host.js";
 import { createDatasetReplica, type DatasetReplica, type DatasetReplicaSource } from "./replica.js";
 import type { PersistentRuntimeOptions } from "./persistent.js";
 import type { AppRuntimeLauncher } from "./protocol.js";
+
+vi.mock("node:fs/promises", async importOriginal => {
+ const actual = await importOriginal<typeof import("node:fs/promises")>();
+ return { ...actual, mkdtemp: vi.fn(actual.mkdtemp) };
+});
 
 const hash=(v:string|Uint8Array)=>createHash("sha256").update(v).digest("hex");
 const id=(n:number)=>`00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
@@ -76,6 +81,20 @@ it("locks one owner copy and prunes snapshots while committing bounded pages",as
  await replica.catchUp(f.remote);for(let n=0;n<65;n++)f.add(`row-${n}`);
  await replica.catchUp(f.remote);expect(replica.state()?.cursor.revision).toBe(65);
  expect((await readdir(join(f.directory,"copy"))).filter(name=>/^[a-f0-9-]{36}\.sqlite$/.test(name))).toHaveLength(1);
+});
+// Windows can't make a folder whose path reaches 248 characters, and SQLite
+// can't open a file whose path passes 259 (#2652). Every folder the copy
+// makes sits in the copy folder, so a worker's files are one short name deeper.
+it("makes every folder directly in the copy folder and removes them after a catch-up",async()=>{
+ const f=await fixture(),copy=join(f.directory,"copy");f.add("first");
+ await mkdir(join(copy,"worker-AbC123"),{recursive:true});
+ const replica=await f.open();expect(await readdir(copy)).not.toContain("worker-AbC123");
+ vi.mocked(mkdtemp).mockClear();
+ await replica.catchUp(f.remote);await f.transition();f.add("second");await replica.catchUp(f.remote);await replica.read(f.read);
+ const made=(await Promise.all(vi.mocked(mkdtemp).mock.results.map(result=>result.value as Promise<string>))).map(path=>relative(copy,path));
+ for(const name of made)expect(name).toMatch(/^(work|worker|read)-[A-Za-z0-9]{6}$/);
+ expect(made.filter(name=>name.startsWith("worker-"))).toHaveLength(3);
+ expect((await readdir(copy)).filter(name=>/^work(er)?-/.test(name))).toEqual([]);
 });
 
 it("reuses one read worker and fresh guest contexts, replaces it after catch-up, and clears it on revoke",async()=>{
