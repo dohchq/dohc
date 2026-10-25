@@ -193,6 +193,24 @@ it.each([
   expect(beforeRendererReload).not.toHaveBeenCalled();
 });
 
+it.each([
+  [false, false],
+  [true, true],
+])("keeps the main-frame reload document across a start with isMainFrame=%s and isSameDocument=%s", async (isMainFrame, isSameDocument) => {
+  const sessions = sessionOwner();
+  const window = sessionWindow(sessions);
+  const sender = window.webContents;
+  const workspace = { workspaceId: "workspace-a", attachmentId: Symbol("a") };
+  await sessions.open(sender, workspace, "document-1");
+
+  startNavigation(window);
+  startNavigation(window, isMainFrame, isSameDocument);
+  sender.emit("did-navigate", {}, "file:///renderer/index.html");
+
+  await expect(sessions.open(sender, workspace, "document-2"))
+    .resolves.toMatchObject({ rendererDocumentId: "document-2" });
+});
+
 it("replaces an uncommitted navigation record and clears it after commit", () => {
   const currentRendererDocumentId = vi.fn()
     .mockReturnValueOnce("document-1")

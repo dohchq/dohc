@@ -314,9 +314,8 @@ export function createMainWindow(options?: {
   // The reload IPC and crash recovery retire it before navigation starts.
   let navigatingDocumentId: string | undefined;
   window.webContents.on("did-start-navigation", (event) => {
-    navigatingDocumentId = event.isMainFrame && !event.isSameDocument
-      ? options?.currentRendererDocumentId?.(window.webContents)
-      : undefined;
+    if (!event.isMainFrame || event.isSameDocument) return;
+    navigatingDocumentId = options?.currentRendererDocumentId?.(window.webContents);
   });
   window.webContents.on("did-navigate", async () => {
     const documentId = navigatingDocumentId;
