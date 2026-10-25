@@ -45,6 +45,7 @@ import {
   ZIP_TOO_LARGE_REFUSAL,
 } from "../workspaces/workspaceFiles";
 import { readWorkspaceListingVisibility } from "../workspaces/workspaceListingVisibility";
+import { cameFromAnotherPerson, markedCopyOf, type MarkedCopies } from "../workspaces/markedCopies";
 import { collectOwnedWorkspaceZipEntries } from "../workspaces/ownedWorkspaceZip";
 import { buildStoreZip, type ZipEntry } from "../workspaces/zipWriter";
 
@@ -76,6 +77,8 @@ export function createWorkspaceFilesIpc<
     ): Promise<{ canceled: boolean; filePath?: string }>;
   };
   shell: { openPath(path: string): Promise<string> };
+  // Where and how a file from another person becomes the copy the OS opens.
+  markedCopies: MarkedCopies;
   withRendererWorkspaceOperation<Result>(
     sender: Sender,
     workspaceId: string,
@@ -104,6 +107,7 @@ export function createWorkspaceFilesIpc<
     app,
     dialog,
     shell,
+    markedCopies,
     withRendererWorkspaceOperation,
     exactRendererWorkspaceReferences,
     workspaceFileListings,
@@ -603,6 +607,7 @@ export function createWorkspaceFilesIpc<
       // Resolve+contain first: only a real file inside the workspace can be
       // handed to the OS opener — never an arbitrary path or URL. window.open
       // remains fully denied; this is the only sanctioned external-open path.
+      // A file from another person reaches the opener only as a marked copy.
       await ensureOwnedProjectionCurrent(
         operation.workspace,
         input.relativePath,
@@ -612,8 +617,11 @@ export function createWorkspaceFilesIpc<
         input.relativePath,
         "read",
       );
+      const opened = await cameFromAnotherPerson(operation.workspace, realTarget)
+        ? await markedCopyOf(markedCopies, realTarget)
+        : realTarget;
       operation.assertCurrent();
-      const error = await shell.openPath(realTarget);
+      const error = await shell.openPath(opened);
       if (error) throw new Error(error);
     },
   } satisfies OperationHandlers<typeof workspaceFileOperations, Event, Operation>;

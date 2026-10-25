@@ -110,6 +110,7 @@ import { createSharedChannelsIpc } from "./ipc/sharedChannelsIpc";
 import { createShareHandoffIpcHandlers } from "./ipc/shareHandoffIpc";
 import { createDesktopSharedChannelSync } from "./workspaces/desktopSharedChannelSync";
 import { createWorkspaceFilesIpc } from "./ipc/workspaceFilesIpc";
+import { markedCopiesRoot, removeEarlierMarkedCopies, removeMarkedCopies, systemMarkedCopies } from "./workspaces/markedCopies";
 import { settingsOperations } from "./ipc/settingsOperations";
 import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
 import { registerWorkspaceHeadingsIpcHandlers } from "./ipc/workspaceFilesIpc";
@@ -5797,6 +5798,9 @@ function offerMoveToApplicationsOn(window: BrowserWindow | undefined): void {
   else window.once("show", offer);
 }
 
+// Files from other people open as marked copies in this run's folder.
+const markedCopies = systemMarkedCopies(markedCopiesRoot(app.getPath("temp"), stateDir()));
+
 const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, DesktopUserSettingsResult>({
   app,
   runtime: process,
@@ -5853,6 +5857,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     markReady: () => {
       launchMarks.appReady();
       desktopMarks.markOnce("app-ready");
+      void removeEarlierMarkedCopies(markedCopies);
       // Start retention even when Off. Never wait for measurement on startup.
       usageLoad = setImmediate(() => {
         usageLoad = undefined;
@@ -5972,6 +5977,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     stopAutomationWakes: () => automationWakeConsumer.stop(),
     stopSearch: () => workspaceSearchOwner.dispose(),
     stopSitePreviews: stopAllSitePreviews,
+    removeMarkedCopies: () => removeMarkedCopies(markedCopies),
     settleYDocs: async () => {
       await settleYDocsAfterFileObservation(
       [flushTypingCheckpoints(), ...workspaceAuthorities.workspaceIds().map(workspaceId =>
@@ -6405,6 +6411,7 @@ function registerIpcHandlers(): void {
     app,
     dialog,
     shell,
+    markedCopies,
     withRendererWorkspaceOperation,
     exactRendererWorkspaceReferences,
     workspaceFileListings,

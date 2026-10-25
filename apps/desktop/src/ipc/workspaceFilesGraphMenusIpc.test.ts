@@ -2,8 +2,8 @@ import { createEngineFileResolver, workspaceFileRef } from "../workspaces/resolv
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, readdir, realpath, stat, symlink, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerWorkspaceHeadingsIpcHandlers, createWorkspaceFilesIpc } from "./workspaceFilesIpc";
 import { workspaceFileOperations } from "./workspaceFileOperations";
@@ -25,6 +25,8 @@ import { shareViewWriteScopeOf, workspaceWriteRefusal, type ShareViewWriteScope 
 import { createTestScratch } from "../workspaces/testTemp";
 import { deferred } from "../testing/deferred";
 import { openedLocalState } from "../testing/preparedLocalState";
+import { systemMarkedCopies, type MarkedCopies } from "../workspaces/markedCopies";
+import { isInside } from "../security/pathContainment";
 
 type Sender = { id: number };
 type Event = { sender: Sender; trusted: boolean };
@@ -101,14 +103,21 @@ async function harness() {
     if (refusal) throw new Error(refusal);
   });
   const repair = vi.fn<() => Promise<void>>(async () => undefined);
-  const openPath = vi.fn(async () => "");
+  const openPath = vi.fn(async (_path: string) => "");
+  const system = systemMarkedCopies(await createTestScratch("marked-copies-"));
+  const markedCopies = {
+    folder: system.folder,
+    copy: vi.fn<MarkedCopies["copy"]>(system.copy),
+    // The mark itself is the system's; here it only has to land on the copy.
+    mark: vi.fn<MarkedCopies["mark"]>(async (path) => { await stat(path); }),
+  };
   const reveal = vi.fn();
   const renderPdf = vi.fn<() => Promise<Uint8Array>>(async () => new Uint8Array([37, 80, 68, 70]));
   const notify = vi.fn();
   const listings = new WorkspaceFileListingCache();
   const fileOwner = createWorkspaceFilesIpc<Sender, Event, Workspace, Operation>({
     app: { isPackaged: false },
-    dialog: { showOpenDialog: openDialog, showSaveDialog: saveDialog }, shell: { openPath },
+    dialog: { showOpenDialog: openDialog, showSaveDialog: saveDialog }, shell: { openPath }, markedCopies,
     withRendererWorkspaceOperation: withOperation, exactRendererWorkspaceReferences: references,
     workspaceFileListings: listings, workspaceFileMutations: mutations,
     listOwnedWorkspaceFilesFor: listing, readOwnedWorkspaceTextFor: readText,
@@ -145,7 +154,7 @@ async function harness() {
   };
   return {
     workspace, lookup, listings, handlers, invoke, change, openDialog, saveDialog, listing, readText, repair,
-    openPath, reveal, renderPdf, notify, buildMenu,
+    openPath, markedCopies, reveal, renderPdf, notify, buildMenu,
     retireRenderer: () => { rendererCurrent = false; },
     retirePhysical: () => { physicalCurrent = false; },
     reenterWorkspace: () => { generation += 1; },
@@ -445,6 +454,73 @@ describe("registered workspace file handlers", () => {
     h.repair.mockImplementation(async () => { h.retirePhysical(); });
     await expect(h.invoke(workspaceFileOperations.openFileExternally.channel, { workspaceId: "workspace", relativePath: "notes.md" })).rejects.toThrow();
     expect(h.openPath).not.toHaveBeenCalled();
+  });
+});
+
+describe("opening a file externally", () => {
+  const bytes = new Uint8Array([7, 1, 2, 3, 0, 255]);
+  const open = (h: Awaited<ReturnType<typeof harness>>, relativePath: string) =>
+    h.invoke(workspaceFileOperations.openFileExternally.channel, { workspaceId: "workspace", relativePath });
+
+  async function expectMarkedCopy(h: Awaited<ReturnType<typeof harness>>, original: string) {
+    expect(h.openPath).toHaveBeenCalledOnce();
+    const opened = h.openPath.mock.calls[0]![0];
+    expect(opened).not.toBe(await realpath(original));
+    expect(isInside(h.markedCopies.folder, opened)).toBe(true);
+    expect(basename(opened)).toBe(basename(original));
+    expect(new Uint8Array(await readFile(opened))).toEqual(bytes);
+    expect(h.markedCopies.mark).toHaveBeenCalledExactlyOnceWith(opened);
+    expect(new Uint8Array(await readFile(original))).toEqual(bytes);
+  }
+
+  it("opens a file in a share mount as a marked copy", async () => {
+    const h = await harness();
+    const original = join(h.workspace.rootPath, "shared-with-me", "alex", "report.bin");
+    await mkdir(dirname(original), { recursive: true });
+    await writeFile(original, bytes);
+    await open(h, "shared-with-me/alex/report.bin");
+    await expectMarkedCopy(h, original);
+  });
+
+  it("opens every file in a standalone shared view as a marked copy", async () => {
+    const h = await harness();
+    h.workspace.shareView = {} as NonNullable<Workspace["shareView"]>;
+    const original = join(h.workspace.rootPath, "notes.bin");
+    await writeFile(original, bytes);
+    await open(h, "notes.bin");
+    await expectMarkedCopy(h, original);
+  });
+
+  it("opens a link from the person's own folder into a share mount as a marked copy", async () => {
+    const h = await harness();
+    const shared = join(h.workspace.rootPath, "shared-with-me", "alex", "docs");
+    await mkdir(shared, { recursive: true });
+    await writeFile(join(shared, "plan.bin"), bytes);
+    await symlink(shared, join(h.workspace.rootPath, "linked"), process.platform === "win32" ? "junction" : "dir");
+    await open(h, "linked/plan.bin");
+    await expectMarkedCopy(h, join(shared, "plan.bin"));
+  });
+
+  it("opens the person's own file in place, with no copy and no mark", async () => {
+    const h = await harness();
+    const original = join(h.workspace.rootPath, "notes.bin");
+    await writeFile(original, bytes);
+    await open(h, "notes.bin");
+    expect(h.openPath).toHaveBeenCalledExactlyOnceWith(await realpath(original));
+    expect(h.markedCopies.copy).not.toHaveBeenCalled();
+    expect(h.markedCopies.mark).not.toHaveBeenCalled();
+  });
+
+  it.each(["copy", "mark"] as const)("opens nothing when the %s fails", async (step) => {
+    const h = await harness();
+    const original = join(h.workspace.rootPath, "shared-with-me", "alex", "report.bin");
+    await mkdir(dirname(original), { recursive: true });
+    await writeFile(original, bytes);
+    h.markedCopies[step].mockRejectedValueOnce(new Error(`${step} refused`));
+    await expect(open(h, "shared-with-me/alex/report.bin")).rejects.toThrow(`${step} refused`);
+    expect(h.openPath).not.toHaveBeenCalled();
+    expect(await readdir(h.markedCopies.folder)).toEqual([]);
+    expect(new Uint8Array(await readFile(original))).toEqual(bytes);
   });
 });
 

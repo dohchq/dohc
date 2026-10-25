@@ -326,9 +326,20 @@ async function historyKeeps(workspaceId: string, path: string, contentHash: stri
   return hex === contentHash ? "kept" : "not-recorded";
 }
 
+// Opens a file in the system's app for it. A failure goes to the shell's
+// toasts and Notices, with Try again.
+export function openExternally(props: { workspaceId: string; path: string; onError?: ReportButtonError }): void {
+  void bridge()
+    .openFileExternally({ workspaceId: props.workspaceId, relativePath: props.path })
+    .catch((error: unknown) =>
+      props.onError?.("dohc could not open this file externally.", error, () => openExternally(props), `open-externally:${props.path}`),
+    );
+}
+
 export function EngineArtifactAssetsInvalidNotice(props: {
   workspaceId: string;
   path: string;
+  onError?: ReportButtonError;
 }) {
   return (
     <div
@@ -340,12 +351,7 @@ export function EngineArtifactAssetsInvalidNotice(props: {
       </span>
       <button
         type="button"
-        onClick={() =>
-          void bridge().openFileExternally({
-            workspaceId: props.workspaceId,
-            relativePath: props.path,
-          })
-        }
+        onClick={() => openExternally(props)}
         className="text-subtle hover:text-ink"
       >
         Open externally
@@ -356,16 +362,9 @@ export function EngineArtifactAssetsInvalidNotice(props: {
 
 // The next step in a file view that cannot show its file: the system's app
 // for it.
-export function OpenExternallyButton(props: { workspaceId: string; path: string }) {
+export function OpenExternallyButton(props: { workspaceId: string; path: string; onError?: ReportButtonError }) {
   return (
-    <SecondaryButton
-      onClick={() =>
-        void bridge().openFileExternally({
-          workspaceId: props.workspaceId,
-          relativePath: props.path,
-        })
-      }
-    >
+    <SecondaryButton onClick={() => openExternally(props)}>
       Open externally
     </SecondaryButton>
   );
