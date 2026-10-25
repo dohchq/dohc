@@ -19,8 +19,9 @@
   --color-primary-darker: var(--dohc-accent);
   --color-primary-darkest: var(--dohc-accent);
   --color-primary-hover: color-mix(in srgb, var(--dohc-accent) 90%, transparent);
-  --color-primary-light: var(--dohc-selected);
-  --color-primary-light-darker: var(--dohc-selected);
+  /* A selected fill on the islands, and the tick, add icon and count drawn
+   * over --color-primary, so it is opaque. */
+  --color-primary-light: color-mix(in srgb, var(--dohc-accent) 12%, var(--dohc-panel));
   --color-brand-hover: color-mix(in srgb, var(--dohc-accent) 90%, transparent);
   --color-brand-active: var(--dohc-accent);
   /* The selected tool or option: an accent fill with a paper icon, as on
@@ -47,7 +48,7 @@
 
 /* In dark, Excalidraw draws the canvas light and shows it through
  * invert(93%) hue-rotate(180deg). The selection takes the color that this
- * filter turns into the accent, so it follows a custom accent too. */
+ * filter turns into the accent, as closely as the filter can show it. */
 :root[data-theme="dark"] .excalidraw {
   --color-selection: rgb(from var(--dohc-accent)
     calc((237.15 + 0.574 * r - 1.43 * g - 0.144 * b) / 0.86)
