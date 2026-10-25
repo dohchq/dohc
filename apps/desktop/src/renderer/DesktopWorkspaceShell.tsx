@@ -13,7 +13,7 @@ import { matchShellShortcut, matchShellShortcutChord } from "../shortcuts/shortc
 import { hasBlockingModal } from "./modalFocus";
 import { SkeletonRows, SkeletonSlot } from "./ui/SkeletonRows";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
-import { Bot, Check, ChevronRight, CircleHelp, Copy, Eye, RefreshCw, Search, Send, User } from "lucide-react";
+import { Bot, Check, ChevronRight, CircleHelp, Copy, Eye, RefreshCw, Search, Send, User, X } from "lucide-react";
 import {
   Fragment,
   Suspense,
@@ -186,6 +186,7 @@ import { workspaceName } from "./Titlebar";
 import { toggleTheme } from "./theme";
 import { runUpdateCheck, runUpdateInstall } from "./appMenuCommands";
 import {
+  IconButton,
   PrimaryButton,
   SecondaryButton,
 } from "./ui/controls";
@@ -992,6 +993,13 @@ export function DesktopWorkspaceShell(props: {
     setSettingsSection(null);
     setSettingsFocus(null);
   }, [refreshCloudStatus, settingsOpen]);
+  const closeCloud = useCallback(() => {
+    setCloudOpen(false);
+    setCloudRetryServerUrl("");
+    // A sign-in/out inside the dialog changes the relay session —
+    // refresh so Chats presence lights up (or goes dormant) at once.
+    refreshCloudStatus();
+  }, [refreshCloudStatus]);
   // Connect server, wherever it is asked for. The account and the sync switch
   // are settings, so only a person known to be signed out gets the Cloud
   // dialog. A status still loading, or unreadable, opens Settings, which says
@@ -6364,19 +6372,12 @@ export function DesktopWorkspaceShell(props: {
         />
       ) : null}
       {cloudOpen ? (
-        <Overlay
-          onClose={() => {
-            setCloudOpen(false);
-            setCloudRetryServerUrl("");
-            // A sign-in/out inside the dialog changes the relay session —
-            // refresh so Chats presence lights up (or goes dormant) at once.
-            refreshCloudStatus();
-          }}
-        >
+        <Overlay onClose={closeCloud}>
           {/* Once signed in, what is left is settings: the account and the
               sync switch. A session the dialog finds goes there too. */}
           <CloudLogin
             handOffSession
+            onClose={closeCloud}
             onConnected={() => {
               setCloudOpen(false);
               setCloudRetryServerUrl("");
@@ -6498,11 +6499,20 @@ export function DesktopWorkspaceShell(props: {
         <Overlay onClose={() => setShareTarget(null)}>
           <Suspense
             fallback={
-              // The share dialog's own card, so the dialog lands in its place.
-              <SkeletonRows
-                label="Loading share dialog..."
-                className="dohc-elevated w-105 rounded-xl border border-line bg-panel p-5"
-              />
+              // The share dialog's own card and X, so the dialog lands in its place.
+              <div className="relative">
+                <SkeletonRows
+                  label="Loading share dialog..."
+                  className="dohc-elevated w-105 rounded-xl border border-line bg-panel p-5"
+                />
+                <IconButton
+                  aria-label="Close"
+                  onClick={() => setShareTarget(null)}
+                  className="absolute right-5 top-5"
+                >
+                  <X size={13} aria-hidden />
+                </IconButton>
+              </div>
             }
           >
             <LazyRelayShareDialog

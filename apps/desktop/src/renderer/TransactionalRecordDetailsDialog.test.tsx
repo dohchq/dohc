@@ -38,6 +38,15 @@ describe("record details", () => {
     expect(base.onAction).toHaveBeenCalledWith(base.operations[1]);
   });
 
+  it("keeps Close and Done available while the page refreshes", () => {
+    render(<TransactionalRecordDetailsDialog {...base} disabled />);
+    const dialog = within(screen.getByRole("dialog", { name: "Record details" }));
+    expect((dialog.getByRole("button", { name: "Edit Name" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(dialog.getByRole("button", { name: "Close" }));
+    fireEvent.click(dialog.getByRole("button", { name: "Done" }));
+    expect(base.onClose).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps offline details read-only and does not attempt file download", () => {
     const readFile = vi.fn();
     render(<TransactionalRecordDetailsDialog {...base} offline readFile={readFile} />);
