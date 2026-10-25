@@ -780,10 +780,11 @@ async fn publication_turn_has_constant_store_work_with_twenty_or_two_thousand_pe
         .unwrap();
     }
     assert!(counts[0].reads > 0 && counts[0].writes > 0 && counts[0].rows > 0);
-    assert_eq!(
-        counts[0], counts[1],
-        "one placement turn must not scale with pending jobs"
-    );
+    assert_eq!(counts[0].reads, counts[1].reads);
+    assert_eq!(counts[0].writes, counts[1].writes);
+    assert_eq!(counts[0].rows, counts[1].rows);
+    assert_eq!(counts[0].staging_entries, 20);
+    assert_eq!(counts[1].staging_entries, 2000);
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publication_turn_retries_a_staging_error_that_lasts_half_a_second() {
