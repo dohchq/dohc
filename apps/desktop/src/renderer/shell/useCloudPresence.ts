@@ -33,11 +33,14 @@ export function useCloudPresence(
   // fresh sign-in lights presence up without waiting for a workspace switch.
   const cloudStatusToken = useRef(0);
   // A workspace still taking in files is busy, not unreadable: its refusal
-  // keeps the last status, and the next workspace activity reads again.
+  // keeps the last status, and the next workspace activity reads again. An
+  // activity that arrived while the refused read was out reads again at once.
   const readAgainOnActivity = useRef(false);
+  const activityCount = useRef(0);
   const refreshCloudStatus = useCallback(() => {
     const token = ++cloudStatusToken.current;
     if (!workspaceIsReady) return;
+    const activityAtRead = activityCount.current;
     bridge()
       .cloudStatus({ workspaceId })
       .then((status) => {
@@ -49,7 +52,8 @@ export function useCloudPresence(
       .catch((error: unknown) => {
         if (token !== cloudStatusToken.current) return;
         if (isWorkspaceUpdatingError(error)) {
-          readAgainOnActivity.current = true;
+          if (activityCount.current !== activityAtRead) refreshCloudStatus();
+          else readAgainOnActivity.current = true;
           return;
         }
         setScopedStatus(null);
@@ -82,6 +86,7 @@ export function useCloudPresence(
     });
   }, [refreshCloudStatus]);
   const readCloudStatusAgainIfBusy = useCallback(() => {
+    activityCount.current += 1;
     if (!readAgainOnActivity.current) return;
     readAgainOnActivity.current = false;
     refreshCloudStatus();

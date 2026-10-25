@@ -122,6 +122,26 @@ it("says nothing while the workspace is still updating, then reads again", async
   expect(onStatusUnavailable).not.toHaveBeenCalled();
 });
 
+// The import's last activity can land while a read is still out. Its refusal
+// arrives after that activity, so nothing later would read again.
+it("reads again at once when the last activity came while the refused read was out", async () => {
+  const pending = deferred<CloudStatusResult>();
+  bridgeMock.cloudStatus
+    .mockReturnValueOnce(pending.promise)
+    .mockRejectedValueOnce(new Error("engine unavailable"));
+  const { result } = renderHook(() => useCloudPresence("ws-1", onStatusUnavailable, true));
+  expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(1);
+
+  act(() => result.current.readCloudStatusAgainIfBusy());
+  expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(1);
+  await act(async () => pending.reject(stillUpdating()));
+
+  await waitFor(() => expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(2));
+  // The read again fails for real, so the person is told.
+  await waitFor(() => expect(onStatusUnavailable).toHaveBeenCalledTimes(1));
+  expect(result.current.cloudStatusUnreadable).toBe(true);
+});
+
 it("keeps a still-updating answer workspace A asked for out of workspace B", async () => {
   const slow = deferred<CloudStatusResult>();
   bridgeMock.cloudStatus.mockImplementation(async (payload) =>
