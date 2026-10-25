@@ -1,3 +1,9 @@
+import { installWorkspaceDataKey, SECRET_KEY_RELATIVE_PATH } from "../workspaces/workspaceDataKey";
+import { mkdir } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { atomicCreateFile } from "../atomicReplaceFile";
+import { createTestScratch } from "../workspaces/testTemp";
+import { ipcErrorMessage } from "../renderer/ipcError";
 import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 import { ServerCollectionsUnavailableError } from "../workspaces/remoteDataset";
 import { ReservedWorkspaceIdError } from "@dohc/workspace-core";
@@ -6,7 +12,7 @@ import { readFileSync } from "node:fs";
 import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
 import { DatasetReopenWaitError } from "@dohc/app-backend-runtime/supervisor";
 import { DaemonRefusalError, type DaemonErrorCode } from "@dohc/workspace-engine-client";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CompilerProcessError } from "../workspaces/compilerProcessSupervisor";
 import { WorkspaceManifestError } from "../workspaces/createWorkspaceFolder";
 import { LiveDocumentMutationError, RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
@@ -30,6 +36,11 @@ import {
   withErrorWords,
 } from "./errorWords";
 
+vi.mock("../atomicReplaceFile", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../atomicReplaceFile")>();
+  return { ...actual, atomicCreateFile: vi.fn(actual.atomicCreateFile) };
+});
+
 it("explains the held-file live-open refusal after Electron serializes it", () => {
   const error = new Error("Error invoking remote method 'desktop:engine-ydoc-open': DaemonRefusalError [CONFLICT]: capture-file-held: notes/held.md");
   expect(readError(error).words).toBe('dohc cannot open "notes/held.md" for live editing. dohc cannot take in this file\'s Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Restore the file\'s exact contents from before that edit. For nested lists, make the edit in dohc after the file opens again.');
@@ -52,6 +63,22 @@ const engineCodes = [
 ].map((match) => match[1]!);
 
 describe("error words", () => {
+  it.each([
+    ["desktop:cloud-enable-sync", "dohc could not enable sync for this workspace."],
+    ["desktop:cloud-join-workspace", "Couldn't join the workspace."],
+  ])("keeps the key-install refusal unchanged across %s", async (channel, prefix) => {
+    const root = await createTestScratch("dohc-key-ipc-words-");
+    await mkdir(dirname(join(root, SECRET_KEY_RELATIVE_PATH)), { recursive: true });
+    vi.mocked(atomicCreateFile).mockRejectedValueOnce(
+      Object.assign(new Error("link failed"), { code: "ENOTSUP", syscall: "link" }),
+    );
+    const failure = await installWorkspaceDataKey(root, Buffer.alloc(32, 7)).catch(error => error);
+    const sentence = "This drive can't store the workspace's secret key safely. Move the workspace to an NTFS, APFS or ext4 drive, then try again.";
+    const received = acrossIpc(failure, channel);
+    expect(readError(received).words).toBe(sentence);
+    expect(ipcErrorMessage(received, prefix)).toBe(sentence);
+  });
+
   it.each([
     ["chat-mention-access-changed", "Chat access changed. Try again."],
     ["chat-mention-version-changed", "It changed while dohc was working on it. Try again."],
@@ -307,6 +334,23 @@ describe("error words", () => {
     expect(isSharedLiveFileRefusal(acrossIpc(refusal("INVALID_PARAMS", "live-document-binding-active")))).toBe(false);
   });
 
+  it("explains an open editing session across IPC and keeps its refusal for Copy", () => {
+    const received = acrossIpc(refusal("INVALID_PARAMS", "ydoc-session-busy"), "desktop:restore-engine-moment-file");
+    expect(received.message).toBe(
+      "Error invoking remote method 'desktop:restore-engine-moment-file': DaemonRefusalError [INVALID_PARAMS]: ydoc-session-busy",
+    );
+    const words = "This file is open for editing. Close its tabs, then try again.";
+    expect(readError(received)).toEqual({
+      words,
+      mapped: true,
+      cause: "DaemonRefusalError [INVALID_PARAMS]: ydoc-session-busy",
+    });
+    for (const sentence of ["dohc could not restore kyoto.md.", "dohc could not undo the restore of kyoto.md."]) {
+      expect(withErrorWords(sentence, received)).toBe(`${sentence} ${words}`);
+      expect(ipcErrorMessage(received, sentence)).toBe(`${sentence} ${words}`);
+    }
+  });
+
   it("leaves the caller's words for a refusal that names nothing a person can act on", () => {
     expect(readError(acrossIpc(refusal("INVALID_PARAMS", "invalid-input")))).toEqual({
       words: null,
@@ -323,6 +367,8 @@ describe("error words", () => {
   });
 
   it("reads the app compiler and the Collection worker by their codes", () => {
+    const timeout = Object.assign(new CompilerProcessError("timeout", "Compiler timed out."), { details: "Supervisor-only details" });
+    expect(String(ipcWireError(timeout))).not.toContain(timeout.details);
     expect(readError(acrossIpc(new CompilerProcessError("exit", "Compiler exited (1).")))).toEqual({
       words: "The app's code did not build.",
       mapped: true,
@@ -392,12 +438,22 @@ describe("error words", () => {
     ))).toBe("dohc could not prepare this review. The Collection changed after this preview. Preview the change again.");
   });
 
-  it("carries a refusal to use the Collections here across IPC, with its kind and its words", () => {
+  it("carries a refusal to use the Collections here across IPC, with its kind, its words and the computer that keeps them", () => {
     const elsewhere = new CollectionsRefusalError({ kind: "elsewhere", computer: { installId: "install-laptop", label: "Laptop" }, sameName: false });
-    expect(String(ipcWireError(elsewhere))).toBe(`CollectionsRefusalError [collections-elsewhere]: ${elsewhere.message}`);
-    expect(readCollectionsRefusal(acrossIpc(elsewhere, "desktop:dataset"))).toEqual({ kind: "elsewhere", words: elsewhere.message });
+    expect(String(ipcWireError(elsewhere))).toBe(`CollectionsRefusalError [collections-elsewhere] [computer=Laptop]: ${elsewhere.message}`);
+    expect(readCollectionsRefusal(acrossIpc(elsewhere, "desktop:dataset"))).toEqual({ kind: "elsewhere", words: elsewhere.message, computer: "Laptop" });
+    // A name with spaces and brackets crosses whole.
+    const studio = new CollectionsRefusalError({ kind: "elsewhere", computer: { installId: "install-studio", label: "Sam's Studio [2]" }, sameName: false });
+    expect(readCollectionsRefusal(acrossIpc(studio, "desktop:dataset"))).toEqual({ kind: "elsewhere", words: studio.message, computer: "Sam's Studio [2]" });
+    // A refusal with no name, or one that doesn't decode, stays a refusal and names no computer.
+    for (const wire of ["", " [computer=%ZZ]"]) {
+      expect(readCollectionsRefusal(`Error invoking remote method 'desktop:dataset': CollectionsRefusalError [collections-elsewhere]${wire}: ${elsewhere.message}`))
+        .toEqual({ kind: "elsewhere", words: elsewhere.message, computer: null });
+    }
+    expect(readCollectionsRefusal(acrossIpc(new CollectionsRefusalError({ kind: "unclaimed" }), "desktop:dataset"))).toEqual({
+      kind: "unclaimed", words: new CollectionsRefusalError({ kind: "unclaimed" }).message,
+    });
     expect(withErrorWords("Could not read Collections.", acrossIpc(elsewhere, "desktop:dataset"))).toBe(`Could not read Collections. ${elsewhere.message}`);
-    expect(readCollectionsRefusal(acrossIpc(new CollectionsRefusalError({ kind: "unclaimed" }), "desktop:dataset"))?.kind).toBe("unclaimed");
     // Another error with the same words is not a refusal.
     expect(readCollectionsRefusal(acrossIpc(new Error(elsewhere.message), "desktop:dataset"))).toBeNull();
     expect(readCollectionsRefusal(acrossIpc(Object.assign(new Error("x"), { name: "CollectionsRefusalError", code: "collections-other" })))).toBeNull();
@@ -407,14 +463,18 @@ describe("error words", () => {
     const elsewhere = new CollectionsRefusalError({ kind: "elsewhere", computer: { installId: "install-laptop", label: "Laptop" }, sameName: false });
     const failed = new ServerCollectionsUnavailableError(elsewhere, new TypeError("fetch failed"));
     const read = readServerCollectionsUnavailable(acrossIpc(failed, "desktop:dataset"));
-    expect(read).toEqual({ elsewhere: elsewhere.message, failure: "TypeError: fetch failed" });
+    expect(read).toEqual({ elsewhere: elsewhere.message, computer: "Laptop", failure: "TypeError: fetch failed" });
     // The server's error reads as it would have alone.
     for (const cause of [new TypeError("fetch failed"), new CollectionsRefusalError({ kind: "unclaimed" }), new Error("Your server session changed. Try again.")]) {
       const failure = readServerCollectionsUnavailable(acrossIpc(new ServerCollectionsUnavailableError(elsewhere, cause), "desktop:dataset"))!.failure;
       expect(readError(new Error(failure))).toEqual(readError(acrossIpc(cause, "desktop:dataset")));
     }
     expect(readServerCollectionsUnavailable(acrossIpc(new ServerCollectionsUnavailableError(elsewhere, new Error()), "desktop:dataset")))
-      .toEqual({ elsewhere: elsewhere.message, failure: "" });
+      .toEqual({ elsewhere: elsewhere.message, computer: "Laptop", failure: "" });
+    for (const wire of ["", " [computer=%ZZ]"]) {
+      expect(readServerCollectionsUnavailable(`ServerCollectionsUnavailableError [server-collections-unavailable]${wire}: ${elsewhere.message}\nTypeError: fetch failed`))
+        .toEqual({ elsewhere: elsewhere.message, computer: null, failure: "TypeError: fetch failed" });
+    }
     expect(readCollectionsRefusal(acrossIpc(failed, "desktop:dataset"))).toBeNull();
     // The same words from another error are not that list.
     expect(readServerCollectionsUnavailable(acrossIpc(new Error(failed.message), "desktop:dataset"))).toBeNull();

@@ -69,6 +69,22 @@ afterEach(async () => {
 });
 
 describe("owner Collection migration", () => {
+  it("migrates and reopens records in a 153-character workspace folder", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "dohc-migration-")); roots.push(parent);
+    const workspaceRoot = join(parent, "w".repeat(153 - parent.length - 1));
+    expect(workspaceRoot).toHaveLength(153);
+    await mkdir(workspaceRoot);
+    const { host } = await open({ workspaceRoot }), f = fixture(), first = await activate(host, f);
+    await host.action(call(first, id(6), { name: "Camera" }, "add"));
+    f.next();
+    const review = await prepare(host, f), migrated = await host.approveMigration(approval(review));
+    await host.close();
+    const restarted = (await open({ workspaceRoot })).host;
+    expect((await restarted.query(call(migrated.revision, id(5)))).result).toEqual([
+      { id: expect.any(String), name: "Camera migrated", note: null },
+    ]);
+  });
+
   it("commits reviewed bytes once, retains recovery history, and restores the new schema after restart", async () => {
     const { host, workspaceRoot } = await open(), f = fixture(), first = await activate(host, f);
     await host.action(call(first, id(6), { name: "Camera" }, "add"));

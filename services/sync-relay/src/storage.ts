@@ -127,6 +127,7 @@ import { createRelayDatasetHost, type RelayDatasetHostOptions } from "./datasetH
 import * as appCollectionModeration from "./storage/appCollectionModeration";
 import * as keyEnvelopesStorage from "./storage/keyEnvelopes";
 import * as logStorage from "./storage/log";
+import * as linkChatStorage from "./storage/linkChat";
 import * as shareRemovalStorage from "./storage/shareRemoval";
 import * as sharesStorage from "./storage/shares";
 import * as discussionStorage from "./storage/discussion";
@@ -718,6 +719,38 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   recordAutomationServerProgress(input: { workspaceId: string; throughMs: number }) {
     automationHostStorage.recordAutomationServerProgress(this, input);
+  }
+
+  recordAutomationServerRunChanging(input: Parameters<typeof automationHostStorage.recordAutomationServerRunChanging>[1]) {
+    automationHostStorage.recordAutomationServerRunChanging(this, input);
+  }
+
+  endAutomationServerRun(input: automationHostStorage.AutomationServerRun) {
+    return automationHostStorage.endAutomationServerRun(this, input);
+  }
+
+  endedAutomationServerRuns(input: { workspaceId: string; incarnation: number }) {
+    return this.readTx(() => automationHostStorage.endedAutomationServerRuns(this, input));
+  }
+
+  confirmAutomationServerRunsSent(input: Parameters<typeof automationHostStorage.confirmAutomationServerRunsSent>[1]) {
+    automationHostStorage.confirmAutomationServerRunsSent(this, input);
+  }
+
+  markAutomationServerRunsLost(input: { workspaceId: string; incarnation: number; nowMs: number }) {
+    automationHostStorage.markAutomationServerRunsLost(this, input);
+  }
+
+  lostAutomationServerRuns(input: Parameters<typeof automationHostStorage.lostAutomationServerRuns>[1]) {
+    return this.readTx(() => automationHostStorage.lostAutomationServerRuns(this, input));
+  }
+
+  unreportedLostAutomationServerRuns(input: { workspaceId: string; nowMs: number }) {
+    return this.readTx(() => automationHostStorage.unreportedLostAutomationServerRuns(this, input));
+  }
+
+  reportAutomationServerRunsLost(input: Parameters<typeof automationHostStorage.reportAutomationServerRunsLost>[1]) {
+    automationHostStorage.reportAutomationServerRunsLost(this, input);
   }
 
   joinAutomationWorkspace(input: { workspaceId: string; nowMs: number }) {
@@ -1503,6 +1536,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   appendBrowserChatBatch(input: Parameters<typeof logStorage.appendBrowserChatBatch>[1]): AppendLogBatchResult {
     return logStorage.appendBrowserChatBatch(this, input);
+  }
+
+  appendLinkChatPost(input: Parameters<typeof linkChatStorage.appendLinkChatPost>[1]): linkChatStorage.AppendLinkChatPostResult {
+    return linkChatStorage.appendLinkChatPost(this, input);
   }
 
   fetchLogCoordinate(input: {

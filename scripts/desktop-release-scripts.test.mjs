@@ -3,7 +3,6 @@ import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import {
-  chmod,
   mkdir,
   mkdtemp as createTemporaryDirectory,
   readFile,
@@ -94,25 +93,13 @@ test("release platform selection defaults to every workflow platform and leaves 
   assert.deepEqual(desktopReleaseTargets("windows-linux"), both);
   const [windows, linux] = both;
   assert.deepEqual(desktopReleaseTargets("windows"), [windows]);
-  assert.deepEqual(windows.runner, ["self-hosted", "windows", "x64"]);
+  assert.equal(windows.runner, "windows-2025");
   assert.equal(windows.target, "x86_64-pc-windows-msvc");
   assert.deepEqual(desktopReleaseTargets("linux"), [linux]);
-  assert.deepEqual(linux.runner, ["self-hosted", "linux", "x64"]);
+  assert.equal(linux.runner, "ubuntu-24.04");
   assert.equal(linux.target, "x86_64-unknown-linux-gnu");
   assert.equal(linux.require_signing, "0");
-  for (const target of both) assert.equal(target.runner[0], "self-hosted");
-  assert.deepEqual(desktopReleaseTargets("windows-linux", "self-hosted"), both);
   for (const platforms of ["mac", "macos", "all"]) assert.throws(() => desktopReleaseTargets(platforms), /Invalid release platforms/);
-});
-
-test("runners=github packages each target on its pinned GitHub-hosted image and changes nothing else", () => {
-  const withoutRunner = targets => targets.map(({ runner: _runner, ...target }) => target);
-  const hosted = desktopReleaseTargets("windows-linux", "github");
-  assert.deepEqual(hosted.map(target => target.runner), ["windows-2025", "ubuntu-24.04"]);
-  assert.deepEqual(withoutRunner(hosted), withoutRunner(desktopReleaseTargets("windows-linux")));
-  assert.deepEqual(desktopReleaseTargets("windows", "github"), [hosted[0]]);
-  assert.deepEqual(desktopReleaseTargets("linux", "github"), [hosted[1]]);
-  for (const runners of ["", "ubuntu-latest", "cloud"]) assert.throws(() => desktopReleaseTargets("windows-linux", runners), /Invalid release runners/);
 });
 
 test("Linux nightly metadata keeps the version generator and selects only Linux", async () => {
@@ -346,11 +333,11 @@ test("resolve-desktop-release prints release metadata when run as a command", as
   assert.match(stdout, /^version=0\.1\.1-nightly\.20260621\.2\.1$/m);
   const matrix = output => JSON.parse(/^matrix=(.*)$/m.exec(output)[1]);
   assert.deepEqual(matrix(stdout), desktopReleaseTargets());
-  const hosted = await runReleaseScript("resolve-desktop-release.mjs", [
-    "--root", root, "--channel", "nightly", "--platforms", "linux", "--runners", "github", "--date", "20260621",
+  const linux = await runReleaseScript("resolve-desktop-release.mjs", [
+    "--root", root, "--channel", "nightly", "--platforms", "linux", "--date", "20260621",
     "--run-number", "2", "--run-attempt", "1", "--sha", "0123456789abcdef",
   ]);
-  assert.deepEqual(matrix(hosted.stdout), desktopReleaseTargets("linux", "github"));
+  assert.deepEqual(matrix(linux.stdout), desktopReleaseTargets("linux"));
 });
 
 // Node resolves links in the entry path before it sets import.meta.url, so a
@@ -443,10 +430,10 @@ function workflowValues(value) {
 function releaseExpression(expression, needs, secrets = {}, inputs = {}, matrix = {}) {
   // These release guards use string comparisons and operators shared by Actions and JavaScript.
   assert.match(expression, /^\$\{\{[\s\S]*\}\}$/u);
-  return Function("needs", "secrets", "inputs", "matrix", "fromJSON", `return (${expression.slice(3, -2)});`)(needs, secrets, inputs, matrix, JSON.parse);
+  return Function("needs", "secrets", "inputs", "matrix", `return (${expression.slice(3, -2)});`)(needs, secrets, inputs, matrix);
 }
 
-test("desktop releases start only by dispatch, run on the selected Windows and Linux runners, and preserve unsigned package smoke", () => {
+test("desktop releases start only by dispatch, use pinned GitHub images, and preserve unsigned package smoke", () => {
   const { jobs } = releaseWorkflow;
   assert.deepEqual(Object.keys(releaseWorkflow.on), ["workflow_dispatch"], "only a dispatch can start a release");
   assert.equal(releaseWorkflow.concurrency["cancel-in-progress"], false, "a publish in progress must finish");
@@ -454,58 +441,30 @@ test("desktop releases start only by dispatch, run on the selected Windows and L
   assert.equal(jobs.preflight.if, "github.ref == 'refs/heads/main'");
   for (const job of [jobs.build, jobs.publish]) assert.equal(job.environment, "desktop-release");
 
-  // The scheduled nightly dispatches without runners and gets the self-hosted
-  // runners. runners=github moves every job to a pinned GitHub-hosted image.
-  // Packaging runs on the matrix preflight selects from the release targets.
-  // Every other job runs on Linux for a Linux dispatch and on Windows otherwise.
-  const runnersInput = releaseWorkflow.on.workflow_dispatch.inputs.runners;
-  assert.deepEqual([runnersInput.type, runnersInput.default, runnersInput.options], ["choice", "self-hosted", ["self-hosted", "github"]]);
   assert.equal(jobs.build["runs-on"], "${{ matrix.runner }}");
   assert.equal(jobs.build.strategy.matrix.include, "${{ fromJSON(needs.preflight.outputs.matrix) }}");
-  // Windows and WSL share one PC, so a combined self-hosted dispatch packages one platform at a time.
+  assert.equal(jobs.build.strategy["max-parallel"], undefined, "platform builds can run in parallel");
   const dispatchPlatforms = releaseWorkflow.on.workflow_dispatch.inputs.platforms.options;
-  const runnerStates = [undefined, "", "self-hosted", "github"];
-  const maxParallel = (platforms, runners) => releaseExpression(jobs.build.strategy["max-parallel"], {}, {}, { platforms, runners });
-  for (const runners of runnerStates) {
-    assert.deepEqual(dispatchPlatforms.map(platforms => maxParallel(platforms, runners)),
-      dispatchPlatforms.map(platforms => (platforms === "windows-linux" && runners !== "github" ? 1 : 4)), `max-parallel on runners=${runners}`);
-  }
-  const resolveMetadata = releaseStep(jobs.preflight, '--platforms "$DISPATCH_PLATFORMS"');
-  assert.match(resolveMetadata.run, /--runners "\$DISPATCH_RUNNERS"/);
-  assert.equal(resolveMetadata.env.DISPATCH_RUNNERS, "${{ inputs.runners || 'self-hosted' }}");
-  const refusePublish = jobs.preflight.steps.find(step => step.name === "Refuse a publish on GitHub's runners");
-  assert.ok(refusePublish, "runners=github cannot publish until the repository is public");
-  const refuses = inputs => releaseExpression(`\${{ ${refusePublish.if} }}`, {}, {}, inputs);
-  assert.deepEqual([["github", false], ["github", true], ["self-hosted", false], [undefined, false]].map(([runners, dry_run]) => refuses({ runners, dry_run })),
-    [true, false, false, false]);
-  assert.ok(jobs.preflight.steps.indexOf(refusePublish) < jobs.preflight.steps.findIndex(step => step.name === "Checkout"));
   // GitHub's images lack the pinned Rust, and qa:prepare reads rustc without installing it.
   for (const [job, firstRustStep] of [[jobs.preflight, "Prepare native test engine"], [jobs.build, "Build workspace engine"]]) {
     const toolchain = job.steps.findIndex(step => step.name === "Rust toolchain");
     assert.ok(toolchain >= 0 && toolchain < job.steps.findIndex(step => step.name === firstRustStep), `${firstRustStep} has the pinned Rust`);
-    assert.equal(job.steps[toolchain].if, "inputs.runners == 'github'");
+    assert.equal(job.steps[toolchain].if, undefined);
     assert.match(job.steps[toolchain].run, /rustup show active-toolchain \|\| rustup toolchain install/);
     // GitHub's Windows TEMP is a short 8.3 path; every later step uses the runner's own temp folder.
     const temp = job.steps.findIndex(step => step.name === "Use the runner's temp folder");
     assert.ok(temp >= 0 && temp < job.steps.findIndex(step => step.name === "Install"), "TEMP is set before anything runs");
-    assert.equal(job.steps[temp].if, "inputs.runners == 'github' && runner.os == 'Windows'");
+    assert.equal(job.steps[temp].if, "runner.os == 'Windows'");
     assert.match(job.steps[temp].run, /TEMP=\$RUNNER_TEMP[\s\S]*TMP=\$RUNNER_TEMP/);
   }
-  const selfHosted = platforms => ["self-hosted", platforms === "linux" ? "linux" : "windows", "x64"];
   const hostedImage = platforms => (platforms === "linux" ? "ubuntu-24.04" : "windows-2025");
-  const resolvedRunners = runners => releaseExpression(resolveMetadata.env.DISPATCH_RUNNERS, {}, {}, { runners });
-  for (const runners of runnerStates) {
-    const expected = runners === "github" ? hostedImage : selfHosted;
-    for (const platforms of dispatchPlatforms) {
-      assert.deepEqual(desktopReleaseTargets(platforms, resolvedRunners(runners)).map(target => target.runner),
-        (platforms === "windows-linux" ? ["windows", "linux"] : [platforms]).map(expected), `${platforms} packages run on runners=${runners}`);
-    }
-    for (const [name, job] of Object.entries(jobs)) {
-      if (name === "build") continue;
-      assert.deepEqual(dispatchPlatforms.map(platforms => releaseExpression(job["runs-on"], {}, {}, { platforms, runners })), dispatchPlatforms.map(expected),
-        `${name} runs on Linux only for a Linux dispatch, on runners=${runners}`);
-    }
+  for (const platforms of dispatchPlatforms) {
+    assert.deepEqual(desktopReleaseTargets(platforms).map(target => target.runner),
+      (platforms === "windows-linux" ? ["windows", "linux"] : [platforms]).map(hostedImage));
   }
+  assert.deepEqual(dispatchPlatforms.map(platforms => releaseExpression(jobs.preflight["runs-on"], {}, {}, { platforms })), dispatchPlatforms.map(hostedImage),
+    "preflight runs on Linux only for a Linux dispatch");
+  for (const job of [jobs["unused-version"], jobs.publish]) assert.equal(job["runs-on"], "ubuntu-24.04");
 
   // Desktop tests need the built runtime exports and the native engine. The
   // PR gate's runner runs the package's unit and script tests with its retries.
@@ -1645,70 +1604,20 @@ test("release-desktop-macos refuses incomplete arguments when run as a command, 
   );
 });
 
-// A Linux desktop build leaves apps/desktop/resources/engine-reader/<generation>
-// read-only (stage-engine-reader.mjs), and checkout cannot clean a workspace
-// that holds it. Every job can land on the Linux runner, so each one makes it
-// writable before checkout.
-test("every release job lets checkout remove an earlier build's read-only reader folder", async () => {
+test("release checkouts do not persist credentials", () => {
   for (const [name, job] of Object.entries(releaseWorkflow.jobs)) {
-    const checkout = job.steps.findIndex(step => step.uses?.startsWith("actions/checkout@"));
-    assert.ok(checkout > 0, `${name} prepares its workspace before checkout`);
-    const prepare = job.steps[checkout - 1];
-    assert.equal(prepare.if, "runner.os != 'Windows'", `${name} skips the step on Windows, where the folder stays writable`);
-    assert.equal(prepare.shell, "bash");
-    assert.match(prepare.run, /reader="\$\{GITHUB_WORKSPACE\}\/apps\/desktop\/resources\/engine-reader"/);
+    const checkout = job.steps.find(step => step.uses?.startsWith("actions/checkout@"));
+    assert.ok(checkout, `${name} checks out the release commit`);
+    assert.equal(checkout.with["persist-credentials"], false);
   }
-  if (process.platform === "win32") return;
-  // Run the step itself against a workspace an earlier build left behind.
-  const workspace = await createTemporaryDirectory(join(tmpdir(), "dohc-release-workspace-"));
-  const generation = join(workspace, "apps/desktop/resources/engine-reader/generation");
-  await mkdir(generation, { recursive: true });
-  await writeFile(join(generation, "reader.cjs"), "reader");
-  await chmod(join(generation, "reader.cjs"), 0o444);
-  await chmod(generation, 0o555);
-  const step = releaseWorkflow.jobs.build.steps.find(candidate => candidate.name === "Let checkout remove an earlier build's reader folder");
-  await promisify(execFile)("bash", ["-euo", "pipefail", "-c", step.run], { env: { ...process.env, GITHUB_WORKSPACE: workspace } });
-  await rm(workspace, { recursive: true });
-  assert.equal(existsSync(workspace), false, "the workspace and the reader folder in it are removable");
-  // A fresh runner has no workspace yet.
-  await promisify(execFile)("bash", ["-euo", "pipefail", "-c", step.run], { env: { ...process.env, GITHUB_WORKSPACE: workspace } });
-});
-
-// Deleting node_modules takes the Windows runner over 15 minutes, so a job
-// there keeps it and the Rust target folder between jobs.
-test("every release job on Windows keeps node_modules and target, and removes every other untracked file", async () => {
-  for (const [name, job] of Object.entries(releaseWorkflow.jobs)) {
-    const checkout = job.steps.findIndex(step => step.uses?.startsWith("actions/checkout@"));
-    assert.equal(job.steps[checkout].with.clean, "${{ runner.os != 'Windows' }}", `${name} lets checkout clean everywhere but Windows`);
-    const clean = job.steps[checkout + 1];
-    assert.equal(clean.if, "runner.os == 'Windows'", `${name} cleans its Windows workspace after checkout`);
-    assert.equal(clean.run, "git clean -ffdx --exclude=node_modules --exclude=target");
-  }
-  // Run the command against a workspace an earlier job left behind.
-  const workspace = await mkdtemp(join(tmpdir(), "dohc-release-workspace-"));
-  await promisify(execFile)("git", ["init", "--quiet"], { cwd: workspace });
-  const kept = ["node_modules/electron/index.js", "apps/desktop/node_modules/.bin/vite", "target/release/engine"];
-  const removed = ["apps/desktop/release/dohc-setup.exe", "release-history.jsonl"];
-  for (const file of [...kept, ...removed]) {
-    await mkdir(join(workspace, file, ".."), { recursive: true });
-    await writeFile(join(workspace, file), "");
-  }
-  const [command, ...args] = releaseWorkflow.jobs.build.steps.find(step => step.name === "Remove leftover files but keep node_modules and target").run.split(" ");
-  await promisify(execFile)(command, args, { cwd: workspace });
-  for (const file of kept) assert.equal(existsSync(join(workspace, file)), true, `${file} stays`);
-  for (const file of removed) assert.equal(existsSync(join(workspace, file)), false, `${file} is removed`);
 });
 
 const NIGHTLY_HEAD = "a".repeat(40);
-const ONLINE_RUNNERS = [
-  { name: "dohc-windows", status: "online", labels: ["self-hosted", "Windows", "X64", "desktop-release"] },
-  { name: "dohc-linux", status: "online", labels: ["self-hosted", "Linux", "X64", "desktop-release"] },
-];
 const YESTERDAY = { tag: "v0.1.1-nightly.20261019.41.1", commit: "b".repeat(40), publishedAt: "2026-10-19T20:30:00Z", assets: ["nightly.yml", "nightly-linux.yml", "nightly-mac.yml"] };
 const TONIGHT = Date.parse("2026-10-20T20:00:00Z");
 
-test("the nightly job dispatches only a new main that passed verification, with both release runners online", () => {
-  const night = { head: NIGHTLY_HEAD, verifiedHead: NIGHTLY_HEAD, lastNightly: YESTERDAY, now: TONIGHT, runners: ONLINE_RUNNERS };
+test("the nightly job dispatches only a new main that passed verification", () => {
+  const night = { head: NIGHTLY_HEAD, verifiedHead: NIGHTLY_HEAD, lastNightly: YESTERDAY, now: TONIGHT };
   assert.deepEqual(nightlyDecision(night), { kind: "dispatch" });
   assert.deepEqual(nightlyDecision({ ...night, lastNightly: null }), { kind: "dispatch" }, "the first nightly needs no earlier one");
 
@@ -1723,14 +1632,8 @@ test("the nightly job dispatches only a new main that passed verification, with 
   assert.match(unverified.reason, /has not passed on main's head aaaaaaaaa; its last pass is ccccccccc/);
   assert.match(nightlyDecision({ ...night, verifiedHead: null }).reason, /has not passed/);
 
-  const windowsOffline = nightlyDecision({ ...night, runners: [{ ...ONLINE_RUNNERS[0], status: "offline" }, ONLINE_RUNNERS[1]] });
-  assert.deepEqual([windowsOffline.kind, windowsOffline.report], ["skip", true]);
-  assert.match(windowsOffline.reason, /No Windows release runner is online/);
-  assert.match(nightlyDecision({ ...night, runners: [] }).reason, /No Windows or Linux release runner/);
-
-  // A dry run publishes nothing, so only the runners matter.
+  // A dry run publishes nothing, so it skips publication and verification rules.
   assert.deepEqual(nightlyDecision({ ...night, verifiedHead: null, lastNightly: { ...YESTERDAY, commit: NIGHTLY_HEAD }, dryRun: true }), { kind: "dispatch" });
-  assert.match(nightlyDecision({ ...night, runners: [], dryRun: true }).reason, /dry run would wait/);
 });
 
 test("only a full nightly verification of main counts as verified", () => {
@@ -1761,7 +1664,6 @@ function fakeNightly({ runHead = NIGHTLY_HEAD, conclusion = "success", lastNight
     if (line.startsWith("gh api repos/dohchq/dohc/git/ref/heads/main")) return ok(`${NIGHTLY_HEAD}\n`);
     if (line.startsWith("gh api --paginate repos/dohchq/dohc/releases")) return ok(lastNightly ? `${JSON.stringify({ tag: lastNightly.tag, publishedAt: lastNightly.publishedAt, assets: lastNightly.assets })}\n` : "");
     if (line.startsWith("gh api repos/dohchq/dohc/commits/refs/tags/")) return ok(`${tags[args[1].split("/").pop()]}\n`);
-    if (line.startsWith("gh api --paginate repos/dohchq/dohc/actions/runners")) return ok(ONLINE_RUNNERS.map(runner => JSON.stringify(runner)).join("\n"));
     if (line.startsWith("gh run list")) {
       const earlier = { databaseId: 8, headSha: YESTERDAY.commit, url: "https://github.com/dohchq/dohc/actions/runs/8", displayTitle: "Desktop Release" };
       // Someone's stable release for the same commit, dispatched at the same time.
@@ -1856,7 +1758,7 @@ test("a nightly keeps following its run through gh errors, and leaves a run stil
 
   const stuck = fakeNightly({ views: [{ status: "queued" }] });
   const stuckHost = nightlyHost(stuck);
-  assert.match(await runNightly({}, stuckHost.deps), /was still going after 6 hours\. Check that the runners on ICE-PC are online\. If it publishes, the next night adds its macOS files\./);
+  assert.match(await runNightly({}, stuckHost.deps), /was still going after 6 hours\. Check the run on GitHub\. If it publishes, the next night adds its macOS files\./);
   assert.deepEqual(stuckHost.macs, []);
 });
 

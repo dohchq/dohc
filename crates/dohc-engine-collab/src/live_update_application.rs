@@ -64,7 +64,8 @@ pub use restore_fence::{
     current_generation as restore_generation, require_generation as require_restore_generation,
 };
 pub use restore_fence::{
-    NativeRestoreFence, NativeRestoreFenceReceipt, NativeRestoreSelection, RestoreDeliveryOrigin,
+    NativeRestoreFence, NativeRestoreFenceReceipt, NativeRestoreRefusal,
+    NativeRestoreRefusalReason, NativeRestoreSelection, RestoreDeliveryOrigin,
 };
 pub use restore_resume::{NativeRestoreResume, NativeRestoreResumeReceipt};
 pub use settlement::{
@@ -101,6 +102,8 @@ pub enum ApplicationError {
     Interrupted,
     #[error("this document's settlement moments must reach the relay before a restore fence")]
     PublicationPending,
+    #[error("native restore refused before fencing ({:?})", .0.reason)]
+    RestoreRefused(Box<NativeRestoreRefusal>),
     #[error(
         "this document's last settlement must reach its file before its interval can name another author"
     )]

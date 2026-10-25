@@ -2,11 +2,11 @@
 
 // Publishes the day's nightly with nobody at the Mac. launchd runs it at 04:00
 // from a clean checkout of main. It waits for the verification queue, checks
-// that main changed, passed verification and has its runners online, then
-// dispatches Desktop Release for that commit and waits for it to publish. It
-// adds the macOS files with release-desktop-macos.mjs and reports each result
-// on the release tracker. docs/engineering/desktop-release.md, "Publish
-// nightlies on a schedule", describes it.
+// that main changed and passed verification, then dispatches Desktop Release
+// for that commit and waits for it to publish. It adds the macOS files with
+// release-desktop-macos.mjs and reports each result on the release tracker.
+// docs/engineering/desktop-release.md describes it under "Publish nightlies
+// on a schedule".
 
 import { spawnSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -25,8 +25,6 @@ export const TRACKER_ISSUE = 2281;
 export const DRIVER_CHECKOUT = join(WORK_ROOT, "driver");
 export const NIGHTLY_LOG = join(WORK_ROOT, "nightly.log");
 const WORKFLOW = "desktop-release.yml";
-// The labels of the jobs a windows-linux nightly runs (docs/engineering/desktop-release.md).
-const RUNNERS = { Windows: ["self-hosted", "windows", "x64"], Linux: ["self-hosted", "linux", "x64"] };
 const MAC_MANIFEST = macFileNames("", "nightly").manifest;
 // The Mac's nightly verification starts at 03:07 and takes about 40 minutes.
 const QUEUE_WAIT_MS = 3 * 60 * 60_000;
@@ -61,23 +59,19 @@ export const verifiedNightly = requests => requests.findLast(({ request, status 
 
 /**
  * Whether tonight's nightly should be dispatched. A skip that needs someone,
- * such as an offline runner, is reported; a quiet night is not.
+ * such as a verification failure, is reported; a quiet night is not.
  */
-export function nightlyDecision({ head, verifiedHead, lastNightly, now, runners, dryRun = false }) {
-  const offline = Object.entries(RUNNERS)
-    .filter(([, labels]) => !runners.some(runner => runner.status === "online" && labels.every(label => runner.labels.some(name => name.toLowerCase() === label))))
-    .map(([platform]) => platform);
-  if (dryRun) return offline.length ? { kind: "skip", report: true, reason: `No ${offline.join(" or ")} release runner is online, so the dry run would wait in the queue.` } : { kind: "dispatch" };
+export function nightlyDecision({ head, verifiedHead, lastNightly, now, dryRun = false }) {
+  if (dryRun) return { kind: "dispatch" };
   if (lastNightly?.commit === head) return { kind: "skip", report: false, reason: `main is still at ${short(head)}, which ${lastNightly.tag} published.` };
   if (lastNightly && utcDay(lastNightly.publishedAt) === utcDay(now)) return { kind: "skip", report: false, reason: `${lastNightly.tag} already published on ${utcDay(now)} (UTC), and one nightly publishes per UTC day.` };
   if (verifiedHead !== head) {
     return { kind: "skip", report: true, reason: `The Mac's nightly verification has not passed on main's head ${short(head)}${verifiedHead ? `; its last pass is ${short(verifiedHead)}` : ""}.` };
   }
-  if (offline.length) return { kind: "skip", report: true, reason: `No ${offline.join(" or ")} release runner is online. Start the runners on ICE-PC.` };
   return { kind: "dispatch" };
 }
 
-/** What the decision reads from GitHub: main's head, the newest published nightly, and the release runners. */
+/** What the decision reads from GitHub: main's head and the newest published nightly. */
 export function readGitHub(run, repo = RELEASE_REPOSITORY) {
   const head = read(run, "gh", ["api", `repos/${repo}/git/ref/heads/main`, "--jq", ".object.sha"]).trim();
   const nightlies = jsonLines(read(run, "gh", [
@@ -88,8 +82,7 @@ export function readGitHub(run, repo = RELEASE_REPOSITORY) {
   const lastNightly = newest
     ? { ...newest, commit: read(run, "gh", ["api", `repos/${repo}/commits/refs/tags/${newest.tag}`, "--jq", ".sha"]).trim() }
     : null;
-  const runners = jsonLines(read(run, "gh", ["api", "--paginate", `repos/${repo}/actions/runners`, "--jq", ".runners[] | {name, status, labels: [.labels[].name]}"]));
-  return { head, lastNightly, runners };
+  return { head, lastNightly };
 }
 
 /** The job runs with Ice's token, so it runs only from a clean checkout of a commit on main, as the macOS command does. */
@@ -211,7 +204,7 @@ async function publishTonight({ dryRun, github, run, repo, wait, now, log, verif
     return `The job lost track of [Desktop Release](${started.url}) for ${short(github.head)}: ${error instanceof Error ? error.message : String(error)} If it publishes, the next night adds its macOS files.`;
   }
   if (conclusion === null) {
-    return `[Desktop Release](${started.url}) for ${short(github.head)} was still going after ${RUN_WAIT_MS / 3_600_000} hours. Check that the runners on ICE-PC are online. If it publishes, the next night adds its macOS files.`;
+    return `[Desktop Release](${started.url}) for ${short(github.head)} was still going after ${RUN_WAIT_MS / 3_600_000} hours. Check the run on GitHub. If it publishes, the next night adds its macOS files.`;
   }
   if (conclusion !== "success") {
     // The workflow refuses to build when main is no longer at the requested commit.

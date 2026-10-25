@@ -28,7 +28,7 @@ function normalizeDiscussionDisplayName(value: unknown): string | null {
   return result.ok ? result.value : null;
 }
 
-function validLinkDiscussionIdempotencyKey(value: unknown): value is string {
+export function validLinkDiscussionIdempotencyKey(value: unknown): value is string {
   return (
     typeof value === "string" &&
     value.length >= 1 &&

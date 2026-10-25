@@ -6,10 +6,13 @@ const headers = {...SHARE_WEB_SECURITY_HEADERS, "cross-origin-resource-policy": 
 export function opaqueLinkRefusal(): Response {
   return Response.json({ok: false, error: "not found"}, {status: 404, headers});
 }
+export function unavailableLinkRefusal(): Response {
+  return Response.json(linkRefusalBody("link_unavailable"), {status: 503, headers});
+}
 export async function relayLinkRefusal(response: Response, signal: AbortSignal): Promise<Response> {
   if (response.status >= 500 && !response.redirected && !response.headers.has("location")) {
     await response.body?.cancel().catch(() => undefined);
-    return Response.json(linkRefusalBody("link_unavailable"), {status: 503, headers});
+    return unavailableLinkRefusal();
   }
   if (!response.redirected && !response.headers.has("location") && [403, 429].includes(response.status) &&
       response.headers.get("content-type")?.split(";", 1)[0] === "application/json") {

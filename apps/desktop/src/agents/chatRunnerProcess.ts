@@ -1,5 +1,6 @@
-import { chmodSync, closeSync, fchmodSync, mkdirSync, openSync, writeSync } from "node:fs";
-import { delimiter, dirname, isAbsolute, resolve, win32 } from "node:path";
+import { accessSync, chmodSync, closeSync, constants, fchmodSync, mkdirSync, openSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { delimiter, dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
 import { agentProfileArguments, type AgentLaunchProfile } from "./agentToolCatalog";
@@ -82,16 +83,51 @@ function validPid(pid: number | undefined): pid is number {
 // entry would let a program the workspace carries run in place of a real one.
 // Windows allows a quoted entry, such as "C:\Program Files\x"; keep it
 // unquoted. Elsewhere a quote is part of the name, so the entry is relative.
+// Codex's Windows sandbox cannot start an app execution alias, such as the
+// Microsoft Store's pwsh.exe, so a Codex run skips the folders that hold them
+// and its shell resolves to an installed PowerShell instead.
+const WINDOWS_APP_ALIAS_DIRECTORY = /[\\/]Microsoft[\\/]WindowsApps(?:[\\/]|$)/iu;
+
 function runnerSearchPath(
   prefix: string,
   current: string | undefined,
   platform: NodeJS.Platform,
+  skipAppAliases: boolean,
 ): string {
   const entries = (current ?? "")
     .split(delimiter)
     .map((entry) => (platform === "win32" ? entry.replace(/^"(.*)"$/u, "$1") : entry))
-    .filter((entry) => isAbsolute(entry));
+    .filter((entry) => isAbsolute(entry) && !(skipAppAliases && WINDOWS_APP_ALIAS_DIRECTORY.test(entry)));
   return [prefix, ...entries].join(delimiter);
+}
+
+function runnerNodeAvailable(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): boolean {
+  const extensions = platform === "win32"
+    ? (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").map((ext) => ext.trim()).filter(Boolean)
+    : [""];
+  const searchPath = platform === "win32" ? env.Path ?? env.PATH : env.PATH;
+  return (searchPath ?? "").split(delimiter).filter((entry) => isAbsolute(entry)).some((directory) =>
+    extensions.some((extension) => {
+      const candidate = join(directory, `node${extension}`);
+      try {
+        if (!statSync(candidate).isFile()) return false;
+        accessSync(candidate, platform === "win32" ? constants.F_OK : constants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    }));
+}
+
+// Keep the launch environment's lookup beside its log, so an owed notice can
+// use the same fact after restart. Older runs have no recorded lookup.
+export async function readRunnerNodeAvailable(logPath: string): Promise<boolean | undefined> {
+  try {
+    const saved = await readFile(`${logPath}.node`, "utf8");
+    return saved === "true\n" ? true : saved === "false\n" ? false : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function resolveDohcCliBinDirectory(input: {
@@ -103,6 +139,33 @@ export function resolveDohcCliBinDirectory(input: {
     return resolve(input.appRoot, "node_modules", ".bin");
   }
   return resolve(input.resourcesPath ?? dirname(process.execPath), "cli-bin");
+}
+
+// A TOML string for a Codex config value. A literal string needs no escapes
+// and no double quote, which a cmd.exe command line cannot carry. Its
+// multi-line form can hold an apostrophe, as in C:\Users\O'Brien.
+function tomlString(value: string): string {
+  if (/\p{Cc}|'''/u.test(value)) return JSON.stringify(value);
+  return value.includes("'") ? `'''${value}'''` : `'${value}'`;
+}
+
+// Codex's sandbox cannot connect to the desktop app, so a Codex run replies
+// through the dohc MCP server, which Codex starts outside the sandbox. The
+// server offers only the reply tool, and that tool runs without approval.
+// Codex waits for a required server before the first turn; it gives others one
+// second, after which the turn starts without their tools.
+// Codex starts the server without NoDefaultCurrentDirectoryInExePath, so the
+// launcher's bare `node` searches the server's working directory first. That
+// directory is dohc's own, never the workspace, where the sandbox can write.
+function codexReplyServerConfig(cliBin: string, platform: NodeJS.Platform, rootPath: string, stateDir: string): string[] {
+  return [
+    `mcp_servers.dohc.command=${tomlString(join(cliBin, platform === "win32" ? "dohc-mcp.cmd" : "dohc-mcp"))}`,
+    `mcp_servers.dohc.args=[${["--workspace", rootPath, "--home", stateDir].map(tomlString).join(",")}]`,
+    `mcp_servers.dohc.cwd=${tomlString(cliBin)}`,
+    "mcp_servers.dohc.required=true",
+    "mcp_servers.dohc.enabled_tools=['dohc_reply_to_chat']",
+    "mcp_servers.dohc.tools.dohc_reply_to_chat.approval_mode='approve'",
+  ];
 }
 
 export function tokenizeRunnerCommand(command: string): string[] {
@@ -179,23 +242,22 @@ export function createChatRunnerProcess(
   }
 
   function runnerEnvironment(input: {
+    cliBin: string;
     threadId?: string;
     runId: string;
+    profile?: AgentLaunchProfile;
   }): NodeJS.ProcessEnv {
-    const cliBin = resolveDohcCliBinDirectory({
-      appRoot: options.appRoot(),
-      isPackaged: options.isPackaged(),
-      resourcesPath: options.resourcesPath?.(),
-    });
+    const { cliBin } = input;
+    const skipAppAliases = platform === "win32" && input.profile?.tool === "codex";
     return {
       ...process.env,
       DOHC_CHAT_THREAD: input.threadId,
       DOHC_CHAT_ACTOR: "agent",
       DOHC_RUN_ID: input.runId,
       DOHC_STATE_DIR: options.stateDir(),
-      PATH: runnerSearchPath(cliBin, process.env.PATH, platform),
+      PATH: runnerSearchPath(cliBin, process.env.PATH, platform, skipAppAliases),
       ...(process.env.Path
-        ? { Path: runnerSearchPath(cliBin, process.env.Path, platform) }
+        ? { Path: runnerSearchPath(cliBin, process.env.Path, platform, skipAppAliases) }
         : {}),
       // cmd.exe looks in the current directory before PATH, so an npm shim's
       // bare `node` would run a node.cmd at the workspace root. This turns
@@ -234,8 +296,16 @@ export function createChatRunnerProcess(
     input: Parameters<typeof spawnConfiguredRunner>[0],
     logFd: number,
   ): RunnerProcess {
+    const cliBin = resolveDohcCliBinDirectory({
+      appRoot: options.appRoot(),
+      isPackaged: options.isPackaged(),
+      resourcesPath: options.resourcesPath?.(),
+    });
+    const codexConfig = input.profile?.tool === "codex"
+      ? codexReplyServerConfig(cliBin, platform, input.rootPath, options.stateDir())
+      : [];
     const commandParts = input.profile
-      ? [input.profile.executable, ...agentProfileArguments(input.profile)]
+      ? [input.profile.executable, ...agentProfileArguments(input.profile, codexConfig)]
       : tokenizeRunnerCommand(input.command);
     const executable = commandParts[0]!;
     // The prompt is DATA and rides stdin, never argv. It carries the rendered
@@ -251,8 +321,10 @@ export function createChatRunnerProcess(
     // stdin has neither limit and needs no escaping at all.
     const args = commandParts.slice(1);
     const env = runnerEnvironment({
+      cliBin,
       threadId: input.threadId,
       runId: input.runId,
+      profile: input.profile,
     });
     const resolved = resolveSpawnCommand(executable, args, {
       env,
@@ -270,6 +342,9 @@ export function createChatRunnerProcess(
             : `Couldn't find ${executable} on PATH. Use its full path in the runner command.`,
       );
     }
+    try {
+      writeFileSync(`${input.logPath}.node`, `${runnerNodeAvailable(env, platform)}\n`, { mode: 0o600 });
+    } catch {}
     input.assertMayStart();
     const child = spawnRunner(resolved.command, resolved.args, {
       cwd: input.rootPath,

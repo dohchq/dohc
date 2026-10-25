@@ -60,6 +60,9 @@ struct PendingMessageAppend {
     /// Another computer's automation or agent message sends its chain depth;
     /// sync apply checked it before parking the message.
     chain_depth: Option<u32>,
+    /// A link message's link, which sync apply also checked.
+    link_grant_id: Option<String>,
+    link_principal_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -586,8 +589,9 @@ fn apply_pending_message(
         .execute(
             "INSERT OR IGNORE INTO chat_messages \
              (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name, \
-              author_user_id,parent_message_id,origin,body,created_at_ms,author_owner_display_name) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+              author_user_id,parent_message_id,origin,body,created_at_ms,author_owner_display_name, \
+              link_grant_id,link_principal_id) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             params![
                 workspace_id,
                 payload.thread_id,
@@ -600,7 +604,9 @@ fn apply_pending_message(
                 payload.origin,
                 body,
                 payload.created_at_ms,
-                owner_name
+                owner_name,
+                payload.link_grant_id,
+                payload.link_principal_id
             ],
         )
         .map_err(DomainError::sql_persist)?;

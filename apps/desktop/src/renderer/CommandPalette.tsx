@@ -78,6 +78,7 @@ export function CommandPalette(props: {
   return (
     <Overlay
       onClose={props.onClose}
+      closeOnBackdrop
       panelProps={{
         onKeyDown: (event) => {
           if (matchShellShortcut(event.nativeEvent, window.dohcDesktop?.platform) === (props.toggleShortcut ?? "command-palette")) {

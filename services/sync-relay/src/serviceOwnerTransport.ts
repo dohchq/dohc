@@ -78,7 +78,7 @@ export function serviceOwnerTransport(options: {
       const params=configRecord(request.params,["registrationId","reason"]);
       registration(params.registrationId);
       if(!adopted || !outboxId)throw new Error("Service owner outbox is unavailable.");
-      if(params.reason!=="provenance-refused" && params.reason!=="delivery-conflict")throw new Error("Invalid owner quarantine reason.");
+      if(params.reason!=="provenance-refused" && params.reason!=="delivery-conflict" && params.reason!=="capacity-refused")throw new Error("Invalid owner quarantine reason.");
       const response=await client.sendRequest({...request,method:"ydoc.ownerOutbox.quarantine",params:{outboxId,reason:params.reason}},signal);
       check(signal);return response;
     }

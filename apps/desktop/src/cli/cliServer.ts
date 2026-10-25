@@ -263,6 +263,9 @@ export interface CliAutomationsPort {
   /** One page of runs, newest first, after `before`, and the `before` of the next page or null. */
   runs(automationId: string, before?: string): Promise<{ runs: CollectionAutomationRun[]; next: string | null }>;
   run(automationId: string, claimId: string): Promise<CollectionAutomationRunDetail | null>;
+  /** The same reads of the workspace's self-hosted server's runs. Null when this computer cannot ask it as the owner. */
+  serverRuns(automationId: string, before?: string): Promise<{ runs: CollectionAutomationRun[]; next: string | null } | null>;
+  serverRun(automationId: string, claimId: string): Promise<CollectionAutomationRun | null>;
   retry(input: { automationId: string; claimId: string; startOver: boolean }): Promise<AutomationRunRetry>;
 }
 
@@ -374,6 +377,7 @@ export interface CliServerOptions {
   agentRunDepth(workspaceId: string): number;
   // Whether a run dohc dispatched holds the workspace's run slot.
   dispatchedAgentRun(workspaceId: string): boolean;
+  agentRunWorkspace(runId: string): string | undefined;
   // Runs once a command has made its last durable change.
   onWrite?(workspace: CliWorkspaceContext): void | Promise<void>;
   // A chat read has no renderer poll behind it — with no window open, nothing
@@ -759,6 +763,7 @@ function retainedCopiesUnavailable() {
 }
 
 const SHARED_VIEW_AUTOMATIONS = SHARED_AUTOMATION_HISTORY_REASON;
+const SERVER_RUNS_UNREADABLE = "Your server has no runs in this workspace that this computer can read.";
 
 // Try again as the panel answers it, in words for an agent: a run that
 // would start over needs startOver, as the panel's confirmation asks.
@@ -798,6 +803,7 @@ function automationRunFields(run: Omit<CollectionAutomationRun, "writes">) {
     neverStarted: run.neverStarted,
     chainStopped: run.chainStopped,
     undone: run.undone,
+    ...(run.unsentChangesLost ? { unsentChangesLost: true as const } : {}),
   };
 }
 
@@ -2778,13 +2784,21 @@ async function dispatchWorkspace(
         const automationId = await automations.automationIdAt(validated.normalized, request.args.automation);
         if (automationId === null) return { ok: false as const, reason: `"${validated.normalized}" is not a Collection in this workspace.` };
         if (request.verb === "automationRuns") {
-          const page = await automations.runs(automationId, request.args.page);
+          const page = request.args.server ? await automations.serverRuns(automationId, request.args.page) : await automations.runs(automationId, request.args.page);
+          if (page === null) return { ok: false as const, reason: SERVER_RUNS_UNREADABLE };
           const listed: CliResultByVerb["automationRuns"] = {
             ok: true,
             runs: page.runs.map(({ writes, ...run }) => ({ ...automationRunFields(run), changes: writes.length })),
             next: page.next,
           };
           return listed;
+        }
+        if (request.verb === "automationRun" && request.args.server) {
+          const run = await automations.serverRun(automationId, request.args.run);
+          if (run === null) return { ok: false as const, reason: `Your server has no run ${request.args.run} of this automation that this computer can read.` };
+          const { writes, ...fields } = run;
+          const read: CliResultByVerb["automationRun"] = { ok: true, run: { ...automationRunFields(fields), server: true, changes: writes } };
+          return read;
         }
         if (request.verb === "automationRun") {
           const run = await automations.run(automationId, request.args.run);
@@ -3575,6 +3589,13 @@ async function workspaceContextForRequest(
 ): Promise<CliWorkspaceContext> {
   const workspace = await resolveCliWorkspace(request.args.cwd, options.listWorkspaces());
   if (!workspace) throw new CliCommandError("not inside a dohc workspace");
+  if ("runId" in request.args && request.args.runId) {
+    const runWorkspaceId = options.agentRunWorkspace(request.args.runId);
+    if (runWorkspaceId !== undefined) {
+      if (runWorkspaceId !== workspace.workspaceId) throw new CliCommandError("Agent runs cannot write in another workspace.");
+      request.args.actor = "agent";
+    }
+  }
   const collectionWriteRequest =
     request.verb === "collectionSetFields" ||
     request.verb === "collectionCreateRecord";

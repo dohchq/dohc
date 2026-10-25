@@ -30,7 +30,7 @@ const source = `globalThis.operations = { run(ctx,input) {
   return ctx.db.query('SELECT * FROM items ORDER BY id');
 }}`;
 
-async function fixture(options: { transform?: (journal: DatasetJournal) => DatasetJournal; launch?: AppRuntimeLauncher; maxWorkers?: number; schemaSql?:string; source?:string; tables?:string[];maintenanceStorage?:DatasetSupervisorOptions["maintenanceStorage"];nowMs?:()=>number; materializationEvents?:number; idleMs?:number; queueMs?:number; onMaintenanceError?:DatasetSupervisorOptions["onMaintenanceError"] } = {}) {
+async function fixture(options: { transform?: (journal: DatasetJournal) => DatasetJournal; launch?: AppRuntimeLauncher; maxWorkers?: number; schemaSql?:string; source?:string; tables?:string[];maintenanceStorage?:DatasetSupervisorOptions["maintenanceStorage"];nowMs?:()=>number; materializationEvents?:number; idleMs?:number; queueMs?:number; onMaintenanceError?:DatasetSupervisorOptions["onMaintenanceError"]; workerRoot?:string } = {}) {
   const approvedSchema=options.schemaSql ?? schemaSql, approvedSource=options.source ?? source;
   const directory = await mkdtemp(join(tmpdir(), "dohc-supervisor-"));
   const seed = new DatabaseSync(join(directory, "seed.sqlite")); seed.exec(approvedSchema); seed.close();
@@ -51,7 +51,7 @@ async function fixture(options: { transform?: (journal: DatasetJournal) => Datas
   }
   initialize();
   const supervisor = await createDatasetSupervisor({ journal: options.transform?.(journal) ?? journal,
-    directory: privateFolder(join(directory, "workers")), runtime: { launch: options.launch }, maxWorkers: options.maxWorkers,maintenanceStorage:options.maintenanceStorage,nowMs:options.nowMs,materializationEvents:options.materializationEvents,idleMs:options.idleMs,queueMs:options.queueMs,onMaintenanceError:options.onMaintenanceError });
+    directory: privateFolder(options.workerRoot ?? join(directory, "workers")), runtime: { launch: options.launch }, maxWorkers: options.maxWorkers,maintenanceStorage:options.maintenanceStorage,nowMs:options.nowMs,materializationEvents:options.materializationEvents,idleMs:options.idleMs,queueMs:options.queueMs,onMaintenanceError:options.onMaintenanceError });
   cleanups.push(async () => { await supervisor.close(); db.close(); await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 }); });
   function invoke(input: DatasetInvocation["input"] = {}, overrides: Partial<DatasetInvocation> = {}) {
     return supervisor.invoke({ scope, tables: options.tables ?? ["items"], operation: "run", caller: { kind: "owner" }, callerKey: "owner", input,
@@ -274,6 +274,18 @@ it("migrates an approved dataset through the real worker and recovers its new sc
   expect((await f.invoke({}, {readOnly:true})).result).toEqual([{id:"before",value:"saved",note:"migrated"}]);expect(launches).toBe(2);
   expect((await f.invoke({id:"after",value:"new"},{idempotencyKey:"after"})).revision).toBe(3);
   expect((await f.invoke({id:"before",value:"saved"})).replayed).toBe(true);
+});
+it.each([125, 153])("migrates records in a long workspace folder (%i characters)",async length=>{
+  const parent=await mkdtemp(join(tmpdir(),"dohc-migration-"));
+  cleanups.push(()=>rm(parent,{recursive:true,force:true}));
+  const workspaceRoot=join(parent,"w".repeat(length-parent.length-1));
+  expect(workspaceRoot).toHaveLength(length);
+  const f=await fixture({workerRoot:join(workspaceRoot,".dohc","local","datasets","workers")});
+  await f.invoke({id:"before",value:"saved"});
+  const migrated=await f.supervisor.migrate(migration(f));
+  expect(migrated.revision).toBe(2);
+  expect((await f.invoke({}, {readOnly:true})).result).toEqual([{id:"before",value:"saved",note:"migrated"}]);
+  expect((await f.invoke({id:"after",value:"new"},{idempotencyKey:"after"})).revision).toBe(3);
 });
 it("refuses migration after another queued write advances the approved preview",async()=>{
   const f=await fixture(),input=migration(f);

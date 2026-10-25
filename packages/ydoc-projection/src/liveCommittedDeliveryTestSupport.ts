@@ -21,6 +21,7 @@ import {
 import { initializeRelayDeployment, openRelayDeployment } from "../../../services/sync-relay/src/relayDeployment.js";
 import type { StorageContext } from "../../../services/sync-relay/src/storage/context.js";
 import { liveJournalCheckpointDue } from "../../../services/sync-relay/src/storage/liveJournalCheckpoint.js";
+import { liveRestoreValidator, runLiveRestoreWork } from "../../../services/sync-relay/src/liveRestoreValidation.js";
 
 export const policy = {
   maxStructVisits: 1_000_000,
@@ -31,6 +32,8 @@ export const policy = {
   maxDeleteIntervalVisits: 1_000_000,
   maxIndexOperations: 10_000_000,
 };
+/** Restore validation in this process, through the relay's artifact protocol. */
+export const restore = liveRestoreValidator(async work => runLiveRestoreWork(work, policy));
 const validate = createLiveMarkdownRegistrationValidator(policy);
 const validateJournal = createLiveMarkdownJournalValidator(policy);
 export const { DatabaseSync } = createRequire(import.meta.url)(

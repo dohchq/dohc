@@ -280,7 +280,7 @@ function MentionedFileRow(props: { file: MentionedFile; onOpen: () => void }) {
             {file.authors.map((author, index) => (
               <Fragment key={authorKey(author)}>
                 {index > 0 ? ", " : null}
-                {author.kind === "human" ? null : <span className="sr-only">{author.kind} </span>}
+                {author.kind === "human" ? null : <span className="sr-only">{author.kind === "link" ? "link holder" : author.kind} </span>}
                 <AgentName kind={author.kind} presentation={author.presentation}>{author.displayName}</AgentName>
               </Fragment>
             ))}

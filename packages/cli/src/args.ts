@@ -83,10 +83,10 @@ type CliCommandBody =
   | { verb: "historyUndo"; operationId: string }
   | { verb: "fileDuplicate"; path: string; agent?: string; requestId?: string }
   | { verb: "moment"; id: string; side: "before" | "after" }
-  | { verb: "automationRuns"; collectionPath: string; automation: string; page?: string }
+  | { verb: "automationRuns"; collectionPath: string; automation: string; page?: string; server?: true }
   | { verb: "automationList"; collectionPath: string }
   | { verb: "automationSwitch"; collectionPath: string; automation: string; enabled: boolean; expectedContentHash: string; reformat: boolean; submitId: string }
-  | { verb: "automationRun"; collectionPath: string; automation: string; run: string }
+  | { verb: "automationRun"; collectionPath: string; automation: string; run: string; server?: true }
   | { verb: "automationRetry"; collectionPath: string; automation: string; run: string; startOver: boolean }
   | { verb: "automationButtons"; collectionPath: string; table?: string }
   | {
@@ -621,7 +621,10 @@ const AUTOMATION_VERBS = {
     capabilityId: "automation.runs.list",
     summary: "List an automation's runs on this computer, newest first.",
     operands: "<collection> <automation>",
-    flags: [{ name: "--page", value: "page", text: "List the older runs the last line of an earlier listing names." }],
+    flags: [
+      { name: "--page", value: "page", text: "List the older runs the last line of an earlier listing names." },
+      { name: "--server", text: "List the runs of the workspace's self-hosted server instead." },
+    ],
     notes: [
       "Lists 20 runs at a time, newest first, as the Automations panel does. Each line starts with the run's ID.",
       "When older runs remain, the last line gives the --page value that lists them.",
@@ -629,19 +632,20 @@ const AUTOMATION_VERBS = {
     parse: (input) => {
       const { collectionPath, automation } = automationOperands(input, "runs", false);
       const page = lastValue(input, "--page");
-      return { verb: "automationRuns", collectionPath, automation, ...(page === undefined ? {} : { page }) };
+      return { verb: "automationRuns", collectionPath, automation, ...(page === undefined ? {} : { page }), ...(input.flags.has("--server") ? { server: true as const } : {}) };
     },
   },
   run: {
     capabilityId: "automation.run.read",
     summary: "Show one run: what started it, what each step changed, and why it failed.",
     operands: "<collection> <automation> <run>",
+    flags: [{ name: "--server", text: "Show a run of the workspace's self-hosted server. It lists what the run changed, without steps." }],
     notes: [
       "Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.",
     ],
     parse: (input) => {
       const { collectionPath, automation, run } = automationOperands(input, "run", true);
-      return { verb: "automationRun", collectionPath, automation, run };
+      return { verb: "automationRun", collectionPath, automation, run, ...(input.flags.has("--server") ? { server: true as const } : {}) };
     },
   },
   retry: {

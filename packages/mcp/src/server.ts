@@ -644,8 +644,8 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_list_automation_runs",
     {
       description:
-        "List an automation's runs on this computer, 20 at a time, newest first: each run's id, state, what started it, how many changes it made, and why it failed. Name the automation by its Collection's folder and its id in automations.yaml. When older runs remain, `next` is not null; pass it as `page` to list them. Each computer keeps the runs of the automations it ran for 30 days after they end.",
-      inputSchema: { ...automationInput, page: z.string().min(1).max(512).optional() },
+        "List an automation's runs on this computer, 20 at a time, newest first: each run's id, state, what started it, how many changes it made, and why it failed. Name the automation by its Collection's folder and its id in automations.yaml. When older runs remain, `next` is not null; pass it as `page` to list them. Each computer keeps the runs of the automations it ran for 30 days after they end. With server true, list the runs of the workspace's self-hosted server instead. A run marked unsentChangesLost ran in a copy the server lost, and its latest changes may not have been sent.",
+      inputSchema: { ...automationInput, page: z.string().min(1).max(512).optional(), server: z.boolean().optional() },
     },
     async (args) => text(await listAutomationRuns(ctx, args)),
   );
@@ -654,8 +654,8 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_read_automation_run",
     {
       description:
-        "Read one automation run: what started it, what each step changed, why it failed, which step failed, and whether Try again resumes there or starts over. Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.",
-      inputSchema: { ...automationInput, run: z.string().min(1).max(256) },
+        "Read one automation run: what started it, what each step changed, why it failed, which step failed, and whether Try again resumes there or starts over. Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed. With server true, read a run of the workspace's self-hosted server: it lists what the run changed, oldest first, as `changes` instead of steps.",
+      inputSchema: { ...automationInput, run: z.string().min(1).max(256), server: z.boolean().optional() },
     },
     async (args) => text(await readAutomationRun(ctx, args)),
   );

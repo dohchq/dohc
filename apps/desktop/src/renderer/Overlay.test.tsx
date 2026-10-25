@@ -60,6 +60,34 @@ describe("Overlay", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("stays open on a press outside its panel", () => {
+    const onClose = vi.fn();
+    render(
+      <Overlay onClose={onClose}>
+        <input aria-label="Name" />
+      </Overlay>,
+    );
+
+    fireEvent.click(document.querySelector('[data-dohc-modal="true"]')!);
+
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("closes a picker on a press outside its panel", () => {
+    const onClose = vi.fn();
+    render(
+      <Overlay onClose={onClose} closeOnBackdrop>
+        <button type="button">Result</button>
+      </Overlay>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Result" }));
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.click(document.querySelector('[data-dohc-modal="true"]')!);
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("closes an open menu on the first Escape and the overlay on the second", async () => {
     const user = userEvent.setup();
     function Dialog() {
@@ -232,16 +260,16 @@ describe("Overlay with toasts above it", () => {
   });
 });
 
-function FocusDialog({ removeOpener = false }: { removeOpener?: boolean }) {
+function FocusDialog({ removeOpener = false, picker = false }: { removeOpener?: boolean; picker?: boolean }) {
   const [open, setOpen] = useState(false);
   return <section data-focus-surface="test" tabIndex={-1} data-testid="surface">
     {(!removeOpener || !open) && <button onClick={() => setOpen(true)}>Open dialog</button>}
-    {open && <Overlay onClose={() => setOpen(false)}><button autoFocus onClick={() => setOpen(false)}>Done</button></Overlay>}
+    {open && <Overlay onClose={() => setOpen(false)} closeOnBackdrop={picker}><button autoFocus onClick={() => setOpen(false)}>Done</button></Overlay>}
   </section>;
 }
 
 it.each(["Escape", "Done", "backdrop"])("returns dialog focus after %s", async (action) => {
-  render(<StrictMode><FocusDialog /></StrictMode>);
+  render(<StrictMode><FocusDialog picker={action === "backdrop"} /></StrictMode>);
   const opener = screen.getByText("Open dialog");
   opener.focus();
   fireEvent.click(opener);

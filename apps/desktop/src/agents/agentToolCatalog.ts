@@ -25,7 +25,7 @@ export function supportsAgentProfile(tool: AgentToolId, version: string | null):
 
 export const AGENT_TOOLS = [
   { id: "claude", name: "Claude Code", command: "claude", authArgs: ["auth", "status"],
-    permissions: "Uses your Claude permissions. Requests that need approval are denied." },
+    permissions: "Edits workspace files and replies without asking. Other actions use your Claude permissions; approval requests are denied." },
   { id: "codex", name: "Codex", command: "codex", authArgs: ["login", "status"],
     permissions: "Workspace-write sandbox. Runs without approval prompts." },
   { id: "opencode", name: "OpenCode", command: "opencode", authArgs: ["auth", "list", "--pure"],
@@ -34,10 +34,12 @@ export const AGENT_TOOLS = [
     permissions: "No launch profile yet" },
 ] as const;
 
-export function agentProfileArguments(profile: AgentLaunchProfile): string[] {
+// codexConfig adds `key=value` entries to a Codex launch.
+export function agentProfileArguments(profile: AgentLaunchProfile, codexConfig: readonly string[] = []): string[] {
+  // In CLI rules, / anchors at the primary working directory. Bare Edit matches every path.
   return profile.tool === "claude"
-    ? ["-p", "--permission-prompts", "none", "--no-session-persistence"]
-    : ["exec", "--config", "approval_policy=never", "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-"];
+    ? ["-p", "--permission-prompts", "none", "--no-session-persistence", "--allowedTools", "Edit(/**)", "Bash(dohc chat reply:*)", "--disallowedTools", "Edit(/.dohc/**)"]
+    : ["exec", "--config", "approval_policy=never", ...codexConfig.flatMap((entry) => ["--config", entry]), "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-"];
 }
 
 function quoteRunnerToken(value: string): string {
@@ -46,7 +48,7 @@ function quoteRunnerToken(value: string): string {
 
 export function configuredRunnerCommand(runner: { command: string; profile?: AgentLaunchProfile }): string {
   return runner.profile
-    ? [quoteRunnerToken(runner.profile.executable), ...agentProfileArguments(runner.profile)].join(" ")
+    ? [quoteRunnerToken(runner.profile.executable), ...agentProfileArguments(runner.profile).map((arg) => /\s/u.test(arg) ? quoteRunnerToken(arg) : arg)].join(" ")
     : runner.command.trim();
 }
 

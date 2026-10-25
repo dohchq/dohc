@@ -20,6 +20,7 @@ import {
   initializeAutomationHostPlacementSchema,
   initializeAutomationReachHandoverSchema,
   initializeAutomationServerScheduleSchema,
+  initializeAutomationServerUnsentRunSchema,
 } from "./automationHosts";
 import { initializeCollectionWriteSchema } from "./collectionWrites";
 import { initializeAutomationPressSchema } from "./automationPresses";
@@ -1289,6 +1290,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeAutomationHostPlacementSchema(db);
     initializeAutomationReachHandoverSchema(db);
     initializeAutomationServerScheduleSchema(db);
+    initializeAutomationServerUnsentRunSchema(db);
     initializeCurrentFileKeySchema(db);
     initializeCollectionWriteSchema(db);
     initializeAutomationPressSchema(db);

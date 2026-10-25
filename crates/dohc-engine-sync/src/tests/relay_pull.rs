@@ -3988,9 +3988,12 @@ fn workspace_push_excludes_origins_imported_from_share_views() {
     client
         .push_workspace(&mut engine, "ws", &NoFaults, &crate::NoLiveLeases, 1_000, 0)
         .expect("push owner lane");
-    assert_eq!(
-        client.transport().pushes.lock().expect("push calls").len(),
-        1,
+    let pushes = client.transport().pushes.lock().expect("push calls");
+    assert_eq!(pushes.len(), 1);
+    assert!(
+        pushes
+            .iter()
+            .all(|push| !push.origin_id.starts_with("shared:")),
         "an unfiltered origin scan sends the imported share row through the owner lane"
     );
 }

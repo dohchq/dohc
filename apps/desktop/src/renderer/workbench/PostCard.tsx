@@ -3,7 +3,7 @@ import { AutomationBadge } from "./AutomationBadge";
 import { Bookmark, CircleHelp, FileText, MessageSquare } from "lucide-react";
 import type { ChannelThreadRecord, ChatBookmarkRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
 import { formatChatTime, formatShortTime } from "../time";
-import { AgentName, ChatAvatar } from "./ChatAvatar";
+import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
 import { chatAuthorLabel, MessageReactions, RowToolbar, TOOLBAR_BUTTON, type ChatReactionControls } from "./chatMessages";
 import { UnreadPill } from "./ChatsControls";
@@ -263,6 +263,7 @@ export function PostCard(props: {
             {isAgent ? (
               <AgentBadge testIdPrefix="chats-post" author={message!} viewerAuthorId={props.data.viewerAuthorId} presentation={message!.presentation} />
             ) : null}
+            {message?.authorKind === "link" ? <LinkHolderMark testId="chats-post-link-holder" /> : null}
             {message?.authorKind === "automation" ? (
               <AutomationBadge
                 testIdPrefix="chats-post"

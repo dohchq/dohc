@@ -173,8 +173,10 @@ type ChatThreadProjectionParams = ChatThreadParams & {
   linkedFileAccess?: ChatProjectionFileAccess;
 };
 // Only the automation executor names an automation, and the engine accepts an
-// automation author only with it.
+// automation author only with it. Only the relay writes a link author, so no
+// local write names one.
 type ChatMessageAuthorKind = "human" | "agent" | "automation";
+export type ChatWriteActor = { kind: ChatMessageAuthorKind; displayName: string };
 type ChatMessageAutomationParams = ChatsJsonObject & {
   automationId: string;
   chainDepth: number;
@@ -459,7 +461,7 @@ const AnyInt = Schema.Int;
 const NullableString = Schema.NullOr(Schema.String);
 const NullableNonnegativeInt = Schema.NullOr(NonnegativeInt);
 // Message and mention authors. Reaction authors stay human or agent.
-const MessageAuthorKindSchema = Schema.Literals(["human", "agent", "automation"]);
+const MessageAuthorKindSchema = Schema.Literals(["human", "agent", "automation", "link"]);
 const ReactorKindSchema = Schema.Literals(["human", "agent"]);
 const ChannelKindSchema = Schema.Literals(["channel", "dm", "agent"]);
 const ChannelTypeSchema = Schema.Literals(["posts", "chat", "both"]);
@@ -471,10 +473,27 @@ const FollowTargetKindSchema = Schema.Literals([
 ]);
 const NextCursorFields = { nextCursor: NullableString } as const;
 
-const ChatActorSchema = mutableStruct({
-  kind: MessageAuthorKindSchema,
-  displayName: Schema.String,
-});
+// A link author names its link grant and link principal, and no other author does.
+const ChatActorSchema = Schema.Union([
+  mutableStruct({
+    kind: Schema.Literals(["human", "agent", "automation"]),
+    displayName: Schema.String,
+  }),
+  mutableStruct({
+    kind: Schema.Literal("link"),
+    displayName: Schema.String,
+    grantId: Schema.NonEmptyString,
+    principalId: Schema.NonEmptyString,
+  }),
+]);
+// A link message names no account, owner, actor key, origin or automation.
+const ACCOUNT_FIELDS = ["authorUserId", "authorOwnerDisplayName", "authorActorKey", "origin", "automation"] as const;
+const noAccountOnLinkMessage = Schema.makeFilter(
+  (message: { author: { kind: string } } & Partial<Record<(typeof ACCOUNT_FIELDS)[number], unknown>>) =>
+    message.author.kind !== "link" ||
+    ACCOUNT_FIELDS.every((field) => message[field] === undefined) ||
+    "A link message names no account.",
+);
 const ChatMessageAutomationSchema = mutableStruct({
   automationId: Schema.String,
 });
@@ -520,7 +539,7 @@ const ChatMessageSchema = mutableStruct({
   createdAtMs: AnyInt,
   automation: Schema.optionalKey(ChatMessageAutomationSchema),
   attachments: Schema.mutable(Schema.Array(ChatAttachmentSchema)),
-});
+}).check(noAccountOnLinkMessage);
 const ChatDecisionSchema = mutableStruct({
   threadId: Schema.String,
   messageId: Schema.String,
@@ -689,7 +708,7 @@ const ChatChannelOpeningMessageSchema = mutableStruct({
   bodySnippet: Schema.String,
   automation: Schema.optionalKey(ChatMessageAutomationSchema),
   reactions: Schema.mutable(Schema.Array(ChatReactionSchema)),
-});
+}).check(noAccountOnLinkMessage);
 const ChatChannelThreadSummarySchema = mutableStruct({
   thread: ChatThreadSchema,
   messageCount: NonnegativeInt,

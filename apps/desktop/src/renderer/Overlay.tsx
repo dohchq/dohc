@@ -56,11 +56,14 @@ export function OverlayFrame(props: {
   );
 }
 
-// Shared modal scaffold: dimmed backdrop that closes on click, with an inner
-// panel that swallows clicks. Used by the command palette, quick-open, new
-// file dialog, and cloud panel so close/backdrop behavior — and this keyboard behavior — stays identical everywhere.
+// Shared modal scaffold: a dimmed backdrop and a panel, with one close and
+// keyboard behavior everywhere. Escape and the dialog's own controls close
+// it; a press on the backdrop does nothing, so a stray click never throws
+// away what someone typed. A picker, which holds nothing worth keeping,
+// sets closeOnBackdrop.
 export function Overlay(props: {
   onClose?: () => void;
+  closeOnBackdrop?: boolean;
   children: ReactNode;
   appearance?: "standard" | "warning";
   panelRef?: RefObject<HTMLDivElement | null>;
@@ -111,7 +114,7 @@ export function Overlay(props: {
       appearance={props.appearance}
       panelRef={panelRef}
       panelProps={props.panelProps}
-      onBackdropClick={props.onClose}
+      onBackdropClick={props.closeOnBackdrop ? props.onClose : undefined}
     >
       {props.children}
     </OverlayFrame>
