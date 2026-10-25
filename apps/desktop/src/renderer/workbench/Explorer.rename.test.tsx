@@ -107,9 +107,9 @@ describe("Explorer rename", () => {
     await waitFor(() => expect(moveWorkspacePath).toHaveBeenCalledOnce());
   });
 
-  it.each(["file", "folder"] as const)("validates a Windows new %s inline before mutation", async kind => {
+  it("validates a Windows new folder inline before mutation", async () => {
     window.dohcDesktop!.platform = "win32";
-    render(<Explorer {...explorerProps()} createRequest={{ id: 1, kind }} />);
+    render(<Explorer {...explorerProps()} newFolderRequest={1} />);
     const input = await screen.findByTestId("tree-edit-input");
     fireEvent.change(input, { target: { value: "a?b" } });
     fireEvent.keyDown(input, { key: "Enter" });

@@ -1499,9 +1499,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     if (commit && editValue.trim()) {
       const platform = window.dohcDesktop?.platform ?? "";
       const typed = resolveTypedPath(editValue, editing.mode === "rename" ? dirnameOf(editing.path) : editing.parentPath);
-      const destination = editing.mode === "rename"
-        ? editing.isFolder ? typed : withRenameDefault(editing.path, typed)
-        : editing.kind === "folder" ? typed : withMarkdownDefault(typed);
+      const destination = editing.mode === "rename" && !editing.isFolder ? withRenameDefault(editing.path, typed) : typed;
       const error = workspaceDestinationError(editValue, platform) ?? workspaceDestinationError(destination, platform);
       if (error) {
         setEditError(error);
