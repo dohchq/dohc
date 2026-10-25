@@ -217,23 +217,31 @@ function withoutClientAuthors(payloadJson: string): string {
   delete payload.authors;
   return stableJsonStringify(payload);
 }
-/** The restores whose rows lie in the interval a moment's settlement record names, by this relay's journal. */
-function restoresPublished(storage: StorageContext, workspaceId: string, payload: Record<string, unknown>): [namespace: string, operationId: string][] {
-  let namespace: string, binding: LiveObjectBinding, previous: number, terminal: number;
+/** The interval a moment's settlement record names in `workspaceId`, or null. */
+function settledInterval(workspaceId: string, payload: Record<string, unknown>) {
   try {
     const record = bag(bag(payload.settlementReference).record);
-    namespace = parseHostControlIdentifier(record.relayDatabaseNamespace);
-    binding = parseLiveObjectBinding(record.binding);
-    [previous, terminal] = [record.previousCursor, record.terminalCursor].map(integer) as [number, number];
+    const namespace = parseHostControlIdentifier(record.relayDatabaseNamespace), binding = parseLiveObjectBinding(record.binding);
+    const [previous, terminal] = [record.previousCursor, record.terminalCursor].map(integer) as [number, number];
+    return binding.workspaceId === workspaceId ? { namespace, binding, previous, terminal } : null;
   } catch {
-    return [];
+    return null;
   }
-  if (binding.workspaceId !== workspaceId) return [];
-  return storage.db.prepare(`SELECT o.operation_id FROM ${LIVE_RESTORE_OPERATIONS} o JOIN sync_relay_live_update_journal j
-    ON j.relay_database_namespace=o.relay_database_namespace AND j.restore_operation_id=o.operation_id
-    WHERE o.relay_database_namespace=? AND o.workspace_id=? AND o.main_version_id=? AND o.object_id=? AND o.lineage_claim_id=?
-      AND j.journal_cursor>? AND j.journal_cursor<=?`)
-    .all(namespace, ...documentParams(binding), previous, terminal).map((row) => [namespace, String(row.operation_id)]);
+}
+/**
+ * Whether admission bounded what this interval's proof reads: it ends at the
+ * row of a restore whose publication is still funded, and starts no earlier
+ * than the document's latest binding, as `restorePublicationFits` measured.
+ */
+function publicationBounded(storage: StorageContext, interval: NonNullable<ReturnType<typeof settledInterval>>): boolean {
+  const { namespace, binding, previous, terminal } = interval;
+  const funded = storage.db.prepare(`SELECT 1 FROM sync_relay_live_update_journal j JOIN ${LIVE_RESTORE_LIFECYCLES} l
+    ON l.relay_database_namespace=j.relay_database_namespace AND l.operation_id=j.restore_operation_id
+    WHERE j.workspace_id=? AND j.main_version_id=? AND j.object_id=? AND j.lineage_claim_id=? AND j.journal_cursor=?
+      AND j.relay_database_namespace=? AND l.publication_reservation_bytes>0`).get(...documentParams(binding), terminal, namespace);
+  const prior = storage.db.prepare(`SELECT terminal_cursor FROM ${SETTLEMENT_BINDINGS} WHERE ${where} ORDER BY terminal_cursor DESC LIMIT 1`)
+    .get(...documentParams(binding));
+  return funded !== undefined && previous >= Number(prior?.terminal_cursor ?? 0);
 }
 function refuseSettlement(op: SyncRelayLogInput, settlementId: string) {
   prepared.delete(op);
@@ -751,8 +759,11 @@ export async function prepareHostedSettlements(
     } catch (error) {
       if (signal?.aborted) throw error;
       const exhausted = error instanceof RestoreHistoryBudgetExceeded || error instanceof SettlementProofExhausted;
-      // A restore must publish, so its host retries an unfinished proof instead of falling back to an unattributed moment.
-      if (exhausted && (input.ops.length > 1 || restoresPublished(storage, input.workspaceId, payload).length > 0))
+      // A batch's host halves it, and a restore's host retries the publication admission bounded. Any other single
+      // proof gets the same answer again, so it falls back to an unattributed moment.
+      const interval = settledInterval(input.workspaceId, payload);
+      if (exhausted && (input.ops.length > 1 ||
+        (error instanceof RestoreHistoryBudgetExceeded && interval !== null && publicationBounded(storage, interval))))
         throw relayError("settlement_proof_budget");
       if (exhausted) exhaustedProofs.add(op);
       if (
@@ -894,26 +905,26 @@ function commitPreparedHostedSettlement(
   require(!conflict);
   const values = bindingValues(p, originId, op.originSeq);
   const storageBytes = Buffer.byteLength(JSON.stringify(values));
-  const publishes = p.restores.filter((restore) => restore.terminal > p.previous);
-  if (publishes.length > 0) {
-    require(
-      Buffer.byteLength(op.payloadJson) <= MAX_PAYLOAD_JSON_BYTES &&
-        Buffer.byteLength(JSON.stringify(op.admittedAuthorSnapshot ?? [])) <= MAX_LIVE_AUTHOR_BYTES &&
-        Buffer.byteLength(JSON.stringify(op.settlementAdmission)) <= MAX_ADMISSION_JSON_BYTES &&
-        storageBytes <= maximumBindingBytes(p.namespace, p.binding),
-    );
-  }
-  // Admission funded each restore's publication. The append's rollback restores a release, and a replay finds none.
-  for (const restore of publishes) {
-    // A STRICT integer column, read without a catchable refusal once a release is made.
-    const held = Number(storage.db
+  // Admission funded each restore's publication, which must charge no more than is held.
+  // A STRICT integer column, read before any release.
+  const reserved = p.restores.filter((restore) => restore.terminal > p.previous).map((restore) => ({
+    ...restore,
+    held: Number(storage.db
       .prepare(`SELECT publication_reservation_bytes FROM ${LIVE_RESTORE_LIFECYCLES} WHERE relay_database_namespace=? AND operation_id=?`)
-      .get(p.namespace, restore.operationId)!.publication_reservation_bytes);
-    if (held === 0) continue;
+      .get(p.namespace, restore.operationId)!.publication_reservation_bytes),
+  })).filter((restore) => restore.held > 0);
+  if (reserved.length > 0) {
+    const logBytes = Buffer.byteLength(op.payloadJson) +
+      (op.admittedAuthorSnapshot === undefined ? 0 : Buffer.byteLength(JSON.stringify(op.admittedAuthorSnapshot))) +
+      Buffer.byteLength(JSON.stringify(op.settlementAdmission));
+    require(storageBytes + logBytes <= reserved.reduce((bytes, restore) => bytes + restore.held, 0));
+  }
+  // The append's rollback restores a release, and a replay finds none.
+  for (const { operationId, held } of reserved) {
     if (
       storage.db.prepare(`UPDATE ${LIVE_RESTORE_LIFECYCLES} SET publication_reservation_bytes=0,accounted_bytes=accounted_bytes-?
         WHERE relay_database_namespace=? AND operation_id=? AND publication_reservation_bytes=?`)
-        .run(held, p.namespace, restore.operationId, held).changes !== 1 ||
+        .run(held, p.namespace, operationId, held).changes !== 1 ||
       storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-? WHERE workspace_id=? AND usage_bytes>=?")
         .run(held, workspaceId, held).changes !== 1
     ) throw new Error("Retained restore evidence is damaged.");
@@ -941,9 +952,14 @@ export function commitHostedSettlement(
   if (op.settlementAdmission?.status !== "refused") return;
   op.payloadJson = withoutClientAuthors(op.payloadJson);
   if (op.opKind !== "moment.append") return;
-  // Its host falls back to an unattributed moment and never publishes the restore, so it needs repair.
-  for (const [namespace, operationId] of restoresPublished(storage, workspaceId, bag(JSON.parse(op.payloadJson))))
-    storage.db.prepare(`UPDATE ${LIVE_RESTORE_LIFECYCLES} SET publication_refused=1 WHERE relay_database_namespace=? AND operation_id=? AND workspace_id=?
-      AND publication_reservation_bytes>0`)
-      .run(namespace, operationId, workspaceId);
+  // Its host falls back to an unattributed moment instead of offering this interval again. The restore that opened
+  // the interval's generation keeps the furthest refused terminal, which the next restore reports as needing repair.
+  const interval = settledInterval(workspaceId, bag(JSON.parse(op.payloadJson)));
+  if (!interval) return;
+  storage.db.prepare(`UPDATE ${LIVE_RESTORE_LIFECYCLES} SET refused_terminal_cursor=MAX(refused_terminal_cursor,?)
+    WHERE relay_database_namespace=? AND operation_id=(SELECT o.operation_id FROM ${LIVE_RESTORE_OPERATIONS} o JOIN sync_relay_live_update_journal j
+      ON j.relay_database_namespace=o.relay_database_namespace AND j.workspace_id=o.workspace_id AND j.main_version_id=o.main_version_id
+        AND j.object_id=o.object_id AND j.lineage_claim_id=o.lineage_claim_id AND j.restore_fence_generation=o.new_fence
+      WHERE o.relay_database_namespace=? AND o.workspace_id=? AND o.main_version_id=? AND o.object_id=? AND o.lineage_claim_id=? AND j.journal_cursor=?)`)
+    .run(interval.terminal, interval.namespace, interval.namespace, ...documentParams(interval.binding), interval.terminal);
 }

@@ -1,7 +1,7 @@
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
-import type { OrderedLiveUpdateCutPolicy } from "@dohc/ydoc-projection/live-journal-validation";
+import { createLiveMarkdownRegistrationValidator, type OrderedLiveUpdateCutPolicy } from "@dohc/ydoc-projection/live-journal-validation";
 import type { OwnerOutboxAdmission, CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
 import type { LiveJournalValidation } from "./storage/types.js";
 
@@ -175,22 +175,28 @@ export function createLiveValidationExecutor() {
       input: SettlementNormalizationInput,
       signal?: AbortSignal,
     ) {
-      const policy = {
-        maxStructVisits: 1_000_000,
-        maxValueNodeVisits: 5_000_000,
-        maxDecodedPayloadByteVisits: 100_000_000,
-        maxStructClientGroupVisits: 1_000_000,
-        maxDeleteClientGroupVisits: 1_000_000,
-        maxDeleteIntervalVisits: 1_000_000,
-        maxIndexOperations: 10_000_000,
-      };
       return submit<SettlementNormalizationResult>(
-        { kind: "settlement", policy, input },
+        { kind: "settlement", policy: SETTLEMENT_NORMALIZATION_POLICY, input },
         signal,
       );
+    },
+    /** Whether `input` normalizes within a settlement's work limits, checked in this thread. A contradiction is its settlement's to refuse. */
+    settlementFits(input: SettlementNormalizationInput): boolean {
+      const result = createLiveMarkdownRegistrationValidator(SETTLEMENT_NORMALIZATION_POLICY)(input);
+      return result.kind === "accepted" || result.reason !== "capacity-refused";
     },
     close,
   };
 }
+/** The work limits a settlement's state normalizes within. */
+const SETTLEMENT_NORMALIZATION_POLICY: OrderedLiveUpdateCutPolicy = Object.freeze({
+  maxStructVisits: 1_000_000,
+  maxValueNodeVisits: 5_000_000,
+  maxDecodedPayloadByteVisits: 100_000_000,
+  maxStructClientGroupVisits: 1_000_000,
+  maxDeleteClientGroupVisits: 1_000_000,
+  maxDeleteIntervalVisits: 1_000_000,
+  maxIndexOperations: 10_000_000,
+});
 
 export const liveValidation = createLiveValidationExecutor();

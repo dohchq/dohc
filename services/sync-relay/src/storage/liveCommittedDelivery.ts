@@ -1,5 +1,6 @@
 import {SETTLEMENT_CUTS} from "./hostedSettlementSchema";
 import {restorePublicationFits,restorePublicationReservation} from "./hostedSettlement";
+import {liveValidation} from "../liveValidation";
 import {relayError} from "../errors";
 import {nativeSourceAuthorMatches} from "./liveNativeSourceAuthors";
 import {parseNativeRestoreApplicationReceipt,parseNativeRestoreSettlementReceipt,parseNativeRestoreResumeReceipt,type RestoreLifecycle,type NativeRestoreApplicationReceipt,type NativeRestoreSettlementReceipt,type NativeRestoreResumeReceipt} from "../liveRestoreLifecycle";
@@ -1435,6 +1436,10 @@ export class LiveCommittedDeliveryStore {
     const checkpointDigest=createHash("sha256").update(checkpointBytes).digest("hex"),at=authorityInteger(now);
     const {fence,point,nativeSourceManifestDigest}=capture.receipt,document=journalDocument({workspaceId:fence.operation.oldBinding.workspaceId,mainVersionId:fence.operation.oldBinding.mainVersionId,objectId:fence.operation.oldBinding.objectId,lineageClaimId:fence.operation.oldBinding.lineageClaimId});
     const binding=parseLiveObjectBinding({...fence.operation.oldBinding,restoreFenceGeneration:fence.operation.newFence});
+    // The restore's publication normalizes its checkpoint within a settlement's limits, which can be lower than admission's.
+    if (!liveValidation.settlementFits({document,currentPath:binding.currentPath,checkpoint:checkpointBytes})) {
+      throw relayError("payload_too_large","The server can't confirm this restore: the restored file is too large for it to check. Decline this restore.");
+    }
     const sourceRanges:RestoreSourceRange[]=[];
     const known=[...validated.content.acceptedCheckpointRanges,...capture.accepted.events.flatMap(event=>event.metadata.firstSeen)]
       .sort((a,b)=>a.clientId-b.clientId || a.startClock-b.startClock);

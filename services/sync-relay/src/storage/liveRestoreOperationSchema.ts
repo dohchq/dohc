@@ -8,7 +8,7 @@ const marker = "live-restore-operation-v1";
 // Adds the declined phase. The phase is final, like resumed, so neither counts
 // as the document's unfinished restore.
 const declinedMarker = "live-restore-declined-v1";
-// Adds a lifecycle's publication reservation and its refused publication.
+// Adds a lifecycle's publication reservation and its generation's refused settlements.
 const publicationMarker = "live-restore-publication-v1";
 const safe = Number.MAX_SAFE_INTEGER;
 /** Where a restore no longer blocks another restore of its document. */
@@ -88,11 +88,12 @@ export const LIVE_RESTORE_LIFECYCLES_V1_SQL = `CREATE TABLE ${LIVE_RESTORE_LIFEC
     ${lifecycleColumns}
     ${lifecycleKeys}`;
 // The publication reservation funds the restore's settlement binding and log
-// row until its publication lands. A refused publication needs repair.
+// row until its publication lands. The refused terminal cursor is the furthest
+// row a refused settlement at the restore's generation reached, or 0.
 const lifecyclesSql = `CREATE TABLE ${LIVE_RESTORE_LIFECYCLES} (
     ${lifecycleColumns}
     publication_reservation_bytes INTEGER NOT NULL DEFAULT 0 CHECK (publication_reservation_bytes BETWEEN 0 AND ${safe}),
-    publication_refused INTEGER NOT NULL DEFAULT 0 CHECK (publication_refused IN (0,1)),
+    refused_terminal_cursor INTEGER NOT NULL DEFAULT 0 CHECK (refused_terminal_cursor BETWEEN 0 AND ${safe}),
     ${lifecycleKeys}`;
 const schema = {
   [LIVE_RESTORE_OPERATIONS]: operationsSql,

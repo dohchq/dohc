@@ -3,7 +3,6 @@ import {maximumBindingBytes, nativeSettlementId, prepareHostedSettlements, resto
 import {appendValidatedLiveJournal, assertJournalCheckpointPosition, readReplicaLiveJournal, decodeJournalRow} from "../../../services/sync-relay/src/storage/liveUpdateJournal.js";
 import {acrossDeclinedRestores, MAX_DECLINED_GENERATIONS} from "../../../services/sync-relay/src/storage/liveRestoreLifecycleStorage.js";
 import {RestoreHistoryBudget} from "../../../services/sync-relay/src/storage/liveAcceptedHistory.js";
-import {MAX_PAYLOAD_JSON_BYTES} from "../../../services/sync-relay/src/wireLimits.js";
 import {verifyRestoreCheckpoint} from "../../../services/sync-relay/src/storage/liveRestoreCheckpoint.js";
 import {stableJsonStringify} from "../../../services/sync-relay/src/canonicalJson.js";
 import {initialAcceptedHistoryDigest} from "../../../services/sync-relay/src/liveAcceptedHistory.js";
@@ -1868,7 +1867,7 @@ function editAfterRestore(f: Pick<ReturnType<typeof admittedRestoreFixture>, "jo
   expect(accepted.result.kind).toBe("accepted");
   return accepted.admitted!.metadata.accepted.receipt.journalCursor;
 }
-const publicationRepair = "The server could not confirm the last restore of this file. Ask the server's operator to repair it before restoring again.";
+const publicationRepair = "The server could not confirm the latest changes to this file. Ask the server's operator to repair it before restoring again.";
 
 // Proves: a restore's publication its push ran out of proof budget for stays
 // mandatory. The push answers retryably and stores nothing, so it is neither
@@ -1909,15 +1908,120 @@ it("reports a refused restore publication as needing repair", async () => {
   const f = admittedRestoreFixture("owner", false);
   try {
     f.complete();
-    const publication = restorePublication(f, restoredState(f, f.admitted), f.admitted.admitted.accepted.receipt.journalCursor,
-      "refused-restore-publication", 0, hash(Buffer.from("not the baseline")));
+    const restored = f.admitted.admitted.accepted.receipt.journalCursor;
+    const publication = restorePublication(f, restoredState(f, f.admitted), restored, "refused-restore-publication", 0, hash(Buffer.from("not the baseline")));
     await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [publication.op]});
     expect(publication.op).toMatchObject({settlementAdmission: {status: "refused"}});
     expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [publication.op]})).toMatchObject({inserted: 1});
-    expect(f.raw.prepare("SELECT publication_refused FROM sync_relay_live_restore_lifecycles").get()).toEqual({publication_refused: 1});
+    expect(f.raw.prepare("SELECT refused_terminal_cursor FROM sync_relay_live_restore_lifecycles").get()).toEqual({refused_terminal_cursor: restored});
     reshare(f, 6);
     expect(() => beginStopRestore(f.context, {...f.intent, operationId: "restore-b", expectedFence: 2, expectedGrantGeneration: 6}, 300)).toThrow(publicationRepair);
   } finally {f.close();}
+});
+
+// Proves: a proof normalization refuses for capacity gets the same answer on
+// every retry, so a single push publishing a restore is refused instead of
+// asked to retry, and the device's next op lands behind it. The next restore
+// says it needs repair until a later settlement publishes the restore.
+it("refuses a restore's publication whose state is over the normalization limits", async () => {
+  const f = admittedRestoreFixture("owner", false), normalize = vi.spyOn(liveValidation, "normalizeSettlement");
+  try {
+    f.complete();
+    const restored = f.admitted.admitted.accepted.receipt.journalCursor;
+    const publication = restorePublication(f, restoredState(f, f.admitted), restored, "oversized-restore-publication");
+    normalize.mockResolvedValueOnce({kind: "refused", reason: "capacity-refused", source: "call"});
+    await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [publication.op]});
+    expect(publication.op).toMatchObject({settlementAdmission: {status: "refused"}});
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [publication.op]})).toMatchObject({inserted: 1});
+    reshare(f, 6);
+    const b = {...f.intent, operationId: "restore-b", expectedFence: 2, expectedGrantGeneration: 6};
+    expect(() => beginStopRestore(f.context, b, 300)).toThrow(publicationRepair);
+    await publishRestore(f, f.admitted, "restore-a-publication", 0, undefined, 1);
+    expect(beginStopRestore(f.context, b, 301).previousOperationId).toBe("restore");
+  } finally {normalize.mockRestore(); f.close();}
+});
+
+// Proves: once a restore's publication is refused, a later settlement whose
+// interval spans the restore's row and runs out of proof budget is refused,
+// not asked to retry, and the device's next op lands behind it.
+it("refuses an exhausted settlement across a restore whose publication was refused", async () => {
+  const f = admittedRestoreFixture("owner", false), doc = new Y.Doc({gc: false});
+  try {
+    f.complete();
+    const restored = f.admitted.admitted.accepted.receipt.journalCursor;
+    const refused = restorePublication(f, restoredState(f, f.admitted), restored, "refused-restore-publication", 0, hash(Buffer.from("not the baseline")));
+    await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [refused.op]});
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [refused.op]})).toMatchObject({inserted: 1});
+    Y.applyUpdate(doc, restoredState(f, f.admitted)); doc.getMap("frontmatter").set("after", "continued work");
+    const edited = editAfterRestore(f, doc, "after-restore");
+    const spanning = restorePublication(f, Y.encodeStateAsUpdate(doc), edited, "spanning-publication", 0, undefined, 1);
+    await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [spanning.op]}, new RestoreHistoryBudget(1, 65_536));
+    expect(spanning.op).toMatchObject({settlementAdmission: {status: "refused"}});
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [spanning.op]})).toMatchObject({inserted: 1});
+    const next = restorePublication(f, Y.encodeStateAsUpdate(doc), edited, "next-publication", 0, undefined, 2);
+    await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [next.op]});
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [next.op]})).toMatchObject({inserted: 1});
+  } finally {doc.destroy(); f.close();}
+});
+
+// Proves: when the newest refused settlement at a resumed restore's
+// generation reaches its last row, beginning or fencing the next restore says
+// it needs repair, with no later edit and across a restart. A settlement the
+// relay refuses and one past the push's proof budget both count.
+it.each([["begin", "refused"], ["fence", "refused"], ["begin", "over budget"]] as const)("reports an edit's unsettleable interval after a resumed restore as needing repair: %s, %s",
+  async (step, cause) => {
+    const first = admittedRestoreFixture("owner", false), doc = new Y.Doc({gc: false});
+    let f = first;
+    try {
+      first.complete();
+      const a = await publishRestore(f, first.admitted, "restore-a-publication"), restored = first.admitted.admitted.accepted.receipt.journalCursor;
+      reshare(f, 6);
+      const intent = {...f.intent, operationId: "restore-b", expectedFence: 2, expectedGrantGeneration: 6}, lookup = {...f.lookup, operationId: "restore-b"};
+      if (step === "fence") beginStopRestore(f.context, intent, 300);
+      Y.applyUpdate(doc, restoredState(f, first.admitted)); doc.getMap("frontmatter").set("after", "continued work");
+      const edited = editAfterRestore(f, doc, "after-restore");
+      const edits = restorePublication(f, Y.encodeStateAsUpdate(doc), edited, "edits-publication", restored,
+        cause === "refused" ? hash(Buffer.from("not the restore")) : a.markdownDigest, 1);
+      await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [edits.op]},
+        cause === "refused" ? undefined : new RestoreHistoryBudget(1, 65_536));
+      expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [edits.op]})).toMatchObject({inserted: 1});
+      expect(edits.op).toMatchObject({settlementAdmission: {status: "refused"}});
+      const next = () => step === "begin" ? beginStopRestore(f.context, intent, 301) : advanceStopRestoreFence(f.context, lookup, 301);
+      const operations = () => f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all(), before = operations();
+      expect(next).toThrow(publicationRepair);
+      f = restartRelay(first);
+      expect(next).toThrow(publicationRepair);
+      expect(operations()).toEqual(before);
+    } finally {doc.destroy(); f.close();}
+  });
+
+// Proves: a refused settlement stops counting once a later one covers its
+// row. After a refused publication of restore A, a covering one lands; an
+// edit after it then asks to try again, across a restart, and once the
+// edit's settlement lands the next restore begins.
+it("asks to try again for an edit after a refused publication is covered", async () => {
+  const first = admittedRestoreFixture("owner", false), doc = new Y.Doc({gc: false});
+  let f = first;
+  try {
+    first.complete();
+    const restored = first.admitted.admitted.accepted.receipt.journalCursor;
+    const refused = restorePublication(f, restoredState(f, first.admitted), restored, "refused-restore-publication", 0, hash(Buffer.from("not the baseline")));
+    await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [refused.op]});
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [refused.op]})).toMatchObject({inserted: 1});
+    const a = await publishRestore(f, first.admitted, "restore-a-publication", 0, undefined, 1);
+    Y.applyUpdate(doc, restoredState(f, first.admitted)); doc.getMap("frontmatter").set("after", "continued work");
+    const edited = editAfterRestore(f, doc, "after-restore");
+    reshare(f, 6);
+    const b = {...f.intent, operationId: "restore-b", expectedFence: 2, expectedGrantGeneration: 6};
+    expect(() => beginStopRestore(f.context, b, 300)).toThrow(publicationPending);
+    f = restartRelay(first);
+    expect(() => beginStopRestore(f.context, b, 301)).toThrow(publicationPending);
+    const edits = restorePublication(f, Y.encodeStateAsUpdate(doc), edited, "edits-publication", restored, a.markdownDigest, 2);
+    await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [edits.op]});
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [edits.op]})).toMatchObject({inserted: 1});
+    expect(edits.op).toMatchObject({settlementAdmission: {status: "accepted"}});
+    expect(beginStopRestore(f.context, b, 302).previousOperationId).toBe("restore");
+  } finally {doc.destroy(); f.close();}
 });
 
 // Proves: the next fence waits for every row at the resumed restore's
@@ -2081,21 +2185,24 @@ it("funds a restore's publication at admission and releases it once with its bin
     expect(second.op).toMatchObject({settlementAdmission: {status: "refused"}});
     const refused = f.storage.fetchLogCoordinate({workspaceId: "workspace", originId: "second", originSeq: 0})!;
     expect(held()).toEqual({bytes: 0, accounted_bytes: Number(before.held.accounted_bytes) - reservation});
-    expect(f.raw.prepare("SELECT publication_refused FROM sync_relay_live_restore_lifecycles").get()).toEqual({publication_refused: 0});
+    expect(f.raw.prepare("SELECT refused_terminal_cursor FROM sync_relay_live_restore_lifecycles").get()).toEqual({refused_terminal_cursor: cursor});
     expect(usage()).toBe(after + Buffer.byteLength(refused.payloadJson) + Buffer.byteLength(JSON.stringify(refused.settlementAdmission)));
     expect(f.store.readStopRestoreLifecycle(f.input)!.phase).toBe("resumed");
   } finally {f.close();}
 });
 
-// Proves: a restore publication that would charge more than admission held
-// is refused before anything is released: here a moment over the log payload
-// limit, which the log route never admits.
-it("refuses a restore publication over its payload limit without releasing its reserve", async () => {
+// Proves: a restore publication is bounded by what admission actually holds,
+// not by the largest binding its own binding could store. With less held than
+// its binding and log row charge, as a reservation computed from a smaller
+// binding would be, it is refused before anything is released.
+it("refuses a restore publication that would charge more than admission held", async () => {
   const f = admittedRestoreFixture("owner", false);
   try {
     f.complete();
-    const publication = restorePublication(f, restoredState(f, f.admitted), f.admitted.admitted.accepted.receipt.journalCursor, "oversized-publication");
-    publication.op.payloadJson = stableJsonStringify({...publication.payload, padding: "x".repeat(MAX_PAYLOAD_JSON_BYTES)});
+    const reservation = restorePublicationReservation("restore-test", f.admitted.admitted.accepted.binding);
+    f.raw.prepare("UPDATE sync_relay_live_restore_lifecycles SET accounted_bytes=accounted_bytes-publication_reservation_bytes+1,publication_reservation_bytes=1").run();
+    f.raw.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-? WHERE workspace_id='workspace'").run(reservation - 1);
+    const publication = restorePublication(f, restoredState(f, f.admitted), f.admitted.admitted.accepted.receipt.journalCursor, "overcharged-publication");
     await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [publication.op]});
     expect(publication.op).toMatchObject({settlementAdmission: {status: "accepted"}});
     const held = () => f.raw.prepare("SELECT publication_reservation_bytes,accounted_bytes FROM sync_relay_live_restore_lifecycles").get(), before = held();
@@ -2847,6 +2954,68 @@ it.each(["decline", "admission"] as const)("lets exactly one of Decline and admi
   } finally {f.close();}
 });
 
+// Proves: admission checks the restored checkpoint within the limits its
+// publication normalizes under, here lowered to the struct visits that
+// checkpoint needs. At that limit the restore is admitted; one below it,
+// admission stores nothing and the restore can still be declined.
+it.each(["at", "over"] as const)("admits a restore only if its checkpoint normalizes within the publication limits: %s", limit => {
+  const f = contentProposalFixture("owner", "device");
+  const normalizes = (input: Parameters<typeof liveValidation.settlementFits>[0], maxStructVisits: number) =>
+    createLiveMarkdownRegistrationValidator({...policy, maxStructVisits})(input);
+  // The fewest struct visits the checkpoint normalizes within.
+  const needed = (input: Parameters<typeof liveValidation.settlementFits>[0]) => {
+    let low = 1, high = policy.maxStructVisits;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (normalizes(input, middle).kind === "accepted") high = middle; else low = middle + 1;
+    }
+    return low;
+  };
+  const fits = vi.spyOn(liveValidation, "settlementFits").mockImplementation(input => {
+    const result = normalizes(input, needed(input) - (limit === "over" ? 1 : 0));
+    return result.kind === "accepted" || result.reason !== "capacity-refused";
+  });
+  try {
+    const proposed = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200), before = lifecycleRows(f);
+    const admit = () => f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201);
+    if (limit === "at") {
+      expect(admit().phase).toBe("relay-admitted");
+      const checkpoint = f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE restore_operation_id IS NOT NULL").get()!;
+      expect(fits.mock.calls.map(([input]) => Buffer.from(input.checkpoint))).toEqual([Buffer.from(checkpoint.validation_checkpoint_bytes as Uint8Array)]);
+      return;
+    }
+    let refusal: unknown;
+    try {admit();} catch (error) {refusal = error;}
+    expect(refusal).toMatchObject({code: "payload_too_large",
+      message: "The server can't confirm this restore: the restored file is too large for it to check. Decline this restore."});
+    expect(lifecycleRows(f)).toEqual(before);
+    expect(declineStopRestore(f.context, f.lookup, 202).phase).toBe("native-fenced");
+  } finally {fits.mockRestore(); f.close();}
+});
+
+// Proves: admission refuses a restore whose publication one push could not
+// prove, here with that proof's event limit lowered to none. It stores
+// nothing, and the restore can still be declined.
+it("refuses a restore whose publication proof would pass a push's budget", () => {
+  const f = contentProposalFixture("owner", "device"), charge = RestoreHistoryBudget.prototype.chargeEvents;
+  let measured = false;
+  // Only the publication proof admission measures starts at a push's event limit.
+  const lowered = vi.spyOn(RestoreHistoryBudget.prototype, "chargeEvents").mockImplementation(function (this: RestoreHistoryBudget, value: number) {
+    if (this.events === SETTLEMENT_PUSH_MAX_METADATA_EVENTS) {this.events = 0; measured = true;}
+    charge.call(this, value);
+  });
+  try {
+    const proposed = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200), before = lifecycleRows(f);
+    let refusal: unknown;
+    try {f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201);} catch (error) {refusal = error;}
+    expect(refusal).toMatchObject({code: "payload_too_large",
+      message: "The server can't confirm this restore: too many changes to this file haven't been confirmed yet. Decline this restore."});
+    expect(measured).toBe(true);
+    expect(lifecycleRows(f)).toEqual(before);
+    expect(declineStopRestore(f.context, f.lookup, 202).phase).toBe("native-fenced");
+  } finally {lowered.mockRestore(); f.close();}
+});
+
 // Proves: a store from before the declined phase opens with every restore
 // row, lifecycle, proposal, source range and journal reference as it was,
 // though foreign keys stay on while its tables move.
@@ -2867,7 +3036,7 @@ it("migrates a store from before the declined phase without changing its restore
     expect(before.sources.length).toBeGreaterThan(0);
     expect(before.journal.some(row => row.restore_operation_id === "restore")).toBe(true);
     layOutEarlierRestoreStore(db, [["sync_relay_live_restore_operations", LIVE_RESTORE_OPERATIONS_V1_SQL, ["declined_at_ms"]],
-      ["sync_relay_live_restore_lifecycles", LIVE_RESTORE_LIFECYCLES_V1_SQL, ["publication_reservation_bytes", "publication_refused"]]],
+      ["sync_relay_live_restore_lifecycles", LIVE_RESTORE_LIFECYCLES_V1_SQL, ["publication_reservation_bytes", "refused_terminal_cursor"]]],
     [LIVE_RESTORE_ACTIVE_V1_SQL], ["live-restore-declined-v1", "live-restore-publication-v1"]);
     // The relay migrates inside its schema transaction, with foreign keys on.
     db.exec("BEGIN IMMEDIATE"); initializeLiveRestoreOperationSchema(db); db.exec("COMMIT");
@@ -2890,12 +3059,12 @@ it("migrates a store from before publication funding without changing its restor
     db.exec("UPDATE sync_relay_live_restore_lifecycles SET accounted_bytes=accounted_bytes-publication_reservation_bytes,publication_reservation_bytes=0");
     const snapshot = () => ({lifecycles: rows("sync_relay_live_restore_lifecycles"), sources: rows("sync_relay_live_restore_source_ranges")}), before = snapshot();
     expect(before.sources.length).toBeGreaterThan(0);
-    layOutEarlierRestoreStore(db, [["sync_relay_live_restore_lifecycles", LIVE_RESTORE_LIFECYCLES_V1_SQL, ["publication_reservation_bytes", "publication_refused"]]],
+    layOutEarlierRestoreStore(db, [["sync_relay_live_restore_lifecycles", LIVE_RESTORE_LIFECYCLES_V1_SQL, ["publication_reservation_bytes", "refused_terminal_cursor"]]],
       [], ["live-restore-publication-v1"]);
-    expect(db.prepare("SELECT name FROM pragma_table_info('sync_relay_live_restore_lifecycles') WHERE name LIKE 'publication_%'").all()).toEqual([]);
+    expect(db.prepare("SELECT name FROM pragma_table_info('sync_relay_live_restore_lifecycles') WHERE name IN ('publication_reservation_bytes','refused_terminal_cursor')").all()).toEqual([]);
     db.exec("BEGIN IMMEDIATE"); initializeLiveRestoreOperationSchema(db); db.exec("COMMIT");
     expect(snapshot()).toEqual(before);
-    expect(before.lifecycles).toMatchObject([{publication_reservation_bytes: 0, publication_refused: 0}]);
+    expect(before.lifecycles).toMatchObject([{publication_reservation_bytes: 0, refused_terminal_cursor: 0}]);
     expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(f.store.readStopRestoreLifecycle(f.input)!.phase).toBe("resumed");
     expect(() => initializeLiveRestoreOperationSchema(db)).not.toThrow();
