@@ -14,6 +14,7 @@ import { deferred } from "../../testing/deferred";
 import { useEffect, useRef } from "react";
 import { Overlay } from "../Overlay";
 import { switchModalRegion } from "../modalFocus";
+import { captureOrphanedDraft, resetOrphanedDrafts } from "../orphanedDrafts";
 
 it("offers Discard as a separate toast action without dismissing the Notice",()=>{
   const action=vi.fn();const hide=vi.fn();render(<WorkspaceErrorToast error={{id:"typing",message:"Kept typing",details:"",atMs:0,canRetry:false,seen:false,actionLabel:"Copy your typing",additionalActionLabels:["Discard your typing"]}} onAction={action} onHide={hide}/>);
@@ -1991,6 +1992,7 @@ describe("notices sent to you", () => {
     afterEach(() => {
       vi.useRealTimers();
       vi.restoreAllMocks();
+      resetOrphanedDrafts();
     });
 
     it("reads a row the pointer rests on, not one it crosses", () => {
@@ -2051,6 +2053,69 @@ describe("notices sent to you", () => {
       rerender(noticeElement({ ...errorProps(onHideWorkspaceError), workspaceErrors: [] }));
       rerender(noticeElement(errorProps(onHideWorkspaceError)));
       expect(screen.getByTestId("notice-e1-unread")).toBeTruthy();
+    });
+
+    it("reads a row's words as they are when the rest ends", () => {
+      const onHideWorkspaceError = vi.fn();
+      const { rerender } = renderNotices(errorProps(onHideWorkspaceError));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      fireEvent.pointerEnter(screen.getByTestId("notice-e1"));
+      act(() => vi.advanceTimersByTime(300));
+      const [, second] = errorProps().workspaceErrors;
+      rerender(noticeElement({
+        ...errorProps(onHideWorkspaceError),
+        workspaceErrors: [{ ...error, message: "dohc could not save Trip/day-3.md." }, second!],
+      }));
+      act(() => vi.advanceTimersByTime(300));
+      expect(onHideWorkspaceError).toHaveBeenCalledExactlyOnceWith("e1");
+      expect(screen.queryByTestId("notice-e1-unread")).toBeNull();
+    });
+
+    it("reads a row once when the pointer and focus both rest on it", () => {
+      const onReadSentNotice = vi.fn();
+      renderNotices({ sentNotices: [sentRow("a")], onReadSentNotice });
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      act(() => screen.getByTestId("sent-notice-a").focus());
+      act(() => vi.advanceTimersByTime(100));
+      fireEvent.pointerEnter(screen.getByTestId("sent-notice-a"));
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(onReadSentNotice).toHaveBeenCalledOnce();
+    });
+
+    it("keeps an updater error's toast closed once its row is read", () => {
+      renderNotices({ onOpenSettings: vi.fn() });
+      act(() => pushUpdate?.({
+        status: "error",
+        message: "dohc could not check for updates. Try again.",
+        currentVersion: "1.2.2",
+        channel: "latest",
+        canCheck: true,
+        canInstall: false,
+      }));
+      expect(screen.getByTestId("update-toast")).toBeTruthy();
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      fireEvent.pointerEnter(screen.getByTestId("notice-update-error"));
+      act(() => vi.advanceTimersByTime(600));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.queryByTestId("update-toast")).toBeNull();
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      expect(screen.getByTestId("notice-update-error")).toBeTruthy();
+    });
+
+    it("counts a different set-aside edit as unread, even at the same count", async () => {
+      captureOrphanedDraft("ws-status-test", "a.md", "Kept!");
+      renderNotices();
+      await act(async () => {});
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      fireEvent.pointerEnter(screen.getByTestId("notice-set-aside-edits"));
+      act(() => vi.advanceTimersByTime(600));
+      expect(screen.queryByTestId("notice-set-aside-edits-unread")).toBeNull();
+
+      await act(async () => {
+        resetOrphanedDrafts();
+        captureOrphanedDraft("ws-status-test", "b.md", "Kept too!");
+      });
+      expect(screen.getByTestId("notice-set-aside-edits-unread")).toBeTruthy();
     });
 
     it("opens clipped text in place", () => {

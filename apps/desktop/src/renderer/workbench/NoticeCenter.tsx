@@ -192,6 +192,7 @@ const ROW_CONTROLS_CLASS = "ml-auto flex h-6 shrink-0 items-center gap-2";
 // tooltip would show.
 const READ_REST_MS = 600;
 
+type RestSource = "pointer" | "focus";
 type RestHandlers = Pick<HTMLAttributes<HTMLElement>, "onPointerEnter" | "onPointerLeave" | "onFocus" | "onBlur">;
 
 // A read row of this computer's is remembered by what it says, so one whose
@@ -890,11 +891,6 @@ export function NoticeCenter(props: {
     updateState?.status === "ready"
       ? `${updateState.version ?? "unknown"}:${updateState.message}`
       : null;
-  const updateToastVisible =
-    updateActionError !== null ||
-    (updateState?.status === "ready" &&
-      readyUpdateKey !== null &&
-      readyUpdateKey !== dismissedUpdateToastKey);
 
   // Derived from the status, never accumulated: a snapshot that repeats
   // itself renders the same notice, and delivery that recovers to active (or
@@ -1363,7 +1359,6 @@ export function NoticeCenter(props: {
         title: "Update ready",
         body: updateActionError ?? updateState.message,
         ...(updateState.installCommand ? { command: updateState.installCommand } : {}),
-        ...(readyUpdateKey ? { onRead: () => setDismissedUpdateToastKey(readyUpdateKey) } : {}),
         ...(updateState.canInstall
           ? {
               actions: [{
@@ -1429,7 +1424,6 @@ export function NoticeCenter(props: {
     refusalsKey,
     installPending,
     installUpdate,
-    readyUpdateKey,
     updateActionError,
     updateState,
   ]);
@@ -1449,7 +1443,9 @@ export function NoticeCenter(props: {
   // This computer's rows read in this window. A row that goes and comes back
   // is unread again.
   const [localRead, setLocalRead] = useState<ReadonlySet<string>>(new Set());
-  const setAsideKey = recoveryRows.length > 0 ? JSON.stringify([props.workspaceId, "set-aside", recoveryRows.length]) : null;
+  const setAsideKey = recoveryRows.length > 0
+    ? JSON.stringify([props.workspaceId, "set-aside", recoveryRows.map((row) => [row.path, row.draft.id])])
+    : null;
   useEffect(() => {
     const present = new Set(notices.map((notice) => localReadKey(props.workspaceId, notice)));
     if (setAsideKey !== null) present.add(setAsideKey);
@@ -1461,6 +1457,10 @@ export function NoticeCenter(props: {
   const unreadNotices = notices.filter((notice) => !localRead.has(localReadKey(props.workspaceId, notice)));
   const setAsideUnread = setAsideKey !== null && !localRead.has(setAsideKey);
   const unreadLocal = unreadNotices.length + (setAsideUnread ? 1 : 0);
+  // The update toast closes once its row is read.
+  const updateRow = notices.find((notice) => notice.id === "update-ready" || notice.id === "update-error");
+  const updateToastVisible = updateRow !== undefined && unreadNotices.includes(updateRow) &&
+    (updateActionError !== null || readyUpdateKey !== dismissedUpdateToastKey);
   // Every row counts until it is read.
   const count = unreadLocal + unreadSent;
   const canReadAll = unreadLocal > 0 || (unreadSent > 0 && props.onReadAllSentNotices !== undefined);
@@ -1474,10 +1474,24 @@ export function NoticeCenter(props: {
     });
     for (const row of rows) row.onRead?.();
   };
-  // The row the pointer rests on and the row holding focus, each with the
-  // read it waits to make. Closing the panel makes none.
-  const rests = useRef<Record<"pointer" | "focus", { key: string; timer: ReturnType<typeof setTimeout> } | null>>({ pointer: null, focus: null });
-  const stopRest = (by: "pointer" | "focus") => {
+  // How to read each unread row as it is now, by a name that stays with the
+  // row while its words change. A rest that ends reads what the row says then.
+  const readers = new Map<string, () => void>();
+  for (const notice of unreadNotices) readers.set(`local:${notice.id}`, () => readLocal([notice], false));
+  if (setAsideUnread) readers.set("set-aside", () => readLocal([], true));
+  for (const { notice } of sentNotices) {
+    if (notice.readAtMs === null && props.onReadSentNotice) {
+      readers.set(`sent:${sentKey(sentAccount, notice)}`, () => props.onReadSentNotice?.(notice));
+    }
+  }
+  const latestReaders = useRef(readers);
+  useLayoutEffect(() => {
+    latestReaders.current = readers;
+  });
+  // The row the pointer rests on and the row holding focus, each waiting to
+  // be read. Closing the panel reads neither.
+  const rests = useRef<Record<RestSource, { row: string; timer: ReturnType<typeof setTimeout> } | null>>({ pointer: null, focus: null });
+  const stopRest = (by: RestSource) => {
     const rest = rests.current[by];
     if (rest) clearTimeout(rest.timer);
     rests.current[by] = null;
@@ -1491,19 +1505,21 @@ export function NoticeCenter(props: {
       current.focus = null;
     };
   }, [open]);
-  const restReads = (key: string, read: (() => void) | null): RestHandlers | undefined => {
-    if (!read) return undefined;
-    const start = (by: "pointer" | "focus") => {
-      if (rests.current[by]?.key === key) return;
+  const restReads = (row: string): RestHandlers => {
+    const start = (by: RestSource) => {
+      if (rests.current[by]?.row === row) return;
       stopRest(by);
       const timer = setTimeout(() => {
         rests.current[by] = null;
-        read();
+        // One read per rest, even when the pointer and focus both wait on the row.
+        const other = by === "pointer" ? "focus" : "pointer";
+        if (rests.current[other]?.row === row) stopRest(other);
+        latestReaders.current.get(row)?.();
       }, READ_REST_MS);
-      rests.current[by] = { key, timer };
+      rests.current[by] = { row, timer };
     };
-    const end = (by: "pointer" | "focus") => {
-      if (rests.current[by]?.key === key) stopRest(by);
+    const end = (by: RestSource) => {
+      if (rests.current[by]?.row === row) stopRest(by);
     };
     return {
       onPointerEnter: () => start("pointer"),
@@ -1964,7 +1980,7 @@ export function NoticeCenter(props: {
               {recoveryRows.length > 0 ? (
                 <section
                   data-testid="notice-set-aside-edits"
-                  {...restReads(setAsideKey ?? "", setAsideUnread ? () => readLocal([], true) : null)}
+                  {...restReads("set-aside")}
                   className="flex gap-2 border-b border-line px-3 py-2"
                 >
                   <UnreadMark unread={setAsideUnread} testId="notice-set-aside-edits-unread" className="h-4" />
@@ -1987,7 +2003,7 @@ export function NoticeCenter(props: {
                   key={notice.id}
                   notice={notice}
                   unread={unreadNotices.includes(notice)}
-                  rest={restReads(localReadKey(props.workspaceId, notice), unreadNotices.includes(notice) ? () => readLocal([notice], false) : null)}
+                  rest={restReads(`local:${notice.id}`)}
                   onKeyDown={rowKeys({
                     open: firstAction(notice),
                     dismiss: notice.onDismiss,
@@ -2041,7 +2057,7 @@ export function NoticeCenter(props: {
                           data-notice-row=""
                           tabIndex={-1}
                           onKeyDown={rowKeys({ open: openNotice, dismiss: dismissNotice })}
-                          {...restReads(key, unread && props.onReadSentNotice ? () => props.onReadSentNotice?.(notice) : null)}
+                          {...restReads(`sent:${key}`)}
                           className={ROW_CLASS}
                         >
                           <UnreadMark unread={unread} testId={`sent-notice-${notice.noticeId}-unread`} />
