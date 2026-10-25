@@ -36,6 +36,7 @@ const callbacks = {
 };
 const SYNCED: AccessFacts = { cloud: { connected: true, workspaceSynced: true, workspaceSyncConnected: true }, shareView: false };
 const SIGNED_OUT: AccessFacts = { cloud: { connected: false, workspaceSynced: true, workspaceSyncConnected: false }, shareView: false };
+const NOT_SYNCED: AccessFacts = { cloud: { connected: false, workspaceSynced: false, workspaceSyncConnected: false }, shareView: false };
 const contexts = new Map<AccessFacts, { facts: AccessFacts; openSyncSettings: () => void; connect: () => void }>();
 function contextFor(facts: AccessFacts) {
   let context = contexts.get(facts);
@@ -203,13 +204,24 @@ describe("the Sharing view's two lists", () => {
     await waitFor(() => expect(bridgeMock.requestAccessRefresh).toHaveBeenCalledTimes(2));
   });
 
-  it("asks a signed-out person to connect their server", async () => {
+  // Shared with me lists what others share with the account, so it says what
+  // signing in shows. Shared by me keeps About's words for who has access.
+  const SHARED_WITH_ME = "Connect a server to see what others share with you.";
+  it.each([
+    ["signed out", "granted", SIGNED_OUT, "signed-out", "Connect your server to check who has access.", "Connect server", "connect"],
+    ["signed out", "received", SIGNED_OUT, "signed-out", SHARED_WITH_ME, "Connect server", "connect"],
+    ["not synced", "granted", NOT_SYNCED, "not-synced", "Shares need sync, and this workspace does not sync.", "Sync and sharing", "openSyncSettings"],
+    ["not synced", "received", NOT_SYNCED, "signed-out", SHARED_WITH_ME, "Connect server", "connect"],
+    ["signed in", "received", SYNCED, "unexplained",
+      "Access information is unavailable for your account. This does not mean that nothing is shared with you.", "Try again", null],
+  ] as const)("when %s, the %s list says why it is unknown in its own words", async (_, lane, facts, reason, words, label, action) => {
     answerWith({ granted: UNKNOWN("granted"), received: UNKNOWN("received") });
-    render(<View facts={SIGNED_OUT} />);
-    const unknown = await screen.findByTestId("sharing-received-unknown");
-    expect(unknown.getAttribute("data-reason")).toBe("signed-out");
-    await userEvent.click(within(unknown).getByRole("button", { name: "Connect server" }));
-    expect(callbacks.connect).toHaveBeenCalledOnce();
+    render(<View facts={facts} />);
+    const unknown = await screen.findByTestId(`sharing-${lane}-unknown`);
+    expect(unknown.getAttribute("data-reason")).toBe(reason);
+    expect(unknown.querySelector("p")?.textContent).toBe(words);
+    await userEvent.click(within(unknown).getByRole("button", { name: label }));
+    if (action) expect(callbacks[action]).toHaveBeenCalledOnce();
   });
 
   it("files a failed read in Notices and reads again from Try again", async () => {

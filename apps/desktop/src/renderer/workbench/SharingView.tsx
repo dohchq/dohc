@@ -22,6 +22,7 @@ import {
   accessReasonForLane,
   AccessUnknown,
   LEVELS,
+  SIGNED_OUT_ACCESS,
   useSectionRead,
   type AboutNotices,
   type AccessContext,
@@ -56,13 +57,17 @@ const LANE = {
     scope: "for this workspace",
     empty: "No shares from this workspace. Right-click a file and choose Share… to share it.",
     unexplained: "Access information is unavailable for this workspace. This does not mean that nothing is shared.",
+    signedOut: SIGNED_OUT_ACCESS,
     failed: "dohc could not check the shares from this workspace.",
   },
+  // What others shared with the account. It needs a signed-in account, never
+  // this workspace's sync, so signed out is the only cause it names.
   received: {
     label: "Shared with me",
     scope: "for your account",
     empty: "No shares to your account.",
     unexplained: "Access information is unavailable for your account. This does not mean that nothing is shared with you.",
+    signedOut: "Connect a server to see what others share with you.",
     failed: "dohc could not check the shares to your account.",
   },
 } as const;
@@ -546,7 +551,7 @@ function Section(props: {
           <div data-testid={`sharing-${lane}-answer`} data-freshness={view.answer.freshness} data-coverage={view.answer.coverage.kind}>
             {!known ? (
               <>
-                <AccessUnknown testId={`sharing-${lane}`} unexplained={words.unexplained} answer={view.answer}
+                <AccessUnknown testId={`sharing-${lane}`} unexplained={words.unexplained} signedOut={words.signedOut} answer={view.answer}
                   setup={props.setup} onRetry={() => actions.retry(lane)} />
                 {localList}
               </>

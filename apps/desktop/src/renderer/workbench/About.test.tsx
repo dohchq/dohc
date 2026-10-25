@@ -290,6 +290,16 @@ describe("About Access", () => {
     expect(action).toHaveBeenCalledTimes(1);
   });
 
+  it("asks who has access to a file shared here, not what others share", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(UNKNOWN);
+    render(<Access path="shared-with-me/alex/notes.md" facts={SIGNED_OUT} />);
+    const unknown = await screen.findByTestId("about-access-unknown");
+    expect(unknown.dataset.reason).toBe("signed-out");
+    expect(unknown.querySelector("p")?.textContent).toBe("Connect your server to check who has access.");
+    await userEvent.setup().click(within(unknown).getByRole("button", { name: "Connect server" }));
+    expect(connect).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     ["hidden", "Shares do not include this file."],
     ["missing", "This file is no longer available at this path."],
