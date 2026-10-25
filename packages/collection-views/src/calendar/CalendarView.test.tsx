@@ -161,6 +161,21 @@ describe("CalendarView", () => {
     expect(screen.queryByRole("button", { name: /^Go to/ })).toBeNull();
   });
 
+  it("measures from the grid's last day, so a record one day before it beats one two days after", () => {
+    // The August 2026 grid runs from 26 July to 5 September.
+    render(
+      <CalendarView schema={makeSchema()} records={[]} dateField="due" date={AUGUST} onNavigate={() => undefined} nearbyDates={["2026-09-07", "2026-07-25"]} />,
+    );
+    expect(screen.getByRole("button", { name: "Go to July 2026" })).toBeDefined();
+  });
+
+  it("offers the later record on a tie", () => {
+    render(
+      <CalendarView schema={makeSchema()} records={[]} dateField="due" date={AUGUST} onNavigate={() => undefined} nearbyDates={["2026-07-24", "2026-09-07"]} />,
+    );
+    expect(screen.getByRole("button", { name: "Go to September 2026" })).toBeDefined();
+  });
+
   it("offers the nearest of the dates a querying host found outside the month", () => {
     const onNavigate = vi.fn<(date: Date) => void>();
     render(

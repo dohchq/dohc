@@ -70,15 +70,16 @@ export function TransactionalCollectionViews(props: Props) {
       const result = await readPage({ ...base, limit: 50, range, ...(view.sort ? {sort:view.sort} : {}), ...(calendarPosition.after ? {after:{...calendarPosition.after}} : {}) });
       calendar = parseCalendarPage(result,fields.map(field=>field.fieldId),range);
       // An empty month reads the nearest record on each side, so the calendar can offer to go there.
-      // A read action that cannot answer leaves the offer out.
+      // If either read fails, the offer is left out, because that side might hold the closer record.
       const nearest = async (start: string, end: string, direction: "asc" | "desc") => {
         const outside = { fieldId: range.fieldId, start, end };
-        try {
-          const value = parseCalendarPage(await readPage({ ...base, limit: 1, range: outside, sort: { fieldId: range.fieldId, direction } }),fields.map(field=>field.fieldId),outside).rows[0]?.values[range.fieldId];
-          return typeof value === "string" ? [value] : [];
-        } catch { signal.throwIfAborted(); return []; }
+        const value = parseCalendarPage(await readPage({ ...base, limit: 1, range: outside, sort: { fieldId: range.fieldId, direction } }),fields.map(field=>field.fieldId),outside).rows[0]?.values[range.fieldId];
+        return typeof value === "string" ? [value] : [];
       };
-      if (!calendar.rows.length && !calendarPosition.after) nearby = (await Promise.all([nearest("0001-01-01",range.start,"desc"), nearest(range.end,"9999-12-31","asc")])).flat();
+      if (!calendar.rows.length && !calendarPosition.after) {
+        try { nearby = (await Promise.all([nearest("0001-01-01",range.start,"desc"), nearest(range.end,"9999-12-31","asc")])).flat(); }
+        catch { signal.throwIfAborted(); }
+      }
     } else {
       const field = fields.find(field=>field.fieldId===view.groupBy);
       if (!field) throw Error("Choose a readable field for this board.");

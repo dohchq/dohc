@@ -5,8 +5,9 @@ import type { CalendarProps } from "react-big-calendar";
 import withDragAndDrop from "react-big-calendar/lib/addons/dragAndDrop";
 import type { EventInteractionArgs } from "react-big-calendar/lib/addons/dragAndDrop";
 import { addMonths } from "date-fns/addMonths";
-import { addWeeks } from "date-fns/addWeeks";
+import { differenceInCalendarDays } from "date-fns/differenceInCalendarDays";
 import { endOfMonth } from "date-fns/endOfMonth";
+import { endOfWeek } from "date-fns/endOfWeek";
 import { format } from "date-fns/format";
 import { getDay } from "date-fns/getDay";
 import { isValid } from "date-fns/isValid";
@@ -91,14 +92,14 @@ function day(value: string): Date | null {
   return isValid(parsed) ? parsed : null;
 }
 
-/** The record day closest to the month grid around `month`, or null when the grid shows one. */
+/** The record day closest to the month grid around `month`, the later one on a tie, or null when the grid shows one. */
 function nearestDay(month: Date, days: readonly Date[]): Date | null {
-  const start = startOfWeek(startOfMonth(month)), end = startOfWeek(addWeeks(endOfMonth(month), 1));
+  const first = startOfWeek(startOfMonth(month)), last = endOfWeek(endOfMonth(month));
   let nearest: Date | null = null, distance = Infinity;
   for (const candidate of days) {
-    if (candidate >= start && candidate < end) return null;
-    const away = candidate < start ? start.getTime() - candidate.getTime() : candidate.getTime() - end.getTime();
-    if (away < distance) { nearest = candidate; distance = away; }
+    if (candidate >= first && candidate <= last) return null;
+    const away = candidate < first ? differenceInCalendarDays(first, candidate) : differenceInCalendarDays(candidate, last);
+    if (away < distance || (away === distance && nearest !== null && candidate > nearest)) { nearest = candidate; distance = away; }
   }
   return nearest;
 }

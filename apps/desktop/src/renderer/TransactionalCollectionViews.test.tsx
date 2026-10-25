@@ -119,6 +119,20 @@ it("reads the nearest record on each side of an empty month for the calendar to 
     [{fieldId:"date",start:expect.any(String),end:"9999-12-31"},{fieldId:"date",direction:"asc"}],
   ]);
 });
+it("leaves the offer out when only one side's read fails, since that side might be closer",async()=>{
+  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
+    const input=request.input as Record<string,AppBackendJson>,range=input.range as {fieldId:string;start:string;end:string};
+    if(input.limit!==1)return {result:{...empty,range}};
+    if(range.start==="0001-01-01")throw Error("The earlier read failed.");
+    return {result:{range,rows:[{id:7,version:1,values:{date:"2027-03-04"}}],nextCursor:null}};
+  });
+  const result=setup(invoke,calendar);
+  await screen.findByRole("button",{name:"January"});
+  await waitFor(()=>expect(invoke.mock.calls.filter(([request])=>(request.input as Record<string,AppBackendJson>).limit===1)).toHaveLength(2));
+  await act(async()=>{});
+  expect(screen.queryByText(/^Nearby/)).toBeNull();
+  expect(result.props.onError).not.toHaveBeenCalled();
+});
 it("leaves the offer out when the read action cannot find records outside the month",async()=>{
   const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
     const input=request.input as Record<string,AppBackendJson>;
