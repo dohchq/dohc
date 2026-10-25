@@ -1015,7 +1015,7 @@ impl EngineService {
         }
         let capture_phase = lock(&open.capture)
             .as_ref()
-            .map(|driver| driver.status().snapshot().phase)
+            .map(|driver| driver.status_snapshot().phase)
             .unwrap_or(capture_driver::CapturePhase::Ready);
         if probe.head_blob_sha256.is_none() && capture_phase != capture_driver::CapturePhase::Ready
         {
