@@ -106,15 +106,16 @@ const ROW_HEIGHT = 28;
 const NEAR_END_ROWS = 20;
 const helper = createColumnHelper<typeof TABLE_FEATURES, CollectionRecord>();
 
-function NewRecordRow(props: { disabled: boolean; onClick: () => void }) {
+function NewRecordRow(props: { disabled: boolean; openColumn: boolean; onClick: () => void }) {
   return (
     <div role="row" className="flex shrink-0">
+      {props.openColumn ? <div role="gridcell" style={{ width: OPEN_COLUMN_WIDTH }} /> : null}
       <div role="gridcell" className="flex-1">
         <button
           type="button"
           disabled={props.disabled}
           onClick={props.onClick}
-          className="flex h-8 w-full items-center gap-1.5 px-3 text-left text-[13px] text-subtle transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex h-8 w-full items-center gap-1.5 px-2 text-left text-[13px] text-subtle transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" aria-hidden>
             <path d="M5 12h14M12 5v14" />
@@ -347,7 +348,7 @@ export function TableView({
       </div>
       {records.length === 0 ? (
         onNewRecord ? (
-          <NewRecordRow disabled={editingDisabled} onClick={onNewRecord} />
+          <NewRecordRow disabled={editingDisabled} openColumn={Boolean(onOpenRecord)} onClick={onNewRecord} />
         ) : (
           <div className="px-3 py-4 text-sm text-muted">No records in this collection yet.</div>
         )
@@ -452,7 +453,7 @@ export function TableView({
               </fieldset>
             ) : null}
           </div>
-          {onNewRecord ? <NewRecordRow disabled={editingDisabled} onClick={onNewRecord} /> : null}
+          {onNewRecord ? <NewRecordRow disabled={editingDisabled} openColumn={Boolean(onOpenRecord)} onClick={onNewRecord} /> : null}
         </div>
       )}
     </div>

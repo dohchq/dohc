@@ -163,7 +163,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const openRecordRead = useRef<AbortController | null>(null);
   const detailsOpen = details !== null;
   useEffect(() => { if (!detailsOpen) setDetailsUnavailable(null); }, [detailsOpen]);
-  const editorForm = useRef<HTMLFormElement>(null), createRow = useRef<HTMLTableRowElement>(null);
+  const editorForm = useRef<HTMLFormElement>(null), createRow = useRef<HTMLTableRowElement>(null), addRow = useRef<HTMLButtonElement>(null);
   const [draft, setDraft] = useState<Record<string, AppBackendJson>>({});
   const [invalid, setInvalid] = useState<string | null>(null);
   const [pending, setPending] = useState<Mutation | null>(null);
@@ -177,7 +177,11 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const currentQuery = useRef(query); currentQuery.current = query;
   const loadedVersion = useRef(props.recordsVersion), changedVersion = useRef(props.recordsChanged);
   useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; sequence.current++; active.current?.abort(); readActive.current?.abort(); openRecordRead.current?.abort(); }; }, []);
-  useLayoutEffect(() => { if (editor) (createRow.current ?? editorForm.current)?.querySelector<HTMLElement>("input, select, button")?.focus(); }, [editor]);
+  useLayoutEffect(() => {
+    if (editor) (createRow.current ?? editorForm.current)?.querySelector<HTMLElement>("input, select, button")?.focus();
+    // Closing the table's New record row remounts its button, so focus moves to the new button when the opener is gone.
+    else if (trigger.current) { (trigger.current.isConnected ? trigger.current : addRow.current)?.focus(); trigger.current = null; }
+  }, [editor]);
 
   function request(operation: DatasetOperation, input: AppBackendJson, key: string): TransactionalInvoke {
     return { workspaceId, datasetId: dataset.datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256, operationId: operation.operationId, input, idempotencyKey: key };
@@ -329,7 +333,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     else void reread();
   }, [props.recordsChanged, busy, visualBusy, resourceBusy]);
 
-  function closeEditor(): void { setEditor(null); setInvalid(null); trigger.current?.focus(); }
+  function closeEditor(): void { setEditor(null); setInvalid(null); }
   const currentExecute = useRef(execute);
   useLayoutEffect(() => { currentExecute.current = execute; });
   async function execute(change: Mutation): Promise<void> {
@@ -358,6 +362,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   }
   function submitEditor(): void {
     if (!editor || locked.current || resourceLock.current || mutation.current) return;
+    // The row has no form to stop a value the browser rejects, such as a half-typed number.
+    if (createRow.current && !Array.from(createRow.current.querySelectorAll("input")).every(input => input.reportValidity())) return;
     const editable = editor.kind === "edit" ? [editor.field] : createFields;
     for (const field of editable) {
       const problem = inputProblem(field, draft[field.fieldId] ?? null);
@@ -457,7 +463,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       <thead className="sticky top-0 bg-bg"><tr>{fields.map(field => <th key={field.fieldId} scope="col" aria-sort={query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? "ascending" : "descending" : undefined} className="border-b border-line px-3 py-2 text-left font-medium text-muted">
         <span className="flex items-center gap-1.5">{supportsSort(field) ? <button type="button" disabled={readDisabled || editor !== null} className="flex items-center gap-1.5 text-left" onClick={() => void load({ ...query, after: null, sort: { fieldId: field.fieldId, direction: query.sort?.fieldId === field.fieldId && query.sort.direction === "asc" ? "desc" : "asc" } }, [])}><FieldTypeIcon type={field.type} />{field.name}{query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? " ↑" : " ↓" : ""}</button> : <><FieldTypeIcon type={field.type} />{field.name}</>}
         {props.fieldMarks?.has(field.name) ? <AutomationFieldMark automations={props.fieldMarks.get(field.name)!} /> : null}</span>
-      </th>)}{props.buttons?.fields.map(field => <th key={`button:${field}`} scope="col" className="border-b border-line px-3 py-2 text-left font-medium text-muted"><span className="block truncate">{field}</span></th>)}<th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
+      </th>)}{props.buttons?.fields.map(field => <th key={`button:${field}`} scope="col" className="border-b border-line px-3 py-2 text-left font-medium text-muted"><span className="block truncate">{field}</span></th>)}<th scope="col" className="border-b border-line"><span className="sr-only">Actions</span></th></tr></thead>
       <tbody>{page.rows.map(row => <tr key={JSON.stringify(row.id)} className="border-b border-line last:border-0 hover:bg-hover">{fields.map(field => {
         const edit = operations.find(operation => operation.kind === "edit" && !operation.readOnly && operation.fieldIds.includes(field.fieldId));
         const attachment = field.type === "attachment" && typeof row.values[field.fieldId] === "string" && props.readFile && !props.copy?.offline;
@@ -475,7 +481,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         <IconButton title="Create record" aria-label="Create record" disabled={disabled} onClick={submitEditor}><Check size={15} strokeWidth={1.9} aria-hidden /></IconButton>
       </div></td></tr> : null}
       {createInRow && invalid ? <tr><td colSpan={columns} role="alert" className="px-3 py-1.5 text-[12px] text-danger">{invalid}</td></tr> : null}
-      {canCreate && !createInRow ? <tr><td colSpan={columns} className="p-0"><button type="button" disabled={writeDisabled || editor !== null} className="flex h-9 w-full items-center gap-1.5 px-3 text-left text-[13px] text-subtle transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-50" onClick={event => openCreate(event.currentTarget)}><Plus size={14} strokeWidth={1.9} aria-hidden />New record</button></td></tr> : null}
+      {canCreate && !createInRow ? <tr><td colSpan={columns} className="p-0"><button ref={addRow} type="button" disabled={writeDisabled || editor !== null} className="flex h-9 w-full items-center gap-1.5 px-3 text-left text-[13px] text-subtle transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-50" onClick={event => openCreate(event.currentTarget)}><Plus size={14} strokeWidth={1.9} aria-hidden />New record</button></td></tr> : null}
     </tbody>
     </table></div> : null}
     {!visual && page && (page.rows.length > 0 || previous.length > 0) ? <footer className="flex items-center justify-between gap-2 text-[12px] text-muted"><span className="font-mono">{page.rows.length} {page.rows.length === 1 ? "record" : "records"} on this page</span><div className="flex gap-2"><IconButton aria-label="Previous" title="Previous page" disabled={readDisabled || editor !== null || previous.length === 0} onClick={() => void load({ ...query, after: previous.at(-1) ?? null }, previous.slice(0, -1))}><ChevronLeft size={16} strokeWidth={1.9} aria-hidden /></IconButton><IconButton aria-label="Next" title="Next page" disabled={readDisabled || editor !== null || page.nextCursor === null} onClick={() => void load({ ...query, after: page.nextCursor }, [...previous, query.after])}><ChevronRight size={16} strokeWidth={1.9} aria-hidden /></IconButton></div></footer> : null}

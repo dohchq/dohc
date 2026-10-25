@@ -386,11 +386,27 @@ describe("transactional Collection page", () => {
     expect(screen.queryByRole("form", { name: "New record" })).toBeNull();
     fireEvent.keyDown(within(row).getByLabelText("Name"), { key: "Escape" });
     expect(within(table).queryByLabelText("Name")).toBeNull();
+    expect(document.activeElement).toBe(within(table).getByRole("button", { name: "New record" }));
 
     fireEvent.click(within(table).getByRole("button", { name: "New record" }));
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bob" } });
     fireEvent.keyDown(screen.getByLabelText("Name"), { key: "Enter" });
     await waitFor(() => expect(invoke.mock.calls.find(([request]) => request.operationId === create)?.[0].input).toEqual({ values: { [name]: "Bob", [amount]: null, [status]: "New" } }));
+    await waitFor(() => expect(document.activeElement).toBe(within(table).getByRole("button", { name: "New record" })));
+  });
+
+  it("keeps the New record row open when the browser rejects a value, such as a half-typed number", async () => {
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({ result: request.operationId === read ? { rows: [], nextCursor: null } : { id: 1, version: 1 } }));
+    setup({ invoke });
+    const table = await screen.findByRole("table");
+    fireEvent.click(within(table).getByRole("button", { name: "New record" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bob" } });
+    // jsdom cannot hold a half-typed number, so the input reports the browser's rejection directly.
+    vi.spyOn(screen.getByLabelText<HTMLInputElement>("Amount"), "reportValidity").mockReturnValue(false);
+    fireEvent.keyDown(screen.getByLabelText("Name"), { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: "Create record" }));
+    expect(invoke.mock.calls.some(([request]) => request.operationId === create)).toBe(false);
+    expect(within(table).getByRole("row", { name: "New record" })).toBeTruthy();
   });
 
   it("keeps a refused edit draft editable and never treats it as an uncertain commit", async () => {
