@@ -285,7 +285,7 @@ function NoticeText(props: {
         id={`${id}-title`}
         title={props.title}
         onClick={openOnClick}
-        className={`min-w-0 py-1 whitespace-pre-line wrap-anywhere text-[12px] leading-4 ${props.titleClass}${open ? "" : " line-clamp-2"}${pointer}`}
+        className={`min-w-0 my-1 whitespace-pre-line wrap-anywhere text-[12px] leading-4 ${props.titleClass}${open ? "" : " line-clamp-2"}${pointer}`}
       >
         {props.title}
       </span>
