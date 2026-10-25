@@ -118,6 +118,7 @@ export function FieldDraftRow({
   relationTargets,
   disabled,
   types = FIELD_TYPES,
+  autoFocus,
 }: {
   draft: FieldDraft;
   onChange: (draft: FieldDraft) => void;
@@ -126,6 +127,7 @@ export function FieldDraftRow({
   disabled?: boolean;
   /** The field types to offer. */
   types?: readonly CollectionFieldType[];
+  autoFocus?: boolean;
 }) {
   return (
     <div className="flex flex-col gap-1.5">
@@ -134,6 +136,7 @@ export function FieldDraftRow({
           type="text"
           aria-label="Field name"
           placeholder="Field name"
+          autoFocus={autoFocus}
           disabled={disabled}
           value={draft.name}
           onChange={(event) => onChange({ ...draft, name: event.target.value })}
