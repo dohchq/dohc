@@ -176,6 +176,7 @@ impl RuntimeError {
                     }
                     ApplicationError::Interrupted => "operation-crashed",
                     ApplicationError::PublicationPending => "live-application-publication-pending",
+                    ApplicationError::RestoreRefused(_) => "native-restore-refused",
                     ApplicationError::MaterializationPending => {
                         "settlement-materialization-pending"
                     }

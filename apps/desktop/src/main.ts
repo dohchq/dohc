@@ -146,6 +146,7 @@ import {
   Menu,
   nativeImage,
   nativeTheme,
+  Notification,
   powerMonitor,
   protocol,
   safeStorage,
@@ -183,6 +184,7 @@ import {
   scheduleHostOperations,
   chatDispatchNoticeOperations,
   agentRunStateOperations,
+  chatDispatchPauseOperations,
   type ScheduleHostResult,
   type NoticeRef,
   type NoticeRow,
@@ -238,6 +240,7 @@ import {
 } from "./quitGuard";
 import { decideNavigation } from "./security/electronSecurity";
 import { createDesktopTray } from "./window/desktopTray";
+import { linuxTrayShown } from "./window/linuxTrayShown";
 import { createDesktopWindows } from "./window/desktopWindows";
 import { renderHtmlToPdf } from "./window/documentPdfExport";
 import {
@@ -3630,6 +3633,13 @@ const chatDispatchService = createChatDispatchService({
         });
     });
   },
+  // The tray and every window show the pause, wherever it changed.
+  onPausedChanged: (paused) => {
+    void refreshDispatchTray().catch((error) => console.error("[desktop] dispatch tray:", error));
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send(CHANNELS.chatDispatchPaused, { paused });
+    }
+  },
   onRunUpdated: (workspace) =>
     withWorkspaceAttachment(workspace, () =>
       notifyRenderer({ workspaceId: workspace.workspaceId }),
@@ -5190,11 +5200,12 @@ function broadcastUpdateState(state: PublicUpdateState): void {
   }
 }
 
-const { refreshDispatchTray, refreshTrayIcon, dispatchKeepsRunning } = createDesktopTray<
+const { refreshDispatchTray, refreshTrayIcon, dispatchKeepsRunning, noticeRunningInBackground } = createDesktopTray<
   ReturnType<typeof nativeImage.createFromPath>,
   ReturnType<typeof Menu.buildFromTemplate>
 >({
-  app, process, Menu, nativeImage, nativeTheme, Tray,
+  app, process, Menu, nativeImage, nativeTheme, Tray, Notification, linuxTrayShown,
+  hasWindow: () => BrowserWindow.getAllWindows().length !== 0,
   moduleDirectory: import.meta.dirname,
   readCachedUserSettingsFile, stateDir, chatDispatchService, showOrCreateMainWindow,
   runningSchedules: () => automationScheduler.runningSchedules(),
@@ -5932,6 +5943,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     },
     refreshTray: refreshDispatchTray,
     releaseIdleWorkspaces,
+    noticeRunningInBackground,
     reportTrayFailure: (error) => console.error("[desktop] dispatch tray:", error),
     warmCredentials: warmCredentialCache,
     reconcileCloud: () => { activity.reconcileCloud(); },
@@ -7443,6 +7455,11 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, chatDispatchNoticeOperations, {
     registerChatDispatchNotices: (input) => chatDispatchNotices.register(input.workspaceId),
     dismissChatDispatchNotice: (input) => chatDispatchNotices.dismiss(input.workspaceId, input.id),
+  });
+
+  registerOperations(operationBoundary, chatDispatchPauseOperations, {
+    readChatDispatchPaused: () => ({ paused: chatDispatchService.isPaused() }),
+    setChatDispatchPaused: ({ paused }) => chatDispatchService.setPaused(paused),
   });
 
   registerOperations(operationBoundary, agentRunStateOperations, {

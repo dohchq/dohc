@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
   createChatRunnerProcess,
+  readRunnerNodeAvailable,
   RUNNER_KILL_GRACE_MS,
   type RunnerProcess,
   type ChatRunnerProcessOptions,
@@ -83,10 +84,14 @@ function runNoticeTitle(outcome: RunOutcome, thread: string): string {
   return sentence([...thread].length <= room ? thread : `${[...thread].slice(0, room - 1).join("")}…`);
 }
 
-// A run that failed to start says why in its notice, and the start error
-// says what to do next. Other outcomes have no body. A body holds no control
-// characters, or the notice store would refuse it.
-function runNoticeBody(run: AgentRunRecord, outcome: RunOutcome): string {
+// A run that failed to start says why and what to do next.
+// A failed or no-reply run whose PATH had no node says replies need Node.js.
+// Other outcomes have no body. A body holds no control characters,
+// or the notice store would refuse it.
+function runNoticeBody(run: AgentRunRecord, outcome: RunOutcome, nodeAvailable?: boolean): string {
+  if ((outcome === "failed" || outcome === "no-reply") && nodeAvailable === false) {
+    return "Agent replies need Node.js. Install Node.js, restart dohc, then try again.";
+  }
   if (outcome !== "not-started" || !run.failureReason) return "";
   const reason = [...run.failureReason
     .slice(`${RUNNER_START_FAILURE}: `.length)
@@ -173,6 +178,7 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   // channel this message landed in instead of waiting for the sync rotation.
   onMessagePosted(workspace: ChatDispatchWorkspace, threadId: string): void;
   onRunUpdated?(workspace: ChatDispatchWorkspace): void;
+  onPausedChanged?(paused: boolean): void;
   onDispatchNotice?(workspace: ChatDispatchWorkspace, notice: Omit<ChatDispatchNotice, "id">): void;
   // Every write the agent makes while the run holds the slot is the run's,
   // at the run's chain depth, for the person main names.
@@ -761,12 +767,21 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   ): Promise<void> {
     if (!options.runNotices) return;
     const { workspaceId } = workspace;
+    let nodeAvailable: boolean | undefined;
+    if (outcome === "failed" || outcome === "no-reply") {
+      nodeAvailable = await readRunnerNodeAvailable(actualLogPath(run.runId, run.logPath));
+      if (nodeAvailable === false && outcome === "failed") {
+        const replies = await options.dispatchStoreFor(workspace)
+          .listRunMessages(workspaceId, run.runId, durableDispatchRequest);
+        if (replies.length > 0) nodeAvailable = undefined;
+      }
+    }
     await options.runNotices.post({
       workspaceId,
       noticeId: `agent-run:${workspaceId}:${run.runId}`,
       kind: "agent-run",
       title: runNoticeTitle(outcome, await threadTitle(workspace, run.threadId)),
-      body: runNoticeBody(run, outcome),
+      body: runNoticeBody(run, outcome, nodeAvailable),
       target: { thread: run.threadId, run: run.runId },
     });
   }
@@ -1412,7 +1427,15 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   }
 
   function setPaused(next: boolean): void {
+    const changed = paused !== next;
     paused = next;
+    if (changed) {
+      try {
+        options.onPausedChanged?.(paused);
+      } catch (error) {
+        reportError(error);
+      }
+    }
     if (!paused && !stopped) {
       for (const workspace of options.listOpenWorkspaces()) {
         void scanWorkspace(workspace.workspaceId).catch(reportError);

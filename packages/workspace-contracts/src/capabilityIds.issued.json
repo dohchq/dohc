@@ -254,5 +254,7 @@
   "collection.copies.left.remove",
   "dataset.holder.keep",
   "file.retained.list",
-  "file.retained.delete"
+  "file.retained.delete",
+  "chat.dispatch.pause.read",
+  "chat.dispatch.pause.switch"
 ]

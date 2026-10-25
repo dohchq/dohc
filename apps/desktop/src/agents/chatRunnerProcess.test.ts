@@ -1,9 +1,11 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTestScratch } from "../workspaces/testTemp";
 import {
   createChatRunnerProcess,
+  readRunnerNodeAvailable,
   tokenizeRunnerCommand,
   type RunnerSpawnOptions,
 } from "./chatRunnerProcess";
@@ -45,6 +47,64 @@ async function runnerFixture(platform: NodeJS.Platform) {
 describe("chat runner process", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
+  });
+
+  it("starts the runner when the Node.js sidecar write fails", async () => {
+    const { calls, root, spawn } = await runnerFixture("linux");
+    mkdirSync(join(root, "logs", "run.log.node"), { recursive: true });
+    expect(() => spawn("agent")).not.toThrow();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.command).toBe("agent");
+  });
+
+  it("treats a non-ENOENT Node.js sidecar read error as an unknown lookup", async () => {
+    const root = await createTestScratch("dohc-chat-runner-");
+    const logPath = join(root, "run.log");
+    mkdirSync(`${logPath}.node`);
+    await expect(readFile(`${logPath}.node`, "utf8")).rejects.toMatchObject({ code: "EISDIR" });
+    await expect(readRunnerNodeAvailable(logPath)).resolves.toBeUndefined();
+  });
+
+  it.each([false, true])("records Node.js on the filtered POSIX runner PATH: %s", async (executable) => {
+    const { root, spawn } = await runnerFixture("linux");
+    const bin = join(root, "node_modules", ".bin");
+    mkdirSync(bin, { recursive: true });
+    const node = join(bin, "node");
+    writeFileSync(node, "not executed");
+    chmodSync(node, executable ? 0o700 : 0o600);
+    vi.stubEnv("PATH", "");
+    spawn("agent");
+    expect(readFileSync(join(root, "logs", "run.log.node"), "utf8"))
+      .toBe(`${process.platform === "win32" || executable}\n`);
+  });
+
+  it("records Node.js as missing when it is only in the workspace or a relative PATH entry", async () => {
+    const { root, spawn } = await runnerFixture("linux");
+    writeFileSync(join(root, "node"), "not executed", { mode: 0o700 });
+    vi.stubEnv("PATH", ["", ".", "relative"].join(delimiter));
+    spawn("agent");
+    expect(readFileSync(join(root, "logs", "run.log.node"), "utf8")).toBe("false\n");
+  });
+
+  it.runIf(process.platform === "win32")
+    .each([".EXE", ".CMD", ".OTHER"])("uses the runner's PATHEXT for Node.js lookup: %s", async (extension) => {
+      const { root, spawn } = await runnerFixture("win32");
+      const bin = join(root, "node_modules", ".bin");
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(join(bin, `node${extension}`), "not executed");
+      vi.stubEnv("PATH", "");
+      vi.stubEnv("PATHEXT", ".CMD;.EXE");
+      spawn(`"${process.execPath}"`);
+      expect(readFileSync(join(root, "logs", "run.log.node"), "utf8"))
+        .toBe(`${extension !== ".OTHER"}\n`);
+    });
+
+  it.runIf(process.platform === "win32")("does not count Node.js in the Windows current directory", async () => {
+    const { root, spawn } = await runnerFixture("win32");
+    writeFileSync(join(root, "node.exe"), "not executed");
+    vi.stubEnv("PATH", ["", ".", "relative"].join(delimiter));
+    spawn(`"${process.execPath}"`);
+    expect(readFileSync(join(root, "logs", "run.log.node"), "utf8")).toBe("false\n");
   });
 
   it("tokenizes quoted runner arguments and rejects an unterminated command", () => {

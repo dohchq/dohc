@@ -832,6 +832,8 @@ async fn cancelled_set_active_keeps_the_owned_fence_until_the_switch_finishes() 
     let (_scratch, transport, handle, workspace_id) = fixture("cancel-owned", service).await;
     let feature = create_feature(&transport, &handle, &workspace_id, 2).await;
 
+    call(&transport, &handle, 100, "capture.flush", json!({})).await;
+    probe.pause_next_version_fence();
     probe.pause_next_version_commit();
     let switch_transport = Arc::clone(&transport);
     let switch_handle = handle.clone();
@@ -848,19 +850,10 @@ async fn cancelled_set_active_keeps_the_owned_fence_until_the_switch_finishes() 
         .await
     });
     bounded(
-        "setActive detached commit pause",
-        probe.wait_until_version_commit_paused(),
+        "setActive capture-held pause",
+        probe.wait_until_version_fence_paused(),
     )
     .await;
-    switching.abort();
-    assert!(
-        switching
-            .await
-            .expect_err("request future was cancelled")
-            .is_cancelled()
-    );
-
-    probe.observe_next_apply_gate_wait();
     let flush_transport = Arc::clone(&transport);
     let flush_handle = handle.clone();
     let mut flushing = tokio::spawn(async move {
@@ -874,7 +867,27 @@ async fn cancelled_set_active_keeps_the_owned_fence_until_the_switch_finishes() 
         .await
     });
     bounded(
-        "live driver waiting behind detached fence",
+        "driver waiting before commit pause",
+        probe.wait_until_apply_gate_waiting(),
+    )
+    .await;
+    probe.release_version_fence();
+    bounded(
+        "setActive detached commit pause",
+        probe.wait_until_version_commit_paused(),
+    )
+    .await;
+    switching.abort();
+    assert!(
+        switching
+            .await
+            .expect_err("request future was cancelled")
+            .is_cancelled()
+    );
+
+    // The driver reached the gate before this wait, while the switch was paused.
+    bounded(
+        "driver still waiting behind detached fence",
         probe.wait_until_apply_gate_waiting(),
     )
     .await;
@@ -884,6 +897,7 @@ async fn cancelled_set_active_keeps_the_owned_fence_until_the_switch_finishes() 
             .is_err(),
         "capture must remain fenced after the request future is cancelled"
     );
+    assert!(probe.is_apply_gate_waiting(), "driver must still be fenced");
 
     probe.release_version_commit();
     bounded("capture after detached switch", flushing)
@@ -1594,13 +1608,9 @@ async fn workspace_close_and_set_active_share_capture_then_session_lock_order() 
     )
     .await;
 
-    // Queue the real driver on the capture gate while setActive owns it. A
-    // session-first close would now hold session_ops and await this driver,
-    // while setActive awaits session_ops: the review's deadlock triangle.
-    probe.observe_next_apply_gate_wait();
     let flush_transport = Arc::clone(&transport);
     let flush_handle = handle.clone();
-    let flushing = tokio::spawn(async move {
+    let mut flushing = tokio::spawn(async move {
         flush_transport
             .call(
                 RequestContext::unbounded(),
@@ -1613,8 +1623,14 @@ async fn workspace_close_and_set_active_share_capture_then_session_lock_order() 
         probe.wait_until_apply_gate_waiting(),
     )
     .await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut flushing)
+            .await
+            .is_err(),
+        "capture must remain fenced while setActive owns the capture gate"
+    );
+    assert!(probe.is_apply_gate_waiting(), "driver must still be fenced");
 
-    probe.observe_next_apply_gate_wait();
     let close_transport = Arc::clone(&transport);
     let close_handle = handle.clone();
     let mut closing = tokio::spawn(async move {
@@ -1627,7 +1643,7 @@ async fn workspace_close_and_set_active_share_capture_then_session_lock_order() 
     });
     bounded(
         "close queued on the capture gate",
-        probe.wait_until_apply_gate_waiting(),
+        probe.wait_until_close_gate_waiting(),
     )
     .await;
     assert!(

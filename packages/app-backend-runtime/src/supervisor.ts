@@ -693,7 +693,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       if(!path) {
         worker=await recover(lane,input);standing(input);
         input.signal?.addEventListener("abort",abort,{once:true});
-        path=join(worker.directory,`migration-${randomUUID()}.sqlite`);
+        path=join(worker.directory,"migrated.sqlite");
         const migrated=await worker.runtime.migrateCheckpoint({path,schemaSql:input.schemaSql,tables:input.newTables,migrationSql:input.migrationSql});
         if(migrated.path!==path||migrated.cursor.revision!==captured.cursor.revision||migrated.cursor.digest!==captured.cursor.digest)throw new Error("The changed records do not match the Collection. Preview the change again.");
       }

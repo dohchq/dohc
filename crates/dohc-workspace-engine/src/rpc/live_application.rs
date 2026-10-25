@@ -722,6 +722,20 @@ impl EngineService {
                     output_guard: Some(guard),
                 });
             }
+            Err(dohc_engine_runtime::RuntimeError::LiveApplication(
+                dohc_engine_collab::live_update_application::ApplicationError::RestoreRefused(
+                    refusal,
+                ),
+            )) => {
+                return Ok(ServiceResponse {
+                    response: Response {
+                        id: request.id,
+                        result: json!({"status":"refused", "refusal":refusal}),
+                    },
+                    blob_egress: None,
+                    output_guard: Some(guard),
+                });
+            }
             Err(error) => return Err(map_runtime(error)),
         };
         {
@@ -1334,6 +1348,35 @@ mod tests {
             progress: false,
             params: json!({"operation":{"point":{"journalCursor":0,"receiptDigest":binding.lineage_claim_id},"operationId":"restore-rpc","relayDatabaseNamespace":namespace,"oldBinding":binding,"hostId":"host","newFence":binding.restore_fence_generation+1,"origin":{"kind":"bootstrap","id":"bootstrap"},"terminal":null,"appliedSequence":0}}),
         }
+    }
+
+    #[tokio::test]
+    async fn fence_returns_an_identified_pre_write_refusal_for_a_changed_binding() {
+        let (_scratch, service, owner, workspace, _registration, binding) = fixture().await;
+        let workspace = WorkspaceHandle(workspace);
+        let open = service.open(Some(&workspace)).unwrap();
+        let mut store =
+            dohc_engine_storage::EngineStore::open(open.actor.database_path(), 0).unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE live_device_application_bindings SET available=0",
+                    [],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        let request = fence_request(&workspace, &binding, "relay-history");
+        let expected = json!({"status":"refused", "refusal":{
+            "operation":request.params["operation"], "reason":"binding-changed"
+        }});
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let result = service.call(ctx, request).await.unwrap();
+        assert_eq!(result.response.result, expected);
+        assert!(result.output_guard.as_ref().unwrap().is_current());
+        assert_eq!(store.table_row_count("live_restore_fences").unwrap(), 0);
+        service.workspace_close(Some(workspace)).await.unwrap();
     }
 
     #[tokio::test]
