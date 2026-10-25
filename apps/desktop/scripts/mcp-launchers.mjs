@@ -3,6 +3,12 @@ export const BUNDLED_NODE_MISSING_MESSAGE =
 export const NODE_MISSING_MESSAGE =
   "dohc commands need Node.js on PATH. Install Node.js 22.13 or newer, then try again.";
 
+export function agentRuntimeTarget(platform, arch) {
+  if (platform === "win32" && arch === "x64" || platform === "darwin" && arch === "arm64") return "bundled";
+  if (platform === "linux" && ["x64", "arm64"].includes(arch)) return "path";
+  throw new Error(`Unsupported agent runtime target: ${platform}-${arch}`);
+}
+
 // ${0%/*} instead of dirname: it is a shell builtin expansion, so the
 // launcher's own failure path cannot depend on anything else being on the
 // broken PATH it exists to report. Callers reach this file by absolute path
@@ -19,10 +25,14 @@ NODE_MAJOR=\${NODE_RELEASE%%.*}
 NODE_MINOR_REST=\${NODE_RELEASE#*.}
 NODE_MINOR=\${NODE_MINOR_REST%%.*}
 case "$NODE_MAJOR" in
-  ''|*[!0-9]*) exit 127 ;;
+  ''|*[!0-9]*)
+    echo "${NODE_MISSING_MESSAGE}" >&2
+    exit 127 ;;
 esac
 case "$NODE_MINOR" in
-  ''|*[!0-9]*) exit 127 ;;
+  ''|*[!0-9]*)
+    echo "${NODE_MISSING_MESSAGE}" >&2
+    exit 127 ;;
 esac
 NODE_FLOOR=""
 if [ "$NODE_MAJOR" -lt 22 ]; then
@@ -66,10 +76,7 @@ export function windowsLauncher(moduleFileName) {
 }
 
 export function cliLaunchers({ platform = process.platform, arch = process.arch } = {}) {
-  const bundled = platform === "win32" && arch === "x64" || platform === "darwin" && arch === "arm64";
-  if (!bundled && !(platform === "linux" && ["x64", "arm64"].includes(arch))) {
-    throw new Error(`Unsupported agent launcher target: ${platform}-${arch}`);
-  }
+  const bundled = agentRuntimeTarget(platform, arch) === "bundled";
   const files = {};
   for (const name of ["dohc", "dohc-mcp"]) {
     files[name] = bundled

@@ -10,7 +10,16 @@ async function bundle(input) {
     configFile: false, root: input.repoDir, logLevel: "info",
     build: {
       target: "node22", ssr: input.entry, outDir: input.outputDir, emptyOutDir: input.emptyOutDir,
-      rollupOptions: { output: { format: "es", entryFileNames: input.name, inlineDynamicImports: true } },
+      rollupOptions: {
+        output: {
+          format: "es",
+          entryFileNames: input.name,
+          // One self-contained file per bundle: a dynamic import must not
+          // split into an assets/ chunk the packaged cli-bin filter would
+          // have to ship alongside it.
+          inlineDynamicImports: true,
+        },
+      },
     },
     ssr: { noExternal: true },
   });
@@ -30,11 +39,5 @@ export async function buildCliBin(options = {}) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const options = {};
-  for (let i = 2; i < process.argv.length; i += 2) {
-    const flag = process.argv[i];
-    if (!["--platform", "--arch"].includes(flag) || !process.argv[i + 1]) throw new Error(`Unknown or incomplete option: ${flag}`);
-    options[flag.slice(2)] = process.argv[i + 1];
-  }
-  await buildCliBin(options);
+  await buildCliBin();
 }

@@ -11,6 +11,10 @@ import {
 } from "./chatRunnerProcess";
 import type { AgentLaunchProfile } from "./agentToolCatalog";
 
+const [bundledPlatform, bundledArch, nodeName] = process.platform === "win32"
+  ? ["win32", "x64", "node.exe"] as const
+  : ["darwin", "arm64", "node"] as const;
+
 async function runnerFixture(platform: NodeJS.Platform, packaged = false, arch = "x64") {
   const root = await createTestScratch("dohc-chat-runner-");
   const calls: { command: string; options: RunnerSpawnOptions }[] = [];
@@ -50,8 +54,8 @@ async function runnerFixture(platform: NodeJS.Platform, packaged = false, arch =
 
 describe("chat runner process", () => {
   it("refuses a directory in place of the packaged runtime", async () => {
-    const { root, calls, spawn } = await runnerFixture("win32", true);
-    mkdirSync(join(root, "resources", "app-compiler", "node.exe"), { recursive: true });
+    const { root, calls, spawn } = await runnerFixture(bundledPlatform, true, bundledArch);
+    mkdirSync(join(root, "resources", "app-compiler", nodeName), { recursive: true });
     expect(() => spawn(`"${process.execPath}"`)).toThrow("Reinstall dohc");
     expect(calls).toHaveLength(0);
   });
@@ -71,7 +75,7 @@ describe("chat runner process", () => {
     expect(await readRunnerNodeAvailable(log)).toBeUndefined();
   });
   it.each(["claude", "codex", "custom"] as const)("refuses missing packaged Node before %s configuration, recording, or spawn", async (tool) => {
-    const { root, calls, spawn } = await runnerFixture("win32", true);
+    const { root, calls, spawn } = await runnerFixture(bundledPlatform, true, bundledArch);
     vi.stubEnv("PATH", process.execPath);
     const profile = tool === "custom" ? undefined : { tool, executable: process.execPath, args: [] } as unknown as AgentLaunchProfile;
     expect(() => spawn(`"${process.execPath}"`, () => undefined, profile)).toThrow(
@@ -83,9 +87,9 @@ describe("chat runner process", () => {
   });
 
   it("records the packaged reply runtime even without Node on PATH", async () => {
-    const { root, spawn } = await runnerFixture("win32", true);
+    const { root, spawn } = await runnerFixture(bundledPlatform, true, bundledArch);
     mkdirSync(join(root, "resources", "app-compiler"), { recursive: true });
-    writeFileSync(join(root, "resources", "app-compiler", "node.exe"), "runtime");
+    writeFileSync(join(root, "resources", "app-compiler", nodeName), "runtime", { mode: 0o755 });
     vi.stubEnv("PATH", "");
     spawn(`"${process.execPath}"`);
     expect(await readRunnerNodeAvailable(join(root, "logs", "run.log"))).toEqual({ source: "bundled", available: true });

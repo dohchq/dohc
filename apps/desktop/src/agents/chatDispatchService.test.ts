@@ -57,6 +57,10 @@ import { UNNAMED_AGENT_ID } from "./activeAgentRun";
 import { AGENTS_RESTRICTED_MESSAGE } from "./agentToolCatalog";
 import { createWorkspaceTrust, type WorkspaceTrust } from "../workspaces/workspaceTrust";
 
+const [bundledPlatform, bundledArch, nodeName] = process.platform === "win32"
+  ? ["win32", "x64", "node.exe"] as const
+  : ["darwin", "arm64", "node"] as const;
+
 const WORKSPACE_ID = "workspace-chat-dispatch";
 const CHAT_START_MS = Date.parse("2026-07-10T04:05:06.000Z");
 
@@ -116,6 +120,7 @@ interface FixtureOptions {
   packaged?: boolean;
   workspaceAttachmentId?: symbol;
   platform?: NodeJS.Platform;
+  arch?: string;
   runner?: Partial<RunnerSettings>;
   identity?: ChatDispatchIdentity;
   dispatchNoticeFailures?: Error[];
@@ -661,6 +666,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     spawnRunner,
     killProcessGroup,
     platform: options.platform ?? "linux",
+    arch: options.arch,
     nowMs: () => now.value,
     createId: () => `self_test_id_${(nextSelfTestId += 1)}`,
     onError: (error) => errors.push(error),
@@ -827,7 +833,7 @@ async function restrictWorkspace(fixture: Fixture): Promise<void> {
 
 describe("chatDispatchService", () => {
   it("the connection test exposes the missing packaged runtime repair instruction", async () => {
-    const fixture = await createFixture({ packaged: true, platform: "win32", runner: { command: `"${process.execPath}"` } });
+    const fixture = await createFixture({ packaged: true, platform: bundledPlatform, arch: bundledArch, runner: { command: `"${process.execPath}"` } });
     const result = await fixture.service.runnerSelfTest(WORKSPACE_ID);
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("dohc is missing a file it needs to run agents. Reinstall dohc, then try again.");
@@ -835,10 +841,10 @@ describe("chatDispatchService", () => {
     expect(fixture.spawnCalls).toHaveLength(0);
   });
   it.each([0, 7])("a packaged run with its own Node does not recommend installing Node, exit %s", async (exitCode) => {
-    const fixture = await createFixture({ packaged: true, platform: "win32", runner: { command: `"${process.execPath}"` } });
+    const fixture = await createFixture({ packaged: true, platform: bundledPlatform, arch: bundledArch, runner: { command: `"${process.execPath}"` } });
     const compiler = join(fixture.appRoot, "resources", "app-compiler");
     await mkdir(compiler, { recursive: true });
-    await writeFile(join(compiler, "node.exe"), "runtime");
+    await writeFile(join(compiler, nodeName), "runtime", { mode: 0o755 });
     vi.stubEnv("PATH", "");
     await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
     await activate(fixture);
@@ -849,7 +855,7 @@ describe("chatDispatchService", () => {
   });
 
   it("shows the missing packaged runtime repair instruction in Notices", async () => {
-    const fixture = await createFixture({ packaged: true, platform: "win32", runner: { command: `"${process.execPath}"` } });
+    const fixture = await createFixture({ packaged: true, platform: bundledPlatform, arch: bundledArch, runner: { command: `"${process.execPath}"` } });
     await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
     await activate(fixture);
     expect(fixture.spawnCalls).toHaveLength(0);
