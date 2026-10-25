@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NewFileDialog } from "./NewFileDialog";
 import { deferred } from "../testing/deferred";
+import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 
 const bridgeMock = {
   createWorkspaceFile: vi.fn(),
@@ -16,9 +17,33 @@ vi.mock("./bridge", () => ({
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  delete (window as Partial<Window>).dohcDesktop;
 });
 
 describe("NewFileDialog", () => {
+  it.each([
+    ["a?b", "A name cannot contain a question mark (?). Remove it."],
+    ["CON", 'Windows keeps "CON" for itself. Choose another name.'],
+    ["tail.", "Windows removes dots and spaces at the end of a name. Remove the ending dot or space."],
+    ["tail ", "Windows removes dots and spaces at the end of a name. Remove the ending dot or space."],
+  ])("keeps invalid Windows name %s for correction", async (name, message) => {
+    window.dohcDesktop = { platform: "win32" } as DohcDesktopBridge;
+    render(<NewFileDialog workspaceId="ws-1" onClose={vi.fn()} onCreated={vi.fn()} />);
+    const input = screen.getByLabelText("File name");
+    fireEvent.change(input, { target: { value: name } });
+    fireEvent.submit(input.closest("form")!);
+    expect(screen.getByRole("alert").textContent).toBe(message);
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(input.getAttribute("aria-describedby")).toBe(screen.getByRole("alert").id);
+    expect(input.classList.contains("border-danger")).toBe(true);
+    expect((input as HTMLInputElement).value).toBe(name);
+    expect(bridgeMock.createWorkspaceFile).not.toHaveBeenCalled();
+    fireEvent.change(input, { target: { value: "valid" } });
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(input.hasAttribute("aria-invalid")).toBe(false);
+    expect(input.classList.contains("border-danger")).toBe(false);
+  });
+
   it("exposes a labelled modal with visible create and cancel actions", async () => {
     const onClose = vi.fn();
     const user = userEvent.setup();

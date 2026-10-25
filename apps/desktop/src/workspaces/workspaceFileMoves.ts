@@ -7,6 +7,7 @@ import type { CliResultByVerb } from "@dohc/cli/protocol";
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import { validateUserMaterializePath } from "@dohc/workspace-core";
+import { workspaceDestinationError, workspaceNameError } from "@dohc/workspace-contracts/workspace-paths";
 import type { WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import type { AuthoredPathChanges, WorkspaceEngineCapture } from "./workspaceEngineCapture";
@@ -81,10 +82,13 @@ function assertWritable(operation: PathChangeOperation) {
 
 function checkedPath(path: string): string {
   const checked = validateUserMaterializePath(path, { platform: process.platform });
-  if (!checked.ok) throw new Error(`Cannot change ${path}: ${checked.reason}. Choose a visible workspace path.`);
-  if (process.platform === "win32" && checked.normalized.split("/").some(segment => /[. ]$/u.test(segment))) {
-    throw new Error(`Cannot change ${path}: Windows removes trailing dots and spaces. Choose a path without those endings.`);
+  if (checked.ok || checked.reason === "unsupported-name") {
+    for (const name of (checked.ok ? checked.normalized : path.replaceAll("\\", "/")).split("/")) {
+      const error = workspaceNameError(name, process.platform);
+      if (error) throw new Error(error);
+    }
   }
+  if (!checked.ok) throw new Error(`Cannot change ${path}: ${checked.reason}. Choose a visible workspace path.`);
   return checked.normalized;
 }
 
@@ -256,6 +260,8 @@ export async function moveWorkspacePathByHand(operation: PathChangeOperation, in
     assertWritable(operation);
     await options.admit?.();
     const prepared = await prepareWorkspaceMove(operation.workspace.rootPath, input.fromPath, input.toPath);
+    const destinationError = workspaceDestinationError(prepared.physicalToPath, process.platform);
+    if (destinationError) throw new Error(destinationError);
     if ((await stat(join(operation.workspace.rootPath, prepared.physicalFromPath))).isDirectory()) {
       if (options.capture) assertMoveDocumentKind(prepared.physicalFromPath, prepared.physicalToPath, "rename");
       const finishRename = await options.capture?.beginFileRename(prepared.physicalFromPath, prepared.physicalToPath);
@@ -290,6 +296,8 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
       const prepared = options.prepared;
       if (prepared && options.capture) assertMoveDocumentKind(prepared.physicalFromPath, prepared.physicalToPath, "rename");
       const endpoints = prepared ? [prepared.physicalFromPath, prepared.physicalToPath] : [(await admitPath(rootPath, input.fromPath)).physical, (await admitPath(rootPath, input.toPath)).physical];
+      const destinationError = workspaceDestinationError(endpoints[1]!, process.platform);
+      if (destinationError) throw new Error(destinationError);
       const work = async (engine: AuthoredPathChanges | null): Promise<Changed<{ fromPath: string; toPath: string; withoutHistory: string[]; replacedWithoutHistory: string[]; recovery: DeleteRecoveryPlan | undefined; from: string; to: string; overwritten: boolean }, MoveFailure>> => {
           // Admission runs here, with capture held, right before the disk changes.
           assertWritable(operation);
