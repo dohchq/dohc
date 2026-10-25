@@ -179,7 +179,7 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
     const notice = new dependencies.Notification({
       title: "dohc is still running",
       body: [
-        ...(dispatchEnabled ? ["Agent dispatch is on."] : []),
+        ...(dispatchEnabled ? [chatDispatchService.isPaused() ? "Agent dispatch is paused." : "Agent dispatch is on."] : []),
         ...(schedules > 0 ? [schedules === 1 ? "Running 1 schedule." : `Running ${schedules} schedules.`] : []),
         "To quit, open dohc and press Ctrl+Q.",
       ].join(" "),

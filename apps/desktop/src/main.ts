@@ -184,6 +184,7 @@ import {
   scheduleHostOperations,
   chatDispatchNoticeOperations,
   agentRunStateOperations,
+  chatDispatchPauseOperations,
   type ScheduleHostResult,
   type NoticeRef,
   type NoticeRow,
@@ -3633,6 +3634,13 @@ const chatDispatchService = createChatDispatchService({
           console.error("[desktop] chat dispatch scan:", error);
         });
     });
+  },
+  // The tray and every window show the pause, wherever it changed.
+  onPausedChanged: (paused) => {
+    void refreshDispatchTray().catch((error) => console.error("[desktop] dispatch tray:", error));
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send(CHANNELS.chatDispatchPaused, { paused });
+    }
   },
   onRunUpdated: (workspace) =>
     withWorkspaceAttachment(workspace, () =>
@@ -7497,6 +7505,11 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, chatDispatchNoticeOperations, {
     registerChatDispatchNotices: (input) => chatDispatchNotices.register(input.workspaceId),
     dismissChatDispatchNotice: (input) => chatDispatchNotices.dismiss(input.workspaceId, input.id),
+  });
+
+  registerOperations(operationBoundary, chatDispatchPauseOperations, {
+    readChatDispatchPaused: () => ({ paused: chatDispatchService.isPaused() }),
+    setChatDispatchPaused: ({ paused }) => chatDispatchService.setPaused(paused),
   });
 
   registerOperations(operationBoundary, agentRunStateOperations, {

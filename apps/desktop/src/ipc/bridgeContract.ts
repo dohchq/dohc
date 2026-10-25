@@ -6643,6 +6643,25 @@ export const agentRunStateOperations = {
   },
 } as const satisfies OperationTable;
 
+// Whether agent dispatch is paused on this computer, in every workspace. Requests
+// wait while it is paused. The pause lasts until it is resumed or dohc quits.
+export const ChatDispatchPausedEvent = z.strictObject({ paused: z.boolean() });
+export type ChatDispatchPausedEvent = z.infer<typeof ChatDispatchPausedEvent>;
+export const chatDispatchPauseOperations = {
+  readChatDispatchPaused: {
+    capabilityId: "chat.dispatch.pause.read",
+    scope: "device",
+    channel: "desktop:read-chat-dispatch-paused",
+    payload: z.strictObject({}), result: ChatDispatchPausedEvent, guard: "trusted-sender",
+  },
+  setChatDispatchPaused: {
+    capabilityId: "chat.dispatch.pause.switch",
+    scope: "device",
+    channel: "desktop:set-chat-dispatch-paused",
+    payload: ChatDispatchPausedEvent, guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
+
 export const scheduleHostOperations = {
   readScheduleHost: {
     capabilityId: "automation.host.read",
@@ -7173,6 +7192,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof scheduleHostOperations>,
     OperationBridge<typeof chatDispatchNoticeOperations>,
     OperationBridge<typeof agentRunStateOperations>,
+    OperationBridge<typeof chatDispatchPauseOperations>,
     OperationBridge<typeof sharedViewAccessOperations>,
     OperationBridge<typeof shareDirectWriteDeliveryOperations>,
     OperationBridge<typeof engineYDocAdmissionOperations>,
@@ -7410,6 +7430,8 @@ export interface DohcDesktopBridge
   // Live push: this computer's agent started or stopped in a workspace this
   // window shows.
   onAgentRunState(listener: (event: AgentRunStateEvent) => void): () => void;
+  // Agent dispatch was paused or resumed on this computer, from any window or the tray.
+  onChatDispatchPaused(listener: (event: ChatDispatchPausedEvent) => void): () => void;
   // A step started or stopped waiting for a current editor, or a share
   // stopped a step: re-list holds and stops.
   onAutomationHoldsChanged(

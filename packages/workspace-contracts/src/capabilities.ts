@@ -159,6 +159,8 @@ export const CAPABILITIES = {
   "usage.restore": capability("Restore the usage record set aside last.", {ipc: ["restoreUsageRecord"]}),
   "chat.dispatch.notices.read": capability("Read chat dispatch notices.", {ipc: ["registerChatDispatchNotices"]}),
   "chat.dispatch.notice.dismiss": capability("Dismiss a chat dispatch notice.", {ipc: ["dismissChatDispatchNotice"]}),
+  "chat.dispatch.pause.read": capability("Read whether agent dispatch is paused on this computer.", {ipc: ["readChatDispatchPaused"]}),
+  "chat.dispatch.pause.switch": capability("Pause or resume agent dispatch on this computer.", {ipc: ["setChatDispatchPaused"]}),
   "agent.run.state.read": capability("Read whether this computer's agent is working in this workspace.", {ipc: ["readAgentRunState"]}),
   "automation.host.read": capability("Read the computer that runs schedules.", {ipc: ["readScheduleHost"]}),
   "automation.host.choose": capability("Choose the computer that runs schedules.", {ipc: ["chooseScheduleHost"]}),
