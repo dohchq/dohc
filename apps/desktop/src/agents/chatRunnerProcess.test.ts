@@ -9,6 +9,7 @@ import {
   tokenizeRunnerCommand,
   type RunnerSpawnOptions,
 } from "./chatRunnerProcess";
+import type { AgentLaunchProfile } from "./agentToolCatalog";
 
 async function runnerFixture(platform: NodeJS.Platform) {
   const root = await createTestScratch("dohc-chat-runner-");
@@ -32,12 +33,13 @@ async function runnerFixture(platform: NodeJS.Platform) {
     },
     () => undefined,
   );
-  const spawn = (command: string, assertMayStart = () => undefined) =>
+  const spawn = (command: string, assertMayStart = () => undefined, profile?: AgentLaunchProfile) =>
     runner.spawnConfiguredRunner({
       rootPath: root,
       runId: "run-1",
       logPath: join(root, "logs", "run.log"),
       command,
+      profile,
       prompt: "",
       assertMayStart,
     });
@@ -124,6 +126,17 @@ describe("chat runner process", () => {
     const env = calls[0]!.options.env;
     expect(env.NoDefaultCurrentDirectoryInExePath).toBe("1");
     expect(env.PATH!.split(delimiter).slice(1)).toEqual([process.cwd(), spaced]);
+  });
+
+  it.each(["claude", "codex"] as const)("keeps app execution aliases on a Windows PATH only for a %s run that can start them", async (tool) => {
+    const aliases = join(process.cwd(), "Microsoft", "WindowsApps");
+    const storePowerShell = join(aliases, "Microsoft.PowerShell_8wekyb3d8bbwe");
+    vi.stubEnv("PATH", [aliases, process.cwd(), storePowerShell].join(delimiter));
+    const { calls, spawn } = await runnerFixture("win32");
+    spawn("", undefined, { tool, executable: process.execPath });
+    expect(calls[0]!.options.env.PATH!.split(delimiter).slice(1)).toEqual(
+      tool === "codex" ? [process.cwd()] : [aliases, process.cwd(), storePowerShell],
+    );
   });
 
   it("drops a quoted PATH entry elsewhere, where the quote is part of its name", async () => {
@@ -213,4 +226,29 @@ describe("chat runner process", () => {
       expect(readFileSync(join(shims, "node-version.txt"), "utf8")).toMatch(/^v\d+\./u);
     },
   );
+
+  it.runIf(process.platform === "win32")("starts an npm-installed Codex in a folder with an apostrophe", async () => {
+    const root = join(await createTestScratch("dohc-chat-runner-"), "O'Brien");
+    mkdirSync(root);
+    // Stands in for npm's codex.cmd and records the arguments cmd.exe passes on.
+    const codex = join(root, "codex.cmd");
+    writeFileSync(codex, `@"${process.execPath}" -e "require('fs').writeFileSync(process.argv[1], JSON.stringify(process.argv))" "%~dp0args.json" %*\r\n`);
+    const runner = createChatRunnerProcess(
+      { stateDir: () => join(root, "state"), appRoot: () => root, isPackaged: () => false },
+      () => undefined,
+    );
+    const child = runner.spawnConfiguredRunner({
+      rootPath: root,
+      runId: "run-1",
+      logPath: join(root, "run.log"),
+      command: "",
+      profile: { tool: "codex", executable: codex },
+      prompt: "",
+      assertMayStart: () => undefined,
+    });
+    expect(await new Promise<number | null>((resolveExit) => child.onExit(resolveExit))).toBe(0);
+    expect(JSON.parse(readFileSync(join(root, "args.json"), "utf8"))).toContain(
+      `mcp_servers.dohc.cwd='''${join(root, "node_modules", ".bin")}'''`,
+    );
+  });
 });
