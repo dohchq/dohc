@@ -228,7 +228,7 @@ export function StepperControl(props: {
           >
             {spec.label}
             {spec.keys?.map((key) => (
-              <kbd key={key} className="rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle">
+              <kbd key={key} className="rounded border border-line bg-bg px-1 font-sans text-[11px] text-subtle">
                 {key}
               </kbd>
             ))}

@@ -1688,7 +1688,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 aria-hidden
                 className={`shrink-0 transition-transform ${openEditorsExpanded ? "rotate-90" : ""}`}
               />
-              <span className="min-w-0 flex-1 truncate">Open Editors</span>
+              <span className="min-w-0 flex-1 truncate">Open editors</span>
               {openEditorCount > 0 ? (
                 <span
                   aria-label={`${openEditorCount} open editor${openEditorCount === 1 ? "" : "s"}`}
