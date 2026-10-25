@@ -7,7 +7,7 @@ import {
   type RunnerSpawnOptions,
   type SpawnRunner,
 } from "./chatRunnerProcess";
-import { rm } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { delimiter, join, resolve } from "node:path";
 import {
   CHATS_METHOD,
@@ -824,6 +824,60 @@ async function restrictWorkspace(fixture: Fixture): Promise<void> {
 }
 
 describe("chatDispatchService", () => {
+  it.each([
+    { nodePresent: false, exitCode: 7, replied: false },
+    { nodePresent: false, exitCode: 0, replied: false },
+    { nodePresent: true, exitCode: 7, replied: false },
+    { nodePresent: true, exitCode: 0, replied: false },
+    { nodePresent: false, exitCode: 0, replied: true },
+    { nodePresent: false, exitCode: 7, replied: true },
+  ])("adds the Node.js notice only for a missing runtime and missing reply: %j", async ({ nodePresent, exitCode, replied }) => {
+    const fixture = await createFixture();
+    const bin = join(fixture.appRoot, "node_modules", ".bin");
+    await mkdir(bin, { recursive: true });
+    if (nodePresent) await writeFile(join(bin, "node"), "not executed", { mode: 0o700 });
+    vi.stubEnv("PATH", "");
+    const trigger = await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
+    await activate(fixture);
+    const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
+    if (replied) await linkAgentReply(fixture, trigger.threadId, claim.run.runId);
+
+    fixture.spawnCalls[0]!.process.emitExit(exitCode);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect(fixture.notices).toHaveLength(1);
+    expect(fixture.notices[0]!.body).toBe(!nodePresent && !replied
+      ? "Agent replies need Node.js. Install Node.js, check that `node` runs in a terminal, then try again."
+      : "");
+  });
+
+  it.each([0, 7])("recovers the saved Node.js notice after restart, exit %s", async (exitCode) => {
+    const noticeFailures = Array.from({ length: 20 }, () => new Error("Notice unavailable"));
+    const fixture = await createFixture({ noticeFailures });
+    vi.stubEnv("PATH", "");
+    await createAgentThread(fixture, { body: "Recover the notice.", authorUserId: "user_local" });
+    await activate(fixture);
+    fixture.spawnCalls[0]!.process.emitExit(exitCode);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    const runId = fixture.spawnCalls[0]!.options.env.DOHC_RUN_ID!;
+    expect(fixture.notices).toEqual([]);
+    expect(await fixture.owedRunNotices.list(WORKSPACE_ID)).toContain(runId);
+    expect(await fixture.dispatch.getRunRecord(runId)).toMatchObject({ exitCode });
+    await fixture.service.stop();
+    fixture.service = createChatDispatchService({
+      ...fixture.serviceOptions,
+      runNotices: {
+        post: async (notice) => { fixture.notices.push(notice); },
+        owed: createOwedRunNotices(() => fixture.owedRunNoticesPath),
+      },
+    });
+    vi.unstubAllEnvs();
+    await activate(fixture);
+    expect(fixture.notices).toEqual([expect.objectContaining({
+      body: "Agent replies need Node.js. Install Node.js, check that `node` runs in a terminal, then try again.",
+    })]);
+  });
+
   it("does not provision an agent channel before the runner is enabled", async () => {
     const fixture = await createFixture({ runner: { enabled: false } });
 

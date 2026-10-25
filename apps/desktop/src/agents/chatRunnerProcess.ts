@@ -1,5 +1,6 @@
-import { chmodSync, closeSync, fchmodSync, mkdirSync, openSync, writeSync } from "node:fs";
-import { delimiter, dirname, isAbsolute, resolve, win32 } from "node:path";
+import { accessSync, chmodSync, closeSync, constants, fchmodSync, mkdirSync, openSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { delimiter, dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
 import { agentProfileArguments, type AgentLaunchProfile } from "./agentToolCatalog";
@@ -92,6 +93,36 @@ function runnerSearchPath(
     .map((entry) => (platform === "win32" ? entry.replace(/^"(.*)"$/u, "$1") : entry))
     .filter((entry) => isAbsolute(entry));
   return [prefix, ...entries].join(delimiter);
+}
+
+function runnerNodeAvailable(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): boolean {
+  const extensions = platform === "win32"
+    ? (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").map((ext) => ext.trim()).filter(Boolean)
+    : [""];
+  const searchPath = platform === "win32" ? env.Path ?? env.PATH : env.PATH;
+  return (searchPath ?? "").split(delimiter).filter((entry) => isAbsolute(entry)).some((directory) =>
+    extensions.some((extension) => {
+      const candidate = join(directory, `node${extension}`);
+      try {
+        if (!statSync(candidate).isFile()) return false;
+        accessSync(candidate, platform === "win32" ? constants.F_OK : constants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    }));
+}
+
+// Keep the launch environment's lookup beside its log, so an owed notice can
+// use the same fact after restart. Older runs have no recorded lookup.
+export async function readRunnerNodeAvailable(logPath: string): Promise<boolean | undefined> {
+  try {
+    const saved = await readFile(`${logPath}.node`, "utf8");
+    return saved === "true\n" ? true : saved === "false\n" ? false : undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
 }
 
 export function resolveDohcCliBinDirectory(input: {
@@ -270,6 +301,7 @@ export function createChatRunnerProcess(
             : `Couldn't find ${executable} on PATH. Use its full path in the runner command.`,
       );
     }
+    writeFileSync(`${input.logPath}.node`, `${runnerNodeAvailable(env, platform)}\n`, { mode: 0o600 });
     input.assertMayStart();
     const child = spawnRunner(resolved.command, resolved.args, {
       cwd: input.rootPath,
