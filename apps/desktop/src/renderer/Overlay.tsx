@@ -47,7 +47,9 @@ export function OverlayFrame(props: {
         ref={props.panelRef}
         tabIndex={-1}
         data-focus-surface="dialog"
-        className={`${props.panelProps?.className ?? "dohc-pop-in"} shrink-0`}
+        // The panel holds focus only until Tab reaches its controls, which
+        // show their own ring, so the whole dialog never wears one.
+        className={`${props.panelProps?.className ?? "dohc-pop-in"} shrink-0 outline-none`}
         onClick={(event) => event.stopPropagation()}
       >
         {props.children}

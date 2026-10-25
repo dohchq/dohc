@@ -271,7 +271,7 @@ A running agent shows a 6px round `bg-agent` dot.
 - End-to-end tests pin every `data-testid`, `aria-*`, `role`, and accessible name. Rewording and restyling keep them. A surface can become something else, such as the right panel changing from Chats to About. Then change them in the same PR as the tests that read them.
 - Surface work adds no dependencies, no `any`, and no `styles.css` edits. Propose a new shared pattern instead of inlining it.
 - Use lucide-react icons only, at 12 to 18px, with `strokeWidth={1.9}` at rail size.
-- Keep the global `:focus-visible` ring. Do not add `outline-none`. Opt out only where a ring would clip and the frame shows focus another way. The command palette's `focus-within:border-ink` is one example. Say why in a comment.
+- Keep the global `:focus-visible` ring. Do not add `outline-none`, with two exceptions, each explained in a comment. Where a ring would clip, opt out only if the frame shows focus another way, as the command palette's `focus-within:border-ink` does. A dialog's panel never wears the ring: it holds focus only until Tab reaches its controls, which show their own.
 - Keep body text at 4.5:1 or more and decorative text at 3:1 or more against its surface.
 
 ## Before you finish
