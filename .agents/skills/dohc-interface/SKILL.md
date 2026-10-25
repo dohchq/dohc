@@ -149,6 +149,7 @@ A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `rol
 - A row in Notices stays unread until the pointer or keyboard focus rests on it for 0.6 s, or the person presses **Mark all read**. Reading a row closes its toast and keeps the row.
 - A row shows two lines of title and three of text. Offer **Show more** for the rest, and open it in place, wrapped and selectable.
 - When the text has one fact per line, show its first three facts whole instead of three lines. Show the count of facts it leaves out only after **Show more**.
+- If an untitled message would run past two lines, give it a title that says what happened and a body with why and the Next, so the clamp never hides the Next.
 - Restarting or closing the app asks once, in one dialog.
 - Report errors through the shell's `reportError` callback instead of rendering them yourself.
 - For a list or section whose read failed, show `RetryRow`.
