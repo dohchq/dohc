@@ -135,10 +135,12 @@ A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `rol
 | --- | --- |
 | The whole workspace is unusable | A full-height state over the workbench, which goes inert |
 | One thing failed, and the workspace still works | A toast at the bottom right, above the update toast, then a row in Notices until it is retried or dismissed |
-| Something finished or became ready | A toast at the bottom right that fades, and a row in Notices |
+| Something finished out of sight, such as a background job | A toast at the bottom right that fades, and a row in Notices |
+| An action whose result the person can see | No toast and no row |
 | A control's own input is wrong | Inline, beside the control |
 
-- Use these four places. Do not add a new one for a new message.
+- Use these places. Do not add a new one for a new message.
+- Keep the toast and its row when it holds the only Undo for the change.
 - Keep the workbench still when a message arrives. No bar slides in across the top.
 - Give a message about something the person can retry a **Try again** control on the toast and the row.
 - Put a copy control beside text a person might need to report. Use an icon on the toast and the row, and a **Technical details** disclosure on a full-height state. Copy what the person reads, one line per fact, never a log.
