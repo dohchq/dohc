@@ -2858,7 +2858,11 @@ fn try_settle_through(
                 )?;
                 let id = audit.record_in_tx(tx, moment_id, &written.snapshot.blob_sha256, &vector, 300)?;
                 audit.record_publication_state_in_tx(tx, &id, &doc.encode_full_state())?;
-                assert!(journal_live_settlement_in_tx(tx, "ws", &id, 300)?.is_some());
+                // Before the relay's first contact, enrollment exports it later.
+                assert_eq!(
+                    journal_live_settlement_in_tx(tx, "ws", &id, 300)?.is_some(),
+                    crate::workspace_replicates_with_relay_in_tx(tx, "ws")?
+                );
                 Ok(())
             })?;
             match result {

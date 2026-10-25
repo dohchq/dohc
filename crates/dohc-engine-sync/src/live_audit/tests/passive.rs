@@ -920,24 +920,31 @@ fn passive_cancellation_of_an_unseen_lineage_skips_by_its_authority() {
 /// the relay ends a fence nothing applied. Returns the cancellation.
 fn fence_and_cancel(
     source: &mut Fixture,
-    terminal: LiveUpdateReceipt,
+    terminal: Option<LiveUpdateReceipt>,
 ) -> dohc_engine_collab::live_update_application::NativeRestoreCancellationReceipt {
     use dohc_engine_collab::live_update_application::{
         ApplicationHostCoordinate, NativeRestoreFence, RestoreDeliveryOrigin,
         RestoreFenceCancellation, RestoreFenceCancellationOutcome, cancel_restore_fence,
     };
-    // The relay took every settlement, so the restore may fence.
-    let pushed = operations(&source.store).last().unwrap().origin_seq;
-    crate::cursor::write_pushed_seq(
-        &mut source.store,
-        "ws",
-        "owner-origin",
-        pushed,
-        &NoFaults,
-        &NoLiveLeases,
-        300,
-    )
-    .unwrap();
+    // The relay took every settlement, so the restore may fence. Before its
+    // first contact there is nothing to take, and pushing would enroll.
+    if source
+        .store
+        .read_with(|c| crate::workspace_replicates_with_relay(c, "ws"))
+        .unwrap()
+    {
+        let pushed = operations(&source.store).last().unwrap().origin_seq;
+        crate::cursor::write_pushed_seq(
+            &mut source.store,
+            "ws",
+            "owner-origin",
+            pushed,
+            &NoFaults,
+            &NoLiveLeases,
+            300,
+        )
+        .unwrap();
+    }
     let applied_sequence: i64 = source
         .store
         .read_with(|c| c.query_row("SELECT head_update_seq FROM ydoc_docs", [], |r| r.get(0)))
@@ -958,7 +965,7 @@ fn fence_and_cancel(
         origin: RestoreDeliveryOrigin::Bootstrap {
             id: "bootstrap".into(),
         },
-        terminal: Some(terminal),
+        terminal,
         applied_sequence,
     };
     source
@@ -1029,7 +1036,7 @@ fn passive_replica_round_trips_a_cancelled_restore_and_its_audit() {
     );
     let cancelled = fence_and_cancel(
         &mut source,
-        first.admitted.metadata.accepted.receipt.clone(),
+        Some(first.admitted.metadata.accepted.receipt.clone()),
     );
     let next = counted_row(&mut source, 3, 2, &first.evidence_digest, &doc);
     // The bootstrap's anchor stays at generation 1; the settlement crosses
@@ -1744,7 +1751,7 @@ fn a_settlement_interval_crosses_cancelled_restores_only_through_their_evidence(
         doc.apply(&source.bytes).unwrap();
         let previous = initial(&source);
         let first = row(&mut source, 1, &previous, &doc);
-        let terminal = first.admitted.metadata.accepted.receipt.clone();
+        let terminal = Some(first.admitted.metadata.accepted.receipt.clone());
         fence_and_cancel(&mut source, terminal.clone());
         fence_and_cancel(&mut source, terminal);
         let next = counted_row(&mut source, 4, 2, &first.evidence_digest, &doc);
@@ -1833,7 +1840,7 @@ fn cancellations_beyond_one_chain_settle_and_import_when_events_split_them() {
     let mut last = row(&mut source, 1, &previous, &doc);
     let mut cursor = 1;
     for (index, span) in spans.into_iter().enumerate() {
-        let terminal = last.admitted.metadata.accepted.receipt.clone();
+        let terminal = Some(last.admitted.metadata.accepted.receipt.clone());
         for _ in 0..span {
             fence_and_cancel(&mut source, terminal.clone());
         }
@@ -1884,6 +1891,48 @@ fn cancellations_beyond_one_chain_settle_and_import_when_events_split_them() {
     assert_eq!(count(&replica, "live_audit_settlements"), 1);
 }
 
+/// Sol 1: before the relay's first contact, a bootstrap lineage cancels a
+/// restore, accepts an update and settles at generation 1, then cancels
+/// another and accepts an update at generation 2. Enrollment exports both
+/// events, then the earlier settlement, crossing from its own generation
+/// rather than the later event's, and finishes. A fresh replica imports it.
+#[test]
+fn enrollment_exports_a_first_settlement_from_before_a_later_cancellation() {
+    let mut source = fixture(false);
+    bootstrap(&mut source, false).unwrap();
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&source.bytes).unwrap();
+    fence_and_cancel(&mut source, None);
+    let previous = initial(&source);
+    let first = counted_row(&mut source, 2, 1, &previous, &doc);
+    let terminal = first.admitted.metadata.accepted.receipt.clone();
+    settle_through(&mut source, terminal.clone(), "first");
+    fence_and_cancel(&mut source, Some(terminal));
+    counted_row(&mut source, 4, 2, &first.evidence_digest, &doc);
+    assert_eq!(source.binding.restore_fence_generation, 2);
+    contact(&mut source.store);
+    for _ in 0..4 {
+        enrollment::prepare_exports(
+            &mut source.store,
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            301,
+            &mut false,
+        )
+        .unwrap();
+    }
+    assert_eq!(count(&source.store, "live_audit_pending_exports"), 0);
+    let settlements = operations(&source.store)
+        .into_iter()
+        .filter(|op| op.op_kind == settlement_record::SETTLEMENT_OP)
+        .count();
+    assert_eq!(settlements, 1);
+    let (_scratch, _path, replica) = receiver(&source);
+    assert_eq!(count(&replica, "live_audit_events"), 2);
+    assert_eq!(count(&replica, "live_audit_settlements"), 1);
+}
+
 /// A lineage bound by 100 selector paths, nearly all quotes that escape to
 /// twice their bytes, fences a restore and cancels it. The cancellation
 /// outgrows every other object the record bounds, and the update after it
@@ -1918,7 +1967,7 @@ fn a_large_binding_cancellation_exports_and_imports() {
     let first = row(&mut source, 1, &previous, &doc);
     let cancelled = fence_and_cancel(
         &mut source,
-        first.admitted.metadata.accepted.receipt.clone(),
+        Some(first.admitted.metadata.accepted.receipt.clone()),
     );
     let length = serde_json::to_vec(&cancelled).unwrap().len();
     assert!(

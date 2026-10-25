@@ -693,6 +693,7 @@ pub(super) fn require_cancelled(
         &held.binding,
         (from, through),
         Some(tip),
+        accepted_history::CHECKPOINT_EVENTS,
         |_| (),
     )
 }
@@ -708,12 +709,30 @@ pub fn require_crossed(
     b: &LiveObjectBinding,
     from: i64,
 ) -> Result<(), ApplicationError> {
+    require_crossed_within(
+        conn,
+        namespace,
+        b,
+        from,
+        accepted_history::CHECKPOINT_EVENTS,
+    )
+}
+
+/// [`require_crossed`] in one chain of at most `limit` generations.
+pub(super) fn require_crossed_within(
+    conn: &Connection,
+    namespace: &str,
+    b: &LiveObjectBinding,
+    from: i64,
+    limit: i64,
+) -> Result<(), ApplicationError> {
     cancelled_chain(
         conn,
         namespace,
         b,
         (from, b.restore_fence_generation),
         None,
+        limit,
         |_| (),
     )
 }
@@ -745,23 +764,25 @@ pub fn cancelled_restores(
             binding,
             (from, through),
             Some(&tip),
+            accepted_history::CHECKPOINT_EVENTS,
             |cancelled| chain.push(cancelled),
         )?;
     }
     Ok(chain)
 }
 
-/// The cancellations from `from` to `through`, each checked by
-/// [`cancellations`], and each ending at `tip` when one is named.
+/// The cancellations from `from` to `through`, at most `limit` of them, each
+/// checked by [`cancellations`], and each ending at `tip` when one is named.
 fn cancelled_chain(
     conn: &Connection,
     namespace: &str,
     b: &LiveObjectBinding,
     (from, through): (i64, i64),
     tip: Option<&accepted_history::Tip<'_>>,
+    limit: i64,
     mut keep: impl FnMut(NativeRestoreCancellationReceipt),
 ) -> Result<(), ApplicationError> {
-    if through <= from || through - from > accepted_history::CHECKPOINT_EVENTS {
+    if through <= from || through - from > limit {
         return Err(ApplicationError::Conflict);
     }
     let doc = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
@@ -796,35 +817,55 @@ fn cancelled_chain(
 }
 
 /// [`require_crossed`] from `from`, or from the generation of the lineage's
-/// accepted tip when that is later. Each accepted event crossed one bounded
-/// chain when it was admitted, so the history through the tip is already
-/// verified, and fence admission keeps the generations since within one chain.
+/// latest accepted event or checkpoint at or before `b`'s when that is later.
+/// Each accepted event crossed one bounded chain when it was admitted, so the
+/// history through that anchor is already verified, and fence admission keeps
+/// the generations since within one chain.
 pub fn require_crossed_since(
     conn: &Connection,
     namespace: &str,
     b: &LiveObjectBinding,
     from: i64,
 ) -> Result<(), ApplicationError> {
-    let from = tip_generation(conn, namespace, b)?.map_or(from, |tip| tip.max(from));
+    require_crossed_since_within(
+        conn,
+        namespace,
+        b,
+        from,
+        accepted_history::CHECKPOINT_EVENTS,
+    )
+}
+
+/// [`require_crossed_since`] with chains of at most `limit` generations.
+pub(super) fn require_crossed_since_within(
+    conn: &Connection,
+    namespace: &str,
+    b: &LiveObjectBinding,
+    from: i64,
+    limit: i64,
+) -> Result<(), ApplicationError> {
+    let anchor = tip_generation(conn, namespace, b, b.restore_fence_generation)?;
+    let from = anchor.map_or(from, |anchor| anchor.max(from));
     if from == b.restore_fence_generation {
         return Ok(());
     }
-    require_crossed(conn, namespace, b, from)
+    require_crossed_within(conn, namespace, b, from, limit)
 }
 
-/// The generation of `b`'s lineage's accepted tip in `namespace`: its latest
-/// accepted event, or checkpoint, when it has one.
+/// The generation of `b`'s lineage's latest accepted event, or checkpoint, in
+/// `namespace` at or before generation `through`, when it has one.
 fn tip_generation(
     conn: &Connection,
     namespace: &str,
     b: &LiveObjectBinding,
+    through: i64,
 ) -> Result<Option<i64>, ApplicationError> {
     conn.query_row(
         "SELECT generation FROM (
-            SELECT * FROM (SELECT event_count,json_extract(metadata_json,'$.accepted.binding.restoreFenceGeneration') AS generation FROM live_accepted_updates WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 ORDER BY event_count DESC LIMIT 1)
-            UNION ALL SELECT * FROM (SELECT event_count,json_extract(binding_json,'$.restoreFenceGeneration') FROM live_accepted_checkpoints WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 ORDER BY event_count DESC LIMIT 1)
+            SELECT * FROM (SELECT event_count,json_extract(metadata_json,'$.accepted.binding.restoreFenceGeneration') AS generation FROM live_accepted_updates WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND generation<=?6 ORDER BY event_count DESC LIMIT 1)
+            UNION ALL SELECT * FROM (SELECT event_count,json_extract(binding_json,'$.restoreFenceGeneration') AS generation FROM live_accepted_checkpoints WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND generation<=?6 ORDER BY event_count DESC LIMIT 1)
          ) ORDER BY event_count DESC LIMIT 1",
-        params![namespace, b.workspace_id, b.main_version_id, b.object_id, b.lineage_claim_id],
+        params![namespace, b.workspace_id, b.main_version_id, b.object_id, b.lineage_claim_id, through],
         |r| r.get(0),
     ).optional().map_err(read_sql)
 }
@@ -838,7 +879,7 @@ pub(super) fn require_chain_room(
     b: &LiveObjectBinding,
     new_fence: i64,
 ) -> Result<(), ApplicationError> {
-    let tip = tip_generation(conn, namespace, b)?.unwrap_or(b.restore_fence_generation);
+    let tip = tip_generation(conn, namespace, b, i64::MAX)?.unwrap_or(b.restore_fence_generation);
     if new_fence - tip > accepted_history::CHECKPOINT_EVENTS {
         return Err(ApplicationError::Conflict);
     }

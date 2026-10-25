@@ -742,6 +742,43 @@ fn a_fence_past_the_readable_cancelled_chain_refuses() {
         .unwrap();
 }
 
+/// Sol 3: under a chain limit of 2, a lineage cancels four restores, split by
+/// an accepted event into two spans of 2. Crossing from the origin to the
+/// binding reads only the span after that event, while one chain over the
+/// whole history refuses.
+#[test]
+fn a_crossing_reads_each_span_within_the_chain_limit() {
+    use super::super::restore_fence::{require_crossed_since_within, require_crossed_within};
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
+    for span in 0..2 {
+        if span > 0 {
+            let event = remote_event(&mut f, 80);
+            assert!(matches!(apply_event(&mut f, event).unwrap(), ApplicationResult::Applied(..)));
+        }
+        for _ in 0..2 {
+            let operation = format!("cancelled-{}", f.binding.restore_fence_generation + 1);
+            fence_next(&mut f, &operation).unwrap();
+            cancel_fenced(&mut f, &operation);
+            f.binding.restore_fence_generation += 1;
+            f.handle = f._owner.register(&mut f.store, "namespace".into(), coordinate.clone(), f.binding.clone()).unwrap();
+        }
+    }
+    assert_eq!(f.binding.restore_fence_generation, 4);
+    f.store
+        .read_with(|conn| {
+            require_crossed_since_within(conn, "namespace", &f.binding, 0, 2)?;
+            assert!(matches!(
+                require_crossed_within(conn, "namespace", &f.binding, 0, 2),
+                Err(ApplicationError::Conflict)
+            ));
+            // The whole history is cancellations, so only its length refuses.
+            require_crossed_within(conn, "namespace", &f.binding, 0, 4)
+        })
+        .unwrap();
+}
+
 /// Opus 4: with no binding, a released lineage proves only the generation
 /// it released at. A later settled restore of another lineage of the
 /// document moves the document, not this lineage.
