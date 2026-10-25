@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createReadStream, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -1801,6 +1801,56 @@ it("moves an untouched uncaptured file without settling", async () => {
   expect(captureErrors).toEqual([]);
   expect(await readFile(join(root, destination), "utf8")).toBe("");
   await expect(readFile(join(root, path))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("duplicates the latest queued edit from a settled new page", async () => {
+  await capture.stop();
+  const entered = deferred();
+  const release = deferred();
+  let holdJournal = false;
+  capture = createWorkspaceEngineCapture({
+    workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID,
+    rustEngineSessions: sessions, onError: context => captureErrors.push(context),
+    openRustYDocProviderSession: async options => {
+      const provider = await openEngineYdocProviderSession(options);
+      const apply = provider.applyLocalUpdate.bind(provider);
+      provider.applyLocalUpdate = async (update, applyOptions) => {
+        if (holdJournal) { entered.resolve(); await release.promise; }
+        await apply(update, applyOptions);
+      };
+      return provider;
+    },
+  });
+  const path = "Reading notes.md";
+  const destination = "Reading notes copy.md";
+  await writeFile(join(root, path), "", "utf8");
+  const session = await capture.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "hello");
+  await session.settleNow();
+  holdJournal = true;
+  typeIntoBody(editor, "world");
+  await entered.promise;
+  const checksBefore = methodCount(VERSIONED_METHOD.textCheckMove);
+  const duplicate = capture.changePathsAs([path], {
+    operation: "duplicate",
+    operationId: "dohc-operation:22222222-2222-4222-8222-222222222222",
+    author: { kind: "human", humanId: "person" },
+  }, async held => {
+    await held.recordDisk(path, [path]);
+    await copyFile(join(root, path), join(root, destination));
+  }, () => []);
+  try {
+    await expect.poll(() => methodCount(VERSIONED_METHOD.textCheckMove)).toBeGreaterThan(checksBefore);
+    // Drain the duplicate preflight's microtasks before releasing the journal.
+    await new Promise<void>(resolve => setImmediate(resolve));
+  } finally {
+    release.resolve();
+  }
+  await duplicate;
+  expect(await readFile(join(root, destination), "utf8")).toContain("world");
+  expect(captureErrors).toEqual([]);
+  editor.destroy();
 });
 
 it("still opens a file the user just created that capture has not ingested", async () => {

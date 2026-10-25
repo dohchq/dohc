@@ -28,7 +28,7 @@ it.each(["clean", "outside", "unchecked"])("publishes only checked save states o
       replace = () => options.onLineageReplaced?.(new Y.Doc(), []);
       return {
         doc, initialUpdate: Y.encodeStateAsUpdate(doc), path: options.path,
-        contentKind: "plaintext", head: "present", lineage: "existing", canSkipSettle: false, unsettled: false,
+        contentKind: "plaintext", head: "present", lineage: "existing", unsettled: false,
         applyLocalUpdate: async () => undefined, evict: async () => undefined,
         close: async () => undefined,
         settleNow: async () => {
@@ -79,7 +79,7 @@ it.each(["empty", "nonempty", "missing", "update"])("checks a fresh absent-head 
       }
       return {
         doc, initialUpdate: Y.encodeStateAsUpdate(doc), path: options.path,
-        contentKind: "plaintext", head: "absent", lineage: "absent", canSkipSettle: false, unsettled: mode === "update",
+        contentKind: "plaintext", head: "absent", lineage: "absent", unsettled: mode === "update",
         applyLocalUpdate: async () => undefined, evict: async () => undefined,
         close: async () => undefined,
         settleNow: async () => {

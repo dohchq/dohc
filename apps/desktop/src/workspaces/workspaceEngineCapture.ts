@@ -3500,9 +3500,6 @@ export function createWorkspaceEngineCapture(
         // operation's next line records it here.
         return current?.lineageClaimId ?? canonicalLineageClaimId;
       },
-      get canSkipSettle() {
-        return current?.canSkipSettle ?? false;
-      },
       contentKind,
       get artifactAssets() {
         return current?.artifactAssets ?? [];
@@ -3737,8 +3734,8 @@ export function createWorkspaceEngineCapture(
       // and may have been refused — because the release below hands over
       // anything the engine is still missing whatever `settle` says, and
       // refuses to release while it is behind (ydocProviderSession `close`).
-      if (entry.status === "live" && !entry.session.canSkipSettle) {
-        await entry.session.settleNow({ summary });
+      if (entry.status === "live") {
+        await entry.session.settleNow({ summary, ifNeeded: true });
       }
       await entry.close({ settle: false });
     }
@@ -5029,8 +5026,8 @@ export function createWorkspaceEngineCapture(
               settleFailure = error;
               throw error;
             }
-            if (result.materialized) settleCovers = covers;
-            return result.materialized;
+            if (result?.materialized) settleCovers = covers;
+            return result?.materialized === true;
           };
           try {
             if (writeCancelled) {
@@ -5863,9 +5860,6 @@ export function createWorkspaceEngineCapture(
           get lineageClaimId() {
             return session.lineageClaimId;
           },
-          get canSkipSettle() {
-            return session.canSkipSettle;
-          },
           contentKind: session.contentKind,
           get artifactAssets() {
             return session.artifactAssets ?? [];
@@ -6221,7 +6215,7 @@ export function createWorkspaceEngineCapture(
         const duplicating = authored.operation === "duplicate";
         if (duplicating) {
           for (const entry of [...liveYDocSessions.values()]) {
-            if (match(entry.path) && entry.status === "live" && !entry.session.canSkipSettle) await entry.session.settleNow({summary: "Saved latest edits before duplicating the file"});
+            if (match(entry.path) && entry.status === "live") await entry.session.settleNow({summary: "Saved latest edits before duplicating the file", ifNeeded: true});
           }
         } else {
           await settleAndCloseLiveYDocSessions(match, "Saved latest edits before moving or deleting the file");

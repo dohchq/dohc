@@ -146,7 +146,6 @@ export interface EngineYdocProviderSession {
   // The resumed lineage holds updates its workspace file may not, so the
   // consumer settles it before it reports the document saved.
   readonly unsettled: boolean;
-  readonly canSkipSettle: boolean;
   // `armSettle: false` journals the update without scheduling a settle, for
   // a replay the file must not receive until the person edits again.
   applyLocalUpdate(
@@ -162,7 +161,7 @@ export interface EngineYdocProviderSession {
   // holds another history, `onLineageReplaced` has announced it by then.
   resync?(): Promise<void>;
   adoptCollectionRecord?(): Promise<"settled" | "ownerPending" | "declined">;
-  settleNow(options?: { summary?: string }): Promise<YdocSettleResult>;
+  settleNow(options?: { summary?: string; ifNeeded?: boolean }): Promise<YdocSettleResult | undefined>;
   // `settle: false` alone does not promise the file will be left alone: a
   // release the daemon refuses as unsettled escalates to a settling close, so
   // pending edits survive a transient failure. A caller that must never
@@ -454,9 +453,6 @@ export async function openEngineYdocProviderSession(
     get lineageClaimId() {
       return session.lineageClaimId;
     },
-    get canSkipSettle() {
-      return canSkipSettle();
-    },
     get lineageOriginatedHere() {
       return session.lineageOriginatedHere;
     },
@@ -515,6 +511,7 @@ export async function openEngineYdocProviderSession(
     },
 
     async settleNow(settleOptions) {
+      if (settleOptions?.ifNeeded && canSkipSettle()) return;
       cancelSettle?.();
       cancelSettle = null;
       const operation = runSettle(settleOptions?.summary);

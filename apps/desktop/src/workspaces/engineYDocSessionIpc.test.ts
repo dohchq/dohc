@@ -94,7 +94,7 @@ function providerSession(
 ): WorkspaceEngineYDocProviderSession {
   const base = {
     doc: new Y.Doc(),
-    initialUpdate: new Uint8Array(), canSkipSettle: false,
+    initialUpdate: new Uint8Array(),
     path: "notes/a.md",
     contentKind: "richdoc",
     settleNow: vi.fn(async () => {

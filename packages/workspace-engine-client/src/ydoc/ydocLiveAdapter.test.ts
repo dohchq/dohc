@@ -111,11 +111,9 @@ describe("closing a settled revision", () => {
     });
     expect(provider.head).toBe("absent");
     expect(provider.lineage).toBe("absent");
-    expect(provider.canSkipSettle).toBe(true);
     if (edited) {
       await provider.applyLocalUpdate(plaintextUpdate(provider.initialUpdate, text => text.insert(0, "first edit")));
     }
-    expect(provider.canSkipSettle).toBe(!edited);
 
     await expect(provider.close()).resolves.toBeUndefined();
 
@@ -4626,8 +4624,8 @@ describe("YdocLiveAdapter", () => {
     // settle first, which is what covers it.
     await provider.close({ settle: true });
 
-    expect(settled.content).toBe("seed local");
-    expect(settled.projection).toEqual({
+    expect(settled?.content).toBe("seed local");
+    expect(settled?.projection).toEqual({
       contentKind: "plaintext",
       sourceStateVectorSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
       destructive: false,

@@ -129,7 +129,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     },
   });
   const provider = {
-    doc: new Y.Doc(), initialUpdate: new Uint8Array(), canSkipSettle: false, path: "notes/a.md", contentKind: "richdoc",
+    doc: new Y.Doc(), initialUpdate: new Uint8Array(), path: "notes/a.md", contentKind: "richdoc",
     artifactAssets: [descriptor],
     settleNow: vi.fn(async () => { throw new Error("unused settlement"); }),
     applyLocalUpdate: vi.fn((_update, onArmed) => onArmed?.()),
