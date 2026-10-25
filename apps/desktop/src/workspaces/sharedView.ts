@@ -16,7 +16,7 @@ import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import { readOwnedFile } from "@dohc/workspace-core/owned-file";
 import { isInside } from "../security/pathContainment";
 import { existingAncestor } from "./workspaceFiles";
-import { diskSpelling } from "./diskSpelling";
+import { absentAsNull, diskSpelling } from "./diskSpelling";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
   ShareUnavailableError,
@@ -288,8 +288,8 @@ function spellingGroups(paths: Iterable<string>): Map<string, string[]> {
 // The first other spelling in `spellings` that `owns` accepts, by path, whose
 // regular file is the one at `target`, as `Notes.md` reaches `notes.md`'s
 // file on a disk that ignores case. The disk decides, so a folder that keeps
-// case apart holds two files. Trouble reading a spelling means it shares
-// nothing.
+// case apart holds two files. An unknown identity stops the caller before it
+// can delete or overwrite another spelling's file.
 async function spellingSharingFile(
   rootDir: string,
   path: string,
@@ -299,7 +299,7 @@ async function spellingSharingFile(
 ): Promise<string | null> {
   const others = (spellings.get(pathCollisionKey(path)) ?? []).filter((other) => other !== path && owns(other)).sort();
   if (others.length === 0) return null;
-  const fileAt = (at: string) => lstat(at).then((entry) => entry.isFile() ? diskSpelling(rootDir, at) : null, () => null);
+  const fileAt = (at: string) => lstat(at).then((entry) => entry.isFile() ? diskSpelling(rootDir, at) : null, absentAsNull);
   const file = await fileAt(target);
   if (file === null) return null;
   for (const other of others) {
@@ -354,10 +354,6 @@ async function materializeSharedViewPaths(
   let aliases: Map<string, string[]> | undefined;
   // A missing entry is an answer; any other failure at the delete's own target
   // stops the refresh before it deletes.
-  const absentAsNull = (error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-    throw error;
-  };
   // The first other live path, by path, that reaches the regular file at
   // `target`: that path's head owns the file, as the engine decides for
   // workspace peers (#2157). A link or folder at the target has no owner; the
@@ -376,7 +372,7 @@ async function materializeSharedViewPaths(
     const head = await store.readTextFile({ workspaceId, versionId: main.id, path: owner });
     if (head === null) return null;
     if (diskMatchesSnapshot(await readDiskContent(target), head)) {
-      const spelling = await diskSpelling(rootDir, target);
+      const spelling = await diskSpelling(rootDir, target).catch(() => null);
       if (spelling !== null && basename(spelling) === basename(owner)) return null;
     }
     return { path: owner, operation: "write", contentKind: head.contentKind === "binary" ? "binary" : "text" };
@@ -2033,7 +2029,8 @@ async function captureSharedViewLocalDivergence(input: {
     if (work.collision) {
       const owner = await withCaptureMutationLock(rootDir, work.path, workspaceLease, (resolvedTarget) =>
         spellingSharingFile(rootDir, work.path, resolvedTarget, spellings, (other) => !everyCollisionRecordedPath.has(other)),
-      ).catch(() => null);
+      ).catch(() => undefined);
+      if (owner === undefined) return unjournalableVerdict(work.path, "unreadable");
       if (owner !== null && work.tracked === null) {
         return { kind: "repaired", action: { kind: "none" }, resolveCollision: true };
       }
@@ -2052,7 +2049,8 @@ async function captureSharedViewLocalDivergence(input: {
       && await withCaptureMutationLock(rootDir, work.path, workspaceLease, async (resolvedTarget) =>
         !(await lstat(resolvedTarget).then(() => true, () => false))
           || (await spellingSharingFile(rootDir, work.path, resolvedTarget, knownSpellings)) !== null,
-      ).catch(() => false);
+      ).catch(() => undefined);
+    if (sharedSpelling === undefined) return unjournalableVerdict(work.path, "unreadable");
     if (preserved.has(work.path) && !sharedSpelling) {
       // These bytes predate the restriction. Journal them locally before
       // releasing protection, even when this copy is now read-only.

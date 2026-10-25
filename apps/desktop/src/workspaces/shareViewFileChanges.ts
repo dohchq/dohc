@@ -412,7 +412,7 @@ async function applyShareViewPathMove(
   // Every destination, before any of them is applied. A collision found half
   // way through would otherwise leave the files before it already moved.
   for (const move of moves) {
-    if (held.has(move.to) || (await projectionOccupies(input.rootPath, move))) {
+    if (held.has(move.to) || (!renamesInPlace && (await projectionOccupies(input.rootPath, move)))) {
       throw new Error(`Destination already exists: ${move.to}`);
     }
   }
@@ -1105,10 +1105,12 @@ async function sameProjectionEntry(
   left: string,
   right: string,
 ): Promise<boolean> {
-  const [leftReal, rightReal] = await Promise.all([
+  const identities = await Promise.all([
     diskSpelling(rootPath, join(rootPath, left)),
     diskSpelling(rootPath, join(rootPath, right)),
-  ]);
+  ]).catch(() => null);
+  if (identities === null) return false;
+  const [leftReal, rightReal] = identities;
   return leftReal !== null && rightReal !== null && leftReal === rightReal;
 }
 
@@ -1143,9 +1145,9 @@ async function preflightProjectionMoveIdentity(
     throw error;
   }
   const identityUnavailable = () => new Error(
-    `dohc did not rename ${from} to ${to}. dohc could not read their names on disk. Refresh the shared view and try again.`,
+    `dohc did not rename ${from} to ${to}. dohc could not tell which files on disk they are. Check both paths in your file manager before trying again.`,
   );
-  const source = await diskSpelling(input.rootPath, sourceTarget);
+  const source = await diskSpelling(input.rootPath, sourceTarget).catch(() => null);
   if (source === null) throw identityUnavailable();
 
   const destinationTarget = await input.projection.resolvedTarget(
@@ -1169,7 +1171,7 @@ async function preflightProjectionMoveIdentity(
   }
   // resolvedTarget resolves links in the existing ancestors, but Linux can
   // keep their lookup case. Only the missing tail keeps its given spelling.
-  const storedAncestor = await diskSpelling(input.rootPath, ancestor);
+  const storedAncestor = await diskSpelling(input.rootPath, ancestor).catch(() => null);
   if (storedAncestor === null) throw identityUnavailable();
   const destination = join(storedAncestor, ...missing);
   const renamesInPlace = source === destination;

@@ -4,15 +4,15 @@ import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import { isInside } from "../security/pathContainment";
 
 // Resolve links, then read every name below the root from its folder. Linux
-// realpath keeps lookup case even when the disk ignores it. An unreadable,
-// missing, escaped, or ambiguous entry has no known spelling.
+// realpath keeps lookup case even when the disk ignores it. Missing or escaped
+// entries return null; unknown identities throw so callers cannot infer absence.
 export async function diskSpelling(root: string, path: string): Promise<string | null> {
   try {
     const realRoot = await realpath(root);
     if (resolve(root) === resolve(path) || resolve(realRoot) === resolve(path)) return realRoot;
     // A handle's final path can name another hard link on Windows. Keep the
     // looked-up leaf unless it is itself a symlink; resolve its parent only.
-    const entry = await lstat(path, { bigint: true });
+    const entry = await lstat(path);
     const file = entry.isSymbolicLink()
       ? await realpath(path)
       : join(await realpath(dirname(path)), basename(path));
@@ -22,17 +22,30 @@ export async function diskSpelling(root: string, path: string): Promise<string |
     for (const leaf of relative(realRoot, file).split(sep)) {
       const folder = stored;
       const lookup = await lstat(join(folder, leaf), { bigint: true });
-      const name = await storedNameAmong(leaf, await readdir(folder), async (candidate) => {
-        const other = await lstat(join(folder, candidate), { bigint: true }).catch(() => null);
+      let names: string[];
+      try {
+        names = await readdir(folder);
+      } catch {
+        stored = join(folder, basename(await realpath(join(folder, leaf))));
+        continue;
+      }
+      const name = await storedNameAmong(leaf, names, async (candidate) => {
+        const other = await lstat(join(folder, candidate), { bigint: true }).catch(absentAsNull);
         return other !== null && other.dev === lookup.dev && other.ino === lookup.ino;
       });
-      if (name === null) return null;
+      if (name === null) throw new Error(`Could not identify the stored name: ${join(folder, leaf)}`);
       stored = join(folder, name);
     }
     return stored;
-  } catch {
-    return null;
+  } catch (error) {
+    return absentAsNull(error);
   }
+}
+
+export function absentAsNull(error: unknown): null {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === "ENOENT" || code === "ENOTDIR") return null;
+  throw error;
 }
 
 // Exact names win. Among identity matches, prefer names that fold like the

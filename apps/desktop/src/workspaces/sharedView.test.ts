@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import * as fsPromises from "node:fs/promises";
 import {
   chmod,
   link,
@@ -1844,6 +1845,83 @@ describe("shared view refresh", () => {
 
     expect(await readdir(join(rootDir, "docs"))).toEqual(["Notes.md"]);
     expect(await readFile(join(rootDir, "docs", "Notes.md"), "utf8")).toBe("live\n");
+  });
+
+  it("keeps a protected owner's file and delete debt when its folder cannot be listed", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    const harness = daemonHarness(view.relay);
+    const target = { workspaceId: WORKSPACE, rootPath: view.rootDir };
+    try {
+      view.relay.addWrite("docs/notes.md", "old\n");
+      await view.reconcile();
+      view.relay.addWrite("docs/Notes.md", "live\n");
+      await view.reconcile();
+      await writeFile(join(view.rootDir, "docs", "notes.md"), "local bytes\n");
+      view.relay.addDelete("docs/notes.md");
+      failReaddirPathOnce = { path: join(view.rootDir, "docs"), error: Object.assign(new Error("listing denied"), { code: "EACCES" }) };
+      const protectedPaths = new Set(["docs/Notes.md"]);
+      await refreshSharedViewOnceWithPull({
+        rootDir: view.rootDir, workspaceId: WORKSPACE, relay: harness.relay,
+        shareId: SHARE_ID, pull: harness.pullFor(target),
+        pinnedSelector: { ...PINNED_SELECTOR, access: "edit" }, recordRefusals: async () => undefined,
+        store: view.store, excludeFromMaterialization: protectedPaths, protectedPaths, trackPendingMaterialization: true,
+      });
+      expect(failReaddirPathOnce).toBeNull();
+      expect(await readFile(join(view.rootDir, "docs", "notes.md"), "utf8")).toBe("local bytes\n");
+      expect((await readSharedViewProjectionDebt(view.rootDir, SHARE_ID)).pendingPaths).toContain("docs/notes.md");
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  it("stops a delete with unknown stored names before removing another spelling's file", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    try {
+      view.relay.addWrite("notes.md", "old\n");
+      await view.reconcile();
+      view.relay.addWrite("Notes.md", "live\n");
+      await view.reconcile();
+      view.relay.addDelete("notes.md");
+      const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+      const listing = vi.spyOn(fsPromises, "readdir").mockImplementation((async (path: Parameters<typeof readdir>[0], options?: unknown) => {
+        if (String(path) === view.rootDir) return [];
+        return actual.readdir(path, options as never);
+      }) as typeof readdir);
+      try {
+        await expect(view.reconcile()).rejects.toThrow();
+        expect(await readFile(join(view.rootDir, "notes.md"), "utf8")).toBe("old\n");
+        expect((await readSharedViewProjectionDebt(view.rootDir, SHARE_ID)).pendingPaths).toContain("notes.md");
+      } finally {
+        listing.mockRestore();
+      }
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  it("keeps a held spelling excluded from capture when stored names are unknown", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    try {
+      view.relay.addWrite("notes.md", "same\n");
+      view.relay.addWrite("Notes.md", "same\n");
+      await view.reconcile();
+      const before = await momentIds(view.store);
+      const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+      const listing = vi.spyOn(fsPromises, "readdir").mockImplementation((async (path: Parameters<typeof readdir>[0], options?: unknown) => {
+        if (String(path) === view.rootDir) return [];
+        return actual.readdir(path, options as never);
+      }) as typeof readdir);
+      try {
+        const captured = await view.capture(["Notes.md"]);
+        expect(captured.unjournalablePaths).toEqual([{ path: "Notes.md", reason: "unreadable" }]);
+        expect(await readCollisionRecordPaths(view.rootDir, SHARE_ID)).toEqual(new Set(["Notes.md"]));
+        expect(await momentIds(view.store)).toEqual(before);
+      } finally {
+        listing.mockRestore();
+      }
+    } finally {
+      await view.store.close();
+    }
   });
 
   // The same sequence the way dohc refreshes a view, capturing first: the

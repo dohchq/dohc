@@ -20,6 +20,7 @@ import {
 // a pure string decision on fail-closed paths, called up to ~2,000 times per
 // interaction here -- an RPC would add a failure mode where today there is none.
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
+import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
@@ -49,6 +50,7 @@ import {
   IMPORT_SKIPS_LISTED,
 } from "../ipc/channels";
 import { isInside } from "../security/pathContainment";
+import { diskSpelling } from "./diskSpelling";
 import type { LocalStateWorkspace } from "./workspaceLocalState";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { refuseOnlyInICloud } from "./workspaceICloudOnly";
@@ -1396,6 +1398,46 @@ interface InspectedWorkspaceMove extends PreparedWorkspaceMove {
   realFrom: string;
 }
 
+function moveIdentityUnavailable(fromPath: string, toPath: string): Error {
+  return new Error(
+    `dohc did not move ${fromPath} to ${toPath}. dohc could not tell which files on disk they are. Check both paths in your file manager before trying again.`,
+  );
+}
+
+async function movePathsNest(
+  realRoot: string,
+  source: string,
+  parent: string,
+  paths: WorkspaceMovePaths,
+): Promise<boolean> {
+  if (isInside(source, parent)) return true;
+  const sourceKey = pathCollisionKey(relative(realRoot, source).replaceAll("\\", "/"));
+  const parentKey = pathCollisionKey(relative(realRoot, parent).replaceAll("\\", "/"));
+  if (parentKey !== sourceKey && !parentKey.startsWith(`${sourceKey}/`)) return false;
+  // Only lookup-case aliases need a listing after realpath's containment check.
+  const [storedSource, storedParent] = await Promise.all([
+    diskSpelling(realRoot, source),
+    diskSpelling(realRoot, parent),
+  ]).catch(() => { throw moveIdentityUnavailable(paths.fromPath, paths.toPath); });
+  if (storedSource === null || storedParent === null) throw moveIdentityUnavailable(paths.fromPath, paths.toPath);
+  return isInside(storedSource, storedParent);
+}
+
+async function sameMoveEntry(
+  realRoot: string,
+  source: string,
+  destination: string,
+  paths: WorkspaceMovePaths,
+): Promise<boolean> {
+  if (source === destination) return true;
+  const [storedSource, storedDestination] = await Promise.all([
+    diskSpelling(realRoot, source),
+    diskSpelling(realRoot, destination),
+  ]).catch(() => { throw moveIdentityUnavailable(paths.fromPath, paths.toPath); });
+  if (storedSource === null) throw moveIdentityUnavailable(paths.fromPath, paths.toPath);
+  return storedSource === storedDestination;
+}
+
 async function inspectWorkspaceMove(
   rootPath: string,
   fromPath: string,
@@ -1447,14 +1489,14 @@ async function inspectWorkspaceMove(
   if (!isInside(realRoot, realDestAncestor)) {
     throw new Error(`Invalid move destination (escapes workspace): ${toPath}`);
   }
-  if (isInside(realFrom, realDestAncestor)) {
+  if (await movePathsNest(realRoot, realFrom, realDestAncestor, { fromPath, toPath })) {
     throw new Error(`Cannot move a path into itself: ${fromPath}`);
   }
   const destExists = await lstat(to).then(
     () => true,
     () => false,
   );
-  if (destExists && realFrom !== (await realpath(to))) {
+  if (destExists && !(await sameMoveEntry(realRoot, realFrom, await realpath(to), { fromPath, toPath }))) {
     throw new Error(`Destination already exists: ${toPath}`);
   }
   return {
@@ -1534,10 +1576,10 @@ export async function movePath(
   // Descendant guard, case-fold safe. The lexical self/descendant refusal at
   // the top is case-SENSITIVE, so on a case-insensitive filesystem "Foo" ->
   // "foo/bar" slips past it and would move a folder into its own (same-inode)
-  // subtree — corrupting it. Compare real paths: if the destination's parent
+  // subtree — corrupting it. Compare resolved paths: if the destination's parent
   // resolves to the source itself or anywhere beneath it, refuse. (For a file
   // source this is always false — a file has no descendants.)
-  if (isInside(realFrom, realDestParent)) {
+  if (await movePathsNest(realRoot, realFrom, realDestParent, { fromPath, toPath })) {
     throw new Error(`Cannot move a path into itself: ${fromPath}`);
   }
   const destExists = await lstat(to).then(
@@ -1547,10 +1589,10 @@ export async function movePath(
   if (destExists) {
     // Case-only rename carve-out: on a case-insensitive filesystem the
     // destination "exists" because it IS the source under another case.
-    // Compare real paths (never strings) so a genuinely distinct file that
+    // Compare resolved paths so a genuinely distinct file that
     // case-collides still refuses — the carve-out must not reopen the
     // overwrite hole.
-    if (realFrom !== (await realpath(to))) {
+    if (!(await sameMoveEntry(realRoot, realFrom, await realpath(to), { fromPath, toPath }))) {
       throw new Error(`Destination already exists: ${toPath}`);
     }
   }
