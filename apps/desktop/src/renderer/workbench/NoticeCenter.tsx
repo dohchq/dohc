@@ -291,7 +291,7 @@ function NoticeText(props: {
             aria-expanded={open}
             aria-controls={props.body ? `${id}-title ${id}-body` : `${id}-title`}
             onClick={() => setOpen((value) => !value)}
-            className="-ml-1 mt-0.5 flex items-center gap-0.5 rounded-md px-1 text-[11px] font-medium text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
+            className="-ml-1 mt-0.5 flex items-center gap-0.5 rounded-md px-1 text-[12px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
           >
             {open ? "Show less" : "Show more"}
             <ChevronDown size={12} strokeWidth={1.9} aria-hidden className={`transition-transform duration-150 ease-out${open ? " rotate-180" : ""}`} />
