@@ -292,7 +292,11 @@ function replyToolCall(threadId: string, runId: string): string {
   return `the \`dohc_reply_to_chat\` tool of the \`dohc\` MCP server with \`threadId\` \`${threadId}\` and \`runId\` \`${runId}\``;
 }
 
-function buildRunnerPrompt(threadMarkdown: string, threadId: string, runId: string, form: ReplyForm): string {
+// A Claude Code run loads only the person's own Claude Code settings
+// (agentToolCatalog.ts), which leaves out the workspace's CLAUDE.md.
+function buildRunnerPrompt(threadMarkdown: string, threadId: string, runId: string, tool: AgentLaunchProfile["tool"] | undefined): string {
+  const form = replyFormFor(tool);
+  const instructionsFile = tool === "claude" ? "If the workspace has a CLAUDE.md file at its root, read it first and follow it. " : "";
   const replyInstruction = form === "mcp"
     ? `Reply in-thread by calling ${replyToolCall(threadId, runId)}, with your Markdown report as \`body\`.`
     : `Reply in-thread with \`${replyCommand(threadId, "<report>")}\`.`;
@@ -303,7 +307,7 @@ function buildRunnerPrompt(threadMarkdown: string, threadId: string, runId: stri
 
 ## Report contract
 
-Work on the request represented by this thread. Report outcomes, not tool logs. ${replyInstruction} On long tasks, post progress the way a teammate would. ${decisionInstruction}`;
+${instructionsFile}Work on the request represented by this thread. Report outcomes, not tool logs. ${replyInstruction} On long tasks, post progress the way a teammate would. ${decisionInstruction}`;
 }
 
 export function createChatDispatchService(options: ChatDispatchServiceOptions) {
@@ -912,7 +916,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         logPath,
         command: configuredRunnerCommand(runner),
         profile: runner.profile,
-        prompt: buildRunnerPrompt(markdown, claim.run.threadId, claim.run.runId, replyFormFor(runner.profile?.tool)),
+        prompt: buildRunnerPrompt(markdown, claim.run.threadId, claim.run.runId, runner.profile?.tool),
         assertMayStart,
       });
       const timeout = setTimeout(() => {

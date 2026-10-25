@@ -3374,6 +3374,9 @@ describe("chatDispatchService", () => {
     const prompt = call.process.stdinText;
     expect(prompt).toContain(expectedReply(form, thread.threadId, call.options.env.DOHC_RUN_ID!, "<report>"));
     if (form === "mcp") expect(prompt).not.toContain("dohc chat reply");
+    const instructionsFile = "If the workspace has a CLAUDE.md file at its root, read it first and follow it.";
+    if (tool === "claude") expect(prompt).toContain(instructionsFile);
+    else expect(prompt).not.toContain("CLAUDE.md");
   });
 
   it.each(["shutdown", "occupied"])("does not start a self-test after %s during its thread write", async (reason) => {
