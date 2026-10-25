@@ -151,7 +151,7 @@ function tomlString(value: string): string {
 
 // A run replies through the dohc MCP server, which its agent starts outside
 // any sandbox; Codex's sandbox cannot connect to the desktop app, and Claude
-// Code's Bash needs Git Bash on Windows. The agent may call only the reply
+// Code's Bash needs Git Bash on Windows. The server offers only the reply
 // tool, and that tool runs without approval.
 // Codex waits for a required server before the first turn; it gives others one
 // second, after which the turn starts without their tools. Codex starts the
@@ -170,7 +170,7 @@ function replyServerArguments(input: {
   logPath: string;
 }): string[] {
   const command = join(input.cliBin, input.platform === "win32" ? "dohc-mcp.cmd" : "dohc-mcp");
-  const args = ["--workspace", input.rootPath, "--home", input.stateDir];
+  const args = ["--workspace", input.rootPath, "--home", input.stateDir, "--tool", "dohc_reply_to_chat"];
   if (input.tool === "claude") {
     const configPath = `${input.logPath}.mcp.json`;
     writeFileSync(configPath, JSON.stringify({ mcpServers: { dohc: { type: "stdio", command, args } } }), { mode: 0o600 });

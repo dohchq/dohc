@@ -3424,7 +3424,7 @@ describe("chatDispatchService", () => {
       const configPath = join(fixture.stateRoot, "run-logs", `${runId}.log.mcp.json`);
       expect(call.args).toEqual(agentProfileArguments(profile, profile.tool === "codex" ? [
         `mcp_servers.dohc.command='${server}'`,
-        `mcp_servers.dohc.args=['--workspace','${fixture.workspace.rootPath}','--home','${fixture.stateRoot}']`,
+        `mcp_servers.dohc.args=['--workspace','${fixture.workspace.rootPath}','--home','${fixture.stateRoot}','--tool','dohc_reply_to_chat']`,
         `mcp_servers.dohc.cwd='${cliBin}'`,
         "mcp_servers.dohc.required=true",
         "mcp_servers.dohc.enabled_tools=['dohc_reply_to_chat']",
@@ -3432,7 +3432,7 @@ describe("chatDispatchService", () => {
       ].flatMap((entry) => ["--config", entry]) : ["--mcp-config", configPath]));
       if (profile.tool === "claude") {
         expect(JSON.parse(await readFile(configPath, "utf8"))).toEqual({
-          mcpServers: { dohc: { type: "stdio", command: server, args: ["--workspace", fixture.workspace.rootPath, "--home", fixture.stateRoot] } },
+          mcpServers: { dohc: { type: "stdio", command: server, args: ["--workspace", fixture.workspace.rootPath, "--home", fixture.stateRoot, "--tool", "dohc_reply_to_chat"] } },
         });
       }
       expect(call.options.cwd).toBe(fixture.workspace.rootPath);

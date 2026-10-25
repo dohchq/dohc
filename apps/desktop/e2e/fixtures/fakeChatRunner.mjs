@@ -113,8 +113,17 @@ function replyThroughMcp(args, body) {
       buffer = buffer.slice(newline + 1);
       if (message.id === 1) {
         send({ method: "notifications/initialized" });
-        send({ id: 2, method: "tools/call", params: { name: "dohc_reply_to_chat", arguments: { threadId, runId, body } } });
+        send({ id: 2, method: "tools/list" });
       } else if (message.id === 2) {
+        // The run's server offers the reply tool and nothing else.
+        const names = message.result?.tools?.map((tool) => tool.name);
+        if (JSON.stringify(names) !== JSON.stringify(["dohc_reply_to_chat"])) {
+          console.error("Unexpected dohc tools", JSON.stringify(message));
+          child.kill();
+          process.exit(2);
+        }
+        send({ id: 3, method: "tools/call", params: { name: "dohc_reply_to_chat", arguments: { threadId, runId, body } } });
+      } else if (message.id === 3) {
         if (message.error || message.result?.isError) console.error("dohc_reply_to_chat failed", JSON.stringify(message));
         child.kill();
         process.exit(message.error || message.result?.isError ? 1 : 0);
