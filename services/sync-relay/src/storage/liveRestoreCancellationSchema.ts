@@ -8,7 +8,8 @@ const safe = Number.MAX_SAFE_INTEGER;
 // before the host is asked, so relay admission refuses from then on, and
 // holds the host's authenticated answer once it is known. A committed native
 // fence ends at its own journal cursor, the control entry passive replicas
-// apply between deliveries; it is no delivery.
+// apply between deliveries; it is no delivery. Its bytes come out of the
+// operation's reservation, so a full workspace can still decline.
 const tableSql = `CREATE TABLE ${LIVE_RESTORE_CANCELLATIONS} (
     relay_database_namespace TEXT NOT NULL,
     operation_id TEXT NOT NULL,
@@ -17,6 +18,7 @@ const tableSql = `CREATE TABLE ${LIVE_RESTORE_CANCELLATIONS} (
     outcome TEXT CHECK (outcome IN ('cancelled','fence-cancelled')),
     acknowledgment_json TEXT CHECK (json_valid(acknowledgment_json)),
     journal_cursor INTEGER UNIQUE CHECK (journal_cursor BETWEEN 1 AND ${safe}),
+    accounted_bytes INTEGER NOT NULL CHECK (accounted_bytes BETWEEN 1 AND ${safe}),
     PRIMARY KEY (relay_database_namespace,operation_id),
     FOREIGN KEY (relay_database_namespace,operation_id) REFERENCES ${LIVE_RESTORE_OPERATIONS}(relay_database_namespace,operation_id) ON DELETE CASCADE,
     CHECK ((outcome IS NULL) = (acknowledgment_json IS NULL)),

@@ -127,7 +127,7 @@ it("declines a restore before its fence and keeps access revoked", () => {
 // Proves: Decline and the fence advance read and write the operation in the
 // same serialized writer, so when both answer one status only one takes it.
 // A decline after the fence leaves the fence in place and only records the
-// request the fencing host must answer.
+// request the fencing host must answer, charged to the restore's reservation.
 it.each(["decline", "fence"] as const)("lets exactly one of Decline and the fence take the restore: %s first", first => {
   const f = fixture();
   try {
@@ -139,7 +139,8 @@ it.each(["decline", "fence"] as const)("lets exactly one of Decline and the fenc
     const settled = f.rows();
     if (first === "decline") expect(fence).toThrow("This restore was declined.");
     else expect(decline()).toEqual(won);
-    expect(f.rows()).toEqual(settled);
+    const charged = f.raw.prepare("SELECT accounted_bytes FROM sync_relay_live_restore_cancellations").all().reduce((sum, row) => sum + Number(row.accounted_bytes), 0);
+    expect(f.rows()).toEqual({...settled, operations: settled.operations.map(row => ({...row, accounted_bytes: Number(row.accounted_bytes) - charged}))});
     expect(f.raw.prepare("SELECT outcome FROM sync_relay_live_restore_cancellations").all()).toEqual(first === "decline" ? [] : [{outcome: null}]);
     expect(readStopRestore(f.context, f.lookup)).toEqual(won);
     expect(won.phase).toBe(first === "decline" ? "declined" : "fenced");

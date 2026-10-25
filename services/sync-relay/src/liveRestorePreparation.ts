@@ -2,7 +2,8 @@ import {encodeNativeRestoreInput,DEFAULT_MAX_BLOB_BYTES} from "@dohc/workspace-e
 import {resolveLiveRestorePoint, type OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/restore-proof";
 import {configRecord} from "./deviceLiveHostConfig";
 import {authorityInteger} from "./storage/liveDocumentAuthority";
-import {deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelivery";
+import {cancelStopRestore, deliverStopRestore, snapshotStopRestoreLookup, type StopRestoreOutcome} from "./liveRestoreDelivery";
+import type {StopRestoreContinuation} from "./storage/liveRestoreOperation";
 import {parseLiveUpdateDigest} from "@dohc/live-session-contract/live-update-admission";
 import {snapshotHostCoordinate} from "./liveTicketInputs";
 
@@ -70,15 +71,27 @@ export class LiveRestorePreparation {
     } finally {release();}
   }
 
+  // Ends a restore that Decline or its departed path ended, through the fencing host's cancellation.
+  async #end(options: Parameters<typeof deliverStopRestore>[0], continuation: Exclude<StopRestoreContinuation, "continue">): Promise<Extract<StopRestoreOutcome, {kind: "pending"}>> {
+    if (continuation === "cancel") {
+      const ended = await cancelStopRestore({...options, lookup: snapshotStopRestoreLookup(options.lookup)});
+      if (ended.kind === "pending") return ended;
+    }
+    return {kind: "pending", reason: "The restore was declined."};
+  }
+
   async prepare(options: Parameters<typeof deliverStopRestore>[0]) {
     const config = this.config, lookup = snapshotStopRestoreLookup(options.lookup), signal = options.signal;
     const check = () => {if (signal?.aborted) throw signal.reason;};
+    const {store, connection} = options;
+    const input = {...lookup, host: connection.host, maxBytes: config.maxBytes, maxEvents: config.maxEvents};
     return this.#reserved(signal, async () => {
+      let continuation = store.continueStopRestore(input, Date.now());
+      if (continuation !== "continue") return this.#end(options, continuation);
       const stopped = await deliverStopRestore({...options, lookup});
       check();
       if (stopped.kind === "pending") return stopped;
-      const {store, connection} = options;
-      const input = {...lookup, host: connection.host, maxBytes: config.maxBytes, maxEvents: config.maxEvents};
+      if ((continuation = store.continueStopRestore(input, Date.now())) !== "continue") return this.#end(options, continuation);
       const saved = store.readStopRestoreProposal(input, config.validation);
       if (saved) return {kind: "prepared" as const, proposalDigest: saved.proposalDigest,
         candidateDigest: saved.candidateDigest, recordedAtMs: saved.recordedAtMs, replayed: true};
@@ -88,7 +101,9 @@ export class LiveRestorePreparation {
       const bytes = encodeNativeRestoreInput(Buffer.from(json), config.maxBytes);
       const output = await connection.client.sendLiveRestore({id: connection.nextRequestId(), workspace: connection.workspace,
         deadlineMs: connection.deadlineMs}, "prepare", bytes, config.maxBytes, signal);
-      check(); selected.assertCurrent();
+      check();
+      if ((continuation = store.continueStopRestore(input, Date.now())) !== "continue") return this.#end(options, continuation);
+      selected.assertCurrent();
       const recorded = store.recordStopRestoreProposal(input, output.bytes, config.validation, Date.now());
       return {kind: "prepared" as const, ...recorded};
     });
@@ -145,6 +160,9 @@ export class LiveRestorePreparation {
     const check = () => {if (signal?.aborted) throw signal.reason;};
     return this.#reserved(signal, async () => {
       const retained = store.readStopRestoreLifecycle(input);
+      // Admission loses to a recorded Decline or a departed path.
+      const continuation = retained ? "continue" : store.continueStopRestore(input, Date.now());
+      if (continuation !== "continue") throw new Error((await this.#end({...options, connection}, continuation)).reason);
       let current = retained ?? (requireReview
         ? store.admitReviewedStopRestoreProposal({...input, maxOutputBytes: config.maxBytes}, proposalDigest, config.validation, Date.now(), signal)
         : store.admitStopRestoreProposal(input, proposalDigest, config.validation, Date.now()));

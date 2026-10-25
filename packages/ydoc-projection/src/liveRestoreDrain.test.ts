@@ -33,6 +33,8 @@ import {LiveCommittedDelivery} from "../../../services/sync-relay/src/liveCommit
 import {OwnerCommittedDelivery} from "../../../services/sync-relay/src/ownerCommittedDelivery.js";
 import {OwnerRestoreReview} from "../../../apps/desktop/src/ipc/ownerRestoreContract.js";
 import {fixture, bootstrapAck, applicationAck} from "./liveRestoreFixture.integration-helper.js";
+import {createReplicaSupervisor} from "../../../services/sync-relay/src/replicaSupervisor.js";
+import {closeTestStorages, tempRoot} from "../../../services/sync-relay/src/testing/index.js";
 
 afterEach(cleanupLiveDeliveryFixtures);
 const jsonHash = (value: unknown) => hash(Buffer.from(JSON.stringify(value)));
@@ -1621,14 +1623,13 @@ it("refuses the fence when an open retirement's accepted-through is not its cuto
 });
 
 // A restore fenced on the service host, whose revocation opened a
-// retirement, declined after its fence, and after the native fence when
-// `native`. It carries the two answers its fencing host may give.
-function declinedFence(native: boolean) {
+// retirement, with the native fence saved when `native`. It carries the two
+// answers its fencing host may give to a cancellation.
+function serviceFence(native: boolean) {
   const f = readyNativeFence("bootstrap", "service", true, false, hosted => hostRestoredDocument(hosted, hosted.intent.shareId));
   try {
     if (native) f.store.acknowledgeStopRestoreFence(f.lookup, f.receipt);
     const cutover = readStopRestore(f.context, f.lookup)!.cutoverCursor!;
-    expect(declineStopRestore(f.context, f.lookup, 150).phase).toBe(native ? "native-fenced" : "old-cut-applied");
     const fence = f.receipt.operation, binding = {...fence.oldBinding, restoreFenceGeneration: fence.newFence};
     const row = f.raw.prepare("SELECT accepted_event_count,accepted_evidence_digest FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(cutover)!;
     const cancelled: NativeRestoreCancellationAnswer = {status: "cancelled", hostId: fence.hostId, generation: fence.newFence - 1, binding: fence.oldBinding};
@@ -1638,6 +1639,14 @@ function declinedFence(native: boolean) {
     const key = (restoreFenceGeneration: number) => ({objectId: f.document.objectId, lineageClaimId: f.document.lineageClaimId,
       activationId: hostedActivationId, restoreFenceGeneration, acceptedThrough: cutover});
     return {...f, cutover, cancelled, fenceCancelled, key};
+  } catch (error) {f.close(); throw error;}
+}
+// The same restore, declined after its fence.
+function declinedFence(native: boolean) {
+  const f = serviceFence(native);
+  try {
+    expect(declineStopRestore(f.context, f.lookup, 150).phase).toBe(native ? "native-fenced" : "old-cut-applied");
+    return f;
   } catch (error) {f.close(); throw error;}
 }
 type DeclinedFence = ReturnType<typeof declinedFence>;
@@ -1708,6 +1717,36 @@ it.each([false, true])("ends a declined restore at the fenced generation with it
   } finally {if (!closed) f.close(); reopened?.close();}
 });
 
+// Proves: a fenced restore's cancellation entry moves the workspace journal
+// frontier with no later update, so an active replica refreshes and saves its
+// current view at the cancellation's cursor.
+it("refreshes a replica to a fenced restore's cancellation entry", async () => {
+  const f = declinedFence(true);
+  const pull = vi.fn(async () => {});
+  const text = "notes", sha256 = createHash("sha256").update(text).digest("hex");
+  let supervisor: ReturnType<typeof createReplicaSupervisor> | undefined;
+  try {
+    f.write(db => db.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+      VALUES ('viewer-grant','share','user','viewer',NULL,'view',1,'active',0,NULL,NULL)`).run());
+    const frontier = () => f.storage.readReplicaStanding("workspace")!.journalCursor;
+    expect(frontier()).toBe(f.cutover);
+    supervisor = createReplicaSupervisor({storage: f.storage, storeRoot: await tempRoot("restore-cancellation"),
+      startChild: async input => ({pull, close: async () => {}, currentView: async () => ({workspaceId: input.lease.workspaceId, revision: 0, logCursor: 0,
+        journalCursor: frontier(), files: [{versionId: "main", objectId: "notes", path: "docs/notes.txt", contentKind: "text" as const, sha256,
+          byteLength: text.length, lineageClaimId: null, restoreGeneration: null}], texts: [{sha256, text}], delta: false, removed: [], moved: false,
+        nextCursor: null, refusedFiles: []})})});
+    await supervisor.activate("workspace");
+    expect(pull).toHaveBeenCalledTimes(1);
+    const control = Number(f.raw.prepare("SELECT seq FROM sqlite_sequence WHERE name='sync_relay_live_update_journal'").get()!.seq) + 1;
+    f.store.acknowledgeStopRestoreCancellation(f.lookup, f.fenceCancelled, 170);
+    expect(frontier()).toBe(control);
+    await expect.poll(() => pull.mock.calls.length).toBe(2);
+    await supervisor.settled("workspace");
+    expect(f.storage.readReplicaCurrentView("workspace")?.journalCursor).toBe(control);
+    expect(f.raw.prepare("SELECT journal_cursor FROM sync_relay_replica_cuts WHERE workspace_id='workspace'").get()).toEqual({journal_cursor: control});
+  } finally {await supervisor?.close(); f.close(); await closeTestStorages();}
+});
+
 // Proves: a cancellation answer that does not prove this restore's end is
 // refused and changes nothing, and an answer with no binding, a replay after
 // a later restore, is not recorded. Once the relay saved the native fence's
@@ -1732,6 +1771,144 @@ it.each([false, true])("refuses a missing or altered cancellation proof, native 
     expect(f.rows()).toEqual(before);
     expect(cancellations()).toEqual(requested);
     expect(f.store.pendingStopRestoreCancellation(f.lookup)).not.toBeNull();
+  } finally {f.close();}
+});
+
+// Moves the restored file to another path and lets another object take its old one.
+const departFrozenPath = (f: Pick<ReturnType<typeof fixture>, "write" | "document">) => f.write(db => {
+  const copy = db.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+    SELECT workspace_id,?,?,?,version_id,?,blob_sha256,content_kind,byte_length,? FROM sync_relay_object_moments WHERE object_id=? ORDER BY relay_seq DESC LIMIT 1`);
+  copy.run(f.document.objectId, 10, "renamed", "docs/renamed.md", 10, f.document.objectId);
+  copy.run("reusing", 11, "reusing", "docs/a.md", 11, f.document.objectId);
+});
+const cancellingConnection = (f: Pick<ReturnType<typeof fixture>, "coordinate">, reply: () => Promise<unknown>) => {
+  const sendRequest = vi.fn(async (request: {method: string}) => {
+    expect(request.method).toBe("liveApplication.cancelRestoreFence");
+    return {result: await reply()};
+  });
+  return {sendRequest, connection: {client: {sendRequest, sendLiveRestore: vi.fn()} as never, workspace: "native-workspace", host: f.coordinate,
+    deadlineMs: 1000, nextRequestId: () => 1}};
+};
+const lostReply = async () => {throw new Error("The reply was lost.");};
+
+// Proves: a file renamed after the fence, before admission, ends the restore
+// through its fencing host's cancellation. The request is recorded under the
+// writer admission takes, survives a restart and a lost reply, and a replay
+// does not ask the host again. The retirement completes at the generation the
+// host proved, the old one is refused, and the renamed file and the object
+// now at its old path are left as they are.
+it.each([false, true])("ends a restore through its host's cancellation when its file is renamed, native fence saved=%s", async native => {
+  const f = serviceFence(native);
+  let reopened: ReturnType<typeof openSyncRelayStorage> | undefined, closed = false;
+  try {
+    departFrozenPath(f);
+    const moments = f.raw.prepare("SELECT * FROM sync_relay_object_moments ORDER BY relay_seq").all();
+    let reply: () => Promise<unknown> = lostReply;
+    const {sendRequest, connection} = cancellingConnection(f, () => reply());
+    const preparation = new LiveRestorePreparation(preparationConfig());
+    const options = (store: typeof f.store) => ({store, lookup: f.lookup, deliveryKind: "bootstrap" as const, connection});
+    await expect(preparation.prepare(options(f.store))).rejects.toThrow("The reply was lost.");
+    expect(f.raw.prepare("SELECT outcome FROM sync_relay_live_restore_cancellations").all()).toEqual([{outcome: null}]);
+    expect(readStopRestore(f.context, f.lookup)?.phase).toBe(native ? "native-fenced" : "old-cut-applied");
+    f.close(); closed = true;
+    reopened = openSyncRelayStorage(f.path);
+    const history = createLiveJournalHistoryAuthority({namespace: "restore-test", reconciled: true});
+    const store = reopened.createLiveCommittedDeliveryStore(history);
+    reply = async () => f.fenceCancelled;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await expect(preparation.prepare(options(store))).resolves.toEqual({kind: "pending", reason: "The restore was declined."});
+    }
+    expect(sendRequest).toHaveBeenCalledTimes(2);
+    expect(readStopRestore(reopened as StorageContext, f.lookup)).toMatchObject({phase: "declined", nativeReceipt: f.receipt});
+    const db = (reopened as StorageContext).db;
+    expect(db.prepare("SELECT outcome FROM sync_relay_live_restore_cancellations").all()).toEqual([{outcome: "fence-cancelled"}]);
+    expect(db.prepare("SELECT * FROM sync_relay_object_moments ORDER BY relay_seq").all()).toEqual(moments);
+    expect(reopened.objectIdAtPathInVersion({workspaceId: "workspace", versionId: "main", path: "docs/a.md"})).toBe("reusing");
+    const reopenedFixture = {storage: reopened, history, document: f.document, lookup: f.lookup};
+    expect(() => completeRetirementAt(reopenedFixture, f.key(1))).toThrow("Service activation retirement is unavailable.");
+    expect(completeRetirementAt(reopenedFixture, f.key(2))).toEqual({status: "retired", replayed: false});
+  } finally {if (!closed) f.close(); reopened?.close();}
+});
+
+// Proves: a rename while the host prepares, or after the proposal is saved,
+// ends the restore instead of saving or returning the proposal, and
+// admission inside its own transaction refuses a departed path.
+it.each(["preparing", "saved"] as const)("ends a restore whose file is renamed after native preparation: %s", async when => {
+  const f = contentProposalFixture("bootstrap", "service");
+  try {
+    const {sendRequest, connection} = cancellingConnection(f, lostReply);
+    const sendLiveRestore = vi.fn(async () => {
+      if (when === "preparing") departFrozenPath(f);
+      return {response: {result: {status: "prepared"}}, bytes: Buffer.from(f.encoded)};
+    });
+    const options = {store: f.store, lookup: f.lookup, deliveryKind: "bootstrap" as const,
+      connection: {...connection, client: {sendRequest, sendLiveRestore} as never}};
+    if (when === "saved") {
+      const proposed = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+      departFrozenPath(f);
+      const before = proposalRows(f);
+      expect(() => f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201)).toThrow();
+      expect(proposalRows(f)).toEqual(before);
+    }
+    await expect(new LiveRestorePreparation(preparationConfig()).prepare(options)).rejects.toThrow("The reply was lost.");
+    expect(sendRequest).toHaveBeenCalledTimes(1);
+    expect(f.raw.prepare(`SELECT COUNT(*) AS count FROM ${proposalTable}`).get()!.count).toBe(when === "saved" ? 1 : 0);
+    expect(f.raw.prepare("SELECT outcome FROM sync_relay_live_restore_cancellations").all()).toEqual([{outcome: null}]);
+    expect(readStopRestore(f.context, f.lookup)?.phase).toBe("native-fenced");
+  } finally {f.close();}
+});
+
+// Proves: a file that leaves its frozen path before the fence ends the
+// restore at its old generation, with no host to ask.
+it("declines a restore whose file is renamed before its fence", () => {
+  const f = fixture("bootstrap", "device");
+  try {
+    beginStopRestore(f.context, f.intent, 40);
+    departFrozenPath(f);
+    expect(advanceStopRestoreFence(f.context, f.lookup, 50)).toMatchObject({phase: "declined", newFence: null, declinedAtMs: 50});
+    expect(documentState(f)).toMatchObject({restore_fence_generation: 1});
+    expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_live_restore_cancellations").get()!.n).toBe(0);
+  } finally {f.close();}
+});
+
+// Proves: neither a raised log floor nor invalid moment evidence at the
+// frozen path is read as a rename. A floor at or past the restore's baseline
+// refuses the restore's continuation outright; altered evidence at the same
+// path lets it continue. Neither records a cancellation.
+it.each(["floor", "evidence"] as const)("does not read a %s change as a rename", cause => {
+  const f = serviceFence(true);
+  try {
+    if (cause === "floor") f.write(db => db.prepare("UPDATE sync_relay_workspaces SET epoch_log_floor=5 WHERE workspace_id='workspace'").run());
+    else f.moment(f.input, 10, {moment_id: "altered", blob_sha256: "0".repeat(64), byte_length: 1});
+    const before = f.rows(), operations = () => f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all(), saved = operations();
+    const continuation = () => f.store.continueStopRestore(f.lookup, 60);
+    if (cause === "floor") expect(continuation).toThrow();
+    else expect(continuation()).toBe("continue");
+    expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_live_restore_cancellations").get()!.n).toBe(0);
+    expect(f.rows()).toEqual(before);
+    expect(operations()).toEqual(saved);
+  } finally {f.close();}
+});
+
+// Proves: a Decline's evidence comes out of the restore's own reservation,
+// so Decline and its host's answer still record with the workspace's quota
+// exhausted, and usage does not move.
+it("charges a Decline's evidence to the restore's reservation with the quota exhausted", () => {
+  const f = serviceFence(true);
+  try {
+    f.write(db => db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=? WHERE workspace_id='workspace'").run(f.context.options.workspaceQuotaBytes));
+    const usage = () => Number(f.raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()!.usage_bytes);
+    const reserved = () => Number(f.raw.prepare("SELECT accounted_bytes FROM sync_relay_live_restore_operations").get()!.accounted_bytes);
+    const charged = () => Number(f.raw.prepare("SELECT accounted_bytes FROM sync_relay_live_restore_cancellations").get()!.accounted_bytes);
+    const total = reserved();
+    expect(declineStopRestore(f.context, f.lookup, 150).phase).toBe("native-fenced");
+    const requested = charged();
+    expect(requested).toBeGreaterThan(0);
+    expect(reserved() + requested).toBe(total);
+    expect(f.store.acknowledgeStopRestoreCancellation(f.lookup, f.fenceCancelled, 170).phase).toBe("declined");
+    expect(charged()).toBeGreaterThan(requested);
+    expect(reserved() + charged()).toBe(total);
+    expect(usage()).toBe(f.context.options.workspaceQuotaBytes);
   } finally {f.close();}
 });
 

@@ -68,8 +68,8 @@ import {
   assertJournalCheckpointPosition,
 } from "./liveUpdateJournal";
 import { bindLiveDeliveryHostNamespace, consumeLiveDeliveryReservation } from "./liveDeliveryReservations";
-import { acknowledgeStopRestoreCancellation, nativeRestoreFence, readStopRestoreCancellation, requireStopRestoreCut, requireStopRestoreOwnerOrigin, readStopRestoreInTransaction,
-  stopRestoreDeclineRecorded, stopRestoreRevocationHolds, type StopRestoreLookup, type StopRestoreOperation, type StopRestoreApplied } from "./liveRestoreOperation";
+import { acknowledgeStopRestoreCancellation, continueStopRestoreInTransaction, nativeRestoreFence, readStopRestoreCancellation, requireStopRestoreCut, requireStopRestoreOwnerOrigin, readStopRestoreInTransaction,
+  stopRestoreDeclineRecorded, stopRestoreHoldsFrozenPath, stopRestoreRevocationHolds, type StopRestoreContinuation, type StopRestoreLookup, type StopRestoreOperation, type StopRestoreApplied } from "./liveRestoreOperation";
 import {parseNativeRestoreFenceReceipt, type NativeRestoreCancellation, type NativeRestoreCancellationAnswer, type NativeRestoreFenceReceipt} from "../liveRestoreFence";
 import {parseNativeRestoreProposalReceipt, decodeNativeRestoreProposal, type RestoreProofBudget} from "../liveRestoreProposal";
 import {validateLiveRestoreProposal, type OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/restore-proof";
@@ -1456,7 +1456,7 @@ export class LiveCommittedDeliveryStore {
       assertCurrentInTransaction();
       const operation=readStopRestoreInTransaction(this.#storage,input);integrity(operation);
       // The same writer records a Decline, so exactly one of them takes the fenced restore.
-      integrity(operation.phase==="native-fenced" && !stopRestoreDeclineRecorded(this.#storage,operation));
+      integrity(operation.phase==="native-fenced" && !stopRestoreDeclineRecorded(this.#storage,operation) && stopRestoreHoldsFrozenPath(this.#storage,operation));
       const admitted=appendValidatedLiveJournal(this.#storage,{document,namespace:this.#history.namespace,host,
         current:{binding,authority:{principalKind:"owner",principalId:input.ownerUserId,grantId:null,grantGeneration:null}},metadata,
         updateBytes,receivedAtMs:at,firstSeen:validated.content.replacementRanges,firstSeenDeletes:validated.content.firstSeenDeletes,
@@ -1629,12 +1629,22 @@ export class LiveCommittedDeliveryStore {
       return acknowledgeStopRestoreCancellation(this.#storage, input, answer, now);
     });
   }
+  /** Whether this host goes on with the restore, or ends it through its cancellation because Decline or a departed path ended it. */
+  continueStopRestore(input: StopRestoreLookup & {host: LiveHostConnectionCoordinate}, now: number): StopRestoreContinuation {
+    const host = snapshotHostCoordinate(input.host);
+    return this.#storage.tx(() => {
+      const operation = this.#cancellingHost(input, host);
+      requireLiveJournalHistory(this.#storage);
+      return continueStopRestoreInTransaction(this.#storage, operation, now);
+    });
+  }
   // Cancellation does not recheck the frozen cut: a Decline ends the restore
   // even where that cut no longer describes the current file.
-  #cancellingHost(input: StopRestoreLookup, host: LiveHostConnectionCoordinate): void {
+  #cancellingHost(input: StopRestoreLookup, host: LiveHostConnectionCoordinate): StopRestoreOperation {
     this.#standing(host);
     const operation = readStopRestoreInTransaction(this.#storage, input); integrity(operation);
     integrity(operation.basis.namespace === this.#history.namespace && operation.basis.hostId === host.hostId && operation.basis.hostMode === host.mode);
+    return operation;
   }
   closeStopRestoreCut(capture: StopRestoreCutCapture): void {
     const saved = this.#restores.get(capture);

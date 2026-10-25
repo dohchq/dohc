@@ -234,6 +234,28 @@ export function nativeRestoreFence(applied: StopRestoreApplied, newFence: number
     hostId: applied.hostId, newFence, origin: {kind: applied.kind, id: applied.sourceId},
     terminal: applied.terminal ? {...applied.terminal} : null, appliedSequence: applied.localYDocSequence};
 }
+// The largest cut, application and fence evidence the operation can save.
+// Identifiers refuse controls, so a backslash is their longest JSON character.
+function maximumFenceEvidence(intent: StopRestoreIntent, basis: StopRestoreBasis) {
+  const receipt = {deliveryId: "\\".repeat(512),updateDigest: "f".repeat(64),journalCursor: Number.MAX_SAFE_INTEGER,acceptingHostEpoch: Number.MAX_SAFE_INTEGER};
+  const applied = {operationId: intent.operationId,binding: intent.deliveryKind === "owner" ? basis.ownerBinding : basis.binding,
+    kind: "bootstrap",namespace: basis.namespace,hostMode: basis.hostMode,
+    hostId: basis.hostId,sourceId: "\\".repeat(512),localYDocSequence: Number.MAX_SAFE_INTEGER,terminal: receipt};
+  const nativeReceipt = {operation: nativeRestoreFence(applied as StopRestoreApplied, Number.MAX_SAFE_INTEGER),
+    localHeadSequence: Number.MAX_SAFE_INTEGER, recordedAtMs: Number.MAX_SAFE_INTEGER};
+  return {receipt, applied, nativeReceipt};
+}
+const cancellationBytes = (operation: Pick<StopRestoreOperation, "intent" | "basis">, requestedAtMs: number,
+  outcome: StopRestoreCancellationRow["outcome"], acknowledgmentJson: string | null, journalCursor: number | null) =>
+  Buffer.byteLength(JSON.stringify([operation.basis.namespace, operation.intent.operationId, operation.intent.document.workspaceId,
+    requestedAtMs, outcome, acknowledgmentJson, journalCursor]));
+/** The bytes a Decline's request and its host's largest answer can take, funded as the restore begins. */
+function cancellationReservation(intent: StopRestoreIntent, basis: StopRestoreBasis): number {
+  const maximum = maximumFenceEvidence(intent, basis), binding = {...maximum.applied.binding, restoreFenceGeneration: Number.MAX_SAFE_INTEGER};
+  const answer = {status: "fenceCancelled", hostId: basis.hostId, generation: Number.MAX_SAFE_INTEGER, binding, receipt: {fence: maximum.nativeReceipt, binding,
+    endpoint: {terminalReceipt: maximum.receipt, eventCount: Number.MAX_SAFE_INTEGER, historyEvidenceDigest: "f".repeat(64)}, recordedAtMs: Number.MAX_SAFE_INTEGER}};
+  return cancellationBytes({intent, basis}, Number.MAX_SAFE_INTEGER, "fence-cancelled", JSON.stringify(answer), Number.MAX_SAFE_INTEGER);
+}
 
 /** Read the exact access to stop. Initiation rechecks these coordinates in its write. */
 export function readStopRestorePlan(storage: StorageContext, input: StopRestorePlanInput): StopRestorePlan {
@@ -334,15 +356,11 @@ export function beginStopRestore(storage: StorageContext, input: StopRestoreInte
     const initialBasis = basis(storage,intent,authority(storage,intent)), basisJson = JSON.stringify(initialBasis);
     if (intent.deliveryKind === "bootstrap" && initialBasis.ownerOrigin !== null) refuse();
     if (intent.deliveryKind === "owner") requireStopRestoreOwnerOrigin(storage,initialBasis);
-    // Fund the final cutoff metadata before invalidation so fencing cannot run out of quota.
-    const maximumReceipt = {deliveryId: "\\".repeat(512),updateDigest: "f".repeat(64),journalCursor: Number.MAX_SAFE_INTEGER,acceptingHostEpoch: Number.MAX_SAFE_INTEGER};
-    const maximumApplied = {operationId: intent.operationId,binding: intent.deliveryKind === "owner" ? initialBasis.ownerBinding : initialBasis.binding,
-      kind: "bootstrap",namespace: initialBasis.namespace,hostMode: initialBasis.hostMode,
-      hostId: initialBasis.hostId,sourceId: "\\".repeat(512),localYDocSequence: Number.MAX_SAFE_INTEGER,terminal: maximumReceipt};
-    const maximumNativeReceipt = {operation: nativeRestoreFence(maximumApplied as StopRestoreApplied, Number.MAX_SAFE_INTEGER),
-      localHeadSequence: Number.MAX_SAFE_INTEGER, recordedAtMs: Number.MAX_SAFE_INTEGER};
-    const charge = Buffer.byteLength(JSON.stringify([intent.operationId, namespace, previousOperationId, ...key(intent.document), intentJson, basisJson, JSON.stringify(maximumReceipt),JSON.stringify(maximumApplied),JSON.stringify(maximumNativeReceipt), "authority-invalidated",
-      intent.expectedFence, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, intent.expectedGrantGeneration + 1, at, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]));
+    // Fund the final cutoff metadata and a Decline's evidence before invalidation so neither can run out of quota.
+    const maximum = maximumFenceEvidence(intent, initialBasis);
+    const charge = Buffer.byteLength(JSON.stringify([intent.operationId, namespace, previousOperationId, ...key(intent.document), intentJson, basisJson, JSON.stringify(maximum.receipt),JSON.stringify(maximum.applied),JSON.stringify(maximum.nativeReceipt), "authority-invalidated",
+      intent.expectedFence, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, intent.expectedGrantGeneration + 1, at, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER])) +
+      cancellationReservation(intent, initialBasis);
     assertWorkspaceQuota(storage, intent.document.workspaceId, charge);
     const revoked = revokeShareGrantInTransaction(storage, { shareId: intent.shareId, grantId: intent.grantId,
       revokedAtMs: at, expectedDependentGrantIds: intent.expectedDependentGrantIds });
@@ -375,6 +393,8 @@ export function advanceStopRestoreFence(storage: StorageContext, input: { operat
     if (saved.phase !== "authority-invalidated") return saved;
     const { intent } = saved;
     if (at < saved.invalidatedAtMs || !stopRestoreRevocationHolds(storage, saved)) refuse();
+    // A file that left its frozen path ends the restore before the host takes part.
+    if (continueStopRestoreInTransaction(storage, saved, at) === "declined") return read(storage, operationId, workspaceId)!;
     requireAvailableJournalCursor(storage);
     const current = authority(storage,intent);
     if (!current.current || !current.open || !isDeepStrictEqual(basis(storage,intent,current),saved.basis)) refuse();
@@ -398,15 +418,74 @@ export function advanceStopRestoreFence(storage: StorageContext, input: { operat
 
 /** Phases a restore is fenced in but not admitted, where only the host's answer can end it. */
 const CANCELLABLE: readonly StopRestoreOperation["phase"][] = ["fenced", "old-cut-applied", "native-fenced"];
-type StopRestoreCancellationRow = {outcome: "cancelled" | "fence-cancelled" | null; acknowledgmentJson: string | null; journalCursor: number | null};
+type StopRestoreCancellationRow = {requestedAtMs: number; outcome: "cancelled" | "fence-cancelled" | null; acknowledgmentJson: string | null; journalCursor: number | null; accountedBytes: number};
 function cancellation(storage: StorageContext, operation: StopRestoreOperation): StopRestoreCancellationRow | null {
-  const row = storage.db.prepare(`SELECT outcome,acknowledgment_json,journal_cursor FROM ${LIVE_RESTORE_CANCELLATIONS} WHERE relay_database_namespace=? AND operation_id=?`)
+  const row = storage.db.prepare(`SELECT requested_at_ms,outcome,acknowledgment_json,journal_cursor,accounted_bytes FROM ${LIVE_RESTORE_CANCELLATIONS} WHERE relay_database_namespace=? AND operation_id=?`)
     .get(operation.basis.namespace, operation.intent.operationId);
   if (!row) return null;
   // A host's answer leaves the operation declined; a request alone leaves it where the fence put it.
   if ((row.outcome === null) !== CANCELLABLE.includes(operation.phase) || (row.outcome !== null && operation.phase !== "declined")) refuse();
-  return {outcome: row.outcome as StopRestoreCancellationRow["outcome"], acknowledgmentJson: row.acknowledgment_json === null ? null : String(row.acknowledgment_json),
-    journalCursor: row.journal_cursor === null ? null : integer(Number(row.journal_cursor), 1)};
+  const saved: StopRestoreCancellationRow = {requestedAtMs: integer(Number(row.requested_at_ms)), outcome: row.outcome as StopRestoreCancellationRow["outcome"],
+    acknowledgmentJson: row.acknowledgment_json === null ? null : String(row.acknowledgment_json),
+    journalCursor: row.journal_cursor === null ? null : integer(Number(row.journal_cursor), 1), accountedBytes: integer(Number(row.accounted_bytes), 1)};
+  if (saved.accountedBytes !== cancellationBytes(operation, saved.requestedAtMs, saved.outcome, saved.acknowledgmentJson, saved.journalCursor)) refuse();
+  return saved;
+}
+// Moves a cancellation row's bytes out of its operation's reservation. The workspace's usage does not change.
+function chargeCancellation(storage: StorageContext, operation: StopRestoreOperation, bytes: number, previous: number): void {
+  if (bytes > cancellationReservation(operation.intent, operation.basis)) refuse();
+  if (Number(storage.db.prepare(`UPDATE ${table} SET accounted_bytes=accounted_bytes-? WHERE relay_database_namespace=? AND operation_id=? AND accounted_bytes>?`)
+    .run(bytes - previous, operation.basis.namespace, operation.intent.operationId, bytes - previous).changes) !== 1) refuse();
+}
+function requestCancellation(storage: StorageContext, operation: StopRestoreOperation, at: number): void {
+  const bytes = cancellationBytes(operation, at, null, null, null);
+  chargeCancellation(storage, operation, bytes, 0);
+  storage.db.prepare(`INSERT INTO ${LIVE_RESTORE_CANCELLATIONS}(relay_database_namespace,operation_id,workspace_id,requested_at_ms,accounted_bytes) VALUES (?,?,?,?,?)`)
+    .run(operation.basis.namespace, operation.intent.operationId, operation.intent.document.workspaceId, at, bytes);
+}
+function declineBeforeFence(storage: StorageContext, operation: StopRestoreOperation, at: number): StopRestoreOperation {
+  const declined = storage.db.prepare(`UPDATE ${table} SET phase='declined',declined_at_ms=? WHERE relay_database_namespace=? AND operation_id=? AND phase='authority-invalidated'`)
+    .run(at, operation.basis.namespace, operation.intent.operationId);
+  if (Number(declined.changes) !== 1) refuse();
+  return read(storage, operation.intent.operationId, operation.intent.document.workspaceId)!;
+}
+/**
+ * Whether the object a restore froze has left its frozen path in main: its
+ * latest moment names another path or none, or another object has taken that
+ * path since. A workspace identity rotation supersedes the restore, so it
+ * refuses instead. A moment the live document cannot use, such as one with
+ * invalid evidence, still holds the path.
+ */
+function departedFrozenPath(storage: StorageContext, operation: StopRestoreOperation): boolean {
+  const {document} = operation.intent, path = operation.basis.binding.currentPath;
+  if (operation.basis.baselineSequence <= storage.getEpochLogFloor(document.workspaceId)) refuse();
+  const latest = storage.db.prepare(`SELECT path FROM sync_relay_object_moments WHERE workspace_id=? AND object_id=? AND version_id='main' ORDER BY relay_seq DESC LIMIT 1`)
+    .get(document.workspaceId, document.objectId);
+  if (!latest) refuse();
+  return latest.path !== path || storage.objectIdAtPathInVersion({workspaceId: document.workspaceId, versionId: "main", path}) !== document.objectId;
+}
+/** Whether the restore's object still holds its frozen path. Admission refuses otherwise. */
+export function stopRestoreHoldsFrozenPath(storage: StorageContext, operation: StopRestoreOperation): boolean {
+  return !departedFrozenPath(storage, operation);
+}
+/** How a restore goes on: at its frozen path, by its host's cancellation, or not at all. */
+export type StopRestoreContinuation = "continue" | "cancel" | "declined";
+/**
+ * Called in the serialized writer Decline and admission share. A restore
+ * that is not admitted ends once its frozen path departs, as a Decline would:
+ * at once before its fence, and otherwise by recording the request its
+ * fencing host then answers. An admitted restore finishes at its frozen path.
+ */
+export function continueStopRestoreInTransaction(storage: StorageContext, operation: StopRestoreOperation, now: number): StopRestoreContinuation {
+  const at = integer(now);
+  if (operation.phase === "declined") return "declined";
+  if (operation.phase !== "authority-invalidated" && !CANCELLABLE.includes(operation.phase)) return "continue";
+  if (operation.phase !== "authority-invalidated" && cancellation(storage, operation)) return "cancel";
+  if (!departedFrozenPath(storage, operation)) return "continue";
+  if (at < operation.invalidatedAtMs) refuse();
+  if (operation.phase === "authority-invalidated") {declineBeforeFence(storage, operation, at); return "declined";}
+  requestCancellation(storage, operation, at);
+  return "cancel";
 }
 /** Whether the owner declined this restore after its fence. Admission refuses from then on. */
 export function stopRestoreDeclineRecorded(storage: StorageContext, operation: StopRestoreOperation): boolean {
@@ -444,17 +523,13 @@ export function declineStopRestore(storage: StorageContext, input: StopRestoreLo
     if (saved.phase === "declined") return saved;
     if (at < saved.invalidatedAtMs) refuse();
     if (CANCELLABLE.includes(saved.phase)) {
-      if (!cancellation(storage, saved)) storage.db.prepare(`INSERT INTO ${LIVE_RESTORE_CANCELLATIONS}(relay_database_namespace,operation_id,workspace_id,requested_at_ms) VALUES (?,?,?,?)`)
-        .run(saved.basis.namespace, operationId, workspaceId, at);
+      if (!cancellation(storage, saved)) requestCancellation(storage, saved, at);
       return saved;
     }
     if (saved.phase !== "authority-invalidated") {
       throw relayError("conflict", "The restore is already being applied, so it can no longer be declined. Retry to finish it.");
     }
-    const declined = storage.db.prepare(`UPDATE ${table} SET phase='declined',declined_at_ms=? WHERE relay_database_namespace=? AND operation_id=? AND phase='authority-invalidated'`)
-      .run(at, saved.basis.namespace, operationId);
-    if (Number(declined.changes) !== 1) refuse();
-    return read(storage, operationId, workspaceId)!;
+    return declineBeforeFence(storage, saved, at);
   });
 }
 
@@ -507,6 +582,7 @@ export function acknowledgeStopRestoreCancellation(storage: StorageContext, inpu
   } else {
     const {receipt} = answer;
     if (!saved.applied || !isDeepStrictEqual(receipt.fence.operation, nativeRestoreFence(saved.applied, newFence)) ||
+      !isDeepStrictEqual(receipt.binding, {...nativeBinding(saved), restoreFenceGeneration: newFence}) ||
       (saved.nativeReceipt && !isDeepStrictEqual(receipt.fence, saved.nativeReceipt))) refuse();
     // The endpoint the host froze is the relay's accepted history through the cutover.
     const terminal = cutover === 0 ? null : storage.db.prepare(`SELECT accepted_event_count,accepted_evidence_digest FROM sync_relay_live_update_journal WHERE journal_cursor=?
@@ -518,8 +594,11 @@ export function acknowledgeStopRestoreCancellation(storage: StorageContext, inpu
     if (Number(storage.db.prepare(`UPDATE ${table} SET phase='declined',declined_at_ms=?,native_receipt_json=? WHERE ${where}`)
       .run(at, JSON.stringify(receipt.fence), ...params).changes) !== 1) refuse();
   }
-  if (Number(storage.db.prepare(`UPDATE ${LIVE_RESTORE_CANCELLATIONS} SET outcome=?,acknowledgment_json=?,journal_cursor=? WHERE relay_database_namespace=? AND operation_id=? AND outcome IS NULL`)
-    .run(answer.status === "cancelled" ? "cancelled" : "fence-cancelled", JSON.stringify(answer), journalCursor, saved.basis.namespace, saved.intent.operationId).changes) !== 1) refuse();
+  const outcome = answer.status === "cancelled" ? "cancelled" : "fence-cancelled", acknowledgmentJson = JSON.stringify(answer);
+  const bytes = cancellationBytes(saved, requested.requestedAtMs, outcome, acknowledgmentJson, journalCursor);
+  chargeCancellation(storage, saved, bytes, requested.accountedBytes);
+  if (Number(storage.db.prepare(`UPDATE ${LIVE_RESTORE_CANCELLATIONS} SET outcome=?,acknowledgment_json=?,journal_cursor=?,accounted_bytes=? WHERE relay_database_namespace=? AND operation_id=? AND outcome IS NULL`)
+    .run(outcome, acknowledgmentJson, journalCursor, bytes, saved.basis.namespace, saved.intent.operationId).changes) !== 1) refuse();
   return read(storage, input.operationId, input.workspaceId)!;
 }
 
