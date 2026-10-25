@@ -17,7 +17,7 @@ import { relayError } from "../errors";
 import { revokeShareGrantInTransaction } from "./shares";
 import { readCurrentShareGrant } from "./currentShareGrant";
 import { assertWorkspaceQuota } from "./workspaces";
-import { LIVE_RESTORE_OPERATIONS as table, UNFINISHED_RESTORE } from "./liveRestoreOperationSchema";
+import { LIVE_RESTORE_LIFECYCLES, LIVE_RESTORE_OPERATIONS as table, UNFINISHED_RESTORE } from "./liveRestoreOperationSchema";
 import { effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson } from "../shareFilter";
 import { canonicalLiveSelector, currentLiveDocumentMoment, decodeLiveDocumentAuthorityStructure } from "./liveDocumentAuthority";
 import { requireLiveJournalHistory, liveJournalHistoryNamespace } from "./liveJournalHistory";
@@ -221,10 +221,14 @@ function previousRestore(storage: StorageContext, document: LiveDocumentKey, gen
   if (!binding || previous.new_fence !== generation || previous.lineage_claim_id !== document.lineageClaimId ||
     (previous.phase === "declined" ? open : !open && !cancelled(operationId)) ||
     binding.restoreFenceGeneration !== generation || !isDeepStrictEqual(key(binding), key(document))) refuse();
-  // A resumed restore's settlement commits only at its own generation, so the next fence waits for it.
-  if (previous.phase === "resumed" && !storage.db.prepare(`SELECT 1 FROM ${SETTLEMENT_BINDINGS} b JOIN sync_relay_live_update_journal j ON j.relay_database_namespace=b.namespace AND j.restore_operation_id=?
-    WHERE b.workspace_id=? AND b.main_version_id=? AND b.object_id=? AND b.lineage_claim_id=? AND b.namespace=? AND b.restore_fence=? AND b.terminal_cursor>=j.journal_cursor LIMIT 1`)
-    .get(operationId, ...key(document), namespace, generation)) {
+  // Settlements commit only at their own generation, so the next fence waits until one covers the generation's last row.
+  if (previous.phase === "resumed" && !storage.db.prepare(`SELECT 1 FROM ${SETTLEMENT_BINDINGS} b WHERE b.workspace_id=? AND b.main_version_id=? AND b.object_id=? AND b.lineage_claim_id=?
+    AND b.namespace=? AND b.restore_fence=? AND b.terminal_cursor>=(SELECT journal_cursor FROM sync_relay_live_update_journal
+      WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND restore_fence_generation=? ORDER BY journal_cursor DESC LIMIT 1) LIMIT 1`)
+    .get(...key(document), namespace, generation, ...key(document), generation)) {
+    if (storage.db.prepare(`SELECT 1 FROM ${LIVE_RESTORE_LIFECYCLES} WHERE relay_database_namespace=? AND operation_id=? AND publication_refused=1`).get(namespace, operationId)) {
+      throw relayError("conflict", "The server could not confirm the last restore of this file. Ask the server's operator to repair it before restoring again.");
+    }
     throw relayError("conflict", "The last restore of this file has not reached the server yet. Try again in a moment.");
   }
   return operationId;

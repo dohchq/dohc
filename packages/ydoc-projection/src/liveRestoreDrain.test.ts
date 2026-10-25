@@ -1,5 +1,9 @@
-import {nativeSettlementId, prepareHostedSettlements, settlementRecordDigest} from "../../../services/sync-relay/src/storage/hostedSettlement.js";
-import {appendValidatedLiveJournal, readReplicaLiveJournal, decodeJournalRow} from "../../../services/sync-relay/src/storage/liveUpdateJournal.js";
+import {maximumBindingBytes, nativeSettlementId, prepareHostedSettlements, restorePublicationReservation, settlementRecordDigest, SETTLEMENT_PUSH_MAX_BYTES,
+  SETTLEMENT_PUSH_MAX_METADATA_EVENTS} from "../../../services/sync-relay/src/storage/hostedSettlement.js";
+import {appendValidatedLiveJournal, assertJournalCheckpointPosition, readReplicaLiveJournal, decodeJournalRow} from "../../../services/sync-relay/src/storage/liveUpdateJournal.js";
+import {acrossDeclinedRestores, MAX_DECLINED_GENERATIONS} from "../../../services/sync-relay/src/storage/liveRestoreLifecycleStorage.js";
+import {RestoreHistoryBudget} from "../../../services/sync-relay/src/storage/liveAcceptedHistory.js";
+import {MAX_PAYLOAD_JSON_BYTES} from "../../../services/sync-relay/src/wireLimits.js";
 import {verifyRestoreCheckpoint} from "../../../services/sync-relay/src/storage/liveRestoreCheckpoint.js";
 import {stableJsonStringify} from "../../../services/sync-relay/src/canonicalJson.js";
 import {initialAcceptedHistoryDigest} from "../../../services/sync-relay/src/liveAcceptedHistory.js";
@@ -22,7 +26,7 @@ import {createServiceHostFeed} from "../../../services/sync-relay/src/serviceHos
 import {SERVICE_HOST_ORIGIN_PREFIX} from "../../../services/sync-relay/src/relayLogInputs.js";
 import { openSyncRelayStorage } from "../../../services/sync-relay/src/storage.js";
 import {parseNativeRestoreProposalReceipt, encodeNativeRestoreProposal, decodeNativeRestoreProposal, nativeSourceAgentDeclaration} from "../../../services/sync-relay/src/liveRestoreProposal.js";
-import {initializeLiveRestoreOperationSchema, LIVE_RESTORE_ACTIVE_V1_SQL, LIVE_RESTORE_OPERATIONS_V1_SQL} from "../../../services/sync-relay/src/storage/liveRestoreOperationSchema.js";
+import {initializeLiveRestoreOperationSchema, LIVE_RESTORE_ACTIVE_V1_SQL, LIVE_RESTORE_LIFECYCLES_V1_SQL, LIVE_RESTORE_OPERATIONS_V1_SQL} from "../../../services/sync-relay/src/storage/liveRestoreOperationSchema.js";
 import {readServiceActivationRetirement} from "../../../services/sync-relay/src/storage/serviceActivationRetirement.js";
 import {fenceAccount, initializeAccountDeletion, purgeAccountRows} from "../../../services/sync-relay/src/storage/accountDeletion.js";
 import {validateLiveRestoreProposal} from "./liveRestoreProof.js";
@@ -1631,8 +1635,8 @@ it("publishes a restore's settlement moment for a retirement once the restore re
 });
 
 type HostedStorage = Parameters<typeof createServiceHostFeed>[0];
-// Uploads a restore publication's blobs and pushes its settlement moment through the retiring host's feed.
-async function pushRestoreSettlement(storage: HostedStorage, {payload, record}: Pick<ReturnType<typeof restorePublication>, "payload" | "record">) {
+// Uploads a restore publication's blobs and pushes its settlement moment through the host's feed, retiring unless `retiring` is false.
+async function pushRestoreSettlement(storage: HostedStorage, {payload, record}: Pick<ReturnType<typeof restorePublication>, "payload" | "record">, retiring = true) {
   const feed = createServiceHostFeed(storage), originId = `${SERVICE_HOST_ORIGIN_PREFIX}native`;
   const call = (method: string, route: string[], body?: BodyInit) => feed(new Request(`https://relay.test/sync/workspace/hosted/${route.join("/")}`,
     {method, ...(body === undefined ? {} : {body})}), {workspaceId: "workspace", route, actor: {userId: "owner"}, guard() {}});
@@ -1641,7 +1645,8 @@ async function pushRestoreSettlement(storage: HostedStorage, {payload, record}: 
   const answer = await call("POST", ["log"], JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream", originId,
     ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: 1, payload}]}));
   expect(answer.status).toBe(200);
-  expect(storage.fetchLogCoordinate({workspaceId: "workspace", originId, originSeq: 0})).toMatchObject({relayAdmission: "departed", settlementAdmission: {status: "accepted"}});
+  expect(storage.fetchLogCoordinate({workspaceId: "workspace", originId, originSeq: 0})).toMatchObject({...(retiring ? {relayAdmission: "departed"} : {}),
+    settlementAdmission: {status: "accepted"}});
 }
 // The retirement key a restore's relay admission carried, and the boundary its owner delivery releases at.
 function carriedRetirement(f: Pick<ReturnType<typeof admittedRestoreFixture>, "admitted" | "document" | "raw">) {
@@ -1846,9 +1851,277 @@ it("holds a restore's fence while its resumed predecessor's settlement is missin
       operations: f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all()}), before = state();
     expect(() => advanceStopRestoreFence(f.context, lookup, 301)).toThrow(publicationPending);
     expect(state()).toEqual(before);
-    f.raw.prepare(`INSERT INTO sync_relay_live_settlement_bindings VALUES (${Object.keys(binding).map(() => "?").join(",")})`)
+    f.raw.prepare(`INSERT INTO sync_relay_live_settlement_bindings(${Object.keys(binding).join(",")}) VALUES (${Object.keys(binding).map(() => "?").join(",")})`)
       .run(...Object.values(binding) as (string | number)[]);
     expect(advanceStopRestoreFence(f.context, lookup, 302)).toMatchObject({phase: "fenced", newFence: 3});
+  } finally {f.close();}
+});
+
+// The restore's checkpoint, as its host's settlement captures it.
+const restoredState = (f: Pick<ReturnType<typeof fixture>, "raw">, admitted: Admitted) => f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?")
+  .get(admitted.admitted.accepted.receipt.journalCursor)!.validation_checkpoint_bytes as Uint8Array;
+// Accepts the owner's edit to `doc` after the restore resumed.
+function editAfterRestore(f: Pick<ReturnType<typeof admittedRestoreFixture>, "journalCapture" | "storage">, doc: Y.Doc, deliveryId: string) {
+  const captured = f.journalCapture(Y.encodeStateAsUpdate(doc), deliveryId);
+  const accepted = f.storage.commitLiveUpdateJournal({...captured, trustedAccount: {accountId: "owner", name: "Owner"},
+    metadata: {...captured.metadata, authorContext: {kind: "account", accountId: "owner"}}});
+  expect(accepted.result.kind).toBe("accepted");
+  return accepted.admitted!.metadata.accepted.receipt.journalCursor;
+}
+const publicationRepair = "The server could not confirm the last restore of this file. Ask the server's operator to repair it before restoring again.";
+
+// Proves: a restore's publication its push ran out of proof budget for stays
+// mandatory. The push answers retryably and stores nothing, so it is neither
+// refused nor replaced by an unattributed moment. After a restart the host's
+// retry publishes it through the feed and the next restore begins. Once that
+// one is declined, the retirement that carries the restore's row completes.
+it("retries a restore's publication its push ran out of proof budget for", async () => {
+  const first = admittedRestoreFixture("owner", false, "service", hosted => hostRestoredDocument(hosted, "other"));
+  let f = first;
+  try {
+    expect(first.complete().phase).toBe("resumed");
+    const restored = first.admitted.admitted.accepted.receipt.journalCursor;
+    const publication = restorePublication(first, restoredState(first, first.admitted), restored, "retried-restore-publication");
+    const state = () => ({log: f.raw.prepare("SELECT * FROM sync_relay_log").all(), lifecycles: f.raw.prepare("SELECT * FROM sync_relay_live_restore_lifecycles").all()}), before = state();
+    await expect(prepareHostedSettlements(first.context, {workspaceId: "workspace", originId: "proof", ops: [publication.op]}, new RestoreHistoryBudget(1, 65_536)))
+      .rejects.toMatchObject({code: "settlement_proof_budget"});
+    expect(publication.op).not.toHaveProperty("settlementAdmission");
+    expect(state()).toEqual(before);
+    f = restartRelay(first);
+    await pushRestoreSettlement(f.storage, publication, false);
+    // Restore B revokes the activation's other grant, which opens its retirement at A's row.
+    expect(beginStopRestore(f.context, {...f.intent, operationId: "restore-b", shareId: "other", grantId: "other-grant", expectedGrantGeneration: 1,
+      expectedFence: 2}, 300).previousOperationId).toBe("restore");
+    expect(readServiceActivationRetirement(f.context, f.document)).toMatchObject({restoreFenceGeneration: 2, acceptedThrough: restored});
+    // The retirement waits for B, which its owner declines after its fence.
+    declineAfterFence(f, {...f.lookup, operationId: "restore-b"}, 301, "fenceCancelled");
+    const carried = carriedRetirement(f);
+    expect(f.storage.createServiceActivationStore(f.history).completeRetirement({workspaceId: f.document.workspaceId,
+      key: {...carried.key, restoreFenceGeneration: 3}, boundary: carried.boundary, host: f.lookup.host, registeredAtMs: 400, nowMs: 400,
+      guard() {}})).toEqual({status: "retired", replayed: false});
+  } finally {f.close();}
+});
+
+// Proves: a restore's publication the relay refuses is a contradiction its
+// host never retries, so the refusal is stored and the next restore of the
+// file says it needs repair instead of asking to try again.
+it("reports a refused restore publication as needing repair", async () => {
+  const f = admittedRestoreFixture("owner", false);
+  try {
+    f.complete();
+    const publication = restorePublication(f, restoredState(f, f.admitted), f.admitted.admitted.accepted.receipt.journalCursor,
+      "refused-restore-publication", 0, hash(Buffer.from("not the baseline")));
+    await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [publication.op]});
+    expect(publication.op).toMatchObject({settlementAdmission: {status: "refused"}});
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [publication.op]})).toMatchObject({inserted: 1});
+    expect(f.raw.prepare("SELECT publication_refused FROM sync_relay_live_restore_lifecycles").get()).toEqual({publication_refused: 1});
+    reshare(f, 6);
+    expect(() => beginStopRestore(f.context, {...f.intent, operationId: "restore-b", expectedFence: 2, expectedGrantGeneration: 6}, 300)).toThrow(publicationRepair);
+  } finally {f.close();}
+});
+
+// Proves: the next fence waits for every row at the resumed restore's
+// generation, not only the restore's own. Edits after restore A are unsettled
+// when restore B would fence, so B waits with nothing changed. Once their
+// settlement lands, B fences and is declined after its fence, and the edits
+// are the file another device reads.
+it("waits for edits after a resumed restore before the next restore fences", async () => {
+  const f = admittedRestoreFixture("owner", false), doc = new Y.Doc({gc: false});
+  try {
+    f.complete();
+    const a = await publishRestore(f, f.admitted, "restore-a-publication"), restored = f.admitted.admitted.accepted.receipt.journalCursor;
+    reshare(f, 6);
+    const lookup = {...f.lookup, operationId: "restore-b"};
+    beginStopRestore(f.context, {...f.intent, operationId: "restore-b", expectedFence: 2, expectedGrantGeneration: 6}, 300);
+    Y.applyUpdate(doc, restoredState(f, f.admitted)); doc.getMap("frontmatter").set("after", "continued work");
+    const edited = editAfterRestore(f, doc, "after-restore");
+    const state = () => ({documents: f.raw.prepare("SELECT * FROM sync_relay_live_documents").all(),
+      operations: f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all()}), before = state();
+    expect(() => advanceStopRestoreFence(f.context, lookup, 301)).toThrow(publicationPending);
+    expect(state()).toEqual(before);
+    const edits = restorePublication(f, Y.encodeStateAsUpdate(doc), edited, "edits-publication", restored, a.markdownDigest, 1);
+    await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [edits.op]});
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [edits.op]})).toMatchObject({inserted: 1});
+    expect(edits.op).toMatchObject({settlementAdmission: {status: "accepted"}});
+    advanceStopRestoreFence(f.context, lookup, 302);
+    // The owner's host applies the edit before its cut.
+    const capture = f.store.openStopRestoreCut(lookup);
+    if (capture.kind !== "ready") throw Error(capture.kind);
+    const step = f.store.nextStopRestoreCut(capture.capture);
+    if (step.kind !== "next") throw Error(step.kind);
+    f.store.acknowledgeStopRestoreApplication(capture.capture, step.predecessor, applicationAck(step.admitted.metadata.accepted.receipt, f.application.localHeadSequence + 1));
+    f.store.completeStopRestoreCut(capture.capture);
+    const operation = f.store.pendingStopRestoreFence(lookup).operation;
+    const answers = cancellationAnswers({context: f.context, lookup, raw: f.raw, receipt: {operation, localHeadSequence: operation.appliedSequence, recordedAtMs: 303}});
+    declineStopRestore(f.context, lookup, 304);
+    expect(f.store.acknowledgeStopRestoreCancellation(lookup, answers.fenceCancelled, 305).phase).toBe("declined");
+    expect(projectedMoment(f, "edits-publication")).toEqual({moment: {path: "docs/a.md", blob_sha256: edits.markdownDigest},
+      file: {blob_sha256: edits.markdownDigest}});
+  } finally {doc.destroy(); f.close();}
+});
+
+// Proves: a restore's settlement proof and its journal row step back across
+// two consecutive restores declined after their fences, charging each host
+// answer they load to the caller's budget. The traversal finds nothing for a
+// cutover or binding that does not match.
+it("steps across consecutive restores declined after their fences", async () => {
+  const f = admittedRestoreFixture("owner", false);
+  try {
+    f.complete();
+    const a = await publishRestore(f, f.admitted, "restore-a-publication"), restored = f.admitted.admitted.accepted.receipt.journalCursor;
+    for (const [index, operationId] of ["restore-b", "restore-c"].entries()) {
+      reshare(f, 6 + 2 * index);
+      beginStopRestore(f.context, {...f.intent, operationId, expectedFence: 2 + index, expectedGrantGeneration: 6 + 2 * index}, 300 + 10 * index);
+      declineAfterFence(f, {...f.lookup, operationId}, 301 + 10 * index, "fenceCancelled");
+    }
+    reshare(f, 10);
+    beginStopRestore(f.context, {...f.intent, operationId: "restore-d", expectedFence: 4, expectedGrantGeneration: 10}, 320);
+    const d = completeRestore(f, {...f.lookup, operationId: "restore-d"}, 321), terminal = d.admitted.admitted.accepted.receipt.journalCursor;
+    const answers = f.raw.prepare("SELECT length(CAST(acknowledgment_json AS BLOB)) AS bytes FROM sync_relay_live_restore_cancellations WHERE outcome='fence-cancelled'")
+      .all().map(row => Number(row.bytes));
+    expect(answers).toHaveLength(2);
+    const budget = new RestoreHistoryBudget(SETTLEMENT_PUSH_MAX_BYTES, SETTLEMENT_PUSH_MAX_METADATA_EVENTS), proofCharges = vi.spyOn(budget, "chargeBytes");
+    const published = restorePublication({...f, admitted: d.admitted}, restoredState(f, d.admitted), terminal, "restore-d-publication", restored, a.markdownDigest, 1);
+    await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [published.op]}, budget);
+    expect(published.op).toMatchObject({settlementAdmission: {status: "accepted"}});
+    expect(proofCharges.mock.calls.map(([bytes]) => bytes)).toEqual(expect.arrayContaining(answers));
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [published.op]})).toMatchObject({inserted: 1});
+    const journalCharges: number[] = [], db = f.context.db;
+    assertJournalCheckpointPosition(db, decodeJournalRow(db, db.prepare("SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(terminal)!),
+      {bytes: Number.MAX_SAFE_INTEGER, chargeBytes: bytes => {journalCharges.push(bytes);}});
+    expect(journalCharges).toEqual(expect.arrayContaining(answers));
+    const at = (restoreFenceGeneration: number, path = "docs/a.md") => ({...f.admitted.admitted.accepted.binding, currentPath: path, restoreFenceGeneration});
+    expect(acrossDeclinedRestores(db, "restore-test", at(4), restored)).toEqual(at(2));
+    expect(acrossDeclinedRestores(db, "restore-test", at(4), restored - 1)).toBeNull();
+    expect(acrossDeclinedRestores(db, "restore-test", at(4, "docs/b.md"), restored)).toBeNull();
+  } finally {f.close();}
+});
+
+// Proves: the traversal steps across as many declined generations as native's
+// `require_cancelled` does, and finds nothing past them.
+it("stops stepping across declined restores past native's generation limit", async () => {
+  const f = admittedRestoreFixture("owner", false);
+  try {
+    f.complete();
+    await publishRestore(f, f.admitted, "restore-a-publication");
+    const restored = f.admitted.admitted.accepted.receipt.journalCursor, db = f.context.db;
+    reshare(f, 6);
+    beginStopRestore(f.context, {...f.intent, operationId: "restore-b", expectedFence: 2, expectedGrantGeneration: 6}, 300);
+    declineAfterFence(f, {...f.lookup, operationId: "restore-b"}, 301, "fenceCancelled");
+    const at = (restoreFenceGeneration: number) => ({...f.admitted.admitted.accepted.binding, restoreFenceGeneration});
+    // Copies restore B's Decline to each later generation, through `top`.
+    const operation = db.prepare("SELECT * FROM sync_relay_live_restore_operations WHERE operation_id='restore-b'").get()!;
+    const cancellation = db.prepare("SELECT * FROM sync_relay_live_restore_cancellations WHERE operation_id='restore-b'").get()!;
+    const insert = (table: string, row: Record<string, unknown>) => db.prepare(`INSERT INTO ${table}(${Object.keys(row).join(",")}) VALUES (${Object.keys(row).map(() => "?").join(",")})`)
+      .run(...Object.values(row) as (string | number | null)[]);
+    let declined = 3;
+    const copyThrough = (top: number) => {
+      db.exec("BEGIN");
+      while (declined < top) {
+        declined++;
+        const answer = JSON.parse(String(cancellation.acknowledgment_json));
+        answer.generation = answer.binding.restoreFenceGeneration = answer.receipt.binding.restoreFenceGeneration = answer.receipt.fence.operation.newFence = declined;
+        answer.receipt.fence.operation.oldBinding.restoreFenceGeneration = declined - 1;
+        insert("sync_relay_live_restore_operations", {...operation, operation_id: `declined-${declined}`, old_fence: declined - 1, new_fence: declined});
+        insert("sync_relay_live_restore_cancellations", {...cancellation, operation_id: `declined-${declined}`, journal_cursor: 1_000_000 + declined, acknowledgment_json: JSON.stringify(answer)});
+      }
+      db.exec("COMMIT");
+    };
+    copyThrough(MAX_DECLINED_GENERATIONS + 2);
+    expect(acrossDeclinedRestores(db, "restore-test", at(MAX_DECLINED_GENERATIONS + 2), restored)).toEqual(at(2));
+    copyThrough(MAX_DECLINED_GENERATIONS + 3);
+    expect(acrossDeclinedRestores(db, "restore-test", at(MAX_DECLINED_GENERATIONS + 3), restored)).toBeNull();
+  } finally {f.close();}
+});
+
+// Proves: admission funds a restore's publication apart from its receipts and
+// keeps it through resume. The append that stores the restore's binding
+// releases it once: a failed append keeps it, a second covering settlement
+// releases nothing, and usage is the stored charges plus what is held. The
+// held amount is the moment's log row and the binding, each at its limit.
+it("funds a restore's publication at admission and releases it once with its binding", async () => {
+  const f = admittedRestoreFixture("owner", false);
+  try {
+    const binding = f.admitted.admitted.accepted.binding, cursor = f.admitted.admitted.accepted.receipt.journalCursor;
+    const reservation = restorePublicationReservation("restore-test", binding);
+    // Every field at its limit, escaped as stored: a backslash costs two JSON bytes and a lone surrogate six.
+    expect(maximumBindingBytes("restore-test", binding)).toBe(2 + 15 + [binding.workspaceId, binding.mainVersionId, binding.objectId, binding.lineageClaimId,
+      "restore-test", binding.restoreFenceGeneration, stableJsonStringify(binding)].reduce<number>((n, value) => n + Buffer.byteLength(JSON.stringify(value)), 0) +
+      2 * 16 + (2 + 80) + (2 + 2 * 512) + 3 * (2 + 64) + (2 + 6 * 256) + 16);
+    expect(reservation).toBe(262_144 + 131_072 + 119 + maximumBindingBytes("restore-test", binding));
+    const held = () => f.raw.prepare("SELECT publication_reservation_bytes AS bytes,accounted_bytes FROM sync_relay_live_restore_lifecycles").get()!;
+    const usage = () => Number(f.raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()!.usage_bytes);
+    expect(Number(held().bytes)).toBe(reservation);
+    f.complete();
+    expect(Number(held().bytes)).toBe(reservation);
+    const funded = held();
+    const publication = restorePublication(f, restoredState(f, f.admitted), cursor, "funded-publication");
+    await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [publication.op]});
+    // Another settlement of the same row, proved before either lands.
+    const second = restorePublication(f, restoredState(f, f.admitted), cursor, "second-publication");
+    await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "second", ops: [second.op]});
+    expect(second.op).toMatchObject({settlementAdmission: {status: "accepted"}});
+    // Proving releases nothing; only the append does.
+    const before = {held: funded, usage: usage()};
+    expect(held()).toEqual(funded);
+    f.raw.exec("CREATE TRIGGER refuse_binding BEFORE INSERT ON sync_relay_live_settlement_bindings BEGIN SELECT RAISE(ABORT,'binding refused'); END");
+    expect(() => f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [publication.op]})).toThrow("binding refused");
+    expect({held: held(), usage: usage()}).toEqual(before);
+    f.raw.exec("DROP TRIGGER refuse_binding");
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [publication.op]})).toMatchObject({inserted: 1});
+    const stored = Number(f.raw.prepare("SELECT storage_bytes FROM sync_relay_live_settlement_bindings").get()!.storage_bytes);
+    const log = f.storage.fetchLogCoordinate({workspaceId: "workspace", originId: "proof", originSeq: 0})!;
+    const logged = Buffer.byteLength(log.payloadJson) + Buffer.byteLength(JSON.stringify(log.admittedAuthorSnapshot)) + Buffer.byteLength(JSON.stringify(log.settlementAdmission));
+    expect(stored).toBeLessThanOrEqual(maximumBindingBytes("restore-test", binding));
+    expect(held()).toEqual({bytes: 0, accounted_bytes: Number(before.held.accounted_bytes) - reservation});
+    expect(usage()).toBe(before.usage - reservation + stored + logged);
+    const after = usage();
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [publication.op]})).toMatchObject({inserted: 0});
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "second", ops: [second.op]})).toMatchObject({inserted: 1});
+    expect(second.op).toMatchObject({settlementAdmission: {status: "refused"}});
+    const refused = f.storage.fetchLogCoordinate({workspaceId: "workspace", originId: "second", originSeq: 0})!;
+    expect(held()).toEqual({bytes: 0, accounted_bytes: Number(before.held.accounted_bytes) - reservation});
+    expect(f.raw.prepare("SELECT publication_refused FROM sync_relay_live_restore_lifecycles").get()).toEqual({publication_refused: 0});
+    expect(usage()).toBe(after + Buffer.byteLength(refused.payloadJson) + Buffer.byteLength(JSON.stringify(refused.settlementAdmission)));
+    expect(f.store.readStopRestoreLifecycle(f.input)!.phase).toBe("resumed");
+  } finally {f.close();}
+});
+
+// Proves: a restore publication that would charge more than admission held
+// is refused before anything is released: here a moment over the log payload
+// limit, which the log route never admits.
+it("refuses a restore publication over its payload limit without releasing its reserve", async () => {
+  const f = admittedRestoreFixture("owner", false);
+  try {
+    f.complete();
+    const publication = restorePublication(f, restoredState(f, f.admitted), f.admitted.admitted.accepted.receipt.journalCursor, "oversized-publication");
+    publication.op.payloadJson = stableJsonStringify({...publication.payload, padding: "x".repeat(MAX_PAYLOAD_JSON_BYTES)});
+    await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [publication.op]});
+    expect(publication.op).toMatchObject({settlementAdmission: {status: "accepted"}});
+    const held = () => f.raw.prepare("SELECT publication_reservation_bytes,accounted_bytes FROM sync_relay_live_restore_lifecycles").get(), before = held();
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [publication.op]})).toMatchObject({inserted: 1});
+    expect(publication.op).toMatchObject({settlementAdmission: {status: "refused"}});
+    expect(held()).toEqual(before);
+    expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_live_settlement_bindings").get()).toEqual({n: 0});
+  } finally {f.close();}
+});
+
+// Proves: deleting the owner's account removes a restore's held publication
+// with its rows and workspace, and leaves another workspace's usage alone.
+it("removes a restore's held publication with its owner's account", () => {
+  const f = admittedRestoreFixture("owner", false);
+  try {
+    f.complete();
+    expect(Number(f.raw.prepare("SELECT publication_reservation_bytes FROM sync_relay_live_restore_lifecycles").get()!.publication_reservation_bytes)).toBeGreaterThan(0);
+    const others = () => f.raw.prepare("SELECT * FROM sync_relay_workspace_usage WHERE workspace_id<>'workspace' ORDER BY workspace_id").all(), before = others();
+    initializeAccountDeletion(f.context, "fence-key");
+    const deletion = fenceAccount(f.context, "fence-key", "owner", "owner@dohc.test");
+    purgeAccountRows(f.context, "owner", "owner@dohc.test", deletion.manifest!);
+    const count = (table: string) => Number(f.raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()!.n);
+    expect(["sync_relay_live_restore_lifecycles", "sync_relay_live_restore_operations", "sync_relay_workspaces"].map(count)).toEqual([0, 0, 0]);
+    expect(f.raw.prepare("SELECT 1 FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()).toBeUndefined();
+    expect(others()).toEqual(before);
+    expect(f.raw.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   } finally {f.close();}
 });
 
@@ -2587,25 +2860,60 @@ it("migrates a store from before the declined phase without changing its restore
     const snapshot = () => ({operations: rows("sync_relay_live_restore_operations"), proposals: rows(proposalTable),
       lifecycles: rows("sync_relay_live_restore_lifecycles"), sources: rows("sync_relay_live_restore_source_ranges"),
       journal: db.prepare("SELECT journal_cursor,restore_operation_id FROM sync_relay_live_update_journal ORDER BY journal_cursor").all()});
+    // The earlier build held no publication reservation.
+    db.exec("UPDATE sync_relay_live_restore_lifecycles SET accounted_bytes=accounted_bytes-publication_reservation_bytes,publication_reservation_bytes=0");
     const before = snapshot();
     expect(before.lifecycles).toHaveLength(1);
     expect(before.sources.length).toBeGreaterThan(0);
     expect(before.journal.some(row => row.restore_operation_id === "restore")).toBe(true);
-    // Lay the operation table out as the earlier build left it.
-    const columns = db.prepare("SELECT name FROM pragma_table_info('sync_relay_live_restore_operations') WHERE name<>'declined_at_ms' ORDER BY cid").all().map(row => row.name).join(",");
-    db.exec("PRAGMA foreign_keys=OFF"); db.exec("PRAGMA legacy_alter_table=ON");
-    db.exec(`BEGIN; ALTER TABLE sync_relay_live_restore_operations RENAME TO restore_operations_v2; ${LIVE_RESTORE_OPERATIONS_V1_SQL};
-      INSERT INTO sync_relay_live_restore_operations(${columns}) SELECT ${columns} FROM restore_operations_v2; DROP TABLE restore_operations_v2;
-      ${LIVE_RESTORE_ACTIVE_V1_SQL}; DELETE FROM sync_relay_migrations WHERE migration_id='live-restore-declined-v1'; COMMIT`);
-    db.exec("PRAGMA legacy_alter_table=OFF"); db.exec("PRAGMA foreign_keys=ON");
+    layOutEarlierRestoreStore(db, [["sync_relay_live_restore_operations", LIVE_RESTORE_OPERATIONS_V1_SQL, ["declined_at_ms"]],
+      ["sync_relay_live_restore_lifecycles", LIVE_RESTORE_LIFECYCLES_V1_SQL, ["publication_reservation_bytes", "publication_refused"]]],
+    [LIVE_RESTORE_ACTIVE_V1_SQL], ["live-restore-declined-v1", "live-restore-publication-v1"]);
     // The relay migrates inside its schema transaction, with foreign keys on.
     db.exec("BEGIN IMMEDIATE"); initializeLiveRestoreOperationSchema(db); db.exec("COMMIT");
     expect(snapshot()).toEqual(before);
     expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
-    expect(db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id='live-restore-declined-v1'").get()).toBeTruthy();
+    expect(db.prepare("SELECT COUNT(*) AS n FROM sync_relay_migrations WHERE migration_id IN ('live-restore-declined-v1','live-restore-publication-v1')").get()).toEqual({n: 2});
     expect(() => initializeLiveRestoreOperationSchema(db)).not.toThrow();
   } finally {f.close();}
 });
+
+// Proves: a store from before publication funding opens with every lifecycle
+// and source range as it was, holding no publication and no refusal, and its
+// restores still read.
+it("migrates a store from before publication funding without changing its restore rows", () => {
+  const f = admittedRestoreFixture("owner", true);
+  try {
+    f.complete();
+    const db = f.context.db;
+    const rows = (table: string) => db.prepare(`SELECT * FROM ${table} ORDER BY 1,2`).all();
+    db.exec("UPDATE sync_relay_live_restore_lifecycles SET accounted_bytes=accounted_bytes-publication_reservation_bytes,publication_reservation_bytes=0");
+    const snapshot = () => ({lifecycles: rows("sync_relay_live_restore_lifecycles"), sources: rows("sync_relay_live_restore_source_ranges")}), before = snapshot();
+    expect(before.sources.length).toBeGreaterThan(0);
+    layOutEarlierRestoreStore(db, [["sync_relay_live_restore_lifecycles", LIVE_RESTORE_LIFECYCLES_V1_SQL, ["publication_reservation_bytes", "publication_refused"]]],
+      [], ["live-restore-publication-v1"]);
+    expect(db.prepare("SELECT name FROM pragma_table_info('sync_relay_live_restore_lifecycles') WHERE name LIKE 'publication_%'").all()).toEqual([]);
+    db.exec("BEGIN IMMEDIATE"); initializeLiveRestoreOperationSchema(db); db.exec("COMMIT");
+    expect(snapshot()).toEqual(before);
+    expect(before.lifecycles).toMatchObject([{publication_reservation_bytes: 0, publication_refused: 0}]);
+    expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(f.store.readStopRestoreLifecycle(f.input)!.phase).toBe("resumed");
+    expect(() => initializeLiveRestoreOperationSchema(db)).not.toThrow();
+  } finally {f.close();}
+});
+
+// Lays restore tables out as an earlier build left them, each without its
+// later columns, and forgets the migrations that added them.
+function layOutEarlierRestoreStore(db: StorageContext["db"], tables: [table: string, sql: string, later: string[]][], indexes: string[], migrations: string[]) {
+  db.exec("PRAGMA foreign_keys=OFF"); db.exec("PRAGMA legacy_alter_table=ON"); db.exec("BEGIN");
+  for (const [table, sql, later] of tables) {
+    const columns = db.prepare(`SELECT name FROM pragma_table_info('${table}') ORDER BY cid`).all().map(row => String(row.name)).filter(name => !later.includes(name)).join(",");
+    db.exec(`ALTER TABLE ${table} RENAME TO ${table}_later; ${sql}; INSERT INTO ${table}(${columns}) SELECT ${columns} FROM ${table}_later; DROP TABLE ${table}_later`);
+  }
+  for (const sql of indexes) db.exec(sql);
+  for (const migration of migrations) db.prepare("DELETE FROM sync_relay_migrations WHERE migration_id=?").run(migration);
+  db.exec("COMMIT"); db.exec("PRAGMA legacy_alter_table=OFF"); db.exec("PRAGMA foreign_keys=ON");
+}
 
 // Proves: deleting the account of the collaborator a restore stopped, after the
 // restore begins, purges the revoked grant without stranding the restore. It

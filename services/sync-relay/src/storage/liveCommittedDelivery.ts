@@ -1,4 +1,6 @@
 import {SETTLEMENT_CUTS} from "./hostedSettlementSchema";
+import {restorePublicationFits,restorePublicationReservation} from "./hostedSettlement";
+import {relayError} from "../errors";
 import {nativeSourceAuthorMatches} from "./liveNativeSourceAuthors";
 import {parseNativeRestoreApplicationReceipt,parseNativeRestoreSettlementReceipt,parseNativeRestoreResumeReceipt,type RestoreLifecycle,type NativeRestoreApplicationReceipt,type NativeRestoreSettlementReceipt,type NativeRestoreResumeReceipt} from "../liveRestoreLifecycle";
 import type { ServiceActivationAccess } from "./serviceActivationAccess";
@@ -1479,7 +1481,9 @@ export class LiveCommittedDeliveryStore {
         settlementId:id,momentId:id,markdownDigest:"f".repeat(64),localHeadSequence:integer,recordedAtMs:integer};
       const reservation=Buffer.byteLength(JSON.stringify(application))+2*Buffer.byteLength(JSON.stringify(settlement))+Buffer.byteLength(JSON.stringify(resume));
       const values=[this.#history.namespace,input.operationId,document.workspaceId,input.maxBytes,admissionJson,restoreDigest(admission)];
-      const charge=Buffer.byteLength(JSON.stringify(values))+reservation;
+      // The restore's publication must land, so admission funds it too, apart from the evidence limit.
+      const publication=restorePublicationReservation(this.#history.namespace,binding);
+      const charge=Buffer.byteLength(JSON.stringify(values))+reservation+publication;
       const sourceRows=sourceRanges.map(range=>{
         const values=[this.#history.namespace,input.operationId,...documentParams(document),range.sourceOrdinal,range.clientId,range.startClock,range.endClock,
           expectedProposalDigest,range.sourceDigest];
@@ -1487,8 +1491,8 @@ export class LiveCommittedDeliveryStore {
       });
       const total=charge+sourceRows.reduce((n,row)=>n+row.charge,0);
       assertWorkspaceQuota(this.#storage,document.workspaceId,total);
-      integrity(this.#storage.db.prepare(`INSERT INTO ${LIVE_RESTORE_LIFECYCLES}(relay_database_namespace,operation_id,workspace_id,max_evidence_bytes,admission_json,admission_sha256,receipt_reservation_bytes,accounted_bytes)
-        VALUES (?,?,?,?,?,?,?,?)`).run(...values,reservation,charge).changes===1);
+      integrity(this.#storage.db.prepare(`INSERT INTO ${LIVE_RESTORE_LIFECYCLES}(relay_database_namespace,operation_id,workspace_id,max_evidence_bytes,admission_json,admission_sha256,receipt_reservation_bytes,publication_reservation_bytes,accounted_bytes)
+        VALUES (?,?,?,?,?,?,?,?,?)`).run(...values,reservation,publication,charge).changes===1);
       const insert=this.#storage.db.prepare(`INSERT INTO ${LIVE_RESTORE_SOURCE_RANGES}(relay_database_namespace,operation_id,workspace_id,main_version_id,object_id,lineage_claim_id,source_ordinal,client_id,start_clock,end_clock,proposal_sha256,source_sha256,accounted_bytes)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       for (const row of sourceRows) integrity(insert.run(...row.values,row.charge).changes===1);
@@ -1498,6 +1502,9 @@ export class LiveCommittedDeliveryStore {
       // The fence carried the open retirement to this generation. It now names the restore's own accepted row.
       carryServiceActivationRetirement(this.#storage,document,fence.operation.newFence,admitted.metadata.accepted.receipt.journalCursor);
       requireRestoreLifecycleBudget(this.#storage.db,this.#history.namespace,input.operationId,input.workspaceId,input.maxBytes);
+      if (!restorePublicationFits(this.#storage,this.#history.namespace,fence.operation.oldBinding,binding,admitted.metadata.accepted.receipt.journalCursor)) {
+        throw relayError("payload_too_large","The server can't confirm this restore: too many changes to this file haven't been confirmed yet. Decline this restore.");
+      }
     });
     return this.readStopRestoreLifecycle(input)!;
   }

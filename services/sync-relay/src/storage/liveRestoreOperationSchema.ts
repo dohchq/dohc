@@ -8,6 +8,8 @@ const marker = "live-restore-operation-v1";
 // Adds the declined phase. The phase is final, like resumed, so neither counts
 // as the document's unfinished restore.
 const declinedMarker = "live-restore-declined-v1";
+// Adds a lifecycle's publication reservation and its refused publication.
+const publicationMarker = "live-restore-publication-v1";
 const safe = Number.MAX_SAFE_INTEGER;
 /** Where a restore no longer blocks another restore of its document. */
 export const UNFINISHED_RESTORE = "phase NOT IN ('resumed','declined')";
@@ -64,6 +66,34 @@ const operationsSql = `CREATE TABLE ${LIVE_RESTORE_OPERATIONS} (
     CHECK (phase='declined' OR (phase NOT IN ('authority-invalidated','fenced','old-cut-applied')) = (native_receipt_json IS NOT NULL)),
     CHECK ((phase='declined') = (declined_at_ms IS NOT NULL)),
     ${operationKeys}`;
+const lifecycleColumns = `relay_database_namespace TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+    max_evidence_bytes INTEGER NOT NULL CHECK (max_evidence_bytes BETWEEN 1 AND ${safe}),
+    admission_json TEXT NOT NULL CHECK (json_valid(admission_json)),
+    admission_sha256 TEXT NOT NULL CHECK (length(admission_sha256)=64 AND admission_sha256 NOT GLOB '*[^0-9a-f]*'),
+    application_json TEXT CHECK (json_valid(application_json)),
+    pending_settlement_json TEXT CHECK (json_valid(pending_settlement_json)),
+    settlement_json TEXT CHECK (json_valid(settlement_json)),
+    resume_json TEXT CHECK (json_valid(resume_json)),
+    receipt_reservation_bytes INTEGER NOT NULL CHECK (receipt_reservation_bytes BETWEEN 0 AND ${safe}),`;
+const lifecycleKeys = `accounted_bytes INTEGER NOT NULL CHECK (accounted_bytes BETWEEN 1 AND ${safe}),
+    PRIMARY KEY (relay_database_namespace,operation_id),
+    FOREIGN KEY (relay_database_namespace,operation_id) REFERENCES ${LIVE_RESTORE_OPERATIONS}(relay_database_namespace,operation_id) ON DELETE CASCADE,
+    CHECK ((pending_settlement_json IS NULL AND settlement_json IS NULL) OR application_json IS NOT NULL),
+    CHECK (resume_json IS NULL OR settlement_json IS NOT NULL)
+  ) STRICT`;
+/** The lifecycle table before its publication columns. A test builds an earlier store from it. */
+export const LIVE_RESTORE_LIFECYCLES_V1_SQL = `CREATE TABLE ${LIVE_RESTORE_LIFECYCLES} (
+    ${lifecycleColumns}
+    ${lifecycleKeys}`;
+// The publication reservation funds the restore's settlement binding and log
+// row until its publication lands. A refused publication needs repair.
+const lifecyclesSql = `CREATE TABLE ${LIVE_RESTORE_LIFECYCLES} (
+    ${lifecycleColumns}
+    publication_reservation_bytes INTEGER NOT NULL DEFAULT 0 CHECK (publication_reservation_bytes BETWEEN 0 AND ${safe}),
+    publication_refused INTEGER NOT NULL DEFAULT 0 CHECK (publication_refused IN (0,1)),
+    ${lifecycleKeys}`;
 const schema = {
   [LIVE_RESTORE_OPERATIONS]: operationsSql,
   [LIVE_RESTORE_PROPOSALS]: `CREATE TABLE ${LIVE_RESTORE_PROPOSALS} (
@@ -79,24 +109,7 @@ const schema = {
     PRIMARY KEY (relay_database_namespace,operation_id),
     FOREIGN KEY (relay_database_namespace,operation_id) REFERENCES ${LIVE_RESTORE_OPERATIONS}(relay_database_namespace,operation_id) ON DELETE CASCADE
   ) STRICT`,
-  [LIVE_RESTORE_LIFECYCLES]: `CREATE TABLE ${LIVE_RESTORE_LIFECYCLES} (
-    relay_database_namespace TEXT NOT NULL,
-    operation_id TEXT NOT NULL,
-    workspace_id TEXT NOT NULL REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
-    max_evidence_bytes INTEGER NOT NULL CHECK (max_evidence_bytes BETWEEN 1 AND ${safe}),
-    admission_json TEXT NOT NULL CHECK (json_valid(admission_json)),
-    admission_sha256 TEXT NOT NULL CHECK (length(admission_sha256)=64 AND admission_sha256 NOT GLOB '*[^0-9a-f]*'),
-    application_json TEXT CHECK (json_valid(application_json)),
-    pending_settlement_json TEXT CHECK (json_valid(pending_settlement_json)),
-    settlement_json TEXT CHECK (json_valid(settlement_json)),
-    resume_json TEXT CHECK (json_valid(resume_json)),
-    receipt_reservation_bytes INTEGER NOT NULL CHECK (receipt_reservation_bytes BETWEEN 0 AND ${safe}),
-    accounted_bytes INTEGER NOT NULL CHECK (accounted_bytes BETWEEN 1 AND ${safe}),
-    PRIMARY KEY (relay_database_namespace,operation_id),
-    FOREIGN KEY (relay_database_namespace,operation_id) REFERENCES ${LIVE_RESTORE_OPERATIONS}(relay_database_namespace,operation_id) ON DELETE CASCADE,
-    CHECK ((pending_settlement_json IS NULL AND settlement_json IS NULL) OR application_json IS NOT NULL),
-    CHECK (resume_json IS NULL OR settlement_json IS NOT NULL)
-  ) STRICT`,
+  [LIVE_RESTORE_LIFECYCLES]: lifecyclesSql,
   [LIVE_RESTORE_SOURCE_RANGES]: `CREATE TABLE ${LIVE_RESTORE_SOURCE_RANGES} (
     relay_database_namespace TEXT NOT NULL,
     operation_id TEXT NOT NULL,
@@ -125,29 +138,31 @@ const indexSchema = {
 export const LIVE_RESTORE_ACTIVE_V1_SQL = `CREATE UNIQUE INDEX sync_relay_live_restore_active ON ${LIVE_RESTORE_OPERATIONS}(workspace_id,main_version_id,object_id) WHERE phase<>'resumed'`;
 
 // Runs inside the relay's schema transaction, where foreign keys stay on.
-// Dropping the operation table would cascade into its children, so all four
-// tables move through temporary copies. Journal rows that name an operation
+// Dropping a parent table would cascade into its children, so `tables`, a
+// parent before its children, move through temporary copies, and a column a
+// table did not have takes its default. Journal rows that name an operation
 // wait on deferred checks until the operation rows return.
-function addDeclinedPhase(db: SqliteDb): void {
-  const tables = [LIVE_RESTORE_OPERATIONS, LIVE_RESTORE_PROPOSALS, LIVE_RESTORE_LIFECYCLES, LIVE_RESTORE_SOURCE_RANGES];
-  const columns = db.prepare(`SELECT name FROM pragma_table_info('${LIVE_RESTORE_OPERATIONS}') ORDER BY cid`).all().map(row => String(row.name)).join(",");
+function rebuild(db: SqliteDb, tables: readonly (keyof typeof schema)[], indexes: readonly (keyof typeof indexSchema)[]): void {
+  const columns = tables.map(table => db.prepare(`SELECT name FROM pragma_table_info('${table}') ORDER BY cid`).all().map(row => String(row.name)).join(","));
   db.exec("PRAGMA defer_foreign_keys=ON");
-  for (const table of tables) db.exec(`CREATE TEMP TABLE ${table}_v1 AS SELECT * FROM main.${table}`);
+  for (const table of tables) db.exec(`CREATE TEMP TABLE ${table}_previous AS SELECT * FROM main.${table}`);
   for (const table of [...tables].reverse()) db.exec(`DROP TABLE main.${table}`);
-  for (const table of tables) db.exec(schema[table as keyof typeof schema]);
-  db.exec(`INSERT INTO main.${LIVE_RESTORE_OPERATIONS}(${columns}) SELECT ${columns} FROM temp.${LIVE_RESTORE_OPERATIONS}_v1`);
-  for (const table of tables.slice(1)) db.exec(`INSERT INTO main.${table} SELECT * FROM temp.${table}_v1`);
-  for (const table of tables) db.exec(`DROP TABLE temp.${table}_v1`);
-  for (const sql of Object.values(indexSchema)) db.exec(sql);
+  for (const table of tables) db.exec(schema[table]);
+  for (const [index, table] of tables.entries()) db.exec(`INSERT INTO main.${table}(${columns[index]}) SELECT ${columns[index]} FROM temp.${table}_previous`);
+  for (const table of tables) db.exec(`DROP TABLE temp.${table}_previous`);
+  for (const index of indexes) db.exec(indexSchema[index]);
 }
 
 export function initializeLiveRestoreOperationSchema(db: SqliteDb): void {
   const isMarked = (migration: string) => db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(migration) !== undefined;
-  const marked = isMarked(marker), declined = isMarked(declinedMarker);
+  const marked = isMarked(marker), declined = isMarked(declinedMarker), published = isMarked(publicationMarker);
   const normalize = (sql: string) => sql.replace(/\s+/g, " ").trim();
-  const expected = (name: string, sql: string) => marked && !declined
-    ? name === LIVE_RESTORE_OPERATIONS ? LIVE_RESTORE_OPERATIONS_V1_SQL : name === "sync_relay_live_restore_active" ? LIVE_RESTORE_ACTIVE_V1_SQL : sql
-    : sql;
+  const expected = (name: string, sql: string) => {
+    if (!marked) return sql;
+    if (!declined && name === LIVE_RESTORE_OPERATIONS) return LIVE_RESTORE_OPERATIONS_V1_SQL;
+    if (!declined && name === "sync_relay_live_restore_active") return LIVE_RESTORE_ACTIVE_V1_SQL;
+    return !published && name === LIVE_RESTORE_LIFECYCLES ? LIVE_RESTORE_LIFECYCLES_V1_SQL : sql;
+  };
   for (const [name, sql] of Object.entries(schema)) {
     const row = db.prepare("SELECT type,sql FROM sqlite_schema WHERE name=?").get(name);
     if (!marked) {
@@ -166,7 +181,9 @@ export function initializeLiveRestoreOperationSchema(db: SqliteDb): void {
       throw new Error("Live restore index is missing or damaged.");
     }
   }
-  if (marked && !declined) addDeclinedPhase(db);
+  const tables = [LIVE_RESTORE_OPERATIONS, LIVE_RESTORE_PROPOSALS, LIVE_RESTORE_LIFECYCLES, LIVE_RESTORE_SOURCE_RANGES] as const;
+  if (marked && !declined) rebuild(db, tables, ["sync_relay_live_restore_active", "sync_relay_live_restore_source_clients"]);
+  else if (marked && !published) rebuild(db, tables.slice(2), ["sync_relay_live_restore_source_clients"]);
   const indexes = db.prepare(`PRAGMA index_list(${LIVE_RESTORE_OPERATIONS})`).all();
   if (indexes.length !== 3 || indexes.some(row => row.unique !== 1 || (row.name==="sync_relay_live_restore_active" ? row.partial!==1 || row.origin!=="c" : row.partial!==0 || (row.origin!=="pk" && row.origin!=="u")))) {
     throw new Error("Live restore index is damaged.");
@@ -184,7 +201,7 @@ export function initializeLiveRestoreOperationSchema(db: SqliteDb): void {
     proposalIndexes[0]!.partial !== 0 || db.prepare(`PRAGMA foreign_key_check(${LIVE_RESTORE_PROPOSALS})`).all().length) {
     throw new Error("Live restore proposal storage is damaged.");
   }
-  for (const migration of [...(marked ? [] : [marker]), ...(declined ? [] : [declinedMarker])]) {
+  for (const migration of [...(marked ? [] : [marker]), ...(declined ? [] : [declinedMarker]), ...(published ? [] : [publicationMarker])]) {
     db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(migration, Date.now());
   }
 }

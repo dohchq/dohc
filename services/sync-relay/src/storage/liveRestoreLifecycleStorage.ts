@@ -47,7 +47,7 @@ export function retainedRestoreLifecycle(db: SqliteDb, namespace: string, operat
   validateRestoreLifecycle(admission,lifecycle);
   require(row.pending_settlement_json===null || row.settlement_json===null);
   const base=Buffer.byteLength(JSON.stringify([row.relay_database_namespace,row.operation_id,row.workspace_id,row.max_evidence_bytes,row.admission_json,row.admission_sha256]));
-  require(authorityInteger(row.accounted_bytes,1)===base+bytes+authorityInteger(row.receipt_reservation_bytes));
+  require(authorityInteger(row.accounted_bytes,1)===base+bytes+authorityInteger(row.receipt_reservation_bytes)+authorityInteger(row.publication_reservation_bytes));
   return {admission,lifecycle,row};
 }
 
@@ -67,31 +67,44 @@ export function finishedRestoreBinding(db:SqliteDb,namespace:string,operationId:
   return answer.binding;
 }
 
+/** Native `require_cancelled` (`restore_fence.rs`) steps across at most this many generations, `CHECKPOINT_EVENTS`. */
+export const MAX_DECLINED_GENERATIONS=4095;
+// The largest host answer a step loads, native's accepted header bound.
+const MAX_ANSWER_BYTES=643_576;
 /**
  * The binding the history before `binding` was accepted at, or null when it
  * can't be. Restores declined after their fence moved the generation with no
  * accepted event, so each one ending at `binding` steps back to its old
- * binding, and its cutover must be `previous`, the event before.
+ * binding. Its host must have stopped at that binding, and its cutover must be
+ * `previous`, the event before. Each host answer it loads is charged to
+ * `chargeBytes`.
  */
-export function acrossDeclinedRestores(db:SqliteDb,namespace:string,binding:LiveObjectBinding,previous:number):LiveObjectBinding|null {
+export function acrossDeclinedRestores(db:SqliteDb,namespace:string,binding:LiveObjectBinding,previous:number,
+  chargeBytes?:(value:number)=>void):LiveObjectBinding|null {
   let expected=binding;
-  for (let declined=restoreDeclinedAt(db,namespace,expected); declined; declined=restoreDeclinedAt(db,namespace,expected)) {
-    if (declined.cutover!==previous) return null;
+  for (let steps=0;;steps++) {
+    const declined=restoreDeclinedAt(db,namespace,expected,chargeBytes);
+    if (!declined) return expected;
+    if (steps===MAX_DECLINED_GENERATIONS || !isDeepStrictEqual(declined.binding,expected) || declined.cutover!==previous) return null;
     expected=declined.oldBinding;
   }
-  return expected;
 }
-function restoreDeclinedAt(db:SqliteDb,namespace:string,binding:LiveObjectBinding):{oldBinding:LiveObjectBinding;cutover:number}|null {
-  const row=db.prepare(`SELECT o.cutover_cursor,c.acknowledgment_json FROM ${operations} o JOIN ${LIVE_RESTORE_CANCELLATIONS} c USING(relay_database_namespace,operation_id)
+function restoreDeclinedAt(db:SqliteDb,namespace:string,binding:LiveObjectBinding,chargeBytes?:(value:number)=>void):
+  {binding:LiveObjectBinding;oldBinding:LiveObjectBinding;cutover:number}|null {
+  const header=db.prepare(`SELECT o.operation_id,length(CAST(c.acknowledgment_json AS BLOB)) AS bytes FROM ${operations} o JOIN ${LIVE_RESTORE_CANCELLATIONS} c USING(relay_database_namespace,operation_id)
     WHERE o.relay_database_namespace=? AND o.workspace_id=? AND o.main_version_id=? AND o.object_id=? AND o.lineage_claim_id=? AND o.new_fence=? AND o.phase='declined' AND c.outcome='fence-cancelled'`)
     .get(namespace,binding.workspaceId,binding.mainVersionId,binding.objectId,binding.lineageClaimId,binding.restoreFenceGeneration);
-  if (!row) return null;
+  if (!header) return null;
+  const bytes=authorityInteger(header.bytes,1);
+  require(bytes<=MAX_ANSWER_BYTES);
+  chargeBytes?.(bytes);
+  const row=db.prepare(`SELECT o.cutover_cursor,c.acknowledgment_json FROM ${operations} o JOIN ${LIVE_RESTORE_CANCELLATIONS} c USING(relay_database_namespace,operation_id)
+    WHERE o.relay_database_namespace=? AND o.operation_id=?`).get(namespace,header.operation_id)!;
   const answer=parseNativeRestoreCancellationAnswer(JSON.parse(String(row.acknowledgment_json)));
   require(answer.status==="fenceCancelled");
-  if (!isDeepStrictEqual(answer.binding,binding)) return null;
   const {oldBinding}=answer.receipt.fence.operation;
   require(oldBinding.restoreFenceGeneration===binding.restoreFenceGeneration-1);
-  return {oldBinding,cutover:authorityInteger(row.cutover_cursor)};
+  return {binding:answer.binding,oldBinding,cutover:authorityInteger(row.cutover_cursor)};
 }
 
 export function requireFinishedRestoreBinding(db:SqliteDb,namespace:string,original:LiveObjectBinding,current:LiveObjectBinding):void {

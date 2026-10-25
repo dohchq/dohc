@@ -220,7 +220,7 @@ export function assertJournalCheckpointPosition(db: SqliteDb, row: {admitted: {m
   const predecessor=db.prepare(`SELECT journal_cursor,current_path,restore_fence_generation FROM ${LIVE_JOURNAL_TABLE} WHERE ${JOURNAL_DOCUMENT_WHERE} AND journal_cursor<? ORDER BY journal_cursor DESC LIMIT 1`).get(...documentParams(binding),receipt.journalCursor);
   if (predecessor) journalIntegrity(predecessor.current_path===binding.currentPath && (restored
     ? predecessor.restore_fence_generation===acrossDeclinedRestores(db,row.history.namespace,restored.preparation.fence.operation.oldBinding,
-      authorityInteger(predecessor.journal_cursor,1))?.restoreFenceGeneration
+      authorityInteger(predecessor.journal_cursor,1),budget?value=>budget.chargeBytes(value):undefined)?.restoreFenceGeneration
     : predecessor.restore_fence_generation===binding.restoreFenceGeneration));
   const previous = db.prepare(`SELECT journal_cursor FROM ${LIVE_JOURNAL_TABLE} WHERE ${JOURNAL_DOCUMENT_WHERE}
     AND journal_cursor<? AND validation_checkpoint_bytes IS NOT NULL ORDER BY journal_cursor DESC LIMIT 1`)

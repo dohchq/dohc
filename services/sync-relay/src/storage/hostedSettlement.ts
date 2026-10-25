@@ -16,10 +16,12 @@ import {
 } from "@dohc/live-session-contract/live-authorship";
 import {
   type LiveDocumentKey,
+  LIVE_UPDATE_IDENTIFIER_MAX_BYTES,
   parseLiveUpdateDigest,
   parseLiveUpdateIdentifier,
 } from "@dohc/live-session-contract/live-update-admission";
 import { stableJsonStringify } from "../canonicalJson";
+import { MAX_ORIGIN_ID_CHARS, MAX_PAYLOAD_JSON_BYTES } from "../wireLimits";
 import { liveValidation } from "../liveValidation";
 import { relayError } from "../errors";
 import { initialAcceptedHistoryDigest } from "../liveAcceptedHistory";
@@ -45,6 +47,7 @@ import { liveContentAuthors } from "./liveAuthorWindow";
 import type { SyncRelayLogInput } from "./types";
 export const SETTLEMENT_PUSH_MAX_BYTES = 64_000_000;
 export const SETTLEMENT_PUSH_MAX_METADATA_EVENTS = 65_536;
+const MAX_SETTLEMENT_STATE_BYTES = 20_971_520;
 const where =
   "workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?";
 const hash = (value: Uint8Array | string) =>
@@ -214,6 +217,24 @@ function withoutClientAuthors(payloadJson: string): string {
   delete payload.authors;
   return stableJsonStringify(payload);
 }
+/** The restores whose rows lie in the interval a moment's settlement record names, by this relay's journal. */
+function restoresPublished(storage: StorageContext, workspaceId: string, payload: Record<string, unknown>): [namespace: string, operationId: string][] {
+  let namespace: string, binding: LiveObjectBinding, previous: number, terminal: number;
+  try {
+    const record = bag(bag(payload.settlementReference).record);
+    namespace = parseHostControlIdentifier(record.relayDatabaseNamespace);
+    binding = parseLiveObjectBinding(record.binding);
+    [previous, terminal] = [record.previousCursor, record.terminalCursor].map(integer) as [number, number];
+  } catch {
+    return [];
+  }
+  if (binding.workspaceId !== workspaceId) return [];
+  return storage.db.prepare(`SELECT o.operation_id FROM ${LIVE_RESTORE_OPERATIONS} o JOIN sync_relay_live_update_journal j
+    ON j.relay_database_namespace=o.relay_database_namespace AND j.restore_operation_id=o.operation_id
+    WHERE o.relay_database_namespace=? AND o.workspace_id=? AND o.main_version_id=? AND o.object_id=? AND o.lineage_claim_id=?
+      AND j.journal_cursor>? AND j.journal_cursor<=?`)
+    .all(namespace, ...documentParams(binding), previous, terminal).map((row) => [namespace, String(row.operation_id)]);
+}
 function refuseSettlement(op: SyncRelayLogInput, settlementId: string) {
   prepared.delete(op);
   op.payloadJson = withoutClientAuthors(op.payloadJson);
@@ -302,11 +323,54 @@ function restoreChecks(
       newFence: operation.newFence,
     });
     const before = acrossDeclinedRestores(storage.db, namespace, operation.oldBinding,
-      index === 0 ? previous : events[index - 1]!.metadata.accepted.receipt.journalCursor);
+      index === 0 ? previous : events[index - 1]!.metadata.accepted.receipt.journalCursor, (value) => budget.chargeBytes(value));
     require(before);
     expected = before;
   }
   return { initialBinding: expected, restores };
+}
+/**
+ * Under the admission writer, after the restore's row: whether one push can
+ * prove its publication. No binding commits at the old generation after the
+ * fence, and every event a proof reads after its base shares one binding, so
+ * it reads back no further than the latest binding's terminal or the last row
+ * accepted at another binding. Its state blob is within its bound. A
+ * contradiction is the publication's to refuse.
+ */
+export function restorePublicationFits(storage: StorageContext, namespace: string, oldBinding: LiveObjectBinding, binding: LiveObjectBinding,
+  terminal: number): boolean {
+  const budget = new RestoreHistoryBudget(SETTLEMENT_PUSH_MAX_BYTES - MAX_SETTLEMENT_STATE_BYTES, SETTLEMENT_PUSH_MAX_METADATA_EVENTS);
+  try {
+    const prior = storage.db.prepare(`SELECT terminal_cursor FROM ${SETTLEMENT_BINDINGS} WHERE ${where} ORDER BY terminal_cursor DESC LIMIT 1`)
+      .get(...documentParams(binding));
+    let previous = prior ? integer(prior.terminal_cursor) : 0;
+    const last = storage.db.prepare(`SELECT journal_cursor FROM sync_relay_live_update_journal WHERE ${where} AND journal_cursor<? ORDER BY journal_cursor DESC LIMIT 1`)
+      .get(...documentParams(binding), terminal);
+    if (last) {
+      const initial = acrossDeclinedRestores(storage.db, namespace, oldBinding, integer(last.journal_cursor), (value) => budget.chargeBytes(value));
+      require(initial);
+      const changed = storage.db.prepare(`SELECT journal_cursor FROM sync_relay_live_update_journal WHERE ${where} AND journal_cursor>? AND journal_cursor<?
+        AND (current_path<>? OR json(selector_paths_json)<>json(?) OR restore_fence_generation<>?) ORDER BY journal_cursor DESC LIMIT 1`)
+        .get(...documentParams(binding), previous, terminal, initial.currentPath, JSON.stringify(initial.selectorPaths), initial.restoreFenceGeneration);
+      if (changed) previous = integer(changed.journal_cursor);
+    }
+    const selected = endpoint(storage, binding, namespace, previous), accepted = endpoint(storage, binding, namespace, terminal);
+    const events = readAcceptedHistoryInterval(storage, { document: binding, namespace, selected, accepted }, budget);
+    restoreChecks(storage, namespace, binding, previous, events, budget);
+    if (selected.terminal) {
+      require(readAcceptedHistoryDeliveryMetadata(storage, { document: binding, namespace, through: previous,
+        eventCount: selected.eventCount, deliveryId: selected.terminal.deliveryId }, budget));
+      const row = storage.db.prepare(`SELECT restore_operation_id FROM sync_relay_live_update_journal WHERE ${where} AND journal_cursor=?`)
+        .get(...documentParams(binding), previous)!;
+      if (row.restore_operation_id !== null)
+        readRestoreAdmission(storage.db, namespace, String(row.restore_operation_id), Number.MAX_SAFE_INTEGER, value => budget.chargeBytes(value));
+    }
+    return true;
+  } catch (error) {
+    if (error instanceof RestoreHistoryBudgetExceeded) return false;
+    if (error instanceof SettlementProofRefusal || (error instanceof Error && DAMAGED_HISTORY.includes(error.message))) return true;
+    throw error;
+  }
 }
 function prepareBindingBase(
   storage: StorageContext,
@@ -505,7 +569,7 @@ async function proveSettlementRecord(
     )
     .get(workspaceId, stateBlob);
   if (!header) throw relayError("blob_missing");
-  require(integer(header.byte_length) <= 20_971_520);
+  require(integer(header.byte_length) <= MAX_SETTLEMENT_STATE_BYTES);
   budget.chargeBytes(integer(header.byte_length));
   const bytes = storage.getBlob(workspaceId, stateBlob);
   require(bytes && hash(bytes) === stateBlob);
@@ -686,9 +750,11 @@ export async function prepareHostedSettlements(
       provisional.set(key, p);
     } catch (error) {
       if (signal?.aborted) throw error;
-      if (error instanceof RestoreHistoryBudgetExceeded && input.ops.length > 1)
+      const exhausted = error instanceof RestoreHistoryBudgetExceeded || error instanceof SettlementProofExhausted;
+      // A restore must publish, so its host retries an unfinished proof instead of falling back to an unattributed moment.
+      if (exhausted && (input.ops.length > 1 || restoresPublished(storage, input.workspaceId, payload).length > 0))
         throw relayError("settlement_proof_budget");
-      if (error instanceof RestoreHistoryBudgetExceeded || error instanceof SettlementProofExhausted) exhaustedProofs.add(op);
+      if (exhausted) exhaustedProofs.add(op);
       if (
         !(error instanceof SettlementProofRefusal) &&
         !(error instanceof RestoreHistoryBudgetExceeded) &&
@@ -697,6 +763,41 @@ export async function prepareHostedSettlements(
       refuseSettlement(op, settlementId);
     }
   }
+}
+type BindingFields = Pick<Prepared, "binding" | "namespace" | "previous" | "terminal" | "settlementId" | "momentId" | "recordDigest" | "state" | "markdown">;
+/** A settlement binding's row, charged at its JSON length. */
+function bindingValues(p: BindingFields, originId: string, originSeq: number) {
+  return [
+    ...documentParams(p.binding),
+    p.namespace,
+    p.binding.restoreFenceGeneration,
+    stableJsonStringify(p.binding),
+    p.previous,
+    p.terminal,
+    p.settlementId,
+    p.momentId,
+    p.recordDigest,
+    p.state,
+    p.markdown,
+    originId,
+    originSeq,
+  ];
+}
+const LIMIT_DIGEST = "f".repeat(64);
+// A moment's accepted settlement admission, whose ID native derives as `live-settlement-` and a digest.
+const MAX_ADMISSION_JSON_BYTES = Buffer.byteLength(JSON.stringify({ status: "accepted", settlementId: `live-settlement-${LIMIT_DIGEST}` }));
+/** The largest binding a publication at `binding` can store. */
+export function maximumBindingBytes(namespace: string, binding: LiveObjectBinding): number {
+  // Identifiers refuse controls, so a backslash is their costliest byte. An origin ID can hold lone surrogates.
+  return Buffer.byteLength(JSON.stringify(bindingValues({
+    binding, namespace, previous: Number.MAX_SAFE_INTEGER, terminal: Number.MAX_SAFE_INTEGER,
+    settlementId: `live-settlement-${LIMIT_DIGEST}`, momentId: "\\".repeat(LIVE_UPDATE_IDENTIFIER_MAX_BYTES),
+    recordDigest: LIMIT_DIGEST, state: LIMIT_DIGEST, markdown: LIMIT_DIGEST,
+  }, "\ud800".repeat(MAX_ORIGIN_ID_CHARS), Number.MAX_SAFE_INTEGER)));
+}
+/** What a restore's publication at `binding` can charge: its moment's log row and its binding, each at their limits. */
+export function restorePublicationReservation(namespace: string, binding: LiveObjectBinding): number {
+  return MAX_PAYLOAD_JSON_BYTES + MAX_LIVE_AUTHOR_BYTES + MAX_ADMISSION_JSON_BYTES + maximumBindingBytes(namespace, binding);
 }
 function commitPreparedHostedSettlement(
   storage: StorageContext,
@@ -791,22 +892,32 @@ function commitPreparedHostedSettlement(
       p.previous,
     );
   require(!conflict);
-  const values = [
-    ...documentParams(p.binding),
-    p.namespace,
-    p.binding.restoreFenceGeneration,
-    stableJsonStringify(p.binding),
-    p.previous,
-    p.terminal,
-    p.settlementId,
-    p.momentId,
-    p.recordDigest,
-    p.state,
-    p.markdown,
-    originId,
-    op.originSeq,
-  ];
+  const values = bindingValues(p, originId, op.originSeq);
   const storageBytes = Buffer.byteLength(JSON.stringify(values));
+  const publishes = p.restores.filter((restore) => restore.terminal > p.previous);
+  if (publishes.length > 0) {
+    require(
+      Buffer.byteLength(op.payloadJson) <= MAX_PAYLOAD_JSON_BYTES &&
+        Buffer.byteLength(JSON.stringify(op.admittedAuthorSnapshot ?? [])) <= MAX_LIVE_AUTHOR_BYTES &&
+        Buffer.byteLength(JSON.stringify(op.settlementAdmission)) <= MAX_ADMISSION_JSON_BYTES &&
+        storageBytes <= maximumBindingBytes(p.namespace, p.binding),
+    );
+  }
+  // Admission funded each restore's publication. The append's rollback restores a release, and a replay finds none.
+  for (const restore of publishes) {
+    // A STRICT integer column, read without a catchable refusal once a release is made.
+    const held = Number(storage.db
+      .prepare(`SELECT publication_reservation_bytes FROM ${LIVE_RESTORE_LIFECYCLES} WHERE relay_database_namespace=? AND operation_id=?`)
+      .get(p.namespace, restore.operationId)!.publication_reservation_bytes);
+    if (held === 0) continue;
+    if (
+      storage.db.prepare(`UPDATE ${LIVE_RESTORE_LIFECYCLES} SET publication_reservation_bytes=0,accounted_bytes=accounted_bytes-?
+        WHERE relay_database_namespace=? AND operation_id=? AND publication_reservation_bytes=?`)
+        .run(held, p.namespace, restore.operationId, held).changes !== 1 ||
+      storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-? WHERE workspace_id=? AND usage_bytes>=?")
+        .run(held, workspaceId, held).changes !== 1
+    ) throw new Error("Retained restore evidence is damaged.");
+  }
   assertWorkspaceQuota(storage, workspaceId, storageBytes);
   storage.db
     .prepare(
@@ -827,5 +938,12 @@ export function commitHostedSettlement(
     if (!(error instanceof SettlementProofRefusal)) throw error;
     refuseSettlement(op, op.settlementAdmission?.settlementId ?? "unavailable");
   }
-  if (op.settlementAdmission?.status === "refused") op.payloadJson = withoutClientAuthors(op.payloadJson);
+  if (op.settlementAdmission?.status !== "refused") return;
+  op.payloadJson = withoutClientAuthors(op.payloadJson);
+  if (op.opKind !== "moment.append") return;
+  // Its host falls back to an unattributed moment and never publishes the restore, so it needs repair.
+  for (const [namespace, operationId] of restoresPublished(storage, workspaceId, bag(JSON.parse(op.payloadJson))))
+    storage.db.prepare(`UPDATE ${LIVE_RESTORE_LIFECYCLES} SET publication_refused=1 WHERE relay_database_namespace=? AND operation_id=? AND workspace_id=?
+      AND publication_reservation_bytes>0`)
+      .run(namespace, operationId, workspaceId);
 }
