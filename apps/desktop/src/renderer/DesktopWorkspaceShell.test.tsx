@@ -16,7 +16,7 @@ import { OPEN_EDITORS_DEFAULT_HEIGHT, OPEN_EDITORS_MIN_HEIGHT } from "./workbenc
 import { documentVersionKey } from "./documentVersionKey";
 import { basenameOf } from "./path";
 import { hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEditorDrafts";
-import { retainedOrphanedDraftPaths } from "./orphanedDrafts";
+import { loadStoredDrafts } from "./orphanedDraftStorage";
 import { deferred } from "../testing/deferred";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { DesktopWorkspaceShell, WORKSPACE, STORED_STATE, STORED_CHATS_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
@@ -27,6 +27,16 @@ vi.mock("./shell/useWorkspaceListing", { spy: true });
 // Count inspector and explorer work when the shell renders again.
 vi.mock("./documentVersionKey", { spy: true });
 vi.mock("./path", { spy: true });
+
+// A new page titled Lisbon with "Day one" typed in its body, as its file
+// would hold it.
+const LISBON = "---\ntitle: Lisbon\n---\n\nDay one\n";
+// What recovery holds for the workspace, as a restart brings it back.
+function recovered() {
+  return loadStoredDrafts(Date.now(), { bindHandles: false })
+    .filter((draft) => draft.workspaceId === WORKSPACE.workspaceId)
+    .map(({ path, text }) => ({ path, text }));
+}
 
 describe("workspace switch performance timeline", () => {
   it("reads agent setup once and run state once when a workspace opens", async () => {
@@ -1287,9 +1297,78 @@ describe("open editors", () => {
     const body = await screen.findByLabelText("Page body");
     expect((body as HTMLTextAreaElement).value).toBe("Day one");
 
-    // Quitting first puts it in recovery, by its file.
+    // Quitting first puts it in recovery, by its file, once.
     await expect(settlePendingEditorDrafts()).resolves.toBe(true);
-    expect(retainedOrphanedDraftPaths(WORKSPACE.workspaceId)).toEqual(["Lisbon.md"]);
+    expect(recovered()).toEqual([{ path: "Lisbon.md", text: LISBON }]);
+    expect(hasPendingEditorDrafts()).toBe(false);
+    await expect(settlePendingEditorDrafts()).resolves.toBe(true);
+    expect(recovered()).toEqual([{ path: "Lisbon.md", text: LISBON }]);
+  });
+
+  it("keeps what is typed into a new page after a quit stops", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    // No file opens, so no editor ever takes the page.
+    bridge.readWorkspaceText.mockImplementation(() => deferred<never>().promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    await user.click(screen.getByLabelText("New file"));
+    await user.keyboard("Lisbon{Enter}Day one");
+    await waitFor(() => expect(bridge.createWorkspaceFile).toHaveBeenCalledTimes(1));
+    await expect(settlePendingEditorDrafts()).resolves.toBe(true);
+
+    // Another window stopped the quit, so the page is still being typed in.
+    await user.keyboard(", tram 28");
+    expect(hasPendingEditorDrafts()).toBe(true);
+    await user.click(screen.getAllByLabelText(/^Close Lisbon/)[0]!);
+
+    await waitFor(() => expect(screen.queryByRole("tab", { name: /Lisbon/ })).toBeNull());
+    expect(recovered()).toEqual([
+      { path: "Lisbon.md", text: LISBON },
+      { path: "Lisbon.md", text: "---\ntitle: Lisbon\n---\n\nDay one, tram 28\n" },
+    ]);
+  });
+
+  it("holds a quit for a body typed while its page's file is being created", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const created = deferred<{ path: string }>();
+    bridge.createWorkspaceFile.mockImplementationOnce(() => created.promise);
+    bridge.readWorkspaceText.mockImplementation(() => deferred<never>().promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    await user.click(screen.getByLabelText("New file"));
+    await user.keyboard("{Enter}Day one");
+    await waitFor(() => expect(bridge.createWorkspaceFile).toHaveBeenCalledTimes(1));
+    expect(hasPendingEditorDrafts()).toBe(true);
+
+    const settled = settlePendingEditorDrafts();
+    await act(async () => created.resolve({ path: "Untitled.md" }));
+    await expect(settled).resolves.toBe(true);
+    expect(recovered()).toEqual([{ path: "Untitled.md", text: "Day one\n" }]);
+  });
+
+  it("writes a new page's body into its file when the page is written as it closes", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.createWorkspaceFile.mockRejectedValueOnce(new Error("The disk is full."));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    await user.click(screen.getByLabelText("New file"));
+    await user.keyboard("Lisbon{Enter}Day one");
+    await waitFor(() => expect(bridge.createWorkspaceFile).toHaveBeenCalledTimes(1));
+    await user.click(screen.getAllByLabelText("Close Lisbon")[0]!);
+
+    await waitFor(() => expect(bridge.createWorkspaceFile).toHaveBeenLastCalledWith({
+      workspaceId: "ws-shell-test",
+      relativePath: "Lisbon.md",
+      initialText: LISBON,
+      exclusive: true,
+    }));
+    await waitFor(() => expect(screen.queryByRole("tab", { name: /Lisbon/ })).toBeNull());
   });
 
   it("closes a new page whose file is being created, and keeps what was typed", async () => {
@@ -1307,7 +1386,7 @@ describe("open editors", () => {
 
     await waitFor(() => expect(screen.queryByRole("tab", { name: /Lisbon/ })).toBeNull());
     expect(screen.queryByTestId("new-page")).toBeNull();
-    expect(retainedOrphanedDraftPaths(WORKSPACE.workspaceId)).toEqual(["Lisbon.md"]);
+    expect(recovered()).toEqual([{ path: "Lisbon.md", text: LISBON }]);
   });
 
   it("collapses all expanded folders from the files title action", async () => {

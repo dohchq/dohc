@@ -423,17 +423,19 @@ function uniqueUntitledPath(
   return `Untitled ${Date.now()}.${extension}`;
 }
 
-// A new page someone gave a title or an icon. One that has neither leaves
-// nothing behind.
-function typedNewPage(draft: string): boolean {
-  const { meta } = parseFrontmatter(draft);
-  return displayFrontmatterValue(meta.title) !== "" || displayFrontmatterValue(meta.icon) !== "";
+// A new page someone gave a title, an icon or a body. One that has none
+// leaves nothing behind.
+function typedNewPage(page: { draft: string; body: string }): boolean {
+  const { meta } = parseFrontmatter(page.draft);
+  return displayFrontmatterValue(meta.title) !== "" || displayFrontmatterValue(meta.icon) !== "" || page.body !== "";
 }
 
 // A new page's text as its file would hold it: the title and icon, then the
 // body.
 function newPageText(page: { draft: string; body: string }): string {
-  return page.body === "" ? page.draft : `${page.draft}${page.draft ? "\n" : ""}${page.body}\n`;
+  if (page.body === "") return page.draft;
+  const body = `${page.body.replace(/\n+$/, "")}\n`;
+  return page.draft === "" ? body : `${page.draft.replace(/\n+$/, "")}\n\n${body}`;
 }
 
 type EditorFocus = {
@@ -3053,18 +3055,24 @@ export function DesktopWorkspaceShell(props: {
   const newPageDrafts = useRef(new Map<string, { draft: string; body: string; writing: Promise<string | null> | null }>());
   const [bornPages, setBornPages] = useState<ReadonlyMap<string, { id: string; handedOff: boolean }>>(() => new Map());
   // A created page's title, icon and body wait here, by its file, until its
-  // editor takes them, with the text its file was created with. A page that
-  // unmounts first gets them back when it mounts again.
-  const bornDrafts = useRef(new Map<string, { draft: string; body: string; created: string }>());
-  // Text no editor took goes to recovery, where its file shows it, unless
-  // the file already holds it.
-  const retireBornDraft = useCallback((path: string) => {
+  // editor takes them, with the text its file or recovery already holds. A
+  // page that unmounts first gets them back when it mounts again.
+  const bornDrafts = useRef(new Map<string, { draft: string; body: string; held: string }>());
+  // Text no editor has taken goes to recovery, where its file shows it,
+  // unless the file or recovery already holds it. The page stays, so what is
+  // typed after goes the same way.
+  const keepBornDraft = useCallback((path: string) => {
     const born = bornDrafts.current.get(path);
     if (!born) return;
-    bornDrafts.current.delete(path);
     const text = newPageText(born);
-    if (text !== born.created) captureOrphanedDraft(workspaceId, path, text);
+    if (text === born.held) return;
+    captureOrphanedDraft(workspaceId, path, text);
+    born.held = text;
   }, [workspaceId]);
+  const retireBornDraft = useCallback((path: string) => {
+    keepBornDraft(path);
+    bornDrafts.current.delete(path);
+  }, [keepBornDraft]);
   const openNewPage = useCallback(
     (folder: string) => {
       const path = newPageTabPath(crypto.randomUUID(), folder);
@@ -3099,8 +3107,8 @@ export function DesktopWorkspaceShell(props: {
   // Writes a new page's file, named from its title, and gives its path, or
   // null if it was not written. An opened file starts empty, so its live
   // session opens at once, and its editor takes the title and body from the
-  // page; a closed one starts with the title and icon. A name another file
-  // took first moves on to the next number.
+  // page; a closed one starts with the title, icon and body. A name another
+  // file took first moves on to the next number.
   const writeNewPage = useCallback(
     (tabPath: string, open: boolean): Promise<string | null> => {
       const page = parseTab(tabPath);
@@ -3111,7 +3119,7 @@ export function DesktopWorkspaceShell(props: {
       const title = displayFrontmatterValue(parseFrontmatter(pending.draft).meta.title);
       const stem = pageFileStem(title, bridge().platform);
       const occupied = new Set([...files.map((file) => file.path), ...folders].map((path) => path.toLowerCase()));
-      const initialText = open ? "" : pending.draft;
+      const initialText = open ? "" : newPageText(pending);
       const create = async (): Promise<string> => {
         for (;;) {
           const relativePath = nextPagePath(page.folder, stem, occupied);
@@ -3128,7 +3136,7 @@ export function DesktopWorkspaceShell(props: {
           if (workspaceSelection.current !== selection) return null;
           newPageDrafts.current.delete(tabPath);
           if (open) {
-            bornDrafts.current.set(path, { draft: pending.draft, body: pending.body, created: initialText });
+            bornDrafts.current.set(path, { draft: pending.draft, body: pending.body, held: initialText });
             setBornPages((pages) => new Map(pages).set(path, { id: page.id, handedOff: false }));
             mutateWb((state) =>
               replaceTab(ancestorDirs(path).reduce((next, dir) => setFolderExpanded(next, dir, true), state), tabPath, path));
@@ -3155,32 +3163,33 @@ export function DesktopWorkspaceShell(props: {
       return page && !page.handedOff ? new Map(pages).set(path, { ...page, handedOff: true }) : pages;
     });
   }, [retireBornDraft]);
-  // A typed page still in its title is written when the app quits, the
-  // window closes or the workspace switches, as closing its tab writes it,
-  // and its tab becomes its file's in case the quit stops. A page that
-  // cannot be written stops the quit, and its error says why. What a created
-  // page holds that its editor has not taken goes to recovery.
-  const retireBornDrafts = useRef<() => void>(() => undefined);
-  retireBornDrafts.current = () => {
-    for (const path of [...bornDrafts.current.keys()]) retireBornDraft(path);
+  // A typed page not yet created is written when the app quits, the window
+  // closes or the workspace switches, as closing its tab writes it, and its
+  // tab becomes its file's in case the quit stops. A page that cannot be
+  // written stops the quit, and its error says why. What a created page
+  // holds that its editor has not taken goes to recovery, and the page stays
+  // in case the quit stops.
+  const keepBornDrafts = useRef<() => void>(() => undefined);
+  keepBornDrafts.current = () => {
+    for (const path of bornDrafts.current.keys()) keepBornDraft(path);
   };
   const writeTypedPages = useRef<() => Promise<void>>(async () => undefined);
   writeTypedPages.current = async () => {
-    const pages = [...newPageDrafts.current].filter(([, page]) => typedNewPage(page.draft)).map(([path]) => path);
+    const pages = [...newPageDrafts.current].filter(([, page]) => typedNewPage(page)).map(([path]) => path);
     const written = await Promise.all(pages.map((path) => writeNewPage(path, false)));
     mutateWb((state) => pages.reduce((next, tabPath, index) => {
       const path = written[index];
       return path ? replaceTab(next, tabPath, path) : next;
     }, state));
-    retireBornDrafts.current();
+    keepBornDrafts.current();
     if (written.includes(null)) throw new Error("Could not create the page.");
   };
   useEffect(() => registerPendingEditorDraft(
     () =>
-      [...newPageDrafts.current.values()].some((page) => typedNewPage(page.draft)) ||
-      [...bornDrafts.current.values()].some((page) => newPageText(page) !== page.created),
+      [...newPageDrafts.current.values()].some(typedNewPage) ||
+      [...bornDrafts.current.values()].some((page) => newPageText(page) !== page.held),
     () => writeTypedPages.current(),
-    () => retireBornDrafts.current(),
+    () => keepBornDrafts.current(),
   ), []);
 
   // Stable handlers (Tab/FileRow memo contract: a fresh closure here would
@@ -3249,11 +3258,14 @@ export function DesktopWorkspaceShell(props: {
             );
           });
       };
-      // A new page whose title was typed is written as it closes, and stays
-      // open if it cannot be. An untouched one leaves nothing. A page whose
-      // file was already being created for its editor has become that file's
-      // tab, which closes in its place.
-      const typedPages = [...requested.keys()].filter((tab) => typedNewPage(newPageDrafts.current.get(tab.path)?.draft ?? ""));
+      // A typed new page is written as it closes, and stays open if it
+      // cannot be. An untouched one leaves nothing. A page whose file was
+      // already being created for its editor has become that file's tab,
+      // which closes in its place.
+      const typedPages = [...requested.keys()].filter((tab) => {
+        const page = newPageDrafts.current.get(tab.path);
+        return page !== undefined && typedNewPage(page);
+      });
       if (typedPages.length === 0) {
         closeAfterFlush();
         return;
