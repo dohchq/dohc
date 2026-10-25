@@ -609,6 +609,11 @@ describe("tabs", () => {
     expect(TAB_KINDS.collection.title(parseTab(path))).toBe("road trips");
     expect(TAB_KINDS.collection.tooltip(parseTab(path))).toBe("projects/road trips");
     expect(TAB_KINDS.collection.explorerTitle(parseTab(path))).toBe("road trips");
+    for (const name of ["100% done", "a%zz"]) {
+      const literal = parseTab(collectionTabPath(`projects/${name}`));
+      expect(TAB_KINDS.collection.title(literal)).toBe(name);
+      expect(TAB_KINDS.collection.tooltip(literal)).toBe(`projects/${name}`);
+    }
     expect(parseTab("tab://collection/")).toEqual({ kind: "collection", path: "tab://collection/", collectionPath: null });
     expect(parseTab("tab://collection/%ZZ")).toEqual({ kind: "collection", path: "tab://collection/%ZZ", collectionPath: null });
     expect(parseTab("notes/today.md")).toEqual({ kind: "file", path: "notes/today.md" });
