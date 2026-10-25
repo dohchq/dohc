@@ -125,7 +125,7 @@ function WorkspaceRow(props: {
         <span className="truncate text-[13px] font-medium leading-5 text-ink">
           {workspaceName(props.workspace)}
         </span>
-        <PathLine path={displayPath(props.workspace.rootPath)} className="font-mono text-[11px] leading-4 text-subtle" />
+        <PathLine path={displayPath(props.workspace.rootPath)} className="text-[11px] leading-4 text-subtle" />
       </button>
       {/* One slot at the end: when it was last opened at rest, the row menu
           on hover, focus, or while open. Nothing else moves. */}

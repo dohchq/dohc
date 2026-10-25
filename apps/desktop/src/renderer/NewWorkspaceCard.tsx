@@ -1,4 +1,5 @@
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
+import { workspaceNameError } from "@dohc/workspace-contracts/workspace-paths";
 import { Folder, Pencil } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
@@ -38,6 +39,9 @@ export function NewWorkspaceCard(props: {
   const [folderName, setFolderName] = useState(DEFAULT_FOLDER_NAME);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A picked location shows once its suggested name arrives; until then
+  // Create would use the location still on screen.
+  const [placing, setPlacing] = useState(false);
   const nameField = useRef<HTMLInputElement>(null);
   // Until the person types, the name is dohc's suggestion and follows the
   // location.
@@ -52,12 +56,15 @@ export function NewWorkspaceCard(props: {
   // Windows and macOS take an old "personal" for "Personal", and Create
   // would open that folder. Without an answer, the name stays.
   async function placeAt(location: string, request: number): Promise<boolean> {
+    if (!rootRequests.isCurrent(request)) return false;
+    setPlacing(true);
     const name = nameTyped.current
       ? null
       : await bridge()
           .suggestWorkspaceFolderName({ rootPath: location, name: DEFAULT_FOLDER_NAME })
           .catch(() => null);
     if (!rootRequests.isCurrent(request)) return false;
+    setPlacing(false);
     setRoot(location);
     if (name !== null && !nameTyped.current) setFolderName(name);
     return true;
@@ -100,12 +107,15 @@ export function NewWorkspaceCard(props: {
       if (await placeAt(picked, request)) setError(null);
       return;
     }
-    // Cancelled or failed with nothing chosen yet: the default this click
-    // retired must still arrive, or the card stays stuck on "…".
+    // Cancelled or failed: the location on screen stays. With nothing chosen
+    // yet, the default this click retired must still arrive, or the card
+    // stays stuck on "…".
+    setPlacing(false);
     if (root === null) suggestDefaultRoot();
   }
 
-  const canCreate = root !== null && !creating && validFolderName(folderName);
+  const nameError = workspaceNameError(folderName.trim(), window.dohcDesktop?.platform ?? "");
+  const canCreate = root !== null && !placing && !creating && !nameError && validFolderName(folderName);
 
   async function createWorkspace() {
     if (!root || !canCreate) return;
@@ -147,11 +157,15 @@ export function NewWorkspaceCard(props: {
             nameTyped.current = true;
             setFolderName(event.currentTarget.value);
           }}
+          // A long name scrolls to its caret; at rest the tab shows its start.
+          onBlur={(event) => { event.currentTarget.scrollLeft = 0; }}
+          aria-invalid={nameError ? true : undefined}
+          aria-describedby={nameError ? "new-workspace-error" : undefined}
           placeholder={DEFAULT_FOLDER_NAME}
           spellCheck={false}
           autoCapitalize="off"
           autoCorrect="off"
-          className="field-sizing-content min-w-0 border-0 bg-transparent p-0 text-sm font-medium text-ink placeholder:text-subtle"
+          className={`field-sizing-content min-w-0 border-0 bg-transparent p-0 text-sm font-medium text-ink placeholder:text-subtle ${nameError ? "shadow-[inset_0_-1px_0_var(--dohc-danger)] focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]!" : ""}`}
         />
         <Pencil size={13} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
       </label>
@@ -180,9 +194,9 @@ export function NewWorkspaceCard(props: {
           </span>
         </div>
 
-        {error ? (
-          <p role="alert" className="-mt-2 text-xs leading-relaxed text-danger">
-            {error}
+        {nameError || error ? (
+          <p id="new-workspace-error" role="alert" className="-mt-2 text-xs leading-relaxed text-danger">
+            {nameError ?? error}
           </p>
         ) : null}
 
