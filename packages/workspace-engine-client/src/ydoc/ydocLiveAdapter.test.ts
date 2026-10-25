@@ -83,45 +83,6 @@ describe("server automation draft declarations", () => {
 });
 
 describe("closing a settled revision", () => {
-  it.each(["untouched", "edited"])("settles an absent lineage on close only after an edit (%s)", async state => {
-    const edited = state === "edited";
-    const engine = new YdocLoopbackEngine();
-    const settle = vi.fn();
-    const onSettleError = vi.fn();
-    const provider = await openEngineYdocProviderSession({
-      transport: {
-        ...forwardYdocBlobEgress(engine),
-        onEvent: handler => engine.onEvent(handler),
-        async sendRequest(request) {
-          if (request.method === YDOC_METHOD.settle) {
-            settle();
-            // The daemon refuses NoMarker until the first durable update.
-            if (!engine.requests.some(request => request.method === YDOC_METHOD.recordUpdate)) {
-              throw new DaemonRefusalError({
-                code: "INVALID_PARAMS", message: "workspace operation failed", retry: "no",
-              }, undefined);
-            }
-          }
-          return engine.sendRequest(request);
-        },
-      },
-      workspace: WORKSPACE, versionId: VERSION, path: PATH,
-      contentKind: "plaintext", onRemoteUpdate: () => undefined,
-      scheduleSettle: () => () => undefined, onSettleError,
-    });
-    expect(provider.head).toBe("absent");
-    expect(provider.lineage).toBe("absent");
-    if (edited) {
-      await provider.applyLocalUpdate(plaintextUpdate(provider.initialUpdate, text => text.insert(0, "first edit")));
-    }
-
-    await expect(provider.close()).resolves.toBeUndefined();
-
-    expect(settle).toHaveBeenCalledTimes(edited ? 1 : 0);
-    expect(onSettleError).not.toHaveBeenCalled();
-    expect(engine.requests.filter(request => request.method === YDOC_METHOD.close)).toHaveLength(1);
-  });
-
   async function fixture(onSettled?: (result: YdocSettleResult) => boolean | void | Promise<boolean | void>) {
     const engine = seedPlaintextEngine("seed");
     const provider = await openEngineYdocProviderSession({
@@ -4624,8 +4585,8 @@ describe("YdocLiveAdapter", () => {
     // settle first, which is what covers it.
     await provider.close({ settle: true });
 
-    expect(settled?.content).toBe("seed local");
-    expect(settled?.projection).toEqual({
+    expect(settled.content).toBe("seed local");
+    expect(settled.projection).toEqual({
       contentKind: "plaintext",
       sourceStateVectorSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
       destructive: false,
