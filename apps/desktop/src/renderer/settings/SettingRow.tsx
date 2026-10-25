@@ -28,6 +28,8 @@ export function SettingRow(props: {
   // readable width: 15rem, or 8rem for a compact row's title. Controls that
   // don't fit beside that wrap under the text.
   const first = props.compact ? "min-w-0 flex-[1_1_8rem]" : "min-w-0 flex-[1_1_15rem]";
+  // Reset and the place a row keeps for it share one footprint.
+  const resetPlace = `size-6 shrink-0 ${props.top ? "mt-1" : ""}`;
   const text = (
     <div className={`${props.lead ? "min-w-0 flex-1" : first}${props.top ? " pt-1.5" : ""}`}>
       {/* The dot hangs left of the title, so marking a row moves nothing in it. */}
@@ -66,14 +68,14 @@ export function SettingRow(props: {
       <div className={`ml-auto flex max-w-full shrink-0 flex-wrap gap-2 ${props.top ? "items-start" : "items-center"}`}>
         {/* A row that can reset keeps Reset's place left of the controls, so
             they share the right edge and never move or wrap when it appears. */}
-        {props.onReset && !props.modified ? <span aria-hidden className="size-6 shrink-0" /> : null}
+        {props.onReset && !props.modified ? <span aria-hidden className={resetPlace} /> : null}
         {props.onReset && props.modified ? (
           <button
             type="button"
             aria-label="Reset"
             title="Reset"
             onClick={props.onReset}
-            className={`grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink ${props.top ? "mt-1" : ""}`}
+            className={`grid place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink ${resetPlace}`}
           >
             <RotateCcw size={14} strokeWidth={1.9} aria-hidden />
           </button>
