@@ -48,6 +48,8 @@ export function CollectionTableViewsControl(props:{disabled?:boolean;workspaceId
     try {
       if(!draft.name.trim())throw Error("Give the view a name.");
       const parsed=CollectionTableView.parse(draft);validateTableView(parsed,dataset,tableId);
+      // Saving a calendar needs a date field. A saved one whose field is gone still opens, and asks for one.
+      if(parsed.kind==="calendar"&&!fields.some(field=>field.fieldId===parsed.dateField&&field.type==="date"))throw Error("Choose a readable date field for this calendar.");
       if(snapshot.document.views.some(view=>view.viewId!==parsed.viewId&&view.name===parsed.name))throw Error("A view already has this name. Choose another name.");
       const exists=snapshot.document.views.some(view=>view.viewId===parsed.viewId),views=exists?snapshot.document.views.map(view=>view.viewId===parsed.viewId?parsed:view):[...snapshot.document.views,parsed];
       void save(views,parsed,()=>{setDraft(null);setProblem(null);});

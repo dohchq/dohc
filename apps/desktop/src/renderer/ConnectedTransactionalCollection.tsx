@@ -84,7 +84,8 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCo
     onHistoryShown?.();
   }, [historyRequested, onHistoryShown]);
   const [viewingPending, setViewingPending] = useState(false);
-  const [editingFields, setEditingFields] = useState(false);
+  // True, or the type of the new field the dialog opens on.
+  const [editingFields, setEditingFields] = useState<boolean | "date">(false);
   const [customizing, setCustomizing] = useState(false);
   const [customAction, setCustomAction] = useState<string | null>(null);
   const [managingAccess, setManagingAccess] = useState(false);
@@ -250,6 +251,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCo
     onHistory={owner && !copy?.offline ? () => setViewingHistory(true) : undefined}
     onPendingResponses={owner && !copy?.offline ? () => setViewingPending(true) : undefined}
     onReviewSchema={owner && !copy?.offline ? () => setEditingFields(true) : undefined}
+    onAddDateField={owner && !copy?.offline ? () => setEditingFields("date") : undefined}
     onCustomize={automations.collectionPath !== null ? () => setCustomizing(true) : undefined}
     onManageAccess={owner && !copy?.offline ? () => setManagingAccess(true) : undefined}
     onExportRecovery={owner && !copy?.offline ? () => setExportingRecovery(true) : undefined}
@@ -370,6 +372,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onKeepCo
     {customizing && automations.collectionPath !== null && <CollectionCustomizeDialog name={table?.name ?? dataset.name}
       files={[{ path: `${automations.collectionPath}/${AUTOMATIONS_FILE}`, holds: "automations" }]} onClose={() => setCustomizing(false)} />}
     {editingFields && <CollectionFieldsDialog workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError}
+      addType={editingFields === "date" ? "date" : undefined}
       buttonStates={buttonStates}
       onChooseButton={table ? chooseButton : undefined}
       onButtonAdded={table ? chooseButton : undefined}
