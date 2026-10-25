@@ -863,7 +863,7 @@ it("IPC, CLI and MCP share Links, cursors, omissions and conversation admission"
     }],unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,sharedChannelRowsUncovered:0,nextCursor:"sealed",
   });
   const options:CliServerOptions={
-    chatWrites:h.chatWrites,localUserDisplayName:()=>"Sam",localPersonId:()=>"local",agentRunDepth:()=>0,dispatchedAgentRun:()=>false,
+    chatWrites:h.chatWrites,localUserDisplayName:()=>"Sam",localPersonId:()=>"local",agentRunDepth:()=>0,dispatchedAgentRun:()=>false,agentRunWorkspace:()=>undefined,
     stateDir:root,listWorkspaces:()=>[{workspaceId:"workspace",rootPath:root,readOnly:true}],
     chatLinks:(workspace,input)=>h.chatLinks(workspace.workspaceId,input),
     openWorkspace:async()=>{throw Error("CLI Links must use the shared reader");},

@@ -27,8 +27,8 @@ import { createDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempt
 import { createLocalDatasetMigrations, type PrepareLocalDatasetMigration } from "./localDatasetMigration";
 import { createLocalDatasetRecovery } from "./localDatasetRecovery";
 import { createLocalDatasetTransfers, type DatasetTransferTarget } from "./localDatasetTransfer";
-import { existingLocalDatasetExports, localDatasetFolder, OLD_STORE_PATH, STORE_FILE, STORE_PATH, type LocalDatasetFolder } from "./localDatasetFolders";
-import { localStateOpened, LocalStateUnavailableError, type LocalStateWorkspace } from "./workspaceLocalState";
+import { localDatasetFolder, OLD_STORE_PATH, readLocalDatasetExports, STORE_FILE, STORE_PATH, type LocalDatasetFolder } from "./localDatasetFolders";
+import { currentLocalStateOpen, localStateOpened, LocalStateUnavailableError, readOwnedLocalState, type LocalStateWorkspace } from "./workspaceLocalState";
 import { renameWithRetry } from "../atomicReplaceFile";
 import { admitCollectionsStore, CollectionsRefusalError, createHoldingCheck, holderWork, recordCollectionsStore, type CollectionsAdmission, type CollectionsHolderCheck } from "./collectionsHolder";
 import { hasGeneratedDatasetOperations } from "@dohc/security-contract/dataset-operations";
@@ -397,7 +397,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       prepareMigrationCandidate: input => host.prepareMigration(owner, input),
       approveMigrationCandidate: input => host.approveMigration(owner, input),
       discardMigrationCandidate: input => host.discardMigration(owner, input) });
-    const transfers = createLocalDatasetTransfers({ db, journal, workspaceId, exportDirectory: () => existingLocalDatasetExports(options.workspaceRoot), limits: { maxTotalBytes: maxStoredBytes },
+    const transfers = createLocalDatasetTransfers({ db, journal, workspaceId, inExportDirectory: (read) => readLocalDatasetExports(options.workspaceRoot, read), limits: { maxTotalBytes: maxStoredBytes },
       transaction, assertCurrent, exportRecovery: (datasetId, abort) => host.exportRecovery(owner, { workspaceId, datasetId, signal: abort }),
       fenced: () => changed(undefined) });
     async function prepare(input: { descriptorPath: string; adapter: SourceAdapter; signal?: AbortSignal }): Promise<LocalDatasetPreparation> {
@@ -763,16 +763,26 @@ async function storeFolderOf(root: string, store: string): Promise<string | null
   return directory;
 }
 
-// The store in .dohc/local, or else one not yet moved from .dohc/datasets,
-// or null when neither is there. Creates nothing.
-async function storeHere(root: string): Promise<string | null> {
-  for (const store of [STORE_PATH, OLD_STORE_PATH]) {
-    const folder = await storeFolderOf(root, store), path = folder && join(folder, STORE_FILE);
-    if (!path || !(await statOrNull(path))) continue;
+// Runs `work` on the store in .dohc/local, or else on one not yet moved from
+// .dohc/datasets, or on null when neither is there. Creates nothing. On
+// Windows a store in .dohc/local is used only while the engine's open holds
+// that folder, as every reader of it is: a folder that was missing when
+// dohc looked has no open behind it, so a store there now is not used.
+async function withStoreHere<T>(root: string, work: (path: string | null) => Promise<T>): Promise<T> {
+  const inLocalState = async (): Promise<{ value: T } | null> => {
+    const folder = await storeFolderOf(root, STORE_PATH), path = folder && join(folder, STORE_FILE);
+    if (!path || !(await statOrNull(path))) return null;
     await assertStoreFiles(path);
-    return path;
-  }
-  return null;
+    return { value: await work(path) };
+  };
+  const here = process.platform === "win32"
+    ? await readOwnedLocalState(root, (dir) => dir === null ? Promise.resolve(null) : inLocalState())
+    : await inLocalState();
+  if (here) return here.value;
+  const folder = await storeFolderOf(root, OLD_STORE_PATH), old = folder && join(folder, STORE_FILE);
+  if (!old || !(await statOrNull(old))) return work(null);
+  await assertStoreFiles(old);
+  return work(old);
 }
 
 const sqlite = () => createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
@@ -882,6 +892,9 @@ async function openHeldStore(root: string, localState: LocalStateWorkspace, hold
   const { workspaceId } = localState;
   const admission: CollectionsAdmission = await admitCollectionsStore(root, workspaceId, holder);
   const path = join(await folderOnceOpened(localState, "store"), STORE_FILE);
+  // The engine's open that prepared the store's folder. On Windows what dohc
+  // opens there counts only while that open still holds the folder.
+  const prepared = currentLocalStateOpen(localState);
   const held = createHoldingCheck(root, workspaceId, holder, () => admission.kind === "open" ? admission.storeId : null);
   if (admission.kind === "open") {
     // A copy a crash left before its rename.
@@ -896,6 +909,8 @@ async function openHeldStore(root: string, localState: LocalStateWorkspace, hold
   }
   const db = openStore(path);
   try {
+    // First, so a workspace that closed meanwhile is refused as not opened, not as replaced.
+    if (process.platform === "win32" && !prepared?.current()) throw new LocalStateUnavailableError("not-opened");
     if (admission.kind === "open" && storeIdOf(db) !== admission.storeId) throw new CollectionsRefusalError({ kind: "replaced", path: STORE_PATH });
     if (admission.kind === "create") {
       if (tableCount(db) !== 0) throw new CollectionsRefusalError({ kind: "unclaimed" });
@@ -917,10 +932,11 @@ async function openHeldStore(root: string, localState: LocalStateWorkspace, hold
  * there. A store not yet moved from .dohc/datasets counts. Creates no store.
  */
 export async function localDatasetStoreId(workspaceRoot: string): Promise<string | null> {
-  const path = await storeHere(await realpath(workspaceRoot));
-  if (path === null) return null;
-  const db = openStore(path, true);
-  try { return storeIdOf(db); } finally { db.close(); }
+  return withStoreHere(await realpath(workspaceRoot), async (path) => {
+    if (path === null) return null;
+    const db = openStore(path, true);
+    try { return storeIdOf(db); } finally { db.close(); }
+  });
 }
 
 /**
@@ -931,32 +947,33 @@ export async function localDatasetStoreId(workspaceRoot: string): Promise<string
  */
 export async function adoptLocalDatasetStore(workspaceRoot: string, workspaceId: string, storeId: string): Promise<void> {
   const root = await realpath(workspaceRoot);
-  const path = await storeHere(root);
-  if (path === null) throw new Error(`dohc could not find ${STORE_PATH}. Restore it from a backup, then try again.`);
-  const db = openStore(path);
-  try {
-    db.exec("PRAGMA busy_timeout=5000; BEGIN IMMEDIATE");
+  await withStoreHere(root, async (path) => {
+    if (path === null) throw new Error(`dohc could not find ${STORE_PATH}. Restore it from a backup, then try again.`);
+    const db = openStore(path);
     try {
-      if (tableCount(db) === 0) {
-        // A file with no store in it may be one still syncing from another
-        // computer. In .dohc/local, it is one a creation cut short.
-        throw new Error(path === join(root, ...STORE_PATH.split("/"))
-          ? `${STORE_PATH} is empty. Delete it, then try again.`
-          : `${OLD_STORE_PATH} is empty here, and may still be syncing from another computer. Try again once it has synced.`);
+      db.exec("PRAGMA busy_timeout=5000; BEGIN IMMEDIATE");
+      try {
+        if (tableCount(db) === 0) {
+          // A file with no store in it may be one still syncing from another
+          // computer. In .dohc/local, it is one a creation cut short.
+          throw new Error(path === join(root, ...STORE_PATH.split("/"))
+            ? `${STORE_PATH} is empty. Delete it, then try again.`
+            : `${OLD_STORE_PATH} is empty here, and may still be syncing from another computer. Try again once it has synced.`);
+        }
+        const identity = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='local_dataset_identity'").get()
+          ? db.prepare("SELECT workspace_id FROM local_dataset_identity WHERE singleton=1").get() : undefined;
+        if (identity && identity.workspace_id !== workspaceId) throw new Error("This Collection store belongs to another workspace.");
+        db.exec(STORE_TABLE);
+        db.prepare("INSERT OR REPLACE INTO local_dataset_store VALUES(1,?)").run(storeId);
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
       }
-      const identity = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='local_dataset_identity'").get()
-        ? db.prepare("SELECT workspace_id FROM local_dataset_identity WHERE singleton=1").get() : undefined;
-      if (identity && identity.workspace_id !== workspaceId) throw new Error("This Collection store belongs to another workspace.");
-      db.exec(STORE_TABLE);
-      db.prepare("INSERT OR REPLACE INTO local_dataset_store VALUES(1,?)").run(storeId);
-      db.exec("COMMIT");
-    } catch (error) {
-      db.exec("ROLLBACK");
-      throw error;
+    } finally {
+      db.close();
     }
-  } finally {
-    db.close();
-  }
+  });
 }
 
 /**

@@ -32,7 +32,7 @@ function messageForMarkdown(
   const decision = decisionByMessage.get(message.id);
   return {
     id: message.id,
-    author: message.author,
+    author: { kind: message.author.kind, displayName: message.author.displayName },
     body: message.body,
     createdAtMs: message.createdAtMs,
     ...(message.parentMessageId ? { parentMessageId: message.parentMessageId } : {}),

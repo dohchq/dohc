@@ -1640,8 +1640,9 @@ function buildTableControlDecorations(
 ): DecorationSet {
   const decorations: Decoration[] = [];
 
+  // A textblock holds only inline content, so the walk never enters one.
   doc.descendants((node, pos) => {
-    if (!isTableNode(node)) return;
+    if (!isTableNode(node)) return !node.isTextblock;
 
     const map = TableMap.get(node);
     const tableStart = pos + 1;

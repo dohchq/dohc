@@ -11,7 +11,7 @@ vi.mock("node:fs/promises", async (original) => {
   return {
     ...fs,
     link: async (...args: Parameters<typeof fs.link>) => {
-      if (fault.link) throw Object.assign(new Error("unsupported link"), { code: "ENOTSUP" });
+      if (fault.link) throw Object.assign(new Error("unsupported link"), { code: "ENOTSUP", syscall: "link" });
       return fs.link(...args);
     },
     rm: async (...args: Parameters<typeof fs.rm>) => {
@@ -49,7 +49,7 @@ async function fixture() {
   return root;
 }
 
-it.each(["history", "schedules", "synced", "received-share"] as const)("falls back to a flushed exclusive %s write without allowing key fallback", async (kind) => {
+it.each(["history", "schedules", "synced", "received-share"] as const)("falls back to a flushed exclusive %s write, and a key only by a claim and rename off Windows", async (kind) => {
   const root = await fixture();
   if (kind === "schedules") await writeFile(join(root, ".dohc", "sync-history.json"), legacy);
   fault.link = true;
@@ -68,9 +68,16 @@ it.each(["history", "schedules", "synced", "received-share"] as const)("falls ba
   if (kind === "history") await recordNeverSynced(root, there);
   if (kind === "schedules") expect(await scheduleComputer(root, there)).toEqual({ kind: "computer", computer: here });
   expect(await readFile(path, "utf8")).toBe(winner);
-  await expect(loadSecretDataKey(root, { createIfMissing: true })).rejects.toMatchObject({ code: "key-corrupt" });
-  await expect(installWorkspaceDataKey(root, Buffer.alloc(32, 1))).rejects.toMatchObject({ code: "key-corrupt" });
-  expect(await readdir(join(root, ".dohc", "engine"))).toEqual([]);
+  if (process.platform === "win32") {
+    await expect(loadSecretDataKey(root, { createIfMissing: true })).rejects.toMatchObject({ code: "key-corrupt" });
+    await expect(installWorkspaceDataKey(root, Buffer.alloc(32, 1))).rejects.toMatchObject({ code: "key-install-unsupported" });
+    expect(await readdir(join(root, ".dohc", "engine"))).toEqual([]);
+  } else {
+    const key = await loadSecretDataKey(root, { createIfMissing: true });
+    await installWorkspaceDataKey(root, key);
+    await expect(installWorkspaceDataKey(root, Buffer.alloc(32, 1))).rejects.toThrow("A different workspace secret key");
+    expect(await readdir(join(root, ".dohc", "engine"))).toEqual(["secret.key"]);
+  }
   expect(await readdir(dirname(path))).not.toEqual(expect.arrayContaining([expect.stringContaining(".tmp-")]));
 });
 

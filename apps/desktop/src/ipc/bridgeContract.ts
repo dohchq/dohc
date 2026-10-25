@@ -115,7 +115,7 @@ import {
   SEARCH_EVENT_MAX_PREVIEW_CHARS,
   WORKBENCH_MENU_COMMANDS,
 } from "./channels";
-import { UPDATE_CHANNELS, UPDATE_STATUSES } from "../updates/updateMachine";
+import { UPDATE_CHANNELS, UPDATE_STATUSES, type UpdateChannel } from "../updates/updateMachine";
 import type { chatOperations } from "./chatOperations";
 import type { settingsOperations } from "./settingsOperations";
 import type { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations, relayShareOperations } from "./shareOperations";
@@ -1885,8 +1885,9 @@ export const ChatFileReferenceInput = z.object({
 export type ChatFileReferenceInput = z.infer<typeof ChatFileReferenceInput>;
 
 // Messages and their authors as the renderer shows them. Only the automation
-// executor in main writes an automation's message; the renderer never sends one.
-const CHAT_MESSAGE_AUTHOR_KIND = z.enum(["human", "agent", "automation"]);
+// executor in main writes an automation's message, and only the relay writes a
+// link holder's; the renderer never sends either.
+const CHAT_MESSAGE_AUTHOR_KIND = z.enum(["human", "agent", "automation", "link"]);
 // Which automation wrote a message, when it ran on this computer, and
 // where its Collection is now: null once this computer no longer has it.
 const CHAT_MESSAGE_AUTOMATION = z.object({
@@ -6573,6 +6574,25 @@ export const agentRunStateOperations = {
   },
 } as const satisfies OperationTable;
 
+// Whether agent dispatch is paused on this computer, in every workspace. Requests
+// wait while it is paused. The pause lasts until it is resumed or dohc quits.
+export const ChatDispatchPausedEvent = z.strictObject({ paused: z.boolean() });
+export type ChatDispatchPausedEvent = z.infer<typeof ChatDispatchPausedEvent>;
+export const chatDispatchPauseOperations = {
+  readChatDispatchPaused: {
+    capabilityId: "chat.dispatch.pause.read",
+    scope: "device",
+    channel: "desktop:read-chat-dispatch-paused",
+    payload: z.strictObject({}), result: ChatDispatchPausedEvent, guard: "trusted-sender",
+  },
+  setChatDispatchPaused: {
+    capabilityId: "chat.dispatch.pause.switch",
+    scope: "device",
+    channel: "desktop:set-chat-dispatch-paused",
+    payload: ChatDispatchPausedEvent, guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
+
 export const scheduleHostOperations = {
   readScheduleHost: {
     capabilityId: "automation.host.read",
@@ -7103,6 +7123,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof scheduleHostOperations>,
     OperationBridge<typeof chatDispatchNoticeOperations>,
     OperationBridge<typeof agentRunStateOperations>,
+    OperationBridge<typeof chatDispatchPauseOperations>,
     OperationBridge<typeof sharedViewAccessOperations>,
     OperationBridge<typeof shareDirectWriteDeliveryOperations>,
     OperationBridge<typeof engineYDocAdmissionOperations>,
@@ -7124,6 +7145,9 @@ export interface DohcDesktopBridge
   // renderer shows the debug panel on it; every dev channel is separately
   // gated in main, so this is a hint, not authority.
   devTools: boolean;
+  // Constant: this build's release channel, which main reads from the app
+  // version. The titlebar marks a nightly as an alpha.
+  releaseChannel: UpdateChannel;
   // Constant: the e2e switch that lets sign-in use a plain http server on
   // this machine. The address field checks with it; main decides again.
   insecureLoopbackServersForTests: boolean;
@@ -7337,6 +7361,8 @@ export interface DohcDesktopBridge
   // Live push: this computer's agent started or stopped in a workspace this
   // window shows.
   onAgentRunState(listener: (event: AgentRunStateEvent) => void): () => void;
+  // Agent dispatch was paused or resumed on this computer, from any window or the tray.
+  onChatDispatchPaused(listener: (event: ChatDispatchPausedEvent) => void): () => void;
   // A step started or stopped waiting for a current editor, or a share
   // stopped a step: re-list holds and stops.
   onAutomationHoldsChanged(

@@ -77,15 +77,18 @@ export function parseArgs(argv: string[]): ToolContext {
   let root = nonEmptyArg(process.cwd(), "workspace root");
   let home = nonEmptyArg(process.env.HOME ?? process.cwd(), "home path");
   let shareAccess: ShareAccess | undefined;
+  const tools = new Set<keyof typeof MCP_TOOL_CAPABILITIES>();
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--workspace" && argv[i + 1]) root = nonEmptyArg(argv[++i], "--workspace");
     else if (argv[i] === "--home" && argv[i + 1]) home = nonEmptyArg(argv[++i], "--home");
     else if (argv[i] === "--share-access") shareAccess = shareAccessArg(argv[++i]);
+    else if (argv[i] === "--tool") tools.add(toolArg(argv[++i]));
   }
   return {
     root,
     home,
     ...(shareAccess ? { shareAccess } : {}),
+    ...(tools.size > 0 ? { tools } : {}),
   };
 }
 
@@ -105,6 +108,17 @@ function shareAccessArg(value: string | undefined): ShareAccess {
   );
 }
 
+function isToolName(value: string | undefined): value is keyof typeof MCP_TOOL_CAPABILITIES {
+  return value !== undefined && Object.hasOwn(MCP_TOOL_CAPABILITIES, value);
+}
+
+// A misspelled tool is refused, never read as offering every tool.
+function toolArg(value: string | undefined): keyof typeof MCP_TOOL_CAPABILITIES {
+  if (isToolName(value)) return value;
+  const received = value === undefined ? "no value" : JSON.stringify(value);
+  throw new Error(`--tool must name a dohc tool, such as dohc_reply_to_chat. Received: ${received}.`);
+}
+
 function text(structuredContent: Record<string, unknown> | null) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(structuredContent, null, 2) }],
@@ -122,7 +136,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     config: { description: string; inputSchema: InputArgs },
     handler: ToolCallback<InputArgs>,
   ) {
-    if (MCP_TOOL_LEVELS[name].includes(level)) server.registerTool(name, config, handler);
+    if (MCP_TOOL_LEVELS[name].includes(level) && (ctx.tools?.has(name) ?? true)) server.registerTool(name, config, handler);
   }
 
   register("dohc_read_share_copy", {
@@ -644,8 +658,8 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_list_automation_runs",
     {
       description:
-        "List an automation's runs on this computer, 20 at a time, newest first: each run's id, state, what started it, how many changes it made, and why it failed. Name the automation by its Collection's folder and its id in automations.yaml. When older runs remain, `next` is not null; pass it as `page` to list them. Each computer keeps the runs of the automations it ran for 30 days after they end.",
-      inputSchema: { ...automationInput, page: z.string().min(1).max(512).optional() },
+        "List an automation's runs on this computer, 20 at a time, newest first: each run's id, state, what started it, how many changes it made, and why it failed. Name the automation by its Collection's folder and its id in automations.yaml. When older runs remain, `next` is not null; pass it as `page` to list them. Each computer keeps the runs of the automations it ran for 30 days after they end. With server true, list the runs of the workspace's self-hosted server instead. A run marked unsentChangesLost ran in a copy the server lost, and its latest changes may not have been sent.",
+      inputSchema: { ...automationInput, page: z.string().min(1).max(512).optional(), server: z.boolean().optional() },
     },
     async (args) => text(await listAutomationRuns(ctx, args)),
   );
@@ -654,8 +668,8 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_read_automation_run",
     {
       description:
-        "Read one automation run: what started it, what each step changed, why it failed, which step failed, and whether Try again resumes there or starts over. Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.",
-      inputSchema: { ...automationInput, run: z.string().min(1).max(256) },
+        "Read one automation run: what started it, what each step changed, why it failed, which step failed, and whether Try again resumes there or starts over. Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed. With server true, read a run of the workspace's self-hosted server: it lists what the run changed, oldest first, as `changes` instead of steps.",
+      inputSchema: { ...automationInput, run: z.string().min(1).max(256), server: z.boolean().optional() },
     },
     async (args) => text(await readAutomationRun(ctx, args)),
   );

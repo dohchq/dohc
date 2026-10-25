@@ -97,6 +97,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { isInside } from "../security/pathContainment";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { createFile } from "./workspaceFiles";
+import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "./workspaceTextLimits";
 import {
   type ActiveAgentRun,
 } from "../agents/activeAgentRun";
@@ -2730,6 +2731,9 @@ export function createWorkspaceEngineCapture(
             ...(input.contentKind
               ? { contentKind: input.contentKind }
               : {}),
+            // A note the WYSIWYG editor opens can seed past the in-band cap.
+            // A larger one keeps its read preview and edits its file directly.
+            largeSeed: { workspaceId, maxBytes: WYSIWYG_MARKDOWN_THRESHOLD_BYTES },
             onRemoteUpdate: (update) => {
               if (current !== opened || canonicalDoc === null) {
                 if (!opening.installed) opening.updates.push(update);
@@ -3731,7 +3735,7 @@ export function createWorkspaceEngineCapture(
       // anything the engine is still missing whatever `settle` says, and
       // refuses to release while it is behind (ydocProviderSession `close`).
       if (entry.status === "live") {
-        await entry.session.settleNow({ summary });
+        await entry.session.settleNow({ summary, ifNeeded: true });
       }
       await entry.close({ settle: false });
     }
@@ -4207,6 +4211,7 @@ export function createWorkspaceEngineCapture(
                   expectedObjectId: adoption.objectId,
                   contentKind: "richdoc",
                   seedAbsentLineage: true,
+                  largeSeed: { workspaceId, maxBytes: WYSIWYG_MARKDOWN_THRESHOLD_BYTES },
                   // File-backed adoption state needs no draft writer; terminal eviction releases its lease.
                   onRemoteUpdate: () => undefined,
                 });
@@ -5021,8 +5026,8 @@ export function createWorkspaceEngineCapture(
               settleFailure = error;
               throw error;
             }
-            if (result.materialized) settleCovers = covers;
-            return result.materialized;
+            if (result?.materialized) settleCovers = covers;
+            return result?.materialized === true;
           };
           try {
             if (writeCancelled) {
@@ -6210,7 +6215,7 @@ export function createWorkspaceEngineCapture(
         const duplicating = authored.operation === "duplicate";
         if (duplicating) {
           for (const entry of [...liveYDocSessions.values()]) {
-            if (match(entry.path) && entry.status === "live") await entry.session.settleNow({summary: "Saved latest edits before duplicating the file"});
+            if (match(entry.path) && entry.status === "live") await entry.session.settleNow({summary: "Saved latest edits before duplicating the file", ifNeeded: true});
           }
         } else {
           await settleAndCloseLiveYDocSessions(match, "Saved latest edits before moving or deleting the file");

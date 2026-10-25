@@ -322,22 +322,26 @@ fn p0_restart_recovery_keeps_retained_rows_and_sources() {
         b"before"
     );
 }
-/// A store opened through its engine folder's ID, as the engine opens one on
-/// a Mac, with that folder held open, and the path to open it by again.
-#[cfg(target_vendor = "apple")]
+/// A store opened through its engine folder, as the engine opens one, by the
+/// folder's ID on a Mac and by the descriptor held for it on Linux, with that
+/// folder held open, and the path to open it by again.
+#[cfg(any(target_vendor = "apple", target_os = "linux"))]
 fn store_by_id(root: &Path) -> (EngineStore, PathBuf, std::fs::File) {
     let engine = root.join(".dohc/engine");
     std::fs::create_dir_all(&engine).unwrap();
     let folder = std::fs::File::open(&engine).unwrap();
     let shown = Path::new(".dohc/engine");
-    let by_id = dohc_macos_files::path_by_id(&folder, shown).unwrap();
-    let db = by_id
-        .expect("APFS reaches a folder by ID")
-        .join("engine.db");
+    #[cfg(target_vendor = "apple")]
+    let dir = dohc_macos_files::path_by_id(&folder, shown)
+        .unwrap()
+        .expect("APFS reaches a folder by ID");
+    #[cfg(target_os = "linux")]
+    let dir = dohc_linux_files::held::held_path(std::os::fd::AsFd::as_fd(&folder), shown).unwrap();
+    let db = dir.join("engine.db");
     (EngineStore::open(&db, 0).unwrap(), db, folder)
 }
 /// Move the engine folder aside and put an empty one at its name.
-#[cfg(target_vendor = "apple")]
+#[cfg(any(target_vendor = "apple", target_os = "linux"))]
 fn swap_engine_folder(root: &Path) -> PathBuf {
     let moved = root.join(".dohc/moved");
     std::fs::rename(root.join(".dohc/engine"), &moved).unwrap();
@@ -348,7 +352,7 @@ fn swap_engine_folder(root: &Path) -> PathBuf {
 /// name. A replace sets the old version aside in the folder the store opened
 /// through, under the workspace-relative name main stores, and the other
 /// folder gets nothing (#2468).
-#[cfg(target_vendor = "apple")]
+#[cfg(any(target_vendor = "apple", target_os = "linux"))]
 #[test]
 fn a_replace_sets_the_old_version_aside_in_the_folder_the_store_opened_through() {
     let scratch = ScratchDir::new_named("displaced-by-id").unwrap();
@@ -372,7 +376,10 @@ fn a_replace_sets_the_old_version_aside_in_the_folder_the_store_opened_through()
 /// a restart, recovery still finds the version in the folder the store opens
 /// through and puts it back, and the retained-file check finds a retained
 /// version there by the name main stores (#2468).
-#[cfg(all(target_vendor = "apple", feature = "fault-injection"))]
+#[cfg(all(
+    any(target_vendor = "apple", target_os = "linux"),
+    feature = "fault-injection"
+))]
 #[test]
 fn recovery_after_a_restart_reaches_the_folder_the_store_opens_through() {
     use crate::retained::{Inspection, inspect};

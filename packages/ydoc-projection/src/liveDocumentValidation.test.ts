@@ -607,6 +607,7 @@ it('keeps policy constructors outside root exports and pins explicit subpaths', 
   expect(barrel).not.toHaveProperty('createLiveMarkdownJournalValidator')
   expect(barrel).not.toHaveProperty('createEngineMarkdownReader')
   expect(barrel).not.toHaveProperty('validateJournalCutForProjection')
+  expect(barrel).not.toHaveProperty('isLossyMarkdown')
   const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   expect(manifest.exports).toEqual({
     '.': './src/index.ts',
@@ -618,6 +619,7 @@ it('keeps policy constructors outside root exports and pins explicit subpaths', 
     './frontmatter-map': './src/frontmatter-map.ts',
     './live-journal-validation': './src/live-journal-validation.ts',
     './image-src': './src/image-src.ts',
+    './lossy-markdown': './src/lossy-markdown.ts',
     './markdown-extensions': './src/dohc-markdown-extensions.ts',
     './restore-proof': './src/liveRestoreProof.ts',
     './named-live-provider': './src/namedLiveProvider.ts',

@@ -268,6 +268,39 @@ describe("chat authorship display", () => {
     expect(onOpenPath).toHaveBeenCalledWith("Trip/Tasks/automations.yaml");
   });
 
+  it("shows a link holder's chosen name in a share link's ring and marks it as a link holder", () => {
+    render(
+      <AgentSettingsProvider settings={DEFAULT_USER_SETTINGS}>
+        <ChatMessageList
+          testIdPrefix="test-chat"
+          messages={[
+            { presentation: { group: "7", hue: null, self: false },
+              id: "message-link",
+              threadId: "thread-1",
+              authorKind: "link",
+              authorDisplayName: "You",
+              body: "Count me in",
+              createdAtMs: 1_700_000_000_000,
+            },
+          ]}
+          loading={false}
+          emptyLabel="No messages"
+          listRef={createRef<ChatMessageListHandle>()}
+        />
+      </AgentSettingsProvider>,
+    );
+    const author = screen.getByTestId("test-chat-message-author");
+    expect(author.textContent).toBe("You");
+    expect(author.dataset.authorKind).toBe("link");
+    expect(screen.getByTestId("test-chat-message-link-holder").textContent).toBe("Link holder");
+    expect(screen.queryByTestId("test-chat-agent-badge")).toBeNull();
+    const avatar = screen.getByTitle("You");
+    expect(avatar.textContent).toBe("Y");
+    expect(avatar.className).toMatch(/\brounded-full\b/u);
+    expect(avatar.className).toContain("border-dashed");
+    expect(avatar.className).not.toMatch(/hue/u);
+  });
+
   it("renders file chips without requiring a person or agent roster", () => {
     render(
       <ChatMessageList

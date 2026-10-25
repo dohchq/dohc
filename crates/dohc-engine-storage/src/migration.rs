@@ -3373,6 +3373,18 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
               WHERE release_blocked IS NOT NULL;",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 68,
+        id: "v2-accepted-reader-history",
+        sql: include_str!("accepted_reader_history.sql"),
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 69,
+        id: "v2-chat-link-author",
+        sql: include_str!("chat_link_author.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// Documents whose file a `ydoc.open` found on disk while the version had no
@@ -4448,6 +4460,14 @@ mod tests {
                 "v2-retained-release-blocked",
                 "16b4bee68d7fde08b97ade0bd28c4969c185b73bb65bf54ceb6006bfeaee40ff",
             ),
+            (
+                "v2-accepted-reader-history",
+                "df391d026835c68d1b0c026cad2408d90afb109e2cc2968a664bd36e383ec84d",
+            ),
+            (
+                "v2-chat-link-author",
+                "5b21c35c5a98bc7621b3cc004e422a53b03bb0e74355e28344a24db6c4100f4b",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -4664,7 +4684,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
             MigrationOutcome::Applied { newly_applied: 1 }
         );
         let rows = crate::materialize::retained_rows(&conn, 0).unwrap();
@@ -6269,6 +6289,208 @@ mod tests {
         .expect("an automation mention");
     }
 
+    /// Messages, mentions and pending dispatch discovery written before link
+    /// authors keep every row, and every chat trigger and view keeps its
+    /// definition. The rebuilt tables take a link message only with its grant
+    /// and link principal, and never with an account.
+    #[test]
+    fn chat_rows_from_before_link_authors_upgrade_unchanged() {
+        let dir = tempdir();
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let before = migration_index("v2-chat-link-author");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 68);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO chat_threads (workspace_id, thread_id, title, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', 'thread-1', '', 1, 1); \
+             INSERT INTO chat_messages \
+                 (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, \
+                  author_user_id, body, created_at_ms, automation_id, chain_depth, author_actor_key) \
+                 VALUES ('ws', 'thread-1', 0, 'message-1', 'human', 'Ice', 'user-ice', 'Hi @ana', 2, NULL, NULL, '{\"kind\":\"unknown\"}'), \
+                        ('ws', 'thread-1', 1, 'message-2', 'automation', 'Stamp', NULL, 'Done', 3, 'collection:Tasks#stamp', 1, NULL); \
+             INSERT INTO chat_mentions (workspace_id, thread_id, message_id, handle, author_kind, created_at_ms) \
+                 VALUES ('ws', 'thread-1', 'message-1', 'ana', 'human', 2); \
+             INSERT INTO chat_dispatch_local_discovery (workspace_id, message_id) VALUES ('ws', 'message-1');",
+        )
+        .unwrap();
+        let definitions = |conn: &Connection| -> Vec<(String, String)> {
+            conn.prepare("SELECT name, sql FROM sqlite_schema WHERE type IN ('trigger', 'view') ORDER BY name")
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let definitions_before = definitions(&conn);
+        assert!(
+            definitions_before
+                .iter()
+                .any(|(name, _)| name == "conversation_file_link_message_insert")
+        );
+        // Every store opens with foreign keys on, so DROP TABLE cascades.
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        assert_eq!(definitions(&conn), definitions_before);
+        let legacy: i64 = conn
+            .query_row("PRAGMA legacy_alter_table", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            legacy, 0,
+            "the migration leaves renames in their normal mode"
+        );
+
+        type Row = (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let rows: Vec<Row> = conn
+            .prepare(
+                "SELECT message_id, author_kind, author_user_id, automation_id, author_actor_key, link_grant_id \
+                 FROM chat_messages ORDER BY message_order",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "message-1".into(),
+                    "human".into(),
+                    Some("user-ice".into()),
+                    None,
+                    Some(r#"{"kind":"unknown"}"#.into()),
+                    None
+                ),
+                (
+                    "message-2".into(),
+                    "automation".into(),
+                    None,
+                    Some("collection:Tasks#stamp".into()),
+                    None,
+                    None
+                ),
+            ]
+        );
+        let kept: (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM chat_mentions WHERE message_id = 'message-1' AND handle = 'ana'), \
+                        (SELECT COUNT(*) FROM chat_dispatch_local_discovery WHERE message_id = 'message-1')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            kept,
+            (1, 1),
+            "the mention and the pending discovery row survive"
+        );
+        let violations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(violations, 0);
+
+        let insert = |order: i64,
+                      kind: &str,
+                      user: Option<&str>,
+                      grant: Option<&str>,
+                      principal: Option<&str>| {
+            conn.execute(
+                "INSERT INTO chat_messages \
+                     (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, \
+                      author_user_id, body, created_at_ms, link_grant_id, link_principal_id) \
+                 VALUES ('ws', 'thread-1', ?1, ?2, ?3, 'Guest', ?4, 'Hello', 4, ?5, ?6)",
+                rusqlite::params![order, format!("message-{order}"), kind, user, grant, principal],
+            )
+        };
+        insert(10, "link", None, Some("grant-1"), Some("principal-1")).expect("a link message");
+        assert!(
+            insert(
+                11,
+                "link",
+                Some("user-ice"),
+                Some("grant-1"),
+                Some("principal-1")
+            )
+            .is_err(),
+            "a link message names no account"
+        );
+        assert!(
+            insert(12, "link", None, Some("grant-1"), None).is_err(),
+            "a link message names its link principal"
+        );
+        assert!(
+            insert(13, "link", None, None, None).is_err(),
+            "a link message names its grant"
+        );
+        assert!(
+            insert(
+                14,
+                "human",
+                Some("user-ice"),
+                Some("grant-1"),
+                Some("principal-1")
+            )
+            .is_err(),
+            "only link messages name a link"
+        );
+        conn.execute(
+            "INSERT INTO chat_mentions (workspace_id, thread_id, message_id, handle, author_kind, created_at_ms) \
+             VALUES ('ws', 'thread-1', 'message-10', 'ana', 'link', 4)",
+            [],
+        )
+        .expect("a link mention");
+    }
+
+    /// With foreign keys off, as on a bare connection, dropping the message
+    /// table cascades nothing. The link-author migration still applies once
+    /// and keeps each pending dispatch discovery row once.
+    #[test]
+    fn chat_link_author_migration_keeps_dispatch_discovery_without_foreign_keys() {
+        let dir = tempdir();
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let before = migration_index("v2-chat-link-author");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO chat_threads (workspace_id, thread_id, title, created_at_ms, updated_at_ms) \
+                 VALUES ('ws', 'thread-1', '', 1, 1); \
+             INSERT INTO chat_messages \
+                 (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, \
+                  author_user_id, body, created_at_ms) \
+                 VALUES ('ws', 'thread-1', 0, 'message-1', 'human', 'Ice', 'user-ice', 'Hi', 2); \
+             INSERT INTO chat_dispatch_local_discovery (workspace_id, message_id) VALUES ('ws', 'message-1');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let kept: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chat_dispatch_local_discovery WHERE workspace_id = 'ws' AND message_id = 'message-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 1);
+    }
+
     /// Plugin subscriptions and claims written before the automation facts
     /// migration keep their meaning: a subscription wants added and changed
     /// records on any field, a claim is a first-run changed-record claim
@@ -7778,6 +8000,36 @@ mod tests {
         eprintln!(
             "TRIGGER_GUARD before_ns={} after_ns={} lookups_per_trial=15000 trials=6; SQL dispatch included",
             before_ns[3], after_ns[3]
+        );
+    }
+
+    #[test]
+    fn reader_history_migration_leaves_prior_lineages_unknown() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("reader-history.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-accepted-reader-history");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces VALUES('w','main');
+            INSERT INTO binary_blobs VALUES('native',2,x'0000');
+            INSERT INTO live_accepted_checkpoints VALUES('r','w','main','o','l',0,0,'null','{}',
+                lower(hex(zeroblob(32))),'native',lower(hex(zeroblob(32))),NULL,NULL);",
+        )
+        .unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM live_accepted_reader_history",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
         );
     }
 

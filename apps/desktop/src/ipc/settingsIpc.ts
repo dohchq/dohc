@@ -261,7 +261,8 @@ export function createSettingsIpc<
       ),
 
     // A save or reset before the engine prepared .dohc/local is refused with
-    // words that say why, and writes nothing. Reads never wait for it.
+    // words that say why, and writes nothing. Only on Windows does a read wait
+    // for it, and only for an open under way.
     setWorkspaceSettings: async (input, { operation }) =>
       WorkspaceSettingsResult.parse(
         await saveWorkspaceSettingsFile(operation.workspace, input.patch),

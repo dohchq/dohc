@@ -23,6 +23,10 @@ base64 = "0.23"
 # Finds the workspace of a store opened through its folder's ID.
 dohc-macos-files = { path = "../dohc-macos-files" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Finds the workspace of a store opened through a held descriptor.
+dohc-linux-files = { path = "../dohc-linux-files" }
+
 [dev-dependencies]
 yrs = "=0.27.3"
 quote = "1"

@@ -41,11 +41,8 @@ impl Checkpoints {
     /// The background connection. It never waits for a lock, and it syncs
     /// copied pages as the writer's connection does.
     pub(crate) fn connection(path: &Path) -> Result<Connection, crate::StorageError> {
-        let conn = Connection::open_with_flags(
-            crate::sqlite_path(path),
-            OpenFlags::SQLITE_OPEN_READ_WRITE,
-        )
-        .map_err(crate::StorageError::persist)?;
+        let conn = crate::open_store(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .map_err(crate::StorageError::persist)?;
         conn.busy_timeout(std::time::Duration::ZERO)
             .map_err(crate::StorageError::persist)?;
         conn.pragma_update(None, "synchronous", "NORMAL")

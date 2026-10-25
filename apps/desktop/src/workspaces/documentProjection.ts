@@ -6,6 +6,7 @@ import {
   settledDocumentMarkdown,
   type DocumentEdit,
 } from "@dohc/ydoc-projection";
+import { isLossyDocumentState, isLossyMarkdownCached, lossyNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
 
 // Reading a live document as Markdown and computing an edit to it take time
 // in proportion to the document: about 250 ms for 700 KB. Main runs them in a
@@ -14,11 +15,17 @@ import {
 export type DocumentProjectionRequest =
   | { kind: "read"; state: Uint8Array }
   | { kind: "read-settled"; markdown: string }
-  | { kind: "edit"; state: Uint8Array; edit: DocumentEdit; keepBlocks: boolean }
-  | { kind: "create"; state: Uint8Array; markdown: string; keepBlocks: boolean };
+  // `refuseLossy` names the note, which refuses here if it is a lossy note
+  // (CONTEXT.md): this is the turn that would change it.
+  | { kind: "edit"; state: Uint8Array; edit: DocumentEdit; keepBlocks: boolean; refuseLossy?: string }
+  | { kind: "create"; state: Uint8Array; markdown: string; keepBlocks: boolean }
+  // Whether a file's text is a lossy note (CONTEXT.md). The worker remembers
+  // the verdict by `digest`, the SHA-256 of the text.
+  | { kind: "lossy"; markdown: string; digest: string };
 
 type DocumentProjectionResult<Request extends DocumentProjectionRequest> =
-  Request extends { kind: "edit" | "create" } ? Uint8Array | null : string;
+  Request extends { kind: "edit" | "create" } ? Uint8Array | null
+    : Request extends { kind: "lossy" } ? boolean : string;
 
 export interface DocumentProjection {
   run<Request extends DocumentProjectionRequest>(
@@ -39,18 +46,21 @@ export function transferList(value: unknown): ArrayBuffer[] {
 }
 
 type WorkerMessage =
-  | { id: number; ok: true; result: string | Uint8Array | null }
+  | { id: number; ok: true; result: string | Uint8Array | boolean | null }
   | { id: number; ok: false; message: string };
 
 export function runDocumentProjection(
   request: DocumentProjectionRequest,
-): string | Uint8Array | null {
+): string | Uint8Array | boolean | null {
   switch (request.kind) {
     case "read":
       return documentMarkdown(request.state);
     case "read-settled":
       return settledDocumentMarkdown(request.markdown);
     case "edit":
+      if (request.refuseLossy !== undefined && isLossyDocumentState(request.state)) {
+        throw new Error(lossyNoteRefusal(request.refuseLossy));
+      }
       return documentEditUpdate(request.state, request.edit, {
         keepBlocks: request.keepBlocks,
       });
@@ -58,6 +68,8 @@ export function runDocumentProjection(
       return documentCreateUpdate(request.state, request.markdown, {
         keepBlocks: request.keepBlocks,
       });
+    case "lossy":
+      return isLossyMarkdownCached(request.digest, request.markdown);
   }
 }
 
@@ -102,7 +114,7 @@ export function createDocumentProjectionWorker(
     void stopped.terminate().catch(() => undefined);
   }
 
-  function send(request: DocumentProjectionRequest): Promise<string | Uint8Array | null> {
+  function send(request: DocumentProjectionRequest): Promise<string | Uint8Array | boolean | null> {
     const current = started();
     const id = nextId++;
     return new Promise((resolve, reject) => {

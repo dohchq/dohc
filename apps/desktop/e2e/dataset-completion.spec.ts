@@ -55,8 +55,8 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await create.getByTestId("new-collection-create").click();
     await expect(create).toBeHidden();
     const collection = page.getByRole("region", { name: "Registrations", exact: true });
-    await collection.getByRole("button", { name: "New record", exact: true }).click();
-    await collection.getByRole("form", { name: "New record" }).getByLabel("Name", { exact: true }).fill("Before sharing");
+    await collection.getByRole("button", { name: "New record", exact: true }).first().click();
+    await collection.getByRole("row", { name: "New record" }).getByLabel("Name", { exact: true }).fill("Before sharing");
     await collection.getByRole("button", { name: "Create record", exact: true }).click();
     await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Before sharing");
     await collection.getByLabel("Manage Collection", { exact: true }).click();
@@ -242,8 +242,8 @@ test("@dataset-completion history reverses an authored rule against current reco
       operationId: definition.operations.find(operation => operation.kind === "create")!.operationId, input: { values: { [nameField.fieldId]: "Blocked participant" } }, idempotencyKey: "blocked-before-reversal" };
     const refused = await page.evaluate(async request => window.dohcDesktop!.dataset(request), invoke);
     expect(refused).toMatchObject({ kind: "refused", code: "registration_closed" });
-    await collection.getByRole("button", { name: "New record", exact: true }).click();
-    await collection.getByRole("form", { name: "New record", exact: true }).getByLabel("Name", { exact: true }).fill("Registered after rule change");
+    await collection.getByRole("button", { name: "New record", exact: true }).first().click();
+    await collection.getByRole("row", { name: "New record", exact: true }).getByLabel("Name", { exact: true }).fill("Registered after rule change");
     await collection.getByRole("button", { name: "Create record", exact: true }).click();
     await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Registered after rule change");
     const management = collection.getByLabel("Manage Collection", { exact: true });

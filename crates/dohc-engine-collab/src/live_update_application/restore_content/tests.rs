@@ -98,9 +98,171 @@ fn reader_result<T>(
     panic!("restore proof did not converge");
 }
 
+fn assert_refusal<T: std::fmt::Debug>(
+    result: Result<T, ApplicationError>,
+    operation: &NativeRestoreFence,
+    case: &str,
+) {
+    let expected = match case {
+        "binding" => NativeRestoreRefusalReason::BindingChanged,
+        "no-reader" => NativeRestoreRefusalReason::ReaderUnavailable,
+        "missing" | "pre-rename" => NativeRestoreRefusalReason::SourceUnavailable,
+        "oversized" => NativeRestoreRefusalReason::SourceTooLarge,
+        "partial" => NativeRestoreRefusalReason::IncompleteWitness,
+        _ => panic!("unknown refusal case: {case}"),
+    };
+    let Err(ApplicationError::RestoreRefused(refusal)) = result else {
+        panic!("{case}: expected an identified pre-fence refusal, got {result:?}");
+    };
+    assert_eq!(refusal.operation, *operation);
+    assert_eq!(refusal.reason, expected);
+}
+
+fn watch_fence_writes(f: &Fixture) -> Arc<std::sync::atomic::AtomicUsize> {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let writes = Arc::new(AtomicUsize::new(0));
+    let seen = writes.clone();
+    f.store
+        .read_with(|conn| {
+            conn.authorizer(Some(move |context: AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    AuthAction::Insert {
+                        table_name: "live_restore_fences"
+                    }
+                ) {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
+                Authorization::Allow
+            }))
+        })
+        .unwrap();
+    writes
+}
+
+fn stop_watching_fence_writes(f: &Fixture, writes: &std::sync::atomic::AtomicUsize) {
+    use rusqlite::hooks::{AuthContext, Authorization};
+    f.store
+        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .unwrap();
+    assert_eq!(
+        writes.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a pre-fence refusal must precede even a rolled-back fence write"
+    );
+}
+
+#[test]
+fn binding_refusal_precedes_all_writes_and_saved_fences_stay_retryable() {
+    for committed in [false, true] {
+        let mut f = Fixture::new("original\n");
+        let operation = f.fence_input();
+        let saved = committed.then(|| f.freeze(f.baseline_point.clone()).fence);
+        if !committed {
+            damage(
+                &f,
+                "UPDATE live_device_application_bindings SET available=0",
+            );
+        }
+        let before = binding_state(&f);
+        let bytes = f.canonical().encode_full_state();
+        let writes = watch_fence_writes(&f);
+        let result = f.owner.fence_restore(
+            &mut f.store,
+            None,
+            operation.clone(),
+            f.host.clone(),
+            90,
+            &NoFaults,
+        );
+        stop_watching_fence_writes(&f, &writes);
+        if let Some(saved) = saved {
+            assert_eq!(result.unwrap(), saved);
+        } else {
+            assert_refusal(result, &operation, "binding");
+        }
+        assert_eq!(binding_state(&f), before);
+        assert_eq!(f.canonical().encode_full_state(), bytes);
+        assert_eq!(
+            f.store.table_row_count("live_restore_fences").unwrap(),
+            i64::from(committed)
+        );
+    }
+}
+
+#[test]
+fn fence_conflicts_and_operation_collisions_are_not_typed_refusals() {
+    let mut f = Fixture::new("original\n");
+    let mut invalid_cut = f.fence_input();
+    invalid_cut.applied_sequence += 1;
+    assert!(matches!(
+        f.owner.fence_restore(
+            &mut f.store,
+            None,
+            invalid_cut,
+            f.host.clone(),
+            50,
+            &NoFaults
+        ),
+        Err(ApplicationError::Conflict)
+    ));
+    let saved = f.freeze(f.baseline_point.clone()).fence;
+    let mut collision = saved.operation.clone();
+    collision.point.receipt_digest = "f".repeat(64);
+    assert!(matches!(
+        f.owner
+            .fence_restore(&mut f.store, None, collision, f.host.clone(), 51, &NoFaults),
+        Err(ApplicationError::Conflict)
+    ));
+    let mut another_document = saved.operation.clone();
+    another_document.old_binding.object_id = "another-document".into();
+    assert!(matches!(
+        f.owner.fence_restore(
+            &mut f.store,
+            None,
+            another_document,
+            f.host.clone(),
+            51,
+            &NoFaults
+        ),
+        Err(ApplicationError::Conflict)
+    ));
+    assert_eq!(
+        f.owner
+            .fence_restore(
+                &mut f.store,
+                None,
+                saved.operation.clone(),
+                f.host.clone(),
+                52,
+                &NoFaults
+            )
+            .unwrap(),
+        saved
+    );
+}
+
 fn impossible_prefix_refuses_before_fencing(case: &str) {
-    let (mut f, _) = reader_fixture();
+    let (mut reader, source) = reader_fixture();
+    let mut f = Fixture::new("native original\n");
+    let edit = f
+        .doc
+        .rewrite_richdoc_preserving_source_bounded(&source, &reader.doc, 2_000_000, Some(2123456))
+        .unwrap();
+    f.accept(edit, 3);
+    store_restore_artifact(&mut f, &source);
+    f.resolver = reader.resolver.take();
     match case {
+        "partial" => {
+            use yrs::{Map, Transact, ReadTxn, updates::decoder::Decode};
+            let raw = yrs::Doc::with_options(yrs::Options { client_id: yrs::ClientID::new(333333), skip_gc: true, ..Default::default() });
+            raw.transact_mut().apply_update(yrs::Update::decode_v1(&f.doc.encode_full_state()).unwrap()).unwrap();
+            let before = raw.transact().state_vector();
+            raw.get_or_insert_map("meta").remove(&mut raw.transact_mut(), "dohcMarkdownSource");
+            let delta = raw.transact().encode_state_as_update_v1(&before);
+            f.doc.apply(&delta).unwrap(); f.accept(delta, 4);
+        },
         "no-reader" => f.resolver = None,
         "missing" => damage(&f, "DELETE FROM moments"),
         "pre-rename" => damage(&f, "UPDATE moments SET path='old.md'"),
@@ -110,22 +272,16 @@ fn impossible_prefix_refuses_before_fencing(case: &str) {
     let before: String = f.store.read_with(|conn| conn.query_row(
         "SELECT json_array(current_path,lineage_claim_id,available,restore_fence_generation,host_id,host_epoch,instance_id,connection_id,selector_paths_json) FROM live_device_application_bindings", [], |row| row.get(0))).unwrap();
     let input = f.fence_input();
-    assert!(
-        matches!(
-            f.owner.fence_restore(
-                &mut f.store,
-                f.resolver.as_ref(),
-                input,
-                f.host.clone(),
-                50,
-                &NoFaults
-            ),
-            Err(ApplicationError::Collab(
-                CollabError::MarkdownReaderUnavailable
-            ))
-        ),
-        "{case}"
+    let expected_operation = input.clone();
+    let result = f.owner.fence_restore(
+        &mut f.store,
+        f.resolver.as_ref(),
+        input,
+        f.host.clone(),
+        50,
+        &NoFaults,
     );
+    assert_refusal(result, &expected_operation, case);
     assert_eq!(
         f.store.table_row_count("live_restore_fences").unwrap(),
         0,
@@ -346,6 +502,9 @@ fn reader_restore_applies_settles_and_resumes_in_both_directions() {
         "native-to-reader",
         "reader-to-native",
         "reader-to-native-settled",
+        "expired-to-native",
+        "expired-to-fresh",
+        "expired-to-expired",
     ] {
         let (bytes, source) = crate::reader_resolver::tests::original_baseline_case("valid");
         let reader_point = Ydoc::wire();
@@ -356,8 +515,15 @@ fn reader_restore_applies_settles_and_resumes_in_both_directions() {
             Fixture::with_doc(reader_point, &source)
         };
         let expected_reader = !direction.starts_with("reader-to-native");
-        let target = f.baseline_point.clone();
-        let expected = if expected_reader {
+        let target = if direction.starts_with("expired-") {
+            let edit = f.doc.richdoc_append_paragraph("expired selected point");
+            f.accept(edit, 2)
+        } else {
+            f.baseline_point.clone()
+        };
+        let expected = if direction.starts_with("expired-") {
+            f.doc.project(ContentKind::Richdoc).unwrap().content
+        } else if expected_reader {
             source.clone()
         } else {
             "native original\n".into()
@@ -372,7 +538,18 @@ fn reader_restore_applies_settles_and_resumes_in_both_directions() {
                 .unwrap();
             (doc, "later native\n".into())
         };
-        let edit = if direction == "reader-to-reader" {
+        let edit = if direction == "expired-to-fresh" {
+            let fresh = Ydoc::wire();
+            fresh.apply(&bytes).unwrap();
+            f.doc
+                .rewrite_richdoc_preserving_source_bounded(
+                    &source,
+                    &fresh,
+                    2_000_000,
+                    Some(2123456),
+                )
+                .unwrap()
+        } else if direction == "reader-to-reader" || direction == "expired-to-expired" {
             f.doc.richdoc_append_paragraph("later reader edit")
         } else {
             f.doc
@@ -428,6 +605,7 @@ fn reader_restore_applies_settles_and_resumes_in_both_directions() {
             let proposal = reader_result(|| f.prepare(prep.clone())).unwrap();
             let mut value = serde_json::to_value(&proposal).unwrap();
             value["source"] = json!(source);
+            value["restoredMarkdown"] = json!(expected);
             value["acceptedCheckpoint"] = json!(f.canonical().encode_full_state());
             std::fs::write(
                 std::path::Path::new(&dir).join(format!("{direction}.json")),
@@ -1404,8 +1582,12 @@ pub(in crate::live_update_application) fn record_test_projection(
     let doc = audit.accepted_prefix().unwrap_or(&doc);
     let projected = doc.project(ContentKind::Richdoc)?.content;
     let content = if doc.has_reader_source() {
-        doc.markdown_source(&doc.markdown_source_reference().unwrap())
-            .unwrap()
+        let reference = doc.markdown_source_reference().unwrap();
+        if reference.projection_sha256 == hex_sha256(projected.as_bytes()) {
+            doc.markdown_source(&reference).unwrap()
+        } else {
+            projected.clone()
+        }
     } else {
         doc.preserved_markdown_source(&projected)
             .unwrap_or(projected)
@@ -1665,7 +1847,11 @@ impl Fixture {
         point(&self.doc, cursor, receipt.update_digest)
     }
     fn freeze(&mut self, point: NativeRestorePoint) -> NativeRestorePreparation {
-        let operation = self.fence_input();
+        let mut operation = self.fence_input();
+        operation.point = NativeRestoreSelection {
+            journal_cursor: point.journal_cursor,
+            receipt_digest: point.receipt_digest.clone(),
+        };
         let fence = self
             .owner
             .fence_restore(
@@ -1681,6 +1867,10 @@ impl Fixture {
     }
     fn fence_input(&self) -> NativeRestoreFence {
         NativeRestoreFence {
+            point: crate::live_update_application::NativeRestoreSelection {
+                journal_cursor: 0,
+                receipt_digest: self.binding.lineage_claim_id.clone(),
+            },
             operation_id: if self.binding.restore_fence_generation == 0 {
                 "restore".into()
             } else {
@@ -2008,6 +2198,55 @@ impl FaultInjector for CrashAt {
         } else {
             FaultAction::Continue
         }
+    }
+}
+
+#[test]
+fn interrupted_fences_replay_after_restart_instead_of_becoming_refusals() {
+    for fault in [
+        FaultPoint::StorageBeforePersist,
+        FaultPoint::StorageAfterCommitBeforeAck,
+    ] {
+        let mut f = Fixture::new("original\n");
+        let operation = f.fence_input();
+        let result = f.owner.fence_restore(
+            &mut f.store,
+            None,
+            operation.clone(),
+            f.host.clone(),
+            50,
+            &CrashAt(fault),
+        );
+        assert!(
+            matches!(result, Err(ApplicationError::Interrupted)),
+            "{result:?}"
+        );
+        let committed = fault == FaultPoint::StorageAfterCommitBeforeAck;
+        assert_eq!(
+            f.store.table_row_count("live_restore_fences").unwrap(),
+            i64::from(committed)
+        );
+        let bytes = f.canonical().encode_full_state();
+        drop(f.store);
+        f.store = EngineStore::open(&f.dir.join("engine.db"), 60).unwrap();
+        f.owner = ApplicationOwner::new("workspace".into()).unwrap();
+        f.host.connection_id = "reconnected".into();
+        f.host.host_epoch += 1;
+        let receipt = f
+            .owner
+            .fence_restore_after_reconnect(
+                &mut f.store,
+                None,
+                operation.clone(),
+                f.host.clone(),
+                70,
+                &NoFaults,
+            )
+            .unwrap();
+        assert_eq!(receipt.operation, operation);
+        assert_eq!(receipt.recorded_at_ms, if committed { 50 } else { 70 });
+        assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 1);
+        assert_eq!(f.canonical().encode_full_state(), bytes);
     }
 }
 
@@ -4667,19 +4906,15 @@ fn reader_to_native_restore_validates_the_prefix_artifact_and_cached_authority()
         )));
         if case == "partial" {
             let operation = f.fence_input();
-            assert!(matches!(
-                f.owner.fence_restore(
-                    &mut f.store,
-                    f.resolver.as_ref(),
-                    operation,
-                    f.host.clone(),
-                    50,
-                    &NoFaults
-                ),
-                Err(ApplicationError::Collab(
-                    CollabError::MarkdownReaderUnavailable
-                ))
-            ));
+            let result = f.owner.fence_restore(
+                &mut f.store,
+                f.resolver.as_ref(),
+                operation.clone(),
+                f.host.clone(),
+                50,
+                &NoFaults,
+            );
+            assert_refusal(result, &operation, case);
             assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
             continue;
         }
@@ -4840,4 +5075,651 @@ fn reader_restore_history_leaves_publication_native() {
 #[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
 fn reader_restore_history_leaves_sync_native() {
     ordinary_history_stays_native("sync");
+}
+
+fn binding_state(f: &Fixture) -> String {
+    f.store.read_with(|conn| conn.query_row("SELECT json_array(current_path,lineage_claim_id,available,restore_fence_generation,host_id,host_epoch,instance_id,connection_id,selector_paths_json) FROM live_device_application_bindings", [], |row| row.get(0))).unwrap()
+}
+
+fn impossible_point_refuses(case: &str) {
+    let (mut f, _) = reader_fixture();
+    let mut selected = f.baseline_point.clone();
+    if case == "partial" {
+        use yrs::{updates::decoder::Decode, Map, ReadTxn, Transact};
+        let raw = yrs::Doc::with_options(yrs::Options {
+            client_id: yrs::ClientID::new(333333),
+            skip_gc: true,
+            ..Default::default()
+        });
+        raw.transact_mut()
+            .apply_update(yrs::Update::decode_v1(&f.doc.encode_full_state()).unwrap())
+            .unwrap();
+        let before = raw.transact().state_vector();
+        raw.get_or_insert_map("meta")
+            .remove(&mut raw.transact_mut(), "dohcMarkdownSource");
+        let update = raw.transact().encode_state_as_update_v1(&before);
+        f.doc.apply(&update).unwrap();
+        selected = f.accept(update, 3);
+    }
+    let native = Ydoc::wire();
+    native
+        .rewrite_content_to_markdown(ContentKind::Richdoc, "native head\n")
+        .unwrap();
+    let update = f
+        .doc
+        .rewrite_richdoc_preserving_source_bounded(
+            "native head\n",
+            &native,
+            2_000_000,
+            Some(2123456),
+        )
+        .unwrap();
+    f.accept(update, 4);
+    match case {
+        "partial" => {},
+        "no-reader" => f.resolver = None,
+        "missing" => damage(&f, "DELETE FROM moments"),
+        "pre-rename" => damage(&f, "UPDATE moments SET path='old.md'"),
+        "oversized" => damage(&f, "UPDATE blobs SET byte_length=3000000 WHERE sha256=(SELECT blob_sha256 FROM snapshots WHERE object_id='object')"),
+        _ => unreachable!(),
+    }
+    let mut operation = f.fence_input();
+    operation.point = NativeRestoreSelection {
+        journal_cursor: selected.journal_cursor,
+        receipt_digest: selected.receipt_digest,
+    };
+    assert_preflight_refusal(&mut f, operation, case);
+}
+fn assert_preflight_refusal(f: &mut Fixture, operation: NativeRestoreFence, case: &str) {
+    let config =
+        serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
+    let reader = Arc::new(dohc_engine_reader::Reader::new(Some(config)));
+    if f.resolver.is_some() {
+        f.resolver = Some(Arc::new(crate::reader_resolver::ReaderResolver::new(
+            reader.clone(),
+        )));
+    }
+    let binding = binding_state(f);
+    let head = (
+        f.canonical().canonical_content_sha256(),
+        f.canonical().state_vector(),
+    );
+    let expected_operation = operation.clone();
+    let result = f.owner.fence_restore(
+        &mut f.store,
+        f.resolver.as_ref(),
+        operation,
+        f.host.clone(),
+        50,
+        &NoFaults,
+    );
+    assert_refusal(result, &expected_operation, case);
+    assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
+    assert_eq!(binding_state(f), binding);
+    assert_eq!(
+        (
+            f.canonical().canonical_content_sha256(),
+            f.canonical().state_vector()
+        ),
+        head
+    );
+    assert_eq!(reader.dispatch_count(), 0);
+}
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_point_no_reader_refuses_before_fencing() {
+    impossible_point_refuses("no-reader");
+}
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_point_missing_refuses_before_fencing() {
+    impossible_point_refuses("missing");
+}
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_point_pre_rename_refuses_before_fencing() {
+    impossible_point_refuses("pre-rename");
+}
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_point_oversized_refuses_before_fencing() {
+    impossible_point_refuses("oversized");
+}
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_point_partial_refuses_before_fencing() {
+    impossible_point_refuses("partial");
+}
+#[test]
+fn preparation_refuses_a_substituted_selected_point() {
+    let mut f = Fixture::new("original\n");
+    let point = f.baseline_point.clone();
+    let other = f.edit("newer\n", 3);
+    let mut input = f.freeze(point);
+    input.point = other;
+    let before = binding_state(&f);
+    assert!(matches!(f.prepare(input), Err(ApplicationError::Conflict)));
+    assert_eq!(binding_state(&f), before);
+    assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 1);
+}
+#[test]
+fn old_fence_receipts_without_the_selection_are_refused() {
+    let mut f = Fixture::new("original\n");
+    let prep = f.freeze(f.baseline_point.clone());
+    damage(&f, "UPDATE live_restore_fences SET input_json=json_remove(input_json,'$.point'),receipt_json=json_remove(receipt_json,'$.operation.point')");
+    let before = binding_state(&f);
+    let head = f
+        .store
+        .read_with(|conn| {
+            durable::load_doc_in(conn, &DocKey::new("workspace", "main", "object").unwrap())
+        })
+        .unwrap()
+        .encode_full_state();
+    assert!(matches!(
+        f.owner.fence_restore(
+            &mut f.store,
+            None,
+            prep.fence.operation.clone(),
+            f.host.clone(),
+            51,
+            &NoFaults
+        ),
+        Err(ApplicationError::Conflict)
+    ));
+    assert!(matches!(f.prepare(prep), Err(ApplicationError::Corrupt)));
+    assert_eq!(binding_state(&f), before);
+    assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 1);
+    assert_eq!(
+        f.store
+            .read_with(|conn| durable::load_doc_in(
+                conn,
+                &DocKey::new("workspace", "main", "object").unwrap()
+            ))
+            .unwrap()
+            .encode_full_state(),
+        head
+    );
+}
+
+#[test]
+fn fence_rechecks_selected_terminal_after_preflight() {
+    recheck_selected_terminal(false);
+}
+
+#[test]
+fn unknown_history_fence_rechecks_selected_terminal_after_preflight() {
+    recheck_selected_terminal(true);
+}
+
+fn recheck_selected_terminal(unknown_history: bool) {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut f = Fixture::new("original\n");
+    let point = f.edit("selected\n", 3);
+    f.edit("tip\n", 4);
+    let mut operation = f.fence_input();
+    operation.point = NativeRestoreSelection {
+        journal_cursor: point.journal_cursor,
+        receipt_digest: point.receipt_digest,
+    };
+    if unknown_history {
+        f.store
+            .write_with(&NoFaults, |tx| -> Result<(), ApplicationError> {
+                tx.execute("DELETE FROM live_accepted_reader_history", [])
+                    .unwrap();
+                Ok(())
+            })
+            .unwrap();
+    }
+    let before = binding_state(&f);
+    let other = Connection::open(f.dir.join("engine.db")).unwrap();
+    let replacement = f.terminal.as_ref().unwrap().update_digest.clone();
+    let begins = Arc::new(AtomicUsize::new(0));
+    let seen = begins.clone();
+    f.store.read_with(|conn| conn.authorizer(Some(move |context: AuthContext<'_>| {
+        if matches!(context.action, AuthAction::Transaction { operation: TransactionOperation::Begin })
+            && seen.fetch_add(1, Ordering::SeqCst) == usize::from(unknown_history) {
+            assert_eq!(other.execute("UPDATE live_accepted_updates SET update_sha256=?1 WHERE journal_cursor=3", [&replacement]).unwrap(), 1);
+        }
+        Authorization::Allow
+    }))).unwrap();
+    let result =
+        f.owner
+            .fence_restore(&mut f.store, None, operation, f.host.clone(), 50, &NoFaults);
+    f.store
+        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .unwrap();
+    assert_eq!(
+        begins.load(Ordering::SeqCst),
+        1 + usize::from(unknown_history)
+    );
+    assert!(
+        matches!(result, Err(ApplicationError::Conflict)),
+        "{result:?}"
+    );
+    assert_eq!(binding_state(&f), before);
+    assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
+}
+
+#[test]
+fn native_fence_does_not_rebuild_the_selected_point() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut f = Fixture::new("original\n");
+    let point = f.edit("selected\n", 3);
+    f.edit("tip\n", 4);
+    let mut operation = f.fence_input();
+    operation.point = NativeRestoreSelection {
+        journal_cursor: point.journal_cursor,
+        receipt_digest: point.receipt_digest,
+    };
+    let reads = Arc::new(AtomicUsize::new(0));
+    let seen = reads.clone();
+    f.store
+        .read_with(|conn| {
+            conn.authorizer(Some(move |context: AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    AuthAction::Read {
+                        table_name: "live_accepted_checkpoints",
+                        column_name: "state_sha256",
+                        ..
+                    }
+                ) {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
+                Authorization::Allow
+            }))
+        })
+        .unwrap();
+    f.owner
+        .fence_restore(&mut f.store, None, operation, f.host.clone(), 50, &NoFaults)
+        .unwrap();
+    f.store
+        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .unwrap();
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn fence_rechecks_reader_history_signal_before_writing() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+    let mut f = Fixture::new("original\n");
+    let operation = f.fence_input();
+    let before = binding_state(&f);
+    let other = Connection::open(f.dir.join("engine.db")).unwrap();
+    f.store
+        .read_with(|conn| {
+            conn.authorizer(Some(move |context: AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    AuthAction::Transaction {
+                        operation: TransactionOperation::Begin
+                    }
+                ) {
+                    other
+                        .execute(
+                            "UPDATE live_accepted_reader_history SET may_have_reader=1",
+                            [],
+                        )
+                        .unwrap();
+                }
+                Authorization::Allow
+            }))
+        })
+        .unwrap();
+    let result = f.owner.fence_restore(
+        &mut f.store,
+        None,
+        operation.clone(),
+        f.host.clone(),
+        50,
+        &NoFaults,
+    );
+    f.store
+        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .unwrap();
+    assert!(
+        matches!(result, Err(ApplicationError::Interrupted)),
+        "{result:?}"
+    );
+    assert_eq!(binding_state(&f), before);
+    assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
+    // A conservative signal only adds preflight work; an honest retry still succeeds.
+    f.owner
+        .fence_restore(&mut f.store, None, operation, f.host.clone(), 51, &NoFaults)
+        .unwrap();
+}
+
+#[test]
+fn accepted_reader_signal_is_monotonic_and_unknown_history_stays_conservative() {
+    let mut f = Fixture::new("original\n");
+    let signal = |f: &Fixture| {
+        f.store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT may_have_reader FROM live_accepted_reader_history",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )
+            })
+            .unwrap()
+    };
+    assert!(!signal(&f));
+    damage(&f, "CREATE TABLE reader_signal_writes(value INTEGER); CREATE TRIGGER reader_signal_write AFTER UPDATE ON live_accepted_reader_history BEGIN INSERT INTO reader_signal_writes VALUES(NEW.may_have_reader); END;");
+    let writes = |f: &Fixture| {
+        f.store
+            .read_with(|conn| {
+                conn.query_row("SELECT count(*) FROM reader_signal_writes", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+            })
+            .unwrap()
+    };
+    let baseline = f.doc.encode_full_state();
+    damage(&f, "DELETE FROM live_accepted_checkpoints");
+    {
+        let held = f.handle.registration.lock().unwrap();
+        f.store
+            .write_with(&NoFaults, |tx| {
+                accepted_history::initialize(tx, &held, &baseline)
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        writes(&f),
+        0,
+        "a repeated checkpoint must not rewrite its signal"
+    );
+    f.edit("ordinary edit\n", 3);
+    assert!(!signal(&f));
+    assert_eq!(writes(&f), 0, "an unchanged signal must not write its page");
+    f.edit("dohcMarkdownSourceReader\n", 4);
+    assert!(signal(&f));
+    assert_eq!(writes(&f), 1);
+    f.edit("dohcMarkdownSourceReader repeated\n", 5);
+    assert_eq!(
+        writes(&f),
+        1,
+        "a repeated marker must not rewrite its signal"
+    );
+    f.edit("native again\n", 6);
+    assert!(signal(&f));
+    assert_eq!(writes(&f), 1, "a retained signal must not rewrite its page");
+    damage(&f, "DELETE FROM live_accepted_reader_history");
+    let held = f.handle.registration.lock().unwrap();
+    assert!(f
+        .store
+        .read_with(|conn| accepted_history::may_have_reader(conn, &held))
+        .unwrap());
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_history_signal_keeps_expired_points_on_preflight() {
+    let (mut f, _) = reader_fixture();
+    let signal = |f: &Fixture| {
+        f.store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT may_have_reader FROM live_accepted_reader_history",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )
+            })
+            .unwrap()
+    };
+    assert!(signal(&f));
+    f.accept(f.doc.richdoc_append_paragraph("expired"), 3);
+    assert!(signal(&f));
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_post_rename_point_does_not_require_the_old_head_artifact() {
+    let (mut f, source) = reader_fixture();
+    damage(&f, "UPDATE moments SET path='old.md'");
+    let fresh_source = source + "\n";
+    let config =
+        serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
+    let reader = dohc_engine_reader::Reader::new(Some(config));
+    let mut result = None;
+    crate::reader_resolver::tests::run(async {
+        result = Some(
+            reader
+                .request(dohc_engine_reader::Request {
+                    method: dohc_engine_reader::Method::Construct,
+                    document: dohc_engine_reader::Document {
+                        workspace_id: "workspace".into(),
+                        main_version_id: "main".into(),
+                        object_id: "object".into(),
+                        lineage_claim_id: f.binding.lineage_claim_id.clone(),
+                    },
+                    current_path: "a.md".into(),
+                    source: fresh_source.as_bytes().to_vec(),
+                    checkpoint: f.doc.encode_full_state(),
+                })
+                .await,
+        );
+    });
+    let result = result.unwrap().unwrap();
+    let dohc_engine_reader::Outcome::Constructed { delta, .. } = result else {
+        panic!("{result:?}");
+    };
+    f.doc.apply(&delta).unwrap();
+    let point = f.accept(delta, 3);
+    store_restore_artifact(&mut f, &fresh_source);
+    let (bytes, original_source) = crate::reader_resolver::tests::original_baseline_case("valid");
+    let original = Ydoc::wire();
+    original.apply(&bytes).unwrap();
+    let edit = f
+        .doc
+        .rewrite_richdoc_preserving_source_bounded(
+            &original_source,
+            &original,
+            2_000_000,
+            Some(2123456),
+        )
+        .unwrap();
+    f.accept(edit, 4);
+    let prep = f.freeze(NativeRestorePoint {
+        markdown_digest: hex_sha256(fresh_source.as_bytes()),
+        ..point
+    });
+    let proposal = reader_result(|| f.prepare(prep.clone())).unwrap();
+    assert_eq!(proposal.reader_source(), Some(fresh_source.as_str()));
+}
+
+#[test]
+fn native_points_do_not_need_an_artifact() {
+    let mut f = Fixture::new("native original\n");
+    let target = f.baseline_point.clone();
+    f.edit("native later\n", 3);
+    damage(&f, "DELETE FROM moments");
+    f.freeze(target);
+    assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 1);
+}
+
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG for the real staged bundle"]
+fn reader_partial_prefix_refuses_before_fencing() {
+    impossible_prefix_refuses_before_fencing("partial");
+}
+#[test]
+fn fence_authenticates_the_selected_history_receipt() {
+    for field in ["cursor", "digest"] {
+        let mut f = Fixture::new("native original\n");
+        f.edit("later\n", 3);
+        let mut operation = f.fence_input();
+        if field == "cursor" {
+            operation.point.journal_cursor = 3;
+        } else {
+            operation.point.receipt_digest = "f".repeat(64);
+        }
+        let before = binding_state(&f);
+        assert!(
+            matches!(
+                f.owner
+                    .fence_restore(&mut f.store, None, operation, f.host.clone(), 50, &NoFaults),
+                Err(ApplicationError::Conflict)
+            ),
+            "{field}"
+        );
+        assert_eq!(binding_state(&f), before);
+        assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
+    }
+}
+
+#[test]
+fn native_accepted_append_avoids_reader_signal_sql() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    let mut f = Fixture::new("native\n");
+    let signal: bool = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT may_have_reader FROM live_accepted_reader_history",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert!(
+        !signal,
+        "a new native bootstrap must establish the shortcut"
+    );
+    f.store
+        .read_with(|conn| {
+            conn.authorizer(Some(|context: AuthContext<'_>| match context.action {
+                AuthAction::Read {
+                    table_name: "live_accepted_reader_history",
+                    ..
+                }
+                | AuthAction::Insert {
+                    table_name: "live_accepted_reader_history",
+                }
+                | AuthAction::Update {
+                    table_name: "live_accepted_reader_history",
+                    ..
+                } => Authorization::Deny,
+                _ => Authorization::Allow,
+            }))
+        })
+        .unwrap();
+    f.edit("native edit\n", 3);
+    f.store
+        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .unwrap();
+    let signal: bool = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT may_have_reader FROM live_accepted_reader_history",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert!(!signal);
+}
+#[test]
+fn prior_accepted_rows_cannot_establish_a_native_reader_shortcut() {
+    for prior in ["checkpoint", "update"] {
+        let mut f = Fixture::new("original\n");
+        let baseline = f.doc.encode_full_state();
+        if prior == "update" {
+            f.edit("accepted native\n", 3);
+            damage(&f, "DELETE FROM live_accepted_checkpoints");
+        } else {
+            damage(
+                &f,
+                "UPDATE live_accepted_checkpoints SET event_count=1,journal_cursor=1",
+            );
+        }
+        damage(&f, "DELETE FROM live_accepted_reader_history");
+        let held = f.handle.registration.lock().unwrap();
+        f.store
+            .write_with(&NoFaults, |tx| {
+                accepted_history::initialize(tx, &held, &baseline)
+            })
+            .unwrap();
+        assert!(
+            f.store
+                .read_with(|conn| accepted_history::may_have_reader(conn, &held))
+                .unwrap(),
+            "{prior}"
+        );
+    }
+}
+
+#[test]
+fn accepted_reader_metadata_update_sets_the_history_signal() {
+    let (bytes, source) = crate::reader_resolver::tests::original_baseline_case("valid");
+    let reader = Ydoc::wire();
+    reader.apply(&bytes).unwrap();
+    let mut f = Fixture::new("native original\n");
+    let delta = f
+        .doc
+        .rewrite_richdoc_preserving_source_bounded(&source, &reader, 2_000_000, Some(2123456))
+        .unwrap();
+    f.accept(delta, 3);
+    let held = f.handle.registration.lock().unwrap();
+    assert!(f
+        .store
+        .read_with(|conn| accepted_history::may_have_reader(conn, &held))
+        .unwrap());
+}
+
+#[test]
+fn pre_upgrade_lineage_rebuilds_the_selected_point_before_fencing() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut f = Fixture::new("original\n");
+    let point = f.edit("selected\n", 3);
+    f.edit("tip\n", 4);
+    damage(&f, "DROP TABLE live_accepted_reader_history");
+    f.store
+        .read_with(|conn| {
+            conn.execute_batch(include_str!(
+                "../../../../dohc-engine-storage/src/accepted_reader_history.sql"
+            ))
+        })
+        .unwrap();
+    assert_eq!(
+        f.store
+            .table_row_count("live_accepted_reader_history")
+            .unwrap(),
+        0
+    );
+    let mut operation = f.fence_input();
+    operation.point = NativeRestoreSelection {
+        journal_cursor: point.journal_cursor,
+        receipt_digest: point.receipt_digest,
+    };
+    let reads = Arc::new(AtomicUsize::new(0));
+    let seen = reads.clone();
+    f.store
+        .read_with(|conn| {
+            conn.authorizer(Some(move |context: AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    AuthAction::Read {
+                        table_name: "live_accepted_checkpoints",
+                        column_name: "state_sha256",
+                        ..
+                    }
+                ) {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
+                Authorization::Allow
+            }))
+        })
+        .unwrap();
+    f.owner
+        .fence_restore(&mut f.store, None, operation, f.host.clone(), 50, &NoFaults)
+        .unwrap();
+    f.store
+        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .unwrap();
+    assert!(reads.load(Ordering::SeqCst) > 0);
 }

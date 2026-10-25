@@ -31,6 +31,7 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
     workspaceFor: () => null, listOpenWorkspaces: () => [], listSyncWorkspaces: () => [],
     assertMayStartAgent: async () => () => undefined,
     chatStoreFor: () => { throw new Error("No workspace should be opened"); },
+    startSelfTestThread: async () => { throw new Error("No self-test should start"); },
     dispatchStoreFor: () => { throw new Error("No dispatch store should be opened"); },
     readRunnerSettings: async () => (await readCachedUserSettingsFile(stateRoot)).settings.runner,
     identityFor: async () => ({ displayName: "Nova", ownerDisplayName: "Local" }), stateDir: () => stateRoot,
@@ -59,17 +60,25 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
   const app = { isPackaged: packaged, getAppPath: () => root, quit: vi.fn() };
   const runtime = { platform, resourcesPath: resourcesPath as string | undefined };
   const theme = { shouldUseDarkColors: false };
-  const windows = [{ setIcon: vi.fn((_path: string) => undefined) }];
   const readSettings = vi.fn(readCachedUserSettingsFile);
   const createImage = vi.fn((path: string) => new Image(path));
   const buildMenu = vi.fn((template: MenuItemConstructorOptions[]) => template);
   const showWindow = vi.fn(async () => undefined);
   let lifecycle: { isQuitting(): boolean } | undefined;
   let schedules = 0;
+  const notices: Notice[] = [];
+  class Notice {
+    readonly listeners = new Map<string, () => void>();
+    readonly show = vi.fn(() => undefined);
+    constructor(readonly options: { title: string; body: string }) { notices.push(this); }
+    on(event: "click", listener: () => void) { this.listeners.set(event, listener); return this; }
+  }
+  const linuxTrayShown = vi.fn(async () => false);
+  let windowOpen = false;
   const owner = createDesktopTray({
     app, process: runtime, moduleDirectory, Menu: { buildFromTemplate: buildMenu },
-    nativeImage: { createFromPath: createImage }, nativeTheme: theme, Tray,
-    BrowserWindow: { getAllWindows: () => windows },
+    nativeImage: { createFromPath: createImage }, nativeTheme: theme, Tray, Notification: Notice, linuxTrayShown,
+    hasWindow: () => windowOpen,
     readCachedUserSettingsFile: readSettings, stateDir: () => stateRoot,
     chatDispatchService: service, showOrCreateMainWindow: showWindow,
     runningSchedules: () => schedules,
@@ -77,11 +86,12 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
   });
   lifecycle = { isQuitting: () => false };
   return {
-    root, iconRoot, resourcesPath, stateRoot, created, service, app, runtime, theme, windows,
-    owner, readSettings, createImage, emptyPaths, buildMenu, showWindow, configure,
+    root, iconRoot, resourcesPath, stateRoot, created, service, app, runtime, theme,
+    owner, readSettings, createImage, emptyPaths, buildMenu, showWindow, configure, notices, linuxTrayShown,
     asset: async (name: string) => { const path = join(iconRoot, name); await writeFile(path, "native image fixture"); return path; },
     setLifecycle: (value: { isQuitting(): boolean }) => { lifecycle = value; },
     setSchedules: (count: number) => { schedules = count; },
+    setWindowOpen: (open: boolean) => { windowOpen = open; },
     click: (index: number, checked = false) => {
       const item = created.at(-1)?.menu[index];
       if (!item?.click) throw new Error("Missing tray action");
@@ -161,16 +171,108 @@ describe("desktop tray owner", () => {
     expect(h.created).toHaveLength(1);
   });
 
-  it.each(["win32", "linux"] as const)("refreshes all current %s window icons and the existing tray from the live theme", async (platform) => {
+  it("tells a Linux desktop without a tray, once a run, that dohc keeps running and how to quit", async () => {
+    const h = await harness("linux");
+    await h.asset("icon-light.png");
+    h.setSchedules(2);
+    await h.owner.refreshDispatchTray();
+    await h.owner.noticeRunningInBackground();
+    await h.owner.noticeRunningInBackground();
+    expect(h.notices.map(({ options }) => options)).toEqual([{
+      title: "dohc is still running",
+      body: "Agent dispatch is on. Running 2 schedules. To quit, open dohc and press Ctrl+Q.",
+    }]);
+    expect(h.notices[0]!.show).toHaveBeenCalledTimes(1);
+    h.notices[0]!.listeners.get("click")!();
+    expect(h.showWindow).toHaveBeenCalledTimes(1);
+    expect(h.linuxTrayShown).toHaveBeenCalledTimes(1);
+  });
+
+  it("names only what keeps dohc running", async () => {
+    const h = await harness("linux");
+    await h.asset("icon-light.png");
+    await h.configure(false);
+    h.setSchedules(1);
+    await h.owner.refreshDispatchTray();
+    await h.owner.noticeRunningInBackground();
+    expect(h.notices[0]?.options.body).toBe("Running 1 schedule. To quit, open dohc and press Ctrl+Q.");
+  });
+
+  it("says agent dispatch is paused when it is", async () => {
+    const h = await harness("linux");
+    await h.asset("icon-light.png");
+    await h.owner.refreshDispatchTray();
+    h.service.setPaused(true);
+    await h.owner.noticeRunningInBackground();
+    expect(h.notices[0]?.options.body).toBe("Agent dispatch is paused. To quit, open dohc and press Ctrl+Q.");
+  });
+
+  it("sends one notice when two closes overlap", async () => {
+    const h = await harness("linux");
+    await h.asset("icon-light.png");
+    await h.owner.refreshDispatchTray();
+    const check = deferred<boolean>();
+    h.linuxTrayShown.mockImplementation(() => check.promise);
+    const first = h.owner.noticeRunningInBackground();
+    const second = h.owner.noticeRunningInBackground();
+    check.resolve(false);
+    await Promise.all([first, second]);
+    expect(h.notices).toHaveLength(1);
+  });
+
+  it("keeps the notice for a later close when a window reopens during the check", async () => {
+    const h = await harness("linux");
+    await h.asset("icon-light.png");
+    await h.owner.refreshDispatchTray();
+    const check = deferred<boolean>();
+    h.linuxTrayShown.mockImplementationOnce(() => check.promise);
+    const notice = h.owner.noticeRunningInBackground();
+    h.setWindowOpen(true);
+    check.resolve(false);
+    await notice;
+    expect(h.notices, "dohc is open again").toHaveLength(0);
+    h.setWindowOpen(false);
+    await h.owner.noticeRunningInBackground();
+    expect(h.notices).toHaveLength(1);
+  });
+
+  it("sends no notice once dohc quits during the check", async () => {
+    const quitting = await harness("linux");
+    await quitting.asset("icon-light.png");
+    await quitting.owner.refreshDispatchTray();
+    const late = deferred<boolean>();
+    quitting.linuxTrayShown.mockImplementation(() => late.promise);
+    const notice = quitting.owner.noticeRunningInBackground();
+    quitting.setLifecycle({ isQuitting: () => true });
+    late.resolve(false);
+    await notice;
+    expect(quitting.notices).toHaveLength(0);
+  });
+
+  it("leaves the notice to the tray where one shows", async () => {
+    const linux = await harness("linux");
+    await linux.asset("icon-light.png");
+    linux.linuxTrayShown.mockResolvedValue(true);
+    await linux.owner.refreshDispatchTray();
+    await linux.owner.noticeRunningInBackground();
+    expect(linux.notices).toHaveLength(0);
+    for (const platform of ["win32", "darwin"] as const) {
+      const other = await harness(platform);
+      await other.asset("icon-light.png");
+      await other.owner.refreshDispatchTray();
+      await other.owner.noticeRunningInBackground();
+      expect(other.notices, platform).toHaveLength(0);
+      expect(other.linuxTrayShown, platform).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each(["win32", "linux"] as const)("refreshes the existing %s tray from the live theme", async (platform) => {
     const h = await harness(platform);
     await h.asset("icon-light.png");
     const dark = await h.asset("icon-dark.png");
     await h.owner.refreshDispatchTray();
-    const nextWindow = { setIcon: vi.fn((_path: string) => undefined) };
-    h.windows.push(nextWindow);
     h.theme.shouldUseDarkColors = true;
-    h.owner.refreshSystemThemeDesktopIcons();
-    for (const window of h.windows) expect(window.setIcon).toHaveBeenCalledWith(dark);
+    h.owner.refreshTrayIcon();
     expect(h.created[0]!.setImage.mock.calls[0]?.[0].path).toBe(dark);
     expect(h.created).toHaveLength(1);
   });
@@ -184,18 +286,17 @@ describe("desktop tray owner", () => {
     expect(h.created[0]!.image.path).toBe(template);
     expect(h.created[0]!.image.setTemplateImage).toHaveBeenCalledWith(true);
     h.theme.shouldUseDarkColors = true;
-    h.owner.refreshSystemThemeDesktopIcons();
-    expect(h.windows[0]!.setIcon).not.toHaveBeenCalled();
+    h.owner.refreshTrayIcon();
     const refreshed = h.created[0]!.setImage.mock.calls[0]?.[0];
     expect(refreshed?.path).toBe(template);
     expect(refreshed?.setTemplateImage).toHaveBeenCalledWith(true);
   });
 
-  it("refreshes system icons before a tray exists without creating one", async () => {
+  it("refreshes the tray icon before a tray exists without creating one", async () => {
     const h = await harness();
-    const light = await h.asset("icon-light.png");
-    h.owner.refreshSystemThemeDesktopIcons();
-    expect(h.windows[0]!.setIcon).toHaveBeenCalledWith(light);
+    await h.asset("icon-light.png");
+    h.owner.refreshTrayIcon();
+    expect(h.createImage).not.toHaveBeenCalled();
     expect(h.created).toEqual([]);
     expect(h.readSettings).not.toHaveBeenCalled();
   });
@@ -213,8 +314,7 @@ describe("desktop tray owner", () => {
     const fallback = await h.asset("tray-icon.png");
     await h.owner.refreshDispatchTray();
     expect(h.created[0]!.image.path).toBe(fallback);
-    h.owner.refreshSystemThemeDesktopIcons();
-    expect(h.windows[0]!.setIcon).not.toHaveBeenCalled();
+    h.owner.refreshTrayIcon();
     expect(h.created[0]!.setImage.mock.calls[0]?.[0].path).toBe(fallback);
   });
 

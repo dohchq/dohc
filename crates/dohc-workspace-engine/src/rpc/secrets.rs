@@ -240,9 +240,9 @@ impl EngineService {
         open: &OpenWorkspace,
         operation: &'static str,
     ) -> Result<(dohc_engine_crypto::SecretDataKey, bool), WireError> {
-        let key_folder = open.actor.store_folder().to_path_buf();
+        let held = open.actor.location();
         let key_task =
-            tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(&key_folder));
+            tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(held.folder()));
         let loaded = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
@@ -270,9 +270,9 @@ impl EngineService {
             return Err(cancellation.interruption(operation));
         }
         // A started mint finishes even if its caller leaves, so wait for it.
-        let key_folder = open.actor.store_folder().to_path_buf();
+        let held = open.actor.location();
         let created =
-            tokio::task::spawn_blocking(move || dohc_engine_crypto::create_key_file(&key_folder))
+            tokio::task::spawn_blocking(move || dohc_engine_crypto::create_key_file(held.folder()))
                 .await
                 .map_err(|_| WireError::new(ErrorCode::Internal, "key-corrupt"))?
                 .map_err(|error| map_runtime(RuntimeError::Domain(DomainError::Crypto(error))))?;
@@ -509,9 +509,10 @@ impl EngineService {
         )
         .await?;
         let key = if has_state {
-            let key_folder = open.actor.store_folder().to_path_buf();
-            let key_task =
-                tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(&key_folder));
+            let held = open.actor.location();
+            let key_task = tokio::task::spawn_blocking(move || {
+                dohc_engine_crypto::load_key_file(held.folder())
+            });
             let loaded = tokio::select! {
                 biased;
                 () = cancellation.token.cancelled() => {
@@ -618,9 +619,9 @@ impl EngineService {
                 Err(error) => return Err(error),
             }
         }
-        let key_folder = open.actor.store_folder().to_path_buf();
+        let held = open.actor.location();
         let key_task =
-            tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(&key_folder));
+            tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(held.folder()));
         let key = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
@@ -759,9 +760,9 @@ impl EngineService {
         // wait for it is cancellation/deadline-raced like every other
         // await on this surface (the blocking task finishes on its own;
         // only the caller's wait abandons).
-        let key_folder = open.actor.store_folder().to_path_buf();
+        let held = open.actor.location();
         let key_task =
-            tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(&key_folder));
+            tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(held.folder()));
         let key = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {

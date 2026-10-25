@@ -433,6 +433,7 @@ pub(super) struct MaterializationReplaySummary {
     pub(super) parked: usize,
     pub(super) completed: usize,
     pub(super) failed: usize,
+    pub(super) store_busy: usize,
     pub(super) selected_seen: usize,
     pub(super) hard_errors: Vec<(String, String)>,
 }
@@ -701,6 +702,7 @@ fn replay_materializations(
             parked: 0,
             completed: 0,
             failed: 0,
+            store_busy: 0,
             selected_seen: 0,
             hard_errors: Vec::new(),
         });
@@ -764,6 +766,7 @@ fn replay_materializations(
             parked: 0,
             completed: 0,
             failed: 0,
+            store_busy: 0,
             selected_seen: 0,
             hard_errors: Vec::new(),
         };
@@ -1072,18 +1075,28 @@ fn replay_materializations(
             if let Some(recorder) = scope.self_writes {
                 recorder.record(scope.workspace_id, &job.target_path, &job.content_sha256);
             }
-            let outcome = dohc_engine_files::materialize::materialize_one_ordinary(
-                store,
-                root_dir,
-                &job,
-                &MaterializeOptions {
-                    holds: Some(holds),
-                    policy: DurabilityPolicy::per_os(),
-                    replacer: &StdReplacer,
-                    backoff: &StdBackoff,
-                    now_ms,
-                    faults,
+            #[cfg(test)]
+            let injected =
+                super::history_operations::turns::tests::materialization_error(root_dir, &job);
+            #[cfg(not(test))]
+            let injected: Option<dohc_engine_files::MaterializeError> = None;
+            let outcome = injected.map_or_else(
+                || {
+                    dohc_engine_files::materialize::materialize_one_ordinary(
+                        store,
+                        root_dir,
+                        &job,
+                        &MaterializeOptions {
+                            holds: Some(holds),
+                            policy: DurabilityPolicy::per_os(),
+                            replacer: &StdReplacer,
+                            backoff: &StdBackoff,
+                            now_ms,
+                            faults,
+                        },
+                    )
                 },
+                Err,
             );
             if !matches!(
                 outcome,
@@ -1145,16 +1158,14 @@ fn replay_materializations(
                 Ok(JobOutcome::Crashed(_)) => summary.failed += 1,
                 Err(error) => {
                     summary.failed += 1;
-                    if !matches!(
-                        error,
-                        dohc_engine_files::MaterializeError::FileLocked
-                            | dohc_engine_files::MaterializeError::Storage(
-                                StorageError::FileLocked
-                            )
-                    ) {
-                        summary
+                    match error {
+                        dohc_engine_files::MaterializeError::Storage(StorageError::FileLocked) => {
+                            summary.store_busy += 1;
+                        }
+                        dohc_engine_files::MaterializeError::FileLocked => {}
+                        _ => summary
                             .hard_errors
-                            .push((job.job_id.clone(), format!("{}: {error}", job.target_path)));
+                            .push((job.job_id.clone(), format!("{}: {error}", job.target_path))),
                     }
                 }
             }

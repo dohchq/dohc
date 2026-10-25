@@ -42,9 +42,12 @@ Confirm that changes reaching `main` receive review before enabling signing.
 
 The release workflow starts only when someone dispatches it.
 Dispatches can start on other refs, but the preflight guard permits release jobs only on `main`.
-Pull requests use local verification. Dry runs receive empty signing credentials.
+Pull requests never run this workflow. Dry runs receive empty signing credentials.
 The package and publish jobs both use the restricted environment.
-Only the Windows package job receives the Windows signing secrets. Linux receives none.
+Only Windows signing and packaging steps receive the Windows signing secrets.
+Linux receives no signing secrets.
+Both package targets receive `POSTHOG_CLI_API_KEY` only in the source map upload step.
+Dry runs receive no release secrets.
 
 The macOS signing identity and notarization credentials stay in a release
 keychain on the release owner's Mac. They never enter GitHub, and no workflow
@@ -52,74 +55,27 @@ can read them. The keychain stays locked between releases. Publishing the
 macOS files needs the release owner to unlock it, or the password that the
 owner [saved for unattended releases](#let-releases-run-unattended).
 
-## Provide self-hosted runners
+## GitHub-hosted release jobs
 
-The scheduled nightly runs every release job on a self-hosted runner.
-Until the repository is public, dispatch with `runners=github` only for the trial dry runs Ice approved.
-With `runners=github`, a job runs on GitHub's `ubuntu-24.04` image where the table names a Linux runner, and on `windows-2025` where it names a Windows one.
+Every workflow job runs on a fresh GitHub-hosted runner with a pinned image.
+Windows and Linux packages build in parallel on separate machines.
 
-| Jobs | Runner labels |
+| Jobs | Image |
 | --- | --- |
-| Preflight, version check, and Publish for `linux` | `self-hosted`, `linux`, `x64` |
-| Preflight, version check, and Publish for other selections | `self-hosted`, `windows`, `x64` |
-| Windows x64 package | `self-hosted`, `windows`, `x64` |
-| Linux x64 package | `self-hosted`, `linux`, `x64` |
+| Preflight for `linux` | `ubuntu-24.04` |
+| Preflight for other selections | `windows-2025` |
+| Version check and Publish | `ubuntu-24.04` |
+| Windows x64 package | `windows-2025` |
+| Linux x64 package | `ubuntu-24.04` |
 
-A job waits in the queue until a runner with its labels is online.
-Each runner needs Git with bash, rustup, and the platform's native build tools.
-On Windows, put Git's `bin` folder first on the runner's `PATH`. Otherwise a `bash` step runs `C:\Windows\System32\bash.exe`, which starts WSL.
-The coordinator runner also needs the GitHub CLI, `gh`, for the version check and publishing.
-Run the Windows runner in a signed-in desktop session for the packaged app check.
-The Linux runner also needs `xvfb-run` for the fuse smoke.
-After packaging, that check verifies the actual executable's fuse values and starts it with an isolated profile.
-The smoke looks for `apps/desktop/release/linux-unpacked` on Linux and for `apps/desktop/release/mac-arm64/dohc.app` on a Mac. Point `DOHC_SMOKE_PACKAGE_DIRECTORY` at any other unpacked directory or app bundle.
-The package and publish jobs receive the environment's secrets.
-Register only runners that the release owner controls.
-On a shared Windows runner, set `DOHC_BUILD_SLOT_ROOT=C:\w\_locks` in the runner's `.env` file.
-This keeps release engine builds within the local disk, slot, and compiler budget, even when Actions sets `CI=true`.
-[Scheduled nightlies](#publish-nightlies-on-a-schedule) need both runners online at 04:00 UTC+8.
-A runner that stays online runs any workflow job that targets its labels, including a pull request's.
-Before the repository is public, set Settings, Actions, General, "Approval for running fork pull request workflows from contributors" to "Require approval for all external contributors".
-Never approve a fork run that changes `.github/` or targets these runners' labels.
-Otherwise that run's code would run as you on the release PC, beside the toolchains and the Windows `node_modules` that the next signed build uses.
-Windows jobs keep `node_modules` and the Rust `target` folder between runs, because deleting `node_modules` there takes over 15 minutes.
-`pnpm install --frozen-lockfile` does not check the contents of packages already in `node_modules`.
-
-On the release PC, start each runner when you sign in, and keep the PC awake. Stay signed in: signing out stops both runners.
-Give both tasks priority 4, which is normal.
-With Task Scheduler's default of 7, the Windows runner and every job it starts run below normal CPU and I/O priority.
-The verification service runs at normal priority, so while it is busy the release's tests get little CPU time.
-In PowerShell, with each runner's folder, Git's folder, and the WSL distribution filled in:
-
-```powershell
-$t = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-$s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -Priority 4
-$git = "<Git folder>\bin"
-Register-ScheduledTask -TaskName "dohc Windows runner" -Trigger $t -Settings $s -Action (New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c set `"PATH=$git;%PATH%`" && run.cmd" -WorkingDirectory "<runner folder>")
-Register-ScheduledTask -TaskName "dohc Linux runner" -Trigger $t -Settings $s -Action (New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d <distro> -- bash -lc 'cd <runner folder in WSL> && ./run.sh'")
-```
-
-Without a schedule, start the runner's `run.cmd` when building a release, with Git's `bin` folder first on `PATH`.
-
-### Use WSL2 for Linux builds
-
-Ubuntu on WSL2 can build the Linux x64 AppImage and `.deb` on a Windows PC.
-Register a separate Linux runner inside the distribution with the `self-hosted`, `linux`, and `x64` labels.
-Keep its checkout and dependencies in the Linux filesystem, such as under `/home/<user>/`, rather than `/mnt/c`.
-Use Linux Node 24.16 or newer, pnpm 11.20.0, rustup, and native compiler tools.
-Do not reuse Windows `node_modules` or a Windows pnpm executable.
-Install Electron's Linux runtime libraries, `xvfb-run`, and AppImage's FUSE library.
-Confirm these tools are on the runner's noninteractive `PATH` before starting its `run.sh`.
-
-WSL shares the PC's CPU, memory, and physical disk with Windows.
-Check host disk space and build admission before a release.
-Coordinate WSL builds with other work on the PC and cap Cargo parallelism to the host's build budget.
-Do not share Windows slot records with Linux processes because their PID namespaces differ.
-The `windows-linux` selection packages its two targets sequentially.
-
-WSLg can display the packaged app, and Xvfb supports automated startup checks.
-These checks do not prove Linux desktop installation, protocol registration, or real AppImage or `.deb` upgrades.
-Use a normal Linux desktop or desktop VM for those release rehearsals.
+The workflow installs the pinned Node, pnpm, and Rust versions before building.
+The Windows package runs the packaged app check in its runner's desktop session.
+The Linux package runs its fuse smoke with `xvfb-run`.
+The smoke checks the executable's fuse values and starts it with an isolated profile.
+It uses `apps/desktop/release/linux-unpacked` on Linux and `apps/desktop/release/mac-arm64/dohc.app` on a Mac.
+For a local smoke with another package path, set `DOHC_SMOKE_PACKAGE_DIRECTORY` to that directory or app bundle.
+These checks do not prove installation, protocol registration, or installer upgrades.
+Use a disposable desktop account or VM for those release rehearsals.
 
 ## Contributor access to releases
 
@@ -127,15 +83,13 @@ The committed `dohc-release` skill is a public procedure. It contains no credent
 Contributors can use it to build local packages or operate workflows in their own forks.
 They need repository write access to dispatch this repository's workflow.
 Trusted collaborators with write access can also request publication through `dry_run=false`.
+While the repository is private, workflows from fork PRs never run. Before it goes public, require approval for every outside contributor's run ([setup](enable-blacksmith.md#prepare-the-account-at-launch)).
 
 The publish job receives a short-lived token scoped to this repository, with `contents: write`.
 A fork's token does not grant access to this repository's releases or signing secrets.
 Protect changes to `main` and restrict the `desktop-release` environment to reviewed code.
 If publication must require the owner's approval, configure required reviewers on that environment where the repository plan supports them.
 A branch restriction alone does not require an owner's approval.
-
-Keep self-hosted runners restricted to trusted code when the repository becomes public.
-Do not enable fork pull-request execution on the owner's PC.
 
 ## Choose versions
 
@@ -183,12 +137,11 @@ The job stops unless the clone is clean and on `main`. The job:
 2. Adds the macOS files to the newest nightly if it published without them, after a failure or a lost run.
 3. Skips the night when `main` has not changed since the newest nightly, or when a nightly already published that UTC day.
 4. Skips the night unless the Mac's full nightly verification passed on `main`'s head commit.
-5. Skips the night when no Windows or no Linux release runner is online.
-6. Dispatches `Desktop Release` with `channel=nightly`, `platforms=windows-linux`, `dry_run=false`, and `commit` set to that head. Preflight builds nothing unless `main` is still at `commit`. The run's title names the channel, a dry run, and the commit, so the job follows its own run.
-7. Follows the run for up to 6 hours. When the run publishes, the job [adds the macOS files](#add-the-macos-files) to the new release. The job never cancels a run, because that could interrupt a publish. A run still going after 6 hours is left to finish, and if it publishes, the next night adds its macOS files.
+5. Dispatches `Desktop Release` with `channel=nightly`, `platforms=windows-linux`, `dry_run=false`, and `commit` set to that head. Preflight builds nothing unless `main` is still at `commit`. The run's title names the channel, a dry run, and the commit, so the job follows its own run.
+6. Follows the run for up to 6 hours. When the run publishes, the job [adds the macOS files](#add-the-macos-files) to the new release. The job never cancels a run, because that could interrupt a publish. A run still going after 6 hours is left to finish, and if it publishes, the next night adds its macOS files.
 
 The job comments on #2281 after each published nightly and each failure.
-It also comments when it skips for a reason someone must fix, such as an offline runner, and when launchd cannot update its clone.
+It also comments when it skips for a reason someone must fix, such as missing verification, and when launchd cannot update its clone.
 A night with nothing new posts nothing.
 The LaunchAgent writes the job's output to `~/dohc-release/nightly.log`.
 The job and every run of `release-desktop-macos.mjs` on the Mac take one lock, `~/dohc-release/release.lock`, so only one release command runs at a time.
@@ -201,7 +154,7 @@ The job needs all of these:
 
 - The Mac's verification queue, installed with `pnpm verify:queue install`.
 - A [saved release keychain password](#let-releases-run-unattended).
-- `gh` signed in with admin access to `dohchq/dohc`, which reading the runners' status needs.
+- `gh` signed in with write access to `dohchq/dohc` for dispatch, uploads, and issue comments.
 - A signed-in session. launchd runs the job only there, where the login keychain is open.
 
 Each night the job runs `main`'s code, and the release commit's dependency install scripts, with nobody watching.
@@ -226,7 +179,7 @@ node scripts/release-nightly.mjs run --dry-run
 ## Build a Windows nightly
 
 Dispatch `Desktop Release` from `main` with `channel=nightly`, `platforms=windows`, and `dry_run=true`.
-The Windows runner performs every job for this selection.
+Preflight and packaging run on `windows-2025`. The version check runs on `ubuntu-24.04`.
 The workflow generates the nightly version from the package version, UTC date, run number, and run attempt.
 Download the run's `desktop-Windows-x64` artifact after every job passes.
 Verify its files with the artifact command below.
@@ -239,14 +192,14 @@ The published prerelease records the source commit and includes generated releas
 ## Build a Linux nightly
 
 Dispatch `Desktop Release` from `main` with `channel=nightly`, `platforms=linux`, and `dry_run=true`.
-The Linux runner performs every job for this selection. A Windows runner is not required.
+Every job for this selection runs on `ubuntu-24.04`.
 Download the run's `desktop-Linux-x64` artifact after every job passes.
 It contains the AppImage, the `.deb`, and the nightly Linux update manifest, which lists both.
 Verify the files with `--platform linux`, `--arch x64`, the generated version, and `--channel nightly`.
 The Linux package job checks artifact hashes and runs the packaged fuse smoke and the engine upgrade check before uploading.
 
 Use `platforms=windows-linux` to prepare both packages from one commit and generated version.
-Both runners must be available. The Windows runner performs the coordinator jobs.
+The packages build in parallel. Preflight runs on `windows-2025`; the version check and Publish run on `ubuntu-24.04`.
 Download both platform artifacts from the same run.
 
 Only the selected platforms receive installers and update packages.

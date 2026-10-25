@@ -92,7 +92,8 @@ describe("ui-state file store", () => {
     await writeUiStateFile(workspace, STATE);
     engine.close(workspace);
     await expect(writeUiStateFile(workspace, { ...STATE, sidebarWidth: 300 })).rejects.toBeInstanceOf(LocalStateUnavailableError);
-    expect(await readUiStateFile(workspace.rootPath)).toEqual(STATE);
+    // On Windows nothing reads it until the next open holds the folder.
+    expect(JSON.parse(await readFile(join(workspace.rootPath, ".dohc", "local", "ui-state.json"), "utf8"))).toEqual(STATE);
   });
 
   it("serializes a burst of writes and leaves the latest complete state", async () => {

@@ -167,6 +167,7 @@ fn blocking_capture_variants_round_trip_through_the_actor() {
                 request_id: Some("actor-capture-request".to_owned()),
                 claim_foreign_head: true,
             },
+            scratch.path().to_owned(),
             Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
                 scratch.path(),
             )),
@@ -234,6 +235,7 @@ fn an_absence_retire_refuses_a_file_at_another_spelling() {
                 request_id: None,
                 claim_foreign_head: true,
             },
+            scratch.path().to_owned(),
             Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
                 scratch.path(),
             )),
@@ -655,6 +657,7 @@ fn added_batch_preserves_a_foreign_head_and_indexes_its_new_sibling() {
                 "api",
                 true,
             ),
+            scratch.path().to_owned(),
             Arc::clone(&policy),
             dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
@@ -1329,6 +1332,7 @@ fn an_absence_retire_is_refused_while_the_file_is_on_disk_or_displaced() {
                 request_id: None,
                 claim_foreign_head: true,
             },
+            scratch.path().to_owned(),
             Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
                 scratch.path(),
             )),

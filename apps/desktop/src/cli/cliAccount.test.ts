@@ -18,6 +18,7 @@ function options(serverAccount?: CliServerOptions["serverAccount"]) {
     chatWrites: {} as CliServerOptions["chatWrites"],
     localUserDisplayName: () => "Ice", localPersonId: () => "person", agentRunDepth: () => 0,
     dispatchedAgentRun: () => false,
+    agentRunWorkspace: () => undefined,
     ...(serverAccount ? { serverAccount } : {}),
   };
   return { value, listWorkspaces, openWorkspace };

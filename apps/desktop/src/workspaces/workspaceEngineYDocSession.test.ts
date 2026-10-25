@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createReadStream, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -1753,6 +1753,106 @@ it("refuses a live session for a path the entered version does not have", async 
   });
 });
 
+it.each(["Reading notes.md", "notes/Trip plan.md"])("closes an untouched uncaptured file without settling (%s)", async path => {
+  await writeFile(join(root, path), "", "utf8");
+  const before = await readFile(join(root, path));
+  const onSaveState = vi.fn();
+  const session = await capture.openYDocSession({
+    path,
+    contentKind: "richdoc",
+    onRemoteUpdate: () => undefined,
+    onSaveState,
+  });
+  settleRefusal = wireRefusal("workspace operation failed");
+
+  await expect(session.close()).resolves.toBeUndefined();
+
+  expect(methodCount(YDOC_METHOD.settle)).toBe(0);
+  expect(captureErrors).toEqual([]);
+  expect(onSaveState.mock.calls.map(([state]) => state)).not.toContain("error");
+  expect(await readFile(join(root, path))).toEqual(before);
+  const reopened = await capture.openYDocSession({
+    path,
+    contentKind: "richdoc",
+    onRemoteUpdate: () => undefined,
+  });
+  await expect(reopened.close()).resolves.toBeUndefined();
+});
+
+it("moves an untouched uncaptured file without settling", async () => {
+  const path = "Reading notes.md";
+  const destination = "notes/Trip plan.md";
+  await writeFile(join(root, path), "", "utf8");
+  await capture.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+  settleRefusal = wireRefusal("workspace operation failed");
+
+  await capture.changePathsAs([path], {
+    operation: "move",
+    operationId: "dohc-operation:11111111-1111-4111-8111-111111111111",
+    author: { kind: "human", humanId: "person" },
+  }, async held => {
+    await held.recordDisk(path, [path]);
+    await rename(join(root, path), join(root, destination));
+    await held.rename(path, destination);
+  }, () => [path]);
+
+  expect(methodCount(YDOC_METHOD.settle)).toBe(0);
+  expect(methodCount(YDOC_METHOD.close)).toBe(1);
+  expect(captureErrors).toEqual([]);
+  expect(await readFile(join(root, destination), "utf8")).toBe("");
+  await expect(readFile(join(root, path))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("duplicates the latest queued edit from a settled new page", async () => {
+  await capture.stop();
+  const entered = deferred();
+  const release = deferred();
+  let holdJournal = false;
+  capture = createWorkspaceEngineCapture({
+    workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID,
+    rustEngineSessions: sessions, onError: context => captureErrors.push(context),
+    openRustYDocProviderSession: async options => {
+      const provider = await openEngineYdocProviderSession(options);
+      const apply = provider.applyLocalUpdate.bind(provider);
+      provider.applyLocalUpdate = async (update, applyOptions) => {
+        if (holdJournal) { entered.resolve(); await release.promise; }
+        await apply(update, applyOptions);
+      };
+      return provider;
+    },
+  });
+  const path = "Reading notes.md";
+  const destination = "Reading notes copy.md";
+  await writeFile(join(root, path), "", "utf8");
+  const session = await capture.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "hello");
+  await session.settleNow();
+  holdJournal = true;
+  typeIntoBody(editor, "world");
+  await entered.promise;
+  const checksBefore = methodCount(VERSIONED_METHOD.textCheckMove);
+  const duplicate = capture.changePathsAs([path], {
+    operation: "duplicate",
+    operationId: "dohc-operation:22222222-2222-4222-8222-222222222222",
+    author: { kind: "human", humanId: "person" },
+  }, async held => {
+    await held.recordDisk(path, [path]);
+    await copyFile(join(root, path), join(root, destination));
+  }, () => []);
+  try {
+    await expect.poll(() => methodCount(VERSIONED_METHOD.textCheckMove)).toBeGreaterThan(checksBefore);
+    // Drain the duplicate preflight's microtasks before releasing the journal.
+    await new Promise<void>(resolve => setImmediate(resolve));
+  } finally {
+    release.resolve();
+  }
+  await duplicate;
+  expect(await readFile(join(root, destination), "utf8")).toContain("world");
+  expect(captureErrors).toEqual([]);
+  editor.destroy();
+});
+
 it("still opens a file the user just created that capture has not ingested", async () => {
   // Creation, verbatim: workspaceFiles.createFile writes the artifact to disk
   // with `wx` as an empty file and the editor opens it immediately. The version
@@ -2058,6 +2158,7 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
     workspaceId: WORKSPACE_ID,
     path: PATH,
     origin,
+    assertEditable: async () => undefined,
     change: async (state, options) =>
       documentEditUpdate(state, { find: "Start here.", replacement: "Start over here.\n\n## Added" }, options),
   })).resolves.toEqual({ path: PATH, changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING });

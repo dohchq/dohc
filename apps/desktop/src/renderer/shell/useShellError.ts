@@ -4,7 +4,7 @@ import type { ShareUnconfirmedChanges } from "../../workspaces/shareViewInfo";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import type { ReportKinds } from "../../ipc/bridgeContract";
 import type { ReportButtonError } from "../collections/useAutomationButtons";
-import { isPrivacyDenied, KEEP_COLLECTIONS_HERE, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
+import { isPrivacyDenied, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, UNKNOWN_ERROR_WORDS, USE_THIS_COMPUTER, withErrorWords } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { SETTLEMENT_BINDING_CHANGED } from "../../notices/settlementRefusal";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
@@ -330,7 +330,7 @@ export function useShellError(workspaceId: string) {
         ...(details.length ? { details } : {}),
         retry,
         ...(isPrivacyDenied(error) ? { action: privacySettingsAction }
-          : KEEPABLE_COLLECTIONS_REFUSALS.includes(readCollectionsRefusal(error)?.kind ?? "changed") ? { action: { label: KEEP_COLLECTIONS_HERE, run: () => keepCollectionsHere(retry), ends: true } }
+          : KEEPABLE_COLLECTIONS_REFUSALS.includes(readCollectionsRefusal(error)?.kind ?? "changed") ? { action: { label: USE_THIS_COMPUTER, run: () => keepCollectionsHere(retry), ends: true } }
           : {}),
         ...(kind ? { kind } : {}),
       });

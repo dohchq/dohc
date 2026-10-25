@@ -1,12 +1,15 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTestScratch } from "../workspaces/testTemp";
 import {
   createChatRunnerProcess,
+  readRunnerNodeAvailable,
   tokenizeRunnerCommand,
   type RunnerSpawnOptions,
 } from "./chatRunnerProcess";
+import type { AgentLaunchProfile } from "./agentToolCatalog";
 
 async function runnerFixture(platform: NodeJS.Platform) {
   const root = await createTestScratch("dohc-chat-runner-");
@@ -30,12 +33,13 @@ async function runnerFixture(platform: NodeJS.Platform) {
     },
     () => undefined,
   );
-  const spawn = (command: string, assertMayStart = () => undefined) =>
+  const spawn = (command: string, assertMayStart = () => undefined, profile?: AgentLaunchProfile) =>
     runner.spawnConfiguredRunner({
       rootPath: root,
       runId: "run-1",
       logPath: join(root, "logs", "run.log"),
       command,
+      profile,
       prompt: "",
       assertMayStart,
     });
@@ -45,6 +49,64 @@ async function runnerFixture(platform: NodeJS.Platform) {
 describe("chat runner process", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
+  });
+
+  it("starts the runner when the Node.js sidecar write fails", async () => {
+    const { calls, root, spawn } = await runnerFixture("linux");
+    mkdirSync(join(root, "logs", "run.log.node"), { recursive: true });
+    expect(() => spawn("agent")).not.toThrow();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.command).toBe("agent");
+  });
+
+  it("treats a non-ENOENT Node.js sidecar read error as an unknown lookup", async () => {
+    const root = await createTestScratch("dohc-chat-runner-");
+    const logPath = join(root, "run.log");
+    mkdirSync(`${logPath}.node`);
+    await expect(readFile(`${logPath}.node`, "utf8")).rejects.toMatchObject({ code: "EISDIR" });
+    await expect(readRunnerNodeAvailable(logPath)).resolves.toBeUndefined();
+  });
+
+  it.each([false, true])("records Node.js on the filtered POSIX runner PATH: %s", async (executable) => {
+    const { root, spawn } = await runnerFixture("linux");
+    const bin = join(root, "node_modules", ".bin");
+    mkdirSync(bin, { recursive: true });
+    const node = join(bin, "node");
+    writeFileSync(node, "not executed");
+    chmodSync(node, executable ? 0o700 : 0o600);
+    vi.stubEnv("PATH", "");
+    spawn("agent");
+    expect(readFileSync(join(root, "logs", "run.log.node"), "utf8"))
+      .toBe(`${process.platform === "win32" || executable}\n`);
+  });
+
+  it("records Node.js as missing when it is only in the workspace or a relative PATH entry", async () => {
+    const { root, spawn } = await runnerFixture("linux");
+    writeFileSync(join(root, "node"), "not executed", { mode: 0o700 });
+    vi.stubEnv("PATH", ["", ".", "relative"].join(delimiter));
+    spawn("agent");
+    expect(readFileSync(join(root, "logs", "run.log.node"), "utf8")).toBe("false\n");
+  });
+
+  it.runIf(process.platform === "win32")
+    .each([".EXE", ".CMD", ".OTHER"])("uses the runner's PATHEXT for Node.js lookup: %s", async (extension) => {
+      const { root, spawn } = await runnerFixture("win32");
+      const bin = join(root, "node_modules", ".bin");
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(join(bin, `node${extension}`), "not executed");
+      vi.stubEnv("PATH", "");
+      vi.stubEnv("PATHEXT", ".CMD;.EXE");
+      spawn(`"${process.execPath}"`);
+      expect(readFileSync(join(root, "logs", "run.log.node"), "utf8"))
+        .toBe(`${extension !== ".OTHER"}\n`);
+    });
+
+  it.runIf(process.platform === "win32")("does not count Node.js in the Windows current directory", async () => {
+    const { root, spawn } = await runnerFixture("win32");
+    writeFileSync(join(root, "node.exe"), "not executed");
+    vi.stubEnv("PATH", ["", ".", "relative"].join(delimiter));
+    spawn(`"${process.execPath}"`);
+    expect(readFileSync(join(root, "logs", "run.log.node"), "utf8")).toBe("false\n");
   });
 
   it("tokenizes quoted runner arguments and rejects an unterminated command", () => {
@@ -64,6 +126,17 @@ describe("chat runner process", () => {
     const env = calls[0]!.options.env;
     expect(env.NoDefaultCurrentDirectoryInExePath).toBe("1");
     expect(env.PATH!.split(delimiter).slice(1)).toEqual([process.cwd(), spaced]);
+  });
+
+  it.each(["claude", "codex"] as const)("keeps app execution aliases on a Windows PATH only for a %s run that can start them", async (tool) => {
+    const aliases = join(process.cwd(), "Microsoft", "WindowsApps");
+    const storePowerShell = join(aliases, "Microsoft.PowerShell_8wekyb3d8bbwe");
+    vi.stubEnv("PATH", [aliases, process.cwd(), storePowerShell].join(delimiter));
+    const { calls, spawn } = await runnerFixture("win32");
+    spawn("", undefined, { tool, executable: process.execPath });
+    expect(calls[0]!.options.env.PATH!.split(delimiter).slice(1)).toEqual(
+      tool === "codex" ? [process.cwd()] : [aliases, process.cwd(), storePowerShell],
+    );
   });
 
   it("drops a quoted PATH entry elsewhere, where the quote is part of its name", async () => {
@@ -153,4 +226,29 @@ describe("chat runner process", () => {
       expect(readFileSync(join(shims, "node-version.txt"), "utf8")).toMatch(/^v\d+\./u);
     },
   );
+
+  it.runIf(process.platform === "win32")("starts an npm-installed Codex in a folder with an apostrophe", async () => {
+    const root = join(await createTestScratch("dohc-chat-runner-"), "O'Brien");
+    mkdirSync(root);
+    // Stands in for npm's codex.cmd and records the arguments cmd.exe passes on.
+    const codex = join(root, "codex.cmd");
+    writeFileSync(codex, `@"${process.execPath}" -e "require('fs').writeFileSync(process.argv[1], JSON.stringify(process.argv))" "%~dp0args.json" %*\r\n`);
+    const runner = createChatRunnerProcess(
+      { stateDir: () => join(root, "state"), appRoot: () => root, isPackaged: () => false },
+      () => undefined,
+    );
+    const child = runner.spawnConfiguredRunner({
+      rootPath: root,
+      runId: "run-1",
+      logPath: join(root, "run.log"),
+      command: "",
+      profile: { tool: "codex", executable: codex },
+      prompt: "",
+      assertMayStart: () => undefined,
+    });
+    expect(await new Promise<number | null>((resolveExit) => child.onExit(resolveExit))).toBe(0);
+    expect(JSON.parse(readFileSync(join(root, "args.json"), "utf8"))).toContain(
+      `mcp_servers.dohc.cwd='''${join(root, "node_modules", ".bin")}'''`,
+    );
+  });
 });

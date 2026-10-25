@@ -23,7 +23,7 @@ import type {
   UsageRecordRow,
   WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
-import { readError, withErrorWords } from "../../ipc/errorWords";
+import { collectionsElsewhereWords, readError, withErrorWords } from "../../ipc/errorWords";
 import { CsvPreviewBound, CsvTable, CsvViewActions, csvColumns } from "../CsvView";
 import { DatabaseGrid, DatabaseViewActions, editOf } from "../DatabaseStudioView";
 import { DocumentMenu } from "../DocumentMenu";
@@ -61,7 +61,7 @@ import { ActivityBar } from "../workbench/ActivityBar";
 import { AgentBadge } from "../workbench/AgentBadge";
 import { AgentColorContext, AgentColorSwatches } from "../workbench/AgentColorPicker";
 import { AppRows } from "../workbench/AppsView";
-import { chatTabPath, collectionTabPath, HISTORY_TAB_PATH, siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
+import { chatTabPath, collectionTabPath, HISTORY_TAB_PATH, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MIN_WIDTH, siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { neutralPresentation, relayPresentation } from "../workbench/actorPresentation";
@@ -75,7 +75,7 @@ import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
 import { EditorTabs } from "../workbench/EditorTabs";
 import { EditorGroupFrame } from "../workbench/tabRowActions";
 import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
-import { TreeRow, type VisibleRow } from "../workbench/Explorer";
+import { CollectionsElsewhereRow, CollectionsRefusalRow, TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
 import { EngineHistoryView, MomentRow } from "../workbench/EngineHistory";
 import { DiffCounts, UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "../workbench/unifiedDiff";
@@ -128,7 +128,7 @@ const SAMPLE_SAM: ActorPresentation = { ...relayPresentation(SAM_PALETTE_SLOT), 
 const SAMPLE_NOVA: ActorPresentation = { group: "states-nova", hue: null, self: false };
 const SAMPLE_ORBIT: ActorPresentation = { group: "states-orbit", hue: "plum", self: false };
 
-const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
+const KBD = "rounded border border-line bg-bg px-1 font-sans text-[11px] text-subtle";
 
 // A floating part draws a shadow up to 41px below and 31px beside itself in
 // the dark theme, and its whole shadow must stay in its own capture, which
@@ -352,6 +352,21 @@ function OverflowStripSpecimen(props: { groupId: string; groupNumber: number; ac
     </div>
   );
 }
+
+// The sidebar's Collections section, at a width the sidebar takes.
+function CollectionsSectionSpecimen(props: { width: number; children: ReactNode }) {
+  return (
+    <div style={{ width: props.width }} className="rounded-lg border border-line bg-panel px-1 py-1">
+      <SectionLabel as="div" className="px-2 py-1">Collections</SectionLabel>
+      {props.children}
+    </div>
+  );
+}
+
+const STUDIO_MAC = { label: "Studio Mac", sameName: false };
+const UNCLAIMED_REFUSAL = { kind: "unclaimed", words: "dohc doesn't know which computer keeps this workspace's Collections." } as const;
+const ELSEWHERE_REFUSAL = { kind: "elsewhere", computer: STUDIO_MAC.label, words: collectionsElsewhereWords(STUDIO_MAC) } as const;
+const OTHERS_ELSEWHERE = { computer: STUDIO_MAC.label, others: true, words: collectionsElsewhereWords(STUDIO_MAC, true) };
 
 function treeRow(name: string, folder = false): VisibleRow {
   return {
@@ -1078,6 +1093,18 @@ function notice(id: string, tone: "danger" | "success") {
   };
 }
 
+// A failure whose text runs past three lines: the row clips it and offers Show more.
+const LONG_NOTICE = {
+  id: "self-test",
+  tone: "danger" as const,
+  title: "The self-test did not finish",
+  body: "dohc stopped the self-test at its third step and kept the log at C:\\Users\\ana\\AppData\\Roaming\\dohc\\run-logs\\run_self_test_20261025T053512Z_4f8bd315.log. Open the log to see the step that stopped, then try again.",
+  Icon: AlertTriangle,
+  actions: [{ label: "Try again", onClick: noop }],
+  copyText: "The self-test did not finish",
+  onDismiss: noop,
+};
+
 function DialogSpecimen(props: { theme: "light" | "dark" }) {
   const panelRef = useRef<HTMLDivElement>(null);
   return (
@@ -1576,6 +1603,24 @@ function Pane(props: { theme: "light" | "dark" }) {
         </ul>
       </Section>
 
+      <Section part="collections-rows" title="Collections rows">
+        {[SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MIN_WIDTH].map((width) => (
+          <Specimen key={width} label={`no computer keeps them; another one does; others beside the server's, ${width}px`}>
+            <div className="flex flex-col gap-2">
+              <CollectionsSectionSpecimen width={width}>
+                <CollectionsRefusalRow refusal={UNCLAIMED_REFUSAL} onKeep={noop} onRetry={noop} />
+              </CollectionsSectionSpecimen>
+              <CollectionsSectionSpecimen width={width}>
+                <CollectionsRefusalRow refusal={ELSEWHERE_REFUSAL} onKeep={noop} onRetry={noop} />
+              </CollectionsSectionSpecimen>
+              <CollectionsSectionSpecimen width={width}>
+                <CollectionsElsewhereRow elsewhere={OTHERS_ELSEWHERE} onKeep={noop} />
+              </CollectionsSectionSpecimen>
+            </div>
+          </Specimen>
+        ))}
+      </Section>
+
       {/* Both menus are opened by the capture, one at a time, and their
           boxes are tall enough for the open menu and its shadow. A menu's
           first row takes keyboard focus when it opens; forcing focus and
@@ -1678,9 +1723,10 @@ function Pane(props: { theme: "light" | "dark" }) {
             On this computer
           </SectionLabel>
           <ul className="m-0 list-none p-0" data-force-state="focus-visible" data-force-target="li:nth-child(2)">
-            <LocalNoticeRow notice={notice("sync", "danger")} onKeyDown={noop} onAction={noop} onDismiss={noop} />
-            <LocalNoticeRow notice={notice("sync-focused", "danger")} onKeyDown={noop} onAction={noop} onDismiss={noop} />
-            <LocalNoticeRow notice={notice("moved", "success")} onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={notice("sync", "danger")} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={notice("sync-focused", "danger")} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={notice("moved", "success")} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
+            <LocalNoticeRow notice={LONG_NOTICE} unread={false} onKeyDown={noop} onAction={noop} onDismiss={noop} />
           </ul>
         </div>
       </Section>
@@ -2031,8 +2077,8 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="Notices: History Restore, then a shared live file">
           <div className="w-[360px] rounded-lg border border-line bg-panel text-xs text-ink">
             <ul className="m-0 list-none p-0">
-              <LocalNoticeRow notice={recoveryNotice("capture-recovery", false)} onKeyDown={noop} onAction={noop} onDismiss={noop} />
-              <LocalNoticeRow notice={recoveryNotice("capture-recovery-shared", true)} onKeyDown={noop} onAction={noop} onDismiss={noop} />
+              <LocalNoticeRow notice={recoveryNotice("capture-recovery", false)} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
+              <LocalNoticeRow notice={recoveryNotice("capture-recovery-shared", true)} unread onKeyDown={noop} onAction={noop} onDismiss={noop} />
             </ul>
           </div>
         </Specimen>
@@ -2382,6 +2428,20 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="macOS keys, with dev tools">
           <div className="w-[640px]">
             <KeyboardSettings platform="darwin" devTools />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* Privacy's rows in the narrowest pane, an 840px window's, and the widest. */}
+      <Section part="settings-privacy" title="Settings: Privacy">
+        <Specimen label="narrowest pane: Diagnostics' buttons under its text; usage reports changed, keyboard focus on its switch">
+          <div className="w-[504px]" data-force-state="focus focus-visible" data-force-target='[role="switch"][aria-label="Send usage reports"]'>
+            <PrivacyRowsSpecimen />
+          </div>
+        </Specimen>
+        <Specimen label="widest pane: every control beside its text">
+          <div className="w-[640px]">
+            <PrivacyRowsSpecimen />
           </div>
         </Specimen>
       </Section>
@@ -3172,6 +3232,43 @@ function ZoomSpecimen(props: { percent: number; atMost?: boolean }) {
       reset={{ label: "Reset to 100%", to: "100%", keys: shortcutKeys("zoom-reset", "win32"), onClick: noop }}
       increase={{ label: "Zoom in", keys: shortcutKeys("zoom-in", "win32"), disabled: props.atMost, onClick: noop }}
     />
+  );
+}
+
+const TRUST_OPTIONS = [
+  { value: "trusted", label: "Trusted" },
+  { value: "restricted", label: "Restricted Mode" },
+];
+const DIAGNOSTICS_BUTTON =
+  "rounded-md border border-line bg-transparent px-3 py-1.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink";
+
+// Privacy's rows as Settings draws them: a segmented control, two switches,
+// and Diagnostics' three buttons, the widest controls in Settings.
+function PrivacyRowsSpecimen() {
+  return (
+    <>
+      <SettingRow title="Workspace trust" description="A trusted workspace runs its apps' dev and build commands, and starts agents, on this computer.">
+        <div className="shrink-0 whitespace-nowrap">
+          <SegmentedControl label="Workspace trust" value="trusted" options={TRUST_OPTIONS} onChange={noop} />
+        </div>
+      </SettingRow>
+      <SettingRow
+        title="Send usage reports"
+        description="Counts when you open dohc, create or open a workspace, share, publish an app, or send a chat message. Includes a random ID for this installation. No names, content, or links."
+        modified
+        onReset={noop}
+      >
+        <SwitchControl label="Send usage reports" checked={false} onChange={noop} />
+      </SettingRow>
+      <SettingRow title="Send error reports" description="Sends an error's type and where in dohc's code it happened. No messages, file names, or other paths.">
+        <SwitchControl label="Send error reports" checked onChange={noop} />
+      </SettingRow>
+      <SettingRow title="Diagnostics" description="Version, system, report settings, and recent problems. They stay on this computer until you copy or save them.">
+        <button type="button" className={DIAGNOSTICS_BUTTON}>Show</button>
+        <CopyButton label="Copy diagnostics" getText={() => ""} />
+        <button type="button" className={DIAGNOSTICS_BUTTON}>Save…</button>
+      </SettingRow>
+    </>
   );
 }
 

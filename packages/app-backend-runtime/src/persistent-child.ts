@@ -265,7 +265,7 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
     progress("copying the Collection for the change");
     noLinks(command.input.path,true);
     if(command.input.reportPath) noLinks(command.input.reportPath,true);
-    const copyPath=join(config.directory,`migration-${randomUUID()}.sqlite`);
+    const copyPath=join(config.directory,"migration.sqlite");
     let copy:DatabaseSync | undefined, outputReserved=false, reportCreated=false, succeeded=false;
     try {
       closeSync(openSync(copyPath,"wx",0o600));

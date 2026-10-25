@@ -763,7 +763,7 @@ describe("deletePath", () => {
     ["not-opened", null, "because the workspace has not finished opening. Try again when it opens."],
     ["not-excluded", false, "because it can't keep this workspace's trash out of iCloud Drive. Restart dohc to try again."],
   ] as const)("moves nothing when the OS trash rejects before the open prepares .dohc/local (%s)", async (_refusal, ready, because) => {
-    readLocalStateFrom(ready === null ? null : { currentBinding: () => ({ localStateReady: ready }) });
+    readLocalStateFrom(ready === null ? null : { currentBinding: () => ({ localStateReady: ready }), localStateOpenAt: async () => ({ current: () => true }) });
     await writeFile(join(root, "junk.md"), "keep me");
     await expect(deletePath(workspace(), "junk.md", rejectingTrash)).rejects.toThrow(
       `dohc did not move junk.md to the workspace trash ${because}`,

@@ -209,6 +209,9 @@ export function registerSharedViewsIpcHandlers<
         "Choose an empty folder — the shared files will be placed inside it.",
       );
     }
+    // Opening reaches the engine's sessions, and it can start before the
+    // daemon handshake now that the window loads during it.
+    await engineDaemonStartup();
     // Identity/metadata only (the join bootstrap): the shared content
     // arrives with the first pull below, and a shared view must never seed
     // starter files of its own.

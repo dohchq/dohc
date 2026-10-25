@@ -41,6 +41,17 @@ vi.mock("node:fs/promises", async original => {
   };
 });
 
+// Has the read span find `.dohc/local` missing while a store is in it, as it
+// would if the folder appeared just after dohc looked.
+const localStateFaults = vi.hoisted(() => ({ folderMissing: false }));
+vi.mock("./workspaceLocalState", async original => {
+  const actual = await original<typeof import("./workspaceLocalState")>();
+  return { ...actual,
+    readOwnedLocalState: <T,>(rootPath: string, read: (dir: string | null) => Promise<T>) =>
+      localStateFaults.folderMissing ? read(null) : actual.readOwnedLocalState(rootPath, read),
+  };
+});
+
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const definition: DatasetDefinition = {formatVersion: 1, datasetId: id(1), name: "Items", schemaPath: "items/schema.sql", operationsPath: "items/operations.ts",
@@ -254,6 +265,31 @@ describe("local dataset owner adapter", () => {
     expect(restarted.host.list().datasets).toEqual([]);
     await expect(activate(restarted.host)).rejects.toThrow("deleted");
   });
+  it.each([115, 141, 153])("restores a recovery file in a long workspace folder (%i characters)", async length => {
+    const parent = await mkdtemp(join(tmpdir(), "dohc-recovery-")); roots.push(parent);
+    const sourceRoot = join(parent, "s".repeat(length - parent.length - 1));
+    const workspaceRoot = join(parent, "w".repeat(length - parent.length - 1));
+    expect(sourceRoot).toHaveLength(length);
+    expect(workspaceRoot).toHaveLength(length);
+    await mkdir(sourceRoot); await mkdir(workspaceRoot);
+    const sourceHost = await open({ workspaceRoot: sourceRoot }), approved = await activate(sourceHost.host);
+    await sourceHost.host.action(call(approved, id(6), "saved", { name: "Preserved" }));
+    const archive = await sourceHost.host.prepareExport(id(1));
+    const sourcePath = join(sourceHost.workspaceRoot, "backup.dohc-recovery");
+    try {
+      await writeDatasetRecoveryExport({ workspaceRoots: [], path: sourcePath, stream: archive.stream(),
+        signal: new AbortController().signal, maxBytes: archive.maxBytes, authorize() {} });
+    } finally { await archive.dispose(); }
+    await sourceHost.host.close();
+
+    const target = await open({ workspaceRoot });
+    const prepared = await target.host.prepareRecovery({ sourcePath });
+    await target.host.claimRecovery({ ...prepared, oldHostStopped: true });
+    expect((await target.host.query(call(approved, id(5)))).result).toEqual([
+      { id: expect.any(String), name: "Preserved" },
+    ]);
+  });
+
   it("restores a chosen active backup only after owner claim and preserves files and retry history", async () => {
     const sourceHost = await open(), approved = await activate(sourceHost.host);
     const bytesBase64 = Buffer.from("%PDF-recovery-receipt").toString("base64");
@@ -833,6 +869,54 @@ describe("this computer's Collection folders", () => {
     expect((await host.query(call(approved, id(5)))).result).toEqual([{ id: expect.any(String), name: "Camera" }]);
     await (await host.prepareExport(id(1))).dispose();
     expect(opens.waits()).toBe(1);
+  });
+
+  // Node can't see who may change a folder on Windows, so there the store in
+  // `.dohc/local` is read, or adopted, only while the engine's open holds it.
+  it("on Windows, reads and adopts the store in .dohc/local only while the engine's open holds the folder", async () => {
+    const first = await open();
+    await first.host.close();
+    const root = first.workspaceRoot, storeId = "5b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f";
+    const workspace = { workspaceId: "w", rootPath: root }, opens = fakeLocalStateOpens();
+    const platform = process.platform;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const notOpened = "dohc has not finished opening this workspace. Try again when it opens.";
+      await expect(localDatasetStoreId(root)).rejects.toThrow(notOpened);
+      await expect(adoptLocalDatasetStore(root, "w", storeId)).rejects.toThrow(notOpened);
+      await opens.open(workspace);
+      await adoptLocalDatasetStore(root, "w", storeId);
+      expect(await localDatasetStoreId(root)).toBe(storeId);
+      opens.close(workspace);
+      await expect(localDatasetStoreId(root)).rejects.toThrow(notOpened);
+    } finally {
+      Object.defineProperty(process, "platform", { value: platform });
+    }
+  });
+
+  // A `.dohc/local` that was missing when dohc looked has no open behind it,
+  // so a store found there afterwards is neither read nor adopted.
+  it("on Windows, neither reads nor adopts a store in .dohc/local that the read found missing", async () => {
+    const storeId = "5b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f", otherId = "0f1e2d3c-4b5a-4968-8776-655443322110";
+    const made = await open();
+    await made.host.close();
+    const root = made.workspaceRoot;
+    await adoptLocalDatasetStore(root, "w", storeId);
+    const idHere = () => {
+      const db = new DatabaseSync(join(root, ".dohc", "local", "datasets", "state.sqlite"), { readOnly: true });
+      try { return db.prepare("SELECT store_id FROM local_dataset_store").get()?.store_id; } finally { db.close(); }
+    };
+    const platform = process.platform;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    localStateFaults.folderMissing = true;
+    try {
+      expect(await localDatasetStoreId(root)).toBeNull();
+      await expect(adoptLocalDatasetStore(root, "w", otherId)).rejects.toThrow("dohc could not find .dohc/local/datasets/state.sqlite.");
+      expect(idHere()).toBe(storeId);
+    } finally {
+      localStateFaults.folderMissing = false;
+      Object.defineProperty(process, "platform", { value: platform });
+    }
   });
 });
 

@@ -27,7 +27,7 @@ import type { probeRelayWorkspace } from "../workspaces/relayWorkspaceProbe";
 import type { readWorkspaceSecretState, readWorkspaceDataKeyForEnrollment, WorkspaceSecretState } from "../workspaces/workspaceSecretEnrollmentState";
 import type { enrollWorkspaceKeyEnvelope } from "../workspaces/workspaceKeyEnvelopeEnrollment";
 import type { bootstrapJoinedWorkspace } from "../workspaces/workspaceJoinEnrollment";
-import type { installWorkspaceDataKey } from "../workspaces/workspaceDataKey";
+import { SecretFileStoreError, type installWorkspaceDataKey } from "../workspaces/workspaceDataKey";
 
 export function registerCloudIpcHandlers<
   Sender,
@@ -365,6 +365,9 @@ export function registerCloudIpcHandlers<
       throw error;
     }
 
+    // The bootstrap binds the engine's relay client, and a join can start
+    // before the daemon handshake now that the window loads during it.
+    await engineDaemonStartup();
     await mkdir(rootPath, { recursive: true });
     let summary!: ReturnType<typeof WorkspaceSummary.parse>;
     desktopMarks.mark("workspace-join-start");
@@ -421,6 +424,9 @@ export function registerCloudIpcHandlers<
       cleanupFailureMessage:
         `dohc could not close the failed download. Files remain in ${rootPath}. Restart dohc. If this folder appears in the workspace list, choose Forget from its menu before joining again. Forget keeps the folder. Then choose another empty folder.`,
       failure: (error) => {
+        if (error instanceof SecretFileStoreError && error.code === "key-install-unsupported") {
+          return new Error(`This drive can't store the workspace's secret key safely. Files remain in ${rootPath}. Choose an empty folder on an NTFS, APFS or ext4 drive to try again.`);
+        }
         if (
           error instanceof Error &&
           /^(?:Passphrase required|Passphrase could not)\b/u.test(error.message)

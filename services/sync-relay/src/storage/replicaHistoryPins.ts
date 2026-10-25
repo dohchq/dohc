@@ -66,7 +66,7 @@ export function pinReplicaHistory(storage: StorageContext, view: Pick<ReplicaCur
       clock.dirty_since_ms=null;
       return;
     }
-    const authors = replicaHistoryAuthors(storage,workspace,file.versionId,file.objectId,Number(clock.pin_log_cursor),log,Number(clock.pin_journal_cursor),journal);
+    const authors = replicaHistoryAuthors(storage,workspace,file.versionId,file.objectId,file.lineageClaimId,Number(clock.pin_log_cursor),log,Number(clock.pin_journal_cursor),journal);
     statement(storage,"INSERT INTO sync_relay_history_pins VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
       .run(randomUUID(),workspace,file.versionId,file.objectId,file.path,file.contentKind,file.sha256,file.byteLength,file.lineageClaimId,
         file.restoreGeneration,reason,now,superseded,log,journal,JSON.stringify(authors),

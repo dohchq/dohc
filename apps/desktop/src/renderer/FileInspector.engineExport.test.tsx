@@ -99,6 +99,7 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
     readWorkspaceText: vi.fn(async () => ({
       text: "# Stale disk body\n",
       truncated: false,
+      contentHash: "c".repeat(64),
     })),
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
     listWorkspaceFiles: vi.fn(async () => ({

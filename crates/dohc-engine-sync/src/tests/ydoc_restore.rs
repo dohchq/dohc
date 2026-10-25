@@ -68,6 +68,10 @@ fn stopped_remote_update_retains_bytes_and_advances_with_classified_refusal() {
     )
     .unwrap();
     let operation = NativeRestoreFence {
+        point: dohc_engine_collab::live_update_application::NativeRestoreSelection {
+            journal_cursor: 0,
+            receipt_digest: binding.lineage_claim_id.clone(),
+        },
         operation_id: "restore".into(),
         relay_database_namespace: "relay".into(),
         old_binding: binding.clone(),

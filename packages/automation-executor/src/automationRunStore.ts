@@ -911,10 +911,28 @@ export interface AutomationStoreFolder {
    */
   forWrite(): Promise<string>;
   /**
-   * The folder, for a read, or null when it does not exist. Refuses when the
-   * host does not trust it, so nothing in it is read. Makes nothing.
+   * Runs `work` on the folder, for a read, or on null when it does not
+   * exist, and returns what `work` returned. Refuses when the host does not
+   * trust the folder, before `work` runs or after it, so nothing read in it is
+   * used. A host that has not opened the workspace refuses with
+   * AutomationStoreNotOpenedError. Makes nothing.
    */
-  forRead(): Promise<string | null>;
+  read<T>(work: (dir: string | null) => Promise<T>): Promise<T>;
+}
+
+// A store read the host refused.
+const REFUSED = Symbol("refused");
+
+/**
+ * The host has not opened the workspace, so nothing in its store folder can
+ * be read yet. The read of the steps a person allowed passes this on, so they
+ * don't read as unreadable because of it. Other reads take it as any refusal.
+ */
+export class AutomationStoreNotOpenedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AutomationStoreNotOpenedError";
+  }
 }
 
 /**
@@ -942,30 +960,45 @@ export function createAutomationRunStore(
   };
   // The store's folder for a write, made inside the host's folder when missing.
   const base = async () => realFolder(join(await home.forWrite(), "automations"));
-  // The store's folder at `segments` for a read: null when it does not exist,
-  // and "unusable" when the host refuses its folder or something other than a
-  // folder only this user can change is there. Makes nothing.
-  const existingStoreFolder = async (...segments: string[]): Promise<string | null | "unusable"> => {
-    let found: string | null | "unusable";
+  // Runs `work` on the store's folder at `segments` for a read: null when it
+  // does not exist, and "unusable" when something other than a folder only
+  // this user can change is there. Returns REFUSED when the host refuses its
+  // folder, before `work` or after it, or throws when the host has not opened
+  // the workspace and `notOpened` says so. Makes nothing.
+  const readStoreFolder = async <T>(
+    segments: string[], work: (found: string | null | "unusable") => Promise<T>, notOpened: "refused" | "throws" = "refused",
+  ): Promise<T | typeof REFUSED> => {
+    // What `work` threw, which is not the host's refusal.
+    const failed: { error?: unknown } = {};
     try {
-      found = await home.forRead();
-    } catch {
-      return "unusable";
+      return await home.read(async (dir) => {
+        let found: string | null | "unusable" = dir;
+        for (const segment of ["automations", ...segments]) {
+          if (found === null || found === "unusable") break;
+          found = await existingFolder(join(found, segment));
+        }
+        try {
+          return await work(found);
+        } catch (error) {
+          failed.error = error;
+          throw error;
+        }
+      });
+    } catch (error) {
+      if ("error" in failed) throw failed.error;
+      if (notOpened === "throws" && error instanceof AutomationStoreNotOpenedError) throw error;
+      return REFUSED;
     }
-    for (const segment of ["automations", ...segments]) {
-      if (found === null || found === "unusable") return found;
-      found = await existingFolder(join(found, segment));
-    }
-    return found;
   };
   // One of the store's own files, for a read: undefined when it does not
   // exist, and null when it cannot be read or is not trusted.
-  const readStored = async (name: string): Promise<string | undefined | null> => {
-    const found = await existingStoreFolder();
-    if (found === null) return undefined;
-    return found === "unusable" ? null : readBounded(join(found, name));
+  const readStored = async (name: string, notOpened: "refused" | "throws" = "refused"): Promise<string | undefined | null> => {
+    const read = await readStoreFolder([], async (found) =>
+      found === null ? undefined : found === "unusable" ? null : readBounded(join(found, name)), notOpened);
+    return read === REFUSED ? null : read;
   };
-  const readStoredJson = async (name: string): Promise<unknown> => parseJson(await readStored(name));
+  const readStoredJson = async (name: string, notOpened: "refused" | "throws" = "refused"): Promise<unknown> =>
+    parseJson(await readStored(name, notOpened));
   const runsFolder = async (automationId: string) =>
     realFolder(join(await realFolder(join(await base(), "runs")), hashName(automationId)));
   const runName = (claimId: string, keySeed: string) => `${hashName(claimId)}-${keySeed.replace(/[^a-z0-9-]/g, "")}`;
@@ -1265,19 +1298,21 @@ export function createAutomationRunStore(
 
   return {
     async runsOf(automationId, claimId) {
-      const runs = await existingStoreFolder("runs", hashName(automationId));
-      if (runs === null) return { runs: [], unreadable: false };
-      if (runs === "unusable") return { runs: [], unreadable: true };
-      const prefix = `${hashName(claimId)}-`;
-      const found: StoredRun[] = [];
-      let unreadable = false;
-      for (const file of await readdir(runs)) {
-        if (!file.startsWith(prefix) || !file.endsWith(RUN_SUFFIX)) continue;
-        const run = await readRun(runs, file.slice(0, -RUN_SUFFIX.length), automationId);
-        if (run?.claimId === claimId) found.push(run);
-        else unreadable = true;
-      }
-      return { runs: found, unreadable };
+      const read = await readStoreFolder(["runs", hashName(automationId)], async (runs) => {
+        if (runs === null) return { runs: [], unreadable: false };
+        if (runs === "unusable") return { runs: [], unreadable: true };
+        const prefix = `${hashName(claimId)}-`;
+        const found: StoredRun[] = [];
+        let unreadable = false;
+        for (const file of await readdir(runs)) {
+          if (!file.startsWith(prefix) || !file.endsWith(RUN_SUFFIX)) continue;
+          const run = await readRun(runs, file.slice(0, -RUN_SUFFIX.length), automationId);
+          if (run?.claimId === claimId) found.push(run);
+          else unreadable = true;
+        }
+        return { runs: found, unreadable };
+      });
+      return read === REFUSED ? { runs: [], unreadable: true } : read;
     },
     save(run) {
       return serial(async () => {
@@ -1507,7 +1542,8 @@ export function createAutomationRunStore(
       });
     },
     async readReachVerdicts() {
-      const read = await readStoredJson("reach.json");
+      // With no open, every automation waits for it, not for a reset of holds.
+      const read = await readStoredJson("reach.json", "throws");
       const none = { verdicts: [], hostRecord: 0, unproven: [], unprovenAll: false, unprovenFolders: [], unprovenPaths: [], pending: null, taken: null };
       if (read === undefined) return { ...none, unreadable: false, missing: true };
       const parsed = ReachVerdictsSchema.safeParse(read);
@@ -1525,7 +1561,7 @@ export function createAutomationRunStore(
       });
     },
     async reachVerdictsPath() {
-      const found = await home.forRead();
+      const found = await home.read(async (dir) => dir);
       if (found === null) throw new Error("dohc has not saved which automation steps were allowed in this workspace.");
       return join(found, "automations", "reach.json");
     },

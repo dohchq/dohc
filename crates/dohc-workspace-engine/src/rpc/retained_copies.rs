@@ -11,6 +11,10 @@ use serde_json::json;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(
+    not(unix),
+    expect(dead_code, reason = "only Unix retains copies to delete")
+)]
 struct RetainedCopyParam {
     id: i64,
     revision: i64,

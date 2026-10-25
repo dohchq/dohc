@@ -441,4 +441,30 @@ describe("ChatsView dispatch state", () => {
       "3 queued",
     );
   });
+
+  it("says when this computer paused dispatch, before the thread's own pause, and resumes it", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.readChatDispatchPaused.mockResolvedValue({ paused: true });
+    bridgeMock.chatDispatchStateForThread.mockResolvedValue({
+      liveRunId: null,
+      pendingCount: 2,
+      paused: true,
+      pausedReason: "budget",
+    });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-dispatch-status").textContent).toBe(
+        "dispatch paused on this computer — Resume",
+      ),
+    );
+    await user.click(screen.getByTestId("chats-resume-computer-dispatch"));
+    expect(bridgeMock.setChatDispatchPaused).toHaveBeenCalledWith({ paused: false });
+    expect(screen.getByTestId("chats-dispatch-status").textContent).toBe("dispatch paused — Resume");
+  });
 });

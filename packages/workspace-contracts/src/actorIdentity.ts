@@ -141,6 +141,7 @@ export function deriveLocalActor(input: {
  * Names and kinds remain claims. Missing identity never borrows the reader's credentials.
  * Until agent registration exists, another device's authorDisplayName is its claimedName.
  * That device's original handshake claim is unavailable. Do not invent a placeholder here.
+ * A link holder is its link grant and link principal, which only the relay writes; it has no account.
  */
 export function deriveRelayChatActor(input: {
   readonly issuer: ActorIssuer | null;
@@ -150,8 +151,16 @@ export function deriveRelayChatActor(input: {
 } & (
   | { readonly kind: "agent"; readonly claimedName: string }
   | { readonly kind: "human" | "automation" }
+  | { readonly kind: "link"; readonly grantId: string; readonly principalId: string }
 )): ActorRef {
   const origin = input.origin ?? "unknown";
+  if (input.kind === "link") {
+    if (!input.grantId || !input.principalId || input.authorUserId !== undefined) return unknownActor(input.displayName, origin);
+    return {
+      key: branded({ kind: "link" as const, grantId: input.grantId, principalId: input.principalId }),
+      displayName: input.displayName, origin, assurance: "relay-verified",
+    };
+  }
   if (!input.issuer || !input.authorUserId) return unknownActor(input.displayName, origin);
   const ownerKey = branded({ kind: "account" as const, issuer: createActorIssuer(input.issuer), userId: input.authorUserId });
   switch (input.kind) {

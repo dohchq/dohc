@@ -651,6 +651,14 @@ export interface SyncRelayStorage {
   recordAutomationServerStart(input: { workspaceId: string; incarnation: number; generation: number; releasedThroughMs: number | null }): void;
   recordAutomationServerTaken(input: { workspaceId: string; generation: number }): void;
   recordAutomationServerProgress(input: { workspaceId: string; throughMs: number }): void;
+  recordAutomationServerRunChanging(input: Parameters<typeof import("./automationHosts").recordAutomationServerRunChanging>[1]): void;
+  endAutomationServerRun(input: import("./automationHosts").AutomationServerRun): boolean;
+  endedAutomationServerRuns(input: { workspaceId: string; incarnation: number }): Array<{ automationId: string; claimId: string; touch: number }>;
+  confirmAutomationServerRunsSent(input: Parameters<typeof import("./automationHosts").confirmAutomationServerRunsSent>[1]): void;
+  markAutomationServerRunsLost(input: { workspaceId: string; incarnation: number; nowMs: number }): void;
+  lostAutomationServerRuns(input: Parameters<typeof import("./automationHosts").lostAutomationServerRuns>[1]): import("./automationHosts").LostAutomationServerRun[];
+  unreportedLostAutomationServerRuns(input: { workspaceId: string; nowMs: number }): ReturnType<typeof import("./automationHosts").unreportedLostAutomationServerRuns>;
+  reportAutomationServerRunsLost(input: Parameters<typeof import("./automationHosts").reportAutomationServerRunsLost>[1]): void;
   joinAutomationWorkspace(input: { workspaceId: string; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
   replaceLostAutomationReplica(input: { workspaceId: string; incarnation: number; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
   unwantAutomationWorkspace(input: { workspaceId: string; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
@@ -869,6 +877,7 @@ export interface SyncRelayStorage {
     workspaceId: string; originId: string; messageId: string; ops: SyncRelayLogInput[];
     guard?: (context: AppendLogBatchGuardContext) => void;
   }): AppendLogBatchResult;
+  appendLinkChatPost(input: Parameters<typeof import("./linkChat").appendLinkChatPost>[1]): import("./linkChat").AppendLinkChatPostResult;
   fetchLogCoordinate(input: {
     workspaceId: string;
     originId: string;

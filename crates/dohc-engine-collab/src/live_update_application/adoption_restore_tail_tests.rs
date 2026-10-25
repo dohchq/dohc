@@ -360,12 +360,30 @@ fn native_tail_input(
     terminal: Option<LiveUpdateReceipt>,
     applied_sequence: i64,
 ) -> NativeRestorePreparation {
+    native_tail_input_at(f, terminal, applied_sequence, 0)
+}
+
+fn native_tail_input_at(
+    f: &mut Fixture,
+    terminal: Option<LiveUpdateReceipt>,
+    applied_sequence: i64,
+    point_cursor: i64,
+) -> NativeRestorePreparation {
+    let receipt_digest = if point_cursor == 0 {
+        f.binding.lineage_claim_id.clone()
+    } else {
+        terminal.as_ref().unwrap().update_digest.clone()
+    };
     let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
     let fence = f
         ._owner
         .fence_restore(
             &mut f.store, None,
             NativeRestoreFence {
+                point: crate::live_update_application::NativeRestoreSelection {
+                    journal_cursor: point_cursor,
+                    receipt_digest: receipt_digest.clone(),
+                },
                 operation_id: if f.binding.restore_fence_generation == 0 {
                     "tail-restore".into()
                 } else {
@@ -395,8 +413,8 @@ fn native_tail_input(
     NativeRestorePreparation {
         fence,
         point: NativeRestorePoint {
-            journal_cursor: 0,
-            receipt_digest: f.binding.lineage_claim_id.clone(),
+            journal_cursor: point_cursor,
+            receipt_digest,
             markdown_digest: hex_sha256(source.as_bytes()),
             projection_digest: hex_sha256(projection.as_bytes()),
         },
@@ -2008,12 +2026,14 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
         });
     }
     mark("ingress");
-    let mut preparation = native_tail_input(&mut f, terminal, sequence);
     // The selected current point retains a second authentic copy of the
     // accepted suffix: a large proof with half as many ingress operations.
-    if select_terminal {
-        preparation.point.journal_cursor = events;
-    }
+    let preparation = native_tail_input_at(
+        &mut f,
+        terminal,
+        sequence,
+        if select_terminal { events } else { 0 },
+    );
     let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
     const PROOF_BYTES: usize = 512 * 1024 * 1024;
     let proposal = f

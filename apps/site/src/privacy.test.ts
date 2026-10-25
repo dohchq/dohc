@@ -11,6 +11,7 @@ const KNOWN_HOSTS = new Set([
   "app.loops.so",
   "github.com",
   "docs.github.com",
+  "dohc.computer",
   "loops.so",
   "www.cloudflare.com",
   "www.w3.org",

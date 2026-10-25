@@ -7,10 +7,19 @@ pub enum RestoreDeliveryOrigin {
     Owner { id: String },
 }
 
+/// Journal point authenticated before committing the restore fence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeRestoreSelection {
+    pub journal_cursor: i64,
+    pub receipt_digest: String,
+}
+
 /// Supplied by an authenticated operation adapter after relay old-cut ACK.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeRestoreFence {
+    pub point: NativeRestoreSelection,
     pub operation_id: String,
     pub relay_database_namespace: String,
     pub old_binding: LiveObjectBinding,
@@ -28,6 +37,26 @@ pub struct NativeRestoreFenceReceipt {
     pub local_head_sequence: i64,
     pub recorded_at_ms: i64,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NativeRestoreRefusalReason {
+    BindingChanged,
+    ReaderUnavailable,
+    SourceUnavailable,
+    SourceTooLarge,
+    IncompleteWitness,
+}
+
+/// The writer found no saved fence and refused before its first fence write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeRestoreRefusal {
+    pub operation: NativeRestoreFence,
+    pub reason: NativeRestoreRefusalReason,
+}
+
+const SELECTED_POINT_REPLAY_BYTES: usize = crate::limits::MAX_YDOC_UPDATE_BYTES * 5;
 
 // This document lineage's settlements whose moments have not reached the relay:
 // local moments above the origin's pushed cursor, then settlements a retained
@@ -118,6 +147,8 @@ pub(crate) fn require_registration(
 
 impl NativeRestoreFence {
     pub(super) fn validate(&self) -> Result<(), ApplicationError> {
+        integer(self.point.journal_cursor, 0, SAFE)?;
+        digest(&self.point.receipt_digest)?;
         identifier(&self.operation_id, 512)?;
         identifier(&self.relay_database_namespace, 512)?;
         identifier(&self.host_id, 1024)?;
@@ -278,6 +309,27 @@ impl ApplicationOwner {
             binding: b.clone(),
             live: true,
         };
+        let selected = store.read_with(|conn| {
+            if !accepted_history::may_have_reader(conn, &held)? {
+                return Ok(None);
+            }
+            let read = conn.unchecked_transaction().map_err(read_sql)?;
+            accepted_history::read_selected_point(
+                &read,
+                &held,
+                &input.point,
+                &mut restore_content::Budget {
+                    remaining: SELECTED_POINT_REPLAY_BYTES,
+                },
+                accepted_history::CHECKPOINT_EVENTS as usize,
+            )
+            .map(|history| Some(history.doc))
+        });
+        // Saved fences replay independently of history; preserve transaction error precedence.
+        let (selected, mut selection_error) = match selected {
+            Ok(doc) => (doc, None),
+            Err(error) => (None, Some(error)),
+        };
         let input_json = serde_json::to_string(&input).map_err(|_| ApplicationError::Corrupt)?;
         let outcome = store.write_with(faults, |tx| {
             require_workspace(tx, &held)?;
@@ -308,6 +360,9 @@ impl ApplicationOwner {
                 params![held.namespace,input.operation_id], |r| r.get(0),
             ).map_err(read_sql)?;
             if collision { return Err(ApplicationError::Conflict); }
+            let refused = |reason| ApplicationError::RestoreRefused(Box::new(NativeRestoreRefusal {
+                operation: input.clone(), reason,
+            }));
             let key = DocKey::new(&b.workspace_id,&b.main_version_id,&b.object_id)?;
             require_hosted_ready(tx, &key)?;
             require_registration(tx,&key,&held.namespace,b)?;
@@ -316,7 +371,7 @@ impl ApplicationOwner {
                 binding == *b && available && (coordinate == held.coordinate
                     || (after_reconnect && coordinate.host_id == held.coordinate.host_id))
             }) {
-                return Err(ApplicationError::Interrupted);
+                return Err(refused(NativeRestoreRefusalReason::BindingChanged));
             }
             // A settlement moment's before-image is publishable only while its
             // generation is current. Refuse until the relay acknowledged this
@@ -333,13 +388,29 @@ impl ApplicationOwner {
                 return Err(ApplicationError::Conflict);
             }
             let current = durable::load_doc_in(tx, &key)?;
-            if current.has_reader_source() {
-                let reference = current.markdown_source_reference().ok_or(CollabError::MarkdownReaderUnavailable)?;
-                if resolver.is_none() { return Err(CollabError::MarkdownReaderUnavailable.into()); }
+            if let Some(error) = selection_error.take() {
+                return Err(error);
+            }
+            accepted_history::require_selected_terminal(tx, &held, &input.point)?;
+            // A new reader-bearing append after the preflight needs a fresh attempt.
+            if selected.is_none() && accepted_history::may_have_reader(tx, &held)? {
+                return Err(ApplicationError::Interrupted);
+            }
+            let needed = if selected.as_ref().is_some_and(|doc| doc.has_reader_source()) { selected.as_ref() }
+                else if current.has_reader_source() { Some(&current) } else { None };
+            if let Some(doc) = needed {
+                let reference = doc.markdown_source_reference().ok_or_else(|| refused(NativeRestoreRefusalReason::IncompleteWitness))?;
+                if doc.markdown_source(&reference).is_none() {
+                    return Err(refused(NativeRestoreRefusalReason::IncompleteWitness));
+                }
+                if resolver.is_none() {
+                    return Err(refused(NativeRestoreRefusalReason::ReaderUnavailable));
+                }
                 crate::reader_snapshot::history_artifact(tx, &key, &b.current_path, &reference.source_sha256, crate::limits::MAX_PUBLIC_MARKDOWN_BYTES)
                     .map_err(|error| match error {
-                        CollabError::ConfiguredByteBudgetExceeded => CollabError::MarkdownReaderUnavailable,
-                        error => error,
+                        CollabError::MarkdownReaderUnavailable => refused(NativeRestoreRefusalReason::SourceUnavailable),
+                        CollabError::ConfiguredByteBudgetExceeded => refused(NativeRestoreRefusalReason::SourceTooLarge),
+                        error => error.into(),
                     })?;
             }
             let receipt = NativeRestoreFenceReceipt {

@@ -104,6 +104,9 @@ pub(crate) struct OpenWorkspace {
     /// before their first relay step until they are between pages, finish,
     /// or fail.
     pub(super) pulls_in_flight: std::sync::atomic::AtomicUsize,
+    /// What this binding's last open that writes prepared in `.dohc/local`.
+    /// On Windows it holds the folder until the binding closes.
+    local_state: Mutex<Option<root_binding::LocalState>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,6 +162,7 @@ impl OpenWorkspace {
             cursors_issued: Default::default(),
             collections_owed: Default::default(),
             pulls_in_flight: Default::default(),
+            local_state: Mutex::new(None),
         }
     }
 
@@ -247,6 +251,8 @@ impl Drop for EngineService {
 
         for (_, workspace) in &open {
             workspace.observation.close_synchronously();
+            // The open ends with the service, whatever task still holds the workspace.
+            lock(&workspace.local_state).take();
         }
         let sessions = Arc::clone(&self.sessions);
         let self_writes = self.self_writes.clone();
@@ -830,12 +836,14 @@ impl EngineService {
                 // unmarked folder in its place, while the binding is open, so
                 // this open prepares it again before it changes anything.
                 let local_root = root.clone();
-                let local_state_ready = tokio::task::spawn_blocking(move || {
+                let local_state = tokio::task::spawn_blocking(move || {
                     root_binding::prepare_local_state(&local_root)
                 })
                 .await
                 .map_err(|_| WireError::new(ErrorCode::Internal, "workspace open task failed"))?
                 .map_err(map_root_binding)?;
+                let local_state_ready = local_state.ready;
+                *lock(&open.local_state) = Some(local_state);
                 if let Some(author_json) = capture_author_json.clone() {
                     let _apply = tokio::select! {
                         biased;
@@ -900,6 +908,7 @@ impl EngineService {
             // suppression only after the shutdown drain — an in-flight
             // reconcile apply still consults the registry.
             open.shutdown_capture().await;
+            lock(&open.local_state).take();
             self.self_writes
                 .scoped(&open.root)
                 .clear_workspace(&open.workspace_id);
@@ -926,13 +935,13 @@ impl EngineService {
         let mut opening = tokio::task::spawn_blocking(move || {
             // The marker precedes database creation. A crash leaves either a marker
             // and no schema, or a schema already bound to that marker.
-            let (root_token, local_state_ready) = match requested_mode {
+            let (root_token, local_state) = match requested_mode {
                 WorkspaceOpenMode::Full | WorkspaceOpenMode::Passive => {
                     let token = root_binding::write_new_root_binding(&binding_root)
                         .map_err(map_root_binding)?;
-                    let ready = root_binding::prepare_local_state(&binding_root)
+                    let local_state = root_binding::prepare_local_state(&binding_root)
                         .map_err(map_root_binding)?;
-                    (token, Some(ready))
+                    (token, Some(local_state))
                 }
                 WorkspaceOpenMode::ReadOnly => (
                     root_binding::read_root_binding(&binding_root)
@@ -990,9 +999,9 @@ impl EngineService {
             {
                 probe.pause_open_install_if_armed();
             }
-            Ok((opened, open_guard, local_state_ready))
+            Ok((opened, open_guard, local_state))
         });
-        let (actor_open, open_guard, local_state_ready) = tokio::select! {
+        let (actor_open, open_guard, local_state) = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
                 // Dropping the join handle detaches the blocking task. Its
@@ -1005,6 +1014,7 @@ impl EngineService {
             }
         };
         let (actor_open, bound) = actor_open.map_err(map_runtime)?;
+        let local_state_ready = local_state.as_ref().map(|local| local.ready);
         // The supervisor deduplicates by physical engine.db identity, including
         // root aliases and hard links. EngineService state (capture driver,
         // session registry, and version barriers) deliberately has one owner:
@@ -1036,7 +1046,7 @@ impl EngineService {
             if actor_open.store_freshly_created {
                 // The guard's close finishes on a blocking task; the delete
                 // has to wait for it, or SQLite still holds the file.
-                let store_path = actor.database_path().to_path_buf();
+                let held = actor.location();
                 let removed = supervisor.begin_close_identity(actor.identity());
                 drop(actor);
                 if let Some(closing) = removed {
@@ -1046,7 +1056,7 @@ impl EngineService {
                 // A delete that fails leaves the store the next open refuses
                 // as a mismatch. The refusal stands; the path says why.
                 for suffix in ["", "-wal", "-shm"] {
-                    let mut path = store_path.clone().into_os_string();
+                    let mut path = held.database_path().to_path_buf().into_os_string();
                     path.push(suffix);
                     let path = std::path::PathBuf::from(path);
                     if let Err(error) = std::fs::remove_file(&path)
@@ -1098,7 +1108,7 @@ impl EngineService {
         let open_guard = if requested_mode == WorkspaceOpenMode::Full
             && let Some(config) = self.ordinary_live_host.get()
         {
-            let budget_db_path = actor.database_path().to_path_buf();
+            let budget_store = actor.location();
             let budget_workspace_id = params.workspace_id.clone();
             let owner_outbox = config.owner_outbox.clone();
             let budget_probe = self.capture_apply_probe.clone();
@@ -1109,8 +1119,10 @@ impl EngineService {
                     probe.pause_open_budget_if_armed();
                 }
                 let result = (|| {
-                    let store = dohc_engine_storage::EngineStore::open_read_only(&budget_db_path)
-                        .map_err(|error| {
+                    let store = dohc_engine_storage::EngineStore::open_read_only(
+                        budget_store.database_path(),
+                    )
+                    .map_err(|error| {
                         map_runtime(dohc_engine_runtime::RuntimeError::Storage(error))
                     })?;
                     let mismatch: bool = store.read_with(|conn| conn.query_row(
@@ -1332,6 +1344,7 @@ impl EngineService {
                 cursors_issued: Default::default(),
                 collections_owed: Default::default(),
                 pulls_in_flight: Default::default(),
+                local_state: Mutex::new(local_state),
             }),
         );
         if requested_mode == WorkspaceOpenMode::Full {
@@ -1446,12 +1459,16 @@ impl EngineService {
         // owns the gate can still read the driver and finish. Cancellation is
         // idempotent when the detached task takes the driver below.
         removed.request_capture_shutdown();
+        #[cfg(feature = "harness")]
         let probe = self.capture_apply_probe.clone();
         let close_task = tokio::spawn(async move {
-            if let Some(probe) = &probe {
-                probe.observe_gate_wait_if_armed();
-            }
+            #[cfg(feature = "harness")]
+            let gate_wait = probe
+                .as_ref()
+                .map(capture_driver::CaptureApplyProbe::observe_close_gate_wait);
             let _capture = capture_gate.lock_owned().await;
+            #[cfg(feature = "harness")]
+            drop(gate_wait);
             let capture_drain = removed.begin_capture_shutdown();
             let _session = session_gate.lock_owned().await;
             // Session rows stay present until in-flight session work drains,
@@ -1463,11 +1480,14 @@ impl EngineService {
                 let _ = drain.await;
             }
             clear_suppression.0.clear_workspace(&clear_suppression.1);
-            tokio::task::spawn_blocking(move || match closing {
+            let finished = tokio::task::spawn_blocking(move || match closing {
                 Some(closing) => closing.finish(),
                 None => Ok(()),
             })
-            .await
+            .await;
+            // The open ends with the close, whatever task still holds the workspace.
+            lock(&removed.local_state).take();
+            finished
         });
         close_task
             .await
@@ -3293,6 +3313,11 @@ mod tests {
             let open = service.open(Some(&handle)).expect("open workspace");
             assert!(open.actor.database_path().starts_with("/.vol"));
         }
+        #[cfg(target_os = "linux")]
+        {
+            let open = service.open(Some(&handle)).expect("open workspace");
+            assert!(open.actor.database_path().starts_with("/proc/self/fd"));
+        }
         let engine = scratch.path().join(".dohc/engine");
         let moved = scratch.path().join(".dohc/moved");
         std::fs::rename(&engine, &moved).expect("move");
@@ -3304,6 +3329,55 @@ mod tests {
         other.open(&store, 1).expect("the closed store opens");
         other.close(&store).expect("close");
         assert_eq!(std::fs::read_dir(&engine).expect("replacement").count(), 0);
+    }
+
+    /// On Windows, an open names a junction at `.dohc` or at the engine's
+    /// folder, and makes nothing in the folder it names.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_open_names_a_link_that_keeps_the_engine_folder_from_being_private() {
+        let service = &EngineService::new();
+        let open = |root: &std::path::Path| {
+            let params = open_params(root, "private", json!({ "captureMode": "none" }));
+            async move {
+                service
+                    .workspace_open(&RequestContext::unbounded(), params)
+                    .await
+            }
+        };
+        let elsewhere = ScratchDir::new().expect("scratch");
+        let junction = |at: std::path::PathBuf| {
+            let status = std::process::Command::new("cmd")
+                .args(["/c", "mklink", "/J"])
+                .arg(at)
+                .arg(elsewhere.path())
+                .stdout(std::process::Stdio::null())
+                .status()
+                .expect("mklink");
+            assert!(status.success());
+        };
+
+        let linked = ScratchDir::new().expect("scratch");
+        junction(linked.path().join(".dohc"));
+        let refused = open(linked.path()).await.expect_err("a linked .dohc");
+        assert_eq!(refused.code, ErrorCode::Internal);
+        assert_eq!(refused.message, "engine-folder-not-private: link .dohc");
+
+        let linked = ScratchDir::new().expect("scratch");
+        std::fs::create_dir(linked.path().join(".dohc")).expect("dohc");
+        junction(linked.path().join(".dohc").join("engine"));
+        let refused = open(linked.path())
+            .await
+            .expect_err("a linked engine folder");
+        assert_eq!(refused.code, ErrorCode::Internal);
+        assert_eq!(
+            refused.message,
+            "engine-folder-not-private: link .dohc/engine"
+        );
+        assert_eq!(
+            std::fs::read_dir(elsewhere.path()).expect("target").count(),
+            0
+        );
     }
 
     /// Only an open that writes prepares `.dohc/local`, and its answer says
@@ -3349,9 +3423,37 @@ mod tests {
         close(read).await;
     }
 
-    /// While a binding is open, something outside dohc can remove
-    /// `.dohc/local` or put an unmarked folder in its place. A second open of
-    /// the live binding prepares it again and answers what it found.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn closing_a_workspace_releases_its_local_folder_while_retained() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let local = scratch.path().join(".dohc/local");
+        let renamed = scratch.path().join(".dohc/local-renamed");
+        let service = EngineService::new();
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                open_params(scratch.path(), "local", json!({ "captureMode": "none" })),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        let retained = service.open(Some(&handle)).expect("retained binding");
+        assert!(std::fs::rename(&local, &renamed).is_err());
+
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
+        std::fs::rename(&local, &renamed)
+            .expect("close releases local while the binding is retained");
+        drop(retained);
+    }
+
+    /// While a binding is open, `.dohc/local` can change outside dohc, except
+    /// on Windows, where the open holds the folder. A second open of the live
+    /// binding prepares it again and answers what it found.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_second_open_of_a_live_workspace_prepares_its_local_folder_again() {
         let scratch = ScratchDir::new().expect("scratch");
@@ -3366,7 +3468,11 @@ mod tests {
             }
         };
         let opened = open().await.expect("open");
-        std::fs::remove_dir(&local).expect("remove local");
+        if cfg!(windows) {
+            assert!(std::fs::remove_dir(&local).is_err());
+        } else {
+            std::fs::remove_dir(&local).expect("remove local");
+        }
         assert_eq!(open().await.expect("second open"), opened);
         assert!(std::fs::symlink_metadata(&local).expect("local").is_dir());
         #[cfg(target_os = "macos")]
@@ -4264,6 +4370,16 @@ mod tests {
             serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
 
         let retained = service.open(Some(&handle)).expect("retained dead binding");
+        #[cfg(windows)]
+        {
+            assert!(
+                std::fs::rename(
+                    scratch.path().join(".dohc/local"),
+                    scratch.path().join(".dohc/local-renamed"),
+                )
+                .is_err()
+            );
+        }
 
         lock(&service.pending_cursors).insert(
             "evicted-token".to_owned(),
@@ -4302,6 +4418,20 @@ mod tests {
             .workspace_open(&RequestContext::unbounded(), open_params)
             .await
             .expect("workspace reopen after the actor died");
+        assert!(
+            lock(&retained.local_state).is_none(),
+            "eviction must release the dead binding's local state"
+        );
+        #[cfg(windows)]
+        {
+            assert!(
+                std::fs::rename(
+                    scratch.path().join(".dohc/local"),
+                    scratch.path().join(".dohc/local-renamed"),
+                )
+                .is_err()
+            );
+        }
         let rebound: WorkspaceHandle =
             serde_json::from_value(reopened["workspace"].clone()).expect("rebound handle");
         assert_ne!(rebound, handle, "eviction must mint a fresh handle");
@@ -4321,5 +4451,14 @@ mod tests {
             .workspace_close(Some(rebound))
             .await
             .expect("final workspace close");
+        #[cfg(windows)]
+        {
+            std::fs::rename(
+                scratch.path().join(".dohc/local"),
+                scratch.path().join(".dohc/local-renamed"),
+            )
+            .expect("eviction releases local while the dead binding is retained");
+        }
+        drop(retained);
     }
 }

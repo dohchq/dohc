@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -17,7 +17,7 @@ import { registerStopAndRestoreIpc } from "./stopAndRestoreIpc";
 import { KeptAutomationFieldShape, stopAndRestoreRecoveryOperations } from "./bridgeContract";
 import { newRun } from "@dohc/automation-executor/collection-automation-run";
 import { createAutomationRunStore, type PendingRestore } from "@dohc/automation-executor/automation-run-store";
-import { preparedAutomationStoreFolder } from "../testing/preparedLocalState";
+import { preparedAutomationStoreFolder, readersTrustLocalState } from "../testing/preparedLocalState";
 import {
   LiveDocumentMutationError,
   RestoreHeadChangedError,
@@ -26,6 +26,9 @@ import {
 } from "../workspaces/workspaceEngineCapture";
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import {restoreRequestId, restoreReceiptOf} from "../workspaces/restoreWriteIdentity";
+
+// The run store reads `.dohc/local` as the engine's open leaves it.
+beforeEach(() => readersTrustLocalState());
 
 const KEPT = { id: "f".repeat(32), path: "trip/Tasks/Untitled.md", field: "Finished on", recordId: null };
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";

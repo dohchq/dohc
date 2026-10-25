@@ -1,3 +1,3 @@
 interface:
-  display_name: "Dohc Writing"
-  short_description: "Write clearly by register without AI tells"
+  display_name: "dohc Writing"
+  short_description: "Plain, specific prose for dohc docs, PRs, and skills"

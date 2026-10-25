@@ -304,11 +304,11 @@ impl ActorHandle {
         root: PathBuf,
         token: CancellationToken,
     ) -> Result<PendingPublication, RuntimeError> {
-        let db = self
-            .run(|store, _| Ok(store.database_path().to_path_buf()))
-            .await?;
+        // Read after the actor's earlier work.
+        self.run(|_, _| Ok(())).await?;
+        let held = self.location();
         tokio::task::spawn_blocking(move || {
-            let store = EngineStore::open_read_only(&db)?;
+            let store = HeldReader::open(held)?;
             store.read_with(|conn| pending_publication(conn, &ws, &operation, &root, &token))
         })
         .await
@@ -408,7 +408,7 @@ impl ActorHandle {
             request.clone(),
             author.clone(),
         );
-        let (db, checkpoint) = self
+        let checkpoint = self
             .run_undo_turn(request.clone(), "admission", None, move |store, _| {
                 if store.is_passive() {
                     return Err(DomainError::InvalidInput {
@@ -416,17 +416,14 @@ impl ActorHandle {
                     }
                     .into());
                 }
-                Ok((
-                    store.database_path().to_path_buf(),
-                    Arc::new(store.checkpoint_cycle()),
-                ))
+                Ok(Arc::new(store.checkpoint_cycle()))
             })
             .await?;
-        let read_db = db.clone();
+        let held = self.location();
         let pending_root = root.clone();
         let pending_token = token.clone();
         let (mut inverse_store, prior, pending) = tokio::task::spawn_blocking(move || {
-            let store = EngineStore::open_read_only(&read_db)?;
+            let store = HeldReader::open(held)?;
             let (prior, pending) = store.read_with(|conn| -> Result<_, RuntimeError> {
                 let prior = load(conn, &w, &o, &r, a.as_deref())?;
                 let jobs = if prior.is_none() {
@@ -503,9 +500,9 @@ impl ActorHandle {
                 request.clone(),
                 author.clone(),
             );
-            let read_db = db.clone();
+            let held = self.location();
             let mut prepared = tokio::task::spawn_blocking(move || {
-                let mut store = EngineStore::open_read_only(&read_db)?;
+                let mut store = HeldReader::open(held)?;
                 store
                     .read_with(|conn| conn.execute_batch("BEGIN"))
                     .map_err(StorageError::corrupt_public)?;
@@ -728,9 +725,9 @@ impl ActorHandle {
                     Err(error) => return Err(error),
                 }
             }
-            let read_db = db.clone();
+            let held = self.location();
             tokio::task::spawn_blocking(move || {
-                let store = EngineStore::open_read_only(&read_db)?;
+                let store = HeldReader::open(held)?;
                 let (plan, cursor, _) = store
                     .read_with(|conn| {
                         load(
@@ -803,9 +800,9 @@ impl ActorHandle {
                 return Err(RuntimeError::Cancelled);
             }
             if prepared_cursor == plan.members.len() {
-                let p = plan.clone();
+                let (p, held) = (plan.clone(), self.location());
                 return tokio::task::spawn_blocking(move || {
-                    let store = EngineStore::open_read_only(&db)?;
+                    let store = HeldReader::open(held)?;
                     result(&store, &p, deduped)
                 })
                 .await

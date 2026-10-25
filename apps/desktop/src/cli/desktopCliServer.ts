@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { duplicateWorkspaceFile } from "../workspaces/workspaceDuplicate";
 import { createOperationHistory, readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation } from "../workspaces/workspaceHistoryOperations";
 import { writeWorkspaceFilesAs } from "../workspaces/workspaceFileWrites";
@@ -46,6 +47,7 @@ import { readWorkspaceText } from "../workspaces/workspaceAssets";
 import { historyPathAdmission, historyMomentPathsAdmitted, readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
 import type { DocumentProjection } from "../workspaces/documentProjection";
 import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projection";
+import { lossyNoteRefusal, unreadNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
 import { VersionedTextStoreError, type MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 
 export function agentWriteAuthor(origin: LiveDocumentEditOrigin): MomentWriteAuthor {
@@ -91,6 +93,7 @@ interface DesktopCliServerDependencies<State> {
     queueCloudSync(workspaceId: string): void;
     agentRunDepth(workspaceId: string): number;
     dispatchedAgentRun(workspaceId: string): boolean;
+    agentRunWorkspace(runId: string): string | undefined;
   };
   linkedChatStoreFor(workspace: RegistryEntry): DesktopLinkedChatStore;
   currentDaemon(): Pick<EngineDaemonLifecycle, "requestWorkspace"> | null;
@@ -158,6 +161,23 @@ export function createDesktopCliServer<State>(
     chatDispatchService,
     rememberPendingCliRunMessageLink,
   } = dependencies;
+
+  // A lossy note's file text, or null for any other file. The check runs in
+  // the projection worker, which remembers it by the text's SHA-256. A file
+  // that isn't there has nothing on disk to rewrite; the edit's own check
+  // covers its session. Any other failed or partial read refuses.
+  async function lossyNoteText(rootPath: string, path: string): Promise<string | null> {
+    let read: Awaited<ReturnType<typeof readWorkspaceText>>;
+    try {
+      read = await readWorkspaceText(rootPath, path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") return null;
+      throw new Error(unreadNoteRefusal(path), { cause: error });
+    }
+    if (read.truncated) throw new Error(unreadNoteRefusal(path));
+    const digest = createHash("sha256").update(read.text).digest("hex");
+    return await documentProjection.run({ kind: "lossy", markdown: read.text, digest }) ? read.text : null;
+  }
 
   // Agent-facing `dohc chat`: the socket authenticates locally, then MAIN
   // resolves the registry workspace, and chat writes go through the same
@@ -362,6 +382,10 @@ export function createDesktopCliServer<State>(
       documents: {
         read: async (path) => {
           const live = await liveDocuments.readDocument({ workspaceId: workspace.workspaceId, path });
+          // A lossy note reads as its file, not as the editor's canonical
+          // Markdown, which leaves out the parts dohc can't show.
+          const file = await lossyNoteText(workspace.rootPath, live.path);
+          if (file !== null) return { path: live.path, markdown: file };
           const markdown = live.state
             ? await documentProjection.run({ kind: "read", state: live.state })
             : await documentProjection.run({
@@ -375,8 +399,13 @@ export function createDesktopCliServer<State>(
             workspaceId: workspace.workspaceId,
             path,
             origin,
+            assertEditable: async (resolved) => {
+              if (await lossyNoteText(workspace.rootPath, resolved) !== null) {
+                throw new Error(lossyNoteRefusal(resolved));
+              }
+            },
             change: (state, { keepBlocks }) =>
-              documentProjection.run({ kind: "edit", state, edit, keepBlocks }),
+              documentProjection.run({ kind: "edit", state, edit, keepBlocks, refuseLossy: path }),
           }),
         create: async ({ path, markdown, origin }) => {
           // Frontmatter would land as body blocks, so it is refused before
@@ -407,6 +436,8 @@ export function createDesktopCliServer<State>(
               workspaceId: workspace.workspaceId,
               path,
               origin,
+              // This verb wrote the file empty just above.
+              assertEditable: async () => undefined,
               change: (state, { keepBlocks }) =>
                 documentProjection.run({ kind: "create", state, markdown, keepBlocks }),
             });
@@ -507,6 +538,7 @@ export function createDesktopCliServer<State>(
       localPersonId,
       agentRunDepth: (workspaceId) => activity.agentRunDepth(workspaceId),
       dispatchedAgentRun: (workspaceId) => activity.dispatchedAgentRun(workspaceId),
+      agentRunWorkspace: (runId) => activity.agentRunWorkspace(runId),
       // The renderer did not make this change, so its windows hear about it
       // here. Some CLI writes, such as provisioning General, skip chatWrites,
       // so this queues cloud sync too. The sync engine debounces a second

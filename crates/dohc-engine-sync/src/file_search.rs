@@ -79,10 +79,13 @@ pub(crate) fn upsert_file_search_index(
 
 fn workspace_root_from_database(database_path: &Path) -> Option<PathBuf> {
     let engine_dir = database_path.parent()?;
-    // On a Mac the store opens through its folder's ID, which names no
-    // workspace, so the folder's current path does.
+    // The store opens through its checked folder, by its ID on a Mac and by a
+    // held descriptor on Linux. Neither names a workspace, so the folder's
+    // current path does.
     #[cfg(target_vendor = "apple")]
     let engine_dir = &dohc_macos_files::path_by_name(engine_dir).ok()?;
+    #[cfg(target_os = "linux")]
+    let engine_dir = &dohc_linux_files::held::path_by_name(engine_dir).ok()?;
     let dohc_dir = engine_dir.parent()?;
     if database_path.file_name()? != "engine.db"
         || engine_dir.file_name()? != "engine"
@@ -113,6 +116,23 @@ mod tests {
         let by_id = dohc_macos_files::path_by_id(&folder, shown).expect("lookup");
         let by_id = by_id.expect("path by ID");
         let root = super::workspace_root_from_database(&by_id.join("engine.db"));
+        let workspace = std::fs::canonicalize(scratch.path()).expect("workspace");
+        assert_eq!(root, Some(workspace));
+    }
+
+    /// A store opened through the descriptor held for its folder, as Linux
+    /// opens it, still finds its workspace and so its search policy.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_store_opened_through_its_held_folder_finds_its_workspace() {
+        use std::os::fd::AsFd;
+        let scratch = ScratchDir::new().expect("scratch");
+        let database = dohc_engine_testkit::engine_db_path(&scratch).expect("database path");
+        let folder = std::fs::File::open(database.parent().expect("folder")).expect("open");
+        let held =
+            dohc_linux_files::held::held_path(folder.as_fd(), std::path::Path::new(".dohc/engine"))
+                .expect("held path");
+        let root = super::workspace_root_from_database(&held.join("engine.db"));
         let workspace = std::fs::canonicalize(scratch.path()).expect("workspace");
         assert_eq!(root, Some(workspace));
     }

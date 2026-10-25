@@ -223,7 +223,7 @@ it("checks readiness before a retried move Undo asks History to finish restoring
   f.restoring(true); expect(await f.undo()).toMatchObject({ ok: true, tracked: { state: "restoring" } });
   expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce();
   f.restoring(false);
-  readLocalStateFrom({ currentBinding: () => ({ localStateReady: false }) });
+  readLocalStateFrom({ currentBinding: () => ({ localStateReady: false }), localStateOpenAt: async () => ({ current: () => true }) });
   expect(await f.undo()).toEqual({ ok: false,
     reason: "dohc did not undo the move because it can't keep this workspace's trash out of iCloud Drive. Restart dohc to try again." });
   expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce();
@@ -444,21 +444,34 @@ it("keeps the visible source when rowless Undo cannot hard link it", async () =>
   expect(await readFile(join(f.rootPath, "archive/oversized.bin"), "utf8")).toBe("kept");
 });
 
-// The engine addresses no path past 1,024 bytes or holding a control
-// character. macOS caps a whole path at 1,024 bytes, so no file there can lie
-// past the engine's bound, and Windows refuses control characters in names.
-const unaddressable: [string, string][] = [
-  ...(process.platform === "darwin" ? [] : [["exceeds the engine path limit", Array.from({ length: 11 }, () => "a".repeat(95)).join("/") + "/moved.txt"] as [string, string]]),
-  ...(process.platform === "win32" ? [] : [["holds a control character", "moved\u0001.txt"] as [string, string]]),
+// macOS limits whole paths to 1,024 bytes. Windows refuses these destinations before mutation.
+const overLimitDestination = Array.from({ length: 11 }, () => "a".repeat(95)).join("/") + "/moved.txt";
+const unaddressable: [string, string, boolean][] = [
+  ["exceeds the engine path limit", overLimitDestination, process.platform === "linux"],
+  ["holds a control character", "moved\u0001.txt", process.platform !== "win32"],
 ];
-it.each(unaddressable)("uses the live-session and debt fence when the person's destination %s", async (_case, to) => {
+for (const [scenario, to, supported] of unaddressable) {
+  it.skipIf(!supported)(`uses the live-session and debt fence when the person's destination ${scenario}`, async () => {
+    const f = await fixture(); await f.write("a.txt");
+    const finish = vi.fn(async () => undefined), begin = vi.spyOn(f.capture, "beginFileRename").mockResolvedValue(finish);
+    const authored = vi.spyOn(f.capture, "changePathsAs");
+    const moved = await moveWorkspacePathByHand(f.operation, { fromPath: "a.txt", toPath: to }, person, f.options);
+    expect(begin).toHaveBeenCalledWith("a.txt", to); expect(finish).toHaveBeenCalledWith(true); expect(authored).not.toHaveBeenCalled();
+    expect(await readFile(join(f.rootPath, to), "utf8")).toBe("a.txt");
+    expect(await f.undo(moved.operationId)).toMatchObject({ ok: true, restored: ["a.txt"] });
+  });
+}
+
+it.runIf(process.platform === "win32")("refuses the over-limit destination without changing the disk", async () => {
   const f = await fixture(); await f.write("a.txt");
-  const finish = vi.fn(async () => undefined), begin = vi.spyOn(f.capture, "beginFileRename").mockResolvedValue(finish);
+  const before = await readdir(f.rootPath, { recursive: true });
+  const begin = vi.spyOn(f.capture, "beginFileRename");
   const authored = vi.spyOn(f.capture, "changePathsAs");
-  const moved = await moveWorkspacePathByHand(f.operation, { fromPath: "a.txt", toPath: to }, person, f.options);
-  expect(begin).toHaveBeenCalledWith("a.txt", to); expect(finish).toHaveBeenCalledWith(true); expect(authored).not.toHaveBeenCalled();
-  expect(await readFile(join(f.rootPath, to), "utf8")).toBe("a.txt");
-  expect(await f.undo(moved.operationId)).toMatchObject({ ok: true, restored: ["a.txt"] });
+  await expect(moveWorkspacePathByHand(f.operation, { fromPath: "a.txt", toPath: overLimitDestination }, person, f.options))
+    .rejects.toThrow("This path is too long for dohc. Shorten the name or use fewer folders.");
+  expect(begin).not.toHaveBeenCalled(); expect(authored).not.toHaveBeenCalled();
+  expect(await readFile(join(f.rootPath, "a.txt"), "utf8")).toBe("a.txt");
+  expect(await readdir(f.rootPath, { recursive: true })).toEqual(before);
 });
 
 it("logs a recording failure after the committed move result was published", async () => {

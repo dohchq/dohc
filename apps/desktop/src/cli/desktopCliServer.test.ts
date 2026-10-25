@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { documentMarkdown, markdownToYDoc } from "@dohc/ydoc-projection";
+import { documentMarkdown, markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { directDocumentProjection } from "../workspaces/documentProjection";
 import { CHATS_METHOD, WORKSPACE_METHOD, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { executeCli } from "@dohc/cli";
@@ -124,12 +124,12 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
     chatFileMentions: vi.fn(async () => null),
     chatLinks: vi.fn(async () => null),
     links: { edges: vi.fn(async () => ({versionId:"main",files:[],entries:[],unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,nextCursor:null})), incoming: vi.fn(async () => null), resolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })) },
-    automations: () => ({ automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), retry: vi.fn() }),
+    automations: () => ({ automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), serverRuns: vi.fn(), serverRun: vi.fn(), retry: vi.fn() }),
     buttons: () => ({ inspect: vi.fn(async () => []), press: vi.fn() }),
     findWorkspace: (id) => rows.get(id) ?? null,
     listWorkspaces: () => [...rows.values()],
     openWorkspaceActivity: vi.fn(async () => undefined),
-    activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn(), agentRunDepth: vi.fn(() => 0), dispatchedAgentRun: vi.fn(() => false) },
+    activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn(), agentRunDepth: vi.fn(() => 0), dispatchedAgentRun: vi.fn(() => false), agentRunWorkspace: vi.fn(() => undefined) },
     linkedChatStoreFor: vi.fn(() => store),
     currentDaemon: vi.fn(() => daemon),
     agentDispatchStoreHandleFor: vi.fn(() => ({ store: dispatchStore })),
@@ -451,7 +451,11 @@ describe("desktop CLI workspace context", () => {
   });
 
   it("runs collection fields through physical admission and the existing Y.Doc edit", async () => {
-    const f = fixture();
+    // A field write first reads its record to check it is not a lossy note.
+    const root = await createTestScratch("dohc-cli-fields-");
+    await mkdir(join(root, "tasks"));
+    await writeFile(join(root, "tasks", "one.md"), "# One\n");
+    const f = fixture(root);
     const doc = new Y.Doc();
     const events: string[] = [];
     const session = {
@@ -505,6 +509,51 @@ describe("desktop CLI workspace context", () => {
         [{ workspaceId: "workspace", path: "notes.md" }],
         [{ workspaceId: "workspace", path: "notes.md" }],
       ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reads a lossy note as its file, and refuses to edit it before any session opens", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-cli-lossy-"));
+    const lossy = "# Readme\n\n<details>\n<summary>More</summary>\n\nHidden.\n</details>\n\nSee [the docs][docs].\n\n[docs]: https://example.com/docs\n";
+    try {
+      await writeFile(join(root, "readme.md"), lossy);
+      await writeFile(join(root, "plan.md"), "# Plan\n\nText.\n");
+      const f = fixture(root);
+      const context = await f.create().openCliWorkspace(f.workspace);
+      // Even with an editor holding it, the agent reads what is on disk.
+      vi.mocked(f.dependencies.liveDocuments.readDocument)
+        .mockResolvedValueOnce({ path: "readme.md", state: Y.encodeStateAsUpdate(markdownToYDoc(lossy)) });
+      expect(await context.documents!.read("readme.md")).toEqual({ path: "readme.md", markdown: lossy });
+      // A document an editor holds before its file exists still reads from the editor.
+      vi.mocked(f.dependencies.liveDocuments.readDocument)
+        .mockResolvedValueOnce({ path: "draft.md", state: Y.encodeStateAsUpdate(markdownToYDoc("# Draft")) });
+      expect(await context.documents!.read("draft.md")).toEqual({ path: "draft.md", markdown: "# Draft" });
+
+      const origin = { attribution: { actorKind: "agent" as const, onBehalfOf: "person-local", depth: 0 } };
+      await context.documents!.edit({ path: "readme.md", edit: { find: "Hidden.", replacement: "Shown." }, origin });
+      const [input] = vi.mocked(f.dependencies.liveDocuments.editDocument).mock.calls[0]!;
+      await expect(input.assertEditable("readme.md")).rejects.toThrow(
+        "dohc can't change readme.md without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead.",
+      );
+      await expect(input.assertEditable("plan.md")).resolves.toBeUndefined();
+      // A read that fails, other than for a missing file, refuses too.
+      await mkdir(join(root, "folder.md"));
+      await expect(input.assertEditable("folder.md")).rejects.toThrow(
+        "dohc couldn't read folder.md to check it, so nothing changed. Try again.",
+      );
+      // At the turn that changes it, the session's own document is judged: a
+      // file replaced after the read can't slip through.
+      const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+      const session = markdownToYDoc(lossy);
+      session.getMap("meta").set("dohcMarkdownSource", lossy);
+      session.getMap("meta").set("dohcMarkdownSourceSha256", sha(lossy));
+      session.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(session)));
+      await expect(input.change(Y.encodeStateAsUpdate(session), { keepBlocks: true })).rejects.toThrow(
+        "dohc can't change readme.md without also changing parts it can't show",
+      );
+      expect(await readFile(join(root, "readme.md"), "utf8")).toBe(lossy);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

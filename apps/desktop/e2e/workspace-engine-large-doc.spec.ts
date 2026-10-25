@@ -193,3 +193,45 @@ test("a document past the in-band cap reaches disk, and the editor never claims 
     await cleanupDesktopWorkspace(desktop, temp);
   }
 });
+
+test("a note past the in-band cap opens live, and opens live again after a switch", async () => {
+  // #2521. A note over 48 KiB with no lineage refused its live session, so it
+  // opened in the editor that writes the file directly. A settled close prunes
+  // the lineage, so even a note that had been live reopened that way.
+  test.setTimeout(120_000);
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    const long = `# Long\n\n${"A paragraph of a long note, written outside dohc.\n\n".repeat(1_100)}`;
+    expect(Buffer.byteLength(long, "utf8")).toBeGreaterThan(INBAND_CAP_BYTES);
+    expect(Buffer.byteLength(long, "utf8")).toBeLessThan(64 * 1024);
+    await writeWorkspaceFiles(temp, [
+      { path: "notes/long.md", contents: long },
+      { path: "notes/other.md", contents: "# Other\n\nA small note.\n" },
+    ]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const { page } = desktop;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, workspace.workspaceId, "notes/long.md");
+    await waitForWorkspaceFile(page, workspace.workspaceId, "notes/other.md");
+
+    await openEngineDoc(page, "notes/long.md");
+    const editor = page.getByTestId("markdown-editor");
+    await editor.click();
+    await page.keyboard.press(DOCUMENT_END);
+    await page.keyboard.insertText(TAIL_SENTINEL);
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+    await expect
+      .poll(async () => await readFile(join(temp.rootPath, "notes/long.md"), "utf8"), { timeout: 30_000 })
+      .toContain(TAIL_SENTINEL);
+
+    await explorerRow(page, "notes/other.md").click();
+    await expect(page.getByTestId("markdown-editor")).toContainText("A small note.");
+    await explorerRow(page, "notes/long.md").click();
+    await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0, { timeout: 15_000 });
+    await expect(page.getByTestId("markdown-editor")).toContainText(TAIL_SENTINEL);
+    expect(desktop.logs.filter((entry) => entry.text.includes("engine Y.Doc open refused"))).toEqual([]);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});

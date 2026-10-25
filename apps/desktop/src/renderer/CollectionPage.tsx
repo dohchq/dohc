@@ -565,11 +565,6 @@ export function CollectionPage({
   }
 
   const schema = details.schema;
-  const empty =
-    state.collection !== null &&
-    state.records.length === 0 &&
-    (state.groups === null ||
-      state.groups.every((group) => group.records.length === 0));
 
   // The ⚡ panel docks at the right of whatever the page shows.
   const automationsPanel = automationsOpen ? (
@@ -640,35 +635,6 @@ export function CollectionPage({
       onClose={() => setFieldsOpen(false)}
     />
   ) : null;
-
-  // Settled 2026-08-31, amended for automations on 2026-09-25: a collection
-  // with no records shows one line and the New record action, under a
-  // header that keeps only what sets the Collection up.
-  if (empty) {
-    return (
-      <div className="flex min-h-0 flex-1 flex-col bg-bg">
-        <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-1.5">
-          {collectionName}
-          <span className="flex-1" />
-          {setupButtons}
-        </div>
-        <div className="flex min-h-0 flex-1">
-          <div
-            data-testid="collection-empty"
-            className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 text-center"
-          >
-            <span className="text-sm text-muted">
-              No records in this collection yet.
-            </span>
-            {!readOnly ? <NewRecordButton onClick={newRecord} /> : null}
-          </div>
-          {automationsPanel}
-        </div>
-        {fieldsDialog}
-        {customizeDialog}
-      </div>
-    );
-  }
 
   const kind = activeView?.kind ?? "table";
   const boardReady =
@@ -787,6 +753,7 @@ export function CollectionPage({
             fieldMarks={tableFieldMarks}
             renderButton={readOnly ? undefined : renderButton}
             onNearEnd={loadNextPage}
+            onNewRecord={readOnly ? undefined : newRecord}
           />
         )}
       </div>

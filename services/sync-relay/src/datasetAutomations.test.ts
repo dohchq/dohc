@@ -238,7 +238,7 @@ async function executorFor(f: Awaited<ReturnType<typeof fixture>>, button = fals
     grantId: editor.grantId, recipientUserId: editor.userId, recipientEmail: null,
     files: { paths: native ? (JSON.parse(f.storage.getShare("people-share")!.selectorJson) as { paths: string[] }).paths : ["People"], versionId: null, access: "edit" as const }, channel: null,
   }] : [] });
-  const store = createAutomationRunStore({ forWrite: async () => metadata, forRead: async () => metadata });
+  const store = createAutomationRunStore({ forWrite: async () => metadata, read: (work) => work(metadata) });
   let executor!: CollectionAutomations;
   const makeExecutor = () => executor = new CollectionAutomations({
     resolveRelayedPress: async hostPressId => {

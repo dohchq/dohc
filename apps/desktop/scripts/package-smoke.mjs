@@ -25,8 +25,8 @@ for (const worker of ["workspace-database-worker", "document-projection-worker",
     `build output exists: dist/main/${worker}.js`,
   );
 }
-for (const icon of ["build/icon.png", "build/icon-light.png", "build/icon-dark.png", "build/icon.icns", "build/trayTemplate.png", "build/trayTemplate@2x.png"]) {
-  check(existsSync(join(desktopDir, icon)), `system theme icon exists: ${icon}`);
+for (const icon of ["build/icon.png", "build/icon.ico", "build/icon-light.png", "build/icon-dark.png", "build/icon.icns", "build/trayTemplate.png", "build/trayTemplate@2x.png"]) {
+  check(existsSync(join(desktopDir, icon)), `icon exists: ${icon}`);
 }
 check(
   existsSync(join(desktopDir, "resources/cli-bin/dohc")),
@@ -95,7 +95,7 @@ if (config) {
     extraResources.some(
       (entry) => entry?.from === "build/icon.png" && entry?.to === "icon.png",
     ),
-    "static icon ships as the packaged runtime fallback",
+    "window icon ships as an extraResource",
   );
   for (const theme of ["light", "dark"]) {
     check(

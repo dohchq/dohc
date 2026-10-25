@@ -338,6 +338,8 @@ beforeEach(() => {
         : unexcludedViews.has(view.rootPath)
           ? NOT_EXCLUDED
           : OPENED,
+    // An open that could not keep the folder out of iCloud Drive prepared it.
+    localStateOpenAt: async (rootPath) => (closedViews.has(rootPath) ? null : { current: () => !closedViews.has(rootPath) }),
   });
   outsideLinks = [];
   harnesses = [];

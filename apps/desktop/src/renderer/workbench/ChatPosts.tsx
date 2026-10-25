@@ -17,7 +17,7 @@ import { Ref } from "../ui/Ref";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { formatChatTime, formatClockDigits, formatShortTime } from "../time";
 import { CopyButton } from "../ui/CopyButton";
-import { AgentName, ChatAvatar } from "./ChatAvatar";
+import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
 import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
 import {
   MentionText,
@@ -283,33 +283,33 @@ function RunChip(props: { run: ChatRunRecord }) {
           className="dohc-popover dohc-pop-in absolute left-0 top-full z-30 mt-1 grid w-72 max-w-[calc(100vw-2rem)] gap-2 rounded-lg border border-line bg-panel p-3 text-left"
         >
           <span className="grid gap-0.5">
-            <span className="font-mono text-[10px] uppercase tracking-wide text-subtle">Command</span>
-            <code data-testid="chats-run-command" className="break-words text-[11px] text-ink">
+            <span className="text-[11px] text-muted">Command</span>
+            <code data-testid="chats-run-command" className="wrap-anywhere text-[11px] text-ink">
               {props.run.command}
             </code>
           </span>
           <span className="grid grid-cols-2 gap-2">
             <span className="grid gap-0.5">
-              <span className="font-mono text-[10px] uppercase tracking-wide text-subtle">Started</span>
+              <span className="text-[11px] text-muted">Started</span>
               <time
                 data-testid="chats-run-started"
                 dateTime={started.iso}
-                className="font-mono text-[10px] text-muted"
+                className="text-[11px] tabular-nums text-ink"
               >
                 {started.label}
               </time>
             </span>
             <span className="grid gap-0.5">
-              <span className="font-mono text-[10px] uppercase tracking-wide text-subtle">Exit code</span>
-              <span data-testid="chats-run-exit-code" className="font-mono text-[10px] text-muted">
+              <span className="text-[11px] text-muted">Exit code</span>
+              <span data-testid="chats-run-exit-code" className="text-[11px] tabular-nums text-ink">
                 {props.run.exitCode ?? "—"}
               </span>
             </span>
           </span>
           <span className="grid gap-0.5">
-            <span className="font-mono text-[10px] uppercase tracking-wide text-subtle">Log</span>
+            <span className="text-[11px] text-muted">Log</span>
             <span className="flex min-w-0 items-center gap-1.5">
-              <code data-testid="chats-run-log-path" className="min-w-0 flex-1 break-all text-[10px] text-muted">
+              <code data-testid="chats-run-log-path" className="min-w-0 flex-1 break-all text-[11px] text-ink">
                 {props.run.logPath ?? "No log path"}
               </code>
               {props.run.logPath ? (
@@ -565,6 +565,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               </AgentName>
             </span>
             {isAgent && !continues ? <AgentBadge testIdPrefix="chats-comment" author={comment} viewerAuthorId={reactionControls.viewerAuthorId} presentation={comment.presentation} /> : null}
+            {comment.authorKind === "link" ? <LinkHolderMark testId="chats-comment-link-holder" /> : null}
             {comment.authorKind === "automation" && !continues ? (
               <AutomationBadge
                 testIdPrefix="chats-comment"
@@ -735,6 +736,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               </AgentName>
             </span>
             {openingIsAgent ? <AgentBadge testIdPrefix="chats-message" author={openingMessage} viewerAuthorId={reactionControls.viewerAuthorId} presentation={openingMessage.presentation} /> : null}
+            {openingMessage.authorKind === "link" ? <LinkHolderMark testId="chats-message-link-holder" /> : null}
             {openingMessage.authorKind === "automation" ? (
               <AutomationBadge
                 testIdPrefix="chats-message"

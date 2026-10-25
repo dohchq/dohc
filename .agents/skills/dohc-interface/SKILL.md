@@ -1,239 +1,206 @@
 ---
 name: dohc-interface
 description: >-
-  Use when writing or changing anything a person sees in the dohc desktop app: a button, label, menu item, error, empty state, toast, dialog, panel, or any string inside a control. Also use when choosing a token, class recipe, or control shape in the renderer. Covers both the words and the parts they sit in.
+  Use when writing or changing anything a person sees in the dohc desktop app: a label, button, menu item, error, empty state, toast, dialog, or panel. Also use when choosing a token, class recipe, or control in the renderer.
 ---
 
-# Building dohc's interface
+# dohc's interface
 
-Two questions at once: what is this control made of, and what do its words say. This file answers both, because you decide both in the same edit.
+Write in plain and simple language.
+A person reads these words in the middle of a task, sometimes worried, and cannot ask what they mean.
 
-Tokens themselves are not documented here. `apps/desktop/src/renderer/styles.css` is the source of truth, mirrored in `tokens.ts`, and `tokens.test.ts` fails when the two drift or when a pair misses WCAG AA. Read the code for values. Read this for meaning.
+Token values live in `apps/desktop/src/renderer/styles.css`, mirrored in `tokens.ts`.
+`tokens.test.ts` fails when the two drift or when a color pair misses WCAG AA.
+Read the code for values and this skill for meaning.
 
-The discipline behind the words is the `dohc-writing` skill: Orwell plus ASD-STE100 Simplified Technical English, applied by register. UI copy is almost entirely the strict register, because the user acts on it and cannot ask a follow-up question.
+## Show first
 
-## Identity
+Before reading a word, a person should see what a surface is, its state, and what to do next.
+Use words only for the person's own content and for facts a picture cannot show, such as an error's cause.
 
-- **Mark:** the drop-lobe. A single stroked lobe contour with a central datum dot. SVG only, `currentColor` for both stroke and dot, no gradient, no shadow, no automotive badge. Source of truth: `packages/brand/src/DohcLogo.tsx` (`DohcMark`, `DohcWordmark`, `DohcLockup`).
-
-## Show, don't tell
-
-The eye reads shape, position, and color before it reads a word. A picture sticks where a sentence does not. So a person should know what a surface is, what state it is in, and what to do next at a glance. Decide this before you write any words: most surfaces need fewer than you expect.
-
-Words are for two things: the user's own content (file names, titles, messages), and facts only words can state (an error's cause, a recovery path, a count someone acts on).
-
-**The glance test.** Hide every word that is not the user's own content. A person should still tell what the surface is for, what state it is in, and where to click next. Where they cannot, move that meaning into an icon, a position, a shape, or a color.
+To test a surface, hide every word that is not the person's own content.
+If the purpose, state, or next click disappears, show it with an icon, position, shape, or color.
 
 | Instead of | Show |
 | --- | --- |
-| A type label (`DOCUMENT`, `DATA`) | The file's icon |
-| A panel title that repeats the active rail icon (`EXPLORER`) | The rail's active mark |
-| The same status twice (`Local · saved`, then `Saved`) | One mark in one place. Words appear only when something needs the person |
-| A helper sentence under a control | A live preview of its effect: theme thumbnails, the resolved path |
-| A scope tag on every row (`User`, `Workspace`) | One group heading per scope |
-| A paragraph about who can access something | Three icon facts, one line each |
-| `Unknown source` on every row | An actor glyph, or nothing |
-| An empty state sentence | The actions it offers, with their shortcuts |
+| A type label (`DOCUMENT`) | The file's icon |
+| A panel title that repeats the active rail icon | The rail's active mark |
+| The same status twice (`Local · saved`, then `Saved`) | One mark in one place |
+| A helper sentence under a control | A live preview of its effect, or a tooltip |
+| A scope tag on every row | One group heading per scope |
 | Prose about what changed | A number, a bar, or the changed words highlighted |
-| A label saying who is an agent | The agent's shape (see Agent attribution) |
+| A label saying who is an agent | The agent's square avatar |
 
-**Keep what a picture cannot carry.**
+Some meaning still needs words or its own mark:
 
-- Every icon-only control keeps an accessible name and a tooltip. A new visible label keeps the control's accessible name unless the control changes what it is (see Hard invariants).
-- Distinct facts keep distinct marks. Saved on this machine, accepted by the host, and waiting to share are three states, not one check.
-- An error keeps its words: what happened, why if known, and what to do next. The icon marks the error; the sentence explains it.
-- Color always travels with a second cue (a shape, an icon, or a position), so meaning survives grayscale and color blindness.
-- Use the lucide icon people already know for the action. A clever metaphor costs more reading than the word it replaced.
+- Every icon-only control keeps an accessible name and a tooltip.
+- Distinct states keep distinct marks. Saved on this machine, accepted by the host, and waiting to share are three states.
+- An error keeps its sentence. The icon marks it, and the words explain it.
+- Color always comes with a shape, an icon, or a position, so the meaning survives grayscale and color blindness.
+- Use the lucide icon people already know for the action.
 
-## The words
+## Words
 
-The Controls section below covers the parts. This section covers the words inside them.
+Use as few words as possible in anything a person sees without a hover or a click.
+Put further detail behind a tooltip, a **More details** disclosure, or a **Learn more** link.
+Link **Learn more** only to a page that exists.
+Keep an error and its next step in view.
 
-The rule in one line: **say what is true, what changed, and what to do next.** In that order, in the fewest plain words that carry it.
+Say what is true, what changed, and what to do next, in that order.
 
-UI copy is almost entirely the **strict** register: the user acts on it and cannot ask a follow-up question.
+Most strings do one of four jobs:
 
-### The four moves
-
-Nearly every string in dohc is one of these. Know which one you are writing.
-
-| Move | Job | Shape |
-| --- | --- | --- |
-| **State** | Say what is true now | `3 files changed on this machine` |
-| **Change** | Say what just happened | `Moved 4 files to Archived` |
-| **Ready** | Say something is now usable | `Agent result, ready to review` |
-| **Next** | Say what the user can do | `Choose which copy to keep` |
-
-An empty state and an error both owe the user a **Next**. A toast usually owes a **Change**. A status bar owes a **State**.
-
-**Change or Ready?** Change reports a finished action. Ready reports that something became usable. `Moved 4 files to Archived` is a Change. If nothing new became usable, it is a Change.
-
-### Rules
-
-- **One instruction per sentence. 20 words or fewer.** If it needs two sentences, write two.
-- **Active voice, named actor**. Unless the actor is dohc and the surface makes that obvious. `Saved` and `Moved 4 files to Archived` are correct; naming dohc there adds a word and no information. Never use the passive to hide a *failing* actor: write `dohc could not reach the relay`, not `the relay could not be reached`. Attribution labels are the other exemption: `Edited by agent` is a label naming who acted, not a sentence hiding an actor.
-- **Name the thing the way the UI already names it.** Read the surrounding surface and match it. Never invent a synonym, and never carry an internal name into user-facing text. Check what the code calls it *and* what the shipping UI calls it, because those differ more often than you would expect.
-- **Same word every time.** If it is a `file` in the sidebar it is a `file` in the error. Do not vary wording to avoid repetition.
-- **No figurative language, no jokes, no irony.** Not because dohc is humorless . Because the user reading this string is usually mid-task and sometimes worried.
-- **Sentence case.** Capitalize the first word and proper nouns only. `New folder`, not `New Folder`.
-- **No terminal period on labels, buttons, or fragments.** Full sentences in body text and errors keep their periods.
-- **Numerals for counts the user scans or acts on**, `3 files changed`, `Delete 12 files`, `2 conflicts`. A number woven into a sentence may be a word where that reads better: `A file changed on two machines` is correct. The test is whether the reader is counting something or reading a sentence.
-- **Never magical.** No `magically`, `automatically figures out`, `just works`, `powered by AI`. State the mechanism or say nothing.
-- **No marketing words.** `seamless`, `robust`, `powerful`, `effortless`, `intelligent`, `smart`, `cutting-edge`. These are the easy catch, not the point. A string can contain none of them and still be slop.
-
-### Where a message goes
-
-One system, so a person always knows where to look. Do not add a new surface for a new error.
-
-| Situation | Surface |
+| Job | Example |
 | --- | --- |
-| The whole workspace is degraded, so nothing in it can be used | A full-height state over the workbench, which goes inert. Example: the stop state when this build cannot open the workspace's data store |
-| One thing failed and the workspace still works | A toast in the bottom right, above the update toast, then a row in Notices until it is retried or dismissed |
-| Something became ready or finished | A toast in the bottom right that fades, and a row in Notices |
-| A control's own input is wrong | Inline, beside the control |
+| State: what is true now | `3 files changed on this machine` |
+| Change: what just happened | `Moved 4 files to Archived` |
+| Ready: something new became usable | `Agent result, ready to review` |
+| Next: what the person can do | `Choose which copy to keep` |
 
-Rules that follow from the table:
+Every error and empty state needs a Next. A toast usually reports a Change. A status bar shows a State.
 
-- Nothing in the workbench moves when a message arrives. No bar across the top, no shift.
-- A message that names a value the user can see carries **Try again** on the toast and on the row.
-- A message a person might need to report carries a copy control beside the text it copies: an icon on the toast and the row, a **Technical details** disclosure on a full-height state. What the user reads is what they paste, one line per fact, never a log.
-- The same message, or the same kind, replaces its earlier row instead of piling up.
-- Closing a toast keeps the row. Dismissing the row removes it.
-- Restarting or closing the app asks once, in one dialog, wherever the action started.
-
-The shell owns the list and the dialogs. The notice center only shows them. Report through the shell's error hook; do not render an error yourself.
+- Follow the instruction rules in `dohc-writing`: one instruction per sentence, 20 words or fewer.
+- Use the active voice and name who acted. Leave dohc out when the surface makes it obvious: `Saved`.
+- Always name a failing actor: `dohc could not reach the relay`, not `The relay could not be reached`.
+- Attribution labels such as `Edited by agent` are fine as they are.
+- Call a thing what the surrounding UI calls it, every time. Never show an internal name. Check both the code and the shipping UI, because they often differ.
+- Keep the words literal. Leave out metaphors, jokes, irony, exclamation marks, and emoji.
+- Use sentence case: `New folder`.
+- Leave the period off labels, buttons, and fragments. Full sentences keep theirs.
+- Use numerals for counts a person scans or acts on: `Delete 12 files`. Inside a sentence, a word can read better: `A file changed on two machines`.
+- State the mechanism or say nothing. Cut promises such as `magically`, `just works`, `powered by AI`, `seamless`, `powerful`, and `smart`.
+- Keep sync clearly opt-in. Sync starts off, and signing in alone does not turn it on.
 
 ### Errors
 
-Three parts, in order. Cut any part that is genuinely unknown; never invent it.
+Write up to three parts, in this order. Leave out any part you do not know.
 
-1. **What happened**, in the user's nouns.
-2. **Why**, if we actually know. No guessing.
-3. **What to do next**, as a direct instruction or an action control.
+1. What happened, in the person's words for things.
+2. Why, if dohc knows. Never guess.
+3. What to do next, as an instruction or a control.
 
-Never show a raw error code as the whole message. Never blame the user. Never apologize, `Sorry, something went wrong` states nothing, offers nothing, and costs a line.
+Never show a raw error code alone, blame the person, or apologize. `Sorry, something went wrong` says nothing.
 
-The sync surface is already the house standard. These are good, keep writing like this:
-
-> `A file changed on two machines`
-> `This machine doesn't have this file.`
-> `Your other machine removed this file.`
-> `One file has two copies.`
-
-Each names the actor, states one fact, and uses the user's noun. Their spelled numbers are deliberate. These are sentences, not counts. See the numerals rule above.
+The sync strings show the standard: `A file changed on two machines`, `This machine doesn't have this file.`, and `One file has two copies.`
 
 ### Empty states
 
-An empty state is a **Next**, not a shrug. One `text-sm text-muted` line that says what is missing and what to do about it, per the `EmptyState` control below.
-
-**The Next must work on that surface.** Verify the control or the flow exists there before you write the instruction. An empty state that tells the user to do something the surface does not offer is worse than one that says nothing, because it costs them a search.
+Use `EmptyState`, with one line that says what is missing and what to do.
+Check that the action exists on that surface before you name it.
 
 | Instead of | Write |
 | --- | --- |
 | `No results` | `No files match "budget". Try a shorter search.` |
 | `Nothing here yet` | `This folder is empty. Add a file to start.` |
-| `No chats` | `No chats in this workspace yet.`. Beside a control that actually creates one |
 
-### Agent copy
+### Agents
 
-An agent is marked visually by its rounded square avatar, and a running agent by its agent-colored dot (see Agent attribution). In words:
+- Finished work: past tense, with a count when the count means something. `Updated 3 files`. Never invent a count.
+- Work in progress: the concrete action, with the count when it is known. `Reading 40 files`, not `Working on it…`.
+- Waiting on the person: the reason. `Waiting for your review`.
+- Attribution: `Edited by agent`. No invented names or personalities. Use first person only when the agent itself is speaking.
+- Say what the agent did, not that it understood, decided, or thought.
 
-- Completed work: past tense, with the count when one exists and means something. `Updated 3 files`. Some runs change no countable set, say what happened without inventing a number.
-- Work in progress: name the concrete action, and the count when known. `Reading 40 files`. Never `Working on it…`.
-- Work waiting on the user: state the gate. `Waiting for your review`.
-- Attribute plainly. `Edited by agent`, never a personality, never a name we invented, never first person unless the agent is genuinely speaking.
-- Never imply the agent understood, decided, or thought. It acted.
+### Deletes and other actions that lose work
 
-### Destructive and irreversible actions
+- Name the exact thing and count: `Delete 12 files from Research?`
+- State the true recovery path. Check it in the code first.
+- In a workspace, a deleted file goes to the system trash, or to `.dohc/local/trash` when the system trash refuses it. Name both locations. If neither takes the file, dohc refuses the delete.
+- A shared copy has no trash. Say who still has the file and how to take the change back.
+- Write `This cannot be undone` only after you confirm it is true.
+- Label the confirm button with the verb, such as `Delete files`, never `OK`.
+- Use `DangerButton` for the confirm button.
+- Never ask only `Are you sure?`.
 
-- Name the exact thing and the exact count. `Delete 12 files from Research?`
-- **State the true recovery path, including the fallback.** dohc file deletes are always recoverable: the system trash, or `<workspace>/.dohc/local/trash` whenever the system-trash operation fails. Which is any rejection, not only a drive that lacks a trash. If neither takes the file, dohc refuses the delete. Name both locations. Never write `This cannot be undone.` here.
-- Write `This cannot be undone` only where it is true, and verify before you write it. Durability is a contract, not a tone, see the product invariants in `AGENTS.md`.
-- Label the confirm button with the verb, not `OK`. `Delete files`.
-- Never use `Are you sure?` as the whole question. It states nothing.
+### Before and after
 
-### Before / after
-
-| Before | After | Why |
-| --- | --- | --- |
-| `Your changes have been successfully saved!` | `Saved` | Passive, padded, exclaimed. Six words for one fact. |
-| `Something went wrong. Please try again later.` | `dohc could not reach the sync relay. Check your connection.`. With a `Retry` action | Names the failing actor, one instruction per sentence, and the retry is a control rather than a second instruction. |
-| `Seamlessly sync your workspace across all your devices` | `When you turn on sync, this workspace stays current on every machine you join it from.` | Marketing word out, and the opt-in stays visible. Sync is off by default and signing in alone does not enable it. |
-| `The document was unable to be loaded by the editor` | `The editor could not open this file.` | Active voice, the noun the UI uses, shorter. |
-| `Are you sure you want to do this?` | `Delete 12 files from Research? They move to the system trash, or this workspace's .dohc/local/trash if that fails, and you can restore them.` | States the count and the true recovery path including the fallback. Dohc deletes are recoverable, so `This cannot be undone` would be false. |
-| `AI is analyzing your workspace…` | `Agent is reading 40 files.` | Concrete, countable, no magic. |
-
-### Where shipping copy disagrees with itself
-
-This file is new and the app predates it. Existing strings are not automatically conformant.
-
-But most apparent violations are not one bad string. dohc's UI vocabulary is **unsettled, and mixed inside single surfaces**, not merely different from one surface to the next. `WikilinkPicker` says `page links` and `No files match` in one component. Settings describes attachments with `files` a few rows above two `document` options. Renaming whichever string looks like the odd one out only moves the inconsistency somewhere else.
-
-**Settle a vocabulary, do not rename a string.** Choosing what a thing is called is a deliberate decision taken across every surface that shows it, and it has to be made before any renaming starts.
-
-**A copy fix changes visible words only.** The `data-testid`, `aria-*`, `role`, and accessible name stay as they are (see Hard invariants for when they change).
-
-Known so far:
-
-- The editor and linking surface is **mixed, and the term is unsettled**. It says `page` in `Link another page` (`slashCommands.tsx:83`), `aria-label="page links"` (`WikilinkPicker.tsx:210`) and `aria-label="Page title"` (`PageIdentity.tsx:260`), but `file` in `No files match "…"` (`WikilinkPicker.tsx:218`), inside the very same component. Decide the vocabulary before changing anything. Settling a word changes visible copy and keeps these two `aria-label`s, because the surface stays the same surface (see Hard invariants).
-- `apps/desktop/src/renderer/settings/SettingsDialog.tsx` is **mixed**: `document` at `:487`, `:662` and `:669`, but `files` at `:630` a few rows above them.
-
-Do not read existing copy as an example of the rules. And note that `${confirmDelete.length} items` in the Explorer delete dialog is *correct*, the selection can mix files and folders, so `files` would be false.
-
-### Checklist per string
-
-1. Which move is it, State, Change, Ready, or Next?
-2. Does it owe the user a **Next**? Does it give one?
-3. Every noun the same as the surrounding UI uses, and none of them internal?
-4. Active voice with a named actor?
-5. 20 words or fewer, one instruction?
-6. Any word that promises rather than states? Cut it.
-7. Read it aloud during a bad moment. A failed sync, a lost file. Does it help, or does it perform?
-
-## The controls
-
-This is the working spec for how dohc's desktop UI is built, at the level of concrete class recipes. It exists so every surface, human- or agent-built, composes the same language instead of re-inventing controls per file. The Words section above holds what goes inside these controls. Read it before writing any label, error, empty state, or toast.
-
-The soul in one line: **warm paper, quiet graphite, mono metadata, serif brand moments, color only for meaning.**
-
-### Tokens (semantic and theme-aware, never hex in components)
-
-Defined in `apps/desktop/src/renderer/styles.css` (mirrored in `tokens.ts`, sync-tested). Consume via Tailwind utilities:
-
-| Utility | Meaning |
+| Before | After |
 | --- | --- |
-| `bg-bg` | Document paper. The lightest surface; editors, inputs, popover tiles |
-| `bg-panel` | The chrome: title bar, rails, sidebars, tab strip, plus cards and menus. One step from paper in both themes |
-| `bg-panel-2` | Insets inside the chrome: pills, counts, segmented tracks, inline code, section bands. Two steps from paper |
-| `hover:bg-hover` | Hover fill, using ink alpha in both themes |
-| `bg-selected` | Selected-row fill, using ink alpha in both themes |
-| `bg-scrim` | Modal overlay dim |
-| `border-line` | Every hairline. 1px, no exceptions |
+| `Your changes have been successfully saved!` | `Saved` |
+| `Something went wrong. Please try again later.` | `dohc could not reach the sync relay. Check your connection.`, with a **Try again** control |
+| `The document was unable to be loaded by the editor` | `The editor could not open this file.` |
+| `AI is analyzing your workspace…` | `Agent is reading 40 files.` |
+
+### When shipping copy disagrees
+
+Existing strings do not all follow these rules, and some surfaces use two words for one thing.
+The editor's link picker says `page links` in its accessible name and `No files match` in its empty state.
+Settle the word across every surface before you change any string.
+A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `role`, and accessible name.
+`12 items` in the Explorer's delete dialog is correct, because a selection can mix files and folders.
+
+## Where messages go
+
+| Situation | Where it goes |
+| --- | --- |
+| The whole workspace is unusable | A full-height state over the workbench, which goes inert |
+| One thing failed, and the workspace still works | A toast at the bottom right, above the update toast, then a row in Notices until it is retried or dismissed |
+| Something finished out of sight, such as a background job | A toast at the bottom right that fades, and a row in Notices |
+| An action whose result the person can see | No toast and no row |
+| A control's own input is wrong | Inline, beside the control |
+
+- Use these places. Do not add a new one for a new message.
+- Keep the toast and its row when it holds the only Undo for the change.
+- Keep the workbench still when a message arrives. No bar slides in across the top.
+- Give a message about something the person can retry a **Try again** control on the toast and the row.
+- Put a copy control beside text a person might need to report. Use an icon on the toast and the row, and a **Technical details** disclosure on a full-height state. Copy what the person reads, one line per fact, never a log.
+- Let a repeat of the same message, or the same kind, replace its earlier row.
+- Closing a toast keeps its row. Dismissing the row removes it.
+- A row in Notices stays unread until the pointer or keyboard focus rests on it for 0.6 s, or the person presses **Mark all read**. Reading a row closes its toast and keeps the row.
+- A row shows two lines of title and three of text. Offer **Show more** for the rest, and open it in place, wrapped and selectable.
+- Restarting or closing the app asks once, in one dialog.
+- Report errors through the shell's `reportError` callback instead of rendering them yourself.
+- For a list or section whose read failed, show `RetryRow`.
+
+## Controls
+
+The look in one line: warm paper, quiet graphite, one sans for every word of the interface, serif for brand moments, and color only for meaning.
+
+Use `DohcMark` for the mark, `DohcWordmark` for the name, and `DohcLockup` for both. They live in `packages/brand/src/DohcLogo.tsx`.
+The mark is an SVG in `currentColor`, with no gradient, shadow, or badge.
+
+Compose the controls in `apps/desktop/src/renderer/ui/controls.tsx` first: `PrimaryButton`, `SecondaryButton`, `DangerButton`, `IconButton`, `Pill`, `SectionLabel`, `EmptyState`, and `RetryRow`.
+To inline a control's classes, copy them from that file.
+Use the recipes below only for parts it does not cover.
+
+### Tokens
+
+Never write hex or Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`) in components.
+
+| Utility | Use |
+| --- | --- |
+| `bg-bg` | Paper: editors, inputs, popover tiles |
+| `bg-panel` | Chrome: title bar, rails, sidebars, tab strip, cards, menus |
+| `bg-panel-2` | Insets in the chrome: pills, counts, segmented tracks, inline code, section bands |
+| `hover:bg-hover` | Hover fill |
+| `bg-selected` | Selected row fill |
+| `bg-scrim` | The dim behind a modal |
+| `border-line` | Every hairline, always 1px |
 | `text-ink` | Primary text |
-| `text-muted` | Secondary text (labels, inactive items) |
-| `text-subtle` | Decorative text ONLY (hints, timestamps, kbd), 3:1 floor |
-| `bg-accent` / `text-accent` | Green-graphite. Primary buttons, checked/active semantics, focus rings. THE brand accent |
-| `text-agent` / `bg-agent` | The default agent color, olive (see Agent attribution) |
-| `bg-match` / `text-match` | Find-match highlight ONLY. Never decoration |
-| `text-success` / `warning` / `danger` | State semantics only |
+| `text-muted` | Secondary text, such as labels and inactive items |
+| `text-subtle` | Decorative text only: hints, timestamps, kbd |
+| `bg-accent`, `text-accent` | The brand accent: primary buttons, checked and active states, focus rings |
+| `bg-agent`, `text-agent` | The default agent color |
+| `bg-match`, `text-match` | Find-match highlight only |
+| `text-success`, `text-warning`, `text-danger` | State only |
 
-Rules: no raw hex anywhere in TSX; no Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`); use `bg-scrim` for modal overlays.
+### Type
 
-### Type scale
-
-| Role | Recipe |
+| Role | Classes |
 | --- | --- |
-| Body / rows / inputs | `text-[13px]` (the 13px UI baseline) |
-| Dense secondary | `text-[12px] text-muted` |
-| Hints, timestamps, kbd | `text-[11px] text-subtle` (often `font-mono`) |
-| Section labels | `text-[10px] font-semibold uppercase tracking-wide text-subtle` |
-| Panel/dialog titles | `text-sm font-semibold text-ink` |
-| Brand/editorial moments | `font-serif` (first-run headline, editor quotes), use sparingly |
-| Paths, counts, ids, keys | `font-mono`. The metadata voice (IBM Plex Mono) |
+| Body, rows, inputs | `text-[13px]` |
+| Dense secondary text | `text-[12px] text-muted` |
+| Hints, timestamps, shortcuts | `text-[12px] text-subtle` |
+| Section labels | `dohc-section-label`: `text-[12px] font-medium text-subtle`, in sentence case |
+| Panel and dialog titles | `text-sm font-semibold text-ink` |
+| Brand moments, such as the first-run headline | `font-serif`, rarely |
+| Code and Markdown source | `font-mono` |
 
-Never invent fractional sizes (`text-[10.5px]`); snap to 10/11/12/13px.
+Set small text at 10, 11, 12, or 13px. Never write a fractional size such as `text-[10.5px]`.
+Paths, counts, times, and shortcuts use the interface font. `<kbd>` defaults to mono, so give it `font-sans`.
+Never uppercase a label.
 
-### Radius scale
+### Radius and elevation
 
 | Element | Radius |
 | --- | --- |
@@ -241,69 +208,79 @@ Never invent fractional sizes (`text-[10.5px]`); snap to 10/11/12/13px.
 | Buttons, inputs, list rows, menu items | `rounded-md` (6px) |
 | Cards, menus, dropdowns, larger buttons | `rounded-lg` (8px) |
 | Popovers, dialogs, modals | `rounded-xl` (12px) |
-| Pills, dots, a person's avatar | `rounded-full` (an agent's avatar is a rounded square; see Agent attribution) |
+| Pills, dots, a person's avatar | `rounded-full` |
 
-### Elevation (classes in styles.css, do not write ad-hoc shadows)
+Use the classes in `styles.css` instead of writing shadows:
 
-| Class | Use |
-| --- | --- |
-| `dohc-popover` | Menus, dropdowns, floating chrome |
-| `dohc-elevated` | Dialogs, modal cards, first-run card |
-| `dohc-pop-in` | Entrance for ANY floating surface (130ms settle; respects reduced-motion) |
-| `dohc-paper-grid` | Faint grid texture, brand moments only, never workaday panels |
+- `dohc-popover` for menus and floating chrome.
+- `dohc-elevated` for dialogs and modal cards.
+- `dohc-pop-in` as the entrance for every floating surface.
+- `dohc-paper-grid` for a faint grid, in brand moments only.
 
-Flat panels (sidebars, rails, inline sections) get borders, not shadows.
+Flat panels get borders, not shadows.
 
-### Control recipes
+### Recipes
 
-The canonical implementations live in `apps/desktop/src/renderer/ui/controls.tsx`, `PrimaryButton`, `SecondaryButton`, `IconButton`, `Pill`, `Kbd`, `SectionLabel`, `EmptyState`. **Compose those first**; the raw recipes below exist for elements the primitives don't cover (inputs, rows, cards) and for surfaces where a conditional class needs the recipe inline.
+Text input: `w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink`. Add `font-mono` for code.
 
-Primary button: `rounded-lg bg-accent px-3 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50`
+List row (menus, trees, results): `flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75`.
 
-Secondary button: `rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors hover:bg-hover hover:text-ink`
+- At rest: `text-muted hover:bg-hover hover:text-ink`.
+- Active or selected: `bg-selected text-ink`. The active row adds `font-medium`.
+- Never fade a state fill, as in `bg-selected/85`. `tokens.test.ts` rejects it.
+- Keyboard focus keeps the global accent outline, never an ink ring. A 30% ink ring is under 3:1 on the selected fill.
+- Inside a scroller, draw the focus outline inset: `rounded-md focus-visible:-outline-offset-2`.
+- In a panel, give the parent `px-1`.
 
-Ghost icon button (toolbars, row affordances): `grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink`
+Active option: when focus stays on a frame or input with `aria-activedescendant`, compose `MENU_ACTIVE_OPTION` from `ui/Menu.tsx`.
+It draws the accent outline on the active option, where Enter acts, whether the keyboard or the pointer moved it. The fill alone is about 1.2:1.
 
-Text input: `w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink` (mono content → add `font-mono`). No `outline-none`: the global `:focus-visible` accent ring must stay for keyboard users. `focus:border-ink` alone is too subtle. Only opt out where a ring would clip (rounded overflow-hidden popovers) AND the frame provides an equivalent (e.g. the command palette's `focus-within:border-ink` row).
+Card: `rounded-lg border border-line bg-panel p-3`. A modal card uses `rounded-xl p-5` and `dohc-elevated`.
 
-List row (menus, trees, results): `flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75` + state: active and selected-not-active share `bg-selected text-ink`; the active row adds `font-medium`; the keyboard-focused row keeps the global accent `:focus-visible` outline and never takes `outline-none` or an ink ring in its place (a 30% ink ring measures under 3:1 against the selected fill). A row inside a scroller draws that outline inset with the row's radius (`rounded-md focus-visible:-outline-offset-2`), so the scroller cannot clip it; a row outside a scroller keeps the global outline · rest `text-muted hover:bg-hover hover:text-ink`. Never attenuate a state fill (`bg-selected/85`): it lands between hover and selected, and tokens.test.ts rejects it (inset rows in panels: parent gets `px-1`, row keeps `rounded-md`)
+Dialog: build it on `Overlay`. Cancel, the X, and Escape close it.
+While closing would discard hand-written work, as with open merge conflicts, only the dialog's own buttons close it.
+A press outside a dialog does nothing, so a stray click cannot discard what a person typed.
+Only pickers and popovers close on a press outside: the command palette, quick open, menus, and an action's Run or Cancel question. They hold nothing worth keeping.
+Pass `closeOnBackdrop` to `Overlay` for a picker only.
 
-Active option (a list whose focus stays on its frame or input, with `aria-activedescendant` naming the option: menus the editor builds, pickers, listboxes): the active option draws the accent outline inside the row whenever it is active, whether the keyboard or the pointer moved it, because it is where Enter acts. Compose `MENU_ACTIVE_OPTION` from `ui/Menu.tsx` (`data-active:bg-selected` plus `outline-2 outline-accent -outline-offset-2`). The fill alone measures about 1.2:1.
+Segmented control: track `flex rounded-lg border border-line bg-panel-2 p-0.5`, segment `rounded-md px-2.5 py-1 text-xs transition-colors`, active `bg-bg text-ink shadow-sm`, rest `text-muted hover:text-ink`.
 
-Card / grouped section: `rounded-lg border border-line bg-panel p-3` (modal cards: `rounded-xl p-5` + `dohc-elevated`)
+Kbd chip: `rounded border border-line bg-bg px-1 font-sans text-[11px] text-subtle`.
 
-kbd chip: `rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle`
+Empty state: a centered column with `gap-4`, an optional `DohcMark` in `text-line`, one `text-sm text-muted` line, and actions as kbd-chip buttons.
 
-Count/status pill: `rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[11px] text-muted` (semantic: swap text color through `Pill`'s `tone`, never the fill)
+`Pill` changes meaning through its `tone`, which swaps the text color and keeps the fill.
 
-Segmented control: container `flex rounded-lg border border-line bg-panel-2 p-0.5`, segment `rounded-md px-2.5 py-1 text-xs transition-colors`, active `bg-bg text-ink shadow-sm`, rest `text-muted hover:text-ink`
+### Agent attribution
 
-Empty state: centered column, `gap-4`; optional `DohcMark` in `text-line` (ghost); one `text-sm text-muted` line; actions as kbd-chip buttons. Never a wall of gray text.
-
-Agent attribution: shape first. An agent's avatar is a rounded square (`rounded-lg`, `rounded` at the 18px strip size) and a person's is round (`rounded-full`), in both themes and whatever the colors. The square's color is the `agent` token by default, and a person can choose another for each agent from its avatar in a conversation, so the shape is the visual cue and color is not. Shape is visual only: every agent mark needs a text alternative, such as the screen-reader "agent" label in `AgentBadge`. The name and sparkle beside an avatar take its color through `AgentName` and `AgentBadge`, `text-agent` by default; an agent label with no avatar stays `text-agent`. The square is for avatars; a running dot stays a 6px round `bg-agent` dot.
+An agent's avatar is a rounded square (`rounded-lg`, or `rounded` at the 18px size). A person's avatar is round.
+Shape is the cue, because a person can choose each agent's color. The default color is the `agent` token.
+Give every agent mark a text alternative, as `AgentBadge` does.
+`AgentName` and `AgentBadge` color the name and sparkle beside an avatar to match it. An agent label with no avatar uses `text-agent`.
+A running agent shows a 6px round `bg-agent` dot.
 
 ### Motion
 
-- Hover/active: `transition-colors duration-75`–`100`
-- Real movement (expand, slide): 120–180ms ease-out; panels 220–280ms; no bounce
-- Floating surfaces enter with `dohc-pop-in`; nothing else animates on mount
-- Reduced-motion is handled globally, never inline `animation` that bypasses it
+- Hover and press: `transition-colors` at 75 to 100ms.
+- Real movement, such as expanding or sliding: 120 to 180ms ease-out. Panels take 220 to 280ms. No bounce.
+- Floating surfaces enter with `dohc-pop-in`. Nothing else animates on mount.
+- Reduced motion is handled globally. Never write an inline `animation` that bypasses it.
 
-### Intentionality checklist (per surface)
+### Hard rules
 
-1. What is the ONE thing this surface is for? Its strongest visual weight goes there.
-2. Every border earned? Prefer whitespace/bg steps; boxes-in-boxes is the smell.
-3. Hierarchy readable squinting? Title → sections → rows → metadata.
-4. All interactive states present? (hover, active, focus-visible, disabled, empty, loading, error)
-5. Metadata in the mono voice, decorative text `text-subtle`, semantics the only color?
-6. Passes the glance test in Show, don't tell? Every remaining word earns its place.
-7. Every string checked against the Words section above: right noun, active voice, and a next action where one is owed?
-8. Would Notion/Linear ship it? If not, it isn't done.
+- End-to-end tests pin every `data-testid`, `aria-*`, `role`, and accessible name. Rewording and restyling keep them. A surface can become something else, such as the right panel changing from Chats to About. Then change them in the same PR as the tests that read them.
+- Surface work adds no dependencies, no `any`, and no `styles.css` edits. Propose a new shared pattern instead of inlining it.
+- Use lucide-react icons only, at 12 to 18px, with `strokeWidth={1.9}` at rail size.
+- Keep the global `:focus-visible` ring. Do not add `outline-none`. Opt out only where a ring would clip and the frame shows focus another way. The command palette's `focus-within:border-ink` is one example. Say why in a comment.
+- Keep body text at 4.5:1 or more and decorative text at 3:1 or more against its surface.
 
-### Hard invariants (breaking these breaks the product)
+## Before you finish
 
-- Every `data-testid`, `aria-*`, `role`, and accessible name is pinned by e2e. Restyles, rewording, and vocabulary changes keep them, because a new name for the same surface is not a new surface. When a surface changes what it is, such as the right panel turning from Chats into About, change those attributes in the same PR as the e2e assertions that read them, so tests and assistive technology follow what the surface now is.
-- No new dependencies. No `any`. No styles.css edits from surface work, new shared patterns get proposed, not inlined.
-- Icons: lucide-react only, 12–18px, `strokeWidth={1.9}` for rail-scale icons.
-- Focus: global `:focus-visible` ring is the default; only opt out when a surface provides an equivalent (and say why in a comment).
-- A11y floors: body text ≥ 4.5:1, decorative ≥ 3:1, on the surface it sits on.
+1. Is the surface's one job obvious, and does it carry the most visual weight?
+2. Does every border earn its place? Prefer space and background steps to boxes inside boxes.
+3. Are hover, active, focus-visible, disabled, empty, loading, and error states all there?
+4. Is every visible string as short as it can be, with further detail behind a hover or a click?
+5. Does each string do one job, and does every error and empty state give a Next?
+6. Does every noun match the surrounding UI?
+7. Read each string as someone whose sync just failed. Does it help them?
+8. Would Notion or Linear ship it? If not, it is not done.

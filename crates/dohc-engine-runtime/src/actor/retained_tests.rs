@@ -208,11 +208,12 @@ fn production_worker_imports_changed_bytes_and_promotes_oversized_sources() {
     actor.close().unwrap();
 }
 
-/// On a Mac the actor's store opens through its engine folder's ID. After the
-/// folder moves and another takes its name, the worker still reads a
-/// retained file, recorded under the name main stores, in the folder the
-/// store opened through (#2468).
-#[cfg(target_vendor = "apple")]
+/// The actor's store opens through its engine folder, by the folder's ID on
+/// a Mac and by the descriptor held for it on Linux. After the folder moves
+/// and another takes its name, the worker still reads a retained file,
+/// recorded under the name main stores, in the folder the store opened
+/// through (#2468).
+#[cfg(any(target_vendor = "apple", target_os = "linux"))]
 #[test]
 fn the_worker_reads_retained_files_in_the_folder_the_store_opened_through() {
     let scratch = ScratchDir::new().unwrap();
@@ -220,10 +221,13 @@ fn the_worker_reads_retained_files_in_the_folder_the_store_opened_through() {
     std::fs::create_dir_all(&engine).unwrap();
     let folder = std::fs::File::open(&engine).unwrap();
     let shown = std::path::Path::new(".dohc/engine");
-    let by_id = dohc_macos_files::path_by_id(&folder, shown).unwrap();
-    let db = by_id
-        .expect("APFS reaches a folder by ID")
-        .join("engine.db");
+    #[cfg(target_vendor = "apple")]
+    let dir = dohc_macos_files::path_by_id(&folder, shown)
+        .unwrap()
+        .expect("APFS reaches a folder by ID");
+    #[cfg(target_os = "linux")]
+    let dir = dohc_linux_files::held::held_path(std::os::fd::AsFd::as_fd(&folder), shown).unwrap();
+    let db = dir.join("engine.db");
     drop(EngineStore::open(&db, 0).unwrap());
     let identity = EngineDbIdentity::of_existing(&db).unwrap();
     let mut actor = WorkspaceActor::spawn(db, identity, 1, 0, None).unwrap();

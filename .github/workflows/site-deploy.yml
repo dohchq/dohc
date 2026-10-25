@@ -2,7 +2,8 @@
 # The site's demo builds from the desktop renderer and shared packages, so
 # changes there deploy it too. Deploys run only while the repository variable
 # SITE_DEPLOY_ENABLED is true. The site environment holds the Cloudflare
-# token and account ID, and only main can deploy to it.
+# token and account ID, and only main can deploy to it. Both jobs run on
+# GitHub's hosted runners, which start fresh for each job.
 name: Site deploy
 
 on:
@@ -38,7 +39,7 @@ jobs:
   build:
     name: build site
     if: vars.SITE_DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main'
-    runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && '["blacksmith-2vcpu-ubuntu-2404"]' || '["self-hosted", "linux", "x64"]') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -47,10 +48,10 @@ jobs:
 
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4
 
+      # No pnpm cache: this job holds the deploy token, so it installs from scratch.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: .node-version
-          cache: pnpm
 
       # The site builds desktop sources, not the Electron app.
       - name: Install dependencies
@@ -76,7 +77,7 @@ jobs:
     name: deploy site
     needs: build
     environment: site
-    runs-on: ${{ fromJSON(vars.BLACKSMITH_ENABLED == 'true' && '["blacksmith-2vcpu-ubuntu-2404"]' || '["self-hosted", "linux", "x64"]') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       # The pinned pnpm and Node versions, and the Worker's configuration.
@@ -101,7 +102,6 @@ jobs:
           path: apps/site/dist
 
       # A fresh dlx cache for each run, and only versions published a day ago.
-      # A shared runner can still reach this job; see the site README.
       - name: Deploy
         working-directory: apps/site
         run: >-

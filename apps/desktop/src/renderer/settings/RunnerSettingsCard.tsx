@@ -17,6 +17,8 @@ import { bridge } from "../bridge";
 import { SwitchControl } from "./SettingRow";
 import { SecondaryButton } from "../ui/controls";
 import { ipcErrorMessage } from "../ipcError";
+import { useChatDispatchPaused } from "../useChatDispatchPaused";
+import { withErrorWords } from "../../ipc/errorWords";
 
 const RUNNER_COMMAND_PLACEHOLDER = "Enter the command that starts your agent";
 
@@ -91,6 +93,8 @@ export function RunnerSettingsCard(props: {
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const editedCommandRef = useRef<string | null>(null);
   const requestVersionRef = useRequestSequence();
+  const dispatchPaused = useChatDispatchPaused((cause) =>
+    props.onError?.(withErrorWords("dohc could not read whether agent dispatch is paused.", cause), cause));
 
   useEffect(() => {
     const editedCommand = editedCommandRef.current;
@@ -267,19 +271,38 @@ export function RunnerSettingsCard(props: {
         <div className="flex items-center justify-between gap-3 border-r border-line px-4 py-3 max-[720px]:border-b max-[720px]:border-r-0">
           <div>
             <p className="m-0 text-[11px] font-medium text-ink">Enable dispatch</p>
-            <p className="m-0 mt-0.5 text-[10px] text-subtle">
-              Runs in the background.
+            <p data-testid="runner-dispatch-state" className="m-0 mt-0.5 text-[10px] text-subtle">
+              {runner.enabled && dispatchPaused ? "Paused until you resume or quit dohc." : "Runs in the background."}
             </p>
           </div>
-          <SwitchControl
-            label="Enable chat runner"
-            checked={runner.enabled}
-            disabled={!configured && !runner.enabled}
-            onChange={(enabled) => {
-              if (enabled && !configured) return;
-              void commitDrafts(enabled);
-            }}
-          />
+          <div className="flex shrink-0 items-center gap-2">
+            {/* Pausing holds waiting requests; turning dispatch off fails them. */}
+            {runner.enabled ? (
+              <SecondaryButton
+                size="compact"
+                data-testid="runner-dispatch-pause"
+                aria-label={dispatchPaused ? "Resume agent dispatch" : "Pause agent dispatch"}
+                onClick={() => {
+                  const paused = !dispatchPaused;
+                  void bridge().setChatDispatchPaused({ paused }).catch((cause: unknown) => props.onError?.(
+                    withErrorWords(paused ? "dohc could not pause agent dispatch." : "dohc could not resume agent dispatch.", cause),
+                    cause,
+                  ));
+                }}
+              >
+                {dispatchPaused ? "Resume" : "Pause"}
+              </SecondaryButton>
+            ) : null}
+            <SwitchControl
+              label="Enable chat runner"
+              checked={runner.enabled}
+              disabled={!configured && !runner.enabled}
+              onChange={(enabled) => {
+                if (enabled && !configured) return;
+                void commitDrafts(enabled);
+              }}
+            />
+          </div>
         </div>
 
         <div className="flex items-center justify-between gap-3 px-4 py-3">

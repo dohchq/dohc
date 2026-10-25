@@ -50,10 +50,10 @@ import {
   type UnjournalablePath,
 } from "./shareViewRecords";
 import {
-  existingLocalStateFolder,
   localStateFolder,
   LocalStateFolderError,
   LocalStateUnavailableError,
+  readOwnedLocalStateFolder,
   type LocalStateWorkspace,
 } from "./workspaceLocalState";
 
@@ -599,6 +599,9 @@ async function syncFolder(folder: string): Promise<void> {
   }
 }
 
+// What a refresh says when the view's open has not prepared `.dohc/local`.
+const NOT_OPENED_REFUSAL = "dohc did not update these shared files because the workspace has not finished opening. Try again when it opens.";
+
 // The records folder for a writer, made 0700 when missing.
 async function recordsFolderForWrite(records: ShareViewRecords): Promise<string> {
   try {
@@ -611,7 +614,7 @@ async function recordsFolderForWrite(records: ShareViewRecords): Promise<string>
     throw new LocalStateUnavailableError(
       error.refusal,
       error.refusal === "not-opened"
-        ? "dohc did not update these shared files because the workspace has not finished opening. Try again when it opens."
+        ? NOT_OPENED_REFUSAL
         : `dohc did not update these shared files because it can't keep ${posix.dirname(records.shown)} out of iCloud Drive. Restart dohc to try again.`,
     );
   }
@@ -677,12 +680,14 @@ type RecordRead =
 
 // A record only when its folders and the file are this user's alone: read
 // folder-first, then on one handle that checks owner, mode and links.
-// Creates nothing and does not wait for the engine.
+// Creates nothing. Waits for the engine only on Windows, for an open under way.
 async function readRecord(rootDir: string, name: string): Promise<RecordRead> {
-  let folder: string | null | "unusable";
   try {
-    folder = await existingLocalStateFolder(rootDir, RECORDS_FOLDER);
+    return await readOwnedLocalStateFolder(rootDir, RECORDS_FOLDER, (folder) => recordIn(folder, name));
   } catch (error) {
+    // On Windows nothing in `.dohc/local` is read unless the view's open
+    // holds it throughout, which is no reason to distrust the records.
+    if (error instanceof LocalStateUnavailableError) throw new LocalStateUnavailableError(error.refusal, NOT_OPENED_REFUSAL);
     return {
       status: "untrusted",
       place: "folder",
@@ -690,6 +695,9 @@ async function readRecord(rootDir: string, name: string): Promise<RecordRead> {
       ...(error instanceof LocalStateFolderError ? { words: error.message } : {}),
     };
   }
+}
+
+async function recordIn(folder: string | null | "unusable", name: string): Promise<RecordRead> {
   if (folder === null) return { status: "missing" };
   if (folder === "unusable") {
     return { status: "untrusted", place: "folder", reason: "unusable folder" };

@@ -393,6 +393,322 @@ async fn run(
         )
         .await
 }
+
+async fn placement_waits_for_writer(member_count: usize, close_actor: bool) {
+    let (root, supervisor, actor) = setup(member_count);
+    let hold = actor.hold_link_drain();
+    let request = if close_actor {
+        "placement-close"
+    } else {
+        "placement-retry"
+    };
+    let undo = run(&actor, &root, request, Arc::new(NoFaults))
+        .await
+        .unwrap();
+    let count = undo.moments.len();
+    let [entered, release] = pause_checkpoint(&undo.compensation_operation_id);
+    let writer = rusqlite::Connection::open(engine_db_path(&root).unwrap()).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let placed_count = Arc::new(AtomicUsize::new(0));
+    let observed_count = Arc::clone(&placed_count);
+    let task_actor = actor.clone();
+    let path = root.to_path_buf();
+    let placement = tokio::spawn(async move {
+        task_actor
+            .history_undo_place(WS.into(), undo, path, Arc::new(()), 11, |members| {
+                observed_count.fetch_add(members.len(), Ordering::SeqCst);
+            })
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), entered.notified())
+        .await
+        .unwrap();
+    assert!(
+        !placement.is_finished(),
+        "busy placement must remain scheduled"
+    );
+    assert_eq!(
+        placed_count.load(Ordering::SeqCst),
+        0,
+        "keep leases until placement succeeds"
+    );
+    assert_eq!(
+        actor.active_version_id(WS.into()).await.unwrap(),
+        "main",
+        "backoff must release the actor"
+    );
+    if close_actor {
+        close(supervisor).await;
+        writer.execute_batch("ROLLBACK").unwrap();
+        release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(10), placement)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!result.materialized);
+        assert_eq!(placed_count.load(Ordering::SeqCst), 0);
+    } else {
+        writer.execute_batch("ROLLBACK").unwrap();
+        release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(10), placement)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.materialized);
+        assert_eq!(
+            placed_count.load(Ordering::SeqCst),
+            count,
+            "notify each member exactly once"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("old.md")).unwrap(),
+            "move body"
+        );
+        assert!(!root.join("new.md").exists());
+        for index in 1..member_count {
+            assert_eq!(
+                std::fs::read_to_string(root.join(format!("file-{index:04}.md"))).unwrap(),
+                "retained body"
+            );
+        }
+        close(supervisor).await;
+    }
+    drop(hold);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn history_undo_placement_retries_file_locked_outside_the_actor() {
+    placement_waits_for_writer(2, false).await;
+    placement_waits_for_writer(10, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn history_undo_placement_stops_retrying_when_the_actor_closes() {
+    placement_waits_for_writer(10, true).await;
+}
+
+type MaterializationFault = Arc<
+    dyn Fn(&dohc_engine_storage::MaterializationJob) -> Option<dohc_engine_files::MaterializeError>
+        + Send
+        + Sync,
+>;
+fn materialization_faults()
+-> &'static Mutex<std::collections::HashMap<PathBuf, MaterializationFault>> {
+    static FAULTS: OnceLock<Mutex<std::collections::HashMap<PathBuf, MaterializationFault>>> =
+        OnceLock::new();
+    FAULTS.get_or_init(Mutex::default)
+}
+pub(in crate::actor) fn materialization_error(
+    root: &Path,
+    job: &dohc_engine_storage::MaterializationJob,
+) -> Option<dohc_engine_files::MaterializeError> {
+    let fault = materialization_faults().lock().unwrap().get(root).cloned();
+    fault.and_then(|fault| fault(job))
+}
+struct PlacementFault(PathBuf);
+impl PlacementFault {
+    fn install(root: &Path, path: &'static str, store_busy: bool) -> (Self, Arc<AtomicUsize>) {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = attempts.clone();
+        materialization_faults().lock().unwrap().insert(
+            root.to_path_buf(),
+            Arc::new(move |job| {
+                (job.target_path == path).then(|| {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    if store_busy {
+                        dohc_engine_files::MaterializeError::Storage(StorageError::FileLocked)
+                    } else {
+                        dohc_engine_files::MaterializeError::FileLocked
+                    }
+                })
+            }),
+        );
+        (Self(root.to_path_buf()), attempts)
+    }
+}
+impl Drop for PlacementFault {
+    fn drop(&mut self) {
+        materialization_faults().lock().unwrap().remove(&self.0);
+    }
+}
+
+async fn placement_with_busy_job(clears: bool) {
+    let (root, supervisor, actor) = setup(2);
+    let hold = actor.hold_link_drain();
+    let request = if clears {
+        "placement-busy-job-clears"
+    } else {
+        "placement-busy-job-deadline"
+    };
+    let undo = run(&actor, &root, request, Arc::new(NoFaults))
+        .await
+        .unwrap();
+    let [entered, release] = pause_checkpoint(&undo.compensation_operation_id);
+    let (fault, attempts) = PlacementFault::install(&root, "file-0001.md", true);
+    let task_actor = actor.clone();
+    let path = root.to_path_buf();
+    let start = Instant::now();
+    let mut placement = tokio::spawn(async move {
+        task_actor
+            .history_undo_place(WS.into(), undo, path, Arc::new(()), 11, |_| {})
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), entered.notified())
+        .await
+        .unwrap();
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert!(!placement.is_finished());
+    let mut fault = Some(fault);
+    if clears {
+        drop(fault.take());
+    }
+    release.notify_one();
+    let outcome = tokio::time::timeout(Duration::from_secs(15), &mut placement).await;
+    if outcome.is_err() {
+        placement.abort();
+    }
+    let placed = outcome
+        .expect("placement must stop at the busy deadline")
+        .unwrap();
+    assert_eq!(placed.materialized, clears);
+    let pending = actor
+        .history_operation_pending_jobs(WS.into(), OP.into())
+        .await
+        .unwrap();
+    if clears {
+        assert!(pending.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(root.join("file-0001.md")).unwrap(),
+            "retained body"
+        );
+    } else {
+        assert!(start.elapsed() >= Duration::from_secs(10));
+        assert!(attempts.load(Ordering::SeqCst) > 1);
+        assert!(
+            !pending.is_empty(),
+            "keep durable jobs after the retry deadline"
+        );
+        assert!(!root.join("file-0001.md").exists());
+        drop(fault.take());
+        let replayed = actor
+            .history_undo_place(
+                WS.into(),
+                placed,
+                root.to_path_buf(),
+                Arc::new(()),
+                12,
+                |_| {},
+            )
+            .await;
+        assert!(replayed.materialized, "pending jobs must remain replayable");
+    }
+    close(supervisor).await;
+    drop(hold);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn history_undo_placement_completes_when_a_busy_store_job_clears() {
+    placement_with_busy_job(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn history_undo_placement_deadline_keeps_busy_store_jobs_pending() {
+    placement_with_busy_job(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn history_undo_placement_parks_a_held_workspace_file_without_retrying() {
+    let (root, supervisor, actor) = setup(2);
+    let hold = actor.hold_link_drain();
+    let undo = run(&actor, &root, "placement-held-file", Arc::new(NoFaults))
+        .await
+        .unwrap();
+    let (fault, attempts) = PlacementFault::install(&root, "file-0001.md", false);
+    let placed = actor
+        .history_undo_place(
+            WS.into(),
+            undo,
+            root.to_path_buf(),
+            Arc::new(()),
+            11,
+            |_| {},
+        )
+        .await;
+    assert!(!placed.materialized);
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "a held workspace file must park without a busy-store loop"
+    );
+    assert!(
+        !actor
+            .history_operation_pending_jobs(WS.into(), OP.into())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drop(fault);
+    assert!(
+        actor
+            .history_undo_place(
+                WS.into(),
+                placed,
+                root.to_path_buf(),
+                Arc::new(()),
+                12,
+                |_| {}
+            )
+            .await
+            .materialized
+    );
+    close(supervisor).await;
+    drop(hold);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn history_undo_rename_succeeds_with_a_held_workspace_file() {
+    let (root, supervisor, actor) = setup(2);
+    let hold = actor.hold_link_drain();
+    let (fault, attempts) = PlacementFault::install(&root, "old.md", false);
+    let undo = run(&actor, &root, "rename-held-file", Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert_eq!(
+        undo.moments.len(),
+        2,
+        "finish every compensation despite parked rename placement"
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert!(!root.join("old.md").exists());
+    assert!(
+        !actor
+            .history_operation_pending_jobs(WS.into(), OP.into())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drop(fault);
+    assert!(
+        actor
+            .history_undo_place(
+                WS.into(),
+                undo,
+                root.to_path_buf(),
+                Arc::new(()),
+                12,
+                |_| {}
+            )
+            .await
+            .materialized
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("old.md")).unwrap(),
+        "move body"
+    );
+    close(supervisor).await;
+    drop(hold);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn refuses_every_member_before_any_compensation() {
     let (root, supervisor, actor) = setup(3);

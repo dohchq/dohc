@@ -50,7 +50,7 @@ pub(crate) mod schema;
 mod search_generation;
 mod sqlite_path;
 
-pub(crate) use sqlite_path::sqlite_path;
+pub(crate) use sqlite_path::{open_store, sqlite_path};
 
 pub use search_generation::search_generation;
 

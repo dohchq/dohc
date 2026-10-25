@@ -29,7 +29,7 @@ function engineBridge(
   const serverDoc = markdownToYDoc(markdown);
   return {
     onWorkspaceActivity: vi.fn(() => () => undefined),
-    readWorkspaceText: vi.fn(async () => ({ text: markdown, truncated: false })),
+    readWorkspaceText: vi.fn(async () => ({ text: markdown, truncated: false, contentHash: "c".repeat(64) })),
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
     listWorkspaceFiles: vi.fn(async () => ({
       files: [{ path: "a.md", kind: "file" }],
@@ -102,7 +102,7 @@ describe("engine-mode export with no mounted serializer", () => {
     const bridge = engineBridge(DOC_MARKDOWN, { captureHeld: true });
     vi.stubGlobal("dohcDesktop", bridge);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
-    expect(await screen.findByText('dohc cannot open "a.md" for live editing. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.')).toBeTruthy();
+    expect(await screen.findByText('dohc cannot open "a.md" for live editing. dohc cannot take in this file\'s Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Restore the file\'s exact contents from before that edit. For nested lists, make the edit in dohc after the file opens again.')).toBeTruthy();
     expect(screen.queryByTestId("markdown-source-toggle")).toBeNull();
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
     expect(bridge.applyEngineYDocUpdate).not.toHaveBeenCalled();

@@ -2925,5 +2925,5 @@ input.dohc-math__source {
 }
 
 @utility dohc-section-label {
-  @apply text-[10px] font-semibold uppercase tracking-wide text-subtle;
+  @apply text-[12px] font-medium text-subtle;
 }

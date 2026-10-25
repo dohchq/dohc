@@ -28,8 +28,8 @@ export function storeFolderAt(path: string): AutomationStoreFolder {
       await mkdir(path, { recursive: true });
       return path;
     },
-    async forRead() {
-      return (await lstat(path).catch(() => null)) === null ? null : path;
+    async read(work) {
+      return work((await lstat(path).catch(() => null)) === null ? null : path);
     },
   };
 }

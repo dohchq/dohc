@@ -21,7 +21,7 @@ const envelope = {
   nextCursor: z.string().max(32768).nullable(),
 };
 const author = z.object({
-  kind: z.enum(["human", "agent", "automation"]),
+  kind: z.enum(["human", "agent", "automation", "link"]),
   displayName: z.string(),
   ownerDisplayName: z.string().optional(),
   presentation: z.object({
@@ -51,13 +51,22 @@ export const ChatLinksEnginePage = z.object({
   ...envelope,
   entries: z.array(z.object({
     ...coordinates, file, attachmentId: id,
-    author: z.object({
-      authorKind: z.enum(["human", "agent", "automation"]),
-      authorDisplayName: z.string(),
-      authorOwnerDisplayName: z.string().optional(),
-      authorUserId: z.string().optional(),
-      authorActorKey: z.string().optional(),
-    }).strict(),
+    author: z.discriminatedUnion("authorKind", [
+      z.object({
+        authorKind: z.enum(["human", "agent", "automation"]),
+        authorDisplayName: z.string(),
+        authorOwnerDisplayName: z.string().optional(),
+        authorUserId: z.string().optional(),
+        authorActorKey: z.string().optional(),
+      }).strict(),
+      // A link holder names a link and no account.
+      z.object({
+        authorKind: z.literal("link"),
+        authorDisplayName: z.string(),
+        linkGrantId: id,
+        linkPrincipalId: id,
+      }).strict(),
+    ]),
   }).strict()),
 }).strict().superRefine(bounded).nullable();
 

@@ -293,6 +293,12 @@ export interface LiveDocumentEdit {
    * typing in the document.
    */
   change(state: Uint8Array, options: { keepBlocks: boolean }): Promise<Uint8Array | null>;
+  /**
+   * Throws when the document at the resolved `path` is a lossy note
+   * (CONTEXT.md), whose next write would rewrite the parts dohc can't show.
+   * It runs before any session opens or anything changes.
+   */
+  assertEditable(path: string): Promise<void>;
   origin: LiveDocumentEditOrigin;
 }
 
@@ -1058,6 +1064,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     path: string,
     input: LiveDocumentEdit,
   ): Promise<AppliedEdit> {
+    await input.assertEditable(path);
     const attachment = workspace.attachmentId;
     const held = this.#owner.documentSession(attachment, path);
     if (held) return await this.#editHeld(held, path, input);

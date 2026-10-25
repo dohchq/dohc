@@ -49,7 +49,7 @@ vi.mock("./collab/useEngineDoc", async () => {
 describe("engine save-state lifts to the shell tab dirty dot", () => {
   const bridgeMock = {
     onWorkspaceActivity: vi.fn(() => () => undefined),
-    readWorkspaceText: vi.fn(async () => ({ text: "# Hello\n", truncated: false })),
+    readWorkspaceText: vi.fn(async () => ({ text: "# Hello\n", truncated: false, contentHash: "c".repeat(64) })),
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
     listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "a.md", kind: "file" }], folders: [] })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),

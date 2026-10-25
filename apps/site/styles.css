@@ -110,7 +110,8 @@ body {
   z-index: 10;
   display: flex;
   align-items: center;
-  gap: 32px;
+  /* Narrower windows tighten the gaps, so the alpha tag still fits. */
+  gap: clamp(16px, 3vw, 32px);
   min-height: 60px;
   padding: 8px clamp(20px, 5vw, 56px);
   border-bottom: 1px solid var(--line);
@@ -138,7 +139,7 @@ body {
 
 .nav-links {
   display: flex;
-  gap: 32px;
+  gap: clamp(16px, 3vw, 32px);
   margin-left: auto;
 }
 
@@ -238,7 +239,8 @@ body {
   .nav-github { font-size: 11px; }
 }
 
-@media (max-width: 360px) {
+/* Below 380px the logo and the alpha tag leave no room for the wordmark. */
+@media (max-width: 380px) {
   .nav-brand .wordmark { display: none; }
 }
 
@@ -294,6 +296,9 @@ body {
 }
 
 .download-other:hover { color: var(--ink); }
+/* Every build is an alpha. Drawn like Drive's "Coming soon", one size down. */
+.nav-start { display: flex; align-items: center; gap: 12px; }
+.alpha-tag { padding: 3px 9px; border: 1px solid color-mix(in srgb, var(--ink) 22%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--ink) 8%, var(--bg)); color: var(--ink); font: 600 11px/1.4 var(--font-sans); }
 
 :focus-visible {
   outline: 2px solid var(--accent);
@@ -2040,6 +2045,11 @@ p { text-wrap: pretty; }
 @media (max-width: 720px) {
   .nav-links a[href='#demo'],
   .nav-end .nav-download { display: none; }
+}
+
+/* The alpha tag beside the logo leaves a phone room for one section link. */
+@media (max-width: 420px) {
+  .nav-links a[href='#drive'] { display: none; }
 }
 
 /* ---------- buttons ---------- */

@@ -503,10 +503,10 @@ enum Action {
 }
 
 /// A store [`prepare_store`] made ready: the path SQLite opens it by and, on
-/// a Mac, the folder that path goes through.
+/// a Mac and Linux, the folder that path goes through.
 pub(crate) struct PreparedStore {
     pub(crate) path: PathBuf,
-    #[cfg(target_vendor = "apple")]
+    #[cfg(any(target_vendor = "apple", target_os = "linux"))]
     _folder: std::os::fd::OwnedFd,
 }
 
@@ -526,25 +526,23 @@ fn prepare_store(db_path: &Path) -> Result<PreparedStore, RuntimeError> {
     // its own code. `shown` is the folder's path as a refusal names it.
     #[cfg(target_vendor = "apple")]
     let (folder, shown) = {
-        // In a workspace, `.dohc` is checked as well as the folder.
-        let depth = if parent.ends_with(".dohc/engine") {
-            2
-        } else {
-            1
-        };
-        let base = parent.ancestors().nth(depth).unwrap_or(Path::new(""));
-        let relative = parent.strip_prefix(base).unwrap_or(parent);
-        let base = if base.as_os_str().is_empty() {
-            Path::new(".")
-        } else {
-            base
-        };
+        let (base, relative) = checked_from(parent);
         (
             dohc_macos_files::ensure_private_dir(base, relative),
             relative,
         )
     };
-    #[cfg(not(target_vendor = "apple"))]
+    // Linux opens each folder without following a link, refuses another
+    // user's, and holds the store's folder open.
+    #[cfg(target_os = "linux")]
+    let (folder, shown) = {
+        let (base, relative) = checked_from(parent);
+        (
+            dohc_linux_files::held::private_dir(base, relative),
+            relative,
+        )
+    };
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
     let (folder, shown) = {
         let mut builder = std::fs::DirBuilder::new();
         builder.recursive(true);
@@ -563,6 +561,16 @@ fn prepare_store(db_path: &Path) -> Result<PreparedStore, RuntimeError> {
         reason: "could not create engine.db parent directory",
         source: Some(err),
     })?;
+    // On Linux, SQLite opens the store and creates its journals through the
+    // descriptor held for the folder checked here, so a folder put at its
+    // name since then is not reached. Without that path the open is refused
+    // before any store file is made.
+    #[cfg(target_os = "linux")]
+    let held = dohc_linux_files::held::held_path(std::os::fd::AsFd::as_fd(&folder), shown)
+        .map_err(|err| RuntimeError::Identity {
+            reason: "could not keep the engine store private",
+            source: Some(err),
+        })?;
     #[cfg(unix)]
     {
         #[cfg(target_vendor = "apple")]
@@ -593,7 +601,14 @@ fn prepare_store(db_path: &Path) -> Result<PreparedStore, RuntimeError> {
             _folder: folder,
         })
     }
-    #[cfg(not(target_vendor = "apple"))]
+    #[cfg(target_os = "linux")]
+    {
+        Ok(PreparedStore {
+            path: held.join(name),
+            _folder: folder,
+        })
+    }
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
     {
         let _ = (folder, shown, name);
         Ok(PreparedStore {
@@ -602,7 +617,26 @@ fn prepare_store(db_path: &Path) -> Result<PreparedStore, RuntimeError> {
     }
 }
 
-#[cfg(all(unix, not(target_vendor = "apple")))]
+/// The folder the store's folder is checked from, and the store's folder
+/// below it. In a workspace, `.dohc` is checked as well as the folder.
+#[cfg(any(target_vendor = "apple", target_os = "linux"))]
+fn checked_from(parent: &Path) -> (&Path, &Path) {
+    let depth = if parent.ends_with(".dohc/engine") {
+        2
+    } else {
+        1
+    };
+    let base = parent.ancestors().nth(depth).unwrap_or(Path::new(""));
+    let relative = parent.strip_prefix(base).unwrap_or(parent);
+    let base = if base.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        base
+    };
+    (base, relative)
+}
+
+#[cfg(all(unix, not(any(target_vendor = "apple", target_os = "linux"))))]
 fn open_store_folder(parent: &Path) -> std::io::Result<std::os::fd::OwnedFd> {
     use rustix::fs::{Mode, OFlags};
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
@@ -807,7 +841,7 @@ mod tests {
     /// A folder put at `.dohc/engine` after the engine checked the real one
     /// gets neither the store nor its journals. They open in the checked
     /// folder, wherever it has moved (#2375).
-    #[cfg(target_vendor = "apple")]
+    #[cfg(any(target_vendor = "apple", target_os = "linux"))]
     #[test]
     fn a_store_opens_in_the_folder_the_engine_checked() {
         let scratch = ScratchDir::new().unwrap();
@@ -827,6 +861,35 @@ mod tests {
             assert!(moved.join(file).exists(), "{file}");
         }
         drop(actor);
+    }
+
+    /// Where the engine can't reach its checked folder through the descriptor
+    /// it holds, as without `/proc`, the open is refused, naming the folder,
+    /// and nothing is made in it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_store_whose_folder_cannot_be_held_is_refused_before_anything_is_written() {
+        use dohc_linux_files::held::{not_held, test_support::with_fds};
+        let scratch = ScratchDir::new().unwrap();
+        let db = scratch.path().join(".dohc/engine/engine.db");
+        let supervisor = WorkspaceSupervisor::new();
+        let refused = with_fds(&scratch.path().join("no-fds"), || supervisor.open(&db, 0));
+        let err = match refused {
+            Err(crate::RuntimeError::Identity {
+                source: Some(err), ..
+            }) => err,
+            Err(other) => panic!("{other:?}"),
+            Ok(_) => panic!("the store opened by its name"),
+        };
+        let refused = not_held(&err).expect("a typed refusal");
+        assert_eq!(refused.path, std::path::Path::new(".dohc/engine"));
+        assert_eq!(supervisor.actor_count(), 0);
+        let engine = db.parent().unwrap();
+        let left: Vec<_> = std::fs::read_dir(engine)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
     }
 
     #[cfg(unix)]

@@ -65,7 +65,7 @@ export function AgentToolPicker(props: {
       <dt>Working directory</dt><dd className="m-0 break-all font-mono">{result?.workingDirectory ?? "Current workspace"}</dd>
       <dt>Permissions</dt><dd className="m-0">{AGENT_TOOLS.find((tool) => tool.id === props.profile?.tool)?.permissions}</dd>
       <dt>Prompt</dt><dd className="m-0">Conversation through stdin</dd>
-      <dt>MCP</dt><dd className="m-0">Tool configuration only. dohc adds no servers.</dd>
+      <dt>MCP</dt><dd className="m-0">dohc adds its own server for replies.</dd>
     </dl> : null}
     <p className="m-0 text-[11px] text-muted">Detection does not test replies. Use {props.checkLabel} to test a reply through dohc.</p>
   </div>;

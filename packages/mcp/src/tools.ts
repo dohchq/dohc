@@ -125,6 +125,10 @@ export interface ToolContext {
   // --share-access flag. Absent means a local workspace at the Owner level.
   // The capability table decides the levels at which each tool registers.
   shareAccess?: ShareAccess;
+  // The only tools to offer, from repeated --tool flags, within the share
+  // level's. Absent offers all of the level's tools. A dohc agent run offers
+  // only the reply tool.
+  tools?: ReadonlySet<keyof typeof MCP_TOOL_CAPABILITIES>;
   // Injectable CLI transport for tests. Production uses sendCliRequest with
   // the explicit desktop state dir supplied by --home.
   request?: (request: CliRequestWithoutToken) => Promise<unknown>;
@@ -2235,12 +2239,13 @@ export async function deleteRetainedCopies(
 // in that Collection's automations.yaml.
 export async function listAutomationRuns(
   ctx: ToolContext,
-  args: { collectionPath: string; automation: string; page?: string },
+  args: { collectionPath: string; automation: string; page?: string; server?: boolean },
 ) {
   const resolved = await safeResolve(ctx, args.collectionPath, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   return requestCli(ctx, "automationRuns", {
     collectionPath: resolved.normalized, automation: args.automation, ...(args.page === undefined ? {} : { page: args.page }),
+    ...(args.server ? { server: true } : {}),
   });
 }
 
@@ -2260,11 +2265,12 @@ export async function switchAutomation(ctx: ToolContext, args: {
 
 export async function readAutomationRun(
   ctx: ToolContext,
-  args: { collectionPath: string; automation: string; run: string },
+  args: { collectionPath: string; automation: string; run: string; server?: boolean },
 ) {
   const resolved = await safeResolve(ctx, args.collectionPath, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  return requestCli(ctx, "automationRun", { ...args, collectionPath: resolved.normalized });
+  const { server, ...read } = args;
+  return requestCli(ctx, "automationRun", { ...read, collectionPath: resolved.normalized, ...(server ? { server: true } : {}) });
 }
 
 export async function retryAutomationRun(

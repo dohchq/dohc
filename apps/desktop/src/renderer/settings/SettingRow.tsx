@@ -17,10 +17,16 @@ export function SettingRow(props: {
   // Before the title, such as the signed-in account's avatar.
   lead?: ReactNode;
   // A row of a long list that only shows a value, such as a shortcut's keys.
+  // Its title needs less room than a description, so the value stays beside it
+  // in a narrower pane.
   compact?: boolean;
 }) {
+  // The controls keep their size and the text takes what is left, from a
+  // readable width: 15rem, or 8rem for a compact row's title. Controls that
+  // don't fit beside that wrap under the text.
+  const first = props.compact ? "min-w-0 flex-[1_1_8rem]" : "min-w-0 flex-[1_1_15rem]";
   const text = (
-    <div className="min-w-0">
+    <div className={props.lead ? "min-w-0 flex-1" : first}>
       {/* The dot hangs left of the title, so marking a row moves nothing in it. */}
       <div className="relative flex items-center">
         {props.modified ? (
@@ -42,19 +48,19 @@ export function SettingRow(props: {
       {...(props.highlighted
         ? { "data-highlighted": true, role: "group", "aria-label": props.title, tabIndex: -1 }
         : {})}
-      className={`flex items-center justify-between gap-6 border-b border-line last:border-b-0 max-[720px]:flex-col max-[720px]:items-start max-[720px]:gap-2 ${
+      className={`flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-line last:border-b-0 ${
         props.compact ? "min-h-9 py-1.5" : "min-h-14 py-2.5"
       } ${props.highlighted ? "-mx-3 rounded-lg bg-selected px-3" : ""}`}
     >
       {props.lead ? (
-        <div className="flex min-w-0 items-center gap-3">
+        <div className={`flex items-center gap-3 ${first}`}>
           {props.lead}
           {text}
         </div>
       ) : (
         text
       )}
-      <div className="flex min-w-0 items-center justify-end gap-2 max-[720px]:justify-start">
+      <div className="flex max-w-full shrink-0 flex-wrap items-center gap-2">
         {props.children}
         {/* Every row keeps the reset's place, so controls share a right edge
             and stay under the pointer when a reset appears. */}
@@ -222,7 +228,7 @@ export function StepperControl(props: {
           >
             {spec.label}
             {spec.keys?.map((key) => (
-              <kbd key={key} className="rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle">
+              <kbd key={key} className="rounded border border-line bg-bg px-1 font-sans text-[11px] text-subtle">
                 {key}
               </kbd>
             ))}
@@ -285,7 +291,7 @@ export function SwitchControl(props: {
       onClick={() => {
         if (!props.disabled) props.onChange(!props.checked);
       }}
-      className={`relative h-5 w-9 rounded-full border transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50 aria-busy:cursor-progress ${
+      className={`relative h-5 w-9 shrink-0 rounded-full border transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50 aria-busy:cursor-progress ${
         props.checked ? "border-accent bg-accent" : "border-line bg-line"
       }`}
     >

@@ -14,29 +14,45 @@ pub struct SnapshotIdentity<'a> {
     pub authority: &'a str,
 }
 
+/// The caller authenticates history; its witness selects the artifact and digest.
+pub struct HistoryIdentity<'a> {
+    pub path: &'a str,
+    pub lineage: &'a str,
+    pub restore_fence: Option<i64>,
+    pub authority: &'a str,
+}
+
 /// Only after the caller authenticates its selected history and restore operation.
+/// A verified expired witness authorizes canonical output, never its old source.
 pub fn resolve_history(
     conn: &Connection,
     key: &DocKey,
     doc: &Ydoc,
     canonical: &str,
-    snapshot: &SnapshotIdentity<'_>,
+    history: &HistoryIdentity<'_>,
     resolver: Option<&ReaderResolver>,
     max_source_bytes: usize,
 ) -> Result<String, CollabError> {
-    let (moment, _) =
-        history_artifact(conn, key, snapshot.path, snapshot.digest, max_source_bytes)?;
-    resolve(
-        conn,
-        key,
-        doc,
-        canonical,
-        &SnapshotIdentity {
-            moment: &moment,
-            ..*snapshot
-        },
-        resolver,
-    )
+    let reference = doc
+        .markdown_source_reference()
+        .ok_or(CollabError::MarkdownReaderUnavailable)?;
+    let digest = reference.source_sha256;
+    let (moment, _) = history_artifact(conn, key, history.path, &digest, max_source_bytes)?;
+    let snapshot = SnapshotIdentity {
+        moment: &moment,
+        digest: &digest,
+        path: history.path,
+        lineage: history.lineage,
+        restore_fence: history.restore_fence,
+        authority: history.authority,
+    };
+    let resolver = resolver.ok_or(CollabError::MarkdownReaderUnavailable)?;
+    let source = artifact_source(conn, key, doc, &snapshot)?;
+    if resolver.check_snapshot(conn, key, doc, canonical, &snapshot, &source)? {
+        Ok(source)
+    } else {
+        Ok(canonical.to_owned())
+    }
 }
 
 /// Select stored bytes by the frozen witness, independently of the current snapshot.
@@ -109,7 +125,7 @@ pub(crate) fn verify_restore_prefix(
     conn: &Connection,
     key: &DocKey,
     doc: &Ydoc,
-    snapshot: &SnapshotIdentity<'_>,
+    history: &HistoryIdentity<'_>,
     resolver: Option<&ReaderResolver>,
     max_source_bytes: usize,
 ) -> Result<usize, CollabError> {
@@ -118,11 +134,14 @@ pub(crate) fn verify_restore_prefix(
         .markdown_source_reference()
         .ok_or(CollabError::MarkdownReaderUnavailable)?;
     let digest = reference.source_sha256;
-    let (moment, _) = history_artifact(conn, key, snapshot.path, &digest, max_source_bytes)?;
+    let (moment, _) = history_artifact(conn, key, history.path, &digest, max_source_bytes)?;
     let snapshot = SnapshotIdentity {
         moment: &moment,
         digest: &digest,
-        ..*snapshot
+        path: history.path,
+        lineage: history.lineage,
+        authority: history.authority,
+        restore_fence: history.restore_fence,
     };
     let source = artifact_source(conn, key, doc, &snapshot)?;
     resolver.verify_snapshot(

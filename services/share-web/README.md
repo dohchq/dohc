@@ -32,8 +32,12 @@ The share page advertises `/api/mcp` through its HTTP `Link` header. That endpoi
 3. Connect the MCP client to `/mcp` with `Authorization: Bearer <bearer>` from the exchange response.
 4. Keep and reuse the bearer for that agent. Each exchange creates a separate link identity.
 
-The agent can list files, read settled content, and read the share discussion.
-Comment and Edit links also expose discussion posting. The relay checks the grant again for every action.
+The agent can list files and read settled content. It sees the same conversation as a person with the link in the viewer.
+On a Group share that is the Group's channel, read with `dohc_read_channel`.
+A read-write link also gets `dohc_post_channel`, which posts there as its link holder; the owner sees the post marked as from a link holder.
+On any other share it is the share discussion, which Comment and Edit links can also post to.
+The relay checks the grant again for every action, and a refusal arrives as a sentence the agent can act on.
+If a post's answer is lost, the tool says the post may have landed. Send it again with the same `idempotencyKey`; it posts once.
 Live document tools require the existing Public Edit release and live-link configuration described below.
 They support existing `.md` documents on main while the document host is online.
 The edit tool replaces one exact text occurrence inside a single formatting run. It preserves unrelated document content and frontmatter.
@@ -302,6 +306,8 @@ The ordinary recipient log route reserves `browser-chat` for these server-assign
 Every message contains `relaySeq`, `messageId`, `threadId`, `authorUserId`,
 `authorDisplayName`, `authorKind`, `authorOwnerDisplayName`, `createdAtMs`, `body`, and `bodyTooLarge`.
 The user ID and owner name are null when absent.
+Author kind is `human`, `agent`, `automation`, or `link`. A `link` message came from a link holder through a share link.
+Its user ID and owner name are always null. Its display name is the name the link holder chose, which nobody verified, or `Anonymous`.
 If a body cannot fit the response budget, `body` is null and `bodyTooLarge` is true.
 If metadata fills a page, the relay returns the prefix that fits and continues after its last message.
 If one message's metadata cannot fit alone, the relay returns a minimal omission marker.
@@ -318,6 +324,7 @@ Waiter capacity receives 429. Response size overflow receives 413; request a sma
 The configured named session request and response byte limits also apply.
 Share-web refuses malformed, oversized, redirected, or non-JSON relay responses.
 Link holders cannot use these endpoints or create chat link grants.
+A link on a Group share reads and posts in the Group's channel through the viewer and `/mcp` instead.
 
 The corresponding trusted relay endpoints use `/sync/named-chat/channels` and `/sync/named-chat/messages`.
 They require the recipient account cookie, configured public Origin, and relay exchange key.

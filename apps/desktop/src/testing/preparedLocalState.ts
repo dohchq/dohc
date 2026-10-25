@@ -1,12 +1,16 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { AutomationStoreFolder } from "@dohc/automation-executor/automation-run-store";
-import { ownedLocalStateDir, readLocalStateFrom, type LocalStateWorkspace } from "../workspaces/workspaceLocalState";
+import { localAutomationStoreFolder } from "../automations/localAutomationStore";
+import { readLocalStateFrom, readOwnedLocalState, type LocalStateWorkspace } from "../workspaces/workspaceLocalState";
+
+// An open that holds `.dohc/local` for as long as the test runs.
+const HELD = { current: () => true };
 
 // Stands in for the engine sessions: each workspace's current open, by id and
 // root, with what it said about `.dohc/local`.
 export function fakeLocalStateOpens() {
-  const opens = new Map<string, { localStateReady: boolean }>();
+  const opens = new Map<string, { workspace: LocalStateWorkspace; localStateReady: boolean }>();
   const underWay = new Map<string, Promise<void>>();
   const key = (workspace: LocalStateWorkspace) => `${workspace.workspaceId}\0${workspace.rootPath}`;
   let waits = 0;
@@ -17,12 +21,18 @@ export function fakeLocalStateOpens() {
       if (opening) waits++;
       return opening;
     },
+    // An open that could not keep the folder out of iCloud Drive prepared it.
+    localStateOpenAt: async (rootPath) => {
+      await Promise.all([...underWay].filter(([at]) => at.endsWith(`\0${rootPath}`)).map(([, opening]) => opening.catch(() => undefined)));
+      const open = [...opens.values()].find((candidate) => candidate.workspace.rootPath === rootPath);
+      return open ? { current: () => opens.get(key(open.workspace)) === open } : null;
+    },
   });
   const fake = {
     /** What an engine open that writes does: make the folder, then answer. */
     async open(workspace: LocalStateWorkspace, localStateReady = true) {
       await mkdir(join(workspace.rootPath, ".dohc", "local"), { recursive: true });
-      opens.set(key(workspace), { localStateReady });
+      opens.set(key(workspace), { workspace, localStateReady });
     },
     /** An open that is under way until `finish` answers it. */
     start(workspace: LocalStateWorkspace) {
@@ -50,12 +60,24 @@ const openedKey = (workspace: LocalStateWorkspace) => `${workspace.workspaceId}\
 /**
  * For a test that is not about the open: the engine's open of this workspace
  * has prepared `.dohc/local`, so its writers, such as the workspace trash,
- * write there.
+ * write there, and on Windows its readers read there.
  */
 export async function openedLocalState(workspace: LocalStateWorkspace): Promise<void> {
   await mkdir(join(workspace.rootPath, ".dohc", "local"), { recursive: true });
   opened.set(openedKey(workspace), { localStateReady: true });
-  readLocalStateFrom({ currentBinding: (current) => opened.get(openedKey(current)) ?? null });
+  readLocalStateFrom({
+    currentBinding: (current) => opened.get(openedKey(current)) ?? null,
+    localStateOpenAt: async () => HELD,
+  });
+}
+
+/**
+ * For a test whose readers are not about the open: every workspace's
+ * `.dohc/local` reads as an engine open leaves it, as it does on a Mac and
+ * Linux. No writer gets a folder.
+ */
+export function readersTrustLocalState(): void {
+  readLocalStateFrom({ currentBinding: () => null, localStateOpenAt: async () => HELD });
 }
 
 /**
@@ -67,8 +89,8 @@ export function preparedAutomationStoreFolder(rootPath: string): AutomationStore
   return {
     async forWrite() {
       await mkdir(join(rootPath, ".dohc", "local"), { recursive: true });
-      return (await ownedLocalStateDir(rootPath))!;
+      return (await readOwnedLocalState(rootPath, async (dir) => dir))!;
     },
-    forRead: () => ownedLocalStateDir(rootPath),
+    read: (work) => localAutomationStoreFolder({ workspaceId: "prepared", rootPath }).read(work),
   };
 }

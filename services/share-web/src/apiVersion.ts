@@ -9,7 +9,7 @@ const METHODS: Readonly<Record<string, readonly string[]>> = {
   "/api/exchange": ["POST"], "/api/handoff": ["POST"],
   "/api/view/meta": ["GET"], "/api/view/current": ["GET"], "/api/view/log": ["GET"],
   "/api/view/discussion": ["GET", "POST"], "/api/view/discussion/activity": ["GET"],
-  "/api/view/collection-writes": ["POST"],
+  "/api/view/collection-writes": ["POST"], "/api/view/chat/channels": ["GET"], "/api/view/chat/messages": ["GET", "POST"],
   "/api/account/session": ["GET"], "/api/account/sign-in": ["POST"], "/api/account/sign-out": ["POST"],
   "/api/live/link-document": ["POST"], "/api/live/link-ticket": ["POST"],
   "/api/live/named-session": ["POST"], "/api/live/named-ticket": ["POST"], "/api/live/named-documents": ["POST"],

@@ -42,7 +42,8 @@ pub struct BlobEgress {
 pub struct ServiceResponse {
     pub response: Response,
     pub blob_egress: Option<BlobEgress>,
-    /// Retains input reservations and fences an acknowledgement at the writer.
+    /// Retains input reservations until the writer releases them, and fences
+    /// an acknowledgement at the writer.
     pub output_guard: Option<Arc<dyn OutputGuard>>,
 }
 
@@ -84,6 +85,10 @@ pub trait OutputGuard: std::fmt::Debug + Send + Sync {
     fn deadline(&self) -> Option<Instant> {
         None
     }
+    /// Drops the input reservations the response retains. The writer calls it
+    /// before the client can read the whole response, so a client that acts
+    /// on the response never finds them still held.
+    fn release(&self) {}
 }
 
 /// Resources that must retire synchronously when their connection closes.

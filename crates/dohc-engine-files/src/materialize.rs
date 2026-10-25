@@ -3032,10 +3032,11 @@ pub(super) fn open_displaced(path: &Path) -> std::io::Result<std::fs::File> {
 const STAGING_DIR: &str = ".dohc/engine/displaced";
 
 /// The folder staging is checked from, and the staging folder below it. A
-/// store at `database` that opened through its folder's ID, as the engine
-/// opens a workspace's store on a Mac, sits in the engine folder the engine
-/// checked. Staging then goes through that folder, and only `displaced` is
-/// checked below it. Otherwise the check starts at `root`.
+/// store at `database` that opened through the engine folder the engine
+/// checked, by the folder's ID on a Mac or by the descriptor the engine holds
+/// for it on Linux, sits in that folder. Staging then goes through that
+/// folder, and only `displaced` is checked below it. Otherwise the check
+/// starts at `root`.
 fn staging_base(database: &Path, root: &Path) -> (PathBuf, PathBuf) {
     if let Some(engine) = database.parent().filter(|engine| by_id(engine)) {
         let name = Path::new(STAGING_DIR).file_name().unwrap_or_default();
@@ -3044,11 +3045,14 @@ fn staging_base(database: &Path, root: &Path) -> (PathBuf, PathBuf) {
     (root.to_owned(), root.join(STAGING_DIR))
 }
 
-/// Whether `path` names its folder by ID rather than by name.
+/// Whether `path` reaches its folder by its ID on a Mac, or through a
+/// descriptor this process holds on Linux, rather than by its name.
 fn by_id(path: &Path) -> bool {
     #[cfg(target_vendor = "apple")]
     return dohc_macos_files::is_path_by_id(path);
-    #[cfg(not(target_vendor = "apple"))]
+    #[cfg(target_os = "linux")]
+    return dohc_linux_files::held::is_path_by_fd(path);
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
     {
         let _ = path;
         false
@@ -3094,7 +3098,8 @@ fn sync_staged(
 ) -> Result<(), MaterializeError> {
     sync_parent_dir(store, Some(staging), policy)?;
     // Include newly created staging ancestors before source removal is synced.
-    // A staging folder reached by the engine folder's ID was the only one made.
+    // A staging folder reached through the checked engine folder was the only
+    // one made.
     sync_parent_dir(store, staging.parent(), policy)?;
     let engine = staging.parent().filter(|engine| !by_id(engine));
     sync_parent_dir(store, engine.and_then(Path::parent), policy)

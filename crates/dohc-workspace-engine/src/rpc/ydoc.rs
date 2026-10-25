@@ -260,6 +260,11 @@ struct YdocOpenParams {
     content_kind: Option<String>,
     #[serde(default)]
     seed_from_artifact: bool,
+    /// The largest seed this client reads through `versionedText.readBlob`
+    /// when it is past the in-band cap. Without it, such a seed refuses the
+    /// open.
+    #[serde(default)]
+    seed_limit_bytes: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -293,6 +298,10 @@ struct YdocOpenResult {
     /// device seeding the same head originates the same base.
     #[serde(skip_serializing_if = "Option::is_none")]
     seed_client_id: Option<u32>,
+    /// Set instead of `seed_content` for a seed past the in-band cap: the
+    /// digest the client reads the seed by through `versionedText.readBlob`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed_blob_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     artifact_assets: Option<Vec<ArtifactAssetDescriptorResult>>,
 }
@@ -1198,6 +1207,24 @@ impl EngineService {
             )
             .await?;
         let initial_update_sha256 = dohc_engine_storage::hex_sha256(&initial_update);
+        // A seed past the in-band cap cannot cross the wire as one string. The
+        // client reads it as a blob when it accepts a seed that large. A
+        // client that can't seed can't edit, so a larger seed refuses the open.
+        let (seed_content, seed_blob_sha256) = match state.seed_content {
+            Some(seed) if seed.len() > MAX_INBAND_CONTENT_BYTES => {
+                if params
+                    .seed_limit_bytes
+                    .is_none_or(|limit| seed.len() > limit)
+                {
+                    return Err(WireError::new(
+                        ErrorCode::InvalidParams,
+                        "ydoc-seed-too-large",
+                    ));
+                }
+                (None, Some(dohc_engine_storage::hex_sha256(seed.as_bytes())))
+            }
+            seed => (seed, None),
+        };
         let result = YdocOpenResult {
             owner_draft: owner_draft.clone(),
             session_id: session_id.clone(),
@@ -1217,23 +1244,9 @@ impl EngineService {
             } else {
                 "absent"
             },
-            seed_content: {
-                // A seed past the in-band cap cannot cross the wire as one
-                // string, and a client that can't seed can't edit: refuse the
-                // open outright (blob streaming for large bodies is RPC-D).
-                if state
-                    .seed_content
-                    .as_ref()
-                    .is_some_and(|seed| seed.len() > MAX_INBAND_CONTENT_BYTES)
-                {
-                    return Err(WireError::new(
-                        ErrorCode::InvalidParams,
-                        "ydoc-seed-exceeds-inband-cap",
-                    ));
-                }
-                state.seed_content
-            },
+            seed_content,
             seed_client_id: state.seed_client_id,
+            seed_blob_sha256,
             artifact_assets: (!state.artifact_assets.is_empty()).then(|| {
                 state
                     .artifact_assets

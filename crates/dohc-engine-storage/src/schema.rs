@@ -87,6 +87,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "live_audit_event_conflicts",
     "live_accepted_updates",
     "live_accepted_checkpoints",
+    "live_accepted_reader_history",
     "live_restore_fences",
     "ydoc_owner_applied_frames",
     "ydoc_owner_bindings",
@@ -332,8 +333,8 @@ fn open_engine_db_configured(
     // Step 1: "is this file empty?" is our question, not the VFS's.
     reject_undersized_database(path)?;
 
-    let mut conn = Connection::open_with_flags(
-        crate::sqlite_path(path),
+    let mut conn = crate::open_store(
+        path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
     )
     .map_err(StorageError::corrupt)?;
@@ -442,8 +443,7 @@ pub(crate) fn open_engine_db_read_only(
 ) -> Result<OpenedEngineDb, StorageError> {
     reject_undersized_database(path)?;
     let conn =
-        Connection::open_with_flags(crate::sqlite_path(path), OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(StorageError::corrupt)?;
+        crate::open_store(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(StorageError::corrupt)?;
     count_open_work(&conn, work)?;
     apply_session_pragmas(&conn)?;
     if classify_fingerprint(&conn)? != Disposition::ExistingV2 {
@@ -761,6 +761,7 @@ mod tests {
             "live_audit_base_conflicts",
             "live_accepted_updates",
             "live_accepted_checkpoints",
+            "live_accepted_reader_history",
             "live_restore_fences",
             "live_owner_adoptions",
             "live_device_bootstraps",

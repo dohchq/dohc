@@ -119,7 +119,8 @@ test("a move puts a queued request first or before another, the line follows it,
 
 // A request that belongs to the owner named by --owner.
 const owned = (id, name, state = "queued", extra = {}) => entry(id, { owner: { key: `flag:${name}`, title: name, source: "flag" } }, state, extra);
-const started = (minutes, outcome) => ({ n: 1, startedAt: new Date(Date.parse("2026-10-16T08:00:00Z") + minutes * 60_000).toISOString(), ...(outcome ? { outcome } : {}) });
+const now = Date.parse("2026-10-16T09:00:00Z");
+const started = (minutes, outcome) => ({ n: 1, startedAt: new Date(now - 60 * 60_000 + minutes * 60_000).toISOString(), ...(outcome ? { outcome } : {}) });
 
 test("the nightly run goes first, then a request moved --first, then the owner longest without a start, one request per turn", () => {
   const running = owned("000000001-aaaaaa", "ann", "running", { attempts: [started(0)] });
@@ -158,7 +159,7 @@ const rustOnly = row => ({ ...row, request: { ...row.request, scope: "rust", gat
  */
 function startInTurn(requests, health, { ending = true } = {}) {
   const order = [];
-  for (let at = Date.parse("2026-10-16T09:00:00Z"), next; order.length < requests.length && (next = nextRequest(requests, health, at)); at += 60_000) {
+  for (let at = now, next; order.length < requests.length && (next = nextRequest(requests, health, at)); at += 60_000) {
     order.push(next.id);
     const attempt = { n: next.status.attempts.length + 1, startedAt: new Date(at).toISOString(), ...(ending ? { outcome: "passed" } : {}) };
     requests = requests.map(row => row === next ? { ...row, status: { ...row.status, state: ending ? "passed" : "running", attempts: [...row.status.attempts, attempt] } } : row);
@@ -175,12 +176,12 @@ test("a request waiting on Docker holds no turn, so its owner's Rust-only reques
 
 test("a request in its retry backoff holds no turn, so two free lanes go to two owners", () => {
   const [a1, a2] = ["000000001-aaaaaa", "000000003-aaaaaa"].map(id => owned(id, "ann"));
-  const b1 = owned("000000002-bbbbbb", "bob", "queued", { notBefore: new Date(Date.now() + 60_000).toISOString(), attempts: [started(-5, "environment")] });
+  const b1 = owned("000000002-bbbbbb", "bob", "queued", { notBefore: new Date(now + 60_000).toISOString(), attempts: [started(-5, "environment")] });
   const b2 = owned("000000004-bbbbbb", "bob");
   const requests = [a1, b1, a2, b2];
   const health = { diskOk: true, dockerOk: true };
-  assert.equal(nextRequest(requests, health).id, a1.id);
-  assert.equal(nextRequest(requests, health, Date.now(), new Set([a1.id])).id, b2.id, "the second lane goes to Bob's request that can run, not to Ann's second");
+  assert.equal(nextRequest(requests, health, now).id, a1.id);
+  assert.equal(nextRequest(requests, health, now, new Set([a1.id])).id, b2.id, "the second lane goes to Bob's request that can run, not to Ann's second");
 });
 
 test("a request whose containers are still being removed holds no turn", () => {
@@ -188,7 +189,7 @@ test("a request whose containers are still being removed holds no turn", () => {
   const b2 = owned("000000002-bbbbbb", "bob", "queued", { attempts: [started(-10, "environment")] });
   const a3 = owned("000000003-aaaaaa", "ann");
   const b4 = owned("000000004-bbbbbb", "bob");
-  assert.equal(nextRequest([annRan, b2, a3, b4], { diskOk: true, dockerOk: true }, Date.now(), new Set(), new Set([b2.id])).id, b4.id,
+  assert.equal(nextRequest([annRan, b2, a3, b4], { diskOk: true, dockerOk: true }, now, new Set(), new Set([b2.id])).id, b4.id,
     "Bob has not had a turn, so his other request runs while the first one's cleanup waits");
 });
 
@@ -207,7 +208,7 @@ test("an owner with a run in progress waits until every owner without one has ha
   const bobRan = owned("000000002-bbbbbb", "bob", "passed", { attempts: [started(-20, "passed")] });
   const a3 = owned("000000003-aaaaaa", "ann");
   const b4 = owned("000000004-bbbbbb", "bob");
-  assert.equal(nextRequest([annRunning, bobRan, a3, b4], { diskOk: true, dockerOk: true }).id, b4.id,
+  assert.equal(nextRequest([annRunning, bobRan, a3, b4], { diskOk: true, dockerOk: true }, now).id, b4.id,
     "Ann started longer ago, but her run is still going, so Bob, whose run finished, takes the free lane");
 });
 

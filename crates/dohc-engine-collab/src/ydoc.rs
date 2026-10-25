@@ -73,7 +73,7 @@ const FRONTMATTER_SOURCE_ITEM_META_PREFIX: &str = "dohcFrontmatterSourceItem:";
 const MARKDOWN_SOURCE_META_KEY: &str = "dohcMarkdownSource";
 const MARKDOWN_SOURCE_SHA_META_KEY: &str = "dohcMarkdownSourceSha256";
 const MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY: &str = "dohcMarkdownSourceProjectionSha256";
-const MARKDOWN_SOURCE_READER_META_KEY: &str = "dohcMarkdownSourceReader";
+pub(crate) const MARKDOWN_SOURCE_READER_META_KEY: &str = "dohcMarkdownSourceReader";
 
 pub(crate) fn reader_source_meta_key(key: &str) -> bool {
     matches!(
@@ -1308,6 +1308,43 @@ impl Ydoc {
             MarkdownReading::Projection,
             FileFold::Strict,
         )
+    }
+
+    /// Check a reader fold on a clone. Reader witnesses cannot authorize this path.
+    pub fn native_fold_candidate(&self, update: &[u8]) -> Result<Ydoc, CollabError> {
+        crate::validate_replay_parity(self, update)?;
+        let candidate = Ydoc::wire();
+        candidate.apply(&self.encode_full_state())?;
+        candidate.apply(update)?;
+        let epoch = candidate.lineage_epoch_tag();
+        if candidate.has_pending_dependencies() || epoch != self.lineage_epoch_tag() {
+            return Err(CollabError::MarkdownNotRepresentable);
+        }
+        let meta = candidate.doc.get_or_insert_map(ROOT_META);
+        let txn = candidate.doc.transact();
+        if (epoch.is_none() && meta.contains_key(&txn, LINEAGE_EPOCH_META_KEY))
+            || [
+                MARKDOWN_SOURCE_META_KEY,
+                MARKDOWN_SOURCE_SHA_META_KEY,
+                MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+                MARKDOWN_SOURCE_READER_META_KEY,
+            ]
+            .iter()
+            .any(|key| meta.contains_key(&txn, key))
+        {
+            return Err(CollabError::MarkdownNotRepresentable);
+        }
+        drop(txn);
+        // Public schema validation excludes the engine's private lineage tag.
+        let public = Ydoc::wire();
+        public.apply(&candidate.encode_full_state())?;
+        public
+            .doc
+            .get_or_insert_map(ROOT_META)
+            .remove(&mut public.doc.transact_mut(), LINEAGE_EPOCH_META_KEY);
+        public.validate_public_baseline(&public.encode_full_state())?;
+        public.project(ContentKind::Richdoc)?;
+        Ok(candidate)
     }
 
     /// Replace an outside fold's frontmatter without rebuilding its body.

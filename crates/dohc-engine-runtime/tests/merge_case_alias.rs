@@ -485,9 +485,13 @@ async fn text_case_only_merge_after_failed_delete(
     let root = ScratchDir::new().unwrap();
     let db = engine_db_path(&root).unwrap();
     seed_case_only_rename(&root, &db, &rename, text);
-    if std::fs::metadata(root.join(to)).is_err() {
-        eprintln!("skipping: this disk keeps {before} and {to} apart");
-        return;
+    // Main's file can be stored as `before` only on a disk that gives both
+    // spellings that file.
+    for spelling in [from, to] {
+        if std::fs::metadata(root.join(spelling)).is_err() {
+            eprintln!("skipping: this disk keeps {before} and {spelling} apart");
+            return;
+        }
     }
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 4).unwrap().actor;
