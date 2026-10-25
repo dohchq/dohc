@@ -27,6 +27,11 @@ const source="globalThis.operations={read(ctx){globalThis.readCount=(globalThis.
 const definition:DatasetDefinition={formatVersion:1,datasetId:id(1),name:"Items",schemaPath:"schema.sql",operationsPath:"operations.js",
  tables:[{tableId:id(2),name:"Items",sqlName:"items",primaryKey:"id",fields:[{fieldId:id(3),name:"ID",sqlColumn:"id",type:"number",required:true,unique:true},{fieldId:id(4),name:"Value",sqlColumn:"value",type:"text",required:true,unique:false},{fieldId:id(7),name:"Secret",sqlColumn:"secret",type:"text",required:true,unique:false}]}],
  operations:[{operationId:id(5),name:"read",label:"Read",tableId:id(2),kind:"read",access:"owner",readOnly:true,fieldIds:[id(3),id(4)]},{operationId:id(6),name:"add",label:"Add",tableId:id(2),kind:"create",access:"owner",readOnly:false,fieldIds:[id(4)]}]};
+const spawnWorker:AppRuntimeLauncher=options=>{
+ const child=spawn(process.execPath,["--disable-warning=ExperimentalWarning",options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
+ child.on("message",options.onMessage);child.on("error",options.onError);child.on("close",options.onExit);
+ return {postMessage(message){child.send(message as object,error=>{if(error)options.onError(error);});},kill(){child.kill("SIGKILL");}};
+};
 const cleanups:Array<()=>Promise<void>>=[];
 afterEach(async()=>{for(const close of cleanups.splice(0).reverse())await close();});
 async function fixture(){
@@ -96,13 +101,19 @@ it("makes every folder directly in the copy folder and removes them after a catc
  expect(made.filter(name=>name.startsWith("worker-"))).toHaveLength(3);
  expect((await readdir(copy)).filter(name=>/^work(er)?-/.test(name))).toEqual([]);
 });
+it("removes the folder of a worker that fails to start at a writer checkpoint",async()=>{
+ // The third worker is the one the checkpoint switch starts.
+ let launches=0;
+ const launch:AppRuntimeLauncher=options=>{if(++launches===3)throw Error("The worker did not start.");return spawnWorker(options);};
+ const f=await fixture(),copy=join(f.directory,"copy");f.add("first");
+ const replica=await f.open({launch});await replica.catchUp(f.remote);await f.transition();f.add("second");
+ await expect(replica.catchUp(f.remote)).rejects.toThrow("The worker did not start.");
+ expect(launches).toBe(3);
+ expect((await readdir(copy)).filter(name=>/^work(er)?-/.test(name))).toEqual([]);
+});
 
 it("reuses one read worker and fresh guest contexts, replaces it after catch-up, and clears it on revoke",async()=>{
- const launch=vi.fn<AppRuntimeLauncher>(options=>{
-  const child=spawn(process.execPath,["--disable-warning=ExperimentalWarning",options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
-  child.on("message",options.onMessage);child.on("error",options.onError);child.on("close",options.onExit);
-  return {postMessage(message){child.send(message as object,error=>{if(error)options.onError(error);});},kill(){child.kill("SIGKILL");}};
- });
+ const launch=vi.fn<AppRuntimeLauncher>(spawnWorker);
  const f=await fixture();f.add("first");const replica=await f.open({launch});await replica.catchUp(f.remote);launch.mockClear();
  expect((await replica.read(f.read)).result).toEqual([{id:1,value:"first"}]);
  expect((await replica.read(f.read)).result).toEqual([{id:1,value:"first"}]);
