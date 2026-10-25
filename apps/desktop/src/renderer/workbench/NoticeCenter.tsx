@@ -37,6 +37,9 @@ export type Notice = {
   tone: "danger" | "warning" | "success" | "neutral";
   title: string;
   body: string;
+  // A line after the body that no clamp hides, such as how many more
+  // files a list leaves out.
+  lastLine?: string;
   actions?: readonly NoticeAction[];
   // Explicit dismissal (0P-C gate fix): rendered as a small X on the notice
   // row. Only notices whose underlying state has a real ack path expose it.
@@ -67,6 +70,7 @@ export interface WorkspaceErrorNotice {
   id: string;
   title?: string;
   message: string;
+  lastLine?: string;
   details: string;
   filePaths?: readonly string[];
   atMs: number;
@@ -214,8 +218,9 @@ function UnreadMark(props: { unread: boolean; testId: string; className?: string
   );
 }
 
-// A row's title and text, clipped to fit. A click on clipped text, or Show
-// more, shows all of it in place, wrapped and selectable.
+// A notice's title and text, in its row or its toast, clipped to fit. A
+// click on clipped text, or Show more, shows all of it in place, wrapped
+// and selectable.
 function NoticeText(props: {
   title: string;
   // The title's weight and color.
@@ -223,6 +228,8 @@ function NoticeText(props: {
   body: string;
   // Off for a body that is already shown whole.
   clamp?: boolean;
+  after?: string;
+  onOpenChange?: (open: boolean) => void;
   testId: string;
   children: (text: { title: ReactNode; body: ReactNode }) => ReactNode;
 }) {
@@ -232,6 +239,11 @@ function NoticeText(props: {
   const [open, setOpen] = useState(false);
   const [clipped, setClipped] = useState(false);
   const clamp = props.clamp ?? true;
+  const { onOpenChange } = props;
+  const show = (next: boolean) => {
+    setOpen(next);
+    onOpenChange?.(next);
+  };
   useLayoutEffect(() => {
     if (open) return;
     const title = titleRef.current;
@@ -256,7 +268,7 @@ function NoticeText(props: {
   const openOnClick = clipped && !open
     ? (event: MouseEvent<HTMLElement>) => {
         if (event.detail > 1 || window.getSelection()?.isCollapsed === false) return;
-        setOpen(true);
+        show(true);
       }
     : undefined;
   const pointer = open ? " cursor-text" : openOnClick ? " cursor-pointer" : "";
@@ -284,13 +296,16 @@ function NoticeText(props: {
             {props.body}
           </p>
         ) : null}
+        {props.after ? (
+          <p className="m-0 mt-0.5 whitespace-pre-line wrap-anywhere text-[11px] leading-snug text-muted">{props.after}</p>
+        ) : null}
         {clipped || open ? (
           <button
             type="button"
             data-testid={`${props.testId}-more`}
             aria-expanded={open}
             aria-controls={props.body ? `${id}-title ${id}-body` : `${id}-title`}
-            onClick={() => setOpen((value) => !value)}
+            onClick={() => show(!open)}
             className="-ml-1 mt-0.5 flex items-center gap-0.5 rounded-md px-1 text-[11px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
           >
             {open ? "Show less" : "Show more"}
@@ -483,22 +498,52 @@ export function WorkspaceErrorToast(props: {
   onRetry?: (id: string) => void;
   onHide?: (id: string) => void;
 }) {
-  const { error } = props;
+  const { error, onHide } = props;
   // A success or a warning is a notice: nothing failed.
   const notice = error.tone !== undefined;
+  // A toast for something finished fades, but not while the person reads it.
+  const [pointer, setPointer] = useState(false);
+  const [focus, setFocus] = useState(false);
+  const [open, setOpen] = useState(false);
+  const fades = error.tone === "success" && !error.stays;
+  const held = pointer || focus || open;
+  useEffect(() => {
+    if (!fades || held || !onHide) return;
+    const timer = setTimeout(() => onHide(error.id), FADING_TOAST_MS);
+    return () => clearTimeout(timer);
+  }, [fades, held, onHide, error.id]);
   return (
     <div
       data-testid={notice ? "workspace-shell-notice" : "workspace-shell-error"}
       role={notice ? "status" : "alert"}
+      onPointerEnter={() => setPointer(true)}
+      onPointerLeave={() => setPointer(false)}
+      onFocus={() => setFocus(true)}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setFocus(false);
+      }}
       className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
     >
-      {error.tone === "success"
-        ? <CheckCircle2 size={14} aria-hidden className="mt-0.5 shrink-0 text-success" />
-        : <AlertTriangle size={14} aria-hidden className={`mt-0.5 shrink-0 ${error.tone === "warning" ? "text-warning" : "text-danger"}`} />}
-      <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
-        {error.title ? <span className="block font-medium">{error.title}</span> : null}
-        <span className={error.title ? "block mt-0.5 text-muted" : undefined}>{error.message}</span>
+      <span className="flex h-6 shrink-0 items-center">
+        {error.tone === "success"
+          ? <CheckCircle2 size={14} aria-hidden className="text-success" />
+          : <AlertTriangle size={14} aria-hidden className={error.tone === "warning" ? "text-warning" : "text-danger"} />}
       </span>
+      <NoticeText
+        title={error.title ?? error.message}
+        titleClass={error.title ? "font-medium text-ink" : "text-ink"}
+        body={error.title ? error.message : ""}
+        after={error.lastLine}
+        onOpenChange={setOpen}
+        testId="workspace-shell-toast"
+      >
+        {(text) => (
+          <div className="min-w-0 flex-1 select-text">
+            <div className="flex min-w-0">{text.title}</div>
+            {text.body}
+          </div>
+        )}
+      </NoticeText>
       {(error.actionLabel && props.onAction) || (error.additionalActionLabels?.length && props.onAction) || (error.canRetry && props.onRetry) ? <div className="flex shrink-0 flex-col gap-1">
       {error.actionLabel && props.onAction ? (
         <button
@@ -578,6 +623,7 @@ export function LocalNoticeRow(props: {
         titleClass={props.unread ? "font-medium text-ink" : "text-muted"}
         body={notice.body}
         clamp={notice.filePaths === undefined}
+        after={notice.lastLine}
         testId={`notice-${notice.id}`}
       >
         {(text) => (
@@ -1097,6 +1143,7 @@ export function NoticeCenter(props: {
         tone: error.tone ?? "danger",
         title: error.title ?? error.message,
         body: error.title ? error.message : "",
+        ...(error.lastLine ? { lastLine: error.lastLine } : {}),
         actions: [
           ...(error.actionLabel && props.onWorkspaceErrorAction
             ? [{
@@ -1551,11 +1598,6 @@ export function NoticeCenter(props: {
         .sort((a, b) => b.atMs - a.atMs)[0] ?? null,
     [props.workspaceErrors],
   );
-  useEffect(() => {
-    if (errorToast?.tone !== "success" || errorToast.stays || !props.onHideWorkspaceError) return;
-    const timer = setTimeout(() => props.onHideWorkspaceError?.(errorToast.id), FADING_TOAST_MS);
-    return () => clearTimeout(timer);
-  }, [errorToast?.id, errorToast?.tone, errorToast?.stays, props.onHideWorkspaceError]);
   // Open Notices hides the toasts.
   const shownErrorToastId = open ? null : (errorToast?.id ?? null);
   const { onWorkspaceErrorShown } = props;
@@ -1632,6 +1674,7 @@ export function NoticeCenter(props: {
         <div ref={toastsRef} data-testid="notice-toasts" data-dohc-toasts className={TOAST_STACK_CLASS[host]}>
           {errorToast ? (
             <WorkspaceErrorToast
+              key={errorToast.id}
               error={errorToast}
               onAction={props.onWorkspaceErrorAction}
               onRetry={props.onRetryWorkspaceError}

@@ -2575,6 +2575,42 @@ describe("notices sent to you", () => {
       expect(onHideSentNoticeToast).toHaveBeenCalledOnce();
     });
 
+    // Something finished fades, but not while the person reads it.
+    it("holds a success toast while it is hovered or focused", () => {
+      vi.useFakeTimers();
+      const onHideWorkspaceError = vi.fn();
+      renderNotices({
+        workspaceErrors: [{
+          id: "s1", tone: "success", message: "Moved 4 files to Archived", details: "d", atMs: 1, canRetry: false, seen: false,
+        }],
+        onHideWorkspaceError,
+      });
+      const toast = screen.getByTestId("workspace-shell-notice");
+      fireEvent.pointerEnter(toast);
+      act(() => vi.advanceTimersByTime(10_000));
+      expect(onHideWorkspaceError).not.toHaveBeenCalled();
+      fireEvent.pointerLeave(toast);
+      act(() => within(toast).getByRole("button", { name: "Dismiss workspace notice" }).focus());
+      act(() => vi.advanceTimersByTime(10_000));
+      expect(onHideWorkspaceError).not.toHaveBeenCalled();
+      act(() => (document.activeElement as HTMLElement).blur());
+      act(() => vi.advanceTimersByTime(5_999));
+      expect(onHideWorkspaceError).not.toHaveBeenCalled();
+      act(() => vi.advanceTimersByTime(1));
+      expect(onHideWorkspaceError).toHaveBeenCalledWith("s1");
+    });
+
+    it("keeps a list's last line out of the toast's clamp", () => {
+      renderNotices({
+        workspaceErrors: [{
+          id: "e1", title: "250 files weren't imported", message: "a.md is a link. Drop the file it leads to.",
+          lastLine: "249 more weren't imported.", details: "d", atMs: 1, canRetry: false, seen: false,
+        }],
+      });
+      const last = within(screen.getByTestId("workspace-shell-error")).getByText("249 more weren't imported.");
+      expect(last.className).not.toContain("line-clamp");
+    });
+
     it("opens from the toast or closes it", async () => {
       const onHideSentNoticeToast = vi.fn();
       const onOpenSentNotice = vi.fn(async () => null);

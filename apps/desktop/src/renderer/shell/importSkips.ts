@@ -56,25 +56,24 @@ function shownPath(path: string): string {
 
 const moreLine = (more: number) => `${more} more weren't imported.`;
 
-// One line for each skipped source, as many as a notice holds, then a count
-// of the rest. Copy names every source the import listed.
+// One line for each skipped source, as many as a notice holds, and a last
+// line counting the rest. Copy names every source the import listed.
 export function importSkipLines(
   skipped: number,
   sources: readonly SkippedImportSource[],
-): { lines: string[]; details: ErrorDetailField[] } {
+): { lines: string[]; lastLine?: string; details: ErrorDetailField[] } {
   const lines: string[] = [];
   let used = 0;
   for (const source of sources) {
     const line = skipSentence(source.reason, shownPath(source.path));
-    const rest = skipped - lines.length - 1;
-    const needed = (lines.length > 0 ? 1 : 0) + line.length + (rest > 0 ? 1 + moreLine(rest).length : 0);
+    const needed = (lines.length > 0 ? 1 : 0) + line.length;
     if (used + needed > SHELL_ERROR_MAX_CHARS) break;
     lines.push(line);
-    used += (lines.length > 1 ? 1 : 0) + line.length;
+    used += needed;
   }
-  if (lines.length > 0 && skipped > lines.length) lines.push(moreLine(skipped - lines.length));
+  const rest = lines.length > 0 ? skipped - lines.length : 0;
   const details: ErrorDetailField[] = sources.map((source) =>
     ["Skipped", skipSentence(source.reason, source.path), COPIED_LINE_MAX_CHARS] as const);
   if (skipped > sources.length) details.push(["Skipped", `${skipped - sources.length} more`]);
-  return { lines, details };
+  return { lines, ...(rest > 0 ? { lastLine: moreLine(rest) } : {}), details };
 }

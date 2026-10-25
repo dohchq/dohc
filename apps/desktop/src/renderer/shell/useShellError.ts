@@ -85,6 +85,9 @@ export interface ShellError {
   id: string;
   title?: string;
   message: string;
+  // A line after the message that no clamp hides, such as how many more
+  // files a list leaves out.
+  lastLine?: string;
   // Facts for a report, one "label: value" line each, such as the error as
   // it arrived. They go into Copy details, not the text a person reads.
   details?: ReadonlyArray<ErrorDetailField>;
@@ -500,10 +503,11 @@ export function useShellError(workspaceId: string) {
   // An import that skipped sources: a title, then a line for each one. dohc
   // wrote every line, so the lines are shown as they are.
   const reportImportSkips = useCallback(
-    (notice: { title: string; lines: readonly string[]; details: ReadonlyArray<ErrorDetailField> }) => {
+    (notice: { title: string; lines: readonly string[]; lastLine?: string; details: ReadonlyArray<ErrorDetailField> }) => {
       push({
         title: notice.title,
         message: notice.lines.join("\n"),
+        ...(notice.lastLine ? { lastLine: notice.lastLine } : {}),
         details: notice.details,
         retry: null,
         kind: "import-files",
