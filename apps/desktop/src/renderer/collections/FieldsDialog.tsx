@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { X } from "lucide-react";
-import type { CollectionSchema } from "@dohc/workspace-contracts";
+import type { CollectionFieldType, CollectionSchema } from "@dohc/workspace-contracts";
 import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
 import { Overlay } from "../Overlay";
 import { IconButton, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
@@ -69,11 +69,13 @@ export function FieldsDialog(props: {
   buttonStates?: ReadonlyMap<string, AutomationButtonState> | null;
   /** Opens the automation builder with the trigger set to this button. */
   onChooseButtonAutomation?: (field: string) => void;
+  /** The type a new field starts with. The dialog then opens on its name. */
+  addType?: CollectionFieldType;
   onClose: () => void;
 }) {
   const [editing, setEditing] = useState<string | null>(null);
   const [editOptions, setEditOptions] = useState("");
-  const [draft, setDraft] = useState<FieldDraft>(emptyFieldDraft());
+  const [draft, setDraft] = useState<FieldDraft>(emptyFieldDraft("", props.addType));
   const { pending, error, setError, run } = useSchemaRun(props.apply);
 
   const fieldNames = props.schema.fields.map((field) => field.name);
@@ -194,6 +196,7 @@ export function FieldsDialog(props: {
             disabled={pending}
             relationTargets={props.relationTargets}
             types={FIELD_TYPES_WITH_BUTTON}
+            autoFocus={props.addType !== undefined}
             onChange={setDraft}
           />
           <SecondaryButton

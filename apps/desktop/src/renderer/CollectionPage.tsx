@@ -53,6 +53,7 @@ import {
 import { buttonAutomation } from "./collections/automationDraft";
 import type { Automation } from "./collections/automationSentence";
 import { RecordButton } from "./collections/RecordButton";
+import { CalendarNeedsDateField } from "./collections/CalendarNeedsDateField";
 import { useAutomationButtons, useButtonStates } from "./collections/useAutomationButtons";
 
 // The collection surface behind a tab://collection/<path> tab uses the shared
@@ -446,7 +447,8 @@ export function CollectionPage({
   // through the authored write path (collections/schemaWrite). Returns a
   // user-facing sentence on failure, null on success, so both dialogs
   // share one contract.
-  const [fieldsOpen, setFieldsOpen] = useState(false);
+  // True, or the type of the new field the dialog opens on.
+  const [fieldsOpen, setFieldsOpen] = useState<boolean | "date">(false);
   // The Fields dialog shows what each button does; the page follows the
   // store only while it is open, so a press re-renders just its button.
   const buttonStates = useButtonStates(fieldsOpen ? buttons : null);
@@ -625,6 +627,7 @@ export function CollectionPage({
       schema={schema}
       relationTargets={relationTargets}
       apply={applySchemaChange}
+      addType={fieldsOpen === "date" ? "date" : undefined}
       buttonStates={buttonStates}
       onChooseButtonAutomation={(field) => {
         setFieldsOpen(false);
@@ -639,7 +642,9 @@ export function CollectionPage({
   const kind = activeView?.kind ?? "table";
   const boardReady =
     kind === "board" && activeView?.groupBy && state.groups !== null;
-  const calendarReady = kind === "calendar" && activeView?.dateField;
+  // A calendar uses its date field, or the first one when that is gone, no longer a date, or was never named, so adding a date field shows it.
+  const dateFields = schema.fields.filter((field) => field.type === "date");
+  const calendarReady = kind === "calendar" && (dateFields.find((field) => field.name === activeView?.dateField) ?? dateFields[0])?.name;
 
   return (
     <div
@@ -731,11 +736,13 @@ export function CollectionPage({
           <CalendarView
             schema={schema}
             records={state.records}
-            dateField={activeView?.dateField ?? ""}
+            dateField={calendarReady}
             visibleFields={activeView?.visibleFields ?? null}
             onCellChange={readOnly ? undefined : onCellChange}
             onOpenRecord={openRecord}
           />
+        ) : kind === "calendar" ? (
+          <CalendarNeedsDateField onAddDateField={readOnly ? undefined : () => setFieldsOpen("date")} />
         ) : (
           <TableView
             schema={schema}
