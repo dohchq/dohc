@@ -286,8 +286,9 @@ fn disk_spelling_names_each_entry_as_the_disk_stores_it() {
     assert_eq!(stored("missing.md"), None);
 }
 
-/// A folder that can be searched but not listed still has a spelling, so a
-/// delete never reads its files as unrelated to their other spellings.
+/// A folder that can be searched but not listed still has a spelling, so
+/// spellings that resolve to one file still share it. Root lists any folder,
+/// so there the test has nothing to prove.
 #[cfg(unix)]
 #[test]
 fn disk_spelling_passes_through_a_folder_it_cannot_list() {
@@ -296,9 +297,12 @@ fn disk_spelling_passes_through_a_folder_it_cannot_list() {
     ws.write("private/docs/Notes.md", b"a");
     let private = ws.path().join("private");
     std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o311)).unwrap();
+    let unlistable = std::fs::read_dir(&private).is_err();
     let stored = dohc_engine_files::disk_spelling(ws.path(), "private/docs/Notes.md");
     std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert_eq!(stored.as_deref(), Some("private/docs/Notes.md"));
+    if unlistable {
+        assert_eq!(stored.as_deref(), Some("private/docs/Notes.md"));
+    }
 }
 
 /// A link to a folder whose name differs only in case is not a rename, even
