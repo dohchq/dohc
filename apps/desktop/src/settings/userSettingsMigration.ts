@@ -41,7 +41,7 @@ function version1Agent(raw: Record<string, unknown>): Record<string, unknown> | 
 /** A version 1 settings file as version 2. Every other key stays as the person wrote it. */
 export function migrateVersion1(raw: Record<string, unknown>): Record<string, unknown> {
   const agent = version1Agent(raw);
-  const agents = raw.agents ?? {};
+  const agents = raw.agents === undefined ? {} : raw.agents;
   // Agents the person wrote in the file stay. When the version 1 agent has
   // no place among them, its keys stay too, so a save cannot lose it.
   if (agent && (!isSettingsObject(agents) || Object.hasOwn(agents, DEFAULT_AGENT_ID))) return { ...raw, version: 2 };

@@ -84,8 +84,8 @@ export const AgentSettings = z.object({
 export type AgentSettings = z.infer<typeof AgentSettings>;
 export type Agent = AgentSettings & { id: string };
 
-// Names that differ only in case or spacing look the same in a chat.
-const nameKey = (name: string) => name.trim().replace(/\s+/gu, " ").toLowerCase();
+// Names that differ only in case or spaces look the same in a chat.
+const nameKey = (name: string) => name.replace(/\s/gu, "").toLowerCase();
 // Each agent's name, and the name the default agent's messages had before
 // agents had ids, so an old message names one agent.
 function agentNameKeys(agents: Record<string, AgentSettings>): string[] {

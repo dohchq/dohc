@@ -164,8 +164,10 @@ describe("desktop user settings model", () => {
     expect(AgentsSettings.safeParse({ default: { ...noLaunch, enabled: false } }).success).toBe(true);
     expect(AgentsSettings.safeParse({ default: agent, "agent-b": { ...agent, name: " agent " } }).success).toBe(false);
     expect(AgentsSettings.safeParse({ "agent-b": { ...agent, nameBeforeMigration: "Nova" } }).success).toBe(false);
-    // Names that differ only in case or spacing look the same in a chat.
-    expect(AgentsSettings.safeParse({ default: { ...agent, name: "Nova Bee" }, "agent-b": { ...agent, name: "nova  bee" } }).success).toBe(false);
+    // Names that differ only in case or spaces look the same in a chat.
+    for (const [first, second] of [["Nova Bee", "nova  bee"], ["Claude Code", "ClaudeCode"]]) {
+      expect(AgentsSettings.safeParse({ default: { ...agent, name: first }, "agent-b": { ...agent, name: second } }).success, second).toBe(false);
+    }
     // The default agent's old messages carry its old name, so nobody else takes it.
     expect(AgentsSettings.safeParse({
       default: { ...agent, name: "Atlas", nameBeforeMigration: "Nova" },
@@ -494,17 +496,18 @@ describe("desktop user settings store", () => {
   it("refuses to add an agent over agents dohc cannot use, and saves other settings around them", async () => {
     const root = await createTestScratch("dohc-user-settings-");
     const path = join(root, USER_SETTINGS_FILE);
-    const agents = [testAgent({ name: "Nova" })];
-    await writeFile(path, JSON.stringify({ ...DEFAULT_USER_SETTINGS, agents }));
-    const before = await readFile(path, "utf8");
-    const seen = await readUserSettingsFile(root);
-    const added = withFirstAgent(seen.settings, (current) => current ?? testAgent({ name: "Atlas" }));
-    await expect(writeUserSettingsFile(root, added, seen.settings)).rejects.toThrow(
-      `dohc did not save settings. ${path} has an "agents" value dohc can't use. Fix or remove it in the file, then try again.`,
-    );
-    expect(await readFile(path, "utf8")).toBe(before);
-    await writeUserSettingsFile(root, { ...seen.settings, editor: { ...seen.settings.editor, fontSize: 16 } }, seen.settings);
-    expect(JSON.parse(await readFile(path, "utf8")).agents).toEqual(agents);
+    for (const agents of [[testAgent({ name: "Nova" })], null]) {
+      await writeFile(path, JSON.stringify({ ...DEFAULT_USER_SETTINGS, agents }));
+      const before = await readFile(path, "utf8");
+      const seen = await readUserSettingsFile(root);
+      const added = withFirstAgent(seen.settings, (current) => current ?? testAgent({ name: "Atlas" }));
+      await expect(writeUserSettingsFile(root, added, seen.settings)).rejects.toThrow(
+        `dohc did not save settings. ${path} has an "agents" value dohc can't use. Fix or remove it in the file, then try again.`,
+      );
+      expect(await readFile(path, "utf8")).toBe(before);
+      await writeUserSettingsFile(root, { ...seen.settings, editor: { ...seen.settings.editor, fontSize: 16 } }, seen.settings);
+      expect(JSON.parse(await readFile(path, "utf8")).agents).toEqual(agents);
+    }
   });
 
   it("refuses to save over a file dohc cannot use, and reset replaces it", async () => {

@@ -166,7 +166,7 @@ it("keeps the agents a file without a version already lists", async () => {
 
 it("leaves version 1's agent where it is when the file's own agents have no place for it", () => {
   const version1 = { profile: { agentName: "Nova" }, runner: { enabled: true, command: "agent run" } };
-  for (const agents of [{ default: testAgent({ name: "Writer" }) }, ["Writer"]]) {
+  for (const agents of [{ default: testAgent({ name: "Writer" }) }, ["Writer"], null]) {
     expect(migrateVersion1({ ...version1, agents })).toEqual({ ...version1, agents, version: 2 });
   }
 });

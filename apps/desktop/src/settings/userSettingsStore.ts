@@ -253,9 +253,9 @@ export async function updateUserSettingsFile(
     const changed = change(current);
     // `current` leaves out the agents dohc could not use, so one in the
     // change would be written over what the person wrote there.
-    const fileAgents = onDisk.raw?.agents ?? {};
+    const fileAgents = onDisk.raw?.agents;
     const changedIds = Object.keys(isSettingsObject(changed.agents) ? changed.agents : {});
-    if (!isSettingsObject(fileAgents) && changedIds.length > 0) {
+    if (fileAgents !== undefined && !isSettingsObject(fileAgents) && changedIds.length > 0) {
       throw new Error(`dohc did not save settings. ${path} has an "agents" value dohc can't use. Fix or remove it in the file, then try again.`);
     }
     const replaced = changedIds.find((id) => isSettingsObject(fileAgents) && Object.hasOwn(fileAgents, id) && !Object.hasOwn(current.agents, id));
