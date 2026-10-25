@@ -6,6 +6,7 @@ import type {
 } from "../../ipc/bridgeContract";
 import { ErrorBoundary } from "../ErrorBoundary";
 import { AboutRail } from "../workbench/AboutRail";
+import { isHistoryPaused } from "../workbench/EngineHistory";
 import { SkeletonRows, SkeletonSlot } from "../ui/SkeletonRows";
 import { parseTab, setAboutWidth, type WorkbenchState } from "../workbench/workbenchState";
 import { useAboutConversation } from "../workbench/aboutConversation";
@@ -68,7 +69,6 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
   reportFailureMessage: LinkedChatsPanelProps["onError"];
   onAgentWaitsForTrust?: LinkedChatsPanelProps["onAgentWaitsForTrust"];
   historyRevision: number;
-  historyPaused: boolean;
   openMoment: NonNullable<LinkedChatsPanelProps["history"]>["onOpenMoment"];
   // Changes whenever the open file re-reads: history growth, a version
   // switch, or a share mount's pull.
@@ -97,7 +97,6 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
     reportFailureMessage,
     onAgentWaitsForTrust,
     historyRevision,
-    historyPaused,
     openMoment,
     linksRevision,
     openPathAtLine,
@@ -187,7 +186,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
               aboutTabOpen={aboutTabOpen}
               {...(shareView
                 ? { shareReadOnly: true }
-                : { history: { revision: historyRevision, paused: historyPaused, onOpenMoment: openMoment } })}
+                : { history: { revision: historyRevision, paused: isHistoryPaused(syncStatus), onOpenMoment: openMoment } })}
               // Chats that link here are a Chats call, refused without capture.
               links={{
                 revision: linksRevision,

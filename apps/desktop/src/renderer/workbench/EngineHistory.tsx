@@ -5,7 +5,7 @@ import { EmptyState } from "../ui/controls";
 import { Ref } from "../ui/Ref";
 import { useCallback, useId, useMemo, useState, type ReactNode } from "react";
 import { LegendList } from "@legendapp/list/react";
-import { HISTORY_MAX_SOURCES, type EngineMomentRecord, type TimelineEntry } from "../../ipc/bridgeContract";
+import { HISTORY_MAX_SOURCES, type EngineMomentRecord, type SyncStatusResult, type TimelineEntry } from "../../ipc/bridgeContract";
 import { chatAuthorLabel } from "./chatMessages";
 import { AgentName, ChatAvatar, LinkMark } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
@@ -54,6 +54,12 @@ export function HistoryUpdating(props: { testId: string; className?: string }) {
       Adding recent changes to History
     </p>
   );
+}
+
+// Whether main's status shows the Notices row "History paused": capture
+// failed, and not because the store was refused, which has its own notice.
+export function isHistoryPaused(syncStatus: SyncStatusResult | null | undefined): boolean {
+  return syncStatus?.historyCaptureFailed === true && !syncStatus.engineStoreRefused;
 }
 
 // History stopped recording: main's status says capture failed, and the
@@ -909,6 +915,7 @@ export function EngineHistoryView(props: {
           data-testid="history-collections-unavailable"
           className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center text-xs text-muted"
         >
+          {props.paused ? <HistoryPaused testId="history-paused" /> : null}
           {words.unavailable ? <span>{words.unavailable}</span> : null}
           {words.omitted ? <span>{words.omitted}</span> : null}
           {words.unavailable ? (

@@ -1435,7 +1435,7 @@ describe("About History", () => {
   // changes, heads the rows a read still answers, and stands in for none.
   it("says History is paused in place of updating, then above the rows a paused read answers", async () => {
     bridgeMock.listEngineMoments.mockResolvedValueOnce({ status: "updating" }).mockResolvedValue(page([moment()]));
-    render(<HistorySection paused />);
+    const { rerender } = render(<HistorySection paused />);
     const line = await screen.findByTestId("about-history-paused");
     expect(line.textContent).toBe("History paused");
     expect(screen.queryByTestId("about-history-updating")).toBeNull();
@@ -1444,6 +1444,10 @@ describe("About History", () => {
     const heading = screen.getByTestId("about-history-paused");
     expect(heading.compareDocumentPosition(row!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(notices.report).not.toHaveBeenCalled();
+    // History recovers: the rows stay and the line goes.
+    rerender(<HistorySection paused={false} />);
+    expect(screen.queryByTestId("about-history-paused")).toBeNull();
+    expect(screen.getAllByTestId("about-history-open")).toHaveLength(1);
   });
 
   it("says History is paused, not that the file has no changes, when a paused read answers none", async () => {

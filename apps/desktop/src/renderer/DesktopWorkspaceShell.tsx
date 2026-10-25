@@ -220,6 +220,7 @@ import {
   fileMomentSteps,
   HistoryPaused,
   HistoryUpdating,
+  isHistoryPaused,
   type HistoryCollections,
 } from "./workbench/EngineHistory";
 import { HistoryHiddenState } from "./workbench/HistoryPolicyStates";
@@ -4771,9 +4772,8 @@ export function DesktopWorkspaceShell(props: {
   // or, for a shared view, the registry capability and the share's live
   // state — never from the renderer's own capability read.
   const historyOffCopy = historyOffPlaceholderCopy(syncStatus);
-  // The status behind the Notices row "History paused": History stopped
-  // recording, so the panel and About say so in place of taking in changes.
-  const historyPaused = syncStatus?.historyCaptureFailed === true && !syncStatus.engineStoreRefused;
+  // History stopped recording, so the panel says so in place of taking in changes.
+  const historyPaused = isHistoryPaused(syncStatus);
   // The rail needs no capture-decision clause of its own, unlike the surfaces
   // that call on mount. Only `refreshHistory` and the open effect
   // commit a status, and both now answer after the decision, so a null status
@@ -6162,8 +6162,7 @@ export function DesktopWorkspaceShell(props: {
             reportFailureMessage={reportFailureMessage}
             onAgentWaitsForTrust={trustForHeldAgent}
             historyRevision={historyRefreshCounter}
-            historyPaused={historyPaused}
-            openMoment={openMomentDiffTab}
+              openMoment={openMomentDiffTab}
             linksRevision={historyRefreshCounter + versionEpoch + mountContentEpoch}
             openPathAtLine={openPathAtLine}
             openChatMention={openChatMention}
