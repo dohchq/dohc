@@ -460,20 +460,22 @@ describe("desktop user settings store", () => {
     expect(JSON.parse(await readFile(path, "utf8")).agents.default.launch).toEqual({ tool: "claude", executable: "D:\\claude.exe" });
   });
 
-  it("adds an agent beside an entry dohc cannot read, and leaves that entry as written", async () => {
+  it("refuses to add an agent over an entry dohc cannot use, and leaves that entry as written", async () => {
     const root = await createTestScratch("dohc-user-settings-");
     const path = join(root, USER_SETTINGS_FILE);
     const broken = { ...testAgent({ name: "Nova" }), hue: "green" };
     await writeFile(path, JSON.stringify({ ...DEFAULT_USER_SETTINGS, agents: { default: broken } }));
+    const before = await readFile(path, "utf8");
     const seen = await readUserSettingsFile(root);
     expect(seen.agentProblems?.map(({ id }) => id)).toEqual(["default"]);
     const added = withFirstAgent(seen.settings, (current) => current ?? testAgent({ name: "Atlas" }));
-    // Two saves made from the same settings add one agent.
-    await writeUserSettingsFile(root, added, seen.settings);
-    const saved = await writeUserSettingsFile(root, added, seen.settings);
-    expect(JSON.parse(await readFile(path, "utf8")).agents).toEqual({ default: broken, "default-2": testAgent({ name: "Atlas" }) });
-    expect(Object.keys(saved.settings.agents)).toEqual(["default-2"]);
-    expect(saved.agentProblems?.map(({ id }) => id)).toEqual(["default"]);
+    await expect(writeUserSettingsFile(root, added, seen.settings)).rejects.toThrow(
+      `dohc did not save settings. ${path} has an agent "default" that dohc can't use. Fix or remove it in the file, then try again.`,
+    );
+    expect(await readFile(path, "utf8")).toBe(before);
+    // Other settings still save around it.
+    await writeUserSettingsFile(root, { ...seen.settings, editor: { ...seen.settings.editor, fontSize: 16 } }, seen.settings);
+    expect(JSON.parse(await readFile(path, "utf8")).agents).toEqual({ default: broken });
   });
 
   it("refuses to save over a file dohc cannot use, and reset replaces it", async () => {
