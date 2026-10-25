@@ -203,6 +203,7 @@ import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
 import { Explorer } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import {
+  captureOrphanedDraft,
   loadLiveDraftRecovery,
   noteWorkspaceLabel,
   remapOrphanedDraftPaths,
@@ -427,6 +428,12 @@ function uniqueUntitledPath(
 function typedNewPage(draft: string): boolean {
   const { meta } = parseFrontmatter(draft);
   return displayFrontmatterValue(meta.title) !== "" || displayFrontmatterValue(meta.icon) !== "";
+}
+
+// A new page's text as its file would hold it: the title and icon, then the
+// body.
+function newPageText(page: { draft: string; body: string }): string {
+  return page.body === "" ? page.draft : `${page.draft}${page.draft ? "\n" : ""}${page.body}\n`;
 }
 
 type EditorFocus = {
@@ -3043,12 +3050,25 @@ export function DesktopWorkspaceShell(props: {
   // person leaves the title. Its tab then becomes its file's, and the file
   // keeps the page's host while that tab is open, so the editor that opens
   // under it takes the keystrokes the page held (NewPage).
-  const newPageDrafts = useRef(new Map<string, { draft: string; writing: Promise<string | null> | null }>());
+  const newPageDrafts = useRef(new Map<string, { draft: string; body: string; writing: Promise<string | null> | null }>());
   const [bornPages, setBornPages] = useState<ReadonlyMap<string, { id: string; handedOff: boolean }>>(() => new Map());
+  // A created page's title, icon and body wait here, by its file, until its
+  // editor takes them, with the text its file was created with. A page that
+  // unmounts first gets them back when it mounts again.
+  const bornDrafts = useRef(new Map<string, { draft: string; body: string; created: string }>());
+  // Text no editor took goes to recovery, where its file shows it, unless
+  // the file already holds it.
+  const retireBornDraft = useCallback((path: string) => {
+    const born = bornDrafts.current.get(path);
+    if (!born) return;
+    bornDrafts.current.delete(path);
+    const text = newPageText(born);
+    if (text !== born.created) captureOrphanedDraft(workspaceId, path, text);
+  }, [workspaceId]);
   const openNewPage = useCallback(
     (folder: string) => {
       const path = newPageTabPath(crypto.randomUUID(), folder);
-      newPageDrafts.current.set(path, { draft: "", writing: null });
+      newPageDrafts.current.set(path, { draft: "", body: "", writing: null });
       openVirtualTab(path);
     },
     [openVirtualTab],
@@ -3068,11 +3088,14 @@ export function DesktopWorkspaceShell(props: {
     for (const [path, page] of newPageDrafts.current) {
       if (!open.has(path) && !page.writing) newPageDrafts.current.delete(path);
     }
+    for (const path of [...bornDrafts.current.keys()]) {
+      if (!open.has(path)) retireBornDraft(path);
+    }
     const keepOpen = <T,>(pages: ReadonlyMap<string, T>) =>
       [...pages.keys()].every((path) => open.has(path)) ? pages : new Map([...pages].filter(([path]) => open.has(path)));
     setBornPages(keepOpen);
     setNewPageTitles(keepOpen);
-  }, [wb]);
+  }, [retireBornDraft, wb]);
   // Writes a new page's file, named from its title, and gives its path, or
   // null if it was not written. An opened file starts empty, so its live
   // session opens at once, and its editor takes the title and body from the
@@ -3088,11 +3111,11 @@ export function DesktopWorkspaceShell(props: {
       const title = displayFrontmatterValue(parseFrontmatter(pending.draft).meta.title);
       const stem = pageFileStem(title, bridge().platform);
       const occupied = new Set([...files.map((file) => file.path), ...folders].map((path) => path.toLowerCase()));
+      const initialText = open ? "" : pending.draft;
       const create = async (): Promise<string> => {
         for (;;) {
           const relativePath = nextPagePath(page.folder, stem, occupied);
           try {
-            const initialText = open ? "" : pending.draft;
             return (await bridge().createWorkspaceFile({ workspaceId, relativePath, initialText, exclusive: true })).path;
           } catch (error) {
             if (!isPathTaken(error)) throw error;
@@ -3105,6 +3128,7 @@ export function DesktopWorkspaceShell(props: {
           if (workspaceSelection.current !== selection) return null;
           newPageDrafts.current.delete(tabPath);
           if (open) {
+            bornDrafts.current.set(path, { draft: pending.draft, body: pending.body, created: initialText });
             setBornPages((pages) => new Map(pages).set(path, { id: page.id, handedOff: false }));
             mutateWb((state) =>
               replaceTab(ancestorDirs(path).reduce((next, dir) => setFolderExpanded(next, dir, true), state), tabPath, path));
@@ -3123,16 +3147,23 @@ export function DesktopWorkspaceShell(props: {
     },
     [files, folders, mutateWb, refreshFiles, reportShellError, workspaceId],
   );
-  const pageHandedOff = useCallback((path: string) => {
+  const pageHandedOff = useCallback((path: string, taken: boolean) => {
+    if (taken) bornDrafts.current.delete(path);
+    else retireBornDraft(path);
     setBornPages((pages) => {
       const page = pages.get(path);
       return page && !page.handedOff ? new Map(pages).set(path, { ...page, handedOff: true }) : pages;
     });
-  }, []);
+  }, [retireBornDraft]);
   // A typed page still in its title is written when the app quits, the
   // window closes or the workspace switches, as closing its tab writes it,
   // and its tab becomes its file's in case the quit stops. A page that
-  // cannot be written stops the quit, and its error says why.
+  // cannot be written stops the quit, and its error says why. What a created
+  // page holds that its editor has not taken goes to recovery.
+  const retireBornDrafts = useRef<() => void>(() => undefined);
+  retireBornDrafts.current = () => {
+    for (const path of [...bornDrafts.current.keys()]) retireBornDraft(path);
+  };
   const writeTypedPages = useRef<() => Promise<void>>(async () => undefined);
   writeTypedPages.current = async () => {
     const pages = [...newPageDrafts.current].filter(([, page]) => typedNewPage(page.draft)).map(([path]) => path);
@@ -3141,12 +3172,15 @@ export function DesktopWorkspaceShell(props: {
       const path = written[index];
       return path ? replaceTab(next, tabPath, path) : next;
     }, state));
+    retireBornDrafts.current();
     if (written.includes(null)) throw new Error("Could not create the page.");
   };
   useEffect(() => registerPendingEditorDraft(
-    () => [...newPageDrafts.current.values()].some((page) => typedNewPage(page.draft)),
+    () =>
+      [...newPageDrafts.current.values()].some((page) => typedNewPage(page.draft)) ||
+      [...bornDrafts.current.values()].some((page) => newPageText(page) !== page.created),
     () => writeTypedPages.current(),
-    () => undefined,
+    () => retireBornDrafts.current(),
   ), []);
 
   // Stable handlers (Tab/FileRow memo contract: a fresh closure here would
@@ -3216,7 +3250,9 @@ export function DesktopWorkspaceShell(props: {
           });
       };
       // A new page whose title was typed is written as it closes, and stays
-      // open if it cannot be. An untouched one leaves nothing.
+      // open if it cannot be. An untouched one leaves nothing. A page whose
+      // file was already being created for its editor has become that file's
+      // tab, which closes in its place.
       const typedPages = [...requested.keys()].filter((tab) => typedNewPage(newPageDrafts.current.get(tab.path)?.draft ?? ""));
       if (typedPages.length === 0) {
         closeAfterFlush();
@@ -3224,7 +3260,13 @@ export function DesktopWorkspaceShell(props: {
       }
       void Promise.all(typedPages.map((tab) => writeNewPage(tab.path, false))).then((written) => {
         typedPages.forEach((tab, index) => {
-          if (!written[index]) requested.delete(tab);
+          const groupId = requested.get(tab)!;
+          const tabs = wbRef.current.editorGroups.find((candidate) => candidate.id === groupId)?.tabs ?? [];
+          const path = written[index];
+          if (path && tabs.includes(tab)) return;
+          requested.delete(tab);
+          const fileTab = path ? tabs.find((candidate) => candidate.path === path) : undefined;
+          if (fileTab) requested.set(fileTab, groupId);
         });
         if (requested.size > 0) closeAfterFlush();
       });
@@ -6018,6 +6060,11 @@ export function DesktopWorkspaceShell(props: {
                 key={groupTab.id}
                 draft={newPageDrafts.current.get(groupTab.path)?.draft ?? ""}
                 onDraftChange={(draft) => newPageDraftChanged(groupTab.path, draft)}
+                body={newPageDrafts.current.get(groupTab.path)?.body ?? ""}
+                onBodyChange={(body) => {
+                  const pending = newPageDrafts.current.get(groupTab.path);
+                  if (pending) pending.body = body;
+                }}
                 onLeaveTitle={() => void writeNewPage(groupTab.path, true)}
                 file={null}
                 handedOff={false}
@@ -6094,12 +6141,20 @@ export function DesktopWorkspaceShell(props: {
                   return born && tabPath ? (
               <NewPage
                 key={born.id}
-                draft=""
-                onDraftChange={() => undefined}
+                draft={bornDrafts.current.get(tabPath)?.draft ?? ""}
+                onDraftChange={(draft) => {
+                  const page = bornDrafts.current.get(tabPath);
+                  if (page) page.draft = draft;
+                }}
+                body={bornDrafts.current.get(tabPath)?.body ?? ""}
+                onBodyChange={(body) => {
+                  const page = bornDrafts.current.get(tabPath);
+                  if (page) page.body = body;
+                }}
                 onLeaveTitle={() => undefined}
                 file={fileView}
                 handedOff={born.handedOff}
-                onHandedOff={() => pageHandedOff(tabPath)}
+                onHandedOff={(taken) => pageHandedOff(tabPath, taken)}
               />
             ) : fileView(undefined);
                 }

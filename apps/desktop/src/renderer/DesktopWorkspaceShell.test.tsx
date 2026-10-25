@@ -16,6 +16,7 @@ import { OPEN_EDITORS_DEFAULT_HEIGHT, OPEN_EDITORS_MIN_HEIGHT } from "./workbenc
 import { documentVersionKey } from "./documentVersionKey";
 import { basenameOf } from "./path";
 import { hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEditorDrafts";
+import { retainedOrphanedDraftPaths } from "./orphanedDrafts";
 import { deferred } from "../testing/deferred";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { DesktopWorkspaceShell, WORKSPACE, STORED_STATE, STORED_CHATS_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
@@ -1265,6 +1266,48 @@ describe("open editors", () => {
     });
     expect(hasPendingEditorDrafts()).toBe(false);
     await waitFor(() => expect(screen.queryByTestId("new-page")).toBeNull());
+  });
+
+  it("keeps what a new page holds when its tab is left before the editor takes it", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    // No file opens, so no editor ever takes the page.
+    bridge.readWorkspaceText.mockImplementation(() => deferred<never>().promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    await user.click(screen.getByLabelText("New file"));
+    await user.keyboard("Lisbon{Enter}Day one");
+    await waitFor(() => expect(bridge.createWorkspaceFile).toHaveBeenCalledTimes(1));
+    expect(hasPendingEditorDrafts()).toBe(true);
+
+    await user.click(screen.getByText("a.md"));
+    await waitFor(() => expect(screen.queryByTestId("new-page")).toBeNull());
+    await user.click(screen.getByRole("tab", { name: /Lisbon/ }));
+    const body = await screen.findByLabelText("Page body");
+    expect((body as HTMLTextAreaElement).value).toBe("Day one");
+
+    // Quitting first puts it in recovery, by its file.
+    await expect(settlePendingEditorDrafts()).resolves.toBe(true);
+    expect(retainedOrphanedDraftPaths(WORKSPACE.workspaceId)).toEqual(["Lisbon.md"]);
+  });
+
+  it("closes a new page whose file is being created, and keeps what was typed", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const created = deferred<{ path: string }>();
+    bridge.createWorkspaceFile.mockImplementationOnce(() => created.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    await user.click(screen.getByLabelText("New file"));
+    await user.keyboard("Lisbon{Enter}Day one");
+    await user.click(screen.getAllByLabelText("Close Lisbon")[0]!);
+    await act(async () => created.resolve({ path: "Lisbon.md" }));
+
+    await waitFor(() => expect(screen.queryByRole("tab", { name: /Lisbon/ })).toBeNull());
+    expect(screen.queryByTestId("new-page")).toBeNull();
+    expect(retainedOrphanedDraftPaths(WORKSPACE.workspaceId)).toEqual(["Lisbon.md"]);
   });
 
   it("collapses all expanded folders from the files title action", async () => {

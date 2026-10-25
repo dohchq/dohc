@@ -13,18 +13,23 @@ export type NewPageFile = (onEditorReady: ((editor: PageEditor | null) => void) 
 // When the file's editor is ready, the page gives it the title, the icon and
 // the body, caret included, and steps aside, all in one task, so no
 // keystroke lands between them. A file that opens with no editor, read-only
-// or unreadable, shows itself at once.
+// or unreadable, shows itself at once. The shell keeps what the page holds
+// until an editor takes it.
 export function NewPage(props: {
   // The title and icon so far, as frontmatter.
   draft: string;
   onDraftChange: (draft: string) => void;
+  // What was typed in the body, from an earlier mount.
+  body: string;
+  onBodyChange: (body: string) => void;
   // Enter or Tab from the title, or a click into the body.
   onLeaveTitle: () => void;
   // The page's file, once it exists.
   file: NewPageFile | null;
   // An earlier mount of this page already handed its body over.
   handedOff: boolean;
-  onHandedOff: () => void;
+  // Whether the file's editor took the title and body.
+  onHandedOff: (taken: boolean) => void;
 }) {
   const [draft, setDraft] = useState(props.draft);
   const draftRef = useRef(draft);
@@ -61,7 +66,7 @@ export function NewPage(props: {
       if (focused) page.editor.focus(text ? undefined : "start");
     }
     setHandedOff(true);
-    onHandedOffRef.current();
+    onHandedOffRef.current(page !== null);
   }, []);
 
   const focusBodyEnd = () => {
@@ -118,6 +123,8 @@ export function NewPage(props: {
               aria-label="Page body"
               rows={1}
               placeholder="Type '/' for commands"
+              defaultValue={props.body}
+              onChange={(event) => props.onBodyChange(event.target.value)}
               onFocus={props.onLeaveTitle}
               onCompositionStart={() => {
                 composing.current = true;

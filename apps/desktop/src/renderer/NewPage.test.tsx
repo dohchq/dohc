@@ -19,9 +19,10 @@ function pageEditor() {
 }
 
 // The shell renders the page's file under it once the file exists.
-function renderPage() {
+function renderPage(held: { draft: string; body: string } = { draft: "", body: "" }) {
   const onLeaveTitle = vi.fn();
   const onHandedOff = vi.fn();
+  const onBodyChange = vi.fn();
   let ready: ((editor: PageEditor | null) => void) | undefined;
   const file: NewPageFile = (onEditorReady) => {
     ready = onEditorReady;
@@ -29,8 +30,10 @@ function renderPage() {
   };
   const page = (withFile: boolean) => (
     <NewPage
-      draft=""
+      draft={held.draft}
       onDraftChange={() => undefined}
+      body={held.body}
+      onBodyChange={onBodyChange}
       onLeaveTitle={onLeaveTitle}
       file={withFile ? file : null}
       handedOff={false}
@@ -41,6 +44,7 @@ function renderPage() {
   return {
     onLeaveTitle,
     onHandedOff,
+    onBodyChange,
     fileExists: () => view.rerender(page(true)),
     editorReady: (editor: PageEditor | null) => act(() => ready?.(editor)),
   };
@@ -82,7 +86,7 @@ it("hands the title, the body and its caret to the editor at once, and steps asi
   expect(live.editor.focus).toHaveBeenCalledWith(undefined);
   expect(screen.queryByTestId("new-page")).toBeNull();
   expect(screen.getByTestId("file-view").parentElement!.hasAttribute("inert")).toBe(false);
-  expect(page.onHandedOff).toHaveBeenCalledTimes(1);
+  expect(page.onHandedOff.mock.calls).toEqual([[true]]);
 
   // A later editor of the same file is the file's own.
   page.editorReady(pageEditor());
@@ -108,7 +112,23 @@ it("shows a file that opens with no editor", async () => {
   page.editorReady(null);
   expect(screen.queryByTestId("new-page")).toBeNull();
   expect(screen.getByTestId("file-view").parentElement!.hasAttribute("inert")).toBe(false);
-  expect(page.onHandedOff).toHaveBeenCalledTimes(1);
+  expect(page.onHandedOff.mock.calls).toEqual([[false]]);
+});
+
+// The shell keeps what the page holds, so a page that unmounts before its
+// editor is ready gets it back when it mounts again.
+it("reports the body as it is typed, and starts from the body it held", async () => {
+  const user = userEvent.setup();
+  const page = renderPage({ draft: "---\ntitle: Lisbon\n---\n", body: "Day one" });
+  expect((screen.getByLabelText("Page title") as HTMLTextAreaElement).value).toBe("Lisbon");
+  await user.click(screen.getByLabelText("Page body"));
+  await user.keyboard("{End}!");
+  expect(page.onBodyChange).toHaveBeenLastCalledWith("Day one!");
+
+  page.fileExists();
+  const live = pageEditor();
+  page.editorReady(live);
+  expect(live.editor.insertTypedText).toHaveBeenCalledWith("Day one!", "Day one!".length);
 });
 
 it("waits for an input method to finish before the editor takes the body", async () => {

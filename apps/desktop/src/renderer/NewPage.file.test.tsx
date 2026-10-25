@@ -47,6 +47,8 @@ function renderNewPage() {
     <NewPage
       draft=""
       onDraftChange={() => undefined}
+      body=""
+      onBodyChange={() => undefined}
       onLeaveTitle={() => undefined}
       file={withFile ? (onEditorReady) => <FileInspector workspaceId="ws-1" path="Lisbon.md" onEditorReady={onEditorReady} /> : null}
       handedOff={false}
