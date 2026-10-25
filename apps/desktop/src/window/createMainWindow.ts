@@ -308,6 +308,16 @@ export function createMainWindow(options?: {
     options?.afterRendererCrashLoop,
   );
 
+  // Native reloads bypass the reload IPC. Retire the outgoing document only
+  // after navigation commits, so a cancelled navigation keeps its session.
+  window.webContents.on("did-navigate", async () => {
+    try {
+      await options?.beforeRendererReload?.(window.webContents);
+    } catch (error) {
+      console.error("[desktop] renderer navigation cleanup failed:", error);
+    }
+  });
+
   // window.open is a pure deny with NO side effects: renderer content (file
   // views today, app iframes in 7b) must never reach the OS browser except
   // through the explicit, audited openExternalUrl IPC.
