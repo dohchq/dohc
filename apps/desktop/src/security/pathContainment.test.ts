@@ -1,15 +1,16 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, posix, sep } from "node:path";
+import { join, posix, sep, win32 } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { isInside, isInsideOrUnknown, isInsideOrUnknownSync, type ContainmentStat } from "./pathContainment";
+import { folderIdentities, shortNamePairs } from "../testing/containmentCases";
 
 const root = join(process.cwd(), "containment-root");
 
 describe.each(["sync", "async"] as const)("isInsideOrUnknown (%s)", (mode) => {
   const check = (parent: string, child: string, statPath: ContainmentStat) => mode === "sync"
     ? isInsideOrUnknownSync(parent, child, statPath, posix)
-    : isInsideOrUnknown(parent, child, async (value, options) => statPath(value, options), posix);
+    : isInsideOrUnknown(parent, child, async (value, options) => statPath(value.replaceAll("\\", "/"), options));
 
   it("accepts exact containment without stat", async () => {
     const statPath = vi.fn<ContainmentStat>();
@@ -53,7 +54,7 @@ describe.each(["sync", "async"] as const)("isInsideOrUnknown (%s)", (mode) => {
     expect(statPath).toHaveBeenCalledWith("/work/STRASSE/A", { bigint: true });
   });
 
-  it("recognizes a case alias of the same folder on disk", async (context) => {
+  it("a differently capitalized path to the same folder is inside", async (context) => {
     const disk = mkdtempSync(join(tmpdir(), "dohc-containment-case-"));
     try {
       const parent = join(disk, "Work");
@@ -64,6 +65,31 @@ describe.each(["sync", "async"] as const)("isInsideOrUnknown (%s)", (mode) => {
       expect(statSync(parent, { bigint: true }).ino).toBe(statSync(join(disk, "work"), { bigint: true }).ino);
     } finally { rmSync(disk, { recursive: true, force: true }); }
   });
+
+  describe.each(shortNamePairs(root, "LongFolderName"))("$name", ({ parent, child }) => {
+    it.each(folderIdentities)("decides containment for $name", async ({ inside, fails, same }) => {
+      const statPath = vi.fn<ContainmentStat>((value) => {
+        if (fails) throw new Error("identity unavailable");
+        return { dev: 2n, ino: value === parent || same ? 3n : 4n };
+      });
+      const result = mode === "sync"
+        ? isInsideOrUnknownSync(parent, join(child, "file"), statPath)
+        : await isInsideOrUnknown(parent, join(child, "file"), async (value, options) => statPath(value, options));
+      expect(result).toBe(inside);
+      expect(statPath).toHaveBeenCalledWith(parent, { bigint: true });
+      if (!fails) expect(statPath).toHaveBeenCalledWith(child, { bigint: true });
+    });
+  });
+
+  if (process.platform === "win32" || mode === "sync") {
+    it.each([false, true])("checks short-name roots by identity (reverse: %s)", async (reverse) => {
+      const roots = ["\\\\host\\LongFolderName\\", "\\\\host\\LONGFO~1\\"];
+      const parent = roots[reverse ? 1 : 0]!, child = win32.join(roots[reverse ? 0 : 1]!, "file");
+      const statPath = vi.fn<ContainmentStat>(() => ({ dev: 2n, ino: 3n }));
+      expect(await (mode === "sync" ? isInsideOrUnknownSync(parent, child, statPath, win32)
+        : isInsideOrUnknown(parent, child, async (value, options) => statPath(value, options)))).toBe(true);
+    });
+  }
 });
 
 describe("isInside", () => {

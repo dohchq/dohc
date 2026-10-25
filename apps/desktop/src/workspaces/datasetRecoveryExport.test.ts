@@ -1,9 +1,10 @@
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import * as fsPromises from "node:fs/promises";
 import { afterEach, expect, it, vi } from "vitest";
 import { DATASET_RECOVERY_EXTENSION, writeDatasetRecoveryExport } from "./datasetRecoveryExport";
+import { folderIdentities, shortNamePairs } from "../testing/containmentCases";
 
 vi.mock("node:fs/promises", async (importOriginal) => ({ ...await importOriginal<typeof import("node:fs/promises")>() }));
 
@@ -12,7 +13,7 @@ afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { rec
 async function fixture() { const root = await mkdtemp(join(tmpdir(), "dohc-recovery-export-")); roots.push(root); return root; }
 async function* chunks(...values: string[]) { for (const value of values) yield Buffer.from(value); }
 
-it("refuses case-aliased Linux destinations before opening a temporary archive", async (context) => {
+it("differently capitalized folders keep their export destination result", async (context) => {
   const root = await fixture(), work = join(root, "Work"), lookupWork = join(root, "work");
   await mkdir(work);
   if (!(await fsPromises.stat(lookupWork).catch(() => null))) context.skip();
@@ -31,6 +32,50 @@ it("refuses case-aliased Linux destinations before opening a temporary archive",
     await expect(writeDatasetRecoveryExport({ workspaceRoots: [work], path, stream: chunks("private"), maxBytes: 1024,
       signal: new AbortController().signal, authorize() {} })).resolves.toEqual({ savedPath: path, byteLength: 7 });
   } finally { openSpy.mockRestore(); realpathSpy.mockRestore(); }
+});
+
+for (const { name, parent, child } of shortNamePairs(join(process.cwd(), "containment-folders"), "LongFolderName")) {
+  it.each(folderIdentities)(`${name} keeps the export destination result for $name`, async ({ inside, fails, same }) => {
+    const root = await fixture(), registered = join(root, "registered"), path = join(root, "selection", "archive.dohc-recovery");
+    await mkdir(dirname(path));
+    const identity = await fsPromises.stat(root, { bigint: true }), other = await fsPromises.stat(dirname(path), { bigint: true });
+    const originalRealpath = fsPromises.realpath;
+    const realpathSpy = vi.spyOn(fsPromises, "realpath").mockImplementation(async (value) => {
+      if (String(value) === registered) return parent;
+      if (String(value) === dirname(path)) return child;
+      return originalRealpath(value);
+    });
+    const statSpy = vi.spyOn(fsPromises, "stat").mockImplementation(async (value) => {
+      if (fails) throw new Error("identity unavailable");
+      return String(value) === parent || same ? identity : other;
+    });
+    const openSpy = vi.spyOn(fsPromises, "open").mockRejectedValue(new Error("destination ready"));
+    try {
+      await expect(writeDatasetRecoveryExport({ workspaceRoots: [registered], path, stream: chunks("data"), maxBytes: 1024,
+        signal: new AbortController().signal, authorize() {} })).rejects.toThrow(inside ? "outside all workspaces" : "destination ready");
+      expect(openSpy).toHaveBeenCalledTimes(inside ? 0 : 1);
+      expect(statSpy).toHaveBeenCalled();
+    } finally { openSpy.mockRestore(); statSpy.mockRestore(); realpathSpy.mockRestore(); }
+  });
+}
+
+it("stored spelling decides an export destination without stat", async () => {
+  const root = await fixture(), work = join(root, "Work");
+  await mkdir(work);
+  const originalRealpath = fsPromises.realpath;
+  const realpathSpy = vi.spyOn(fsPromises, "realpath").mockImplementation(async (path) => {
+    if (String(path) === join(root, "work")) return work;
+    return originalRealpath(path);
+  });
+  const statSpy = vi.spyOn(fsPromises, "stat");
+  try {
+    await expect(writeDatasetRecoveryExport({ workspaceRoots: [work], path: join(root, "work", "archive.dohc-recovery"), stream: chunks("data"),
+      maxBytes: 1024, signal: new AbortController().signal, authorize() {} })).rejects.toThrow("outside all workspaces");
+    const path = join(root, "outside.dohc-recovery");
+    await expect(writeDatasetRecoveryExport({ workspaceRoots: [work], path, stream: chunks("data"), maxBytes: 1024,
+      signal: new AbortController().signal, authorize() {} })).resolves.toMatchObject({ byteLength: 4 });
+    expect(statSpy).not.toHaveBeenCalled();
+  } finally { statSpy.mockRestore(); realpathSpy.mockRestore(); }
 });
 
 it("streams a private recovery archive through a synced temp file and publishes atomically", async () => {

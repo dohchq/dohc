@@ -1,5 +1,5 @@
 import { posix, win32 } from "node:path";
-import { isInsideOrUnknownSync, type ContainmentStat } from "../security/pathContainment";
+import { isInside, isInsideOrUnknownSync, type ContainmentStat } from "../security/pathContainment";
 import { AGENT_TOOLS, type AgentToolDetection, type AgentToolId } from "./agentToolCatalog";
 
 export interface ProbeOutput { exitCode: number | null; stdout: string; stderr: string }
@@ -81,16 +81,16 @@ export async function probeAgentTools(deps: AgentProbeDependencies): Promise<Age
   deps.signal.throwIfAborted();
   const path = deps.platform === "win32" ? win32 : posix;
   const canonicalWorkspace = deps.realPath(deps.workspaceRoot);
-  const insideWorkspace = (candidate: string, root: string): boolean => {
-    return isInsideOrUnknownSync(root, candidate, deps.stat, path);
-  };
+  const roots = [canonicalWorkspace ?? deps.workspaceRoot, deps.workspaceRoot];
+  // Exact matches first, so stored spellings never need a stat.
+  const exactlyInside = (candidate: string) => roots.some((root) => isInside(root, candidate, path));
+  const mayBeInside = (candidate: string) => roots.some((root) => isInsideOrUnknownSync(root, candidate, deps.stat, path));
   const installedExecutable = (candidate: string): boolean => {
-    if (!canonicalWorkspace || !path.isAbsolute(canonicalWorkspace)
-      || insideWorkspace(candidate, deps.workspaceRoot) || insideWorkspace(candidate, canonicalWorkspace)) return false;
+    if (!canonicalWorkspace || !path.isAbsolute(canonicalWorkspace) || exactlyInside(candidate)) return false;
     if (!deps.isExecutable(candidate)) return false;
     const canonical = deps.realPath(candidate);
     return canonical !== null && path.isAbsolute(canonical)
-      && !insideWorkspace(canonical, deps.workspaceRoot) && !insideWorkspace(canonical, canonicalWorkspace);
+      && !exactlyInside(canonical) && !mayBeInside(candidate) && !mayBeInside(canonical);
   };
   // Join every started probe before reporting cancellation, so no probe outlives detection.
   const probes = await Promise.allSettled(AGENT_TOOLS.map(async (tool): Promise<AgentToolDetection> => {
