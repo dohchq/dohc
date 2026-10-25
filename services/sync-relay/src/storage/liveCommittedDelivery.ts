@@ -817,6 +817,10 @@ export class LiveCommittedDeliveryStore {
         if (this.#storage.db.prepare(`SELECT 1 FROM ${LIVE_DELIVERY_OWNER_HISTORY} WHERE ${WHERE_DOCUMENT} AND host_id=?`).get(...documentParams(document),host.hostId)) {
           throw new Error("Committed delivery follows a retired owner adoption.");
         }
+        // A service activation's lineage is delivered only through its owner adoption, and is funded only for that.
+        if (this.#storage.db.prepare(`SELECT 1 FROM ${SERVICE_ACTIVATIONS} WHERE ${WHERE_DOCUMENT} LIMIT 1`).get(...documentParams(document))) {
+          throw new Error("Committed delivery cannot bootstrap a service activation's lineage.");
+        }
         const values = [
           baseline.bootstrapId,
           baseline.bootstrapMomentId,

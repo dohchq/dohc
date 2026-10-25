@@ -1770,6 +1770,52 @@ it("registers a host where a successor prepared on another retired never-adopted
   }finally{f.close()}
 })
 
+// Proves: a completed successor, and then a retiring one, keeps its retired
+// predecessor's boundary as the delivery floor on a host with no owner row. A
+// transition to B funds only the adoption and the suffix above the boundary,
+// and B registers with nothing reserved through it in both states.
+it("registers a host a transition funded while a completed successor adopted on another, through the successor's Stop",()=>{
+  const f=fixture();try{
+    const {edit,boundary}=retirePredecessor(f)
+    const terminal=boundary.terminalReceipt.journalCursor,suffix=journalCursors(f).filter(cursor=>cursor>terminal)
+    expect(suffix).toEqual([edit.journalCursor])
+    const adopted=adoptSuccessor(f,boundary);adopted.apply();adopted.complete()
+    expect(completed(f)).toBe(1)
+    const ledger=unaccounted(f)
+    const b=transitionHost(f,host,'device','other-b')
+    expect(reservedOn(f,'other-b')).toEqual([0,...suffix])
+    expect(f.storage.registerLiveHost({...b,updatedAtMs:50,guard(){}}).ok).toBe(true)
+    expect(reservedOn(f,'other-b')).toEqual([0,...suffix])
+    expect(unaccounted(f)).toBe(ledger)
+    stopDocument(f,60)
+    expect(retirement(f.storage)).toMatchObject({activationId:SUCCESSOR,acceptedThrough:edit.journalCursor})
+    expect(f.storage.registerLiveHost({...b,updatedAtMs:70,guard(){}}).ok).toBe(true)
+    expect(reservedOn(f,'other-b')).toEqual([0,...suffix])
+    expect(reservedOn(f,'service')).toEqual([])
+    expect(unaccounted(f)).toBe(ledger)
+  }finally{f.close()}
+})
+
+// Proves: a plain committed delivery never bootstraps a lineage that has a
+// service activation. On a host a transition funded only above the retired
+// boundary, it refuses before it takes the adoption reservation there.
+it("refuses a plain committed delivery's bootstrap of a service activation's lineage before it takes the adoption reservation",()=>{
+  const f=fixture();try{
+    const {boundary}=retirePredecessor(f)
+    const suffix=journalCursors(f).filter(cursor=>cursor>boundary.terminalReceipt.journalCursor)
+    prepareSuccessor(f)
+    const b=transitionHost(f,host,'device','other-b')
+    expect(f.storage.registerLiveHost({...b,updatedAtMs:50,guard(){}}).ok).toBe(true)
+    const ledger=unaccounted(f),usage=usageOf(f)
+    const store=f.storage.createLiveCommittedDeliveryStore(f.history)
+    expect(()=>store.open({host:b,document:f.document})).toThrow("Committed delivery cannot bootstrap a service activation's lineage.")
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_delivery_bootstraps').all()).toEqual([])
+    expect(reservedOn(f,'other-b')).toEqual([0,...suffix])
+    expect(usageOf(f)).toBe(usage)
+    expect(unaccounted(f)).toBe(ledger)
+  }finally{f.close()}
+})
+
 // Proves: an activation that adopted on A never retires as never-adopted on
 // the host its configuration moved to, whatever that host's engine releases.
 // The obligation stays open, and A's provisioning keeps working. Back on A it
