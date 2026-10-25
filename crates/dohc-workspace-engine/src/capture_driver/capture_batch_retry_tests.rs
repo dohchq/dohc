@@ -23,6 +23,12 @@ impl Fixture {
     }
 
     async fn with_files(files: &[(&str, &[u8])]) -> Self {
+        let fixture = Self::unblocked(files).await;
+        fixture.pin_busy();
+        fixture
+    }
+
+    async fn unblocked(files: &[(&str, &[u8])]) -> Self {
         let scratch = ScratchDir::new().unwrap();
         let root = scratch.path();
         for (path, bytes) in files {
@@ -46,19 +52,6 @@ impl Fixture {
             )
             .unwrap();
         let reader = rusqlite::Connection::open(&db).unwrap();
-        reader
-            .execute_batch("BEGIN; SELECT count(*) FROM capture_retry_load")
-            .unwrap();
-        writer
-            .execute_batch("INSERT INTO capture_retry_load VALUES(zeroblob(28*1024*1024))")
-            .unwrap();
-        let frames: i64 = writer
-            .query_row("PRAGMA wal_checkpoint(NOOP)", [], |row| row.get(1))
-            .unwrap();
-        assert!(
-            frames > 6000,
-            "the real write gate must refuse this fixture"
-        );
         Self {
             scratch,
             supervisor,
@@ -68,6 +61,25 @@ impl Fixture {
             reader: Arc::new(Mutex::new(Some(reader))),
             writer,
         }
+    }
+
+    fn pin_busy(&self) {
+        let reader = self.reader.lock().unwrap();
+        let reader = reader.as_ref().unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT count(*) FROM capture_retry_load")
+            .unwrap();
+        self.writer
+            .execute_batch("INSERT INTO capture_retry_load VALUES(zeroblob(28*1024*1024))")
+            .unwrap();
+        let frames: i64 = self
+            .writer
+            .query_row("PRAGMA wal_checkpoint(NOOP)", [], |row| row.get(1))
+            .unwrap();
+        assert!(
+            frames > 6000,
+            "the real write gate must refuse this fixture"
+        );
     }
 
     fn context<'a>(
@@ -116,6 +128,115 @@ impl Fixture {
         drop(self.actor);
         self.supervisor.close(&self.db).unwrap();
     }
+}
+
+async fn apply_releasing_busy_reader(fixture: &Fixture) -> (bool, bool, bool, usize) {
+    let reader = Arc::clone(&fixture.reader);
+    let waits = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&waits);
+    let probe = CaptureApplyProbe {
+        capture_batch_wait: Some(Arc::new(move |_| {
+            if observed.fetch_add(1, Ordering::Relaxed) == 0 {
+                reader
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .execute_batch("ROLLBACK")
+                    .unwrap();
+            }
+        })),
+        ..Default::default()
+    };
+    let leases = LeaseRegistry::new();
+    let status = Arc::new(DriverStatus::default());
+    let self_writes = SelfWriteSuppression::default();
+    let outcome = apply_bound_run_with_handle(
+        fixture.context(&leases, &status, &self_writes, Some(probe)),
+        &fixture.files.handle(),
+        fixture.run().await,
+        &CancellationToken::new(),
+    )
+    .await;
+    (
+        outcome.clean,
+        status.degraded(),
+        fixture.files.handle().stats().await.unwrap().dirty,
+        waits.load(Ordering::Relaxed),
+    )
+}
+
+fn assert_busy_apply_settled((clean, degraded, dirty, waits): (bool, bool, bool, usize)) {
+    assert!(clean, "the first apply must recover from FileLocked");
+    assert!(!degraded);
+    assert!(
+        waits > 0,
+        "the real busy gate must refuse the first attempt"
+    );
+    assert!(!dirty, "the first receipt must settle the path");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn large_text_first_apply_retries_busy_ingest_without_degrading() {
+    let text = "a".repeat(4 * 1024 * 1024 + 1);
+    let fixture = Fixture::with_files(&[("large.csv", text.as_bytes())]).await;
+    let result = apply_releasing_busy_reader(&fixture).await;
+    let mut store = EngineStore::open(&fixture.db, 2).unwrap();
+    let head = VersionedTextStore::new(&mut store)
+        .read_text(WORKSPACE_ID, "main", "large.csv")
+        .unwrap();
+    drop(store);
+    fixture.close().await;
+    assert_busy_apply_settled(result);
+    assert_eq!(head.unwrap().text, text);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secret_first_apply_retries_busy_ingest_without_degrading() {
+    let fixture = Fixture::with_files(&[(".env", b"TOKEN=alpha")]).await;
+    let result = apply_releasing_busy_reader(&fixture).await;
+    let heads = secret_heads(&fixture);
+    fixture.close().await;
+    assert_busy_apply_settled(result);
+    assert_eq!(heads, 1);
+}
+
+fn secret_heads(fixture: &Fixture) -> i64 {
+    let observer = rusqlite::Connection::open(&fixture.db).unwrap();
+    observer
+        .query_row(
+            "SELECT count(*) FROM secret_files WHERE workspace_id=?1 AND path='.env'",
+            [WORKSPACE_ID],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secret_first_apply_retries_busy_removal_without_degrading() {
+    let fixture = Fixture::unblocked(&[(".env", b"TOKEN=alpha")]).await;
+    let leases = LeaseRegistry::new();
+    let status = Arc::new(DriverStatus::default());
+    let self_writes = SelfWriteSuppression::default();
+    assert!(
+        apply_bound_run_with_handle(
+            fixture.context(&leases, &status, &self_writes, None),
+            &fixture.files.handle(),
+            fixture.run().await,
+            &CancellationToken::new(),
+        )
+        .await
+        .clean
+    );
+    assert_eq!(secret_heads(&fixture), 1);
+    std::fs::remove_file(fixture.scratch.path().join(".env")).unwrap();
+    fixture.files.handle().request_rescan();
+    fixture.pin_busy();
+    let result = apply_releasing_busy_reader(&fixture).await;
+    let heads = secret_heads(&fixture);
+    fixture.close().await;
+    assert_busy_apply_settled(result);
+    assert_eq!(heads, 0);
 }
 
 async fn binary_first_apply_recovers_from_store_busy(bytes: &[u8], expected_heads: i64) {
