@@ -70,7 +70,7 @@ export function ChatAvatar(props: {
         aria-hidden
         data-author-kind="link"
         title={props.name}
-        className={`inline-grid shrink-0 place-items-center rounded-full border border-dashed border-subtle bg-bg font-mono font-semibold text-muted ${
+        className={`inline-grid shrink-0 place-items-center rounded-full border border-dashed border-subtle bg-bg font-semibold text-muted ${
           SIZES[size]
         } ${props.className ?? ""}`}
       >
@@ -95,7 +95,7 @@ export function ChatAvatar(props: {
     <span
       aria-hidden
       title={props.name}
-      className={`inline-grid shrink-0 place-items-center border font-mono font-semibold ${
+      className={`inline-grid shrink-0 place-items-center border font-semibold ${
         SIZES[size]
       } ${
         agent
