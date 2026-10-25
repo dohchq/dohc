@@ -8,11 +8,13 @@ import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import type { RegistryEntry } from "./registryStore";
 import { shareViewIsPresent } from "./shareViewMarker";
 
-// Files from other people open as a copy with the system's download mark, so
-// the system checks them the way it checks a download. The copies live in the
-// profile folder, which only one running dohc uses. Each copy gets a fresh
-// folder inside this run's folder. Quit removes this run's folder, and the
-// next start removes what earlier runs left.
+// Files from other people open with the system's download mark, so the system
+// checks them the way it checks a download. A file the person can edit under
+// the share's grant is marked where it is. Every other one opens as a marked,
+// read-only copy, so the other app asks before saving it anywhere. The copies
+// live in the profile folder, which only one running dohc uses. Each copy gets
+// a fresh folder inside this run's folder. Quit removes this run's folder, and
+// the next start removes what earlier runs left.
 
 export interface MarkedCopies {
   /** This run's folder, inside the profile's `opened` folder. Only copies live here. */
@@ -61,29 +63,42 @@ export async function markAsDownloaded(path: string, platform: NodeJS.Platform):
   // Linux has no download mark.
 }
 
-type SharedPlaces = Pick<RegistryEntry, "rootPath" | "shareView">;
+type SharedPlaces = Pick<RegistryEntry, "workspaceId" | "rootPath" | "shareView">;
 
 /**
- * Whether a file came from another person: every file in a standalone shared
- * view, and every file whose real path is in a shared view's real root or a
- * workspace's real shared-with-me. Every registered workspace counts, because
- * one can sit inside another. When dohc cannot tell, it did.
+ * Where a file came from. "own": the person's own work. "shared view": the
+ * current standalone shared view, and no other shared place. "other": the
+ * real shared-with-me of the current workspace or of any registered workspace,
+ * or the real root of another registered shared view, since one can sit inside
+ * another. When dohc cannot tell for the current workspace, it is "other".
+ *
+ * Registered roots are saved as real paths, so only entries whose saved place
+ * could hold the file are resolved. One that fails to resolve holds nothing.
  */
-export async function cameFromAnotherPerson(
+export async function fileOrigin(
   workspace: SharedPlaces,
   registered: readonly SharedPlaces[],
   realTarget: string,
-): Promise<boolean> {
-  if (shareViewIsPresent(workspace.shareView)) return true;
-  const answers = await Promise.all([workspace, ...registered].map(async (entry) => {
-    const shared = shareViewIsPresent(entry.shareView) ? entry.rootPath : join(entry.rootPath, SHARED_WITH_ME_FOLDER);
+  resolve: (path: string) => Promise<string> = realpath,
+): Promise<"own" | "shared view" | "other"> {
+  const target = fileSystemCase(realTarget);
+  const holds = async (place: string, unclear: boolean) => {
     try {
-      return isInside(fileSystemCase(await realpath(shared)), fileSystemCase(realTarget));
+      return isInside(fileSystemCase(await resolve(place)), target);
     } catch (error) {
-      return !(error instanceof Error && "code" in error && error.code === "ENOENT");
+      return error instanceof Error && "code" in error && error.code === "ENOENT" ? false : unclear;
     }
-  }));
-  return answers.includes(true);
+  };
+  const elsewhere = registered
+    .filter((entry) => entry.workspaceId !== workspace.workspaceId)
+    .map((entry) => shareViewIsPresent(entry.shareView) ? entry.rootPath : join(entry.rootPath, SHARED_WITH_ME_FOLDER))
+    .filter((place) => isInside(fileSystemCase(place), target));
+  const answers = await Promise.all([
+    holds(join(workspace.rootPath, SHARED_WITH_ME_FOLDER), true),
+    ...elsewhere.map((place) => holds(place, false)),
+  ]);
+  if (answers.includes(true)) return "other";
+  return shareViewIsPresent(workspace.shareView) ? "shared view" : "own";
 }
 
 // Windows and macOS's default volumes ignore case. Folding on a volume that
@@ -92,7 +107,16 @@ function fileSystemCase(path: string): string {
   return process.platform === "win32" || process.platform === "darwin" ? path.toLowerCase() : path;
 }
 
-/** Copies the file into a fresh folder and marks the copy. Opens nothing; throws when any step fails. */
+/** Marks a file the person can edit where it is. Opens nothing; throws when the mark fails. */
+export async function markInPlace(copies: MarkedCopies, path: string): Promise<void> {
+  try {
+    await copies.mark(path);
+  } catch (error) {
+    throw new MarkedCopyError(error);
+  }
+}
+
+/** Copies the file into a fresh folder, marks the copy and makes it read-only. Opens nothing; throws when any step fails. */
 export async function markedCopyOf(copies: MarkedCopies, source: string): Promise<string> {
   let folder: string | undefined;
   try {
@@ -103,7 +127,9 @@ export async function markedCopyOf(copies: MarkedCopies, source: string): Promis
     folder = await mkdtemp(join(copies.folder, "open-"));
     const target = join(folder, basename(source));
     await copies.copy(source, target);
+    // Mark first: neither system writes the mark to a read-only file.
     await copies.mark(target);
+    await chmod(target, 0o444);
     return target;
   } catch (error) {
     if (folder) await rm(folder, { recursive: true, force: true }).catch(() => undefined);

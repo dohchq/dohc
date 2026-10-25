@@ -45,7 +45,7 @@ import {
   ZIP_TOO_LARGE_REFUSAL,
 } from "../workspaces/workspaceFiles";
 import { readWorkspaceListingVisibility } from "../workspaces/workspaceListingVisibility";
-import { cameFromAnotherPerson, markedCopyOf, type MarkedCopies } from "../workspaces/markedCopies";
+import { fileOrigin, markInPlace, markedCopyOf, type MarkedCopies } from "../workspaces/markedCopies";
 import { collectOwnedWorkspaceZipEntries } from "../workspaces/ownedWorkspaceZip";
 import { buildStoreZip, type ZipEntry } from "../workspaces/zipWriter";
 
@@ -97,8 +97,8 @@ export function createWorkspaceFilesIpc<
     path: string,
   ): Promise<ReadWorkspaceTextResult>;
   assertWritableWorkspace(workspace: Workspace): void;
-  shareViewFiles: Pick<ShareViewFiles, "list" | "read" | "change">;
-  listWorkspaces(): Pick<RegistryEntry, "rootPath" | "shareView">[];
+  shareViewFiles: Pick<ShareViewFiles, "list" | "read" | "change" | "mayEditExternally">;
+  listWorkspaces(): Pick<RegistryEntry, "workspaceId" | "rootPath" | "shareView">[];
   ensureOwnedProjectionCurrent(workspace: Workspace, path: string): Promise<void>;
   renderHtmlToPdf(html: string): Promise<Uint8Array>;
   notifyRenderer(input: { workspaceId: string }): void;
@@ -607,19 +607,28 @@ export function createWorkspaceFilesIpc<
       // Resolve+contain first: only a real file inside the workspace can be
       // handed to the OS opener — never an arbitrary path or URL. window.open
       // remains fully denied; this is the only sanctioned external-open path.
-      // A file from another person reaches the opener only as a marked copy.
+      // A file from another person reaches the opener marked: in place when
+      // the person can edit it under the share's grant, otherwise as a
+      // read-only copy.
       await ensureOwnedProjectionCurrent(
         operation.workspace,
         input.relativePath,
       );
-      const { realTarget } = await resolveWorkspaceFile(
+      const { realTarget, resolvedPath } = await resolveWorkspaceFile(
         operation.workspace.rootPath,
         input.relativePath,
         "read",
       );
-      const opened = await cameFromAnotherPerson(operation.workspace, listWorkspaces(), realTarget)
-        ? await markedCopyOf(markedCopies, realTarget)
-        : realTarget;
+      const origin = await fileOrigin(operation.workspace, listWorkspaces(), realTarget);
+      let opened = realTarget;
+      if (origin === "shared view" && await shareViewFiles.mayEditExternally(
+        { kind: "standalone", workspaceId: operation.workspace.workspaceId },
+        resolvedPath,
+      ).catch(() => false)) {
+        await markInPlace(markedCopies, realTarget);
+      } else if (origin !== "own") {
+        opened = await markedCopyOf(markedCopies, realTarget);
+      }
       operation.assertCurrent();
       const error = await shell.openPath(opened);
       if (error) throw new Error(error);

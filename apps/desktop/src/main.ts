@@ -5527,6 +5527,8 @@ shareViewFiles = {
     ),
   read: (target, request) =>
     withShareViewFilesOperation(target, (files) => files.read(target, request)),
+  mayEditExternally: (target, path) =>
+    withShareViewFilesOperation(target, (files) => files.mayEditExternally(target, path)),
   lookup: (target, paths) =>
     withShareViewFilesOperation(target, files => files.lookup(target, paths)),
   list: (target, options) =>

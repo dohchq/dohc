@@ -201,6 +201,8 @@ export interface ShareViewFiles {
     target: ShareViewFilesTarget,
     request: ShareViewFileReadRequest,
   ): Promise<ShareViewFileReadOutcome>;
+  /** Whether a save to this tracked file reaches the share, by the same check as `change`. False when unsure. */
+  mayEditExternally(target: ShareViewFilesTarget, path: string): Promise<boolean>;
   lookup(target: ShareViewFilesTarget, paths: readonly string[]): Promise<WorkspacePathListing>;
   list(
     target: ShareViewFilesTarget,
@@ -391,6 +393,31 @@ function assertPathWithinGrant(
     throw new SharedFileReadOnlyError(
       `This path is outside the files shared with you: ${validated.normalized}`,
     );
+  }
+}
+
+// The one grant check for an edit to a received file: an intact, unended
+// standalone view with Edit access, and every path inside the grant.
+function assertMayEdit(
+  target: ResolvedShareViewFilesTarget,
+  paths: readonly string[],
+): asserts target is ActiveShareViewFilesTarget {
+  assertActiveTarget(target);
+  const selector = writableSelector(target);
+  for (const path of paths) assertPathWithinGrant(selector, path);
+}
+
+function changedPaths(change: ShareViewFileChange): string[] {
+  switch (change.kind) {
+    case "save":
+    case "create":
+    case "delete":
+      return [change.path];
+    case "move":
+      return [change.fromPath, change.toPath];
+    case "import":
+      // Each destination is checked as the import chooses it.
+      return [];
   }
 }
 
@@ -702,18 +729,9 @@ export function createShareViewFiles(
     lease: WorkspaceOperationLease,
     target: ActiveShareViewFilesTarget,
     change: ShareViewFileChange,
-    selector: NonNullable<ReturnType<typeof recordedShareSelector>>,
     owner: ShareViewFilesOwnerCapability,
   ): Promise<ShareViewFileChangeOutcome> {
     const lifecycle = createShareViewLifecycle(owner);
-    if (change.kind === "save" || change.kind === "create") {
-      assertPathWithinGrant(selector, change.path);
-    } else if (change.kind === "move") {
-      assertPathWithinGrant(selector, change.fromPath);
-      assertPathWithinGrant(selector, change.toPath);
-    } else if (change.kind === "delete") {
-      assertPathWithinGrant(selector, change.path);
-    }
     const store = dependencies.openStore(target);
     const divergenceScopes = localDivergenceScopes(change);
     if (target.kind === "standalone" && divergenceScopes.length > 0) {
@@ -781,7 +799,7 @@ export function createShareViewFiles(
             screenAgainstRoots: change.screenAgainstRoots,
             targetDir: change.targetDir,
             shareViewStore: storeResolver,
-            assertPathAllowed: (path) => assertPathWithinGrant(selector, path),
+            assertPathAllowed: (path) => assertMayEdit(target, [path]),
           });
           break;
       }
@@ -1166,10 +1184,9 @@ export function createShareViewFiles(
       assertLease(lease);
       return withCurrentTarget(requested, async (target) => {
         assertLease(lease, target);
-        assertActiveTarget(target);
-        const selector = writableSelector(target);
+        assertMayEdit(target, changedPaths(change));
         return withOwnerCapability(lease, target, (owner) =>
-          applyChange(lease, target, change, selector, owner),
+          applyChange(lease, target, change, owner),
         );
       });
     },
@@ -1225,6 +1242,24 @@ export function createShareViewFiles(
           ...workspaceTextReadResultFromBytes(bytes),
         };
       });
+    },
+
+    async mayEditExternally(requested, path) {
+      try {
+        return await withCurrentTarget(requested, async (target) => {
+          assertMayEdit(target, [path]);
+          // A file placed in the folder by hand isn't tracked, so its save never reaches the share.
+          const tracked = normalizedWritePath(path);
+          if (tracked === null) return false;
+          return withStore(target, async (store) => {
+            const main = await store.ensureMainVersion({ workspaceId: target.storeWorkspaceId });
+            const [file] = await resolveEngineFileTargets(store, target.storeWorkspaceId, [{ path: tracked }], undefined, main.id);
+            return file?.status === "found" && file.path === tracked;
+          });
+        });
+      } catch {
+        return false;
+      }
     },
 
     async lookup(requested, paths) {
