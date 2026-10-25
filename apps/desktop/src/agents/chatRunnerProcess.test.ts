@@ -226,4 +226,29 @@ describe("chat runner process", () => {
       expect(readFileSync(join(shims, "node-version.txt"), "utf8")).toMatch(/^v\d+\./u);
     },
   );
+
+  it.runIf(process.platform === "win32")("starts an npm-installed Codex in a folder with an apostrophe", async () => {
+    const root = join(await createTestScratch("dohc-chat-runner-"), "O'Brien");
+    mkdirSync(root);
+    // Stands in for npm's codex.cmd and records the arguments cmd.exe passes on.
+    const codex = join(root, "codex.cmd");
+    writeFileSync(codex, `@"${process.execPath}" -e "require('fs').writeFileSync(process.argv[1], JSON.stringify(process.argv))" "%~dp0args.json" %*\r\n`);
+    const runner = createChatRunnerProcess(
+      { stateDir: () => join(root, "state"), appRoot: () => root, isPackaged: () => false },
+      () => undefined,
+    );
+    const child = runner.spawnConfiguredRunner({
+      rootPath: root,
+      runId: "run-1",
+      logPath: join(root, "run.log"),
+      command: "",
+      profile: { tool: "codex", executable: codex },
+      prompt: "",
+      assertMayStart: () => undefined,
+    });
+    expect(await new Promise<number | null>((resolveExit) => child.onExit(resolveExit))).toBe(0);
+    expect(JSON.parse(readFileSync(join(root, "args.json"), "utf8"))).toContain(
+      `mcp_servers.dohc.cwd='''${join(root, "node_modules", ".bin")}'''`,
+    );
+  });
 });

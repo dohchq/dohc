@@ -142,9 +142,11 @@ export function resolveDohcCliBinDirectory(input: {
 }
 
 // A TOML string for a Codex config value. A literal string needs no escapes
-// and no double quote, which a cmd.exe command line cannot carry.
+// and no double quote, which a cmd.exe command line cannot carry. Its
+// multi-line form can hold an apostrophe, as in C:\Users\O'Brien.
 function tomlString(value: string): string {
-  return /^[^'\p{Cc}]*$/u.test(value) ? `'${value}'` : JSON.stringify(value);
+  if (/\p{Cc}|'''/u.test(value)) return JSON.stringify(value);
+  return value.includes("'") ? `'''${value}'''` : `'${value}'`;
 }
 
 // Codex's sandbox cannot connect to the desktop app, so a Codex run replies
