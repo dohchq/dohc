@@ -15,6 +15,7 @@ Use this reference to check which platform and services a feature needs.
 | Share an app with private data | App publishing plus backend-enabled relay services. The shared host must be reachable to confirm operations. |
 | Manage app data through tables or an agent | An approved transactional Collection; table edits and app operations use the same dataset rules. |
 | Run the bundled MCP launcher | Node.js 22.13+, 23.4+, or 24+ on `PATH`. The desktop runtime does not supply Node to MCP. |
+| Agent replies through `dohc chat reply` | Node.js on `PATH`. |
 | dohc Drive | Coming soon. The managed service is not available for launch. |
 
 The supported self-host bundle supplies the session host and live-editing limits.
