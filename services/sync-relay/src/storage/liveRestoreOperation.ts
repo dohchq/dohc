@@ -27,6 +27,7 @@ import { parseNativeRestoreFenceReceipt, type NativeRestoreCancellation, type Na
   type NativeRestoreFenceReceipt } from "../liveRestoreFence";
 import { initialAcceptedHistoryDigest } from "../liveAcceptedHistory";
 import { LIVE_RESTORE_CANCELLATIONS } from "./liveRestoreCancellationSchema";
+import { SETTLEMENT_BINDINGS } from "./hostedSettlementSchema";
 
 export type StopRestoreIntent = {
   deliveryKind: "bootstrap" | "owner";
@@ -203,17 +204,29 @@ function authority(storage: StorageContext, intent: StopRestoreIntent, checkedBa
  * the first. One declined before its fence left the generation as it was. A
  * resumed restore reopened admission; one declined after its fence left it
  * closed at the binding its host stopped at, and the next restore goes on
- * from there.
+ * from there. A Decline its host answered before any native fence put the
+ * generation back and left admission closed, after either.
  */
 function previousRestore(storage: StorageContext, document: LiveDocumentKey, generation: number, open: boolean): string | null {
   const namespace = liveJournalHistoryNamespace(storage);
   const previous = storage.db.prepare(`SELECT operation_id,new_fence,lineage_claim_id,phase FROM ${table} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? AND new_fence IS NOT NULL ORDER BY new_fence DESC LIMIT 1`)
     .get(namespace, ...key(document).slice(0, 3));
-  if (!previous) { if (!open) refuse(); return null; }
+  const cancelled = (predecessor: string | null) => storage.db.prepare(`SELECT 1 FROM ${table} o JOIN ${LIVE_RESTORE_CANCELLATIONS} c USING(relay_database_namespace,operation_id)
+    WHERE o.relay_database_namespace=? AND o.workspace_id=? AND o.main_version_id=? AND o.object_id=? AND o.lineage_claim_id=? AND o.phase='declined'
+      AND o.new_fence IS NULL AND o.old_fence=? AND o.previous_operation_id IS ? AND c.outcome='cancelled' LIMIT 1`)
+    .get(namespace, ...key(document), generation, predecessor) !== undefined;
+  if (!previous) { if (!open && !cancelled(null)) refuse(); return null; }
   const operationId = parseLiveUpdateIdentifier(previous.operation_id);
   const binding = finishedRestoreBinding(storage.db, namespace, operationId, previous.phase);
-  if (!binding || previous.new_fence !== generation || previous.lineage_claim_id !== document.lineageClaimId || (previous.phase === "declined") === open ||
+  if (!binding || previous.new_fence !== generation || previous.lineage_claim_id !== document.lineageClaimId ||
+    (previous.phase === "declined" ? open : !open && !cancelled(operationId)) ||
     binding.restoreFenceGeneration !== generation || !isDeepStrictEqual(key(binding), key(document))) refuse();
+  // A resumed restore's settlement commits only at its own generation, so the next fence waits for it.
+  if (previous.phase === "resumed" && !storage.db.prepare(`SELECT 1 FROM ${SETTLEMENT_BINDINGS} b JOIN sync_relay_live_update_journal j ON j.relay_database_namespace=b.namespace AND j.restore_operation_id=?
+    WHERE b.workspace_id=? AND b.main_version_id=? AND b.object_id=? AND b.lineage_claim_id=? AND b.namespace=? AND b.restore_fence=? AND b.terminal_cursor>=j.journal_cursor LIMIT 1`)
+    .get(operationId, ...key(document), namespace, generation)) {
+    throw relayError("conflict", "The last restore of this file has not reached the server yet. Try again in a moment.");
+  }
   return operationId;
 }
 function requireAvailableJournalCursor(storage: StorageContext): void {
@@ -348,8 +361,8 @@ export function beginStopRestore(storage: StorageContext, input: StopRestoreInte
     if (!document || document.restore_fence_generation !== intent.expectedFence ||
       Number(document.baseline_moment_relay_seq) <= storage.getEpochLogFloor(intent.document.workspaceId) ||
       !currentLiveDocumentMoment(storage, intent.document, String(document.current_path))) refuse();
-    const previousOperationId = previousRestore(storage, intent.document, intent.expectedFence, document.admission_state === "open");
     requireNoPendingActivation(storage, intent.document);
+    const previousOperationId = previousRestore(storage, intent.document, intent.expectedFence, document.admission_state === "open");
     const existing = storage.db.prepare(`SELECT 1 FROM ${table} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND ${UNFINISHED_RESTORE}`).get(...key(intent.document).slice(0, 3));
     if (existing) refuse();
     const current = readCurrentShareGrant(storage, {grantId: intent.grantId, generation: intent.expectedGrantGeneration});

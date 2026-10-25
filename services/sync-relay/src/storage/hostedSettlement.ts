@@ -34,6 +34,7 @@ import { documentParams } from "./liveUpdateJournal";
 import { assertWorkspaceQuota } from "./workspaces";
 import { SETTLEMENT_BINDINGS, SETTLEMENT_CUTS } from "./hostedSettlementSchema";
 import { readRestoreAdmission } from "./liveRestoreCheckpoint";
+import { acrossDeclinedRestores } from "./liveRestoreLifecycleStorage";
 import {
   LIVE_RESTORE_LIFECYCLES,
   LIVE_RESTORE_OPERATIONS,
@@ -252,6 +253,7 @@ function restoreChecks(
   storage: StorageContext,
   namespace: string,
   binding: LiveObjectBinding,
+  previous: number,
   events: ReturnType<typeof readAcceptedHistoryInterval>,
   budget: RestoreHistoryBudget,
 ) {
@@ -299,7 +301,10 @@ function restoreChecks(
       terminal: event.metadata.accepted.receipt.journalCursor,
       newFence: operation.newFence,
     });
-    expected = operation.oldBinding;
+    const before = acrossDeclinedRestores(storage.db, namespace, operation.oldBinding,
+      index === 0 ? previous : events[index - 1]!.metadata.accepted.receipt.journalCursor);
+    require(before);
+    expected = before;
   }
   return { initialBinding: expected, restores };
 }
@@ -485,6 +490,7 @@ async function proveSettlementRecord(
     storage,
     namespace,
     binding,
+    previous,
     events,
     budget,
   );

@@ -2,6 +2,7 @@ import {SETTLEMENT_CUTS} from "./hostedSettlementSchema";
 import {parseAutomationDeclaration} from "@dohc/live-session-contract/live-authorship";
 import {automationPressAdmissionAllowed, automationGrantAdmissionAllowed} from "./automationPresses";
 import {readRestoreAdmission,verifyRestoreCheckpoint, type RestoreAdmission} from "./liveRestoreCheckpoint";
+import {acrossDeclinedRestores} from "./liveRestoreLifecycleStorage";
 import { liveJournalHistoryNamespace, requireLiveJournalHistory } from "./liveJournalHistory";
 import { liveJournalCheckpointDue } from "./liveJournalCheckpoint";
 import { allowsServiceActivationCandidate, type ServiceActivationAccess } from "./serviceActivationAccess";
@@ -216,9 +217,10 @@ export function assertJournalCheckpointPosition(db: SqliteDb, row: {admitted: {m
   restoreOperationId: string | null; history: {namespace: string}}, budget?:{bytes:number;chargeBytes(value:number):void}): { count: number; bytes: number } {
   const restored = verifyRestoreCheckpoint(db, row,budget?.bytes,budget?value=>budget.chargeBytes(value):undefined);
   const { binding, receipt } = row.admitted.metadata.accepted;
-  const predecessor=db.prepare(`SELECT current_path,restore_fence_generation FROM ${LIVE_JOURNAL_TABLE} WHERE ${JOURNAL_DOCUMENT_WHERE} AND journal_cursor<? ORDER BY journal_cursor DESC LIMIT 1`).get(...documentParams(binding),receipt.journalCursor);
+  const predecessor=db.prepare(`SELECT journal_cursor,current_path,restore_fence_generation FROM ${LIVE_JOURNAL_TABLE} WHERE ${JOURNAL_DOCUMENT_WHERE} AND journal_cursor<? ORDER BY journal_cursor DESC LIMIT 1`).get(...documentParams(binding),receipt.journalCursor);
   if (predecessor) journalIntegrity(predecessor.current_path===binding.currentPath && (restored
-    ? predecessor.restore_fence_generation===restored.preparation.fence.operation.oldBinding.restoreFenceGeneration
+    ? predecessor.restore_fence_generation===acrossDeclinedRestores(db,row.history.namespace,restored.preparation.fence.operation.oldBinding,
+      authorityInteger(predecessor.journal_cursor,1))?.restoreFenceGeneration
     : predecessor.restore_fence_generation===binding.restoreFenceGeneration));
   const previous = db.prepare(`SELECT journal_cursor FROM ${LIVE_JOURNAL_TABLE} WHERE ${JOURNAL_DOCUMENT_WHERE}
     AND journal_cursor<? AND validation_checkpoint_bytes IS NOT NULL ORDER BY journal_cursor DESC LIMIT 1`)

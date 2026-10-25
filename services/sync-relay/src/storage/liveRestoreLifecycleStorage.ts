@@ -67,6 +67,33 @@ export function finishedRestoreBinding(db:SqliteDb,namespace:string,operationId:
   return answer.binding;
 }
 
+/**
+ * The binding the history before `binding` was accepted at, or null when it
+ * can't be. Restores declined after their fence moved the generation with no
+ * accepted event, so each one ending at `binding` steps back to its old
+ * binding, and its cutover must be `previous`, the event before.
+ */
+export function acrossDeclinedRestores(db:SqliteDb,namespace:string,binding:LiveObjectBinding,previous:number):LiveObjectBinding|null {
+  let expected=binding;
+  for (let declined=restoreDeclinedAt(db,namespace,expected); declined; declined=restoreDeclinedAt(db,namespace,expected)) {
+    if (declined.cutover!==previous) return null;
+    expected=declined.oldBinding;
+  }
+  return expected;
+}
+function restoreDeclinedAt(db:SqliteDb,namespace:string,binding:LiveObjectBinding):{oldBinding:LiveObjectBinding;cutover:number}|null {
+  const row=db.prepare(`SELECT o.cutover_cursor,c.acknowledgment_json FROM ${operations} o JOIN ${LIVE_RESTORE_CANCELLATIONS} c USING(relay_database_namespace,operation_id)
+    WHERE o.relay_database_namespace=? AND o.workspace_id=? AND o.main_version_id=? AND o.object_id=? AND o.lineage_claim_id=? AND o.new_fence=? AND o.phase='declined' AND c.outcome='fence-cancelled'`)
+    .get(namespace,binding.workspaceId,binding.mainVersionId,binding.objectId,binding.lineageClaimId,binding.restoreFenceGeneration);
+  if (!row) return null;
+  const answer=parseNativeRestoreCancellationAnswer(JSON.parse(String(row.acknowledgment_json)));
+  require(answer.status==="fenceCancelled");
+  if (!isDeepStrictEqual(answer.binding,binding)) return null;
+  const {oldBinding}=answer.receipt.fence.operation;
+  require(oldBinding.restoreFenceGeneration===binding.restoreFenceGeneration-1);
+  return {oldBinding,cutover:authorityInteger(row.cutover_cursor)};
+}
+
 export function requireFinishedRestoreBinding(db:SqliteDb,namespace:string,original:LiveObjectBinding,current:LiveObjectBinding):void {
   require(isDeepStrictEqual({...original,restoreFenceGeneration:current.restoreFenceGeneration},current));
   if (original.restoreFenceGeneration===current.restoreFenceGeneration) return;
