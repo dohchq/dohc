@@ -33,7 +33,7 @@ export function AgentBadge(props: {
   const descriptionId = useId();
   const { author } = props;
   const ownAgent = props.presentation?.self && settings ? ownAgentNamed(settings, author.authorDisplayName) : null;
-  const command = ownAgent ? launchCommand(ownAgent.launch) : undefined;
+  const command = ownAgent?.launch ? launchCommand(ownAgent.launch) : undefined;
   return (
     <span
       className={`relative inline-flex ${ink}`}

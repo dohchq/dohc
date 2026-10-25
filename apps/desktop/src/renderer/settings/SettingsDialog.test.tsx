@@ -1052,7 +1052,8 @@ describe("SettingsDialog", () => {
     );
 
     const command = await screen.findByTestId("runner-command-input");
-    expect(screen.queryByTestId("runner-agent-name-input")).toBeNull();
+    // A name can come before the command: the agent may post from outside dohc.
+    expect(screen.getByTestId("runner-agent-name-input")).toBeTruthy();
     expect(command.getAttribute("placeholder")).toBe(
       "Enter the command that starts your agent",
     );
@@ -1068,7 +1069,7 @@ describe("SettingsDialog", () => {
     await user.type(timeout, "45");
     await user.tab();
 
-    // The command makes the first agent, and its name can change after.
+    // The name goes to the agent the command made.
     const agentName = await screen.findByTestId("runner-agent-name-input");
     await user.clear(agentName);
     await user.type(agentName, "Nova");
@@ -1089,6 +1090,18 @@ describe("SettingsDialog", () => {
     expect(
       screen.getByTestId("runner-configuration-status").getAttribute("data-state"),
     ).toBe("active");
+  });
+
+  it("saves a name for an agent dohc does not start", async () => {
+    const user = userEvent.setup();
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
+    await user.type(await screen.findByTestId("runner-agent-name-input"), "Nova");
+    await user.tab();
+    await waitFor(() =>
+      expect(savedSettings()?.agents).toEqual({
+        default: { name: "Nova", hue: "olive", changesFiles: true, enabled: false, timeoutMinutes: 30 },
+      }),
+    );
   });
 
   it("keeps runner enable disabled until the command draft is non-empty", async () => {

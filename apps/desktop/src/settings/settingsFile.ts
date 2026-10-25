@@ -155,15 +155,17 @@ export function readSettingsLeniently<T>(input: {
  * The file after a save: `raw` as the person left it, with only the settings
  * that differ between `current` (what the file means now) and `next`.
  * Unknown keys, and values dohc could not use and did not change, stay.
+ * An object `whole` names is one value, written whole when it differs.
  */
 export function overlaySettings(
   raw: Record<string, unknown>,
   current: unknown,
   next: unknown,
+  whole: (path: SettingsPath) => boolean = () => false,
 ): Record<string, unknown> {
   let content: unknown = raw;
   const visit = (before: unknown, after: unknown, path: SettingsPath) => {
-    if (isSettingsObject(before) && isSettingsObject(after)) {
+    if (isSettingsObject(before) && isSettingsObject(after) && !whole(path)) {
       for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
         visit(before[key], after[key], [...path, key]);
       }

@@ -540,7 +540,7 @@ import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
 import { readCachedUserSettingsFile } from "./settings/userSettingsStore";
-import { firstAgent, type ThemeMode } from "./settings/userSettings";
+import { firstAgent, firstAgentWithLaunch, type ThemeMode } from "./settings/userSettings";
 import { readWorkspaceSettingsFile } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
@@ -3572,7 +3572,7 @@ const chatDispatchService = createChatDispatchService({
   dispatchStoreFor: (workspace) =>
     agentDispatchStoreHandleFor(workspace).store,
   readDispatchAgent: async () =>
-    firstAgent((await readCachedUserSettingsFile(stateDir())).settings),
+    firstAgentWithLaunch((await readCachedUserSettingsFile(stateDir())).settings),
   identityFor: (workspace, target) =>
     withWorkspaceAttachmentAsync(workspace, async (lease) => {
       await warmCredentialCache();
@@ -3883,7 +3883,7 @@ const scheduleRecords = createScheduleRecords(join(stateDir(), "schedules"));
 const runNowIntents = createRunNowIntents(join(stateDir(), "run-now.json"));
 
 async function agentRunnerReady(): Promise<boolean> {
-  return firstAgent((await readCachedUserSettingsFile(stateDir())).settings)?.enabled === true;
+  return firstAgentWithLaunch((await readCachedUserSettingsFile(stateDir())).settings)?.enabled === true;
 }
 
 async function wakeAutomationAgent(

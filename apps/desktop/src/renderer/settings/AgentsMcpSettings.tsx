@@ -124,9 +124,9 @@ export function AgentsMcpSettings(props: {
   // active agent run only marks changes as the agent's: no trusted signal
   // proves that an external client copied the configuration, so this never
   // claims one is connected.
-  const runnerState = agent?.enabled
+  const runnerState = agent?.launch && agent.enabled
     ? { state: "ready", label: "Dispatch ready" }
-    : agent
+    : agent?.launch
       ? { state: "configured", label: "Configured · dispatch off" }
       : { state: "missing", label: "No runner command" };
 

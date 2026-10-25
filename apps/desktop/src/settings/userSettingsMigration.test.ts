@@ -51,11 +51,21 @@ describe("version 1 settings", () => {
     expect(agent({ enabled: true, command: "x", profile: claude })).toMatchObject({ launch: claude });
   });
 
-  it("makes no agent when version 1 could not start one", () => {
+  it("keeps the name or color an agent posted with from outside dohc, with nothing for dohc to start", () => {
+    const agent = { changesFiles: true, enabled: false, timeoutMinutes: 30 };
+    expect(migrateVersion1({ version: 1, profile: { agentName: "Nova" }, runner: { enabled: true, command: " \t " } }).agents).toEqual({
+      default: { ...agent, name: "Nova", hue: "olive", nameBeforeMigration: "Nova" },
+    });
+    expect(migrateVersion1({ version: 1, appearance: { yourAgentColor: "plum" } }).agents).toEqual({
+      default: { ...agent, name: "Agent", hue: "plum", nameBeforeMigration: "Agent" },
+    });
+  });
+
+  it("makes no agent when version 1 had none", () => {
     for (const raw of [
       { version: 1 },
-      { version: 1, profile: { agentName: "Nova" } },
-      { version: 1, profile: { agentName: "Nova" }, runner: { enabled: false, command: " \t ", timeoutMinutes: 30 } },
+      { version: 1, appearance: { yourAgentColor: null } },
+      { version: 1, appearance: { yourAgentColor: "green" }, runner: { enabled: false, command: " \t ", timeoutMinutes: 30 } },
       { version: 1, runner: "agent run" },
     ]) {
       const migrated = migrateVersion1(raw);
@@ -119,6 +129,19 @@ describe("version 1 settings", () => {
       editor: { fontSize: 16 },
       wallpaper: "teal",
     });
+  });
+});
+
+it("reads a file without a version the way version 1 did", async () => {
+  const root = await createTestScratch("dohc-settings-migration-");
+  await writeFile(join(root, USER_SETTINGS_FILE), JSON.stringify({
+    profile: { agentName: "Nova" },
+    runner: { enabled: true, command: "agent run", timeoutMinutes: 30 },
+  }));
+  const read = await readUserSettingsFile(root);
+  expect(read.ignored ?? []).toEqual([]);
+  expect(read.settings.agents).toEqual({
+    default: testAgent({ name: "Nova", launch: { command: "agent run" }, nameBeforeMigration: "Nova" }),
   });
 });
 

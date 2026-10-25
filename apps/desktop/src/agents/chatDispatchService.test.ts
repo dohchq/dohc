@@ -604,7 +604,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     },
     readDispatchAgent: async () => {
       const launch = launchFrom(runner.profile, runner.command);
-      return launch ? { id: "default", ...testAgent({ launch, enabled: runner.enabled, timeoutMinutes: runner.timeoutMinutes }) } : null;
+      return launch ? { id: "default", ...testAgent({ enabled: runner.enabled, timeoutMinutes: runner.timeoutMinutes }), launch } : null;
     },
     identityFor: async () =>
       options.identity ?? {

@@ -107,7 +107,7 @@ import { MentionComposer } from "./MentionComposer";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import { AGENT_OFFER_SPACE, NEW_CONVERSATION, reachName, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
-import { firstAgent, firstAgentCommand, type DesktopUserSettings } from "../../settings/userSettings";
+import { firstAgent, firstAgentCommand, firstAgentWithLaunch, type DesktopUserSettings } from "../../settings/userSettings";
 import { extractChatFileReferences } from "./chatFileMentions";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
@@ -1099,7 +1099,7 @@ export function ChatsView(props: {
   );
 
   const awaitingAgentChannel = Boolean(
-    props.userSettings && firstAgent(props.userSettings)?.enabled &&
+    props.userSettings && firstAgentWithLaunch(props.userSettings)?.enabled &&
     overview.status === "ready" &&
     !overview.channels.some((channel) => channel.kind === "agent"),
   );

@@ -30,7 +30,7 @@ it("preserves a newer command draft when a pending profile save rolls back", asy
     return <RunnerSettingsCard workspaceId="workspace" agent={agent} sessionRecorderOn onAgentChange={async (fields) => {
       saved(fields);
       setAgent({ ...agent, ...fields });
-      if ("tool" in fields.launch) {
+      if (fields.launch && "tool" in fields.launch) {
         try { await pending.promise; } catch { setAgent(initial); }
       }
     }} />;

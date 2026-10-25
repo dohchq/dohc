@@ -67,7 +67,9 @@ export const AgentId = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/, "An agent's id
 export const AgentSettings = z.object({
   name: PreferredNameForIpc,
   hue: z.enum(AGENT_HUES),
-  launch: AgentLaunch,
+  // How dohc starts the agent. Without one dohc never starts it, and its name
+  // and hue still mark what it posts from outside dohc.
+  launch: AgentLaunch.optional(),
   changesFiles: z.boolean().default(true),
   // Pause and Resume. dohc starts only an enabled agent.
   enabled: z.boolean(),
@@ -79,9 +81,16 @@ export const AgentSettings = z.object({
 export type AgentSettings = z.infer<typeof AgentSettings>;
 export type Agent = AgentSettings & { id: string };
 
-const nameKey = (name: string) => name.trim().toLowerCase();
+// Names that differ only in case or spacing look the same in a chat.
+const nameKey = (name: string) => name.trim().replace(/\s+/gu, " ").toLowerCase();
+// Each agent's name, and the name the default agent's messages had before
+// agents had ids, so an old message names one agent.
+function agentNameKeys(agents: Record<string, AgentSettings>): string[] {
+  return Object.values(agents).flatMap(({ name, nameBeforeMigration }) =>
+    [...new Set([name, nameBeforeMigration ?? name].map(nameKey))]);
+}
 export const AgentsSettings = z.record(AgentId, AgentSettings)
-  .refine((agents) => new Set(Object.values(agents).map(({ name }) => nameKey(name))).size === Object.keys(agents).length, {
+  .refine((agents) => new Set(agentNameKeys(agents)).size === agentNameKeys(agents).length, {
     message: "Give each agent its own name.",
   })
   .refine((agents) => Object.entries(agents).every(([id, agent]) => id === DEFAULT_AGENT_ID || agent.nameBeforeMigration === undefined), {
@@ -98,6 +107,13 @@ export function firstAgent(settings: Pick<DesktopUserSettings, "agents">): Agent
   return listAgents(settings)[0] ?? null;
 }
 
+export type AgentWithLaunch = Agent & { launch: AgentLaunch };
+/** The first agent when dohc can start it, else null. */
+export function firstAgentWithLaunch(settings: Pick<DesktopUserSettings, "agents">): AgentWithLaunch | null {
+  const agent = firstAgent(settings);
+  return agent?.launch ? { ...agent, launch: agent.launch } : null;
+}
+
 /**
  * Your agent that posted as `name`, for a message your own person wrote.
  * The default agent also keeps the name its messages had before agents had
@@ -112,8 +128,8 @@ export function ownAgentNamed(settings: Pick<DesktopUserSettings, "agents">, nam
 
 /** The command that starts the first agent, or "" when there is none. */
 export function firstAgentCommand(settings: Pick<DesktopUserSettings, "agents">): string {
-  const agent = firstAgent(settings);
-  return agent ? launchCommand(agent.launch) : "";
+  const launch = firstAgent(settings)?.launch;
+  return launch ? launchCommand(launch) : "";
 }
 
 /** The settings with one agent changed. */

@@ -40,8 +40,8 @@ type RunnerFields = { command: string; profile?: AgentLaunchProfile; enabled: bo
 
 function runnerFields(agent: AgentSettings | null): RunnerFields {
   return {
-    command: agent && "command" in agent.launch ? agent.launch.command : "",
-    ...(agent && launchProfile(agent.launch) ? { profile: launchProfile(agent.launch) } : {}),
+    command: agent?.launch && "command" in agent.launch ? agent.launch.command : "",
+    ...(agent?.launch && launchProfile(agent.launch) ? { profile: launchProfile(agent.launch) } : {}),
     enabled: agent?.enabled ?? false,
     timeoutMinutes: agent?.timeoutMinutes ?? 30,
   };

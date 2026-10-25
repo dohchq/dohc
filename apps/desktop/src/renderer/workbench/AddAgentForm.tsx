@@ -38,8 +38,8 @@ export function AddAgentForm(props: {
 }) {
   const { settings, onSave } = props;
   const agent = firstAgent(settings);
-  const savedProfile = agent ? launchProfile(agent.launch) : undefined;
-  const savedCommand = agent && "command" in agent.launch ? agent.launch.command : "";
+  const savedProfile = agent?.launch ? launchProfile(agent.launch) : undefined;
+  const savedCommand = agent?.launch && "command" in agent.launch ? agent.launch.command : "";
   const [agentName, setAgentName] = useState(agent?.name ?? "");
   const [profile, setProfile] = useState(savedProfile);
   const [advanced, setAdvanced] = useState(savedCommand.length > 0);

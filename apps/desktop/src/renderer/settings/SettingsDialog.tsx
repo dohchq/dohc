@@ -804,9 +804,12 @@ export function SettingsDialog(props: {
               workspacePath={props.workspacePath}
               preferredName={userSettings.profile.preferredName}
               agentName={agent?.name}
-              onAgentNameChange={agent
-                ? (name) => saveUserSettings(withAgent(userSettings, agent.id, (current) => ({ ...current, name })))
-                : undefined}
+              onAgentNameChange={(name) =>
+                saveUserSettings(withFirstAgent(userSettings, (current) => ({
+                  ...(current ?? newAgentDefaults(userSettings, userSettings.appearance.yourColor ?? ownPresentation.hue)),
+                  name,
+                })))
+              }
               onPreferredNameChange={(preferredName) =>
                 saveUserSettings({
                   ...userSettings,

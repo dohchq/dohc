@@ -17,7 +17,7 @@ import type {
   AgentRunRecord,
   LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
-import type { Agent } from "../settings/userSettings";
+import type { AgentWithLaunch } from "../settings/userSettings";
 import { UNNAMED_AGENT_ID, type AgentRunDispatch } from "./activeAgentRun";
 import {
   AGENT_DISPATCH_RPC_DEADLINE_MS,
@@ -166,7 +166,7 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
     workspace: ChatDispatchWorkspace,
   ): AwaitableAgentDispatchStore;
   // The agent that answers chats, or null when none is set up.
-  readDispatchAgent(): Promise<Agent | null>;
+  readDispatchAgent(): Promise<AgentWithLaunch | null>;
   identityFor(
     workspace: ChatDispatchWorkspace,
     target?: { channelId: string } | { threadId: string },
@@ -886,7 +886,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   async function startClaim(
     workspace: ChatDispatchWorkspace,
     claim: AgentDispatchClaim,
-    agent: Agent,
+    agent: AgentWithLaunch,
     releaseWorkspace: (() => Promise<void>) | null,
     assertMayStart: () => void,
   ): Promise<void> {
