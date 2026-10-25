@@ -308,8 +308,9 @@ export function createMainWindow(options?: {
     options?.afterRendererCrashLoop,
   );
 
-  // Native reloads bypass the reload IPC. Retire the outgoing document only
-  // after navigation commits, so a cancelled navigation keeps its session.
+  // Every committed main-frame navigation replaces the document and its ID.
+  // Retire the outgoing one. The reload IPC and crash recovery have already
+  // retired it, so this call does nothing for those paths.
   window.webContents.on("did-navigate", async () => {
     try {
       await options?.beforeRendererReload?.(window.webContents);

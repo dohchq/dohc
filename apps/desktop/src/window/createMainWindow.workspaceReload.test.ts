@@ -100,6 +100,30 @@ it("opens the workspace after a native window reload", async () => {
     .resolves.toMatchObject({ rendererDocumentId: "document-2" });
 });
 
+it("opens the workspace after the reload IPC and navigation both retire the document", async () => {
+  const sessions = new RendererWorkspaceSessionOwner<RendererWorkspaceSender>({
+    retirement: {
+      retireSender: () => ({
+        requiredForAdmission: Promise.resolve(),
+        detachedFromAdmission: Promise.resolve(),
+      }),
+      retireWorkspace: async () => undefined,
+    },
+  });
+  const window = createMainWindow({
+    beforeRendererReload: (sender) => sessions.retireAfterCrash(sender),
+  }) as unknown as TestWindow;
+  const sender = window.webContents;
+  const workspace = { workspaceId: "workspace-a", attachmentId: Symbol("a") };
+  await sessions.open(sender, workspace, "document-1");
+
+  await sessions.retireForReload(sender, "document-1");
+  sender.emit("did-navigate", {}, "file:///renderer/index.html");
+
+  await expect(sessions.open(sender, workspace, "document-2"))
+    .resolves.toMatchObject({ rendererDocumentId: "document-2" });
+});
+
 it("drains the old document and lets a retry replace an interrupted open", async () => {
   const senderDrain = deferred();
   const workspaceDrain = deferred();
