@@ -55,6 +55,8 @@ export function useDatasetAutomations(props: {
   const [found, setFound] = useState<FindDatasetCollectionResult | "failed" | null>(null);
   const request = useRequestSequence([workspaceId, datasetId]);
   const find = useCallback(async () => {
+    // The page has no dataset id until it has read its dataset.
+    if (!datasetId) return;
     const token = request.next();
     try {
       const result = await bridge().findDatasetCollection({ workspaceId, datasetId });
@@ -66,8 +68,8 @@ export function useDatasetAutomations(props: {
     }
   }, [workspaceId, datasetId, onError]);
   useEffect(() => {
-    if (datasetId) void find();
-  }, [find, datasetId]);
+    void find();
+  }, [find]);
   const collectionPath = found !== null && found !== "failed" && found.status === "found" ? found.collectionPath : null;
   const automations = useCollectionAutomations(workspaceId, collectionPath, onError);
   const [open, setOpen] = useState(false);
