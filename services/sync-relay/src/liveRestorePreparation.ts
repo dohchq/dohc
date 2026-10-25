@@ -76,6 +76,7 @@ export class LiveRestorePreparation {
     if (continuation === "cancel") {
       const ended = await cancelStopRestore({...options, lookup: snapshotStopRestoreLookup(options.lookup)});
       if (ended.kind === "pending") return ended;
+      if (ended.kind === "refused") throw new Error(ended.reason);
     }
     return {kind: "pending", reason: "The restore was declined."};
   }
@@ -159,10 +160,10 @@ export class LiveRestorePreparation {
       maxBytes: config.maxBytes, maxEvents: config.maxEvents};
     const check = () => {if (signal?.aborted) throw signal.reason;};
     return this.#reserved(signal, async () => {
-      const retained = store.readStopRestoreLifecycle(input);
-      // Admission loses to a recorded Decline or a departed path.
-      const continuation = retained ? "continue" : store.continueStopRestore(input, Date.now());
+      // Admission loses to a recorded Decline or a departed path. An admitted restore needs its workspace identity.
+      const continuation = store.continueStopRestore(input, Date.now());
       if (continuation !== "continue") throw new Error((await this.#end({...options, connection}, continuation)).reason);
+      const retained = store.readStopRestoreLifecycle(input);
       let current = retained ?? (requireReview
         ? store.admitReviewedStopRestoreProposal({...input, maxOutputBytes: config.maxBytes}, proposalDigest, config.validation, Date.now(), signal)
         : store.admitStopRestoreProposal(input, proposalDigest, config.validation, Date.now()));

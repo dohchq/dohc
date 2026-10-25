@@ -85,7 +85,7 @@ it("files a row for each unfinished restore, and Decline from the row ends it", 
   ];
   const f = fixture(async input => {
     if (input.action === "unfinished") return { restores, unreadable: 0, nextCursor: null };
-    if (input.action === "decline") { restores.shift(); return status("declined", "first"); }
+    if (input.action === "decline") { restores.shift(); return { status: status("declined", "first"), result: { kind: "declined" } }; }
     if (input.action === "status") return status("native-fenced", "second");
     throw Error(`Unexpected ${input.action}`);
   }, true);
@@ -169,7 +169,7 @@ it("keeps a declined row gone when an older listing replies after the decline", 
       if (listings === 2) return late.promise;
       return { restores: declined ? [] : [restore], unreadable: 0, nextCursor: null };
     }
-    if (input.action === "decline") { declined = true; return status("declined"); }
+    if (input.action === "decline") { declined = true; return { status: status("declined"), result: { kind: "declined" } }; }
     throw Error(`Unexpected ${input.action}`);
   }, true);
   await waitFor(() => expect(f.row()).toBeDefined());
@@ -217,9 +217,10 @@ it("files the row for a restore whose begin replies after its dialog closed", as
 
 // Proves: a failed Decline keeps its row against a listing read before it,
 // and that listing still files the other files' rows. Rejected, the restore
-// still waits, which the next listing shows. Committed with its reply lost,
-// the next listing has no restore and clears the row.
-it.each(["rejected", "lost"] as const)("keeps the row of a %s Decline against an older listing, until a newer one", async outcome => {
+// still waits, which the next listing shows; refused, the row names the
+// server's refusal. Committed with its reply lost, the next listing has no
+// restore and clears the row.
+it.each(["rejected", "refused", "lost"] as const)("keeps the row of a %s Decline against an older listing, until a newer one", async outcome => {
   const restore = { operationId: "restore", path: "docs/a.md", phase: "authority-invalidated", proposalDigest: null };
   const late = deferred<unknown>();
   let declined = false, listings = 0;
@@ -231,6 +232,7 @@ it.each(["rejected", "lost"] as const)("keeps the row of a %s Decline against an
     }
     if (input.action === "decline") {
       if (outcome === "lost") declined = true;
+      if (outcome === "refused") return { status: status("fenced"), result: { kind: "refused" } };
       throw Error("dohc could not reach the relay.");
     }
     throw Error(`Unexpected ${input.action}`);
@@ -240,14 +242,15 @@ it.each(["rejected", "lost"] as const)("keeps the row of a %s Decline against an
   f.rerenderShell({ enabled: true });
   await waitFor(() => expect(listings).toBe(2));
   act(() => shell.runShellErrorAction(f.row()!.id, 1));
-  const failed = "dohc could not decline the restore of docs/a.md. dohc could not reach the relay.";
+  const failed = `dohc could not decline the restore of docs/a.md. ${outcome === "refused"
+    ? "The server refused the answer that ends this restore. Live editing of this file stays stopped." : "dohc could not reach the relay."}`;
   await waitFor(() => expect(f.row()?.message).toBe(failed));
   await act(async () => late.resolve({ restores: [restore, { ...restore, operationId: "other", path: "docs/b.md" }], unreadable: 0, nextCursor: null }));
   expect(f.row()?.message).toBe(failed);
   expect(f.row("docs/b.md")).toMatchObject({ title: "Restore waiting for you" });
   f.rerenderShell({ enabled: false });
   f.rerenderShell({ enabled: true });
-  if (outcome === "rejected") await waitFor(() => expect(f.row()?.title).toBe("Restore waiting for you"));
+  if (outcome !== "lost") await waitFor(() => expect(f.row()?.title).toBe("Restore waiting for you"));
   else await waitFor(() => expect(f.row()).toBeUndefined());
 });
 

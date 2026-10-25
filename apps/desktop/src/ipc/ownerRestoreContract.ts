@@ -85,7 +85,8 @@ export const OwnerRestoreActionResponse = {
   plan: OwnerRestorePlan,
   begin: OwnerRestoreStatus,
   status: OwnerRestoreStatus,
-  decline: OwnerRestoreStatus,
+  // Refused: the server would not record the answer that ends the restore.
+  decline: z.object({status: OwnerRestoreStatus, result: z.object({kind: z.enum(["declined", "refused"])})}),
   unfinished: OwnerUnfinishedRestores,
   prepare: z.object({status: OwnerRestoreStatus, result: z.union([pending,
     z.object({kind: z.literal("prepared"), proposalDigest: digest, candidateDigest: digest, recordedAtMs: integer, replayed: z.boolean()})])}),

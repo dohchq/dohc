@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { withErrorWords } from "../../ipc/errorWords";
 import type { OwnerRestorePhase, OwnerRestoreStatus } from "../../ipc/ownerRestoreContract";
 import { bridge } from "../bridge";
-import { OwnerRestoreDialog, unfinishedRestoreStage, type UnfinishedRestoreStage } from "../OwnerRestoreDialog";
+import { DECLINE_REFUSED_MESSAGE, OwnerRestoreDialog, unfinishedRestoreStage, type UnfinishedRestoreStage } from "../OwnerRestoreDialog";
 import type { useShellError } from "./useShellError";
 
 type Shell = ReturnType<typeof useShellError>;
@@ -111,7 +111,8 @@ export function useSharedRestore(input: {
     const decline = async (restore: Restore) => {
       const workspaceId = latest.current.workspaceId;
       try {
-        const status = await bridge().ownerRestore({ workspaceId, action: "decline", operationId: restore.operationId });
+        const { status, result } = await bridge().ownerRestore({ workspaceId, action: "decline", operationId: restore.operationId });
+        if (result.kind === "refused") throw new Error(DECLINE_REFUSED_MESSAGE);
         if (latest.current.workspaceId !== workspaceId) return;
         file({ ...restore, phase: status.phase });
         if (status.phase === "declined") {

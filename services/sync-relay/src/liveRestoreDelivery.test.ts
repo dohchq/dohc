@@ -201,6 +201,16 @@ it.each([[{status:"fenced",receipt}],[{status:"pending",reason:"native-fence-pen
   expect(f.store.acknowledgeStopRestoreCancellation).not.toHaveBeenCalled();
 });
 
+// An answer the relay will not record stays refused on every attempt, so
+// it is not left pending.
+it("refuses a Decline answer the relay will not record",async()=>{
+  const answer={status:"cancelled",hostId:"service",generation:0,binding};
+  const f=decline(answer);
+  f.store.acknowledgeStopRestoreCancellation.mockImplementation(()=>{throw new Error("Restore cancellation answer does not match the restore.");});
+  await expect(f.declined).resolves.toEqual({kind:"refused",reason:"Restore cancellation answer does not match the restore."});
+  expect(f.store.acknowledgeStopRestoreCancellation).toHaveBeenCalledTimes(1);
+});
+
 it("asks nothing once the Decline is answered",async()=>{
   const f=decline(undefined,null);
   await expect(f.declined).resolves.toEqual({kind:"declined"});

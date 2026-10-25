@@ -154,7 +154,7 @@ it("says when preparation keeps failing, and when the workspace is full", async 
   render(<OwnerRestoreDialog {...f.props} />); await openStop();
   fireEvent.click(screen.getByRole("button", {name: "Stop access"}));
   await screen.findByText("dohc could not prepare the restore. Retry in a moment.");
-  expect(screen.queryByRole("button", {name: "Decline restore"})).toBeNull();
+  expect(screen.getByRole("button", {name: "Decline restore"})).toBeTruthy();
   fireEvent.click(screen.getByRole("button", {name: "Retry"}));
   await screen.findByText("dohc could not prepare the restore again. Live editing of this file stays stopped until it finishes. Retry later.");
   cause = "quota";
@@ -189,7 +189,7 @@ it("declines a reopened restore before its fence", async () => {
   const f = fixture(), original = f.call.getMockImplementation()!;
   f.call.mockImplementation(input => input.action === "options" ? Promise.resolve({...f.options,
     pendingOperation: {operationId: "restore", phase: "authority-invalidated", proposalDigest: null}})
-    : input.action === "decline" ? Promise.resolve({...f.status(), phase: "declined"}) : original(input));
+    : input.action === "decline" ? Promise.resolve({status: {...f.status(), phase: "declined"}, result: {kind: "declined"}}) : original(input));
   render(<OwnerRestoreDialog {...f.props} />);
   await screen.findByText("Access stopped for this restore. Review the restore, or decline it to keep the file unchanged.");
   expect(screen.getByText("Access has stopped. Declining keeps the file unchanged. Live editing through this access stays stopped until you share the file again.")).toBeTruthy();
@@ -202,23 +202,87 @@ it("declines a reopened restore before its fence", async () => {
   fireEvent.click(screen.getByRole("button", {name: "Close"}));
   expect(f.close).toHaveBeenCalledWith(expect.objectContaining({phase: "declined"}));
 });
-// Another window may have moved the restore past its fence. The refusal
-// shows, the dialog reads where the restore stands, and Decline goes.
+// Another window may have moved the restore on to its admission. The
+// refusal shows, the dialog reads where the restore stands, and Decline goes.
+// Retry then finishes the restore instead of asking to decline it.
 it("shows a refused decline and where the restore stands", async () => {
   const f = fixture(), original = f.call.getMockImplementation()!;
   let phase = "authority-invalidated";
   f.call.mockImplementation(input => input.action === "options" ? Promise.resolve({...f.options,
     pendingOperation: {operationId: "restore", phase: "authority-invalidated", proposalDigest: null}})
-    : input.action === "status" ? Promise.resolve({...f.status(), phase})
+    : input.action === "status" ? Promise.resolve({...f.status(), phase, proposalDigest})
     : input.action === "decline" ? Promise.reject(Error("The restore is already being applied, so it can no longer be declined. Retry to finish it."))
     : original(input));
   render(<OwnerRestoreDialog {...f.props} />);
   const decline = await screen.findByRole("button", {name: "Decline restore"});
-  phase = "fenced";
+  phase = "relay-admitted";
   fireEvent.click(decline);
   await screen.findByText("The restore is already being applied, so it can no longer be declined. Retry to finish it.");
   expect(screen.queryByRole("button", {name: "Decline restore"})).toBeNull();
-  expect(screen.getByRole("button", {name: "Retry"})).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", {name: "Retry"}));
+  await screen.findByText("File restored");
+  expect(f.call.mock.calls.filter(([input]) => input.action === "decline")).toHaveLength(1);
+});
+
+// Proves: the owner can decline a restore at every phase before its
+// admission, from a preparation that did not finish and from the review.
+it.each(["pending", "review"] as const)("declines a restore after its fence from the %s step", async step => {
+  const f = fixture(), original = f.call.getMockImplementation()!;
+  f.call.mockImplementation(input => input.action === "prepare" && step === "pending"
+    ? Promise.resolve({status: {...f.status(), phase: "fenced"}, result: {kind: "pending"}})
+    : input.action === "decline" ? Promise.resolve({status: {...f.status(), phase: "declined"}, result: {kind: "declined"}}) : original(input));
+  render(<OwnerRestoreDialog {...f.props} />); await openStop();
+  fireEvent.click(screen.getByRole("button", {name: "Stop access"}));
+  await (step === "pending" ? screen.findByText("dohc could not prepare the restore. Retry in a moment.") : screen.findByRole("button", {name: "Restore file"}));
+  fireEvent.click(screen.getByRole("button", {name: "Decline restore"}));
+  await screen.findByText("Restore declined");
+  expect(f.call).toHaveBeenCalledWith({workspaceId: "workspace", action: "decline", operationId: "restore"});
+  expect(f.call.mock.calls.some(([input]) => input.action === "confirm")).toBe(false);
+  expect(f.changed).toHaveBeenCalledTimes(2);
+});
+
+// Proves: while a Decline has not ended the restore, Retry asks for the
+// Decline again instead of preparing the restore.
+it("repeats a pending Decline on Retry", async () => {
+  const f = fixture(), original = f.call.getMockImplementation()!;
+  let declines = 0;
+  f.call.mockImplementation(input => input.action === "prepare"
+    ? Promise.resolve({status: {...f.status(), phase: "fenced"}, result: {kind: "pending"}})
+    : input.action === "status" ? Promise.resolve({...f.status(), phase: "fenced"})
+    : input.action === "decline" ? (++declines === 1 ? Promise.reject(Error("The restore is still being declined. Try again in a moment."))
+      : Promise.resolve({status: {...f.status(), phase: "declined"}, result: {kind: "declined"}}))
+    : original(input));
+  render(<OwnerRestoreDialog {...f.props} />); await openStop();
+  fireEvent.click(screen.getByRole("button", {name: "Stop access"}));
+  fireEvent.click(await screen.findByRole("button", {name: "Decline restore"}));
+  await screen.findByText("The restore is still being declined. Try again in a moment.");
+  expect(screen.queryByRole("button", {name: "Decline restore"})).toBeNull();
+  const before = f.call.mock.calls.length;
+  fireEvent.click(screen.getByRole("button", {name: "Retry"}));
+  await screen.findByText("Restore declined");
+  expect(f.call.mock.calls.slice(before).map(([input]) => input.action)).toEqual(["decline"]);
+  expect(f.error).not.toHaveBeenCalled();
+});
+
+// Proves: a Decline the server refused is reported through the shell. The
+// dialog shows that declining has not finished, and Retry asks again.
+it("reports a refused Decline through the shell", async () => {
+  const f = fixture(), original = f.call.getMockImplementation()!;
+  f.call.mockImplementation(input => input.action === "prepare"
+    ? Promise.resolve({status: {...f.status(), phase: "fenced"}, result: {kind: "pending"}})
+    : input.action === "decline" ? Promise.resolve({status: {...f.status(), phase: "fenced"}, result: {kind: "refused"}})
+    : original(input));
+  render(<OwnerRestoreDialog {...f.props} />); await openStop();
+  fireEvent.click(screen.getByRole("button", {name: "Stop access"}));
+  fireEvent.click(await screen.findByRole("button", {name: "Decline restore"}));
+  await screen.findByText("Declining has not finished. Live editing of this file stays stopped until it does. Retry to finish declining.");
+  expect(f.error).toHaveBeenCalledWith("dohc could not decline the restore of notes.md.",
+    Error("The server refused the answer that ends this restore. Live editing of this file stays stopped."));
+  expect(screen.queryByText("The server refused the answer that ends this restore. Live editing of this file stays stopped.")).toBeNull();
+  expect(f.changed).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole("button", {name: "Retry"}));
+  await vi.waitFor(() => expect(f.call.mock.calls.filter(([input]) => input.action === "decline")).toHaveLength(2));
+  expect(f.call.mock.calls.some(([input]) => input.action === "review")).toBe(false);
 });
 it("marks the agent the owner's change declared beside the authenticated owner", async () => {
   const f = fixture(); render(<OwnerRestoreDialog {...f.props} />); await openStop();
@@ -306,7 +370,7 @@ it.each([false, true])("reviews a saved proposal before confirming after reopen 
   });
   render(<OwnerRestoreDialog {...f.props} />);
   await screen.findByText("The restore has not finished. Live editing of this file stays stopped until it does. Retry to continue it.");
-  expect(screen.queryByRole("button", {name: "Decline restore"})).toBeNull();
+  expect(screen.getByRole("button", {name: "Decline restore"})).toBeTruthy();
   fireEvent.click(screen.getByRole("button", {name: "Retry"}));
   if (failFirst) {
     await screen.findByText("Review unavailable.");

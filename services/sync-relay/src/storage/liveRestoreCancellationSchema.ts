@@ -9,7 +9,8 @@ const safe = Number.MAX_SAFE_INTEGER;
 // holds the host's authenticated answer once it is known. A committed native
 // fence ends at its own journal cursor, the control entry passive replicas
 // apply between deliveries; it is no delivery. Its bytes come out of the
-// operation's reservation, so a full workspace can still decline.
+// operation's reservation, so a full workspace can still decline. The row is
+// journal history, so deleting its operation never deletes it.
 const tableSql = `CREATE TABLE ${LIVE_RESTORE_CANCELLATIONS} (
     relay_database_namespace TEXT NOT NULL,
     operation_id TEXT NOT NULL,
@@ -20,7 +21,7 @@ const tableSql = `CREATE TABLE ${LIVE_RESTORE_CANCELLATIONS} (
     journal_cursor INTEGER UNIQUE CHECK (journal_cursor BETWEEN 1 AND ${safe}),
     accounted_bytes INTEGER NOT NULL CHECK (accounted_bytes BETWEEN 1 AND ${safe}),
     PRIMARY KEY (relay_database_namespace,operation_id),
-    FOREIGN KEY (relay_database_namespace,operation_id) REFERENCES ${LIVE_RESTORE_OPERATIONS}(relay_database_namespace,operation_id) ON DELETE CASCADE,
+    FOREIGN KEY (relay_database_namespace,operation_id) REFERENCES ${LIVE_RESTORE_OPERATIONS}(relay_database_namespace,operation_id) ON DELETE NO ACTION,
     CHECK ((outcome IS NULL) = (acknowledgment_json IS NULL)),
     CHECK ((journal_cursor IS NOT NULL) = (COALESCE(outcome,'')='fence-cancelled'))
   ) STRICT`;

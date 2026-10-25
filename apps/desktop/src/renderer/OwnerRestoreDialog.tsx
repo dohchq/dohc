@@ -22,12 +22,20 @@ export function unfinishedRestoreStage(phase: OwnerRestorePhase): UnfinishedRest
   if (phase === "authority-invalidated") return "decide";
   return phase === "fenced" || phase === "old-cut-applied" || phase === "native-fenced" ? "waiting" : "finishing";
 }
+// The owner can decline a restore until the relay admits it.
+const beforeAdmission = (phase: OwnerRestorePhase) => {
+  const stage = unfinishedRestoreStage(phase);
+  return stage === "decide" || stage === "waiting";
+};
 const STAGE_MESSAGES: Record<UnfinishedRestoreStage, string> = {
   decide: "Access stopped for this restore. Review the restore, or decline it to keep the file unchanged.",
   waiting: "The restore has not finished. Live editing of this file stays stopped until it does. Retry to continue it.",
   finishing: "The restore has not finished. Retry to finish it.",
 };
 const QUOTA_MESSAGE = "This workspace has reached its limit on the server. Free some space, then retry the restore.";
+const DECLINING_MESSAGE = "Declining has not finished. Live editing of this file stays stopped until it does. Retry to finish declining.";
+/** Why a Decline the server keeps cannot end: it refused the answer that ends the restore. */
+export const DECLINE_REFUSED_MESSAGE = "The server refused the answer that ends this restore. Live editing of this file stays stopped.";
 type Authority = OwnerRestoreReview["acceptedEvents"][number]["metadata"]["accepted"]["authority"];
 // Account emails the relay resolved for this file's grants and authors, by account ID.
 type Emails = ReadonlyMap<string, string>;
@@ -107,7 +115,7 @@ export function OwnerRestoreDialog({workspaceId, path, operationId, onClose, onB
   /** Closes the dialog with the restore it knows of, so an unfinished one stays in Notices. */
   onClose(operation: OwnerRestoreStatus | null): void;
   onBeforeRestore(): Promise<() => void>; onRestored(): void;
-  /** Reports a refused start through the shell. The choice stays on screen. */
+  /** Reports a refused start or Decline through the shell. The choice stays on screen. */
   onError(fallback: string, error: unknown): void;
   /** A start went through, so an earlier refusal no longer holds. */
   onSettled(): void;
@@ -115,6 +123,8 @@ export function OwnerRestoreDialog({workspaceId, path, operationId, onClose, onB
   onChanged(): void;
 }) {
   const [state, setState] = useState<State>({kind: "loading"}), [busy, setBusy] = useState(false);
+  // A Decline was asked for and has not ended the restore, so Retry asks again.
+  const [declining, setDeclining] = useState(false);
   const [grantId, setGrantId] = useState(""), [point, setPoint] = useState("");
   // Kept across pages and steps, so the review names the people the choices named.
   const [emails, setEmails] = useState<Emails>(() => new Map());
@@ -163,7 +173,7 @@ export function OwnerRestoreDialog({workspaceId, path, operationId, onClose, onB
   }
   useEffect(() => {
     const token = request.next();
-    operation.current = null; setGrantId(""); setPoint(""); setEmails(new Map()); running.current = true; setBusy(true); setState({kind: "loading"});
+    operation.current = null; setGrantId(""); setPoint(""); setEmails(new Map()); setDeclining(false); running.current = true; setBusy(true); setState({kind: "loading"});
     void (operationId === undefined ? load(token) : resume(token, operationId))
       .catch(error => {if (current(token)) setState({kind: "error", message: ipcErrorMessage(error)});})
       .finally(() => {if (current(token)) {running.current = false; setBusy(false);}});
@@ -221,19 +231,29 @@ export function OwnerRestoreDialog({workspaceId, path, operationId, onClose, onB
   }
   async function decline(token: number) {
     const saved = operation.current!;
+    setDeclining(true);
     try {
-      const declined = await bridge().ownerRestore({workspaceId, action: "decline", operationId: saved.operationId});
-      onChanged();
+      const {status, result} = await bridge().ownerRestore({workspaceId, action: "decline", operationId: saved.operationId});
+      if (result.kind === "declined") onChanged();
       if (!current(token)) return;
-      operation.current = declined; setState({kind: "declined"});
+      operation.current = status;
+      if (result.kind === "declined") {setState({kind: "declined"}); return;}
+      // The server keeps the Decline and the fence. The shell reports the refusal.
+      setState({kind: "pending", message: DECLINING_MESSAGE});
+      onError(`dohc could not decline the restore of ${path}.`, new Error(DECLINE_REFUSED_MESSAGE));
     } catch (error) {
       // The restore may have moved on in another window. Show where it stands.
       const latest = await bridge().ownerRestore({workspaceId, action: "status", operationId: saved.operationId}).catch(() => null);
-      if (latest && current(token)) operation.current = latest;
+      if (latest && current(token)) {
+        operation.current = latest;
+        if (!beforeAdmission(latest.phase)) setDeclining(false);
+      }
       throw error;
     }
   }
-  const declinable = operation.current?.phase === "authority-invalidated" && (state.kind === "pending" || state.kind === "error");
+  // Decline is offered until the restore is admitted, wherever the dialog stopped.
+  const declinable = !!operation.current && beforeAdmission(operation.current.phase) &&
+    (state.kind === "pending" || state.kind === "error" || state.kind === "review");
   const labels = useMemo(() => state.kind === "options" ? pointLabels(state.options.points, emails) : new Map<number, string>(), [state, emails]);
   return <Overlay onClose={close} panelProps={{role: "dialog", "aria-modal": true, "aria-labelledby": "owner-restore-title", "data-testid": "owner-restore-dialog",
     className: "dohc-elevated dohc-pop-in w-[min(760px,calc(100vw-32px))] rounded-xl border border-line bg-panel p-5"}}>
@@ -281,9 +301,10 @@ export function OwnerRestoreDialog({workspaceId, path, operationId, onClose, onB
         if (!stopped || !current(token)) return; operation.current = stopped; onSettled(); await review(token);
       })}>Stop access</DangerButton>}
       {state.kind === "review" && <PrimaryButton disabled={busy} onClick={() => void perform(token => confirm(token, state.review.proposalDigest))}>Restore file</PrimaryButton>}
-      {declinable && <SecondaryButton disabled={busy} onClick={() => void perform(token => decline(token))}>Decline restore</SecondaryButton>}
-      {(state.kind === "pending" || state.kind === "error") && <PrimaryButton disabled={busy} onClick={() => void perform(token => operation.current ? review(token)
-        : operationId === undefined ? load(token) : resume(token, operationId))}>{declinable ? "Review restore" : "Retry"}</PrimaryButton>}
+      {declinable && !declining && <SecondaryButton disabled={busy} onClick={() => void perform(token => decline(token))}>Decline restore</SecondaryButton>}
+      {(state.kind === "pending" || state.kind === "error") && <PrimaryButton disabled={busy} onClick={() => void perform(token => declining ? decline(token)
+        : operation.current ? review(token) : operationId === undefined ? load(token) : resume(token, operationId))}>
+        {!declining && operation.current?.phase === "authority-invalidated" ? "Review restore" : "Retry"}</PrimaryButton>}
     </div>
   </Overlay>;
 }

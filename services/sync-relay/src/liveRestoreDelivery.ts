@@ -14,13 +14,14 @@ export function snapshotStopRestoreLookup(input: StopRestoreLookup): StopRestore
   return {operationId: parseLiveUpdateIdentifier(input.operationId), workspaceId: parseLiveUpdateIdentifier(input.workspaceId), ownerUserId: parseLiveUpdateIdentifier(input.ownerUserId)};
 }
 
-export type StopRestoreCancellationOutcome = {kind: "pending"; reason: string} | {kind: "declined"};
+export type StopRestoreCancellationOutcome = {kind: "pending"; reason: string} | {kind: "refused"; reason: string} | {kind: "declined"};
 
 /**
  * Asks the fencing host to end a restore whose Decline the relay recorded,
- * and records its durable answer. Any other answer, a refusal or a lost
- * reply leaves the restore pending for the next attempt. The consumer holds
- * its normal document exclusion for this entire call.
+ * and records its durable answer. A lost reply, an unreadable answer or one
+ * that holds no binding leaves the restore pending for the next attempt. An
+ * answer the relay will not record is refused: asking again gets the same answer.
+ * The consumer holds its normal document exclusion for this entire call.
  */
 export async function cancelStopRestore(options: {
   store: LiveCommittedDeliveryStore;
@@ -38,7 +39,8 @@ export async function cancelStopRestore(options: {
   const answer = parseNativeRestoreCancellationAnswer(response.result);
   // The host holds no binding at that generation now, so its answer proves nothing about this restore.
   if (answer.status === "cancelled" && answer.binding === null) return {kind: "pending", reason: "The host holds no binding at the restore's generation."};
-  store.acknowledgeStopRestoreCancellation(input, answer, Date.now());
+  try {store.acknowledgeStopRestoreCancellation(input, answer, Date.now());}
+  catch (error) {return {kind: "refused", reason: error instanceof Error ? error.message : "The relay refused the host's cancellation answer."};}
   return {kind: "declined"};
 }
 

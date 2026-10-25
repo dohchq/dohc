@@ -250,7 +250,7 @@ const cancellationBytes = (operation: Pick<StopRestoreOperation, "intent" | "bas
   Buffer.byteLength(JSON.stringify([operation.basis.namespace, operation.intent.operationId, operation.intent.document.workspaceId,
     requestedAtMs, outcome, acknowledgmentJson, journalCursor]));
 /** The bytes a Decline's request and its host's largest answer can take, funded as the restore begins. */
-export function cancellationReservation(intent: StopRestoreIntent, basis: StopRestoreBasis): number {
+function cancellationReservation(intent: StopRestoreIntent, basis: StopRestoreBasis): number {
   const maximum = maximumFenceEvidence(intent, basis), binding = {...maximum.applied.binding, restoreFenceGeneration: Number.MAX_SAFE_INTEGER};
   const answer = {status: "fenceCancelled", hostId: basis.hostId, generation: Number.MAX_SAFE_INTEGER, binding, receipt: {fence: maximum.nativeReceipt, binding,
     endpoint: {terminalReceipt: maximum.receipt, eventCount: Number.MAX_SAFE_INTEGER, historyEvidenceDigest: "f".repeat(64)}, recordedAtMs: Number.MAX_SAFE_INTEGER}};
@@ -450,15 +450,22 @@ function declineBeforeFence(storage: StorageContext, operation: StopRestoreOpera
   return read(storage, operation.intent.operationId, operation.intent.document.workspaceId)!;
 }
 /**
+ * Whether the workspace keeps the identity the restore began under. A rotation
+ * raises the log floor to the log's tip, at or past the restore's baseline,
+ * and supersedes the restore at every phase that still advances.
+ */
+export function stopRestoreIdentityHolds(storage: StorageContext, operation: StopRestoreOperation): boolean {
+  return operation.basis.baselineSequence > storage.getEpochLogFloor(operation.intent.document.workspaceId);
+}
+/**
  * Whether the object a restore froze has left its frozen path in main: its
  * latest moment names another path or none, or another object has taken that
- * path since. A workspace identity rotation supersedes the restore, so it
- * refuses instead. A moment the live document cannot use, such as one with
- * invalid evidence, still holds the path.
+ * path since. A workspace identity rotation refuses instead. A moment the live
+ * document cannot use, such as one with invalid evidence, still holds the path.
  */
 function departedFrozenPath(storage: StorageContext, operation: StopRestoreOperation): boolean {
   const {document} = operation.intent, path = operation.basis.binding.currentPath;
-  if (operation.basis.baselineSequence <= storage.getEpochLogFloor(document.workspaceId)) refuse();
+  if (!stopRestoreIdentityHolds(storage, operation)) refuse();
   const latest = storage.db.prepare(`SELECT path FROM sync_relay_object_moments WHERE workspace_id=? AND object_id=? AND version_id='main' ORDER BY relay_seq DESC LIMIT 1`)
     .get(document.workspaceId, document.objectId);
   if (!latest) refuse();
@@ -474,12 +481,16 @@ export type StopRestoreContinuation = "continue" | "cancel" | "declined";
  * Called in the serialized writer Decline and admission share. A restore
  * that is not admitted ends once its frozen path departs, as a Decline would:
  * at once before its fence, and otherwise by recording the request its
- * fencing host then answers. An admitted restore finishes at its frozen path.
+ * fencing host then answers. An admitted restore finishes at its frozen path,
+ * under the workspace identity it began in.
  */
 export function continueStopRestoreInTransaction(storage: StorageContext, operation: StopRestoreOperation, now: number): StopRestoreContinuation {
   const at = integer(now);
   if (operation.phase === "declined") return "declined";
-  if (operation.phase !== "authority-invalidated" && !CANCELLABLE.includes(operation.phase)) return "continue";
+  if (operation.phase !== "authority-invalidated" && !CANCELLABLE.includes(operation.phase)) {
+    if (operation.phase !== "resumed" && !stopRestoreIdentityHolds(storage, operation)) refuse();
+    return "continue";
+  }
   if (operation.phase !== "authority-invalidated" && cancellation(storage, operation)) return "cancel";
   if (!departedFrozenPath(storage, operation)) return "continue";
   if (at < operation.invalidatedAtMs) refuse();

@@ -432,7 +432,7 @@ describe("registered owner restore handler", () => {
     for (const action of Object.keys(inputs) as (keyof typeof inputs)[]) {
       const responses = action === "options" ? [options] : action === "plan" ? [plan]
         : action === "begin" || action === "status" ? [status]
-        : action === "decline" ? [{...status, phase: "declined"}]
+        : action === "decline" ? [{status: {...status, phase: "declined"}, result: {kind: "declined"}}, {status, result: {kind: "refused"}}]
         : action === "unfinished" ? [{restores: [{operationId: "restore", path: "notes.md", phase: "fenced", proposalDigest: null}], unreadable: 1, nextCursor: "restore"}]
         : [{status, result: {kind: "pending"}}, {status, result: {kind: "review-required"}},
           ...(action === "prepare" ? [{status, result: {kind: "prepared", proposalDigest: "b".repeat(64), candidateDigest: "c".repeat(64), recordedAtMs: 1, replayed: false}}]
@@ -452,7 +452,7 @@ describe("registered owner restore handler", () => {
   // restores page by page, and never claims a finished one is waiting.
   it("sends Decline and the unfinished listing to their routes", async () => {
     const h = harness();
-    h.request.mockResolvedValue({...status, phase: "declined"});
+    h.request.mockResolvedValue({status: {...status, phase: "declined"}, result: {kind: "declined"}});
     await h.invoke(relayShareOperations.ownerRestore.channel, {...statusInput, action: "decline"});
     expect(h.request).toHaveBeenLastCalledWith(h.credentials, "/sync/workspace/live-restores/restore/decline",
       {method: "POST", body: "{}"}, {retainRestoreConflict: true});

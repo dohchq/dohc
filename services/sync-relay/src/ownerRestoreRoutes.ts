@@ -123,9 +123,12 @@ export function createOwnerRestoreRoutes(options: {
       // After the fence the request holds the restore until the host that fenced it answers.
       if (storage.declineStopRestore(lookup!, options.nowMs()).phase !== "declined") {
         const ended = await host?.declineRestore(lookup!, signal).catch(() => signal.throwIfAborted());
+        // The relay refused the host's answer, so asking again gets the same answer.
+        if (ended?.kind === "refused") return response({status: read(), result: {kind: "refused"}}, 409);
+        // An absent host, a lost reply, or an answer that holds no binding.
         if (ended?.kind !== "declined") throw relayError("conflict", "The restore is still being declined. Try again in a moment.");
       }
-      return response(read());
+      return response({status: read(), result: {kind: "declined"}});
     }
     if (!host) throw notFound();
     if (route.action === "confirm") {

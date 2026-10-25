@@ -21,6 +21,7 @@ import { assertWorkspaceQuota } from "./workspaces";
 import { LIVE_DELIVERY_OWNER_HISTORY, SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
 import { readServiceActivation, serviceActivationAccess, serviceActivationState, type ServiceActivationAccess } from "./serviceActivationAccess";
 import { LIVE_JOURNAL_TABLE } from "./schema";
+import { SETTLEMENT_BINDINGS } from "./hostedSettlementSchema";
 
 const digest = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 function retirementKey(value: RetirementKey): RetirementKey {
@@ -143,7 +144,8 @@ export class ServiceActivationStore {
    * it at `boundary` and its document parked. Archives its owner row, keeps
    * that boundary, and drops its retained state, refunding those bytes once.
    * Exact replay changes nothing, so it never touches a successor's owner row.
-   * Pending, with nothing changed, while the document's restore is unfinished.
+   * Pending, with nothing changed, while the document's restore is unfinished
+   * or the log does not yet hold the settlement moment of a restore it carries.
    */
   completeRetirement(input: {workspaceId: string; key: RetirementKey; boundary: RetainedPrefixBody | null;
     host: LiveHostConnectionCoordinate; registeredAtMs: number; nowMs: number; guard(): void}):
@@ -176,6 +178,8 @@ export class ServiceActivationStore {
       }
       // A restore moves the generation the key names, so retirement waits for it.
       if (restoreInProgress(this.storage, document.workspaceId, document.objectId)) return {status: "pending", reason: "restore"};
+      // A key at a restore's accepted row carries that restore, which the retiring host finishes by publishing its settlement.
+      if (!this.#carriedRestorePublished(document, key)) return {status: "pending", reason: "restore"};
       const current = this.storage.db.prepare(`SELECT lineage_claim_id,restore_fence_generation FROM sync_relay_live_documents
         WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current'`).get(document.workspaceId, document.objectId);
       if (current?.lineage_claim_id !== key.lineageClaimId || current.restore_fence_generation !== key.restoreFenceGeneration) {
@@ -218,6 +222,15 @@ export class ServiceActivationStore {
       forgetIdleServiceHostUploads(this.storage, document.workspaceId);
       return {status: "retired", replayed: false};
     });
+  }
+
+  #carriedRestorePublished(document: LiveDocumentKey, key: RetirementKey): boolean {
+    const params = [document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId];
+    const row = this.storage.db.prepare(`SELECT restore_operation_id FROM ${LIVE_JOURNAL_TABLE}
+      WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND journal_cursor=?`).get(...params, key.acceptedThrough);
+    if (!row || row.restore_operation_id === null) return true;
+    return this.storage.db.prepare(`SELECT 1 FROM ${SETTLEMENT_BINDINGS} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?
+      AND namespace=? AND restore_fence=? AND terminal_cursor>=?`).get(...params, this.history.namespace, key.restoreFenceGeneration, key.acceptedThrough) !== undefined;
   }
 
   // The boundary must end the lineage's real accepted history at or before F.

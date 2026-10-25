@@ -69,7 +69,7 @@ import {
 } from "./liveUpdateJournal";
 import { bindLiveDeliveryHostNamespace, consumeLiveDeliveryReservation } from "./liveDeliveryReservations";
 import { acknowledgeStopRestoreCancellation, continueStopRestoreInTransaction, nativeRestoreFence, readStopRestoreCancellation, requireStopRestoreCut, requireStopRestoreOwnerOrigin, readStopRestoreInTransaction,
-  stopRestoreDeclineRecorded, stopRestoreHoldsFrozenPath, stopRestoreRevocationHolds, type StopRestoreContinuation, type StopRestoreLookup, type StopRestoreOperation, type StopRestoreApplied } from "./liveRestoreOperation";
+  stopRestoreDeclineRecorded, stopRestoreHoldsFrozenPath, stopRestoreIdentityHolds, stopRestoreRevocationHolds, type StopRestoreContinuation, type StopRestoreLookup, type StopRestoreOperation, type StopRestoreApplied } from "./liveRestoreOperation";
 import {parseNativeRestoreFenceReceipt, type NativeRestoreCancellation, type NativeRestoreCancellationAnswer, type NativeRestoreFenceReceipt} from "../liveRestoreFence";
 import {parseNativeRestoreProposalReceipt, decodeNativeRestoreProposal, type RestoreProofBudget} from "../liveRestoreProposal";
 import {validateLiveRestoreProposal, type OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/restore-proof";
@@ -1399,7 +1399,7 @@ export class LiveCommittedDeliveryStore {
     // current_path is the lineage's registered path. A rename after admission doesn't end the restore; it finishes at its frozen path.
     integrity(row && row.restore_fence_generation===operation.newFence && row.current_path===lifecycle.admitted.accepted.binding.currentPath &&
       row.lineage_state==="current" && row.admission_state==="closed");
-    integrity(stopRestoreRevocationHolds(this.#storage,operation));
+    integrity(stopRestoreRevocationHolds(this.#storage,operation) && stopRestoreIdentityHolds(this.#storage,operation));
     const tip=this.#storage.db.prepare(`SELECT journal_cursor FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} ORDER BY journal_cursor DESC LIMIT 1`).get(...documentParams(document));
     integrity(tip?.journal_cursor===lifecycle.admitted.accepted.receipt.journalCursor);
     const active=this.#storage.db.prepare(`SELECT operation_id FROM ${LIVE_RESTORE_OPERATIONS} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND ${UNFINISHED_RESTORE}`)
