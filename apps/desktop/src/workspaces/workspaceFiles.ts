@@ -1614,8 +1614,8 @@ export async function movePath(
   await rename(from, to);
   if (renamesInPlace && from !== to) {
     const spelling = await diskSpelling(rootPath, to).catch(() => null);
-    if (spelling !== null && basename(spelling) !== basename(to)) {
-      throw new Error(`dohc did not rename ${fromPath} to ${toPath}. This disk kept the old capitals. Rename it to another name first, then to ${basename(toPath)}.`);
+    if (spelling !== null && basename(spelling).normalize("NFC") !== basename(to).normalize("NFC")) {
+      throw new Error(`dohc did not rename ${fromPath} to ${toPath}. This disk kept the name ${basename(spelling)}. Rename it to another name first, then to ${basename(toPath)}.`);
     }
   }
   return visibleResultPath;

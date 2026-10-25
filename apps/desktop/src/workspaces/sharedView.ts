@@ -8,6 +8,7 @@ import {
   realpath,
   rename,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join, posix, relative, resolve, sep } from "node:path";
@@ -288,8 +289,8 @@ function spellingGroups(paths: Iterable<string>): Map<string, string[]> {
 // The first other spelling in `spellings` that `owns` accepts, by path, whose
 // regular file is the one at `target`, as `Notes.md` reaches `notes.md`'s
 // file on a disk that ignores case. The disk decides, so a folder that keeps
-// case apart holds two files. An unknown identity stops the caller before it
-// can delete or overwrite another spelling's file.
+// case apart holds two files. Unknown identities stop materialization and
+// exclude paths from capture; collision checks keep them as local collisions.
 async function spellingSharingFile(
   rootDir: string,
   path: string,
@@ -301,22 +302,29 @@ async function spellingSharingFile(
   if (others.length === 0) return null;
   const file = await lstat(target, { bigint: true }).catch(absentAsNull);
   if (!file?.isFile()) return null;
+  const realFile = await realpath(target).catch(absentAsNull);
+  if (realFile === null) return null;
+  let storedFile: Promise<string | null> | undefined;
   for (const other of others) {
     const otherTarget = containedTarget(rootDir, other);
     const otherFile = await lstat(otherTarget, { bigint: true }).catch(absentAsNull);
     if (!otherFile?.isFile()) continue;
-    const [realFile, realOther] = await Promise.all([
-      realpath(target).catch(absentAsNull),
-      realpath(otherTarget).catch(absentAsNull),
-    ]);
-    if (realFile === null || realOther === null) continue;
+    const realOther = await realpath(otherTarget).catch(absentAsNull);
+    if (realOther === null) continue;
     if (realFile === realOther) return other;
-    if (file.dev !== otherFile.dev || file.ino !== otherFile.ino) continue;
-    const [storedFile, storedOther] = await Promise.all([
-      diskSpelling(rootDir, target),
+    if (basename(target) === basename(otherTarget)) {
+      const [parent, otherParent] = await Promise.all([
+        stat(dirname(target), { bigint: true }).catch(absentAsNull),
+        stat(dirname(otherTarget), { bigint: true }).catch(absentAsNull),
+      ]);
+      if (parent !== null && otherParent !== null && parent.dev === otherParent.dev && parent.ino === otherParent.ino) return other;
+    }
+    storedFile ??= diskSpelling(rootDir, target);
+    const [stored, storedOther] = await Promise.all([
+      storedFile,
       diskSpelling(rootDir, otherTarget),
     ]);
-    if (storedFile !== null && storedFile === storedOther) return other;
+    if (stored !== null && stored === storedOther) return other;
   }
   return null;
 }

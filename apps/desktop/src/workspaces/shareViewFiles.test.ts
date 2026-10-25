@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import * as fsPromises from "node:fs/promises";
+import * as storedNames from "./diskSpelling";
 import {
   lstat,
   mkdir,
@@ -3067,7 +3068,7 @@ describe("ShareViewFiles", () => {
     }
   });
 
-  it("lists folders a fixed number of times through a case-only folder rename and refresh", async (context) => {
+  it("lists folders a fixed number of times through a case-only folder rename", async (context) => {
     const rootPath = await workspaceRoot();
     await mkdir(join(rootPath, "docs", "plans"), { recursive: true });
     if (!(await lstat(join(rootPath, "docs", "Plans")).then(() => true, () => false))) context.skip("this disk keeps case apart");
@@ -3088,6 +3089,39 @@ describe("ShareViewFiles", () => {
       expect(store.renameTextFile).toHaveBeenCalledTimes(initial.length);
     } finally {
       listing.mockRestore();
+    }
+  });
+
+  it("keeps store renames when the post-rename leaf uses NFD", async (context) => {
+    const rootPath = await workspaceRoot();
+    const fromPath = "docs/résumé";
+    const toPath = "docs/Résumé";
+    await mkdir(join(rootPath, fromPath), { recursive: true });
+    await writeFile(join(rootPath, fromPath, "a.md"), "body\n");
+    if (!(await lstat(join(rootPath, toPath)).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    const store = mutableTextStore({ initial: [{ path: `${fromPath}/a.md`, text: "body\n" }] });
+    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => target(rootPath), openStore: () => store });
+    const spelling = vi.spyOn(storedNames, "diskSpelling");
+    const originalRename = fsPromises.rename.bind(fsPromises);
+    const rename = vi.spyOn(fsPromises, "rename").mockImplementation(async (from, to) => {
+      await originalRename(from, to);
+      if (String(from) === join(rootPath, fromPath) && String(to) === join(rootPath, toPath)) {
+        spelling.mockResolvedValueOnce(join(rootPath, toPath).normalize("NFD"));
+      }
+    });
+    try {
+      await withStaleSensitiveWorkspaceOperation(rootPath, (lease) => files.change(
+        lease, { kind: "standalone", workspaceId: "workspace-a" }, { kind: "move", fromPath, toPath },
+      ));
+      expect(await store.listTextFileMetadata({ workspaceId: "workspace-a", versionId: "main" })).toEqual([
+        expect.objectContaining({ path: `${toPath}/a.md` }),
+      ]);
+      expect(store.renameTextFile).toHaveBeenCalledTimes(1);
+      expect((await readdir(join(rootPath, "docs"))).map((name) => name.normalize("NFC"))).toEqual(["Résumé"]);
+      expect(await readFile(join(rootPath, toPath, "a.md"), "utf8")).toBe("body\n");
+    } finally {
+      rename.mockRestore();
+      spelling.mockRestore();
     }
   });
 
@@ -3148,7 +3182,7 @@ describe("ShareViewFiles", () => {
       await expect(withStaleSensitiveWorkspaceOperation(rootPath, (lease) => files.change(
         lease, { kind: "standalone", workspaceId: "workspace-a" },
         { kind: "move", fromPath: "docs/plans", toPath: "docs/Plans" },
-      ))).rejects.toThrow("This disk kept the old capitals");
+      ))).rejects.toThrow("This disk kept the name plans");
       expect(await store.listTextFileMetadata({ workspaceId: "workspace-a", versionId: "main" })).toEqual([
         expect.objectContaining({ path: "docs/plans/a.md" }),
       ]);

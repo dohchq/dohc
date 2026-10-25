@@ -151,6 +151,7 @@ let observeRealpath: ((path: string) => void) | null = null;
 let realpathOverride:
   | ((path: string, resolved: string) => string | null)
   | null = null;
+let lstatInodeAlias: string | null = null;
 let failRenameToPathOnce: { path: string; error: Error } | null = null;
 let failRemovePathOnce: { path: string; error: Error } | null = null;
 let failReaddirPathOnce: { path: string; error: Error } | null = null;
@@ -160,6 +161,16 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
     ...actual,
+    lstat: (async (path: Parameters<typeof actual.lstat>[0], options?: unknown) => {
+      const info = await actual.lstat(path, options as never);
+      if (String(path) !== lstatInodeAlias) return info;
+      return new Proxy(info, {
+        get(target, key, receiver) {
+          if (key === "ino") return typeof target.ino === "bigint" ? target.ino + 1n : target.ino + 1;
+          return Reflect.get(target, key, receiver);
+        },
+      });
+    }) as typeof actual.lstat,
     readdir: (async (
       path: Parameters<typeof readdir>[0],
       options?: unknown,
@@ -346,6 +357,7 @@ beforeEach(() => {
   harnesses = [];
   observeRealpath = null;
   realpathOverride = null;
+  lstatInodeAlias = null;
   failRenameToPathOnce = null;
   failRemovePathOnce = null;
   failReaddirPathOnce = null;
@@ -354,6 +366,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   realpathOverride = null;
+  lstatInodeAlias = null;
   failRenameToPathOnce = null;
   failRemovePathOnce = null;
   failReaddirPathOnce = null;
@@ -1857,6 +1870,68 @@ describe("shared view refresh", () => {
       await view.reconcile();
       expect(readdirCalls).toEqual([]);
       for (let index = 0; index < 12; index += 1) expect(await readFile(join(view.rootDir, "docs", "Plans", `${index}.md`), "utf8")).toBe(`body ${index}\n`);
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  it("refreshes a remote case-only folder rename without listing the source when realpath keeps lookup case", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    realpathOverride = (path) => path.startsWith(`${view.rootDir}${sep}`) ? path : null;
+    try {
+      for (let index = 0; index < 12; index += 1) view.relay.addWrite(`docs/plans/${index}.md`, `body ${index}\n`);
+      await view.reconcile();
+      for (let index = 0; index < 12; index += 1) view.relay.addRename(`docs/plans/${index}.md`, `docs/Plans/${index}.md`, `body ${index}\n`);
+      readdirCalls = [];
+      await view.reconcile();
+      expect(readdirCalls.filter((path) => path.toLowerCase() === join(view.rootDir, "docs", "plans").toLowerCase())).toHaveLength(0);
+      expect(readdirCalls).toEqual([]);
+      for (let index = 0; index < 12; index += 1) expect(await readFile(join(view.rootDir, "docs", "Plans", `${index}.md`), "utf8")).toBe(`body ${index}\n`);
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  it("replays a held release with spelling-specific inodes as a local collision without overwriting its owner", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    realpathOverride = (path) => path.startsWith(`${view.rootDir}${sep}`) ? path : null;
+    lstatInodeAlias = join(view.rootDir, "Notes.md");
+    view.relay.addWrite("notes.md", "owner\n");
+    view.relay.addWrite("Notes.md", "held\n");
+    const target = { workspaceId: WORKSPACE, rootPath: view.rootDir };
+    const refresh = async () => {
+      const main = await view.store.ensureMainVersion({ workspaceId: WORKSPACE });
+      const preTrackedPaths = new Set((await view.store.listTextFileMetadata({ workspaceId: WORKSPACE, versionId: main.id })).map((file) => file.path));
+      return refreshSharedViewOnceWithPull({
+        rootDir: view.rootDir, workspaceId: WORKSPACE, relay: view.harness.relay, shareId: SHARE_ID,
+        pull: view.harness.pullFor(target), pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+        recordRefusals: async () => undefined, store: view.store, preTrackedPaths, trackPendingMaterialization: true,
+      });
+    };
+    try {
+      await expect(refresh()).rejects.toThrow("Could not identify the stored name");
+      expect(await readFile(join(view.rootDir, "notes.md"), "utf8")).toBe("owner\n");
+      await expect(refresh()).resolves.toMatchObject({ status: "updated", unjournalablePaths: [{ path: "Notes.md", reason: "local-collision" }] });
+      expect(await readFile(join(view.rootDir, "notes.md"), "utf8")).toBe("owner\n");
+      await expect(refresh()).resolves.toMatchObject({ status: "unchanged" });
+    } finally {
+      await view.store.close();
+    }
+  });
+
+  it("stops a delete with spelling-specific inodes before removing another spelling's file", async (context) => {
+    const view = await caseFoldingView(context, "edit");
+    realpathOverride = (path) => path.startsWith(`${view.rootDir}${sep}`) ? path : null;
+    try {
+      view.relay.addWrite("Notes.md", "old\n");
+      await view.reconcile();
+      view.relay.addWrite("notes.md", "live\n");
+      await view.reconcile();
+      lstatInodeAlias = join(view.rootDir, "Notes.md");
+      view.relay.addDelete("Notes.md");
+      await expect(view.reconcile()).rejects.toThrow("Could not identify the stored name");
+      expect(await readFile(join(view.rootDir, "notes.md"), "utf8")).toBe("old\n");
+      expect((await readSharedViewProjectionDebt(view.rootDir, SHARE_ID)).pendingPaths).toContain("Notes.md");
     } finally {
       await view.store.close();
     }

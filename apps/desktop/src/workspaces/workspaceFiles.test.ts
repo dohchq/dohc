@@ -581,7 +581,7 @@ describe("movePath", () => {
     const noOp = vi.spyOn(fsPromises, "rename").mockResolvedValue(undefined);
     try {
       await expect(movePath(root, "docs/plans", "docs/Plans")).rejects.toThrow(
-        "dohc did not rename docs/plans to docs/Plans. This disk kept the old capitals. Rename it to another name first, then to Plans.",
+        "dohc did not rename docs/plans to docs/Plans. This disk kept the name plans. Rename it to another name first, then to Plans.",
       );
       expect(await readdir(join(root, "docs"))).toEqual(["plans"]);
       expect(await readFile(join(root, "docs", "plans", "a.md"), "utf8")).toBe("body");
