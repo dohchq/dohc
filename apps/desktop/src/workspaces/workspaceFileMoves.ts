@@ -114,9 +114,9 @@ export async function admitPath(rootPath: string, path: string): Promise<Admitte
 // History records at each of `bases`, as spelled and where it resolves. A
 // reserved or ignored folder, such as .git or node_modules, refuses before
 // dohc reads inside it.
-async function admitTree(rootPath: string, spelled: string, allowed: (path: string) => boolean,
+async function admitTree(rootPath: string, admitted: AdmittedPath, allowed: (path: string) => boolean,
   otherBases: readonly string[] = []): Promise<AdmittedTree> {
-  const admitted = await admitPath(rootPath, spelled);
+  const spelled = admitted.path;
   // The tree is named by its entry on disk from here on.
   const target = { ...admitted, relative: admitted.physical };
   const bases = [target.path, target.relative, ...otherBases];
@@ -293,7 +293,7 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
     assertWritable(operation);
     const change = async (markChanged: () => void) => {
       let gone: string[] = [];
-      await assertMoveParentCase(await realpath(rootPath), { fromPath: checkedPath(input.fromPath), toPath: checkedPath(input.toPath) });
+      if (!options.byHand) await assertMoveParentCase(await realpath(rootPath), { fromPath: checkedPath(input.fromPath), toPath: checkedPath(input.toPath) });
       // The capture settles, closes and checks these endpoints before the hold.
       const prepared = options.prepared;
       if (prepared && options.capture) assertMoveDocumentKind(prepared.physicalFromPath, prepared.physicalToPath, "rename");
@@ -304,16 +304,20 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
           // Admission runs here, with capture held, right before the disk changes.
           assertWritable(operation);
           await options.admit?.();
-          if (options.byHand) await prepareWorkspaceMove(rootPath, input.fromPath, input.toPath);
+          const checked = options.byHand ? await prepareWorkspaceMove(rootPath, input.fromPath, input.toPath) : undefined;
           const allowed = engine ? historyAdmission(engine.policy) : () => false;
           const to = await admitPath(rootPath, input.toPath);
-          const spelledFrom = await admitPath(rootPath, input.fromPath);
-          await assertMoveParentCase(await realpath(rootPath), { fromPath: spelledFrom.path, toPath: to.path });
+          const spelledFrom = checked
+            ? { path: checkedPath(input.fromPath), relative: checked.physicalFromPath, physical: checked.physicalFromPath }
+            : await admitPath(rootPath, input.fromPath);
+          if (checked) to.relative = checked.physicalToPath;
+          if (!options.byHand) await assertMoveParentCase(await realpath(rootPath), { fromPath: spelledFrom.path, toPath: to.path });
           if (spelledFrom.physical !== endpoints[0] || (options.byHand ? to.relative : to.physical) !== endpoints[1]) {
             throw new Error(`${input.fromPath} or ${input.toPath} now leads somewhere else. Check both paths, then try again.`);
           }
           // Two spellings of one entry on disk are a rename of its case.
           const caseOnly = spelledFrom.physical === to.physical && spelledFrom.relative !== to.relative;
+          if (caseOnly) to.relative = join(dirname(spelledFrom.physical), basename(to.relative)).split(sep).join("/");
           const pairs = [[spelledFrom.path, to.path], [spelledFrom.relative, to.relative],
             ...(caseOnly ? [] : [[spelledFrom.physical, to.physical]])];
           for (const [a = "", b = ""] of pairs) {
@@ -324,14 +328,14 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
           const from = options.byHand
             ? { ...spelledFrom, relative: spelledFrom.physical, files: (engine ? await historyFilesUnder(rootPath, spelledFrom.physical, allowed,
               folder => historyExcludesSubtree(engine.policy, folder)) : []).map(file => file.slice(spelledFrom.physical.length).replace(/^\//u, "")).filter(sub => allowed(under(to.relative, sub))) }
-            : await admitTree(rootPath, input.fromPath, allowed, [to.path, to.relative]);
+            : await admitTree(rootPath, spelledFrom, allowed, [to.path, to.relative]);
           for (const sub of from.files) assertMoveDocumentKind(under(from.relative, sub), under(to.relative, sub), options.byHand ? "rename" : "move");
           const source = join(rootPath, from.relative);
           const target = join(rootPath, to.relative);
           let dest: AdmittedTree | undefined;
           if (await exists(target) && !caseOnly) {
             if (!input.overwrite) throw new Error(`${input.toPath} already exists. Choose another destination, or move with overwrite.`);
-            dest = await admitTree(rootPath, input.toPath, allowed);
+            dest = await admitTree(rootPath, to, allowed);
           }
           // A replaced destination is named by its entry on disk.
           const destBase = dest?.relative ?? to.relative;
@@ -581,7 +585,7 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
         async engine => {
           // Admission runs here, with capture held, right before the disk changes.
           assertWritable(operation);
-          const target = await admitTree(rootPath, path, historyAdmission(engine.policy));
+          const target = await admitTree(rootPath, await admitPath(rootPath, path), historyAdmission(engine.policy));
           if (target.relative !== endpoint) throw new Error(`${path} now leads somewhere else. Check the path, then try again.`);
           const files = target.files.map(sub => under(target.relative, sub));
           const shown = (file: string) => target.path + file.slice(target.relative.length);

@@ -46,6 +46,7 @@ import {
 } from "./workspaceFiles";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import { createTestScratch } from "./testTemp";
+import { forceStoredNameListing } from "../testing/storedNameListing";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { datalessCandidates, withICloudCheck } from "../testing/iCloudCheck";
 import { readLocalStateFrom } from "./workspaceLocalState";
@@ -599,6 +600,37 @@ describe("movePath", () => {
       expect(await prepareWorkspaceDelete(root, "docs/notes.md")).toBe("Docs/Notes.md");
     });
 
+    it("keeps the stored parent for a case-only rename through an alias parent", async context => {
+      await mkdir(join(root, "Docs"));
+      await writeFile(join(root, "Docs", "notes.md"), "body");
+      if (!ignoresCase) context.skip("this disk keeps case apart");
+      expect(await prepareWorkspaceMove(root, "docs/notes.md", "docs/Notes.md")).toMatchObject({
+        physicalFromPath: "Docs/notes.md", physicalToPath: "Docs/Notes.md", visibleResultPath: "docs/Notes.md",
+      });
+      await expect(movePath(root, "docs/notes.md", "docs/Notes.md")).resolves.toBe("docs/Notes.md");
+      expect(await readdir(join(root, "Docs"))).toEqual(["Notes.md"]);
+    });
+
+    for (const native of [false, true]) {
+      it(`allows an alias source parent when the destination keeps its stored name with ${native ? "native" : "Linux"} realpath`, async context => {
+        await mkdir(join(root, "Docs"));
+        await writeFile(join(root, "Docs", "a.md"), "body");
+        if (!ignoresCase) context.skip("this disk keeps case apart");
+        if (native) {
+          vi.restoreAllMocks();
+          Object.defineProperty(process, "platform", { value: platform });
+        }
+        await expect(movePath(root, "docs/a.md", "Docs/b.md")).resolves.toBe("Docs/b.md");
+        expect(await readdir(join(root, "Docs"))).toEqual(["b.md"]);
+      });
+    }
+
+    it("lets a missing source parent reach the missing source refusal", async context => {
+      if (ignoresCase) context.skip("this disk ignores case");
+      await mkdir(join(root, "docs"));
+      await expect(prepareWorkspaceMove(root, "Docs/a.md", "docs/a.md")).rejects.toMatchObject({ code: "ENOENT" });
+    });
+
     for (const destination of ["docs/a.md", "docs/b.md"]) {
       for (const native of [false, true]) {
         it(`refuses a parent case change to ${destination} with ${native ? "native" : "Linux"} realpath`, async context => {
@@ -610,7 +642,7 @@ describe("movePath", () => {
             Object.defineProperty(process, "platform", { value: platform });
           }
           const mutation = vi.spyOn(fsPromises, "rename");
-          const message = `dohc did not move Docs/a.md to ${destination}. This move can't rename the folder Docs to docs. Rename that folder first.`;
+          const message = `dohc did not move Docs/a.md to ${destination}. The folder is named Docs, not docs. Use that name, or rename the folder first.`;
           await expect(prepareWorkspaceMove(root, "Docs/a.md", destination)).rejects.toThrow(message);
           await expect(movePath(root, "Docs/a.md", destination)).rejects.toThrow(message);
           expect(mutation).not.toHaveBeenCalled();
@@ -628,7 +660,10 @@ describe("movePath", () => {
               if (options?.bigint) throw Object.assign(new Error("gone"), { code: "ENOENT" });
               return original(path, options);
             });
-          } else vi.spyOn(fsPromises, "readdir").mockRejectedValue(Object.assign(new Error("unreadable"), { code: "EIO" }));
+          } else {
+            forceStoredNameListing(join(root, "a.md"));
+            vi.spyOn(fsPromises, "readdir").mockRejectedValue(Object.assign(new Error("unreadable"), { code: "EIO" }));
+          }
           const change = operation === "move" ? prepareWorkspaceMove(root, "a.md", "b.md") : prepareWorkspaceDelete(root, "a.md");
           await expect(change).rejects.toThrow(operation === "move" ? "dohc could not tell which files or folders on disk"
             : "dohc did not delete a.md. dohc could not tell which file or folder on disk it is. Check it in your file manager before trying again.");
@@ -651,7 +686,7 @@ describe("movePath", () => {
       listing.mockClear();
       await writeFile(join(root, "Docs", "b.md"), "other");
       await expect(prepareWorkspaceMove(root, "Docs/a.md", "Docs/b.md")).rejects.toThrow("Destination already exists");
-      expect(listing.mock.calls.map(([path]) => String(path))).toEqual([...endpoint, ...endpoint]);
+      expect(listing.mock.calls.map(([path]) => String(path)).sort()).toEqual([...endpoint, ...endpoint, ...endpoint].sort());
     });
 
     it("refuses an unknown parent identity before making a local move", async context => {
@@ -669,9 +704,9 @@ describe("movePath", () => {
         await mkdir(join(root, parent), { recursive: true });
         await writeFile(join(root, parent, "a.md"), "body");
         if (!ignoresCase) context.skip("this disk keeps case apart");
-        const from = `${parent}/a.md`, to = `${parent.replace("Docs", "docs")}/b.md`;
+        const from = `${parent.replace("Docs", "dOCS")}/a.md`, to = `${parent.replace("Docs", "docs")}/b.md`;
         await expect(movePath(root, from, to)).rejects.toThrow(
-          `dohc did not move ${from} to ${to}. This move can't rename the folder Docs to docs. Rename that folder first.`);
+          `dohc did not move ${from} to ${to}. The folder is named Docs, not docs. Use that name, or rename the folder first.`);
       });
     }
 

@@ -15,7 +15,7 @@ import { createTestScratch } from "./testTemp";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import { createWorkspaceEngineCapture, type AuthoredPathChanges, type WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
-import { admitPath, deleteWorkspacePathByHand, prepareDeleteWorkspacePathAs, prepareMoveWorkspacePathAs, type PathChangeOptions } from "./workspaceFileMoves";
+import { admitPath, deleteWorkspacePathByHand, moveWorkspacePathByHand, prepareDeleteWorkspacePathAs, prepareMoveWorkspacePathAs, type PathChangeOptions } from "./workspaceFileMoves";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { desktopRecordEditContext } from "./desktopRecordEdits";
 import { listEngineMomentsForIpc } from "../ipc/engineHistoryIpc";
@@ -24,6 +24,10 @@ import { engineMomentSourceLabel } from "../renderer/workbench/EngineHistory";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { datalessCandidates, withICloudCheck } from "../testing/iCloudCheck";
 import { readLocalStateFrom } from "./workspaceLocalState";
+import { forceStoredNameListing } from "../testing/storedNameListing";
+import * as storedEntryPaths from "./storedEntryPath";
+
+vi.mock("./storedEntryPath", async importOriginal => ({ ...await importOriginal<typeof import("./storedEntryPath")>() }));
 
 // Filesystem refusals a test switches on for chosen paths.
 const faults = vi.hoisted(() => ({} as {
@@ -139,6 +143,7 @@ async function fixture(options: {
   return { reference, resolve: (refs: WorkspaceFileRef[]) => resolveRefs({ workspaceId, rootPath, attachmentId }, refs), rootPath, systemTrash, systemTrashed, operation, engine, trashItem, markDeleted, settle, rows, start, added, workspaceTrash,
     move: (fromPath: string, toPath: string, by: MomentWriteAuthor = named, overwrite?: boolean) =>
       prepareMoveWorkspacePathAs(operation, { fromPath, toPath, ...(overwrite ? { overwrite } : {}) }, by, pathOptions()).then(finish => finish()),
+    moveByHand: (fromPath: string, toPath: string) => moveWorkspacePathByHand(operation, { fromPath, toPath }, person, { ...pathOptions(), capture: engine() }),
     remove: (path: string, by: MomentWriteAuthor = named) => prepareDeleteWorkspacePathAs(operation, path, by, pathOptions()).then(finish => finish()),
     removeByHand: (path: string, capture: PathChangeOptions["capture"] | null = engine()) =>
       deleteWorkspacePathByHand(operation, path, person, { capture, requestId: "request", trashItem, markDeleted }) };
@@ -183,30 +188,86 @@ describe("agent moves and deletes", () => {
       it(`completes a Linux case-only rename with overwrite ${overwrite}`, async context => {
         const f = await fixture();
         await probeCase(f.rootPath, context);
-        await f.start();
+        const seen = await f.start();
         lookupCase(f.rootPath);
         try {
           expect(await f.move("Notes.md", "notes.md", named, overwrite)).toMatchObject({ ok: true });
           expect(await readdir(f.rootPath)).toContain("notes.md");
+          expect(await f.added(seen)).toContainEqual({ operation: "rename", path: "notes.md", agentId: named.agentId });
         } finally { await f.engine().stop(); }
       });
     }
 
-    it("keeps exact case-colliding hard-link names distinct during admission", async () => {
+    for (const byHand of [false, true]) {
+      it(`keeps the stored parent in History for a case-only ${byHand ? "local" : "CLI"} rename through an alias parent`, async context => {
+        const f = await fixture();
+        await write(f.rootPath, "Docs/notes.md", "body");
+        if (!existsSync(join(f.rootPath, "docs/notes.md"))) context.skip("this disk keeps case apart");
+        const seen = await f.start();
+        lookupCase(f.rootPath);
+        try {
+          if (byHand) expect(await f.moveByHand("docs/notes.md", "docs/Notes.md")).toMatchObject({ path: "docs/Notes.md" });
+          else expect(await f.move("docs/notes.md", "docs/Notes.md")).toMatchObject({ ok: true });
+          expect(await f.added(seen)).toContainEqual({ operation: "rename", path: "Docs/Notes.md", agentId: byHand ? undefined : named.agentId });
+          expect(await readdir(join(f.rootPath, "Docs"))).toEqual(["Notes.md"]);
+        } finally { await f.engine().stop(); }
+      });
+
+      it(`reads the stored source ${byHand ? "three" : "two"} times for an ordinary ${byHand ? "local" : "CLI"} move`, async () => {
+        const f = await fixture();
+        await write(f.rootPath, "Docs/a.md", "body");
+        await f.start();
+        lookupCase(f.rootPath);
+        const stored = vi.spyOn(storedEntryPaths, "storedEntryPath");
+        try {
+          if (byHand) await f.moveByHand("Docs/a.md", "archive.md");
+          else expect(await f.move("Docs/a.md", "archive.md")).toMatchObject({ ok: true });
+          expect(stored.mock.calls.filter(([, path]) => path === join(f.rootPath, "Docs", "a.md"))).toHaveLength(byHand ? 3 : 2);
+        } finally { vi.restoreAllMocks(); await f.engine().stop(); }
+      });
+    }
+
+    for (const native of [false, true]) {
+      for (const byHand of [false, true]) {
+        it(`allows a ${byHand ? "local" : "CLI"} alias source parent when the destination keeps its stored name with ${native ? "native" : "Linux"} realpath`, async context => {
+          const f = await fixture();
+          await write(f.rootPath, "Docs/a.md", "body");
+          if (!existsSync(join(f.rootPath, "docs/a.md"))) context.skip("this disk keeps case apart");
+          const seen = await f.start();
+          if (!native) lookupCase(f.rootPath);
+          const stored = vi.spyOn(storedEntryPaths, "storedEntryPath");
+          try {
+            if (byHand) expect(await f.moveByHand("docs/a.md", "Docs/b.md")).toMatchObject({ path: "Docs/b.md" });
+            else expect(await f.move("docs/a.md", "Docs/b.md")).toMatchObject({ ok: true });
+            expect(await f.added(seen)).toContainEqual({ operation: "rename", path: "Docs/b.md", agentId: byHand ? undefined : named.agentId });
+            if (byHand) expect(stored.mock.calls.filter(([, path]) => [join(f.rootPath, "docs"), join(f.rootPath, "Docs")].includes(path))).toHaveLength(4);
+          } finally { await f.engine().stop(); }
+        });
+      }
+    }
+
+    it("reports a missing CLI source when only the destination parent exists", async context => {
+      const f = await fixture();
+      await write(f.rootPath, "docs/b.md", "body");
+      if (existsSync(join(f.rootPath, "Docs/b.md"))) context.skip("this disk ignores case");
+      await f.start();
+      lookupCase(f.rootPath);
+      try {
+        expect(await f.move("Docs/a.md", "docs/a.md")).toMatchObject({ ok: false,
+          reason: "Nothing is at Docs/a.md. List the folder to see what is there." });
+      } finally { await f.engine().stop(); }
+    });
+
+    it("keeps real case-colliding hard-link names distinct during admission", async context => {
       const root = await createTestScratch("dohc-case-links-");
       await write(root, "Notes.md", "body");
-      await mkdir(join(root, "backup"));
-      await fsPromises.link(join(root, "Notes.md"), join(root, "backup", "notes.md"));
-      const original = fsPromises.lstat.bind(fsPromises);
-      vi.spyOn(fsPromises, "lstat").mockImplementation((path, options) => original(
-        String(path) === join(root, "notes.md") ? join(root, "backup", "notes.md") : path, options));
+      if (existsSync(join(root, "notes.md"))) context.skip("this disk ignores case");
+      await fsPromises.link(join(root, "Notes.md"), join(root, "notes.md"));
       lookupCase(root);
-      const listing = vi.spyOn(fsPromises, "readdir").mockResolvedValue(["Notes.md", "notes.md"] as never);
+      const listing = vi.spyOn(fsPromises, "readdir");
       expect((await admitPath(root, "Notes.md")).physical).toBe("Notes.md");
       expect((await admitPath(root, "notes.md")).physical).toBe("notes.md");
-      // A disk that keeps case apart proves the exact names without listing.
-      const ignoresCase = await original(join(root, "nOTES.MD")).then(() => true, () => false);
-      expect(listing).toHaveBeenCalledTimes(ignoresCase ? 2 : 0);
+      expect(listing).not.toHaveBeenCalled();
     });
 
     for (const unknown of [false, true]) {
@@ -254,7 +315,7 @@ describe("agent moves and deletes", () => {
           const mutation = vi.spyOn(fsPromises, "rename");
           try {
             expect(await f.move("Docs/a.md", destination)).toMatchObject({ ok: false,
-              reason: `dohc did not move Docs/a.md to ${destination}. This move can't rename the folder Docs to docs. Rename that folder first.` });
+              reason: `dohc did not move Docs/a.md to ${destination}. The folder is named Docs, not docs. Use that name, or rename the folder first.` });
             expect(mutation).not.toHaveBeenCalled();
           } finally { await f.engine().stop(); }
         });
@@ -266,6 +327,7 @@ describe("agent moves and deletes", () => {
       await write(f.rootPath, "a.md", "body");
       await f.start();
       lookupCase(f.rootPath);
+      forceStoredNameListing(join(f.rootPath, "a.md"));
       vi.spyOn(fsPromises, "readdir").mockRejectedValue(Object.assign(new Error("unreadable"), { code: "EIO" }));
       const capture = vi.spyOn(f.engine(), "changePathsAs");
       try {
@@ -284,8 +346,8 @@ describe("agent moves and deletes", () => {
       await f.start();
       lookupCase(f.rootPath);
       try {
-        expect(await f.move("base/Docs/sub/a.md", "base/docs/sub/b.md")).toMatchObject({ ok: false,
-          reason: "dohc did not move base/Docs/sub/a.md to base/docs/sub/b.md. This move can't rename the folder Docs to docs. Rename that folder first." });
+        expect(await f.move("base/dOCS/sub/a.md", "base/docs/sub/b.md")).toMatchObject({ ok: false,
+          reason: "dohc did not move base/dOCS/sub/a.md to base/docs/sub/b.md. The folder is named Docs, not docs. Use that name, or rename the folder first." });
       } finally { await f.engine().stop(); }
     });
 

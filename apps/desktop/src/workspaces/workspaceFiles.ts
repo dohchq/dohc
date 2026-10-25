@@ -1414,18 +1414,22 @@ export function deleteIdentityUnavailable(path: string): Error {
 export async function assertMoveParentCase(realRoot: string, paths: WorkspaceMovePaths): Promise<void> {
   const fromParent = dirname(paths.fromPath), toParent = dirname(paths.toPath);
   if (fromParent === toParent || pathCollisionKey(fromParent) !== pathCollisionKey(toParent)) return;
-  const destinationParent = await lstat(join(realRoot, toParent)).catch(absentAsNull)
+  const [sourceParent, destinationParent] = await Promise.all([
+    lstat(join(realRoot, fromParent)).catch(absentAsNull),
+    lstat(join(realRoot, toParent)).catch(absentAsNull),
+  ])
     .catch(() => { throw moveIdentityUnavailable(paths.fromPath, paths.toPath); });
-  if (destinationParent === null) return;
+  if (sourceParent === null || destinationParent === null) return;
   const [from, to] = await Promise.all([
     storedEntryPath(realRoot, join(realRoot, fromParent)),
     storedEntryPath(realRoot, join(realRoot, toParent)),
   ]).catch(() => { throw moveIdentityUnavailable(paths.fromPath, paths.toPath); });
-  if (from === to) {
-    const folders = fromParent.split(/[\\/]/u), renamed = toParent.split(/[\\/]/u);
-    const index = folders.findIndex((folder, index) => folder !== renamed[index]);
+  const spelledParent = toParent.replaceAll("\\", "/");
+  if (from === to && to.normalize("NFC") !== spelledParent.normalize("NFC")) {
+    const folders = to.split("/"), renamed = spelledParent.split("/");
+    const index = folders.findIndex((folder, index) => folder.normalize("NFC") !== renamed[index]?.normalize("NFC"));
     throw new Error(
-      `dohc did not move ${paths.fromPath} to ${paths.toPath}. This move can't rename the folder ${folders[index]} to ${renamed[index]}. Rename that folder first.`,
+      `dohc did not move ${paths.fromPath} to ${paths.toPath}. The folder is named ${folders[index]}, not ${renamed[index]}. Use that name, or rename the folder first.`,
     );
   }
 }
@@ -1539,9 +1543,7 @@ async function inspectWorkspaceMove(
     () => true,
     () => false,
   );
-  const sameDestination = !destExists ? false : process.platform === "linux"
-    ? physicalFromPath === await storedEntryPath(realRoot, to).catch(() => { throw moveIdentityUnavailable(fromPath, toPath); })
-    : await sameMoveEntry(realRoot, realFrom, await realpath(to), { fromPath, toPath });
+  const sameDestination = destExists && await sameMoveEntry(realRoot, realFrom, await realpath(to), { fromPath, toPath });
   if (destExists && !sameDestination) {
     throw new Error(`Destination already exists: ${toPath}`);
   }
@@ -1550,7 +1552,7 @@ async function inspectWorkspaceMove(
     // spelling. On Windows, an IPC case alias still reaches the same entry,
     // but the engine keys stable objects by their canonical workspace path.
     physicalFromPath,
-    physicalToPath: resolvedToPath.replaceAll("\\", "/"),
+    physicalToPath: (sameDestination ? join(dirname(physicalFromPath), basename(normalized.toPath)) : resolvedToPath).replaceAll("\\", "/"),
     visibleResultPath: normalized.toPath,
     realRoot,
     from,

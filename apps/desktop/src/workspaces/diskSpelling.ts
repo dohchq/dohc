@@ -25,7 +25,7 @@ export async function diskSpelling(root: string, path: string): Promise<string |
     const folder = stored;
     const lookup = await lstat(join(folder, leaf), { bigint: true }).catch(absentAsNull);
     if (lookup === null) return null;
-    if (!ignoresCase && /^[\x20-\x7e]+$/u.test(leaf) && !/~\d/u.test(leaf)) {
+    if (!ignoresCase && /^[\x20-\x7e]+$/u.test(leaf) && !/[;`K]|~\d|[. ]$/u.test(leaf)) {
       const swapped = swapAsciiCase(leaf);
       if (swapped === leaf) {
         stored = join(folder, leaf);
