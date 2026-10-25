@@ -712,7 +712,19 @@ describe("start surface", () => {
     expect(await screen.findByTestId(editorTabTestId("a.md"))).toBeTruthy();
   });
 
-  it("imports files dropped on an empty workspace through the Explorer's import", async () => {
+  it("says what a drop added while the Explorer is hidden", async () => {
+    const bridge = makeBridge(Promise.resolve({ ...storedStateWithTabs([]), sidebarVisible: false }));
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready", rules: [] }, files: [], folders: [] });
+    bridge.getDroppedFilePaths.mockReturnValue(["/home/sam/Downloads/notes.md"]);
+    bridge.importWorkspaceFiles.mockResolvedValue({ imported: ["notes.md"], skipped: 0 });
+    const start = await startSurface(bridge);
+    expect(screen.queryByTestId("explorer-files-header")).toBeNull();
+
+    fireEvent.drop(await start.findByTestId("start-drop"), { dataTransfer: { files: [new File([], "notes.md")], types: ["Files"] } });
+    expect((await screen.findByTestId("workspace-shell-notice")).textContent).toContain("Imported 1 file.");
+  });
+
+  it("imports files dropped on an empty workspace at its root", async () => {
     const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
     bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready", rules: [] }, files: [], folders: [] });
     bridge.getDroppedFilePaths.mockReturnValue(["/home/sam/Downloads/notes.md"]);

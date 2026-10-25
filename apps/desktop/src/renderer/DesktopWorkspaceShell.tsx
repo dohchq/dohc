@@ -2161,8 +2161,11 @@ export function DesktopWorkspaceShell(props: {
   // absent = root) — the drop target, or the folder whose context menu ran
   // "Import Files…". Every import shows what landed, where, and how many
   // sources were skipped — never a silent shrink.
+  // Where the import began. An Explorer import selects what landed in the
+  // Explorer. The palette and the start surface may show no Explorer, so a
+  // notice says what landed.
   const importFiles = useCallback(
-    async (from: "explorer" | "palette", droppedPaths?: string[], targetDir?: string) => {
+    async (from: "explorer" | "palette" | "start-surface", droppedPaths?: string[], targetDir?: string) => {
       const reveal = from === "explorer" ? ++revealRequest.current : 0;
       // Try again on a failed import refreshes the shared view first, since
       // some files may have landed, then asks for files for the same folder.
@@ -4100,10 +4103,10 @@ export function DesktopWorkspaceShell(props: {
     }),
     [commandContext, commandHandlers, createUntitledDrawing, createFirstApp],
   );
-  // Files dropped on the start surface import as on the Explorer's root.
+  // Files dropped on the start surface land at the workspace root.
   const importDroppedFiles = useCallback((dropped: File[]) => {
     const paths = bridge().getDroppedFilePaths(dropped);
-    if (paths.length > 0) void importFiles("explorer", paths);
+    if (paths.length > 0) void importFiles("start-surface", paths);
   }, [importFiles]);
 
   useEffect(() => {
