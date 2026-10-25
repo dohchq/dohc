@@ -24,7 +24,7 @@ import { OwnerCommittedDelivery } from "./ownerCommittedDelivery.js";
 import type { NativeOwnerActivation } from "@dohc/workspace-engine-client/daemon";
 import { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { markdownToYDoc } from "../../../packages/ydoc-projection/src/import-export.js";
-import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
+import { createLiveMarkdownHistoryValidator, createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
 import { hostedWindowCovers, releasedLineageBindingDigest, type HostedWindow, type ReleasedLineageBinding } from "@dohc/workspace-engine-client/relay-wire";
 import bindingVectors from "../../../packages/workspace-engine-client/src/relay/releasedLineageBindingVectors.json" with { type: "json" };
 
@@ -530,7 +530,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   // Complete the activation under the earlier connection: adoption, seed, native application.
   const earlier = {mode: "service" as const, hostId: "service", hostEpoch: f.storage.getLiveHostControl()!.hostEpoch, instanceId: "instance", connectionId: "earlier"};
   const actor = {kind: "owner" as const, userId: "owner", shareId: "share"}, store = f.storage.createServiceActivationStore(f.history);
-  store.prepare({capture, host: earlier, shareId: "share", registeredAtMs: 3, guard() {}, validateBaseline, validateJournal,
+  store.prepare({capture, host: earlier, shareId: "share", registeredAtMs: 3, guard() {}, validateBaseline, validateHistory: createLiveMarkdownHistoryValidator(policy),
     bounds: {maxCaptureBytes: 1_000_000, maxEntriesPerDrain: 10, maxBytesPerDrain: 1_000_000}});
   const access = store.pending(document, earlier), delivery = f.storage.createLiveCommittedDeliveryStore(f.history, access);
   const adoption = delivery.captureOwnerCut({host: earlier, document, actor, adoptionId: capture.activationId,
@@ -1240,6 +1240,26 @@ it("records an edit whose application reply was lost before Stop, and settles th
   expect(o.tip()).toEqual(edit);
   expect(o.calls(sent)).toEqual(departure);
   expect(o.ownerCalls()[sent + 1]).toEqual(["liveApplication.settle", {registrationId: 7, terminalReceipt: edit}]);
+  expect(o.client().readLiveApplicationAck).toHaveBeenLastCalledWith(expect.objectContaining({registrationId: 7}), edit, expect.any(AbortSignal));
+  expect(o.client().sendLiveApplication).toHaveBeenCalledTimes(applications);
+});
+
+// Proves: a stopped document whose departure has not reached the host yet
+// still records the edit the engine applied, before anything publishes, so
+// the relay's owner tip covers its output. Passes register its adoption and
+// read the engine's ACK; they send no application and settle nothing.
+it("records what the engine applied of a stopped document before its departure reaches the host", async () => {
+  const o = await enrolledServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.lost.replies = true;
+  const edit = o.acceptEdit("before departure");
+  await vi.waitFor(() => expect(o.applied.has(edit.deliveryId)).toBe(true));
+  o.stop();
+  const applications = o.client().sendLiveApplication.mock.calls.length, sent = o.ownerCalls().length;
+  o.lost.replies = false;
+  await vi.waitFor(() => expect(o.tip()).toEqual(edit));
+  expect(o.calls(sent)).toContain("liveApplication.register");
+  expect(o.calls(sent)).not.toContain("liveApplication.settle");
   expect(o.client().readLiveApplicationAck).toHaveBeenLastCalledWith(expect.objectContaining({registrationId: 7}), edit, expect.any(AbortSignal));
   expect(o.client().sendLiveApplication).toHaveBeenCalledTimes(applications);
 });

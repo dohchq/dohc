@@ -6,7 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { NativeOwnerActivation, NativeOwnerActivationSource, RetainedPrefixBody } from "@dohc/workspace-engine-client/daemon";
 import { parseLiveDocumentKey, parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseLiveUpdateReceipt, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import type { createLiveMarkdownRegistrationValidator, createLiveMarkdownJournalValidator } from "../../../../packages/ydoc-projection/src/liveDocumentValidation";
+import type { createLiveMarkdownRegistrationValidator, createLiveMarkdownHistoryValidator } from "../../../../packages/ydoc-projection/src/liveDocumentValidation";
 import type { StorageContext } from "./context";
 import type { LiveHostConnectionCoordinate } from "./types";
 import { attachLiveJournalHistory, requireLiveJournalHistory, type LiveJournalHistoryAuthority } from "./liveJournalHistory";
@@ -275,7 +275,7 @@ export class ServiceActivationStore {
   prepare(input: {
     capture: NativeOwnerActivation; host: LiveHostConnectionCoordinate; shareId: string; registeredAtMs: number; guard(): void;
     validateBaseline: ReturnType<typeof createLiveMarkdownRegistrationValidator>;
-    validateJournal: ReturnType<typeof createLiveMarkdownJournalValidator>;
+    validateHistory: ReturnType<typeof createLiveMarkdownHistoryValidator>;
     bounds: OrdinaryActivationBounds;
   }) {
     input.guard(); requireLiveJournalHistory(this.storage, this.history);
@@ -312,7 +312,7 @@ export class ServiceActivationStore {
         return {document, replayed: true, completed: prior.completion_json !== null};
       }
       const ordinaryCut=verifyOrdinaryActivationCut(this.storage,{source,document,baselineBytes,fullState,baseline:base.evidence,
-        validateJournal:input.validateJournal,validateRegistration:input.validateBaseline,bounds:input.bounds});
+        validateHistory:input.validateHistory,validateRegistration:input.validateBaseline,bounds:input.bounds});
       if (!registerLiveHostInTransaction(this.storage, {...input.host,updatedAtMs:input.registeredAtMs,guard:input.guard}).ok) throw new Error("Service activation host is unavailable.");
       const registration = registerOrdinaryActivationBaselineInTransaction(this.storage,{host:input.host,registeredAtMs:input.registeredAtMs,baselineBytes,
         evidence:{version:1,document,currentPath:source.currentPath,checkpoint:{updateDigest:source.lineageClaimId,ranges:base.evidence.checkpoint.ranges},

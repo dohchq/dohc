@@ -831,6 +831,15 @@ export async function startServiceLiveHost(options: {
           const waiting=await depart(key,passSignal);
           if(waiting!==undefined)throw new Error(`Departing live document is waiting: ${waiting}`);
         });
+        // A document whose owner lost live authority but that has not left, as right after Stop, records
+        // what the engine applied before anything publishes, so its output does not hold back its workspace's.
+        for(const [key,row] of [...hosted]){
+          if(leaving.has(key) || unloading.has(key) || !checked(row.target.workspaceId) || !authorityLost(row))continue;
+          await step(async()=>{
+            const document=activation!.departing(row.target,passSignal);
+            if(document)await runDocument(document,passSignal,operation=>activation!.reconcileDeparted(row.target,document,operation));
+          });
+        }
         // A dormant document stays out of memory until someone opens it. One whose
         // unload is unanswered may hold an ended registration until the unload is sent again.
         // A departing one whose owner lost live authority only settles what the host applied.

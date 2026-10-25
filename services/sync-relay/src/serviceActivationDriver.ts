@@ -6,7 +6,7 @@ import {hostedWindowCovers,type HostedWindow} from "@dohc/workspace-engine-clien
 import {parseLiveDocumentKey,parseLiveUpdateIdentifier,type LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
 import {validateUserWritePath} from "@dohc/workspace-core";
 import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents";
-import {createLiveMarkdownRegistrationValidator,createLiveMarkdownJournalValidator} from "../../../packages/ydoc-projection/src/liveDocumentValidation";
+import {createLiveMarkdownRegistrationValidator,createLiveMarkdownHistoryValidator} from "../../../packages/ydoc-projection/src/liveDocumentValidation";
 import type {OrderedLiveUpdateCutPolicy} from "../../../packages/ydoc-projection/src/orderedLiveUpdateCut";
 import {configRecord} from "./deviceLiveHostConfig";
 import {OwnerCommittedDelivery} from "./ownerCommittedDelivery";
@@ -17,6 +17,7 @@ import {serviceOwnerTransport} from "./serviceOwnerTransport";
 import {ServiceActivationStaleCut,type ServiceActivationStore} from "./storage/serviceActivation";
 import type {ServiceActivationAccess} from "./storage/serviceActivationAccess";
 import type {SyncRelayStorage,LiveHostConnectionCoordinate} from "./storage";
+import type {DepartedOwnerDelivery} from "./storage/liveCommittedDelivery";
 import type {LiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import type {LiveRestorePreparation} from "./liveRestorePreparation";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
@@ -45,7 +46,7 @@ export function parseServiceActivationConfig(value:unknown){
   for(const value of Object.values(policy))positive(value);
   const validation=Object.freeze({...policy}) as unknown as OrderedLiveUpdateCutPolicy;
   return Object.freeze({targets:Object.freeze(targets),validateBaseline:createLiveMarkdownRegistrationValidator(validation),
-    validateJournal:createLiveMarkdownJournalValidator(validation),validateAdmission:liveValidation.validator(validation),maxCaptureBytes:positive(row.maxCaptureBytes),
+    validateHistory:createLiveMarkdownHistoryValidator(validation),validateAdmission:liveValidation.validator(validation),maxCaptureBytes:positive(row.maxCaptureBytes),
     maxEntriesPerDrain:positive(row.maxEntriesPerDrain),maxBytesPerDrain:positive(row.maxBytesPerDrain),
     maxDocumentsPerPass:positive(row.maxDocumentsPerPass),pollIntervalMs:positive(row.pollIntervalMs),passDeadlineMs:positive(row.passDeadlineMs),
     idleUnloadMs:positive(row.idleUnloadMs),idleRetryMs:positive(row.idleRetryMs)});
@@ -309,6 +310,31 @@ export class ServiceActivationDriver {
    * was adopted here.
    */
   async settleDeparted(target:ServiceActivationTarget,value:LiveDocumentKey,signal:AbortSignal):Promise<DepartedSettlement|null>{
+    const reconciled=await this.#reconcile(target,value,signal,false);
+    if(reconciled?.kind!=="reconciled")return reconciled;
+    const o=this.options,{registrationId,tip}=reconciled;
+    const response=await o.client.sendRequest({id:o.nextRequestId(),workspace:o.workspace(target.workspaceId)!.handle,deadlineMs:o.deadlineMs,
+      method:"liveApplication.settle",params:{registrationId,terminalReceipt:tip?{...tip}:null}},signal);
+    signal.throwIfAborted();o.assertCurrent();
+    return {kind:"settled",settlement:settlementResult(response.result,tip)};
+  }
+  /**
+   * Records what the engine applied of a document whose owner lost live
+   * authority while it stays hosted, as between Stop and its departure or
+   * after a Resume while its activation retires. The relay holds the engine's
+   * output for a row past the owner tip, and every row the workspace publishes
+   * after it, so this runs before anything publishes. It does nothing once the
+   * owner applied every accepted row. Runs in the work of the document
+   * `departing` returned.
+   */
+  reconcileDeparted(target:ServiceActivationTarget,value:LiveDocumentKey,signal:AbortSignal){
+    return this.#reconcile(target,value,signal,true);
+  }
+  // Registers the departed document through the engine client and records
+  // each accepted row the engine applied, with this connection's standing.
+  // Null when nothing was adopted here or, with `behind`, nothing is past the tip.
+  async #reconcile(target:ServiceActivationTarget,value:LiveDocumentKey,signal:AbortSignal,behind:boolean):
+    Promise<{kind:"reconciled";registrationId:number;tip:DepartedOwnerDelivery["tip"]}|Exclude<DepartedSettlement,{kind:"settled"}>|null>{
     const o=this.options,workspace=o.workspace(target.workspaceId);
     if(!workspace)throw new Error("Service activation workspace is not attached.");
     const check=()=>{signal.throwIfAborted();o.assertCurrent();};
@@ -320,7 +346,7 @@ export class ServiceActivationDriver {
     check();
     const input={host:o.host,document,adoptionId:saved.activationId};
     let delivery=this.#delivery.departedOwnerDelivery(input);
-    if(!delivery)return null;
+    if(!delivery || (behind && !delivery.next))return null;
     // Registering retires the engine registration a cached owner holds. That owner
     // registers again, and the document is ready again, only if it returns.
     const owner=this.#owners.get(JSON.stringify(document));
@@ -345,10 +371,7 @@ export class ServiceActivationDriver {
       if(!ack)break;
       delivery=this.#delivery.recordDepartedApplication({...input,binding:delivery.binding},ack);
     }
-    const response=await o.client.sendRequest({...request(),method:"liveApplication.settle",
-      params:{registrationId,terminalReceipt:delivery.tip?{...delivery.tip}:null}},signal);
-    check();
-    return {kind:"settled",settlement:settlementResult(response.result,delivery.tip)};
+    return {kind:"reconciled",registrationId,tip:delivery.tip};
   }
   /**
    * Activates the target and drains it. A target with no owner here first pulls
@@ -420,7 +443,7 @@ export class ServiceActivationDriver {
       if(!saved){
         try{
           this.#store.prepare({capture,host:o.host,shareId:target.shareId,registeredAtMs:Date.now(),guard:check,
-            validateBaseline:c.validateBaseline,validateJournal:c.validateJournal,bounds:{maxCaptureBytes:c.maxCaptureBytes,
+            validateBaseline:c.validateBaseline,validateHistory:c.validateHistory,bounds:{maxCaptureBytes:c.maxCaptureBytes,
               maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain}});
         }catch(error){
           if(!(error instanceof ServiceActivationStaleCut))throw error;

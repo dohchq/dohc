@@ -12,7 +12,7 @@ import * as Y from 'yjs'
 import {parseHostEpoch} from '@dohc/live-session-contract/host-control'
 import type {NativeOwnerActivation} from '../../workspace-engine-client/src/daemon/nativeOwnerActivation.js'
 import {markdownToYDoc} from './import-export.js'
-import {createLiveMarkdownRegistrationValidator,createLiveMarkdownJournalValidator} from './liveDocumentValidation.js'
+import {createLiveMarkdownRegistrationValidator,createLiveMarkdownJournalValidator,createLiveMarkdownHistoryValidator} from './liveDocumentValidation.js'
 import {openSyncRelayStorage} from '../../../services/sync-relay/src/storage.js'
 import {createLiveJournalHistoryAuthority} from '../../../services/sync-relay/src/storage/liveJournalHistory.js'
 import {ServiceActivationStaleCut} from '../../../services/sync-relay/src/storage/serviceActivation.js'
@@ -25,7 +25,7 @@ import {allowsServiceActivation} from '../../../services/sync-relay/src/storage/
 import {readServiceActivationOrigin} from '../../../services/sync-relay/src/storage/serviceActivationOrigin.js'
 import {authorizeServiceHostReplication,deriveServiceHostBearer} from '../../../services/sync-relay/src/serviceHostCredential.js'
 import {createServiceHostReplication} from '../../../services/sync-relay/src/serviceHostReplication.js'
-import {SERVICE_HOST_ORIGIN_PREFIX} from '../../../services/sync-relay/src/relayLogInputs.js'
+import {parseLogOp,SERVICE_HOST_ORIGIN_PREFIX} from '../../../services/sync-relay/src/relayLogInputs.js'
 import {canonicalVersionedAcceptedMetadata,initialAcceptedHistoryDigest} from '../../../services/sync-relay/src/liveAcceptedHistory.js'
 import {stableJsonStringify} from '../../../services/sync-relay/src/canonicalJson.js'
 import {nativeSettlementId,settlementRecordDigest} from '../../../services/sync-relay/src/storage/hostedSettlement.js'
@@ -35,7 +35,7 @@ const {DatabaseSync}=createRequire(import.meta.url)('node:sqlite') as typeof imp
 const hash=(bytes:Uint8Array)=>createHash('sha256').update(bytes).digest('hex')
 const policy={maxStructVisits:1_000_000,maxValueNodeVisits:5_000_000,maxDecodedPayloadByteVisits:100_000_000,
   maxStructClientGroupVisits:1_000_000,maxDeleteClientGroupVisits:1_000_000,maxDeleteIntervalVisits:1_000_000,maxIndexOperations:10_000_000}
-const validateBaseline=createLiveMarkdownRegistrationValidator(policy),validateJournal=createLiveMarkdownJournalValidator(policy)
+const validateBaseline=createLiveMarkdownRegistrationValidator(policy),validateJournal=createLiveMarkdownJournalValidator(policy),validateHistory=createLiveMarkdownHistoryValidator(policy)
 const host={mode:'service' as const,hostId:'service',hostEpoch:parseHostEpoch(1),instanceId:'instance',connectionId:'connection'}
 const actor={kind:'owner' as const,userId:'owner',shareId:'share'}
 const bounds={maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000}
@@ -73,7 +73,7 @@ function fixture(text='Original'){
     .run(base.evidence.projectedMarkdownSha256,base.evidence.projectedMarkdownByteLength)
   raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES ('share','workspace','owner',?,0)").run(JSON.stringify({paths:['docs'],versionId:null}))
   storage.provisionLiveHostControl({...host,updatedAtMs:1,guard(){}})
-  const prepare=(readBounds=bounds)=>store.prepare({capture,host,shareId:'share',registeredAtMs:3,guard(){},validateBaseline,validateJournal,bounds:readBounds})
+  const prepare=(readBounds=bounds)=>store.prepare({capture,host,shareId:'share',registeredAtMs:3,guard(){},validateBaseline,validateHistory,bounds:readBounds})
   return {storage,raw,store,history,capture,document,prepare,path,close(){raw.close();storage.close();rmSync(root,{recursive:true,force:true})}}
 }
 it('retains the original lineage and edited ordinary cut, closing ordinary authority until activation completes',()=>{
@@ -334,7 +334,7 @@ function verify(f:ReturnType<typeof fixture>,readBounds=bounds){
   const base=validateBaseline({document:f.document,currentPath:'docs/a.md',checkpoint:f.capture.baselineBytes})
   if(base.kind!=='accepted')throw new Error('Invalid base fixture')
   return verifyOrdinaryActivationCut(f.storage as StorageContext,{source:f.capture.source,document:f.document,baselineBytes:f.capture.baselineBytes,
-    fullState:f.capture.fullState,baseline:base.evidence,validateJournal,validateRegistration:validateBaseline,bounds:readBounds})
+    fullState:f.capture.fullState,baseline:base.evidence,validateHistory,validateRegistration:validateBaseline,bounds:readBounds})
 }
 it('activates past a losing base from a second device and keeps one lineage through Resume and a fresh capture',()=>{
   const f=fixture(),loser=losingDevice(f);try{
@@ -413,8 +413,8 @@ it.each([
     expect(f.raw.prepare('SELECT * FROM sync_relay_live_documents').all()).toEqual([])
   }finally{loser.doc.destroy();f.close()}
 })
-// Proves: the complete history is charged once, however many later prefixes
-// must keep the source's projection.
+// Proves: the complete history is charged and validated once, however many
+// later prefixes must keep the source's projection.
 it('activates a source followed by many projection-neutral rows over a 1 MB baseline within the self-hosted budget',()=>{
   const f=fixture('x'.repeat(1_000_000)),doc=new Y.Doc();try{
     const {maxCaptureBytes,maxEntriesPerDrain,maxBytesPerDrain}=selfHostLiveProfile().service.activation
@@ -473,6 +473,13 @@ it.each([
     append(f,'other',0,'moment.append',otherWrite({operation:'move',path:'docs/a.md',payloadAfterPath:'docs/a.md',beforePath:'docs/c.md'}))
     append(f,'other',1,'moment.append',otherWrite({operation:'move',beforePath:'docs/a.md'}))},divergent],
   ['a before-image naming the document',f=>{staleArtifact(f);append(f,'other',0,'moment.append',otherWrite({beforeObjectId:'object'}))},divergent],
+  ['an ordinary replacement write to the same object',f=>{append(f,'origin',3,'moment.append',otherWrite({objectId:'object',momentId:'replacement',path:'docs/a.md',payloadAfterPath:'docs/a.md'}))
+    staleArtifact(f,'origin',4)},divergent],
+  ['a replacement whose bytes a later write restores',f=>{const stale=f.raw.prepare("SELECT blob_sha256,byte_length FROM sync_relay_object_moments WHERE moment_id='original-moment'").get()!
+    append(f,'other',0,'moment.append',otherWrite({objectId:'object',momentId:'replacement',path:'docs/a.md',payloadAfterPath:'docs/a.md'}))
+    append(f,'other',1,'moment.append',otherWrite({objectId:'object',momentId:'restoration',path:'docs/a.md',payloadAfterPath:'docs/a.md',
+      payloadAfterBlobSha256:stale.blob_sha256,payloadAfterByteLength:stale.byte_length}))
+    staleArtifact(f,'origin',3)},divergent],
   ['the document moving away and back',f=>{staleArtifact(f)
     append(f,'origin',4,'moment.append',otherWrite({objectId:'object',operation:'move',path:'docs/b.md',payloadAfterPath:'docs/b.md'}))
     append(f,'origin',5,'moment.append',otherWrite({objectId:'object',operation:'move',path:'docs/a.md',payloadAfterPath:'docs/a.md'}))},
@@ -487,6 +494,17 @@ it.each([
     add(f)
     expect(f.prepare).toThrow(message)
     expect(f.raw.prepare('SELECT * FROM sync_relay_live_documents').all()).toEqual([])
+  }finally{f.close()}
+})
+// Proves: every row the replacement scan examines between the artifact's
+// nearest row and the cut is charged to the proof budget, so a long unrelated
+// interval refuses for this pass instead of stalling the writer.
+it('charges a long unrelated interval before a stale settlement artifact to the proof budget',()=>{
+  const f=fixture();try{
+    for(let seq=0;seq<300;seq++)append(f,'other',seq,'moment.append',otherWrite({momentId:`unrelated-${seq}`,padding:'p'.repeat(4096)}))
+    staleArtifact(f)
+    expect(()=>verify(f)).toThrow('Ordinary activation history exceeds its configured byte budget.')
+    expect(verify(f,{...bounds,maxBytesPerDrain:4_000_000})).toEqual({verified:true})
   }finally{f.close()}
 })
 it('rejects a different replication epoch even at the same relay cursor',()=>{
@@ -694,7 +712,7 @@ function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:Re
   const driver=new ServiceActivationDriver({trustedAccount:accountId=>({accountId,name:'Owner'}),storage:f.storage,history:f.history,host,
     client:{...native,captureOwnerActivation,sendRequest} as never,
     workspace:id=>id==='workspace'?{handle:'native-workspace',replica:{pull,publish:vi.fn()}}:undefined,
-    config:{targets:[target],validateBaseline,validateJournal,validateAdmission:validateJournal,maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,
+    config:{targets:[target],validateBaseline,validateHistory,validateAdmission:validateJournal,maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,
       maxDocumentsPerPass:1,pollIntervalMs:1000,passDeadlineMs:10_000,idleUnloadMs:600_000,idleRetryMs:30_000},
     adoption:{maxBytes:1_000_000,maxEvents:10},nextRequestId:()=>1,deadlineMs:1000,assertCurrent(){},registered(){},
     runDocument,
@@ -1413,6 +1431,35 @@ it('retries a retiring application until its owner applied it, confirms its auth
     f.raw.exec('UPDATE sync_relay_service_activations SET retire_accepted_cursor=retire_accepted_cursor-1')
     expect((await r.push([content,audit],2)).body).toMatchObject({inserted:2,refusals:r.refusals([2,'ydoc.update','unproved-retirement-output'],
       [3,'live.audit.application','unproved-retirement-output'])})
+  }finally{f.close()}
+})
+
+// Proves: a sibling document's write behind a retiring application in the
+// host's origin waits with it, then both publish once the engine's ACK is
+// recorded with the connection's standing, as the driver records it before
+// any push, though the retiring owner has no live authority.
+it("publishes a sibling document's write behind a retiring application once its ACK is recorded with the connection's standing",async()=>{
+  const f=fixture();try{
+    const r=await retiringFeed(f)
+    const created=new TextEncoder().encode('sibling'),edited=new TextEncoder().encode('sibling edited')
+    const write=(momentId:string,bytes:Uint8Array)=>({momentId,objectId:'sibling',versionId:'main',operation:'write',path:'docs/b.md',payloadAfterPath:'docs/b.md',
+      payloadAfterBlobSha256:hash(bytes),payloadAfterByteLength:bytes.length,payloadAfterContentKind:'text',recordedAtMs:1})
+    f.storage.putBlob({workspaceId:'workspace',sha256:hash(created),content:created,createdAtMs:1})
+    f.storage.appendLogBatch({workspaceId:'workspace',originId:'owner-device',ops:[parseLogOp({originSeq:0,opKind:'moment.append',recordedAtMs:1,payload:write('sibling-created',created)})]})
+    f.storage.enrollServiceHostDocument({...enrollment,path:'docs/b.md',nowMs:2})
+    for(const bytes of [r.editBytes,edited])await r.upload(bytes)
+    const rows=[r.ydocRow(r.editBytes),['moment.append',write('sibling-edited',edited)] as Row]
+    expect(await r.push(rows,0)).toMatchObject({status:503,body:{code:'settlement_proof_budget'}})
+    expect(f.storage.maxOriginSeq('workspace',HOST_ORIGIN)).toBe(-1)
+    const delivery=f.storage.createLiveCommittedDeliveryStore(f.history),input={host,document:f.document,adoptionId:f.capture.activationId}
+    const pending=delivery.departedOwnerDelivery(input)!
+    expect(pending.next).toEqual(r.receipt)
+    delivery.recordDepartedApplication({...input,binding:pending.binding},{...r.receipt,localYDocSequence:3,applicationReplayed:true})
+    const answer=await r.push(rows,0)
+    expect(answer).toMatchObject({status:200,body:{inserted:2}})
+    expect(answer.body.refusals??[]).toEqual([])
+    expect(r.coordinate(0)).toEqual(departed('ydoc.update'))
+    expect(f.raw.prepare("SELECT path FROM sync_relay_object_moments WHERE moment_id='sibling-edited'").get()).toEqual({path:'docs/b.md'})
   }finally{f.close()}
 })
 

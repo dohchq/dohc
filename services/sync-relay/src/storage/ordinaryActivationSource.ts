@@ -4,7 +4,7 @@ import type {NativeOwnerActivationSource} from "@dohc/workspace-engine-client/da
 import type {LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
 import type {LiveDocumentBaselineRegistrationInput} from "./types";
 import type {StorageContext} from "./context";
-import type {LiveMarkdownRegistrationEvidence,createLiveMarkdownJournalValidator,createLiveMarkdownRegistrationValidator} from "../../../../packages/ydoc-projection/src/liveDocumentValidation";
+import type {LiveMarkdownRegistrationEvidence,createLiveMarkdownHistoryValidator,createLiveMarkdownRegistrationValidator} from "../../../../packages/ydoc-projection/src/liveDocumentValidation";
 import {MAX_OLD_SUFFIX_ENTRIES} from "../../../../packages/ydoc-projection/src/orderedLiveUpdateCut";
 import {ORDINARY_ACTIVATION_BASES} from "./ordinaryActivationBasis";
 import {SETTLEMENT_BINDINGS,SETTLEMENT_CUTS} from "./hostedSettlementSchema";
@@ -30,9 +30,9 @@ function currentCut(storage:StorageContext,source:NativeOwnerActivationSource){
 }
 export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source:NativeOwnerActivationSource;document:LiveDocumentKey;
   baselineBytes:Uint8Array;fullState:Uint8Array;baseline:LiveMarkdownRegistrationEvidence;
-  validateJournal:ReturnType<typeof createLiveMarkdownJournalValidator>;validateRegistration:ReturnType<typeof createLiveMarkdownRegistrationValidator>;
+  validateHistory:ReturnType<typeof createLiveMarkdownHistoryValidator>;validateRegistration:ReturnType<typeof createLiveMarkdownRegistrationValidator>;
   bounds:OrdinaryActivationBounds}):VerifiedOrdinaryActivationCut{
-  const {source,document,baselineBytes,fullState,baseline,validateJournal,validateRegistration,bounds}=input;
+  const {source,document,baselineBytes,fullState,baseline,validateHistory,validateRegistration,bounds}=input;
   for(const value of Object.values(bounds))requireValue(integer(value)&&value>0,"Invalid ordinary activation read budget.");
   requireValue(baselineBytes.length+fullState.length+Buffer.byteLength(JSON.stringify(source))<=bounds.maxCaptureBytes,"Ordinary activation capture exceeds its configured byte budget.");
   currentCut(storage,source);
@@ -89,42 +89,42 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
     return new Uint8Array(bytes);
   });
   requireValue(Buffer.compare(Buffer.from(updates[0]!),Buffer.from(baselineBytes))===0,"Ordinary activation base bytes differ.");
-  // The baseline and the updates through `end`. Each earlier prefix adds nothing to the complete history, which is charged once below.
-  const prefix=(end:number)=>{
-    const result=validateJournal({document,currentPath:source.currentPath,checkpoint:baselineBytes,suffix:updates.slice(1,Math.max(end,1)),
-      candidate:end===0?new Uint8Array([0,0]):updates[end]!});
-    requireValue(result.kind==="accepted","Ordinary activation history is not a valid live document.");return result.evidence;
-  };
   charge(fullState.length);
   const full=validateRegistration({document,currentPath:source.currentPath,checkpoint:fullState});
   requireValue(full.kind==="accepted","Native activation is not a complete standalone CRDT state.");
-  charge(baselineBytes.length+(updates.length===1?2:updates.slice(1).reduce((sum,bytes)=>sum+bytes.length,0)));
-  const captured=full.evidence,ordinary=prefix(updates.length-1);
-  requireValue(captured.stateUpdateSha256===ordinary.stateUpdateSha256&&captured.stateUpdateByteLength===ordinary.stateUpdateByteLength&&
-    Buffer.compare(Buffer.from(captured.stateUpdate),Buffer.from(ordinary.stateUpdate))===0&&
-    ordinary.projectedMarkdownSha256===source.sourceDigest&&ordinary.projectedMarkdownByteLength===source.sourceByteLength,
-    "Native activation differs from the complete ordinary CRDT history.");
   const projects=(evidence:{projectedMarkdownSha256:string;projectedMarkdownByteLength:number})=>
     evidence.projectedMarkdownSha256===source.sourceDigest&&evidence.projectedMarkdownByteLength===source.sourceByteLength;
   const moment=storage.db.prepare(`SELECT relay_seq,moment_id,version_id,path,content_kind,blob_sha256,byte_length FROM sync_relay_object_moments
     WHERE workspace_id=? AND object_id=? AND version_id=? AND relay_seq<=? ORDER BY relay_seq DESC LIMIT 1`).get(document.workspaceId,document.objectId,document.mainVersionId,source.committedCursor);
   const echoes=moment?.path===source.currentPath&&moment.content_kind==="text"&&moment.blob_sha256===source.sourceDigest&&moment.byte_length===source.sourceByteLength;
-  let momentMatches=moment?.moment_id===source.sourceMomentId&&moment.version_id===document.mainVersionId&&echoes;
-  if(!momentMatches){
+  // The first history prefix that must project the source, or null when the latest file moment is the source.
+  let from:number|null=null;
+  if(!(moment?.moment_id===source.sourceMomentId&&moment.version_id===document.mainVersionId&&echoes)){
     // A receiver-generated source names an ordinarily admitted Y.Doc row; a departed row counts as history, never as a source.
     // Otherwise the source is a settlement moment the relay proved, after the history before it.
     const index=rows.findIndex(row=>source.sourceMomentId===`moment-ydoc-apply-${hash([document.workspaceId,document.mainVersionId,document.objectId,source.currentPath,row.origin_id,row.origin_seq].join("\0"))}`);
     if(index>=0)requireValue(rows[index]!.ordinary,"Native activation source moment is not an ordinary history coordinate.");
     const anchor=index>=0?rows[index]!.relay_seq:provedSettlementSource(storage,{source,document,validateRegistration,charge,projects});
-    const from=index>=0?index:rows.filter(row=>row.relay_seq<anchor).length-1;
-    requireValue(!moment||Number(moment.relay_seq)<=anchor||echoes||sameLineageArtifact(storage,source,document,Number(moment.relay_seq)),
+    from=index>=0?index:rows.filter(row=>row.relay_seq<anchor).length-1;
+    requireValue(!moment||Number(moment.relay_seq)<=anchor||echoes||sameLineageArtifact(storage,source,document,Number(moment.relay_seq),charge),
       "Ordinary activation found a later ordinary file moment with a divergent projection.");
-    // The source's prefix and every later one keep its projection, so a change and its reversal can't stand behind an earlier source.
-    // The last prefix is the complete history already compared above.
-    momentMatches=true;
-    for(let end=from;momentMatches&&end<updates.length-1;end++)momentMatches=projects(end===0?baseline:prefix(end));
   }
-  requireValue(momentMatches,"Native activation source moment does not project the captured source.");
+  // One pass validates the history and, from the source's prefix on, checks that every prefix keeps its projection,
+  // so a change and its reversal can't stand behind an earlier source. The baseline alone was validated as a registration.
+  charge(baselineBytes.length+(updates.length===1?2:updates.slice(1).reduce((sum,bytes)=>sum+bytes.length,0)));
+  const start=from===null?updates.length:Math.max(from,1);
+  let projected=from!==0||projects(baseline),visited=0;
+  const result=validateHistory({document,currentPath:source.currentPath,checkpoint:baselineBytes,suffix:updates.slice(1,Math.max(updates.length-1,1)),
+    candidate:updates.length===1?new Uint8Array([0,0]):updates[updates.length-1]!},
+  {from:start,visit:(evidence,index)=>{projected&&=index===start+visited++&&projects(evidence);}});
+  requireValue(result.kind==="accepted"||result.reason!=="capacity-refused","Ordinary activation history exceeds its configured validation budget.");
+  requireValue(result.kind==="accepted","Ordinary activation history is not a valid live document.");
+  const captured=full.evidence,ordinary=result.evidence;
+  requireValue(captured.stateUpdateSha256===ordinary.stateUpdateSha256&&captured.stateUpdateByteLength===ordinary.stateUpdateByteLength&&
+    Buffer.compare(Buffer.from(captured.stateUpdate),Buffer.from(ordinary.stateUpdate))===0&&
+    ordinary.projectedMarkdownSha256===source.sourceDigest&&ordinary.projectedMarkdownByteLength===source.sourceByteLength,
+    "Native activation differs from the complete ordinary CRDT history.");
+  requireValue(projected&&visited===Math.max(updates.length-1-start,0),"Native activation source moment does not project the captured source.");
   const evidence={version:1 as const,document:structuredClone(document),currentPath:source.currentPath,
     checkpoint:{updateDigest:baseline.checkpoint.updateDigest,ranges:baseline.checkpoint.ranges.map(row=>({...row}))},
     projectedMarkdownSha256:baseline.projectedMarkdownSha256,projectedMarkdownByteLength:baseline.projectedMarkdownByteLength};
@@ -188,11 +188,11 @@ function provedSettlementSource(storage:StorageContext,input:{source:NativeOwner
  * native-shaped text write at the bound path whose ID has a native settlement
  * name, whose origin's nearest preceding Y.Doc row of this document, chosen
  * before any filter, is ordinarily admitted history of the captured lineage,
- * and which no other object replaced from that row through the cut. The
- * history check already refused this document's moves, deletes, unclaimed
- * rows and other bases across the cut; a losing lineage's rows break nothing.
+ * and which nothing replaced from that row through the cut. The history check
+ * already refused this document's moves, deletes, unclaimed rows and other
+ * bases across the cut; a losing lineage's rows break nothing.
  */
-function sameLineageArtifact(storage:StorageContext,source:NativeOwnerActivationSource,document:LiveDocumentKey,relaySeq:number):boolean{
+function sameLineageArtifact(storage:StorageContext,source:NativeOwnerActivationSource,document:LiveDocumentKey,relaySeq:number,charge:(bytes:number)=>void):boolean{
   const artifact=storage.db.prepare("SELECT origin_id,origin_seq,op_kind,payload_json FROM sync_relay_log WHERE workspace_id=? AND relay_seq=?").get(document.workspaceId,relaySeq);
   if(artifact?.op_kind!=="moment.append")return false;
   const write=JSON.parse(String(artifact.payload_json)) as Record<string,unknown>;
@@ -205,19 +205,27 @@ function sameLineageArtifact(storage:StorageContext,source:NativeOwnerActivation
       AND origin_id=? AND origin_seq<? AND op_kind='ydoc.update' ORDER BY origin_seq DESC LIMIT 1`)
     .get(document.workspaceId,document.mainVersionId,document.objectId,source.baseRelaySeq,relaySeq,artifact.origin_id,artifact.origin_seq);
   if(!nearest||nearest.relay_admission!==null)return false;
-  // A refused Y.Doc row keeps no object, so one between them may be this document's nearer row.
-  if(storage.db.prepare(`SELECT 1 FROM sync_relay_log WHERE workspace_id=? AND origin_id=? AND origin_seq>? AND origin_seq<? AND op_kind=?
-      AND json_extract(payload_json,'$.opKind')='ydoc.update' LIMIT 1`)
-    .get(document.workspaceId,artifact.origin_id,nearest.origin_seq,artifact.origin_seq,REFUSED_OP_KIND))return false;
   const update=JSON.parse(String(nearest.payload_json)) as Record<string,unknown>;
   if(update.path!==source.currentPath||update.contentKind!=="richdoc"||update.lineageClaimId!==document.lineageClaimId||
     typeof update.isBaseState!=="boolean"||(update.isBaseState&&update.updateBlobSha256!==document.lineageClaimId))return false;
-  // Another object at the bound path, or one whose before-image names this document, replaced it, even if it left again.
-  return !storage.db.prepare(`SELECT 1 FROM sync_relay_log INDEXED BY idx_sync_relay_log_page WHERE workspace_id=? AND relay_seq>=? AND relay_seq<=?
-      AND COALESCE(json_extract(settlement_admission_json,'$.status'),'')<>'refused' AND json_extract(payload_json,'$.versionId')=?
-      AND json_extract(payload_json,'$.objectId') IS NOT ? AND (? IN (json_extract(payload_json,'$.path'),json_extract(payload_json,'$.payloadAfterPath'),
-        json_extract(payload_json,'$.payloadBeforePath'),json_extract(payload_json,'$.beforePath')) OR json_extract(payload_json,'$.beforeObjectId')=?) LIMIT 1`)
-    .get(document.workspaceId,nearest.relay_seq,source.committedCursor,document.mainVersionId,document.objectId,source.currentPath,document.objectId);
+  // In relay order from that row through the cut, each row examined charged to the proof budget, a replacement breaks the lineage:
+  // a refused Y.Doc row of the artifact's origin before it, which keeps no object and so may be this document's nearer row;
+  // another write of this document before the artifact, even one restoring equal bytes; or another object at the bound path,
+  // or one whose before-image names this document, even if it left again.
+  const scan=storage.db.prepare(`SELECT relay_seq,origin_id,origin_seq,op_kind,length(CAST(payload_json AS BLOB)) AS payload_bytes,
+      CASE WHEN op_kind=? THEN origin_id=? AND relay_seq<? AND json_extract(payload_json,'$.opKind')='ydoc.update'
+        WHEN COALESCE(json_extract(settlement_admission_json,'$.status'),'')='refused' OR json_extract(payload_json,'$.versionId') IS NOT ? THEN 0
+        WHEN json_extract(payload_json,'$.objectId') IS ? THEN op_kind='moment.append' AND relay_seq>? AND relay_seq<?
+        ELSE ? IN (json_extract(payload_json,'$.path'),json_extract(payload_json,'$.payloadAfterPath'),json_extract(payload_json,'$.payloadBeforePath'),
+          json_extract(payload_json,'$.beforePath')) OR json_extract(payload_json,'$.beforeObjectId')=? END AS replaced
+    FROM sync_relay_log INDEXED BY idx_sync_relay_log_page WHERE workspace_id=? AND relay_seq>=? AND relay_seq<=? ORDER BY relay_seq`);
+  for(const row of scan.iterate(REFUSED_OP_KIND,artifact.origin_id,relaySeq,document.mainVersionId,document.objectId,nearest.relay_seq,relaySeq,
+    source.currentPath,document.objectId,document.workspaceId,nearest.relay_seq,source.committedCursor)){
+    requireValue(integer(row.payload_bytes),"Ordinary activation metadata is damaged.");
+    charge(Number(row.payload_bytes)+Buffer.byteLength(JSON.stringify([row.relay_seq,row.origin_id,row.origin_seq,row.op_kind])));
+    if(row.replaced===1)return false;
+  }
+  return true;
 }
 export function ordinaryActivationBaseline(storage:StorageContext,input:LiveDocumentBaselineRegistrationInput,cut:VerifiedOrdinaryActivationCut){
   const held=cuts.get(cut);requireValue(held&&held.storage===storage,"Ordinary activation source was not verified.");
