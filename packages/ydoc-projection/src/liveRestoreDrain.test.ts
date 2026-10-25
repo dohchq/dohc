@@ -14,11 +14,13 @@ import { policy, hash, cleanupLiveDeliveryFixtures } from "./liveCommittedDelive
 import {resolveLiveRestorePoint} from "./liveRestorePoint.js";
 import {markdownToYDoc, yDocToMarkdown} from "./import-export.js";
 import { createLiveJournalHistoryAuthority } from "../../../services/sync-relay/src/storage/liveJournalHistory.js";
-import { beginStopRestore, advanceStopRestoreFence, declineStopRestore, readStopRestore } from "../../../services/sync-relay/src/storage/liveRestoreOperation.js";
+import { beginStopRestore, advanceStopRestoreFence, cancellationReservation, declineStopRestore, readStopRestore } from "../../../services/sync-relay/src/storage/liveRestoreOperation.js";
 import type { StorageContext } from "../../../services/sync-relay/src/storage/context.js";
 import type { StopRestoreCutCapture, OwnerCutCapture } from "../../../services/sync-relay/src/storage/liveCommittedDelivery.js";
 import type {NativeRestoreCancellationAnswer, NativeRestoreFenceReceipt} from "../../../services/sync-relay/src/liveRestoreFence.js";
 import {admitRetirementPublication} from "../../../services/sync-relay/src/storage/serviceActivationPublication.js";
+import {createServiceHostFeed} from "../../../services/sync-relay/src/serviceHostFeed.js";
+import {SERVICE_HOST_ORIGIN_PREFIX} from "../../../services/sync-relay/src/relayLogInputs.js";
 import { openSyncRelayStorage } from "../../../services/sync-relay/src/storage.js";
 import {parseNativeRestoreProposalReceipt, encodeNativeRestoreProposal, decodeNativeRestoreProposal, nativeSourceAgentDeclaration} from "../../../services/sync-relay/src/liveRestoreProposal.js";
 import {initializeLiveRestoreOperationSchema, LIVE_RESTORE_ACTIVE_V1_SQL, LIVE_RESTORE_OPERATIONS_V1_SQL} from "../../../services/sync-relay/src/storage/liveRestoreOperationSchema.js";
@@ -995,7 +997,8 @@ function seedOwnerApplicationPrefix(f: ReturnType<typeof fixture>, terminal: Ret
 function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device", events: boolean | "native" | number = false, selectedPoint = false,
   beforeFence?: (f: ReturnType<typeof fixture>) => void) {
   const f = fixture(kind, mode);
-  if (kind === "owner") f.adopt();
+  // An owner adopts after the hook, so it adopts any service activation the hook records.
+  if (kind === "owner") {beforeFence?.(f); f.adopt();}
   let acceptedNative: AcceptedNative | undefined;
   let seededPredecessor: ReturnType<typeof f.add> | null = null;
   const receipts: ReturnType<typeof f.add>[] = [];
@@ -1062,7 +1065,7 @@ function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device
     f.intent.restorePointCursor = receipts[0]!.journalCursor;
     f.intent.restorePointReceiptDigest = receipts[0]!.updateDigest;
   }
-  beforeFence?.(f);
+  if (kind !== "owner") beforeFence?.(f);
   f.fence();
   const capture = f.open();
   if (kind === "bootstrap") {
@@ -1483,7 +1486,8 @@ it.each([["bootstrap","service"],["bootstrap","device"],["owner","device"]] as c
 const hostedActivationId = `ordinary-activation-${"d".repeat(64)}`;
 // Enrolls the fixture document on the service host through `shareId`, which
 // another Edit grant covers unless it is the restore's own share, and records
-// its adopted activation. Stored activation metadata is enough here.
+// its completed activation, whose source is the registered baseline. An owner
+// fixture adopts it.
 function hostRestoredDocument(f: ReturnType<typeof fixture>, shareId: string) {
   if (shareId !== f.intent.shareId) f.write(db => {
     db.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,'owner',?,0)")
@@ -1493,10 +1497,16 @@ function hostRestoredDocument(f: ReturnType<typeof fixture>, shareId: string) {
   });
   f.storage.claimWorkspaceIdentity({workspaceId: f.document.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
   f.storage.enrollServiceHostDocument({workspaceId: f.document.workspaceId, path: "docs/a.md", shareId, ownerUserId: "owner", nowMs: 30, guard() {}});
+  const state = Uint8Array.of(0, 0), {evidence} = f.input;
+  const source = {version: 1, relayDatabaseNamespace: "restore-test", ...f.document, currentPath: "docs/a.md", replicationEpoch: "epoch",
+    streamIdentity: "stream", committedCursor: 1, baseOriginId: "base", baseOriginSeq: 0, baseRelaySeq: 1, sourceMomentId: "moment-1",
+    sourceDigest: evidence.projectedMarkdownSha256, sourceByteLength: evidence.projectedMarkdownByteLength, nativeHeadSequence: 0,
+    fullStateDigest: hash(state), fullStateByteLength: state.byteLength};
+  const binding = {...f.document, currentPath: "docs/a.md", selectorPaths: ["docs"], restoreFenceGeneration: 1};
   f.write(db => db.prepare(`INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
-      source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes) VALUES ('restore-test',?,?,'main',?,?,?,?,?,x'0000','owner',?,'{}',1)`)
-    .run(hostedActivationId, f.document.workspaceId, f.document.objectId, f.document.lineageClaimId, JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream"}),
-      JSON.stringify({currentPath: "docs/a.md"}), f.document.lineageClaimId, shareId));
+      source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes) VALUES ('restore-test',?,?,'main',?,?,?,?,?,?,'owner',?,'{}',1)`)
+    .run(hostedActivationId, f.document.workspaceId, f.document.objectId, f.document.lineageClaimId, JSON.stringify(source),
+      JSON.stringify(binding), source.fullStateDigest, state, shareId));
 }
 
 // Proves: a retirement recorded while a restore is unfinished, by the
@@ -1600,6 +1610,39 @@ it("proves a restore's accepted output for a retirement before the restore resum
   } finally {f.close();}
 });
 
+// Proves: the retiring owner's push of the restore's settlement moment, made
+// through its feed after settlement and before resume, retries until resume
+// moves the owner's applied tip to the restore's row. The retried push then
+// lands as retirement output and moves no projection.
+it("publishes a restore's settlement moment for a retirement once the restore resumes", async () => {
+  const f = admittedRestoreFixture("owner", false, "service", hosted => hostRestoredDocument(hosted, hosted.intent.shareId));
+  try {
+    const receipt = f.admitted.admitted.accepted.receipt, feed = createServiceHostFeed(f.storage), originId = `${SERVICE_HOST_ORIGIN_PREFIX}native`;
+    const call = (method: string, route: string[], body?: BodyInit) => feed(new Request(`https://relay.test/sync/workspace/hosted/${route.join("/")}`,
+      {method, ...(body === undefined ? {} : {body})}), {workspaceId: "workspace", route, actor: {userId: "owner"}, guard() {}});
+    expect(readServiceActivationRetirement(f.context, f.document)).toMatchObject({activationId: hostedActivationId, restoreFenceGeneration: 2, acceptedThrough: receipt.journalCursor});
+    f.store.acknowledgeStopRestoreReplacement(f.input, f.application);
+    expect(f.store.acknowledgeStopRestoreSettlement(f.input, f.settlement).phase).toBe("settled");
+    const bytes = f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(receipt.journalCursor)!.validation_checkpoint_bytes as Uint8Array;
+    const {payload, record} = restorePublication(f, bytes, receipt.journalCursor, "restore-publication");
+    for (const sha256 of [payload.payloadBeforeBlobSha256, payload.payloadAfterBlobSha256, record.acceptedStateBlobSha256])
+      expect((await call("PUT", ["blobs", sha256], Buffer.from(f.storage.getBlob("workspace", sha256)!))).status).toBe(200);
+    const push = () => call("POST", ["log"], JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream", originId,
+      ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: 1, payload}]}));
+    const projected = () => f.raw.prepare("SELECT * FROM sync_relay_object_moments").all(), before = projected();
+    await expect(push()).rejects.toMatchObject({code: "settlement_proof_budget", message: "the retiring owner has not applied this publication yet"});
+    expect(f.storage.fetchLogCoordinate({workspaceId: "workspace", originId, originSeq: 0})).toBeNull();
+    expect(f.store.acknowledgeStopRestoreResume(f.input, f.resume).phase).toBe("resumed");
+    const answer = await push();
+    expect(answer.status).toBe(200);
+    const landed = await answer.json() as Record<string, unknown>;
+    expect([landed.inserted, landed.refusals]).toEqual([1, undefined]);
+    expect(f.storage.fetchLogCoordinate({workspaceId: "workspace", originId, originSeq: 0})).toMatchObject({settlementAdmission: {status: "accepted"}});
+    expect(projected()).toEqual(before);
+    expect(readServiceActivationRetirement(f.context, f.document)).toMatchObject({activationId: hostedActivationId, acceptedThrough: receipt.journalCursor});
+  } finally {f.close();}
+});
+
 // Proves: the fence moves an open retirement to the fenced generation only
 // when its accepted-through is the fence's cutover. Any other value is damage,
 // and the fence changes nothing.
@@ -1622,23 +1665,27 @@ it("refuses the fence when an open retirement's accepted-through is not its cuto
   } finally {f.close();}
 });
 
+// The two answers a fenced restore's host may give to a cancellation.
+function cancellationAnswers(f: Pick<ReturnType<typeof readyNativeFence>, "context" | "lookup" | "raw" | "receipt">) {
+  const cutover = readStopRestore(f.context, f.lookup)!.cutoverCursor!;
+  const fence = f.receipt.operation, binding = {...fence.oldBinding, restoreFenceGeneration: fence.newFence};
+  const row = f.raw.prepare("SELECT accepted_event_count,accepted_evidence_digest FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(cutover)!;
+  const cancelled: NativeRestoreCancellationAnswer = {status: "cancelled", hostId: fence.hostId, generation: fence.newFence - 1, binding: fence.oldBinding};
+  const fenceCancelled: NativeRestoreCancellationAnswer & {status: "fenceCancelled"} = {status: "fenceCancelled", hostId: fence.hostId,
+    generation: fence.newFence, binding, receipt: {fence: f.receipt, binding, endpoint: {terminalReceipt: fence.terminal,
+      eventCount: Number(row.accepted_event_count), historyEvidenceDigest: String(row.accepted_evidence_digest)}, recordedAtMs: 160}};
+  return {cutover, cancelled, fenceCancelled};
+}
 // A restore fenced on the service host, whose revocation opened a
-// retirement, with the native fence saved when `native`. It carries the two
-// answers its fencing host may give to a cancellation.
+// retirement, with the native fence saved when `native`.
 function serviceFence(native: boolean) {
   const f = readyNativeFence("bootstrap", "service", true, false, hosted => hostRestoredDocument(hosted, hosted.intent.shareId));
   try {
     if (native) f.store.acknowledgeStopRestoreFence(f.lookup, f.receipt);
-    const cutover = readStopRestore(f.context, f.lookup)!.cutoverCursor!;
-    const fence = f.receipt.operation, binding = {...fence.oldBinding, restoreFenceGeneration: fence.newFence};
-    const row = f.raw.prepare("SELECT accepted_event_count,accepted_evidence_digest FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(cutover)!;
-    const cancelled: NativeRestoreCancellationAnswer = {status: "cancelled", hostId: fence.hostId, generation: fence.newFence - 1, binding: fence.oldBinding};
-    const fenceCancelled: NativeRestoreCancellationAnswer & {status: "fenceCancelled"} = {status: "fenceCancelled", hostId: fence.hostId,
-      generation: fence.newFence, binding, receipt: {fence: f.receipt, binding, endpoint: {terminalReceipt: fence.terminal,
-        eventCount: Number(row.accepted_event_count), historyEvidenceDigest: String(row.accepted_evidence_digest)}, recordedAtMs: 160}};
+    const answers = cancellationAnswers(f);
     const key = (restoreFenceGeneration: number) => ({objectId: f.document.objectId, lineageClaimId: f.document.lineageClaimId,
-      activationId: hostedActivationId, restoreFenceGeneration, acceptedThrough: cutover});
-    return {...f, cutover, cancelled, fenceCancelled, key};
+      activationId: hostedActivationId, restoreFenceGeneration, acceptedThrough: answers.cutover});
+    return {...f, ...answers, key};
   } catch (error) {f.close(); throw error;}
 }
 // The same restore, declined after its fence.
@@ -1858,6 +1905,69 @@ it.each(["preparing", "saved"] as const)("ends a restore whose file is renamed a
   } finally {f.close();}
 });
 
+// Proves: when the host answers the cancellation a rename during preparation
+// asked for, preparation reports the restore declined at the generation the
+// host proved, and saves no proposal.
+it("declines a restore whose file is renamed while its host prepares, with its host's answer", async () => {
+  const f = contentProposalFixture("bootstrap", "service"), fence = f.receipt.fence;
+  try {
+    const {fenceCancelled} = cancellationAnswers({...f, receipt: fence});
+    const {sendRequest, connection} = cancellingConnection(f, async () => fenceCancelled);
+    const sendLiveRestore = vi.fn(async () => {
+      departFrozenPath(f);
+      return {response: {result: {status: "prepared"}}, bytes: Buffer.from(f.encoded)};
+    });
+    const options = {store: f.store, lookup: f.lookup, deliveryKind: "bootstrap" as const,
+      connection: {...connection, client: {sendRequest, sendLiveRestore} as never}};
+    await expect(new LiveRestorePreparation(preparationConfig()).prepare(options)).resolves.toEqual({kind: "pending", reason: "The restore was declined."});
+    expect(sendRequest).toHaveBeenCalledTimes(1);
+    expect(f.raw.prepare(`SELECT COUNT(*) AS count FROM ${proposalTable}`).get()!.count).toBe(0);
+    expect(readStopRestore(f.context, f.lookup)).toMatchObject({phase: "declined", nativeReceipt: fence});
+    expect(f.raw.prepare("SELECT outcome FROM sync_relay_live_restore_cancellations").all()).toEqual([{outcome: "fence-cancelled"}]);
+    expect(documentState(f)).toEqual({restore_fence_generation: 2, admission_state: "closed"});
+  } finally {f.close();}
+});
+
+// Proves: completion checks the frozen path before admission. A file renamed
+// after its proposal was saved ends the restore through its host's
+// cancellation, and nothing is admitted or sent to the host to apply.
+it("declines at completion a saved restore whose file is renamed", async () => {
+  const f = contentProposalFixture("bootstrap", "service"), fence = f.receipt.fence;
+  try {
+    const proposed = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+    departFrozenPath(f);
+    const {fenceCancelled} = cancellationAnswers({...f, receipt: fence});
+    const {sendRequest, connection} = cancellingConnection(f, async () => fenceCancelled);
+    const sendLiveRestore = vi.fn();
+    const options = {store: f.store, lookup: f.lookup, deliveryKind: "bootstrap" as const,
+      connection: {...connection, client: {sendRequest, sendLiveRestore} as never}};
+    await expect(new LiveRestorePreparation(preparationConfig()).complete(options, proposed.proposalDigest)).rejects.toThrow("The restore was declined.");
+    expect(sendRequest).toHaveBeenCalledTimes(1);
+    expect(sendLiveRestore).not.toHaveBeenCalled();
+    expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_live_restore_lifecycles").get()!.n).toBe(0);
+    expect(readStopRestore(f.context, f.lookup)).toMatchObject({phase: "declined", nativeReceipt: fence});
+  } finally {f.close();}
+});
+
+// Proves: a deleted file has left its frozen path. Before the fence the
+// restore is declined at once; after it, the fencing host is asked to cancel.
+it.each(["before", "after"] as const)("ends a restore whose file is deleted %s its fence", when => {
+  const f = when === "before" ? fixture("bootstrap", "service") : serviceFence(true);
+  try {
+    if (when === "before") beginStopRestore(f.context, f.intent, 40);
+    f.write(db => db.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+      VALUES ('workspace',?,10,'deleted','main',NULL,NULL,NULL,NULL,10)`).run(f.document.objectId));
+    if (when === "before") {
+      expect(advanceStopRestoreFence(f.context, f.lookup, 50)).toMatchObject({phase: "declined", newFence: null});
+      expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_live_restore_cancellations").get()!.n).toBe(0);
+    } else {
+      expect(f.store.continueStopRestore(f.lookup, 60)).toBe("cancel");
+      expect(f.raw.prepare("SELECT outcome FROM sync_relay_live_restore_cancellations").all()).toEqual([{outcome: null}]);
+      expect(readStopRestore(f.context, f.lookup)?.phase).toBe("native-fenced");
+    }
+  } finally {f.close();}
+});
+
 // Proves: a file that leaves its frozen path before the fence ends the
 // restore at its old generation, with no host to ask.
 it("declines a restore whose file is renamed before its fence", () => {
@@ -1869,6 +1979,51 @@ it("declines a restore whose file is renamed before its fence", () => {
     expect(documentState(f)).toMatchObject({restore_fence_generation: 1});
     expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_live_restore_cancellations").get()!.n).toBe(0);
   } finally {f.close();}
+});
+
+// Proves: once relay admission takes a restore, a rename no longer ends it.
+// Its host finishes it across a restart at the frozen path, generation and
+// binding. The renamed file and the object now at the old path keep their
+// moments, the live document keeps the path it registered at, and its open
+// retirement still settles the frozen path. The retirement completes at the
+// restore's own key, with the owner delivery's boundary at the restore's
+// accepted row. A successor needs fresh authority for the renamed path.
+it.each(["bootstrap", "owner"] as const)("finishes an admitted %s restore at its frozen path after its file is renamed", kind => {
+  const f = admittedRestoreFixture(kind, false, "service", hosted => hostRestoredDocument(hosted, hosted.intent.shareId));
+  let reopened: ReturnType<typeof openSyncRelayStorage> | undefined, closed = false;
+  try {
+    const frozen = f.admitted.admitted.accepted.binding, receipt = f.admitted.admitted.accepted.receipt;
+    expect(frozen).toMatchObject({currentPath: "docs/a.md", restoreFenceGeneration: 2});
+    departFrozenPath(f);
+    const moments = f.raw.prepare("SELECT * FROM sync_relay_object_moments ORDER BY relay_seq").all();
+    expect(f.store.acknowledgeStopRestoreReplacement(f.input, f.application).phase).toBe("native-applied");
+    f.close(); closed = true;
+    reopened = openSyncRelayStorage(f.path);
+    const history = createLiveJournalHistoryAuthority({namespace: "restore-test", reconciled: true});
+    const store = reopened.createLiveCommittedDeliveryStore(history), db = (reopened as StorageContext).db;
+    expect(store.acknowledgeStopRestoreSettlement(f.input, f.settlement).phase).toBe("settled");
+    const resumed = store.acknowledgeStopRestoreResume(f.input, f.resume);
+    expect(resumed).toMatchObject({phase: "resumed", resume: {binding: frozen}});
+    expect(store.readStopRestoreLifecycle(f.input)).toEqual(resumed);
+    expect(db.prepare("SELECT * FROM sync_relay_object_moments ORDER BY relay_seq").all()).toEqual(moments);
+    expect(reopened.objectIdAtPathInVersion({workspaceId: "workspace", versionId: "main", path: "docs/renamed.md"})).toBe(f.document.objectId);
+    expect(reopened.objectIdAtPathInVersion({workspaceId: "workspace", versionId: "main", path: "docs/a.md"})).toBe("reusing");
+    expect(db.prepare("SELECT current_path,restore_fence_generation,admission_state FROM sync_relay_live_documents").get())
+      .toEqual({current_path: "docs/a.md", restore_fence_generation: 2, admission_state: "open"});
+    expect(reopened.readServiceHostFeedScope("workspace")?.settling.get(f.document.objectId)).toMatchObject({path: "docs/a.md", restoreFenceGeneration: 2,
+      acceptedThrough: receipt.journalCursor});
+    const owner = db.prepare("SELECT tip_receipt_json FROM sync_relay_live_delivery_owners").get();
+    expect(owner && JSON.parse(String(owner.tip_receipt_json))).toEqual(kind === "owner" ? receipt : undefined);
+    const endpoint = db.prepare("SELECT accepted_event_count,accepted_evidence_digest FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(receipt.journalCursor)!;
+    const boundary = kind === "owner" ? {terminalReceipt: receipt, eventCount: Number(endpoint.accepted_event_count),
+      historyEvidenceDigest: String(endpoint.accepted_evidence_digest)} : null;
+    const key = {objectId: f.document.objectId, lineageClaimId: f.document.lineageClaimId, activationId: hostedActivationId,
+      restoreFenceGeneration: 2, acceptedThrough: receipt.journalCursor};
+    expect(reopened.createServiceActivationStore(history).completeRetirement({workspaceId: f.document.workspaceId, key, boundary,
+      host: f.lookup.host, registeredAtMs: 400, nowMs: 400, guard() {}})).toEqual({status: "retired", replayed: false});
+    db.prepare("UPDATE sync_relay_share_grants SET status='active',generation=6,revoked_at_ms=NULL WHERE grant_id=?").run(f.intent.grantId);
+    expect(reopened.resolveCurrentLiveDocumentBinding({document: f.document, actor: f.actor})).toEqual({kind: "refused", reason: "stale-document"});
+  } finally {if (!closed) f.close(); reopened?.close();}
 });
 
 // Proves: neither a raised log floor nor invalid moment evidence at the
@@ -1892,7 +2047,8 @@ it.each(["floor", "evidence"] as const)("does not read a %s change as a rename",
 
 // Proves: a Decline's evidence comes out of the restore's own reservation,
 // so Decline and its host's answer still record with the workspace's quota
-// exhausted, and usage does not move.
+// exhausted, and usage does not move. The restore funds its largest Decline
+// as it begins, beside its own largest evidence.
 it("charges a Decline's evidence to the restore's reservation with the quota exhausted", () => {
   const f = serviceFence(true);
   try {
@@ -1909,6 +2065,8 @@ it("charges a Decline's evidence to the restore's reservation with the quota exh
     expect(charged()).toBeGreaterThan(requested);
     expect(reserved() + charged()).toBe(total);
     expect(usage()).toBe(f.context.options.workspaceQuotaBytes);
+    // The reservation is this fixture's largest operation evidence with the largest Decline funded beside it.
+    expect(total - cancellationReservation(f.intent, readStopRestore(f.context, f.lookup)!.basis)).toBe(13_532);
   } finally {f.close();}
 });
 

@@ -1396,6 +1396,7 @@ export class LiveCommittedDeliveryStore {
     const {operation,lifecycle}=saved,document=operation.intent.document;
     const row=this.#storage.db.prepare(`SELECT restore_fence_generation,current_path,lineage_state,admission_state FROM sync_relay_live_documents WHERE ${WHERE_DOCUMENT}`)
       .get(...documentParams(document));
+    // current_path is the lineage's registered path. A rename after admission doesn't end the restore; it finishes at its frozen path.
     integrity(row && row.restore_fence_generation===operation.newFence && row.current_path===lifecycle.admitted.accepted.binding.currentPath &&
       row.lineage_state==="current" && row.admission_state==="closed");
     integrity(stopRestoreRevocationHolds(this.#storage,operation));

@@ -15,9 +15,12 @@ export function fixture(kind: "bootstrap" | "owner" = "bootstrap",mode: "service
   const add = (id: string) => {const result=f.storage.commitLiveUpdateJournal(f.capture(f.update(id,id),id)).result; if(result.kind!=="accepted")throw Error(result.kind); return result.receipt;};
   const fence = () => {beginStopRestore(context,intent,40); return advanceStopRestoreFence(context,lookup,50);};
   const open = () => {const result=store.openStopRestoreCut(lookup); if(result.kind!=="ready")throw Error(result.kind);return result.capture;};
+  // The service host adopts the document's service activation, when it has one.
   const adopt = () => {
-    const cut=store.captureOwnerCut({host: coordinate,document,actor: f.actor,adoptionId: "adoption",expectedLocalSequence: 0,maxBytes: 1_000_000,maxEvents: 10});
-    store.acknowledgeOwnerAdoption(cut,{adoptionId: "adoption",localYDocSequence: 0,terminalCursor: cut.cut.terminalReceipt?.journalCursor ?? 0,adoptionReplayed: false});
+    const activation = context.db.prepare("SELECT activation_id FROM sync_relay_service_activations WHERE workspace_id=? AND object_id=?").get(document.workspaceId,document.objectId);
+    const adoptionId = activation ? String(activation.activation_id) : "adoption";
+    const cut=store.captureOwnerCut({host: coordinate,document,actor: f.actor,adoptionId,expectedLocalSequence: 0,maxBytes: 1_000_000,maxEvents: 10});
+    store.acknowledgeOwnerAdoption(cut,{adoptionId,localYDocSequence: 0,terminalCursor: cut.cut.terminalReceipt?.journalCursor ?? 0,adoptionReplayed: false});
   };
   return {...f,journalCapture:f.capture,coordinate,context,history,store,document,intent,lookup,add,fence,open,adopt};
 }

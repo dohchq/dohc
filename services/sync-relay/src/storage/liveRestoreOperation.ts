@@ -250,7 +250,7 @@ const cancellationBytes = (operation: Pick<StopRestoreOperation, "intent" | "bas
   Buffer.byteLength(JSON.stringify([operation.basis.namespace, operation.intent.operationId, operation.intent.document.workspaceId,
     requestedAtMs, outcome, acknowledgmentJson, journalCursor]));
 /** The bytes a Decline's request and its host's largest answer can take, funded as the restore begins. */
-function cancellationReservation(intent: StopRestoreIntent, basis: StopRestoreBasis): number {
+export function cancellationReservation(intent: StopRestoreIntent, basis: StopRestoreBasis): number {
   const maximum = maximumFenceEvidence(intent, basis), binding = {...maximum.applied.binding, restoreFenceGeneration: Number.MAX_SAFE_INTEGER};
   const answer = {status: "fenceCancelled", hostId: basis.hostId, generation: Number.MAX_SAFE_INTEGER, binding, receipt: {fence: maximum.nativeReceipt, binding,
     endpoint: {terminalReceipt: maximum.receipt, eventCount: Number.MAX_SAFE_INTEGER, historyEvidenceDigest: "f".repeat(64)}, recordedAtMs: Number.MAX_SAFE_INTEGER}};
