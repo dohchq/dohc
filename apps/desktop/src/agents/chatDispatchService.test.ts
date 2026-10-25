@@ -609,7 +609,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     stateDir: () => stateRoot,
     appRoot: () => appRoot,
     isPackaged: () => options.packaged ?? false,
-    resourcesPath: () => join(appRoot, "resources"),
+    resourcesPath: () => options.platform === "linux" ? join(appRoot, "resources").replace(/^[a-z]:/iu, "").replaceAll("\\", "/") : join(appRoot, "resources"),
     queueSync: async (dispatchWorkspace) => {
       syncWorkspaces.push(dispatchWorkspace);
       syncRequests.push(dispatchWorkspace.workspaceId);
@@ -834,11 +834,11 @@ describe("chatDispatchService", () => {
     expect(result.detail).not.toContain("runner failed to start: runner failed to start:");
     expect(fixture.spawnCalls).toHaveLength(0);
   });
-  it.each([0, 7])("a packaged run with its own Node does not recommend installing Node, exit %s", async (exitCode) => {
-    const fixture = await createFixture({ packaged: true, platform: "win32", runner: { command: `"${process.execPath}"` } });
+  it.each([["win32", 0], ["win32", 7], ["linux", 0], ["linux", 7]] as const)("a packaged %s run with its own Node does not recommend installing Node, exit %s", async (platform, exitCode) => {
+    const fixture = await createFixture({ packaged: true, platform, runner: { command: `"${process.execPath}"` } });
     const compiler = join(fixture.appRoot, "resources", "app-compiler");
     await mkdir(compiler, { recursive: true });
-    await writeFile(join(compiler, "node.exe"), "runtime");
+    await writeFile(join(compiler, platform === "win32" ? "node.exe" : "node"), "runtime", { mode: 0o755 });
     vi.stubEnv("PATH", "");
     await createAgentThread(fixture, { body: "Run the request.", authorUserId: "user_local" });
     await activate(fixture);

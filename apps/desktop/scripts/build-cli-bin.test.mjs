@@ -85,7 +85,7 @@ for (const label of ["Ice Test", "Icé"]) {
     }
   }
 }
-for (const arch of ["arm64", "x64"]) {
+for (const arch of ["arm64"]) {
   for (const name of ["dohc", "dohc-mcp"]) {
     test(`Linux ${arch} ${name} retains the PATH prerequisite`, { skip: !existsSync(sh) }, () => {
       const f = fixture("linux", arch);
@@ -134,6 +134,21 @@ test("resource closure rejects an omitted chat module or bundled runtime", () =>
   writeFileSync(join(root, "app-compiler", "node.exe"), "runtime");
   assert.deepEqual(agentResourceFailures(root, { platform: "win32", arch: "x64" }), []);
   assert.deepEqual(agentResourceFailures(root, { platform: "linux", arch: "arm64" }), []);
-  assert.deepEqual(agentResourceFailures(root, { platform: "linux", arch: "x64" }), []);
+  assert.ok(agentResourceFailures(root, { platform: "linux", arch: "x64" }).some(failure => failure.includes("app-compiler/node")));
   assert.ok(agentResourceFailures(root, { platform: "darwin", arch: "arm64" }).some((failure) => failure.includes("app-compiler/node")));
 });
+
+for (const name of ["dohc", "dohc-mcp"]) {
+  test(`Linux x64 ${name} uses its own Node without PATH`, { skip: !existsSync(sh) }, () => {
+    const f = fixture("linux", "x64");
+    for (const path of [f.cli, f.competing]) {
+      const result = run(f, name, "sh", path);
+      assert.equal(result.status, 37, result.stderr);
+      assert.equal(resolve(JSON.parse(result.stdout).execPath), resolve(f.node));
+    }
+    rmSync(f.node);
+    const missing = run(f, name, "sh", f.competing);
+    assert.equal(missing.status, 127);
+    assert.match(missing.stderr, /Reinstall dohc/);
+  });
+}

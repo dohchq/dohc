@@ -91,11 +91,22 @@ describe("chat runner process", () => {
     expect(await readRunnerNodeAvailable(join(root, "logs", "run.log"))).toEqual({ source: "bundled", available: true });
   });
 
-  it.each(["x64", "arm64"])("keeps packaged Linux %s on the PATH probe", async (arch) => {
+  it.each(["arm64"])("keeps packaged Linux %s on the PATH probe", async (arch) => {
     const { root, spawn } = await runnerFixture("linux", true, arch);
     vi.stubEnv("PATH", "");
     spawn("agent");
     expect(await readRunnerNodeAvailable(join(root, "logs", "run.log"))).toEqual({ source: "path", available: false });
+  });
+
+  it("Linux x64 refuses missing Node and records its bundled runtime when present", async () => {
+    const { root, spawn, calls } = await runnerFixture("linux", true, "x64");
+    vi.stubEnv("PATH", "");
+    expect(() => spawn("agent")).toThrow("Reinstall dohc");
+    expect(calls).toHaveLength(0);
+    mkdirSync(join(root, "resources", "app-compiler"), { recursive: true });
+    writeFileSync(join(root, "resources", "app-compiler", "node"), "runtime", { mode: 0o755 });
+    spawn("agent");
+    expect(await readRunnerNodeAvailable(join(root, "logs", "run.log"))).toEqual({ source: "bundled", available: true });
   });
 
   it.each([true, false])("reads legacy runtime records: %s", async (available) => {

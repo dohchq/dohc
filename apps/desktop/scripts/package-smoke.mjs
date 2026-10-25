@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 export function agentResourceFailures(resources, { platform = process.platform, arch = process.arch } = {}) {
   const files = ["dohc", "dohc.cmd", "dohc.mjs", "dohc-mcp", "dohc-mcp.cmd", "dohc-mcp.mjs"].map(name => `cli-bin/${name}`);
-  if (platform === "win32" && arch === "x64" || platform === "darwin" && arch === "arm64") {
+  if (platform === "win32" && arch === "x64" || platform === "darwin" && arch === "arm64" || platform === "linux" && arch === "x64") {
     files.push(`app-compiler/${platform === "win32" ? "node.exe" : "node"}`);
   } else if (!(platform === "linux" && ["arm64", "x64"].includes(arch))) {
     return [`Unsupported agent launcher target: ${platform}-${arch}`];
@@ -97,7 +97,7 @@ export async function probeAgentLaunchers(resources) {
     await mkdir(competing);
     await copyFile(process.execPath, join(competing, process.platform === "win32" ? "node.exe" : "node"));
     const args = ["", "two words", "Icé 雪"];
-    const bundled = process.platform !== "linux";
+    const bundled = !(process.platform === "linux" && process.arch === "arm64");
     const input = Buffer.from([0, 10, 13, 255, 65]);
     for (const label of ["Ice Test", "Icé"]) {
       const copied = join(scratch, label, "resources");

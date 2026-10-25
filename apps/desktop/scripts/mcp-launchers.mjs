@@ -66,7 +66,7 @@ export function windowsLauncher(moduleFileName) {
 }
 
 export function cliLaunchers({ platform = process.platform, arch = process.arch } = {}) {
-  const bundled = platform === "win32" && arch === "x64" || platform === "darwin" && arch === "arm64";
+  const bundled = platform === "win32" && arch === "x64" || platform === "darwin" && arch === "arm64" || platform === "linux" && arch === "x64";
   if (!bundled && !(platform === "linux" && ["x64", "arm64"].includes(arch))) {
     throw new Error(`Unsupported agent launcher target: ${platform}-${arch}`);
   }

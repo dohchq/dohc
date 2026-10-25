@@ -14,8 +14,8 @@ Use this reference to check which platform and services a feature needs.
 | Create and run a local Collection-backed app | Windows x64, an Apple silicon Mac with macOS 13.5 or later, or Linux x64 with Linux 5.13 or later and Landlock enabled, with the bundled app compiler and dataset runtime. No account or server; the approved app opens in a local browser session. |
 | Share an app with private data | App publishing plus backend-enabled relay services. The shared host must be reachable to confirm operations. |
 | Manage app data through tables or an agent | An approved transactional Collection; table edits and app operations use the same dataset rules. |
-| Run the bundled MCP launcher | The installed desktop app on Windows x64 or Apple silicon Macs. dohc supplies Node.js. Linux needs Node.js 22.13+, 23.4+, or 24+ on `PATH`. |
-| Agent replies through MCP or `dohc chat reply` | An installed agent and the desktop app. dohc supplies the reply runtime on Windows x64 and Apple silicon Macs. Linux needs Node.js on `PATH`. |
+| Run the bundled MCP launcher | The installed desktop app on Windows x64, Apple silicon Macs, or Linux x64. dohc supplies Node.js. Linux arm64 needs Node.js 22.13+, 23.4+, or 24+ on `PATH`. |
+| Agent replies through MCP or `dohc chat reply` | An installed agent and the desktop app. dohc supplies the reply runtime on Windows x64, Apple silicon Macs, and Linux x64. Linux arm64 needs Node.js on `PATH`. |
 | dohc Drive | Coming soon. The managed service is not available for launch. |
 
 The supported self-host bundle supplies the session host and live-editing limits.
@@ -26,7 +26,7 @@ The server preserves its accepted state; it does not silently bind that state to
 Releases ship for Windows x64, macOS arm64 (Apple silicon), and Linux x64.
 There is no build for Intel Macs.
 On macOS, move dohc to Applications before saving an MCP configuration.
-On Linux, dohc keeps the AppImage's MCP launcher at a stable path.
+On Linux, dohc keeps the AppImage's MCP launcher and runtime at a stable path.
 If you move or rename an installed app, create its MCP configuration again.
 
 Every release target compiles Collection actions. App publishing and local app
