@@ -83,7 +83,8 @@ describe("server automation draft declarations", () => {
 });
 
 describe("closing a settled revision", () => {
-  it.each([false, true])("settles an absent lineage on close only after an edit (%s)", async edited => {
+  it.each(["untouched", "edited"])("settles an absent lineage on close only after an edit (%s)", async state => {
+    const edited = state === "edited";
     const engine = new YdocLoopbackEngine();
     const settle = vi.fn();
     const onSettleError = vi.fn();
@@ -110,9 +111,11 @@ describe("closing a settled revision", () => {
     });
     expect(provider.head).toBe("absent");
     expect(provider.lineage).toBe("absent");
+    expect(provider.canSkipSettle).toBe(true);
     if (edited) {
       await provider.applyLocalUpdate(plaintextUpdate(provider.initialUpdate, text => text.insert(0, "first edit")));
     }
+    expect(provider.canSkipSettle).toBe(!edited);
 
     await expect(provider.close()).resolves.toBeUndefined();
 

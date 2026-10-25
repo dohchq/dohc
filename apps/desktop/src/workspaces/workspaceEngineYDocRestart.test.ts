@@ -141,7 +141,7 @@ async function reconnectFailureCapture(prefix: string) {
       path: options.path,
       head: "present" as const,
       lineage: "existing" as const,
-      unsettled: false,
+      canSkipSettle: false, unsettled: false,
       evict: async () => undefined,
       async applyLocalUpdate() {
         throw Object.assign(new Error("control frame encoding failed"), {
@@ -403,7 +403,7 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
       path: options.path,
       head: "present" as const,
       lineage: "existing" as const,
-      unsettled: false,
+      canSkipSettle: false, unsettled: false,
       evict: async () => undefined,
       async applyLocalUpdate(update) {
         Y.applyUpdate(doc, update);
@@ -544,7 +544,7 @@ it("replaces rather than merges an independently rooted lineage after restart", 
       path: options.path,
       head: "present",
       lineage: "existing",
-      unsettled: false,
+      canSkipSettle: false, unsettled: false,
       evict: async () => undefined,
       async applyLocalUpdate() {
         return;
@@ -653,7 +653,7 @@ it("keeps an unclaimed lineage when its full state is the claimed base", async (
       path: options.path,
       head: "present",
       lineage: "existing",
-      unsettled: false,
+      canSkipSettle: false, unsettled: false,
       evict: async () => undefined,
       async applyLocalUpdate() {
         return;
@@ -765,7 +765,7 @@ it("keeps a locally promoted lineage after later updates change its full state",
       // The unclaimed open is a fresh local document; only the claimed
       // replacement resumes durable state.
       lineage: unclaimed ? "absent" : "existing",
-      unsettled: false,
+      canSkipSettle: false, unsettled: false,
       evict: async () => undefined,
       async applyLocalUpdate(update) {
         Y.applyUpdate(doc, update);
@@ -915,7 +915,7 @@ async function typeIntoLostGeneration(input: {
       path: options.path,
       head: "present",
       lineage: "existing",
-      unsettled: false,
+      canSkipSettle: false, unsettled: false,
       evict: async () => undefined,
       async applyLocalUpdate(update) {
         if (unclaimed) {
@@ -1168,7 +1168,7 @@ it(`settles a recorded word whose settle was lost with its generation (${order})
       path: options.path,
       head: "present",
       lineage: "existing",
-      unsettled: false,
+      canSkipSettle: false, unsettled: false,
       evict: async () => undefined,
       async applyLocalUpdate(update) {
         Y.applyUpdate(doc, update);
@@ -1294,7 +1294,7 @@ it("replaces a fork that claims a base descended from the same Y.Doc history", a
       path: options.path,
       head: "present",
       lineage: "existing",
-      unsettled: false,
+      canSkipSettle: false, unsettled: false,
       evict: async () => undefined,
       async applyLocalUpdate() {
         return;
@@ -1512,7 +1512,7 @@ it("recovers a non-reconnect local refusal by releasing, rebinding, and replayin
       path: options.path,
       head: "present" as const,
       lineage: "existing" as const,
-      unsettled: false,
+      canSkipSettle: false, unsettled: false,
       evict: async () => { lifecycle.push(`close-${openedGeneration}`); },
       async applyLocalUpdate(update) {
         if (openedGeneration === 1) throw refusal;
@@ -1612,7 +1612,7 @@ it("evicts a failed generation before accepting the next edit", async () => {
       path: options.path,
       head: "present" as const,
       lineage: "existing" as const,
-      unsettled: false,
+      canSkipSettle: false, unsettled: false,
       evict: async () => {
         providerClosed = true;
         closeAttempts.push({ generation: openedGeneration, settle: false });
@@ -1744,7 +1744,7 @@ it("defers a version switch behind a dead generation until release converges", a
       path: options.path,
       head: "present" as const,
       lineage: "existing" as const,
-      unsettled: false,
+      canSkipSettle: false, unsettled: false,
       evict: async () => { throw settlingCloseFailure; },
       async applyLocalUpdate() {
         applyCount += 1;
@@ -1882,7 +1882,7 @@ it("an over-cap settle (content omitted from the response) leaves the engine's f
       path: options.path,
       head: "present",
       lineage: "existing" as const,
-      unsettled: false,
+      canSkipSettle: false, unsettled: false,
       evict: async () => undefined,
       async applyLocalUpdate(update) {
         Y.applyUpdate(doc, update);
@@ -1984,7 +1984,7 @@ it("a settle whose materialization was blocked reports an error, never Saved", a
       path: options.path,
       head: "present",
       lineage: "existing" as const,
-      unsettled: false,
+      canSkipSettle: false, unsettled: false,
       evict: async () => undefined,
       async applyLocalUpdate(update) {
         Y.applyUpdate(doc, update);
@@ -2083,7 +2083,7 @@ it("retires a persistent local failure and releases every failed lease", async (
       path: options.path,
       head: "present" as const,
       lineage: "existing" as const,
-      unsettled: false,
+      canSkipSettle: false, unsettled: false,
       evict: async () => {
         closedGenerations.push(openedGeneration);
         leaseActive = false;
@@ -2323,7 +2323,7 @@ async function daemonDeathCapture(
       // only once `head` is absent, which cannot happen here), so the fixture
       // is asserted on directly instead; see `state.reportedLineage`.
       lineage: reportLineage(),
-      unsettled: false,
+      canSkipSettle: false, unsettled: false,
       evict: async () => {
         if (!state.daemonAlive) throw transportDeath();
         if (state.failRelease) throw new Error("release-refused");
@@ -4087,7 +4087,7 @@ it("counts an edit recovered from a synchronous provider refusal", async () => {
       path: options.path,
       head: "present" as const,
       lineage: "existing" as const,
-      unsettled: false,
+      canSkipSettle: false, unsettled: false,
       evict: async () => undefined,
       applyLocalUpdate(update: Uint8Array): Promise<void> {
         // Generation 1 refuses synchronously — no settle is armed, so the
@@ -4235,7 +4235,7 @@ it("announces a recovered edit exactly once when both arm points run", async () 
       path: options.path,
       head: "present" as const,
       lineage: "existing" as const,
-      unsettled: false,
+      canSkipSettle: false, unsettled: false,
       evict: async () => undefined,
       async applyLocalUpdate(update: Uint8Array): Promise<void> {
         // Generation 1 arms its settle, THEN its journal rejects.
@@ -4431,7 +4431,7 @@ async function lockedRebindCapture(
       head: "present" as const,
       // The daemon reports a lineage only once it holds durable state.
       lineage: state.journal.length > 0 ? "existing" : "absent",
-      unsettled: false,
+      canSkipSettle: false, unsettled: false,
       evict: async () => {
         state.evicts += 1;
       },

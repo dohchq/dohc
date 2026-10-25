@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createReadStream, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -1777,6 +1777,30 @@ it.each(["Reading notes.md", "notes/Trip plan.md"])("closes an untouched uncaptu
     onRemoteUpdate: () => undefined,
   });
   await expect(reopened.close()).resolves.toBeUndefined();
+});
+
+it("moves an untouched uncaptured file without settling", async () => {
+  const path = "Reading notes.md";
+  const destination = "notes/Trip plan.md";
+  await writeFile(join(root, path), "", "utf8");
+  await capture.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+  settleRefusal = wireRefusal("workspace operation failed");
+
+  await capture.changePathsAs([path], {
+    operation: "move",
+    operationId: "dohc-operation:11111111-1111-4111-8111-111111111111",
+    author: { kind: "human", humanId: "person" },
+  }, async held => {
+    await held.recordDisk(path, [path]);
+    await rename(join(root, path), join(root, destination));
+    await held.rename(path, destination);
+  }, () => [path]);
+
+  expect(methodCount(YDOC_METHOD.settle)).toBe(0);
+  expect(methodCount(YDOC_METHOD.close)).toBe(1);
+  expect(captureErrors).toEqual([]);
+  expect(await readFile(join(root, destination), "utf8")).toBe("");
+  await expect(readFile(join(root, path))).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 it("still opens a file the user just created that capture has not ingested", async () => {

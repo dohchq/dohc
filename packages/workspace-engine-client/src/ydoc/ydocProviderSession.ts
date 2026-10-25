@@ -146,6 +146,7 @@ export interface EngineYdocProviderSession {
   // The resumed lineage holds updates its workspace file may not, so the
   // consumer settles it before it reports the document saved.
   readonly unsettled: boolean;
+  readonly canSkipSettle: boolean;
   // `armSettle: false` journals the update without scheduling a settle, for
   // a replay the file must not receive until the person edits again.
   applyLocalUpdate(
@@ -235,6 +236,9 @@ export async function openEngineYdocProviderSession(
   let observedDoc = session.doc;
   const noteDocumentChange = (): void => { documentRevision += 1; };
   observedDoc.on("update", noteDocumentChange);
+  const canSkipSettle = (): boolean =>
+    session.head === "absent" && session.lineage === "absent" &&
+    settledRevision === documentRevision && !session.missingLocalState && session.lineageClaimId === null;
 
   function notifyError(
     callback: ((error: unknown) => void) | undefined,
@@ -450,6 +454,9 @@ export async function openEngineYdocProviderSession(
     get lineageClaimId() {
       return session.lineageClaimId;
     },
+    get canSkipSettle() {
+      return canSkipSettle();
+    },
     get lineageOriginatedHere() {
       return session.lineageOriginatedHere;
     },
@@ -534,26 +541,28 @@ export async function openEngineYdocProviderSession(
       ) {
         try {
           await session.resyncIfNeeded();
-          if (settledRevision !== documentRevision || session.missingLocalState) {
-            await runSettle(closeOptions?.summary ?? "session close", closeRetryController.signal);
-          } else if (session.lineageClaimId !== null) {
-            // Replicated lineage can contain owner frames whose notice has
-            // not arrived. Settle it without repeating artifact verification,
-            // then release separately so terminal refusals still release.
-            const token = ++settleTokens;
-            try {
-              const result = await retryWhileEngineBusy(
-                () => session.settle({ summary: closeOptions?.summary ?? "session close" }),
-                closeRetryController.signal,
-              );
-              if (!result.materialized) {
-                throw new Error("dohc could not write the file (blocked target). The write is pending a retry.");
+          if (!canSkipSettle()) {
+            if (settledRevision !== documentRevision || session.missingLocalState) {
+              await runSettle(closeOptions?.summary ?? "session close", closeRetryController.signal);
+            } else if (session.lineageClaimId !== null) {
+              // Replicated lineage can contain owner frames whose notice has
+              // not arrived. Settle it without repeating artifact verification,
+              // then release separately so terminal refusals still release.
+              const token = ++settleTokens;
+              try {
+                const result = await retryWhileEngineBusy(
+                  () => session.settle({ summary: closeOptions?.summary ?? "session close" }),
+                  closeRetryController.signal,
+                );
+                if (!result.materialized) {
+                  throw new Error("dohc could not write the file (blocked target). The write is pending a retry.");
+                }
+              } catch (error) {
+                // Reuse has no success callback. Give failures an observable token.
+                notifySettleStart(token);
+                notifySettleError(error, token);
+                throw error;
               }
-            } catch (error) {
-              // Reuse has no success callback. Give failures an observable token.
-              notifySettleStart(token);
-              notifySettleError(error, token);
-              throw error;
             }
           }
         } catch (error) {

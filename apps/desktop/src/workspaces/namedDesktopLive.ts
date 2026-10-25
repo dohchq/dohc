@@ -119,7 +119,7 @@ export function createNamedDesktopLiveCapture(options: {
       session.doc.on("update", update);
       const provider: EngineYDocSessionProvider = {
         doc: session.doc, initialUpdate: Y.encodeStateAsUpdate(session.doc), contentKind: "richdoc", path: input.path,
-        objectId: first.selection.objectId, versionId: "main", artifactAssets: [],
+        objectId: first.selection.objectId, versionId: "main", artifactAssets: [], canSkipSettle: false,
         get lineageClaimId() { return session.state().binding?.lineageClaimId; },
         liveWritable: () => {
           try { options.assertCurrent(); return !closed && !credentials.signal.aborted && session.state().status === "live"; }

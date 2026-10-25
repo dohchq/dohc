@@ -660,7 +660,7 @@ describe("workspaceEngineCapture batch capture", () => {
       ? { path: input.path, evict: healthyEvict } as unknown as EngineYdocProviderSession : ({
       doc, initialUpdate: Y.encodeStateAsUpdate(doc), contentKind: "richdoc" as const,
       path, objectId, versionId: "main", head: "present" as const, lineage: "existing" as const,
-      unsettled: false, close, evict,
+      canSkipSettle: false, unsettled: false, close, evict,
       applyLocalUpdate: async (update: Uint8Array) => { Y.applyUpdate(doc, update); },
       adoptCollectionRecord: async () => {
         if (transient && blocked) {
@@ -758,7 +758,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const open = vi.fn(async () => ({
       doc, initialUpdate: Y.encodeStateAsUpdate(doc), contentKind: "richdoc" as const,
       path, objectId, versionId: "main", head: "present" as const, lineage: "existing" as const,
-      unsettled: false, close, evict,
+      canSkipSettle: false, unsettled: false, close, evict,
       applyLocalUpdate: async (update: Uint8Array) => { Y.applyUpdate(doc, update); },
       adoptCollectionRecord: adopt,
       settleNow: async () => undefined,
@@ -1932,7 +1932,7 @@ describe("workspaceEngineCapture batch capture", () => {
           path: "note.md",
           head: "present" as const,
           lineage: "existing" as const,
-          unsettled: false,
+          canSkipSettle: false, unsettled: false,
           evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
@@ -1969,7 +1969,7 @@ describe("workspaceEngineCapture batch capture", () => {
       openRustYDocProviderSession: async options => {
         const doc = new Y.Doc();
         return {doc, initialUpdate: Y.encodeStateAsUpdate(doc), objectId: "object-note", contentKind: "richdoc",
-          path: options.path, head: "present", lineage: "existing", unsettled: false,
+          path: options.path, head: "present", lineage: "existing", canSkipSettle: false, unsettled: false,
           applyLocalUpdate: async () => undefined, evict: async () => undefined,
           settleNow: async () => ({sha256: "a".repeat(64), content: "seed"}) as never,
           close: async () => { await options.preserveUnsentState!(doc); released(); },
@@ -2006,7 +2006,7 @@ describe("workspaceEngineCapture batch capture", () => {
       openRustYDocProviderSession: async options => {
         const doc = new Y.Doc();
         return {doc, initialUpdate: Y.encodeStateAsUpdate(doc), objectId: "object-note", contentKind: "plaintext",
-          path: options.path, head: "present", lineage: "existing", unsettled: false, lineageClaimId: "claim-1",
+          path: options.path, head: "present", lineage: "existing", canSkipSettle: false, unsettled: false, lineageClaimId: "claim-1",
           applyLocalUpdate: async (update: Uint8Array) => { Y.applyUpdate(doc, update); }, evict: async () => undefined,
           settleNow: async () => { options.onSettleStart?.(1); options.onSettleError?.(stale, 1); throw stale; },
           close: async () => { throw new YdocReleasedWithSettleFailureError(options.path, stale); },
@@ -2065,7 +2065,7 @@ describe("workspaceEngineCapture batch capture", () => {
       openRustYDocProviderSession: async options => {
         const doc = new Y.Doc();
         return {doc, initialUpdate: Y.encodeStateAsUpdate(doc), objectId: "object-note", contentKind: "plaintext",
-          path: options.path, head: "present", lineage: "existing", unsettled: false, lineageClaimId: "claim-1",
+          path: options.path, head: "present", lineage: "existing", canSkipSettle: false, unsettled: false, lineageClaimId: "claim-1",
           applyLocalUpdate: async (update: Uint8Array) => { Y.applyUpdate(doc, update); }, evict: async () => undefined,
           settleNow: async () => { options.onSettleStart?.(1); options.onSettleError?.(stale, 1); throw stale; },
           close: async () => { released = true; throw new YdocReleasedWithSettleFailureError(options.path, stale); },
@@ -2106,7 +2106,7 @@ describe("workspaceEngineCapture batch capture", () => {
         doc.getText("plainText").insert(0, "typed");
         let tokens = 0;
         return {doc, initialUpdate: Y.encodeStateAsUpdate(doc), objectId: "object-note", contentKind: "plaintext",
-          path: options.path, head: "present", lineage: "existing", unsettled: false,
+          path: options.path, head: "present", lineage: "existing", canSkipSettle: false, unsettled: false,
           applyLocalUpdate: async () => undefined, evict: async () => undefined,
           settleNow: async () => {
             const token = ++tokens;
@@ -2162,7 +2162,7 @@ describe("workspaceEngineCapture batch capture", () => {
         doc.getText("plainText").insert(0, "typed");
         let tokens = 0;
         return {doc, initialUpdate: Y.encodeStateAsUpdate(doc), objectId: `object-${options.path}`, contentKind: "plaintext",
-          path: options.path, head: "present", lineage: "existing", unsettled: false,
+          path: options.path, head: "present", lineage: "existing", canSkipSettle: false, unsettled: false,
           applyLocalUpdate: async () => undefined, evict: async () => undefined,
           settleNow: async () => {
             const token = ++tokens;
@@ -2236,7 +2236,7 @@ describe("workspaceEngineCapture batch capture", () => {
           path: options.path,
           head: "present" as const,
           lineage: "existing" as const,
-          unsettled: false,
+          canSkipSettle: false, unsettled: false,
           evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () => {
@@ -2352,7 +2352,7 @@ describe("workspaceEngineCapture batch capture", () => {
           path: "note.md",
           head: "present" as const,
           lineage: "existing" as const,
-          unsettled: true,
+          canSkipSettle: false, unsettled: true,
           evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () => {
@@ -2404,7 +2404,7 @@ describe("workspaceEngineCapture batch capture", () => {
           path: "note.md",
           head: "present" as const,
           lineage: "existing" as const,
-          unsettled: true,
+          canSkipSettle: false, unsettled: true,
           evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () => {
@@ -4338,7 +4338,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
           path: options.path,
           head: "present" as const,
           lineage: "existing" as const,
-          unsettled: false,
+          canSkipSettle: false, unsettled: false,
           get artifactAssets() {
             return activeAssets;
           },
@@ -4771,7 +4771,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
             }
             return "absent" as const;
           },
-          unsettled: false,
+          canSkipSettle: false, unsettled: false,
           evict: async () => {
             evicts += 1;
           },
@@ -5105,7 +5105,7 @@ it.each(["agent", "typing"])("reopens after a daemon crash by replaying original
       Y.applyUpdate(doc, initial);
       return {
         doc, initialUpdate: initial, contentKind: "plaintext", path: options.path,
-        head: "present", lineage: "existing", unsettled: false,
+        head: "present", lineage: "existing", canSkipSettle: false, unsettled: false,
         async applyLocalUpdate(update, applyOptions) {
           const captured = { update: new Uint8Array(update), options: structuredClone(applyOptions) };
           Y.applyUpdate(doc, update);
