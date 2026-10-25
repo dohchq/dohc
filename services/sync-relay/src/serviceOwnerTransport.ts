@@ -125,9 +125,14 @@ export function serviceOwnerTransport(options: {
   };
   const sendLiveOwnerAdoption:EngineClient["sendLiveOwnerAdoption"]=async(request,cut,bounds,signal)=>{
     check(signal);registration(request.registrationId);
-    const capture=session();
+    const capture=session(),prefix=cut.retainedPrefix;
+    // A first activation adopts at an empty journal. A successor adopts at the boundary its captured predecessor released,
+    // or at an empty journal when that chain never adopted.
+    const boundary=prefix===null?cut.terminalReceipt===null
+      :capture.source.predecessorActivationId!==undefined && prefix.predecessorActivationId===capture.source.predecessorActivationId &&
+        isDeepStrictEqual(cut.terminalReceipt,prefix.terminalReceipt);
     if(request.workspace!==workspace || request.sessionId!==capture.sessionId || cut.adoptionId!==capture.activationId ||
-      cut.expectedLocalSequence!==capture.source.nativeHeadSequence || cut.events.length!==0 || cut.terminalReceipt!==null) {
+      cut.expectedLocalSequence!==capture.source.nativeHeadSequence || cut.events.length!==0 || !boundary) {
       throw new Error("Service owner adoption cut changed.");
     }
     const response=await client.sendLiveOwnerAdoption(request,cut,bounds,signal);

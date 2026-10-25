@@ -165,12 +165,13 @@ it("reports a document edited while live editing was off apart from other refusa
 });
 
 // Proves: Resume of a document held for an unadmitted live edit records the
-// retirement of its exact completed activation in the enrollment transaction,
-// before the host may try it again. A hold that ended before that transaction
-// changes nothing, and the Resume does not reopen the document's admission.
-it("retires the held activation when its owner resumes a document edited while live editing was off", async () => {
+// retirement of its exact prepared activation, completed or a successor still
+// pending, in the enrollment transaction, before the host may try it again. A
+// hold that ended before that transaction changes nothing, and the Resume does
+// not reopen the document's admission.
+it.each([["completed", true], ["pending", false]])("retires the held %s activation when its owner resumes a document edited while live editing was off", async (_state, completed) => {
   const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
-  const activationId = retainServiceActivation(f.raw, namespace, true);
+  const activationId = retainServiceActivation(f.raw, namespace, completed);
   const retirement = () => readServiceActivationRetirement(f.storage as StorageContext, enrolled);
   f.host.block(enrolled.objectId, "live-edit-unadmitted");
   f.host.blocked.mockReturnValueOnce("live-edit-unadmitted").mockReturnValueOnce(undefined);

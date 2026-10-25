@@ -2,9 +2,10 @@ import {expect,it,vi} from "vitest";
 import type {NativeOwnerActivation} from "@dohc/workspace-engine-client/daemon";
 import {receiptFirstSeed,serviceOwnerTransport} from "./serviceOwnerTransport";
 
-function fixture(){
+function fixture(predecessorActivationId?:string){
   const binding={workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"b".repeat(64),currentPath:"file.md",selectorPaths:["file.md"],restoreFenceGeneration:1};
-  const capture={activationId:`ordinary-activation-${"a".repeat(64)}`,sessionId:"actual-native-session",source:{nativeHeadSequence:2,fullStateDigest:"c".repeat(64)}} as NativeOwnerActivation;
+  const capture={activationId:`ordinary-activation-${"a".repeat(64)}`,sessionId:"actual-native-session",
+    source:{nativeHeadSequence:2,fullStateDigest:"c".repeat(64),...(predecessorActivationId===undefined?{}:{predecessorActivationId})}} as NativeOwnerActivation;
   const storage={},host={mode:"service",hostId:"service",hostEpoch:1,instanceId:"instance",connectionId:"connection"} as never;
   let adopted=false,changed=false;
   const sendRequest=vi.fn(async(request:{id:number;method:string})=>({id:request.id,result:request.method==="liveApplication.register"?{registrationId:7}:
@@ -20,7 +21,7 @@ it("derives the seed's delivery from the outbox the engine reports, as native do
   const f=fixture();
   await f.transport.client.sendRequest({...f.request,method:"liveApplication.register",params:{binding:f.binding}});
   await f.transport.client.sendLiveOwnerAdoption({...f.request,id:3,registrationId:7,sessionId:f.capture.sessionId},
-    {adoptionId:f.capture.activationId,expectedLocalSequence:2,events:[],terminalReceipt:null} as never,{maxBytes:1000,maxEvents:2});
+    {adoptionId:f.capture.activationId,expectedLocalSequence:2,events:[],terminalReceipt:null,retainedPrefix:null} as never,{maxBytes:1000,maxEvents:2});
   await f.transport.client.sendRequest({...f.request,id:4,method:"liveApplication.ownerOutbox",params:{registrationId:7}});
   const seed=receiptFirstSeed(f.transport.seedDelivery(),{storage:f.storage,transport:f.transport.client,activationId:f.capture.activationId,binding:f.binding,host:f.host});
   // The Rust test a_successors_later_edit_is_delivered_from_its_outbox pins the same vector natively.
@@ -36,7 +37,7 @@ it("uses the captured native session and translates owner outbox calls to its na
   expect(state.result).toEqual({adoptionId:f.capture.activationId,expectedLocalSequence:2,throughCursor:0,sessionId:"actual-native-session"});
   expect(f.sendRequest).toHaveBeenLastCalledWith(expect.objectContaining({params:{registrationId:7,sessionId:"actual-native-session"}}),undefined);
   await f.transport.client.sendLiveOwnerAdoption({...f.request,id:3,registrationId:7,sessionId:f.capture.sessionId},
-    {adoptionId:f.capture.activationId,expectedLocalSequence:2,events:[],terminalReceipt:null} as never,{maxBytes:1000,maxEvents:2});
+    {adoptionId:f.capture.activationId,expectedLocalSequence:2,events:[],terminalReceipt:null,retainedPrefix:null} as never,{maxBytes:1000,maxEvents:2});
   expect(f.sendLiveOwnerAdoption).toHaveBeenCalledWith(expect.objectContaining({sessionId:"actual-native-session"}),expect.anything(),expect.anything(),undefined);
   await f.transport.client.sendRequest({...f.request,id:4,method:"liveApplication.ownerOutbox",params:{registrationId:7}});
   await f.transport.client.sendRequest({...f.request,id:5,method:"liveApplication.readOwnerOutbox",params:{registrationId:7,cursor:"chunk"}});
@@ -53,8 +54,22 @@ it("refuses foreign bindings, sessions, and retirement without invoking native a
   expect(f.sendRequest).not.toHaveBeenCalled();
   await f.transport.client.sendRequest({...f.request,method:"liveApplication.register",params:{binding:f.binding}});
   await expect(f.transport.client.sendLiveOwnerAdoption({...f.request,registrationId:7,sessionId:"invented"},
-    {adoptionId:f.capture.activationId,expectedLocalSequence:2,events:[],terminalReceipt:null} as never,{maxBytes:1000,maxEvents:2})).rejects.toThrow("cut changed");
+    {adoptionId:f.capture.activationId,expectedLocalSequence:2,events:[],terminalReceipt:null,retainedPrefix:null} as never,{maxBytes:1000,maxEvents:2})).rejects.toThrow("cut changed");
   expect(f.sendLiveOwnerAdoption).not.toHaveBeenCalled();
   f.retire();
   await expect(f.transport.client.sendRequest({...f.request,method:"liveApplication.ownerState",params:{registrationId:7}})).rejects.toThrow("retired");
+});
+it("adopts a successor only at the boundary its captured predecessor released",async()=>{
+  const predecessor=`ordinary-activation-${"d".repeat(64)}`,f=fixture(predecessor);
+  await f.transport.client.sendRequest({...f.request,method:"liveApplication.register",params:{binding:f.binding}});
+  const terminalReceipt={deliveryId:"seed",updateDigest:"e".repeat(64),journalCursor:1,acceptingHostEpoch:1};
+  const prefix={terminalReceipt,eventCount:1,historyEvidenceDigest:"f".repeat(64),predecessorActivationId:predecessor};
+  const adopt=(cut:object)=>f.transport.client.sendLiveOwnerAdoption({...f.request,id:3,registrationId:7,sessionId:f.capture.sessionId},
+    {adoptionId:f.capture.activationId,expectedLocalSequence:2,events:[],terminalReceipt,retainedPrefix:prefix,...cut} as never,{maxBytes:1000,maxEvents:2});
+  await expect(adopt({retainedPrefix:{...prefix,predecessorActivationId:`ordinary-activation-${"9".repeat(64)}`}})).rejects.toThrow("cut changed");
+  await expect(adopt({terminalReceipt:{...terminalReceipt,journalCursor:2}})).rejects.toThrow("cut changed");
+  await expect(adopt({events:[{}]})).rejects.toThrow("cut changed");
+  expect(f.sendLiveOwnerAdoption).not.toHaveBeenCalled();
+  await adopt({});
+  expect(f.sendLiveOwnerAdoption).toHaveBeenCalledOnce();
 });

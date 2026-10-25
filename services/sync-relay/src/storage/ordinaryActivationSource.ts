@@ -98,7 +98,7 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
     WHERE workspace_id=? AND object_id=? AND version_id=? AND relay_seq<=? ORDER BY relay_seq DESC LIMIT 1`).get(document.workspaceId,document.objectId,document.mainVersionId,source.committedCursor);
   const echoes=moment?.path===source.currentPath&&moment.content_kind==="text"&&moment.blob_sha256===source.sourceDigest&&moment.byte_length===source.sourceByteLength;
   // The first history prefix that must project the source, or null when the latest file moment is the source.
-  let from:number|null=null;
+  let from:number|null=null,artifact:number|null=null;
   if(!(moment?.moment_id===source.sourceMomentId&&moment.version_id===document.mainVersionId&&echoes)){
     // A receiver-generated source names an ordinarily admitted Y.Doc row; a departed row counts as history, never as a source.
     // Otherwise the source is a settlement moment the relay proved, after the history before it.
@@ -106,17 +106,25 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
     if(index>=0)requireValue(rows[index]!.ordinary,"Native activation source moment is not an ordinary history coordinate.");
     const anchor=index>=0?rows[index]!.relay_seq:provedSettlementSource(storage,{source,document,validateRegistration,charge,projects});
     from=index>=0?index:rows.filter(row=>row.relay_seq<anchor).length-1;
-    requireValue(!moment||Number(moment.relay_seq)<=anchor||echoes||sameLineageArtifact(storage,source,document,Number(moment.relay_seq),charge),
-      "Ordinary activation found a later ordinary file moment with a divergent projection.");
+    if(moment&&Number(moment.relay_seq)>anchor&&!echoes)artifact=Number(moment.relay_seq);
   }
+  // The history prefix a write at this relay position follows.
+  const prefixAt=(relaySeq:number)=>rows.filter(row=>row.relay_seq<relaySeq).length-1;
   // One pass validates the history and, from the source's prefix on, checks that every prefix keeps its projection,
   // so a change and its reversal can't stand behind an earlier source. The baseline alone was validated as a registration.
+  // Behind a later artifact, it also keeps the projection each of this document's writes followed, to tell folded echoes.
   charge(baselineBytes.length+(updates.length===1?2:updates.slice(1).reduce((sum,bytes)=>sum+bytes.length,0)));
   const start=from===null?updates.length:Math.max(from,1);
-  let projected=from!==0||projects(baseline),visited=0;
+  const wanted=new Set(artifact===null?[]:metadata.filter(row=>row.op_kind==="moment.append"&&Number(row.relay_seq)<artifact)
+    .map(row=>prefixAt(Number(row.relay_seq))).filter(index=>index>=1&&index<updates.length-1));
+  const lower=Math.min(start,...wanted),projections=new Map<number,Projection>();
+  let projected=from!==0||projects(baseline),next=lower;
   const result=validateHistory({document,currentPath:source.currentPath,checkpoint:baselineBytes,suffix:updates.slice(1,Math.max(updates.length-1,1)),
     candidate:updates.length===1?new Uint8Array([0,0]):updates[updates.length-1]!},
-  {from:start,visit:(evidence,index)=>{projected&&=index===start+visited++&&projects(evidence);}});
+  {from:lower,visit:(evidence,index)=>{
+    projected&&=index===next++&&(index<start||projects(evidence));
+    if(wanted.has(index))projections.set(index,{projectedMarkdownSha256:evidence.projectedMarkdownSha256,projectedMarkdownByteLength:evidence.projectedMarkdownByteLength});
+  }});
   requireValue(result.kind==="accepted"||result.reason!=="capacity-refused","Ordinary activation history exceeds its configured validation budget.");
   requireValue(result.kind==="accepted","Ordinary activation history is not a valid live document.");
   const captured=full.evidence,ordinary=result.evidence;
@@ -124,7 +132,12 @@ export function verifyOrdinaryActivationCut(storage:StorageContext,input:{source
     Buffer.compare(Buffer.from(captured.stateUpdate),Buffer.from(ordinary.stateUpdate))===0&&
     ordinary.projectedMarkdownSha256===source.sourceDigest&&ordinary.projectedMarkdownByteLength===source.sourceByteLength,
     "Native activation differs from the complete ordinary CRDT history.");
-  requireValue(projected&&visited===Math.max(updates.length-1-start,0),"Native activation source moment does not project the captured source.");
+  requireValue(projected&&next===Math.max(updates.length-1,lower),"Native activation source moment does not project the captured source.");
+  if(artifact!==null){
+    const projectionAt=(relaySeq:number)=>{const index=prefixAt(relaySeq);return index===0?baseline:index===updates.length-1?ordinary:projections.get(index);};
+    requireValue(sameLineageArtifact(storage,{source,document,charge,projectionAt,proved:new Map()},artifact),
+      "Ordinary activation found a later ordinary file moment with a divergent projection.");
+  }
   const evidence={version:1 as const,document:structuredClone(document),currentPath:source.currentPath,
     checkpoint:{updateDigest:baseline.checkpoint.updateDigest,ranges:baseline.checkpoint.ranges.map(row=>({...row}))},
     projectedMarkdownSha256:baseline.projectedMarkdownSha256,projectedMarkdownByteLength:baseline.projectedMarkdownByteLength};
@@ -183,6 +196,17 @@ function provedSettlementSource(storage:StorageContext,input:{source:NativeOwner
   proved(settledState.kind==="accepted"&&settledState.evidence.stateUpdateSha256===settled.state_sha256&&input.projects(settledState.evidence));
   return Number(settled.relay_seq);
 }
+type Projection={projectedMarkdownSha256:string;projectedMarkdownByteLength:number};
+interface ArtifactProof {
+  source:NativeOwnerActivationSource;document:LiveDocumentKey;charge:(bytes:number)=>void;
+  /** The captured lineage's projection after the history before this relay position. */
+  projectionAt:(relaySeq:number)=>Projection|undefined;
+  proved:Map<number,boolean>;
+}
+const examined=(row:Record<string,unknown>)=>{
+  requireValue(integer(row.payload_bytes),"Ordinary activation metadata is damaged.");
+  return Number(row.payload_bytes)+Buffer.byteLength(JSON.stringify([row.relay_seq,row.origin_id,row.origin_seq,row.op_kind]));
+};
 /**
  * Whether a later divergent file moment is a stale artifact of this lineage: a
  * native-shaped text write at the bound path whose ID has a native settlement
@@ -192,38 +216,57 @@ function provedSettlementSource(storage:StorageContext,input:{source:NativeOwner
  * already refused this document's moves, deletes, unclaimed rows and other
  * bases across the cut; a losing lineage's rows break nothing.
  */
-function sameLineageArtifact(storage:StorageContext,source:NativeOwnerActivationSource,document:LiveDocumentKey,relaySeq:number,charge:(bytes:number)=>void):boolean{
+function sameLineageArtifact(storage:StorageContext,proof:ArtifactProof,relaySeq:number):boolean{
+  let proved=proof.proved.get(relaySeq);
+  if(proved===undefined){proved=artifactStands(storage,proof,relaySeq);proof.proved.set(relaySeq,proved);}
+  return proved;
+}
+function artifactStands(storage:StorageContext,proof:ArtifactProof,relaySeq:number):boolean{
+  const {source,document,charge}=proof;
   const artifact=storage.db.prepare("SELECT origin_id,origin_seq,op_kind,payload_json FROM sync_relay_log WHERE workspace_id=? AND relay_seq=?").get(document.workspaceId,relaySeq);
   if(artifact?.op_kind!=="moment.append")return false;
   const write=JSON.parse(String(artifact.payload_json)) as Record<string,unknown>;
   if(typeof write.momentId!=="string"||!/^moment-ydoc-(apply-)?[0-9a-f]{64}$/.test(write.momentId)||!NATIVE_MOMENT_FIELDS.every(field=>Object.hasOwn(write,field))||
     write.versionId!==document.mainVersionId||write.objectId!==document.objectId||write.operation!=="write"||write.path!==source.currentPath||
     write.payloadAfterPath!==source.currentPath||write.payloadAfterContentKind!=="text"||(write.beforeObjectId!=null&&write.beforeObjectId!==document.objectId))return false;
-  // Within one origin, relay order is origin order, so the range bound never skips a nearer row.
-  const nearest=storage.db.prepare(`SELECT relay_seq,origin_seq,relay_admission,payload_json FROM sync_relay_log INDEXED BY idx_sync_relay_log_document_page
+  // Back from the artifact over this document's rows, each charged to the proof budget. Within one origin, relay order is origin order.
+  const before=storage.db.prepare(`SELECT relay_seq,origin_id,origin_seq,op_kind,length(CAST(payload_json AS BLOB)) AS payload_bytes
+    FROM sync_relay_log INDEXED BY idx_sync_relay_log_document_page
     WHERE workspace_id=? AND json_extract(payload_json,'$.versionId')=? AND json_extract(payload_json,'$.objectId')=? AND relay_seq>=? AND relay_seq<?
-      AND origin_id=? AND origin_seq<? AND op_kind='ydoc.update' ORDER BY origin_seq DESC LIMIT 1`)
-    .get(document.workspaceId,document.mainVersionId,document.objectId,source.baseRelaySeq,relaySeq,artifact.origin_id,artifact.origin_seq);
+    ORDER BY relay_seq DESC`);
+  let nearestSeq:number|undefined;
+  for(const row of before.iterate(document.workspaceId,document.mainVersionId,document.objectId,source.baseRelaySeq,relaySeq)){
+    charge(examined(row));
+    if(row.origin_id===artifact.origin_id&&row.op_kind==="ydoc.update"){nearestSeq=Number(row.relay_seq);break;}
+  }
+  if(nearestSeq===undefined)return false;
+  const nearest=storage.db.prepare("SELECT relay_admission,payload_json FROM sync_relay_log WHERE workspace_id=? AND relay_seq=?").get(document.workspaceId,nearestSeq);
   if(!nearest||nearest.relay_admission!==null)return false;
   const update=JSON.parse(String(nearest.payload_json)) as Record<string,unknown>;
   if(update.path!==source.currentPath||update.contentKind!=="richdoc"||update.lineageClaimId!==document.lineageClaimId||
     typeof update.isBaseState!=="boolean"||(update.isBaseState&&update.updateBlobSha256!==document.lineageClaimId))return false;
   // In relay order from that row through the cut, each row examined charged to the proof budget, a replacement breaks the lineage:
   // a refused Y.Doc row of the artifact's origin before it, which keeps no object and so may be this document's nearer row;
-  // another write of this document before the artifact, even one restoring equal bytes; or another object at the bound path,
-  // or one whose before-image names this document, even if it left again.
+  // another write of this document before the artifact (2), unless it folds as an echo of the lineage's projection at that point
+  // or is itself a stale artifact of this lineage; or another object at the bound path, or one whose before-image names this
+  // document, even if it left again. A write restoring earlier bytes is no echo.
   const scan=storage.db.prepare(`SELECT relay_seq,origin_id,origin_seq,op_kind,length(CAST(payload_json AS BLOB)) AS payload_bytes,
+      json_extract(payload_json,'$.payloadAfterBlobSha256') AS after_sha256,json_extract(payload_json,'$.payloadAfterByteLength') AS after_byte_length,
       CASE WHEN op_kind=? THEN origin_id=? AND relay_seq<? AND json_extract(payload_json,'$.opKind')='ydoc.update'
         WHEN COALESCE(json_extract(settlement_admission_json,'$.status'),'')='refused' OR json_extract(payload_json,'$.versionId') IS NOT ? THEN 0
-        WHEN json_extract(payload_json,'$.objectId') IS ? THEN op_kind='moment.append' AND relay_seq>? AND relay_seq<?
+        WHEN json_extract(payload_json,'$.objectId') IS ? THEN CASE WHEN op_kind='moment.append' AND relay_seq>? AND relay_seq<? THEN 2 ELSE 0 END
         ELSE ? IN (json_extract(payload_json,'$.path'),json_extract(payload_json,'$.payloadAfterPath'),json_extract(payload_json,'$.payloadBeforePath'),
           json_extract(payload_json,'$.beforePath')) OR json_extract(payload_json,'$.beforeObjectId')=? END AS replaced
     FROM sync_relay_log INDEXED BY idx_sync_relay_log_page WHERE workspace_id=? AND relay_seq>=? AND relay_seq<=? ORDER BY relay_seq`);
-  for(const row of scan.iterate(REFUSED_OP_KIND,artifact.origin_id,relaySeq,document.mainVersionId,document.objectId,nearest.relay_seq,relaySeq,
-    source.currentPath,document.objectId,document.workspaceId,nearest.relay_seq,source.committedCursor)){
-    requireValue(integer(row.payload_bytes),"Ordinary activation metadata is damaged.");
-    charge(Number(row.payload_bytes)+Buffer.byteLength(JSON.stringify([row.relay_seq,row.origin_id,row.origin_seq,row.op_kind])));
+  for(const row of scan.iterate(REFUSED_OP_KIND,artifact.origin_id,relaySeq,document.mainVersionId,document.objectId,nearestSeq,relaySeq,
+    source.currentPath,document.objectId,document.workspaceId,nearestSeq,source.committedCursor)){
+    charge(examined(row));
     if(row.replaced===1)return false;
+    if(row.replaced===2){
+      const at=proof.projectionAt(Number(row.relay_seq));
+      const echo=!!at&&row.after_sha256===at.projectedMarkdownSha256&&row.after_byte_length===at.projectedMarkdownByteLength;
+      if(!echo&&!sameLineageArtifact(storage,proof,Number(row.relay_seq)))return false;
+    }
   }
   return true;
 }

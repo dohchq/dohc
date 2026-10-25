@@ -104,13 +104,13 @@ export function createServiceHostEnrollmentRoutes(options: {
     if (current.kind !== "current" || !host.ready(document)) return {...base, status: host.unavailable ? "unavailable" : "preparing"};
     return {path: current.binding.currentPath, status: "ready", document: {binding: current.binding, relayDatabaseNamespace: history.namespace, shareId: row.shareId}};
   }
-  // The exact activation of a document the host holds for an unadmitted live
-  // edit. Its Resume retires that activation inside the enrollment transaction,
-  // which checks the hold again there.
+  // The exact prepared activation, pending or completed, of a document the host
+  // holds for an unadmitted live edit. Its Resume retires that activation inside
+  // the enrollment transaction, which checks the hold again there.
   function heldActivation(row: ServiceHostEnrollment): ServiceHostHeldActivation | undefined {
     if (host.blocked(row) !== "live-edit-unadmitted") return undefined;
     const saved = activation.read(row.workspaceId, row.path, 4 * 1024 * 1024), identity = storage.getWorkspaceIdentity(row.workspaceId);
-    if (!saved?.completed || !identity) return undefined;
+    if (!saved || !identity) return undefined;
     return {activationId: saved.activationId, replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity,
       assertHeld() {if (host.blocked(row) !== "live-edit-unadmitted") throw relayError("conflict", HELD_CHANGED);}};
   }

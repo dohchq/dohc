@@ -14,7 +14,8 @@ import {canonicalVersionedAcceptedMetadata, initialAcceptedHistoryDigest, nextVe
 import {assessLiveAuthorWindow} from "./liveAuthorWindow";
 import type {NativeRestoreHistoryProof} from "../liveRestoreProposal";
 export type {RestoreLifecycle} from "../liveRestoreLifecycle";
-import type { LiveOwnerAdoptionCut, NativeOwnerActivationSource } from "@dohc/workspace-engine-client/daemon";
+import type { LiveOwnerAdoptionCut, NativeOwnerActivationSource, RetainedPrefix, RetainedPrefixBody } from "@dohc/workspace-engine-client/daemon";
+import { SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
 import { isDeepStrictEqual } from "node:util";
 import {
   parseLiveUpdateDigest,
@@ -311,6 +312,17 @@ export class LiveCommittedDeliveryStore {
     return {sourceMomentId: parseLiveUpdateIdentifier(source.moment_id,"source moment ID"), sourceDigest: authority.projectedDigest,
       sourceByteLength: authority.projectedLength, activation: null};
   }
+  // A successor's retained prefix: the boundary its retired predecessor released, or none when that chain never adopted.
+  #retainedPrefix(source: NativeOwnerActivationSource | undefined): RetainedPrefix | null {
+    const predecessorActivationId = source?.predecessorActivationId;
+    if (predecessorActivationId === undefined) return null;
+    const row = this.#storage.db.prepare(`SELECT retired_boundary_json FROM ${SERVICE_ACTIVATIONS}
+      WHERE relay_database_namespace=? AND activation_id=? AND retired_at_ms IS NOT NULL`).get(this.#history.namespace, predecessorActivationId);
+    integrity(row);
+    const boundary = JSON.parse(String(row.retired_boundary_json)) as RetainedPrefixBody | null;
+    return boundary && {terminalReceipt: boundary.terminalReceipt, eventCount: boundary.eventCount,
+      historyEvidenceDigest: boundary.historyEvidenceDigest, predecessorActivationId};
+  }
   // The owner row's adoption against the live document row: its baseline, its
   // source and its original binding. Live authority is the caller's to check.
   #ownerOrigin(document: LiveDocumentKey, owner: Record<string, unknown>) {
@@ -508,8 +520,6 @@ export class LiveCommittedDeliveryStore {
     const requestedCursor = input.throughCursor === undefined ? undefined : authorityInteger(input.throughCursor);
     const captured = this.#storage.readTx(() => {
       this.#standing(host);
-      const count = this.#storage.db.prepare(`SELECT COUNT(*) AS count, COALESCE(SUM(length(update_bytes)),0) AS bytes FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor<=?`).get(...documentParams(document),requestedCursor ?? Number.MAX_SAFE_INTEGER)!;
-      if (authorityInteger(count.count) > maxEvents || authorityInteger(count.bytes) > maxBytes) throw new Error(`Owner adoption cut exceeds configured bounds: ${count.count} journal events / ${maxEvents} allowed; ${count.bytes} journal bytes / ${maxBytes} allowed.`);
       const result = liveJournalCut(this.#storage, document);
       if (result.kind !== "cut") throw new Error(`Owner adoption ${result.reason}.`);
       const authority = result.cut.authorityHistory.find(row => row.current)!;
@@ -518,23 +528,32 @@ export class LiveCommittedDeliveryStore {
       const binding = authorized?.kind === "current" ? authorized.binding : authority.binding;
       const source = this.#ownerSource(document,adoptionId,authority);
       integrity(!source.activation || source.activation.source.nativeHeadSequence === sequence);
+      const prefix = this.#retainedPrefix(source.activation?.source);
       const events: AdmittedLiveUpdate[] = [];
       let bytes = authority.baselineBytes.byteLength;
-      for (const raw of this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor<=? ORDER BY journal_cursor`).iterate(...documentParams(document),requestedCursor ?? Number.MAX_SAFE_INTEGER)) {
-        const row = decodeJournalRow(this.#storage.db, raw);
-        assertJournalCheckpointPosition(this.#storage.db, row);
-        verifyJournalRow(row);
-        bytes += row.admitted.updateBytes.byteLength + Buffer.byteLength(JSON.stringify(row.admitted.metadata)) + 8;
-        if (bytes > maxBytes || events.length === maxEvents) throw new Error("Owner adoption cut exceeds its configured bounds.");
-        events.push(row.admitted);
+      if (prefix) {
+        // A successor adopts at its predecessor's released boundary; ordinary delivery then brings what the journal accepted after it.
+        // Before adoption the engine reports no cursor of its own.
+        integrity(requestedCursor === undefined || requestedCursor === 0 || requestedCursor === (prefix.terminalReceipt?.journalCursor ?? 0));
+      } else {
+        const count = this.#storage.db.prepare(`SELECT COUNT(*) AS count, COALESCE(SUM(length(update_bytes)),0) AS bytes FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor<=?`).get(...documentParams(document),requestedCursor ?? Number.MAX_SAFE_INTEGER)!;
+        if (authorityInteger(count.count) > maxEvents || authorityInteger(count.bytes) > maxBytes) throw new Error(`Owner adoption cut exceeds configured bounds: ${count.count} journal events / ${maxEvents} allowed; ${count.bytes} journal bytes / ${maxBytes} allowed.`);
+        for (const raw of this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor<=? ORDER BY journal_cursor`).iterate(...documentParams(document),requestedCursor ?? Number.MAX_SAFE_INTEGER)) {
+          const row = decodeJournalRow(this.#storage.db, raw);
+          assertJournalCheckpointPosition(this.#storage.db, row);
+          verifyJournalRow(row);
+          bytes += row.admitted.updateBytes.byteLength + Buffer.byteLength(JSON.stringify(row.admitted.metadata)) + 8;
+          if (bytes > maxBytes || events.length === maxEvents) throw new Error("Owner adoption cut exceeds its configured bounds.");
+          events.push(row.admitted);
+        }
+        integrity((events.at(-1)?.metadata.accepted.receipt.journalCursor ?? 0) === (requestedCursor ?? result.cut.highWater ?? 0) && events.length === count.count);
       }
-      const terminal = events.at(-1)?.metadata.accepted.receipt ?? null;
-      integrity((terminal?.journalCursor ?? 0) === (requestedCursor ?? result.cut.highWater ?? 0) && events.length === count.count);
+      const terminal = prefix ? prefix.terminalReceipt : events.at(-1)?.metadata.accepted.receipt ?? null;
       const cut: LiveOwnerAdoptionCut = { relayDatabaseNamespace: this.#history.namespace, adoptionId,
         sourceMomentId: source.sourceMomentId, sourceDigest: source.sourceDigest,
         sourceByteLength: source.sourceByteLength, baselineMomentRelaySequence: authority.baselineSequence,
         baselineRegisteredAtMs: authority.registeredAtMs, expectedLocalSequence: sequence,
-        terminalReceipt: terminal, retainedPrefix: null, baselineBytes: new Uint8Array(authority.baselineBytes), events };
+        terminalReceipt: terminal, retainedPrefix: prefix, baselineBytes: new Uint8Array(authority.baselineBytes), events };
       const { events: _events, baselineBytes: _baseline, ...header } = cut;
       if (bytes + Buffer.byteLength(JSON.stringify({ ...header, eventCount: events.length })) + 8 > maxBytes) throw new Error("Owner adoption cut exceeds its configured bounds.");
       return { journal: result.cut, authority: structuredClone(authority), binding: structuredClone(binding), source: { ...source }, cut };

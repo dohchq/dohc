@@ -4,6 +4,7 @@ import { LIVE_OBJECT_BINDING_PATH_MAX_BYTES,LIVE_OBJECT_BINDING_SELECTOR_PATH_MA
 import type { StorageContext } from "./context";
 import { assertWorkspaceQuota } from "./workspaces";
 import { LIVE_DELIVERY_BOOTSTRAPS, LIVE_DELIVERY_EDGES, LIVE_DELIVERY_HOSTS, LIVE_DELIVERY_RESERVATIONS, LIVE_DELIVERY_DOCUMENTS, LIVE_DELIVERY_OWNERS } from "./liveCommittedDeliverySchema";
+import { LIVE_DELIVERY_OWNER_HISTORY } from "./serviceActivationSchema";
 
 const WHERE_DOCUMENT = "workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?";
 const parameters = (document: LiveDocumentKey) => [document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId];
@@ -62,6 +63,10 @@ function reserveLiveDeliveryEvent(storage: StorageContext, document: LiveDocumen
     row.accepting_host_epoch, maximum, "service", maximum, hostIdentifier, hostIdentifier]);
   reserve(storage, document, hostId, Number(row.journal_cursor), amount);
 }
+/** The next owner adoption, in the transaction that archives the retired owner row whose adoption consumed the last. */
+export function reserveLiveDeliverySuccessor(storage: StorageContext, document: LiveDocumentKey, hostId: string): void {
+  reserveLiveDeliveryBaseline(storage, document, hostId);
+}
 export function registerLiveDeliveryBaseline(storage: StorageContext, document: LiveDocumentKey, hostId: string): void {
   const overhead = bytes([maximum, ...parameters(document)]);
   charge(storage, document.workspaceId, overhead);
@@ -112,6 +117,9 @@ function provisionWorkspaceHost(storage: StorageContext, hostId: string, workspa
     const cursors = new Set(reserved.map(row => Number(row.journal_cursor)));
     const owner = storage.db.prepare(`SELECT tip_cursor FROM ${LIVE_DELIVERY_OWNERS} WHERE ${WHERE_DOCUMENT} AND host_id=?`).all(...parameters(document),hostId);
     integrity(owner.length <= 1 && !(owner.length && bootstrap.length));
+    // A retired owner's archived tip still covers what it applied: its successor adopts there.
+    const applied = owner[0]?.tip_cursor ?? (bootstrap.length ? null : storage.db.prepare(`SELECT MAX(tip_cursor) AS tip FROM ${LIVE_DELIVERY_OWNER_HISTORY}
+      WHERE ${WHERE_DOCUMENT} AND host_id=?`).get(...parameters(document),hostId)?.tip ?? null);
     if ((!bootstrap[0] || bootstrap[0].local_ydoc_sequence === null) && !owner.length) {
       if (!cursors.has(0)) {
         integrity(documentSequence > fundedDocument);
@@ -124,7 +132,7 @@ function provisionWorkspaceHost(storage: StorageContext, hostId: string, workspa
     for (const event of events) {
       const cursor = Number(event.journal_cursor);
       journalHighWater = Math.max(journalHighWater, cursor);
-      if (acknowledged.has(cursor) || (owner[0] && cursor <= Number(owner[0].tip_cursor))) { integrity(!cursors.has(cursor)); continue; }
+      if (acknowledged.has(cursor) || (applied !== null && cursor <= Number(applied))) { integrity(!cursors.has(cursor)); continue; }
       if (!cursors.has(cursor)) {
         integrity(cursor > fundedCursor);
         reserveLiveDeliveryEvent(storage, document, hostId, event);

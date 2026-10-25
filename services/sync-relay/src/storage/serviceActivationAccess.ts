@@ -54,14 +54,29 @@ export function allowsServiceActivation(storage: StorageContext, request: Curren
     request.actor.kind === "owner" && request.actor.userId === row!.owner_user_id && request.actor.shareId === row!.share_id;
 }
 
+/**
+ * F, the live-journal cursor the activation's retired predecessor accepted
+ * through before Stop, or 0 for a first activation. Rows after it are this
+ * activation's own.
+ */
+export function predecessorAcceptedThrough(storage: StorageContext, row: NonNullable<ReturnType<typeof readServiceActivation>>): number {
+  if (row.predecessor_activation_id === null) return 0;
+  const predecessor = storage.db.prepare(`SELECT retire_accepted_cursor FROM ${SERVICE_ACTIVATIONS}
+    WHERE relay_database_namespace=? AND activation_id=? AND retired_at_ms IS NOT NULL`).get(row.relay_database_namespace, row.predecessor_activation_id);
+  const cursor = predecessor?.retire_accepted_cursor;
+  if (typeof cursor !== "number" || !Number.isSafeInteger(cursor) || cursor < 0) throw new Error("Service activation predecessor is unavailable.");
+  return cursor;
+}
+
 export function allowsServiceActivationCandidate(storage: StorageContext, request: CurrentLiveBindingRequest,
   host: LiveHostConnectionCoordinate, binding: LiveObjectBinding, digest: string, deliveryId: string,
   access?: ServiceActivationAccess): boolean {
   const row = readServiceActivation(storage, request.document), state = serviceActivationState(row);
   if (state === "absent" || state === "completed") return true;
   if (!allowsServiceActivation(storage, request, host, binding, access) || digest !== row!.state_digest) return false;
+  // A pending activation admits only its own seed after what its predecessor accepted.
   const prior = storage.db.prepare(`SELECT delivery_id,update_digest FROM ${LIVE_JOURNAL_TABLE}
-    WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? ORDER BY journal_cursor LIMIT 2`)
-    .all(binding.workspaceId, binding.mainVersionId, binding.objectId, binding.lineageClaimId);
+    WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND journal_cursor>? ORDER BY journal_cursor LIMIT 2`)
+    .all(binding.workspaceId, binding.mainVersionId, binding.objectId, binding.lineageClaimId, predecessorAcceptedThrough(storage, row!));
   return prior.length === 0 || (prior.length === 1 && prior[0]!.delivery_id === deliveryId && prior[0]!.update_digest === digest);
 }
