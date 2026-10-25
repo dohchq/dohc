@@ -132,7 +132,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     stopAutomationWakes(): Promise<void>;
     stopSearch(): Promise<void>;
     stopSitePreviews(): Promise<void>;
-    // Copies of other people's files that dohc opened in other apps.
+    // This run's copies of other people's files that dohc opened in other apps.
     removeMarkedCopies(): Promise<void>;
     settleYDocs(): Promise<void>;
     stopAgentIntegration(): Promise<void>;

@@ -98,7 +98,7 @@ export function createWorkspaceFilesIpc<
   ): Promise<ReadWorkspaceTextResult>;
   assertWritableWorkspace(workspace: Workspace): void;
   shareViewFiles: Pick<ShareViewFiles, "list" | "read" | "change">;
-  listWorkspaces(): { rootPath: string }[];
+  listWorkspaces(): Pick<RegistryEntry, "rootPath" | "shareView">[];
   ensureOwnedProjectionCurrent(workspace: Workspace, path: string): Promise<void>;
   renderHtmlToPdf(html: string): Promise<Uint8Array>;
   notifyRenderer(input: { workspaceId: string }): void;
@@ -617,7 +617,7 @@ export function createWorkspaceFilesIpc<
         input.relativePath,
         "read",
       );
-      const opened = await cameFromAnotherPerson(operation.workspace, realTarget)
+      const opened = await cameFromAnotherPerson(operation.workspace, listWorkspaces(), realTarget)
         ? await markedCopyOf(markedCopies, realTarget)
         : realTarget;
       operation.assertCurrent();

@@ -887,6 +887,7 @@ export const FileInspector = memo(function FileInspector(
           onRetryEngineOpen={retryEngineOpen}
           presenceFactory={props.drawingCollaboration}
           localBuffer={localBuffer}
+          onButtonError={props.onButtonError}
         />
       );
     case "csv":

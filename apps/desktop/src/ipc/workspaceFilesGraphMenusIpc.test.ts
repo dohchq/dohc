@@ -104,7 +104,8 @@ async function harness() {
   });
   const repair = vi.fn<() => Promise<void>>(async () => undefined);
   const openPath = vi.fn(async (_path: string) => "");
-  const system = systemMarkedCopies(await createTestScratch("marked-copies-"));
+  const system = systemMarkedCopies(await createTestScratch("marked-copies-profile-"));
+  const registered: Pick<RegistryEntry, "rootPath" | "shareView">[] = [workspace];
   const markedCopies = {
     folder: system.folder,
     copy: vi.fn<MarkedCopies["copy"]>(system.copy),
@@ -123,7 +124,7 @@ async function harness() {
     listOwnedWorkspaceFilesFor: listing, readOwnedWorkspaceTextFor: readText,
     lookupOwnedWorkspaceFilesFor: lookup,
     assertWritableWorkspace: assertWritable, shareViewFiles: shareFiles,
-    listWorkspaces: () => [workspace], ensureOwnedProjectionCurrent: repair,
+    listWorkspaces: () => registered, ensureOwnedProjectionCurrent: repair,
     renderHtmlToPdf: renderPdf, notifyRenderer: notify,
   });
   registerOperations<typeof workspaceFileOperations, Event, Operation>({
@@ -153,7 +154,7 @@ async function harness() {
     return handler({ sender: { id: 1 }, trusted: isTrusted }, payload);
   };
   return {
-    workspace, lookup, listings, handlers, invoke, change, openDialog, saveDialog, listing, readText, repair,
+    workspace, registered, lookup, listings, handlers, invoke, change, openDialog, saveDialog, listing, readText, repair,
     openPath, markedCopies, reveal, renderPdf, notify, buildMenu,
     retireRenderer: () => { rendererCurrent = false; },
     retirePhysical: () => { physicalCurrent = false; },
@@ -499,6 +500,28 @@ describe("opening a file externally", () => {
     await symlink(shared, join(h.workspace.rootPath, "linked"), process.platform === "win32" ? "junction" : "dir");
     await open(h, "linked/plan.bin");
     await expectMarkedCopy(h, join(shared, "plan.bin"));
+  });
+
+  it("opens a file of a shared view inside this workspace as a marked copy", async () => {
+    const h = await harness();
+    const view = join(h.workspace.rootPath, "view");
+    h.registered.push({ rootPath: view, shareView: {} as NonNullable<Workspace["shareView"]> });
+    const original = join(view, "notes.bin");
+    await mkdir(view);
+    await writeFile(original, bytes);
+    await open(h, "view/notes.bin");
+    await expectMarkedCopy(h, original);
+  });
+
+  it("opens a file in another workspace's share mount inside this workspace as a marked copy", async () => {
+    const h = await harness();
+    const inner = join(h.workspace.rootPath, "inner");
+    h.registered.push({ rootPath: inner });
+    const original = join(inner, "shared-with-me", "sam", "plan.bin");
+    await mkdir(dirname(original), { recursive: true });
+    await writeFile(original, bytes);
+    await open(h, "inner/shared-with-me/sam/plan.bin");
+    await expectMarkedCopy(h, original);
   });
 
   it("opens the person's own file in place, with no copy and no mark", async () => {

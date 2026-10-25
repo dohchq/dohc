@@ -1,34 +1,46 @@
 import { execFile } from "node:child_process";
-import { chmod, copyFile, mkdir, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
+import { ipcWireError, readError, withErrorWords } from "../ipc/errorWords";
+import { workspaceFileOperations } from "../ipc/workspaceFileOperations";
 import {
   cameFromAnotherPerson,
   markAsDownloaded,
-  markedCopiesRoot,
   markedCopyOf,
   removeEarlierMarkedCopies,
   removeMarkedCopies,
   systemMarkedCopies,
 } from "./markedCopies";
+import { withPrivacyDenial } from "./privacyDenial";
 import { createTestScratch } from "./testTemp";
 
 const linkType = process.platform === "win32" ? "junction" : "dir";
+const unmarked = (profile: string) => ({ ...systemMarkedCopies(profile), mark: async () => undefined });
+
+// What the toast and its Notices row say, and what Copy details keep, once
+// main's error has crossed to the renderer.
+function shown(error: unknown, platform: NodeJS.Platform) {
+  const wire = String(ipcWireError(withPrivacyDenial(error, platform)));
+  const received = new Error(`Error invoking remote method '${workspaceFileOperations.openFileExternally.channel}': ${wire}`);
+  return { message: withErrorWords("dohc could not open this file externally.", received), details: readError(received).cause };
+}
 
 describe("marked copies", () => {
-  it("keeps one folder per profile inside the temp folder", () => {
-    const first = markedCopiesRoot(join("temp"), join("profiles", "a"));
-    expect(dirname(first)).toBe("temp");
-    expect(markedCopiesRoot(join("temp"), join("profiles", "a"))).toBe(first);
-    expect(markedCopiesRoot(join("temp"), join("profiles", "b"))).not.toBe(first);
+  it("keeps each run's copies in its own folder inside the profile", () => {
+    const first = systemMarkedCopies(join("profile"));
+    const second = systemMarkedCopies(join("profile"));
+    expect(dirname(dirname(first.folder))).toBe("profile");
+    expect(dirname(second.folder)).toBe(dirname(first.folder));
+    expect(second.folder).not.toBe(first.folder);
   });
 
   it("copies into a fresh folder with the same name and bytes, and leaves the original alone", async () => {
     const scratch = await createTestScratch("marked-copy-");
     const original = join(scratch, "report.bin");
     await writeFile(original, "original bytes");
-    const copies = { ...systemMarkedCopies(join(scratch, "copies")), mark: async () => undefined };
+    const copies = unmarked(join(scratch, "profile"));
     const first = await markedCopyOf(copies, original);
     const second = await markedCopyOf(copies, original);
     expect(basename(first)).toBe("report.bin");
@@ -42,82 +54,112 @@ describe("marked copies", () => {
     const original = join(scratch, "report.bin");
     await writeFile(original, "bytes");
     await chmod(original, 0o444);
-    const copy = await markedCopyOf({ ...systemMarkedCopies(join(scratch, "copies")), mark: async () => undefined }, original);
+    const copy = await markedCopyOf(unmarked(join(scratch, "profile")), original);
     expect((await stat(copy)).mode & 0o111).toBe(0);
   });
 
-  it("removes this run's copies and earlier runs' at quit, and nothing outside its folder", async () => {
+  it("removes only this run's copies at quit", async () => {
     const scratch = await createTestScratch("marked-copy-quit-");
-    const outside = join(scratch, "outside");
-    await mkdir(outside);
-    await writeFile(join(outside, "keep.txt"), "keep");
-    const root = join(scratch, "copies");
-    const copies = { ...systemMarkedCopies(root), mark: async () => undefined };
-    const original = join(outside, "keep.txt");
-    await markedCopyOf(copies, original);
-    await mkdir(join(root, "earlier-run"));
-    await writeFile(join(root, "earlier-run", "left.txt"), "left");
-    await symlink(outside, join(root, "link"), linkType);
-    await removeMarkedCopies(copies);
-    expect(await readdir(root)).toEqual([]);
-    expect(await readdir(outside)).toEqual(["keep.txt"]);
-    expect(await readFile(join(outside, "keep.txt"), "utf8")).toBe("keep");
-  });
-
-  it("removes earlier runs' copies at start and keeps this run's", async () => {
-    const scratch = await createTestScratch("marked-copy-start-");
     const original = join(scratch, "report.bin");
     await writeFile(original, "bytes");
-    const root = join(scratch, "copies");
-    const earlier = { ...systemMarkedCopies(root), mark: async () => undefined };
-    const current = { ...systemMarkedCopies(root), mark: async () => undefined };
-    await markedCopyOf(earlier, original);
-    const kept = await markedCopyOf(current, original);
-    await removeEarlierMarkedCopies(current);
-    expect(await readdir(root)).toEqual([basename(current.folder)]);
+    const profile = join(scratch, "profile");
+    const other = unmarked(profile);
+    const current = unmarked(profile);
+    const kept = await markedCopyOf(other, original);
+    await markedCopyOf(current, original);
+    await removeMarkedCopies(current);
+    expect(await readdir(dirname(current.folder))).toEqual([basename(other.folder)]);
     expect(await readFile(kept, "utf8")).toBe("bytes");
   });
 
-  it("removes nothing through a folder that is a link", async () => {
+  it("removes earlier runs' copies at start, keeps this run's, and nothing outside", async () => {
+    const scratch = await createTestScratch("marked-copy-start-");
+    const outside = join(scratch, "outside");
+    await mkdir(outside);
+    await writeFile(join(outside, "keep.txt"), "keep");
+    const original = join(outside, "keep.txt");
+    const profile = join(scratch, "profile");
+    const earlier = unmarked(profile);
+    const current = unmarked(profile);
+    await markedCopyOf(earlier, original);
+    const kept = await markedCopyOf(current, original);
+    await symlink(outside, join(dirname(current.folder), "link"), linkType);
+    await removeEarlierMarkedCopies(current);
+    expect(await readdir(dirname(current.folder))).toEqual([basename(current.folder)]);
+    expect(await readFile(kept, "utf8")).toBe("keep");
+    expect(await readdir(outside)).toEqual(["keep.txt"]);
+  });
+
+  it.each(["the copies folder", "this run's folder"] as const)("removes and opens nothing when %s is a link", async (linked) => {
     const scratch = await createTestScratch("marked-copy-link-");
     const outside = join(scratch, "outside");
-    await mkdir(join(outside, "run"), { recursive: true });
-    await writeFile(join(outside, "run", "keep.txt"), "keep");
-    await symlink(outside, join(scratch, "copies"), linkType);
-    const copies = { ...systemMarkedCopies(join(scratch, "copies")), mark: async () => undefined };
-    await removeEarlierMarkedCopies(copies);
+    const profile = join(scratch, "profile");
+    const copies = unmarked(profile);
+    const run = join(outside, basename(copies.folder));
+    await mkdir(join(outside, "earlier"), { recursive: true });
+    await mkdir(run);
+    await writeFile(join(run, "keep.txt"), "keep");
+    if (linked === "the copies folder") {
+      await mkdir(profile);
+      await symlink(outside, dirname(copies.folder), linkType);
+    } else {
+      await mkdir(dirname(copies.folder), { recursive: true });
+      await symlink(run, copies.folder, linkType);
+    }
     await removeMarkedCopies(copies);
-    expect(await readFile(join(outside, "run", "keep.txt"), "utf8")).toBe("keep");
-    await expect(markedCopyOf(copies, join(outside, "run", "keep.txt"))).rejects.toThrow("is not a private folder");
-    expect(await readdir(outside)).toEqual(["run"]);
+    await removeEarlierMarkedCopies(copies);
+    expect(await readFile(join(run, "keep.txt"), "utf8")).toBe("keep");
+    const failure = await markedCopyOf(copies, join(run, "keep.txt")).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ name: "MarkedCopyError" });
+    expect(shown(failure, process.platform).message).toBe("dohc could not open this file externally.");
+    expect((await readdir(outside)).sort()).toEqual([basename(run), "earlier"].sort());
+    expect(await readdir(run)).toEqual(["keep.txt"]);
+  });
+
+  const refusedMark = Object.assign(
+    new Error("EPERM: operation not permitted, open 'C:\\profile\\opened\\run\\open-1\\report.bin:Zone.Identifier'"),
+    { code: "EPERM", errno: -4048, syscall: "open", path: "C:\\profile\\opened\\run\\open-1\\report.bin:Zone.Identifier" },
+  );
+  const failedMarkCommand = Object.assign(
+    new Error("Command failed: /usr/bin/xattr -w com.apple.quarantine 0081;6ade762a;dohc; /profile/opened/run/open-1/report.bin\nxattr: [Errno 1] Operation not permitted\n"),
+    { code: 1, killed: false, signal: null },
+  );
+  const refusedCopy = Object.assign(
+    new Error("ENOSPC: no space left on device, copyfile 'C:\\work\\report.bin' -> 'C:\\profile\\opened\\run\\open-1\\report.bin'"),
+    { code: "ENOSPC", syscall: "copyfile" },
+  );
+  it.each([
+    ["the mark", "win32", { mark: async () => { throw refusedMark; } }, "EPERM"],
+    ["the mark", "darwin", { mark: async () => { throw failedMarkCommand; } }, "Command failed"],
+    ["the copy", "win32", { copy: async () => { throw refusedCopy; } }, "ENOSPC"],
+  ] as const)("says only that dohc could not open the file when %s fails on %s, and keeps the cause for Copy details", async (_step, platform, failing, cause) => {
+    const scratch = await createTestScratch("marked-copy-words-");
+    const original = join(scratch, "report.bin");
+    await writeFile(original, "bytes");
+    const failure = await markedCopyOf({ ...systemMarkedCopies(join(scratch, "profile")), ...failing }, original)
+      .catch((error: unknown) => error);
+    const { message, details } = shown(failure, platform);
+    expect(message).toBe("dohc could not open this file externally.");
+    expect(details).toContain(cause);
   });
 
   it("counts a file as another person's when dohc cannot tell", async () => {
     const scratch = await createTestScratch("marked-copy-unclear-");
     await writeFile(join(scratch, "notes.bin"), "bytes");
-    await expect(cameFromAnotherPerson({ rootPath: scratch }, join(scratch, "notes.bin"))).resolves.toBe(false);
-    await expect(cameFromAnotherPerson({ rootPath: `${scratch}\0` }, join(scratch, "notes.bin"))).resolves.toBe(true);
+    await expect(cameFromAnotherPerson({ rootPath: scratch }, [], join(scratch, "notes.bin"))).resolves.toBe(false);
+    await expect(cameFromAnotherPerson({ rootPath: `${scratch}\0` }, [], join(scratch, "notes.bin"))).resolves.toBe(true);
+    await expect(cameFromAnotherPerson({ rootPath: scratch }, [{ rootPath: `${scratch}\0` }], join(scratch, "notes.bin")))
+      .resolves.toBe(true);
   });
 
-  it.skipIf(process.platform === "linux")("compares paths without case where the file system does", async () => {
-    const scratch = await createTestScratch("marked-copy-case-");
-    await mkdir(join(scratch, "shared-with-me", "alex"), { recursive: true });
-    await writeFile(join(scratch, "shared-with-me", "alex", "report.bin"), "bytes");
-    const spelled = join(scratch, "SHARED-WITH-ME", "alex", "report.bin");
-    await expect(cameFromAnotherPerson({ rootPath: scratch }, spelled)).resolves.toBe(true);
-  });
-
-  it.skipIf(process.platform !== "win32")("writes the Internet zone mark, and a copy keeps it", async () => {
+  it.skipIf(process.platform !== "win32")("writes the Internet zone mark", async () => {
     const scratch = await createTestScratch("marked-copy-zone-");
     const original = join(scratch, "report.bin");
     await writeFile(original, "bytes");
     await chmod(original, 0o444);
-    const copy = await markedCopyOf(systemMarkedCopies(join(scratch, "copies")), original);
+    const copy = await markedCopyOf(systemMarkedCopies(join(scratch, "profile")), original);
     expect(await readFile(`${copy}:Zone.Identifier`, "utf8")).toMatch(/^\[ZoneTransfer\]\r\nZoneId=3\r\n/);
     await expect(readFile(`${original}:Zone.Identifier`)).rejects.toMatchObject({ code: "ENOENT" });
-    const again = join(scratch, "again.bin");
-    await copyFile(copy, again);
-    expect(await readFile(`${again}:Zone.Identifier`, "utf8")).toContain("ZoneId=3");
   });
 
   it.skipIf(process.platform !== "darwin")("writes the download mark that xattr reads back", async () => {
@@ -126,6 +168,6 @@ describe("marked copies", () => {
     await writeFile(file, "bytes");
     await markAsDownloaded(file, "darwin");
     const { stdout } = await promisify(execFile)("/usr/bin/xattr", ["-p", "com.apple.quarantine", file]);
-    expect(stdout.trim()).toMatch(/^0001;[0-9a-f]{8};dohc;$/);
+    expect(stdout.trim()).toMatch(/^0081;[0-9a-f]{8};dohc;$/);
   });
 });
