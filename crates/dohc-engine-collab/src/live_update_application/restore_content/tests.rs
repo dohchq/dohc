@@ -98,6 +98,151 @@ fn reader_result<T>(
     panic!("restore proof did not converge");
 }
 
+fn assert_refusal<T: std::fmt::Debug>(
+    result: Result<T, ApplicationError>,
+    operation: &NativeRestoreFence,
+    case: &str,
+) {
+    let expected = match case {
+        "binding" => NativeRestoreRefusalReason::BindingChanged,
+        "no-reader" => NativeRestoreRefusalReason::ReaderUnavailable,
+        "missing" | "pre-rename" => NativeRestoreRefusalReason::SourceUnavailable,
+        "oversized" => NativeRestoreRefusalReason::SourceTooLarge,
+        "partial" => NativeRestoreRefusalReason::IncompleteWitness,
+        _ => panic!("unknown refusal case: {case}"),
+    };
+    let Err(ApplicationError::RestoreRefused(refusal)) = result else {
+        panic!("{case}: expected an identified pre-fence refusal, got {result:?}");
+    };
+    assert_eq!(refusal.operation, *operation);
+    assert_eq!(refusal.reason, expected);
+}
+
+fn watch_fence_writes(f: &Fixture) -> Arc<std::sync::atomic::AtomicUsize> {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let writes = Arc::new(AtomicUsize::new(0));
+    let seen = writes.clone();
+    f.store
+        .read_with(|conn| {
+            conn.authorizer(Some(move |context: AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    AuthAction::Insert {
+                        table_name: "live_restore_fences"
+                    }
+                ) {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
+                Authorization::Allow
+            }))
+        })
+        .unwrap();
+    writes
+}
+
+fn stop_watching_fence_writes(f: &Fixture, writes: &std::sync::atomic::AtomicUsize) {
+    use rusqlite::hooks::{AuthContext, Authorization};
+    f.store
+        .read_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
+        .unwrap();
+    assert_eq!(
+        writes.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a pre-fence refusal must precede even a rolled-back fence write"
+    );
+}
+
+#[test]
+fn binding_refusal_precedes_all_writes_and_saved_fences_stay_retryable() {
+    for committed in [false, true] {
+        let mut f = Fixture::new("original\n");
+        let operation = f.fence_input();
+        let saved = committed.then(|| f.freeze(f.baseline_point.clone()).fence);
+        if !committed {
+            damage(
+                &f,
+                "UPDATE live_device_application_bindings SET available=0",
+            );
+        }
+        let before = binding_state(&f);
+        let bytes = f.canonical().encode_full_state();
+        let writes = watch_fence_writes(&f);
+        let result = f.owner.fence_restore(
+            &mut f.store,
+            None,
+            operation.clone(),
+            f.host.clone(),
+            90,
+            &NoFaults,
+        );
+        stop_watching_fence_writes(&f, &writes);
+        if let Some(saved) = saved {
+            assert_eq!(result.unwrap(), saved);
+        } else {
+            assert_refusal(result, &operation, "binding");
+        }
+        assert_eq!(binding_state(&f), before);
+        assert_eq!(f.canonical().encode_full_state(), bytes);
+        assert_eq!(
+            f.store.table_row_count("live_restore_fences").unwrap(),
+            i64::from(committed)
+        );
+    }
+}
+
+#[test]
+fn fence_conflicts_and_operation_collisions_are_not_typed_refusals() {
+    let mut f = Fixture::new("original\n");
+    let mut invalid_cut = f.fence_input();
+    invalid_cut.applied_sequence += 1;
+    assert!(matches!(
+        f.owner.fence_restore(
+            &mut f.store,
+            None,
+            invalid_cut,
+            f.host.clone(),
+            50,
+            &NoFaults
+        ),
+        Err(ApplicationError::Conflict)
+    ));
+    let saved = f.freeze(f.baseline_point.clone()).fence;
+    let mut collision = saved.operation.clone();
+    collision.point.receipt_digest = "f".repeat(64);
+    assert!(matches!(
+        f.owner
+            .fence_restore(&mut f.store, None, collision, f.host.clone(), 51, &NoFaults),
+        Err(ApplicationError::Conflict)
+    ));
+    let mut another_document = saved.operation.clone();
+    another_document.old_binding.object_id = "another-document".into();
+    assert!(matches!(
+        f.owner.fence_restore(
+            &mut f.store,
+            None,
+            another_document,
+            f.host.clone(),
+            51,
+            &NoFaults
+        ),
+        Err(ApplicationError::Conflict)
+    ));
+    assert_eq!(
+        f.owner
+            .fence_restore(
+                &mut f.store,
+                None,
+                saved.operation.clone(),
+                f.host.clone(),
+                52,
+                &NoFaults
+            )
+            .unwrap(),
+        saved
+    );
+}
+
 fn impossible_prefix_refuses_before_fencing(case: &str) {
     let (mut reader, source) = reader_fixture();
     let mut f = Fixture::new("native original\n");
@@ -127,6 +272,7 @@ fn impossible_prefix_refuses_before_fencing(case: &str) {
     let before: String = f.store.read_with(|conn| conn.query_row(
         "SELECT json_array(current_path,lineage_claim_id,available,restore_fence_generation,host_id,host_epoch,instance_id,connection_id,selector_paths_json) FROM live_device_application_bindings", [], |row| row.get(0))).unwrap();
     let input = f.fence_input();
+    let expected_operation = input.clone();
     let result = f.owner.fence_restore(
         &mut f.store,
         f.resolver.as_ref(),
@@ -135,21 +281,7 @@ fn impossible_prefix_refuses_before_fencing(case: &str) {
         50,
         &NoFaults,
     );
-    assert!(
-        matches!(
-            (&result, case),
-            (
-                Err(ApplicationError::ConfiguredByteBudgetExceeded),
-                "oversized"
-            ) | (
-                Err(ApplicationError::Collab(
-                    CollabError::MarkdownReaderUnavailable
-                )),
-                "no-reader" | "missing" | "pre-rename" | "partial"
-            )
-        ),
-        "{case}: {result:?}"
-    );
+    assert_refusal(result, &expected_operation, case);
     assert_eq!(
         f.store.table_row_count("live_restore_fences").unwrap(),
         0,
@@ -2066,6 +2198,55 @@ impl FaultInjector for CrashAt {
         } else {
             FaultAction::Continue
         }
+    }
+}
+
+#[test]
+fn interrupted_fences_replay_after_restart_instead_of_becoming_refusals() {
+    for fault in [
+        FaultPoint::StorageBeforePersist,
+        FaultPoint::StorageAfterCommitBeforeAck,
+    ] {
+        let mut f = Fixture::new("original\n");
+        let operation = f.fence_input();
+        let result = f.owner.fence_restore(
+            &mut f.store,
+            None,
+            operation.clone(),
+            f.host.clone(),
+            50,
+            &CrashAt(fault),
+        );
+        assert!(
+            matches!(result, Err(ApplicationError::Interrupted)),
+            "{result:?}"
+        );
+        let committed = fault == FaultPoint::StorageAfterCommitBeforeAck;
+        assert_eq!(
+            f.store.table_row_count("live_restore_fences").unwrap(),
+            i64::from(committed)
+        );
+        let bytes = f.canonical().encode_full_state();
+        drop(f.store);
+        f.store = EngineStore::open(&f.dir.join("engine.db"), 60).unwrap();
+        f.owner = ApplicationOwner::new("workspace".into()).unwrap();
+        f.host.connection_id = "reconnected".into();
+        f.host.host_epoch += 1;
+        let receipt = f
+            .owner
+            .fence_restore_after_reconnect(
+                &mut f.store,
+                None,
+                operation.clone(),
+                f.host.clone(),
+                70,
+                &NoFaults,
+            )
+            .unwrap();
+        assert_eq!(receipt.operation, operation);
+        assert_eq!(receipt.recorded_at_ms, if committed { 50 } else { 70 });
+        assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 1);
+        assert_eq!(f.canonical().encode_full_state(), bytes);
     }
 }
 
@@ -4725,19 +4906,15 @@ fn reader_to_native_restore_validates_the_prefix_artifact_and_cached_authority()
         )));
         if case == "partial" {
             let operation = f.fence_input();
-            assert!(matches!(
-                f.owner.fence_restore(
-                    &mut f.store,
-                    f.resolver.as_ref(),
-                    operation,
-                    f.host.clone(),
-                    50,
-                    &NoFaults
-                ),
-                Err(ApplicationError::Collab(
-                    CollabError::MarkdownReaderUnavailable
-                ))
-            ));
+            let result = f.owner.fence_restore(
+                &mut f.store,
+                f.resolver.as_ref(),
+                operation.clone(),
+                f.host.clone(),
+                50,
+                &NoFaults,
+            );
+            assert_refusal(result, &operation, case);
             assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
             continue;
         }
@@ -4967,6 +5144,7 @@ fn assert_preflight_refusal(f: &mut Fixture, operation: NativeRestoreFence, case
         f.canonical().canonical_content_sha256(),
         f.canonical().state_vector(),
     );
+    let expected_operation = operation.clone();
     let result = f.owner.fence_restore(
         &mut f.store,
         f.resolver.as_ref(),
@@ -4975,21 +5153,7 @@ fn assert_preflight_refusal(f: &mut Fixture, operation: NativeRestoreFence, case
         50,
         &NoFaults,
     );
-    assert!(
-        matches!(
-            (&result, case),
-            (
-                Err(ApplicationError::ConfiguredByteBudgetExceeded),
-                "oversized"
-            ) | (
-                Err(ApplicationError::Collab(
-                    CollabError::MarkdownReaderUnavailable
-                )),
-                "no-reader" | "missing" | "pre-rename" | "partial"
-            )
-        ),
-        "{case}: {result:?}"
-    );
+    assert_refusal(result, &expected_operation, case);
     assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
     assert_eq!(binding_state(f), binding);
     assert_eq!(
