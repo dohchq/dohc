@@ -1907,9 +1907,10 @@ describe("shared view refresh", () => {
   });
 
   it.for([
-    { name: "Windows with colliding folder IDs", platform: "win32", ino: 42n },
-    { name: "Linux with zero folder inodes", platform: "linux", ino: 0n },
-  ])("deletes only its own normalization spelling on $name", async ({ platform: simulatedPlatform, ino }, context) => {
+    { name: "Windows with colliding folder IDs", platform: "win32", ino: 42n, equalFiles: true },
+    { name: "Linux with zero folder inodes", platform: "linux", ino: 0n, equalFiles: true },
+    { name: "Linux with colliding folder IDs and distinct files", platform: "linux", ino: 42n, equalFiles: false },
+  ])("deletes only its own normalization spelling on $name", async ({ platform: simulatedPlatform, ino, equalFiles }, context) => {
     const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const composed = "café/notes.md";
     const decomposed = composed.normalize("NFD");
@@ -1924,6 +1925,19 @@ describe("shared view refresh", () => {
     expect(await readFile(join(rootDir, composed), "utf8")).toBe("composed\n");
     expect(await readFile(join(rootDir, decomposed), "utf8")).toBe("decomposed\n");
     const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    const files = new Set([join(rootDir, composed), join(rootDir, decomposed)]);
+    const fileStat = vi.spyOn(fsPromises, "lstat").mockImplementation((async (path: Parameters<typeof lstat>[0], options?: unknown) => {
+      const info = await actual.lstat(path, options as never);
+      if (!equalFiles || !files.has(String(path))) return info;
+      return new Proxy(info, {
+        get(target, key, receiver) {
+          if (key === "dev") return typeof target.dev === "bigint" ? 1n : 1;
+          if (key === "ino") return typeof target.ino === "bigint" ? 42n : 42;
+          if (key === "ctimeNs") return 1n;
+          return Reflect.get(target, key, receiver);
+        },
+      });
+    }) as typeof lstat);
     const parents = new Set([dirname(join(rootDir, composed)), dirname(join(rootDir, decomposed))]);
     const folderStat = vi.spyOn(fsPromises, "stat").mockImplementation((async (path: Parameters<typeof stat>[0], options?: unknown) => {
       const info = await actual.stat(path, options as never);
@@ -1944,13 +1958,16 @@ describe("shared view refresh", () => {
       await refresh();
       await expect(lstat(join(rootDir, composed))).rejects.toMatchObject({ code: "ENOENT" });
       expect(await readFile(join(rootDir, decomposed), "utf8")).toBe("decomposed\n");
-      expect(readdirCalls).toContain(rootDir);
-      if (simulatedPlatform === "linux") {
+      expect(readdirCalls).not.toEqual([]);
+      if (!equalFiles) {
+        expect(folderStat.mock.calls.filter(([path]) => parents.has(String(path)))).toEqual([]);
+      } else if (simulatedPlatform === "linux") {
         expect(folderStat.mock.calls.map(([path]) => String(path))).toEqual(expect.arrayContaining([...parents]));
       }
     } finally {
       Object.defineProperty(process, "platform", platform);
       folderStat.mockRestore();
+      fileStat.mockRestore();
     }
   });
 

@@ -312,7 +312,9 @@ async function spellingSharingFile(
     const realOther = await realpath(otherTarget).catch(absentAsNull);
     if (realOther === null) continue;
     if (realFile === realOther) return other;
-    if (process.platform === "linux" && basename(target) === basename(otherTarget)) {
+    // Linux realpath keeps lookup case; elsewhere it gives stored names and IDs can repeat.
+    if (process.platform === "linux" && basename(target) === basename(otherTarget)
+      && file.dev === otherFile.dev && file.ino === otherFile.ino && file.ctimeNs === otherFile.ctimeNs) {
       const [parent, otherParent] = await Promise.all([
         stat(dirname(target), { bigint: true }).catch(absentAsNull),
         stat(dirname(otherTarget), { bigint: true }).catch(absentAsNull),
