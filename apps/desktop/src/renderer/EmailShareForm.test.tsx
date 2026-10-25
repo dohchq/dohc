@@ -212,7 +212,7 @@ describe("EmailShareForm", () => {
       "true",
     );
     expect(screen.getByTestId("share-access-helper").textContent).toBe(
-      "They can read what you selected.",
+      "They can read only what you selected.",
     );
     expect(screen.queryByTestId("share-access-pending")).toBeNull();
 
@@ -223,7 +223,7 @@ describe("EmailShareForm", () => {
     expect(
       screen.getByTestId("share-access-helper").textContent,
       "promising 'edit what you selected' would name a right Edit does not grant",
-    ).toBe("They can read what you selected and send you changes to accept.");
+    ).toBe("They can read only what you selected, and send you changes to accept.");
 
     await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
     await user.click(screen.getByTestId("share-create"));
