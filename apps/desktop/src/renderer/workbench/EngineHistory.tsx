@@ -439,13 +439,14 @@ export function momentDescription(moment: EngineMomentRecord): string {
 // Who made a top-level change, after its title. An agent's or an
 // automation's name shows; anyone else shows the file's folder, and their
 // avatar's title and the hidden source name them. Each gives way before the
-// title does.
+// title does. An agent's name keeps at least its ellipsis (9.5px of 11px
+// Inter), as the save state does, so a squeezed name never shows a sliver.
 function MomentDetail(props: { moment: EngineMomentRecord }) {
   const { moment } = props;
   const label = engineMomentSourceLabel(moment);
   if (moment.agentAuthorName !== undefined) {
     return (
-      <span data-testid="engine-moment-source" className="min-w-0 shrink-[999] truncate text-[11px]">
+      <span data-testid="engine-moment-source" className="min-w-[13px] shrink-[999] truncate text-[11px]">
         <AgentName kind="agent" presentation={moment.authorPresentations?.[0] ?? neutralPresentation}>{label}</AgentName>
       </span>
     );
