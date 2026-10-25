@@ -39,7 +39,7 @@ export function agentProfileArguments(profile: AgentLaunchProfile, replyServer: 
   // A Claude Code run loads only the person's own Claude Code settings, none from the workspace.
   // In CLI rules, / anchors at the primary working directory. Bare Edit matches every path.
   return profile.tool === "claude"
-    ? ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", ...replyServer, "--allowedTools", "Edit(/**)", "mcp__dohc__dohc_reply_to_chat", "--disallowedTools", "Edit(/.dohc/**)"]
+    ? ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", ...replyServer, "--allowedTools", "Edit(/**)", "mcp__dohc__dohc_reply_to_chat", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"]
     : ["exec", "--config", "approval_policy=never", ...replyServer, "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-"];
 }
 

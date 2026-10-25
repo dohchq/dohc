@@ -3374,7 +3374,7 @@ describe("chatDispatchService", () => {
     const prompt = call.process.stdinText;
     expect(prompt).toContain(expectedReply(form, thread.threadId, call.options.env.DOHC_RUN_ID!, "<report>"));
     if (form === "mcp") expect(prompt).not.toContain("dohc chat reply");
-    const instructionsFile = "If the workspace has a CLAUDE.md file at its root, read it first and follow it.";
+    const instructionsFile = "If the workspace has a CLAUDE.md or .claude/CLAUDE.md file, or an AGENTS.md file, at its root, read them first and follow them.";
     if (tool === "claude") expect(prompt).toContain(instructionsFile);
     else expect(prompt).not.toContain("CLAUDE.md");
   });
