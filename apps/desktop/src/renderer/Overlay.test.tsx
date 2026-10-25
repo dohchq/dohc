@@ -8,6 +8,7 @@ import { Menu } from "./ui/Menu";
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
 });
 
 describe("Overlay", () => {
@@ -58,6 +59,35 @@ describe("Overlay", () => {
     fireEvent.keyDown(document, { key: "Escape" });
 
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes on ⌘W on macOS, before the menu can close the tab behind it", () => {
+    vi.stubGlobal("dohcDesktop", { platform: "darwin" });
+    const onClose = vi.fn();
+    render(
+      <Overlay onClose={onClose}>
+        <button type="button">First</button>
+      </Overlay>,
+    );
+
+    const notPrevented = fireEvent.keyDown(document, { key: "w", code: "KeyW", metaKey: true });
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(notPrevented).toBe(false);
+  });
+
+  it("stays open on Ctrl+W on Windows", () => {
+    vi.stubGlobal("dohcDesktop", { platform: "win32" });
+    const onClose = vi.fn();
+    render(
+      <Overlay onClose={onClose}>
+        <button type="button">First</button>
+      </Overlay>,
+    );
+
+    fireEvent.keyDown(document, { key: "w", code: "KeyW", ctrlKey: true });
+
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it("stays open on a press outside its panel", () => {
