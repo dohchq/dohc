@@ -87,7 +87,7 @@ export function NewFileDialog(props: {
           onChange={(event) => { setName(event.target.value); setError(null); }}
           aria-invalid={error ? true : undefined}
           aria-describedby={error ? "new-file-name-error" : undefined}
-          className="w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink placeholder:text-subtle disabled:opacity-50"
+          className={`w-full rounded-md border ${error ? "border-danger focus:border-danger! focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]!" : "border-line"} bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink placeholder:text-subtle disabled:opacity-50`}
         />
         {error ? (
           <p id="new-file-name-error" role="alert" className="m-0 text-xs text-danger">

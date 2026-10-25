@@ -1512,7 +1512,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           // must not morph the label into a web-input pill — and the strong
           // border IS the focus affordance (the input is focused while open;
           // VS Code's rename input signals the same way with focusBorder).
-          className="min-w-0 flex-1 rounded-sm border border-ink/50 bg-bg px-1 py-0.5 text-[13px] text-ink outline-none"
+          className={`min-w-0 flex-1 rounded-sm border ${editError ? "border-danger focus:border-danger! focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]!" : "border-ink/50"} bg-bg px-1 py-0.5 text-[13px] text-ink outline-none`}
         />
       </div>
       {editError && (

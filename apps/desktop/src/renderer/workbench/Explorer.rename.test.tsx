@@ -93,11 +93,15 @@ describe("Explorer rename", () => {
     expect(screen.getByRole("alert").textContent).toBeTruthy();
     expect((screen.getByTestId("tree-edit-input") as HTMLInputElement).value).toBe(name);
     expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(input.getAttribute("aria-describedby")).toBe(screen.getByRole("alert").id);
+    expect(input.classList.contains("border-danger")).toBe(true);
     expect(moveWorkspacePath).not.toHaveBeenCalled();
     expect(props.onBeginChanges).not.toHaveBeenCalled();
     expect(props.onError).not.toHaveBeenCalled();
     fireEvent.change(input, { target: { value: "valid" } });
     expect(screen.queryByRole("alert")).toBeNull();
+    expect(input.hasAttribute("aria-invalid")).toBe(false);
+    expect(input.classList.contains("border-danger")).toBe(false);
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(moveWorkspacePath).toHaveBeenCalledOnce());
   });
@@ -108,7 +112,9 @@ describe("Explorer rename", () => {
     const input = await screen.findByTestId("tree-edit-input");
     fireEvent.change(input, { target: { value: "a?b" } });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(screen.getByRole("alert").textContent).toContain("question mark (?)");
+    expect(screen.getByRole("alert").textContent).toBe("A name cannot contain a question mark (?). Remove it.");
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(input.classList.contains("border-danger")).toBe(true);
     expect((input as HTMLInputElement).value).toBe("a?b");
     expect(createWorkspaceFile).not.toHaveBeenCalled();
     expect(createWorkspaceFolder).not.toHaveBeenCalled();

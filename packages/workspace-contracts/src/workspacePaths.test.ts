@@ -9,14 +9,15 @@ describe("Windows file and folder names", () => {
     ["/", "a slash (/)"], ["\\", "a backslash (\\)"],
   ])("names the forbidden character %s", (character, label) => {
     expect(workspaceNameError(`a${character}b.md`, "win32"))
-      .toBe(`File and folder names cannot contain ${label}. Remove it from the name.`);
+      .toBe(`A name cannot contain ${label}. Remove it.`);
   });
 
   it.each(["CON", "NUL", "PRN", "AUX", "CONIN$", "CONOUT$", "CLOCK$",
     ...Array.from({ length: 9 }, (_, i) => `COM${i + 1}`),
     ...Array.from({ length: 9 }, (_, i) => `LPT${i + 1}`), "COM¹", "COM²", "LPT³"])("refuses device %s with or without an extension", name => {
     for (const spelling of [name, `${name.toLowerCase()}.md`, `${name} .txt`]) {
-      expect(workspaceNameError(spelling, "win32")).toContain("for a device. Choose another file or folder name.");
+      const base = spelling.split(".")[0]!.trimEnd();
+      expect(workspaceNameError(spelling, "win32")).toBe(`Windows keeps "${base}" for itself. Choose another name.`);
     }
   });
 
@@ -26,7 +27,7 @@ describe("Windows file and folder names", () => {
   });
 
   it.each(["a\0b", "a\nb", "a\u001fb", "a\u007fb"])("refuses control characters in %j", name => {
-    expect(workspaceNameError(name, "win32")).toContain("Remove the control character.");
+    expect(workspaceNameError(name, "win32")).toBe("A name cannot contain control characters. Remove them.");
   });
 
   it("counts Windows component length in UTF-16 units", () => {
@@ -52,7 +53,7 @@ describe("destination paths", () => {
     expect(workspaceDestinationError("notes\\旅.md", "win32")).toBeNull();
     expect(workspaceDestinationError("./notes//旅.md", "win32")).toBeNull();
     expect(workspaceDestinationError("a?/b.md", "win32")).toContain("question mark");
-    expect(workspaceDestinationError("NUL/b.md", "win32")).toContain("device");
+    expect(workspaceDestinationError("NUL/b.md", "win32")).toBe('Windows keeps "NUL" for itself. Choose another name.');
   });
 
   it("refuses paths over the engine's UTF-8 byte limit", () => {

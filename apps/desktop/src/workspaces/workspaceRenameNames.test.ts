@@ -32,7 +32,7 @@ describe.skipIf(process.platform !== "win32")("Windows tree naming", () => {
       { kind: "human", humanId: "local:test" }, {
         capture: null, requestId: "names",
         markDeleted: vi.fn(), trashItem: vi.fn(),
-      })).rejects.toThrow("File and folder names cannot contain a question mark (?). Remove it from the name.");
+      })).rejects.toThrow("A name cannot contain a question mark (?). Remove it.");
     expect(await readFile(join(rootPath, "source.md"), "utf8")).toBe("keep this");
   });
 

@@ -96,17 +96,17 @@ export function workspaceNameError(name: string, platform: string): string | nul
       "/": "a slash (/)", "\\": "a backslash (\\)",
       "|": "a vertical bar (|)", "?": "a question mark (?)", "*": "an asterisk (*)",
     }[forbidden];
-    return `File and folder names cannot contain ${character}. Remove it from the name.`;
+    return `A name cannot contain ${character}. Remove it.`;
   }
   if (/[\u0000-\u001f\u007f]/u.test(name)) {
-    return "File and folder names cannot contain control characters. Remove the control character.";
+    return "A name cannot contain control characters. Remove them.";
   }
   if (/[. ]$/u.test(name)) {
     return "Windows removes dots and spaces at the end of a name. Remove the ending dot or space.";
   }
   if (isWindowsDeviceSegment(name)) {
     const base = stripWindowsAliasSuffix(name.split(".", 1)[0] ?? name);
-    return `Windows reserves "${base}" for a device. Choose another file or folder name.`;
+    return `Windows keeps "${base}" for itself. Choose another name.`;
   }
   if (name.length > 255) {
     return "This name is too long for Windows. Use a shorter name.";
