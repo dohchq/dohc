@@ -64,11 +64,14 @@ export function isHistoryPaused(syncStatus: SyncStatusResult | null | undefined)
 
 // History stopped recording: main's status says capture failed, and the
 // Notices row says why. Rereading doesn't end it, so it offers no control. It
-// also heads a page read during the pause, which may be missing changes.
+// also heads a page read during the pause, which may be missing changes. Its
+// dot sits in a row's icon slot, so the words start where the names do.
 export function HistoryPaused(props: { testId: string; className?: string }) {
   return (
     <p role="status" data-testid={props.testId} className={`m-0 flex items-center gap-2 text-xs text-muted ${props.className ?? ""}`}>
-      <span aria-hidden className="size-2 shrink-0 rounded-full bg-warning" />
+      <span aria-hidden className="grid size-4 shrink-0 place-items-center">
+        <span className="size-2 rounded-full bg-warning" />
+      </span>
       History paused
     </p>
   );

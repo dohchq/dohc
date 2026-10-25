@@ -951,7 +951,8 @@ export function AboutHistoryView(props: {
   onOpenMoment: (momentId: string, filePath: string) => void;
 }) {
   const { view } = props;
-  const paused = props.paused ? <HistoryPaused testId="about-history-paused" className="px-2 py-1" /> : null;
+  // Its words start where a file row's name does.
+  const paused = props.paused ? <HistoryPaused testId="about-history-paused" className="py-1 pl-1.5 pr-2" /> : null;
   return (
     <AboutSection
       id="history"
