@@ -93,12 +93,11 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
           : `If ${computerInSentence(from)} is still on, a run can repeat.`}
       </p>
       <div className="flex gap-2">
-        <PrimaryButton size="compact" aria-describedby={warningId} disabled={busy} onClick={() => takeOver(generation)}>
+        <PrimaryButton aria-describedby={warningId} disabled={busy} onClick={() => takeOver(generation)}>
           Take over now
         </PrimaryButton>
         <SecondaryButton
           ref={cancelRef}
-          size="compact"
           aria-describedby={warningId}
           disabled={busy}
           onClick={cancelTakeOver}
@@ -110,7 +109,6 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
   ) : (
     <SecondaryButton
       ref={takeOverRef}
-      size="compact"
       className="self-start"
       disabled={busy}
       onClick={() => setConfirmingTakeOver(true)}
@@ -133,7 +131,7 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
   if (loaded.status === "failed") {
     return (
       <SettingRow title="Schedules run on" testId="settings-row-schedule-host">
-        <SecondaryButton size="compact" disabled={busy} onClick={() => void read()}>Try again</SecondaryButton>
+        <SecondaryButton disabled={busy} onClick={() => void read()}>Try again</SecondaryButton>
       </SettingRow>
     );
   }
@@ -163,7 +161,7 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
         </span>
         {/* A note can pass, as when the connection comes back. */}
         {state.kind === "note" ? (
-          <SecondaryButton size="compact" disabled={busy} onClick={() => void read()}>Check again</SecondaryButton>
+          <SecondaryButton disabled={busy} onClick={() => void read()}>Check again</SecondaryButton>
         ) : null}
       </SettingRow>
     );
@@ -213,7 +211,7 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
                 onKeyDown={(event) => moveFocus(event, index)}
                 onFocus={() => setFocusedId(computer.installId)}
                 onClick={() => { if (!chosen && !busy) choose(computer); }}
-                className={`flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 aria-disabled:cursor-default ${
+                className={`flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 aria-disabled:cursor-default ${
                   chosen ? "bg-selected text-ink" : "text-muted hover:bg-hover hover:text-ink"
                 }`}
               >

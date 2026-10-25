@@ -55,7 +55,7 @@ export function RelayShareDialog(props: {
     >
       <div className="flex items-center gap-2">
         <Share2 size={14} aria-hidden className="text-subtle" />
-        <h2 className="m-0 flex-1 text-sm font-semibold text-ink">Share</h2>
+        <h2 className="m-0 flex-1 text-base font-semibold text-ink">Share</h2>
         <IconButton aria-label="Close" onClick={linkPane.close}>
           <X size={13} aria-hidden />
         </IconButton>

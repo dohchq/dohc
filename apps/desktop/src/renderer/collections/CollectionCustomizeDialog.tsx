@@ -51,7 +51,7 @@ export function CollectionCustomizeDialog(props: {
         className="dohc-elevated w-[min(480px,calc(100vw-32px))] rounded-xl border border-line bg-bg p-5"
       >
         <div className="flex items-center gap-2">
-          <h2 id="collection-customize-title" className="m-0 min-w-0 flex-1 truncate text-sm font-semibold text-ink">
+          <h2 id="collection-customize-title" className="m-0 min-w-0 flex-1 truncate text-base font-semibold text-ink">
             {`Customize ${props.name}`}
           </h2>
           <IconButton ref={closeRef} aria-label="Close" title="Close" onClick={dismiss}>

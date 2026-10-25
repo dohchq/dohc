@@ -37,7 +37,7 @@ export function SettingRow(props: {
         <span className="text-[13px] font-medium text-ink">{props.title}</span>
       </div>
       {props.description ? (
-        <p className="m-0 mt-0.5 text-[11px] text-muted">{props.description}</p>
+        <p className="m-0 mt-1 text-[12px] text-muted">{props.description}</p>
       ) : null}
       {props.aside ? <div className="mt-2">{props.aside}</div> : null}
     </div>
@@ -49,8 +49,8 @@ export function SettingRow(props: {
         ? { "data-highlighted": true, role: "group", "aria-label": props.title, tabIndex: -1 }
         : {})}
       className={`flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-line last:border-b-0 ${
-        props.compact ? "min-h-9 py-1.5" : "min-h-14 py-2.5"
-      } ${props.highlighted ? "-mx-3 rounded-lg bg-selected px-3" : ""}`}
+        props.compact ? "py-2" : "py-4"
+      } ${props.highlighted ? "-mx-2 rounded-md bg-selected px-2" : ""}`}
     >
       {props.lead ? (
         <div className={`flex items-center gap-3 ${first}`}>
@@ -61,9 +61,8 @@ export function SettingRow(props: {
         text
       )}
       <div className="flex max-w-full shrink-0 flex-wrap items-center gap-2">
-        {props.children}
-        {/* Every row keeps the reset's place, so controls share a right edge
-            and stay under the pointer when a reset appears. */}
+        {/* Reset appears left of the controls, so they share the right edge
+            and stay under the pointer when it does. */}
         {props.modified && props.onReset ? (
           <button
             type="button"
@@ -74,11 +73,20 @@ export function SettingRow(props: {
           >
             <RotateCcw size={14} strokeWidth={1.9} aria-hidden />
           </button>
-        ) : (
-          <span aria-hidden className="size-6 shrink-0" />
-        )}
+        ) : null}
+        {props.children}
       </div>
     </div>
+  );
+}
+
+/** A named group of settings: its heading over a card of rows. A page with one group leaves out the heading. */
+export function SettingsSection(props: { title?: string; children: ReactNode }) {
+  return (
+    <section aria-label={props.title} className="mt-8 first:mt-0">
+      {props.title ? <h4 className="m-0 mb-2 text-sm font-semibold text-ink">{props.title}</h4> : null}
+      <div className="rounded-lg border border-line bg-panel px-4">{props.children}</div>
+    </section>
   );
 }
 
@@ -267,7 +275,7 @@ export function TextControl(props: {
       maxLength={props.maxLength}
       data-testid={props.testId}
       onChange={(event) => props.onChange(event.target.value)}
-      className="h-7 w-40 rounded-md border border-line bg-bg px-2 font-mono text-[11px] text-ink placeholder:text-subtle focus:border-ink"
+      className="h-8 w-40 rounded-md border border-line bg-bg px-2 font-mono text-[12px] text-ink placeholder:text-subtle focus:border-ink"
     />
   );
 }

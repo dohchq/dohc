@@ -579,7 +579,7 @@ export function LiveDocumentsDialog({
     >
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <h2 id="live-documents-title" className="m-0 text-sm font-semibold text-ink">
+          <h2 id="live-documents-title" className="m-0 text-base font-semibold text-ink">
             Live documents
           </h2>
           <p className="mt-1 text-[13px] text-muted">

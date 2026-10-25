@@ -605,7 +605,6 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
               <SecondaryButton
                 data-testid="recovery-close-goback"
                 autoFocus
-                className="h-8 py-0"
                 onClick={() => {
                   // Going back on a round cancels it for every window: the
                   // originating install settles, and no other window's

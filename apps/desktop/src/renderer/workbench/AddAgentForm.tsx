@@ -138,7 +138,7 @@ export function AddAgentForm(props: {
       >
         <div className="flex items-center gap-2">
           <ChatAvatar presentation={ownAgentPresentation} name={preview} kind="agent" size="strip" />
-          <h3 id="chats-add-agent-title" className="m-0 text-sm font-semibold text-ink">
+          <h3 id="chats-add-agent-title" className="m-0 text-base font-semibold text-ink">
             Add an agent
           </h3>
         </div>

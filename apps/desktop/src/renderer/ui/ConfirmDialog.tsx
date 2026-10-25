@@ -25,20 +25,22 @@ export function ConfirmDialogCard(props: ConfirmDialogProps) {
   return (
     <div
       data-testid={props.testId}
-      className="w-[min(420px,calc(100vw-32px))] rounded border border-line bg-panel p-4 shadow-xl"
+      className="dohc-elevated flex w-[min(420px,calc(100vw-32px))] flex-col gap-6 rounded-xl border border-line bg-panel p-6"
       role="dialog"
       aria-modal="true"
       aria-labelledby={titleId}
     >
-      <h3 id={titleId} className="m-0 text-sm font-semibold text-ink">
-        {props.title}
-      </h3>
-      {props.children}
-      <div className="mt-4 flex justify-end gap-2">
-        <SecondaryButton data-testid={props.cancelTestId} onClick={props.onCancel} className="h-8 py-0">
+      <div>
+        <h3 id={titleId} className="m-0 text-base font-semibold text-ink">
+          {props.title}
+        </h3>
+        {props.children}
+      </div>
+      <div className="flex justify-end gap-2">
+        <SecondaryButton data-testid={props.cancelTestId} onClick={props.onCancel}>
           Cancel
         </SecondaryButton>
-        <Confirm data-testid={props.confirmTestId} disabled={props.confirmDisabled} onClick={props.onConfirm} className="h-8 py-0 text-xs">
+        <Confirm data-testid={props.confirmTestId} disabled={props.confirmDisabled} onClick={props.onConfirm}>
           {props.confirmLabel}
         </Confirm>
       </div>

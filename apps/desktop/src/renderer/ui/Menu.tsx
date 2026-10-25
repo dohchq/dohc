@@ -81,7 +81,7 @@ type Place = { left: number; maxHeight: number; top?: number; bottom?: number; a
 export const MENU_FRAME = "dohc-popover overflow-y-auto rounded-lg border border-line bg-panel p-1";
 /** One row. The list-row ladder: hover 7%, and 11% for the current or checked row whatever has focus. */
 export const MENU_ROW =
-  "flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 aria-disabled:opacity-50";
+  "flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 aria-disabled:opacity-50";
 export const MENU_ROW_TONE = { rest: "text-muted", current: "bg-selected text-ink", danger: "text-danger" };
 /**
  * The active option of a list whose focus stays on its frame, with
