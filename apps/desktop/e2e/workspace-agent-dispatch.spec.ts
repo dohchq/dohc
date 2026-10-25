@@ -294,7 +294,7 @@ test("failed runner tests stay readable above Settings and remain in Notices", a
   try {
     await seedWorkspaceManifest(temp, "agent-settings-failure-e2e");
     await seedRunnerSettings(temp, "silent-fail");
-    desktop = await launchDesktopApp({ workspace: temp });
+    desktop = await launchDesktopApp({ workspace: temp, env: await installFakeAgentTools(temp) });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
     await trustOpenWorkspace(desktop);

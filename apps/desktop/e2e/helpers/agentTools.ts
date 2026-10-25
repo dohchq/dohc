@@ -1,6 +1,6 @@
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { delimiter, join, resolve } from "node:path";
-import { desktopRoot } from "./desktopApp";
+import { desktopRoot, testSearchPath } from "./desktopApp";
 import type { TempWorkspace } from "./workspace";
 
 export async function installFakeAgentTools(
@@ -16,6 +16,6 @@ export async function installFakeAgentTools(
       : `#!/bin/sh\nexec '${process.execPath.replaceAll("'", "'\\''")}' '${fakeRunner.replaceAll("'", "'\\''")}' profile-${tool} "$@"\n`);
     await chmod(executable, 0o755);
   }
-  const path = `${bin}${delimiter}${process.env.Path ?? process.env.PATH ?? ""}`;
+  const path = `${bin}${delimiter}${testSearchPath}`;
   return { PATH: path, Path: path };
 }

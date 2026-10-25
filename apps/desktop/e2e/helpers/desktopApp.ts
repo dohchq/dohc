@@ -9,8 +9,9 @@ import { appendFileSync, existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { assertPrepared } from "../../../../scripts/verification/build.mjs";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { AGENT_TOOLS } from "../../src/agents/agentToolCatalog";
 import { electronLaunchArgs } from "../../src/testing/electronLaunchArgs";
 import { closeElectronApplication } from "../../../../scripts/verification/close-electron.mjs";
 import { DESKTOP_CLOSE_GRACE_MS } from "../../../../scripts/verification/desktop-close-policy.mjs";
@@ -73,6 +74,23 @@ async function createUserDataDir(
   return dir;
 }
 
+const holdsAgentTool = (dir: string) => AGENT_TOOLS.some(({ command }) =>
+  ["", ".exe", ".cmd", ".bat", ".com"].some((extension) => existsSync(join(dir, `${command}${extension}`))));
+
+// The app's own APPDATA and LOCALAPPDATA, inside its home folder. The engine
+// keeps its private-folder records in LOCALAPPDATA.
+const appDataFolders = (homeDir: string) => ({
+  APPDATA: join(homeDir, "AppData", "Roaming"),
+  LOCALAPPDATA: join(homeDir, "AppData", "Local"),
+});
+
+// The tester's PATH without the folders that hold an agent tool, so agent
+// detection finds only the fakes a spec installs. Node's own folder stays,
+// because runner commands and dohc's CLI shim run `node`.
+export const testSearchPath = (process.env.Path ?? process.env.PATH ?? "").split(delimiter)
+  .filter((dir) => dir !== "" && (resolve(dir) === dirname(process.execPath) || !holdsAgentTool(dir)))
+  .join(delimiter);
+
 function launchEnv(input: {
   workspace: Pick<TempWorkspace, "homeDir" | "rootPath">;
   env?: NodeJS.ProcessEnv;
@@ -87,6 +105,22 @@ function launchEnv(input: {
     DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "1",
     DOHC_TEST_HOME: input.workspace.homeDir,
     DOHC_TEST_PICK_PATH: input.workspace.rootPath,
+    // The app's own home folder, so agent detection and the tools it runs
+    // never read the tester's installs or sign-ins.
+    HOME: input.workspace.homeDir,
+    USERPROFILE: input.workspace.homeDir,
+    ...appDataFolders(input.workspace.homeDir),
+    PATH: testSearchPath,
+    Path: testSearchPath,
+    CLAUDE_CONFIG_DIR: undefined,
+    CODEX_HOME: undefined,
+    XDG_CACHE_HOME: undefined,
+    XDG_CONFIG_HOME: undefined,
+    XDG_DATA_HOME: undefined,
+    XDG_STATE_HOME: undefined,
+    NVM_BIN: undefined,
+    NVM_SYMLINK: undefined,
+    VOLTA_HOME: undefined,
     ELECTRON_DISABLE_SECURITY_WARNINGS: "true",
     ...input.env,
   }).filter((entry): entry is [string, string] => typeof entry[1] === "string");
@@ -107,6 +141,7 @@ export async function launchDesktopApp(input: {
 }): Promise<LaunchedDesktopApp> {
   const build = requireBuiltDesktopApp();
   const userDataDir = await createUserDataDir(input.workspace);
+  for (const dir of Object.values(appDataFolders(input.workspace.homeDir))) await mkdir(dir, { recursive: true });
   const artifacts = test.info().outputPath(`electron-${randomUUID()}`);
   await mkdir(artifacts, { recursive: true });
 
