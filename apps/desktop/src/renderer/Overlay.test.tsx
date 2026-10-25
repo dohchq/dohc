@@ -76,6 +76,17 @@ describe("Overlay", () => {
     expect(notPrevented).toBe(false);
   });
 
+  it("takes ⌘W on macOS even without a close action", () => {
+    vi.stubGlobal("dohcDesktop", { platform: "darwin" });
+    render(
+      <Overlay>
+        <button type="button">First</button>
+      </Overlay>,
+    );
+
+    expect(fireEvent.keyDown(document, { key: "w", code: "KeyW", metaKey: true })).toBe(false);
+  });
+
   it("stays open on Ctrl+W on Windows", () => {
     vi.stubGlobal("dohcDesktop", { platform: "win32" });
     const onClose = vi.fn();
