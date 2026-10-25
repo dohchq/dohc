@@ -232,8 +232,9 @@ It draws the accent outline on the active option, where Enter acts, whether the 
 Card: `rounded-lg border border-line bg-panel p-3`. A modal card uses `rounded-xl p-5` and `dohc-elevated`.
 
 Dialog: build it on `Overlay`. Cancel, the X, and Escape close it.
+While closing would discard hand-written work, as with open merge conflicts, only the dialog's own buttons close it.
 A press outside a dialog does nothing, so a stray click cannot discard what a person typed.
-Only pickers close on a press outside: the command palette, quick open, and menus. They hold nothing worth keeping.
+Only pickers and popovers close on a press outside: the command palette, quick open, menus, and an action's Run or Cancel question. They hold nothing worth keeping.
 Pass `closeOnBackdrop` to `Overlay` for a picker only.
 
 Segmented control: track `flex rounded-lg border border-line bg-panel-2 p-0.5`, segment `rounded-md px-2.5 py-1 text-xs transition-colors`, active `bg-bg text-ink shadow-sm`, rest `text-muted hover:text-ink`.
