@@ -151,12 +151,18 @@ function provisionWorkspaceHost(storage: StorageContext, hostId: string, workspa
     const owner = storage.db.prepare(`SELECT tip_cursor FROM ${LIVE_DELIVERY_OWNERS} WHERE ${WHERE_DOCUMENT} AND host_id=?`).all(...parameters(document),hostId);
     integrity(owner.length <= 1 && !(owner.length && bootstrap.length));
     // A retired owner's archived tip still covers what it applied: its successor adopts there.
-    const applied = owner[0]?.tip_cursor ?? (bootstrap.length ? null : storage.db.prepare(`SELECT MAX(tip_cursor) AS tip FROM ${LIVE_DELIVERY_OWNER_HISTORY}
-      WHERE ${WHERE_DOCUMENT} AND host_id=?`).get(...parameters(document),hostId)?.tip ?? null);
+    const archived = bootstrap.length ? null : storage.db.prepare(`SELECT MAX(tip_cursor) AS tip FROM ${LIVE_DELIVERY_OWNER_HISTORY}
+      WHERE ${WHERE_DOCUMENT} AND host_id=?`).get(...parameters(document),hostId)?.tip ?? null;
     // A retired chain tail that no successor follows yet has no adoption to fund.
-    const retired = !owner.length && !bootstrap.length && serviceActivationState(readServiceActivation(storage, document)) === "retired";
-    // A transition funds again what a retirement of the lineage released below this host's watermarks.
-    const released = transition && !!storage.db.prepare(`SELECT 1 FROM ${SERVICE_ACTIVATIONS} WHERE ${WHERE_DOCUMENT} AND retired_at_ms IS NOT NULL LIMIT 1`)
+    const tail = readServiceActivation(storage, document);
+    const retired = !owner.length && !bootstrap.length && serviceActivationState(tail) === "retired";
+    // Its successor adopts at its released boundary, so no host needs delivery through it.
+    const boundary = retired ? storage.db.prepare(`SELECT json_extract(retired_boundary_json,'$.terminalReceipt.journalCursor') AS cursor FROM ${SERVICE_ACTIVATIONS}
+      WHERE relay_database_namespace=? AND activation_id=?`).get(tail!.relay_database_namespace, tail!.activation_id)?.cursor ?? 0 : 0;
+    integrity(typeof boundary === "number" && Number.isSafeInteger(boundary) && boundary >= 0);
+    const applied = owner[0]?.tip_cursor ?? (retired ? Math.max(Number(archived ?? 0), boundary) : archived);
+    // A transition funds again what a retirement of the lineage released below this host's watermarks. Retirement never releases a bootstrap's.
+    const released = transition && !bootstrap.length && !!storage.db.prepare(`SELECT 1 FROM ${SERVICE_ACTIVATIONS} WHERE ${WHERE_DOCUMENT} AND retired_at_ms IS NOT NULL LIMIT 1`)
       .get(...parameters(document));
     if (retired) integrity(!cursors.has(0));
     else if ((!bootstrap[0] || bootstrap[0].local_ydoc_sequence === null) && !owner.length) {

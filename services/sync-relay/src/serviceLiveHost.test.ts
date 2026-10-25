@@ -1745,6 +1745,49 @@ it.each([false, true])("records an adoption whose reply was lost before Stop dur
   if (restart) expect(o.client().sendLiveOwnerAdoption).not.toHaveBeenCalled();
 });
 
+// Proves: the same for a successor that adopted at its predecessor's released
+// boundary. The recovered adoption keeps that boundary's cursor and event
+// count, the host holds no reservation through it, and the successor retires
+// there without adopting again.
+it("records a successor's adoption at its predecessor's boundary whose reply was lost before Stop, and retires there", async () => {
+  const o = await enrolledServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const edit = o.acceptEdit("before");
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+  o.stop();
+  await o.depart();
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  const boundary = retiredRow(o).boundary, terminal = edit.journalCursor;
+  expect(boundary).toMatchObject({terminalReceipt: edit, eventCount: 2});
+  o.engine.capture = {...o.engine.capture, activationId: SUCCESSOR, source: {...o.engine.capture.source, predecessorActivationId: ACTIVATION}};
+  o.engine.adoption = {activationId: SUCCESSOR, throughCursor: null};
+  o.engine.boundary = undefined;
+  const adopt = o.client().sendLiveOwnerAdoption, adopted = adopt.getMockImplementation()! as (...values: unknown[]) => Promise<unknown>;
+  adopt.mockImplementationOnce(async (...args: unknown[]) => {
+    await adopted(...args);
+    expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
+      enabled: false, retire: true, nowMs: 50, guard() {}})).toMatchObject({retired: true});
+    throw new Error("Adoption reply lost.");
+  });
+  const cuts = vi.spyOn(LiveCommittedDeliveryStore.prototype, "captureOwnerCut");
+  const acks = vi.spyOn(LiveCommittedDeliveryStore.prototype, "acknowledgeOwnerAdoption");
+  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 40, guard() {}});
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(adopt).toHaveBeenCalledTimes(1));
+  expect(o.raw.prepare("SELECT COUNT(*) AS owners FROM sync_relay_live_delivery_owners").get()).toEqual({owners: 0});
+  await o.depart();
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  expect(cuts).toHaveBeenCalledWith(expect.objectContaining({adoptionId: SUCCESSOR, throughCursor: terminal}));
+  expect(acks.mock.calls.map(([, ack]) => ack)).toEqual([{adoptionId: SUCCESSOR, localYDocSequence: 2, terminalCursor: terminal, adoptionReplayed: true}]);
+  expect(acks.mock.results.map(result => result.type)).toEqual(["return"]);
+  const archived = o.raw.prepare("SELECT tip_cursor,origin_json FROM sync_relay_live_delivery_owner_history WHERE activation_id=?").get(SUCCESSOR)!;
+  expect([archived.tip_cursor, JSON.parse(String(archived.origin_json)).originEventCount]).toEqual([terminal, 2]);
+  expect(o.raw.prepare("SELECT journal_cursor FROM sync_relay_live_delivery_reservations WHERE journal_cursor<=?").all(terminal)).toEqual([]);
+  expect(JSON.parse(String(o.raw.prepare("SELECT retired_boundary_json FROM sync_relay_service_activations WHERE activation_id=?").get(SUCCESSOR)!.retired_boundary_json)))
+    .toEqual(boundary);
+  expect(adopt).toHaveBeenCalledTimes(1);
+});
+
 // Proves: a retirement records what the engine applied a page at a time, at
 // most four pages a pass, and the next pass continues from the tip the last
 // one recorded, on this daemon or one started after it stopped. It settles
@@ -1797,6 +1840,10 @@ const waits: Record<string, {hold(o: Enrolled): void; clear(o: Enrolled): void}>
   "Waiting for its hosted replica to confirm the document left.": {hold() {}, clear() {}},
   "Waiting for its hosted replica to confirm the document parked.": {hold: o => {o.replies.commit = {departed: [o.sibling.objectId]};}, clear: o => {o.replies.commit = {};}},
   "Retirement reconciliation is unfinished.": {hold: o => {o.engine.releasePending = "reconciliation";}, clear: o => {o.engine.releasePending = undefined;}},
+  // Stop and a restore refuse each other, so the store's answer stands in for a restore that is unfinished.
+  "Waiting for the document's restore to finish.": {
+    hold() {vi.spyOn(ServiceActivationStore.prototype, "completeRetirement").mockReturnValue({status: "pending", reason: "restore"});},
+    clear() {vi.mocked(ServiceActivationStore.prototype.completeRetirement).mockRestore();}},
 };
 it.each(Object.keys(waits))("resumes a retirement waiting at %j on a restarted daemon", async reason => {
   const o = await enrolledServiceHost();
@@ -1813,8 +1860,9 @@ it.each(Object.keys(waits))("resumes a retirement waiting at %j on a restarted d
     await vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting(reason)));
   }
   await o.host.close();
-  expect(o.calls(sent).includes("liveApplication.releaseActivation")).toBe(reason.includes("parked") || reason.includes("unfinished"));
+  expect(o.calls(sent).includes("liveApplication.releaseActivation")).toBe(/parked|unfinished|restore/.test(reason));
   expect(retiredRow(o).retired).toBe(false);
+  expect(readServiceActivationRetirement(o.f.storage as StorageContext, o.document)).toMatchObject({activationId: ACTIVATION});
   wait.clear(o);
   const host = await restartedHost(o);
   await vi.waitFor(() => expect(host.drained("workspace")).toBe(true));

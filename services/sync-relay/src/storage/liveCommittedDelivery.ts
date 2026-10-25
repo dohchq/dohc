@@ -613,6 +613,12 @@ export class LiveCommittedDeliveryStore {
       integrity(!this.#storage.db.prepare(`SELECT 1 FROM ${BOOTSTRAPS} WHERE relay_database_namespace=? AND ${WHERE_DOCUMENT} AND host_id=?`).get(this.#history.namespace,...documentParams(document),host.hostId));
       const previous = this.#ownerRow(host,document);
       if (previous) { integrity(previous.origin_json === origin && Number(previous.tip_cursor) >= Number(ack.terminalCursor)); return; }
+      // A service activation adopts on one host, once: it retires only there.
+      if (activation && (this.#storage.db.prepare(`SELECT 1 FROM ${OWNERS} WHERE relay_database_namespace=? AND ${WHERE_DOCUMENT} AND host_id<>?
+          AND json_extract(origin_json,'$.adoptionId')=? LIMIT 1`).get(this.#history.namespace,...documentParams(document),host.hostId,cut.adoptionId) ||
+          this.#storage.db.prepare(`SELECT 1 FROM ${LIVE_DELIVERY_OWNER_HISTORY} WHERE relay_database_namespace=? AND activation_id=?`).get(this.#history.namespace,cut.adoptionId))) {
+        throw new Error("Service activation adopted on another host.");
+      }
       const tip = JSON.stringify(cut.terminalReceipt), cursor = cut.terminalReceipt?.journalCursor ?? 0;
       const values = [this.#history.namespace,...documentParams(document),host.hostId,origin,tip,cursor,cut.expectedLocalSequence,cut.expectedLocalSequence];
       const charge = Buffer.byteLength(JSON.stringify(values));
