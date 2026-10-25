@@ -3877,11 +3877,11 @@ export function ChatsView(props: {
                             </AgentName>
                           </span>
                           {item.message.authorKind === "link" ? <LinkHolderMark testId="chats-feed-link-holder" /> : null}
-                          <span className="truncate font-mono text-[11px] text-subtle">{where}</span>
+                          <span className="truncate text-[11px] text-subtle">{where}</span>
                           <time
                             dateTime={time.iso}
                             title={time.label}
-                            className="shrink-0 font-mono text-[11px] text-subtle"
+                            className="shrink-0 text-[11px] tabular-nums text-subtle"
                           >
                             {formatShortTime(item.message.createdAtMs)}
                           </time>
