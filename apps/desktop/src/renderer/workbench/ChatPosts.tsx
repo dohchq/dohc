@@ -294,14 +294,14 @@ function RunChip(props: { run: ChatRunRecord }) {
               <time
                 data-testid="chats-run-started"
                 dateTime={started.iso}
-                className="font-mono text-[11px] text-ink"
+                className="text-[11px] tabular-nums text-ink"
               >
                 {started.label}
               </time>
             </span>
             <span className="grid gap-0.5">
               <span className="text-[11px] text-muted">Exit code</span>
-              <span data-testid="chats-run-exit-code" className="font-mono text-[11px] text-ink">
+              <span data-testid="chats-run-exit-code" className="text-[11px] tabular-nums text-ink">
                 {props.run.exitCode ?? "—"}
               </span>
             </span>
