@@ -48,9 +48,32 @@ pub enum NativeRestoreRefusalReason {
     IncompleteWitness,
 }
 
+impl NativeRestoreRefusalReason {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::BindingChanged => "binding-changed",
+            Self::ReaderUnavailable => "reader-unavailable",
+            Self::SourceUnavailable => "source-unavailable",
+            Self::SourceTooLarge => "source-too-large",
+            Self::IncompleteWitness => "incomplete-witness",
+        }
+    }
+
+    fn from_str(reason: &str) -> Option<Self> {
+        match reason {
+            "binding-changed" => Some(Self::BindingChanged),
+            "reader-unavailable" => Some(Self::ReaderUnavailable),
+            "source-unavailable" => Some(Self::SourceUnavailable),
+            "source-too-large" => Some(Self::SourceTooLarge),
+            "incomplete-witness" => Some(Self::IncompleteWitness),
+            _ => None,
+        }
+    }
+}
+
 /// A terminal decision committed before this operation could write a fence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct NativeRestoreRefusal {
     pub operation: NativeRestoreFence,
     pub reason: NativeRestoreRefusalReason,
@@ -332,11 +355,6 @@ impl ApplicationOwner {
             Err(error) => (None, Some(error)),
         };
         let input_json = serde_json::to_string(&input).map_err(|_| ApplicationError::Corrupt)?;
-        // Canonical identifiers and at most 100 selector paths bound the JSON,
-        // including six-byte JSON escaping, below this stored-input limit.
-        if input_json.len() > 1_048_576 {
-            return Err(ApplicationError::ConfiguredByteBudgetExceeded);
-        }
         let outcome = store.write_with(faults, |tx| {
             require_workspace(tx, &held)?;
             let saved: Option<(String, String)> = tx.query_row(
@@ -368,14 +386,7 @@ impl ApplicationOwner {
             ).optional().map_err(read_sql)?;
             if let Some((saved_input, reason, recorded_at_ms)) = saved {
                 if saved_input != input_json { return Err(ApplicationError::Conflict); }
-                let reason = match reason.as_str() {
-                    "binding-changed" => NativeRestoreRefusalReason::BindingChanged,
-                    "reader-unavailable" => NativeRestoreRefusalReason::ReaderUnavailable,
-                    "source-unavailable" => NativeRestoreRefusalReason::SourceUnavailable,
-                    "source-too-large" => NativeRestoreRefusalReason::SourceTooLarge,
-                    "incomplete-witness" => NativeRestoreRefusalReason::IncompleteWitness,
-                    _ => return Err(ApplicationError::Corrupt),
-                };
+                let reason = NativeRestoreRefusalReason::from_str(&reason).ok_or(ApplicationError::Corrupt)?;
                 integer(recorded_at_ms, 0, SAFE)?;
                 return Ok(Err(Box::new(NativeRestoreRefusal { operation: input.clone(), reason, recorded_at_ms })));
             }
@@ -388,10 +399,9 @@ impl ApplicationOwner {
                 let refusal = Box::new(NativeRestoreRefusal {
                     operation: input.clone(), reason, recorded_at_ms: now_ms,
                 });
-                let reason = serde_json::to_value(&refusal.reason).map_err(|_| ApplicationError::Corrupt)?;
                 tx.execute(
                     "INSERT INTO live_restore_refusals(relay_database_namespace,operation_id,workspace_id,input_json,reason,recorded_at_ms) VALUES(?1,?2,?3,?4,?5,?6)",
-                    params![held.namespace,input.operation_id,b.workspace_id,input_json,reason.as_str().ok_or(ApplicationError::Corrupt)?,now_ms],
+                    params![held.namespace,input.operation_id,b.workspace_id,input_json,refusal.reason.as_str(),now_ms],
                 ).map_err(write_sql)?;
                 Ok(Err(refusal))
             };
@@ -542,6 +552,27 @@ mod tests {
     use super::*;
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn refusal_reason_strings_match_serde() {
+        for reason in [
+            NativeRestoreRefusalReason::BindingChanged,
+            NativeRestoreRefusalReason::ReaderUnavailable,
+            NativeRestoreRefusalReason::SourceUnavailable,
+            NativeRestoreRefusalReason::SourceTooLarge,
+            NativeRestoreRefusalReason::IncompleteWitness,
+        ] {
+            assert_eq!(
+                serde_json::to_value(&reason).unwrap(),
+                serde_json::Value::String(reason.as_str().into())
+            );
+            assert_eq!(
+                NativeRestoreRefusalReason::from_str(reason.as_str()),
+                Some(reason)
+            );
+        }
+        assert_eq!(NativeRestoreRefusalReason::from_str("unknown"), None);
+    }
 
     /// The fence columns `sql` reads, and its query plan.
     fn inspect(conn: &Connection, sql: &str) -> rusqlite::Result<(Vec<String>, Vec<String>)> {

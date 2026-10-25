@@ -8089,6 +8089,10 @@ mod tests {
                 conn.execute(insert, rusqlite::params!["{}", "binding-changed", 1])
                     .unwrap();
                 assert!(
+                    conn.execute(insert, rusqlite::params!["{}", "reader-unavailable", 2])
+                        .is_err()
+                );
+                assert!(
                     conn.execute("UPDATE live_restore_refusals SET recorded_at_ms=2", [])
                         .is_err()
                 );

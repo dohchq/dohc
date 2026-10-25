@@ -82,7 +82,7 @@ export async function deliverStopRestore(options: {
     check();
     const pending = store.pendingStopRestoreFence(input);
     if (pending.receipt) return {kind: "done", receipt: pending.receipt};
-    // A refused fence commits nothing. Publishing once, under this same document
+    // A pending fence needs another attempt. Publishing once, under this same document
     // exclusion, lets the old generation's settlement moments reach the relay first.
     let response = await c.client.sendRequest({...request(), method: "liveApplication.fenceRestore", params: {operation: pending.operation as never}}, signal);
     check();
