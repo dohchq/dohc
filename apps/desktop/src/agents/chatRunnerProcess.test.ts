@@ -9,6 +9,7 @@ import {
   tokenizeRunnerCommand,
   type RunnerSpawnOptions,
 } from "./chatRunnerProcess";
+import type { AgentLaunchProfile } from "./agentToolCatalog";
 
 async function runnerFixture(platform: NodeJS.Platform) {
   const root = await createTestScratch("dohc-chat-runner-");
@@ -32,12 +33,13 @@ async function runnerFixture(platform: NodeJS.Platform) {
     },
     () => undefined,
   );
-  const spawn = (command: string, assertMayStart = () => undefined) =>
+  const spawn = (command: string, assertMayStart = () => undefined, profile?: AgentLaunchProfile) =>
     runner.spawnConfiguredRunner({
       rootPath: root,
       runId: "run-1",
       logPath: join(root, "logs", "run.log"),
       command,
+      profile,
       prompt: "",
       assertMayStart,
     });
@@ -124,6 +126,17 @@ describe("chat runner process", () => {
     const env = calls[0]!.options.env;
     expect(env.NoDefaultCurrentDirectoryInExePath).toBe("1");
     expect(env.PATH!.split(delimiter).slice(1)).toEqual([process.cwd(), spaced]);
+  });
+
+  it.each(["claude", "codex"] as const)("keeps app execution aliases on a Windows PATH only for a %s run that can start them", async (tool) => {
+    const aliases = join(process.cwd(), "Microsoft", "WindowsApps");
+    const storePowerShell = join(aliases, "Microsoft.PowerShell_8wekyb3d8bbwe");
+    vi.stubEnv("PATH", [aliases, process.cwd(), storePowerShell].join(delimiter));
+    const { calls, spawn } = await runnerFixture("win32");
+    spawn("", undefined, { tool, executable: process.execPath });
+    expect(calls[0]!.options.env.PATH!.split(delimiter).slice(1)).toEqual(
+      tool === "codex" ? [process.cwd()] : [aliases, process.cwd(), storePowerShell],
+    );
   });
 
   it("drops a quoted PATH entry elsewhere, where the quote is part of its name", async () => {
