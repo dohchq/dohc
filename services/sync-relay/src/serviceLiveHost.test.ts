@@ -1708,15 +1708,16 @@ it.each([false, true])("records an adoption whose reply was lost before Stop dur
   vi.spyOn(console, "error").mockImplementation(() => {});
   o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
   const adopt = o.client().sendLiveOwnerAdoption, adopted = adopt.getMockImplementation()! as (...values: unknown[]) => Promise<unknown>;
+  let ownersWhenLost: unknown, cutsWhenLost = 0;
   adopt.mockImplementationOnce(async (...args: unknown[]) => {
     await adopted(...args);
     expect(o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
       enabled: false, retire: true, nowMs: 20, guard() {}})).toMatchObject({retired: true});
+    ownersWhenLost = o.raw.prepare("SELECT COUNT(*) AS owners FROM sync_relay_live_delivery_owners").get();
+    cutsWhenLost = cuts.mock.calls.length;
     throw new Error("Adoption reply lost.");
   });
-  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
-  await vi.waitFor(() => expect(adopt).toHaveBeenCalled());
-  expect(o.raw.prepare("SELECT COUNT(*) AS owners FROM sync_relay_live_delivery_owners").get()).toEqual({owners: 0});
+  // Any pass after the lost reply may recover the adoption through the open retirement, so these watch from the start.
   const cuts = vi.spyOn(LiveCommittedDeliveryStore.prototype, "captureOwnerCut");
   const acknowledge = LiveCommittedDeliveryStore.prototype.acknowledgeOwnerAdoption;
   let stopped = restart;
@@ -1724,8 +1725,11 @@ it.each([false, true])("records an adoption whose reply was lost before Stop dur
     if (stopped) throw new Error("Daemon stopped before the adoption was recorded.");
     return acknowledge.apply(this, args);
   });
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(adopt.mock.settledResults).toEqual([{type: "rejected", value: new Error("Adoption reply lost.")}]));
+  expect(ownersWhenLost).toEqual({owners: 0});
   await o.host.update({workspaces: [o.workspace], documents: [], departing: [o.sibling]});
-  let host = o.host, captured = 0;
+  let host = o.host, captured = cutsWhenLost;
   if (restart) {
     await vi.waitFor(() => expect(acks).toHaveBeenCalled());
     await o.host.close();
