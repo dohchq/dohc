@@ -13,6 +13,7 @@ const sendMenuCommand = (command: MenuCommand) => act(() => menuListener?.(comma
 const bridge = {
   getDefaultWorkspaceRoot: vi.fn(async () => "/home/sam/dohc"),
   pickWorkspaceRoot: vi.fn(async (): Promise<string | null> => "/home/sam/projects/research"),
+  suggestWorkspaceFolderName: vi.fn(async (payload: { rootPath: string; name: string }) => payload.name),
   createLocalWorkspace: vi.fn(async () => ({
     workspaceId: "ws-1",
     rootPath: "/home/sam/dohc/personal",
@@ -332,6 +333,48 @@ describe("workspace manager", () => {
     expect(screen.getByRole("button", { name: /create workspace/i })).toHaveProperty("disabled", false);
   });
 
+  it("suggests the first name no folder in the location has", async () => {
+    const user = userEvent.setup();
+    // ~/dohc still holds personal from an earlier install; the picked folder
+    // holds nothing.
+    bridge.suggestWorkspaceFolderName.mockImplementationOnce(async ({ name }) => `${name} 2`);
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    await locationReads("/home/sam/dohc/Personal 2");
+    expect(bridge.suggestWorkspaceFolderName).toHaveBeenCalledWith({ rootPath: "/home/sam/dohc", name: "Personal" });
+    const name = nameField();
+    expect(name.value).toBe("Personal 2");
+    expect([name.selectionStart, name.selectionEnd], "still selected, so typing replaces it").toEqual([0, "Personal 2".length]);
+
+    await user.click(screen.getByRole("button", { name: "Change location" }));
+    await locationReads("/home/sam/projects/research/Personal");
+    expect(name.value).toBe("Personal");
+  });
+
+  it("keeps a name the person typed when the location changes", async () => {
+    const user = userEvent.setup();
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    await locationReads("/home/sam/dohc/Personal");
+    await user.keyboard("Trip");
+    bridge.suggestWorkspaceFolderName.mockClear();
+    await user.click(screen.getByRole("button", { name: "Change location" }));
+    await locationReads("/home/sam/projects/research/Trip");
+    expect(bridge.suggestWorkspaceFolderName).not.toHaveBeenCalled();
+  });
+
+  it("keeps a slow name check for the default from overwriting a picked folder", async () => {
+    const user = userEvent.setup();
+    const slowCheck = deferred<string>();
+    bridge.suggestWorkspaceFolderName.mockReturnValueOnce(slowCheck.promise);
+    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    await waitFor(() => expect(bridge.suggestWorkspaceFolderName).toHaveBeenCalledOnce());
+    expect(screen.getByRole("button", { name: /create workspace/i }), "no Create before the name is known").toHaveProperty("disabled", true);
+
+    await user.click(screen.getByRole("button", { name: "Change location" }));
+    await locationReads("/home/sam/projects/research/Personal");
+    await act(async () => slowCheck.resolve("Personal 2"));
+    expect(location()).toBe("/home/sam/projects/research/Personal");
+  });
+
   it.each(["link", "shares", "notices"])("shows the attach refusal for reserved id %s in a toast and Notices", async (workspaceId) => {
     const body = `Its workspace ID, ${workspaceId}, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.`;
     bridge.attachWorkspaceFolder.mockRejectedValueOnce(new Error(
@@ -498,8 +541,10 @@ describe("workspace manager with registered workspaces", () => {
     );
     const rows = await screen.findAllByTestId("workspace-manager-row");
     expect(rows).toHaveLength(2);
-    expect(screen.getByText("/home/sam/dohc/team")).toBeTruthy();
-    await user.click(screen.getByText("team"));
+    // The row names the workspace over its path; the full path is its title.
+    const team = screen.getByTitle("/home/sam/dohc/team");
+    expect(team.textContent).toBe("team/home/sam/dohc/team");
+    await user.click(team);
     expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-b" }));
   });
 
@@ -566,11 +611,11 @@ describe("workspace manager with registered workspaces", () => {
     render(
       <WorkspaceManager workspaces={KNOWN} current={null} onForgot={async () => KNOWN} onOpenWorkspace={onOpen} />,
     );
-    await user.click(await screen.findByText("team"));
+    await user.click(await screen.findByTitle("/home/sam/dohc/team"));
     expect((await screen.findByRole("alert")).textContent).toBe("That folder is gone.");
     expect(screen.getAllByTestId("workspace-manager-row")).toHaveLength(2);
 
-    await user.click(screen.getByText("team"));
+    await user.click(screen.getByTitle("/home/sam/dohc/team"));
     expect(onOpen).toHaveBeenCalledTimes(2);
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });

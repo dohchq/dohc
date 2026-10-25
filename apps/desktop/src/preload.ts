@@ -25,6 +25,7 @@ import type {
 import {
   workspaceSyncOperations,
   CaptureHoldsEvent,
+  workspaceFolderNameOperations,
   systemMotionOperations,
   systemPrivacySettingsOperations,
   serverAccountOperations,
@@ -149,6 +150,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(sharedChannelOperations, invoke),
   ...relay,
   ownerRestore: relay.ownerRestore as DohcDesktopBridge["ownerRestore"],
+  ...operationBridge(workspaceFolderNameOperations, invoke),
   ...operationBridge(systemMotionOperations, invoke),
   ...operationBridge(systemPrivacySettingsOperations, invoke),
   ...operationBridge(serverAccountOperations, invoke),

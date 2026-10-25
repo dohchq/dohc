@@ -1,11 +1,12 @@
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
 import { Folder, Pencil } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { FolderSheets } from "./FolderSheets";
 import { ipcErrorMessage } from "./ipcError";
-import { PrimaryButton } from "./ui/controls";
+import { GhostButton, PrimaryButton } from "./ui/controls";
+import { PathLine } from "./ui/PathLine";
 import { useRequestSequence } from "./useRequestSequence";
 
 // The folder card: the new workspace's name on the folder's tab, where its
@@ -38,19 +39,35 @@ export function NewWorkspaceCard(props: {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const nameField = useRef<HTMLInputElement>(null);
+  // Until the person types, the name is dohc's suggestion and follows the
+  // location.
+  const nameTyped = useRef(false);
   const locationTooltip = useTooltip();
   // The default suggestion and the picker race for the same field. The
   // newest request wins: a slow default must not overwrite a folder the
   // person already chose.
   const rootRequests = useRequestSequence();
 
+  // Shows the location with a suggested name no folder there has yet:
+  // Windows and macOS take an old "personal" for "Personal", and Create
+  // would open that folder. Without an answer, the name stays.
+  async function placeAt(location: string, request: number): Promise<boolean> {
+    const name = nameTyped.current
+      ? null
+      : await bridge()
+          .suggestWorkspaceFolderName({ rootPath: location, name: DEFAULT_FOLDER_NAME })
+          .catch(() => null);
+    if (!rootRequests.isCurrent(request)) return false;
+    setRoot(location);
+    if (name !== null && !nameTyped.current) setFolderName(name);
+    return true;
+  }
+
   function suggestDefaultRoot() {
     const request = rootRequests.next();
     void bridge()
       .getDefaultWorkspaceRoot()
-      .then((suggested) => {
-        if (rootRequests.isCurrent(request)) setRoot(suggested);
-      })
+      .then((suggested) => placeAt(suggested, request))
       .catch((cause) => {
         if (rootRequests.isCurrent(request)) setError(ipcErrorMessage(cause));
       });
@@ -65,6 +82,11 @@ export function NewWorkspaceCard(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // A new suggestion stays selected in the focused field.
+  useLayoutEffect(() => {
+    if (!nameTyped.current && document.activeElement === nameField.current) nameField.current?.select();
+  }, [folderName]);
+
   async function chooseFolder() {
     const request = rootRequests.next();
     let picked: string | null = null;
@@ -75,8 +97,7 @@ export function NewWorkspaceCard(props: {
     }
     if (!rootRequests.isCurrent(request)) return;
     if (picked) {
-      setRoot(picked);
-      setError(null);
+      if (await placeAt(picked, request)) setError(null);
       return;
     }
     // Cancelled or failed with nothing chosen yet: the default this click
@@ -102,9 +123,7 @@ export function NewWorkspaceCard(props: {
     }
   }
 
-  const separator = isWindows() ? "\\" : "/";
-  const parent = root ? displayPath(root) : error ? "Choose a folder" : "…";
-  const leaf = root ? `${separator}${folderName.trim()}` : "";
+  const path = root ? `${displayPath(root)}${isWindows() ? "\\" : "/"}${folderName.trim()}` : null;
 
   return (
     <form
@@ -124,7 +143,10 @@ export function NewWorkspaceCard(props: {
           ref={nameField}
           aria-label="Workspace name"
           value={folderName}
-          onChange={(event) => setFolderName(event.currentTarget.value)}
+          onChange={(event) => {
+            nameTyped.current = true;
+            setFolderName(event.currentTarget.value);
+          }}
           placeholder={DEFAULT_FOLDER_NAME}
           spellCheck={false}
           autoCapitalize="off"
@@ -136,31 +158,24 @@ export function NewWorkspaceCard(props: {
       <div className="dohc-elevated relative z-2 flex flex-col gap-4 rounded-xl rounded-tl-none border border-line bg-panel p-5">
         <div {...locationTooltip.hoverProps} className="relative flex min-w-0 items-center gap-2 text-subtle">
           <Folder size={13} strokeWidth={1.9} aria-hidden className="shrink-0" />
-          {/* Too long for the line, the parent folders give way first, so
-              the workspace's own folder stays at the end. A name longer than
-              the line keeps its end too: it is laid out from the right. */}
           <span data-testid="new-workspace-location" className="flex min-w-0 flex-1 text-[12px] leading-5 text-muted">
-            <span className="min-w-0 truncate">{parent}</span>
-            <span dir="rtl" className="max-w-[calc(100%-3em)] shrink-0 truncate">
-              <bdi dir="ltr">{leaf}</bdi>
-            </span>
+            {path ? <PathLine path={path} /> : <span className="truncate">{error ? "Choose a folder" : "…"}</span>}
           </span>
           {/* It stays live when no default arrived, so the person can still
               choose a folder by hand. */}
-          <button
-            type="button"
+          <GhostButton
             aria-label="Change location"
             {...locationTooltip.focusProps}
             onClick={() => void chooseFolder()}
-            className="-mr-1 shrink-0 rounded px-1 py-0.5 text-[12px] leading-5 text-muted transition-colors hover:bg-hover hover:text-ink"
+            className="-mr-2 shrink-0"
           >
             Change
-          </button>
+          </GhostButton>
           {/* The path opens over Create, so clicks go through it, and it
               closes once the pointer leaves the line. */}
           <span className="pointer-events-none contents">
-            <Tooltip id={locationTooltip.tooltipProps.id} open={locationTooltip.tooltipProps.open && root !== null}>
-              <span className="block wrap-anywhere">{root ? `${parent}${leaf}` : null}</span>
+            <Tooltip id={locationTooltip.tooltipProps.id} open={locationTooltip.tooltipProps.open && path !== null}>
+              <span className="block wrap-anywhere">{path}</span>
             </Tooltip>
           </span>
         </div>

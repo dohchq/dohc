@@ -15,8 +15,9 @@ import { useCrashReport } from "./shell/useCrashReport";
 import { useWorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
 import { useMenuCommandsWithoutWorkspace } from "./appMenuCommands";
 import { Titlebar, workspaceName } from "./Titlebar";
-import { IconButton, SecondaryButton } from "./ui/controls";
+import { GhostButton, IconButton } from "./ui/controls";
 import { Menu } from "./ui/Menu";
+import { PathLine } from "./ui/PathLine";
 import { useCommitOnRelease } from "./workbench/useCommitOnRelease";
 import { revealInFileManagerLabel } from "../workspaces/explorerMenu";
 
@@ -39,15 +40,10 @@ function RouteButton(props: {
   const Icon = props.icon;
   return (
     <span {...tooltip.hoverProps} className="relative">
-      <SecondaryButton
-        {...tooltip.focusProps}
-        data-testid={props.testId}
-        onClick={props.onClick}
-        className="inline-flex items-center gap-1.5 whitespace-nowrap"
-      >
+      <GhostButton {...tooltip.focusProps} data-testid={props.testId} onClick={props.onClick}>
         <Icon size={14} strokeWidth={1.9} aria-hidden className="shrink-0" />
         {props.label}
-      </SecondaryButton>
+      </GhostButton>
       <Tooltip {...tooltip.tooltipProps}>{props.detail}</Tooltip>
     </span>
   );
@@ -122,15 +118,14 @@ function WorkspaceRow(props: {
     >
       <button
         type="button"
+        title={displayPath(props.workspace.rootPath)}
         onClick={props.onOpen}
         className="flex min-w-0 flex-1 flex-col text-left"
       >
         <span className="truncate text-[13px] font-medium leading-5 text-ink">
           {workspaceName(props.workspace)}
         </span>
-        <span className="truncate font-mono text-[11px] leading-4 text-subtle">
-          {displayPath(props.workspace.rootPath)}
-        </span>
+        <PathLine path={displayPath(props.workspace.rootPath)} className="font-mono text-[11px] leading-4 text-subtle" />
       </button>
       {/* One slot at the end: when it was last opened at rest, the row menu
           on hover, focus, or while open. Nothing else moves. */}
@@ -302,8 +297,7 @@ export function WorkspaceManager(props: {
     ) : (
       <div className="flex w-full flex-col items-center gap-5">
         <NewWorkspaceCard onWorkspaceReady={onWorkspaceReady} />
-        {/* A little wider than the card, so the three fit on one line. */}
-        <div className="-mx-4 flex flex-wrap justify-center gap-1.5 self-stretch">
+        <div className="flex flex-wrap justify-center gap-1">
           <RouteButton
             icon={FolderOpen}
             label="Open folder"

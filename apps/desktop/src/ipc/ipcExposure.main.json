@@ -305,6 +305,7 @@
     "desktop:stop-owner-live-document",
     "desktop:stop-site-preview",
     "desktop:submit-share-changes",
+    "desktop:suggest-workspace-folder-name",
     "desktop:switch-collection-automation",
     "desktop:switch-workspace-version",
     "desktop:sync-dms",
