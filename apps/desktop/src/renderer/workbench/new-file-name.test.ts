@@ -1,5 +1,47 @@
 import { describe, expect, it } from "vitest";
-import { withMarkdownDefault, withRenameDefault } from "./new-file-name";
+import { nextPagePath, pageFileStem, withMarkdownDefault, withRenameDefault } from "./new-file-name";
+
+describe("pageFileStem", () => {
+  it("keeps a title a file can hold as typed", () => {
+    expect(pageFileStem("Trip to Lisbon", "win32")).toBe("Trip to Lisbon");
+    expect(pageFileStem("Café, día 2", "darwin")).toBe("Café, día 2");
+  });
+
+  it("turns characters a file name cannot hold into spaces", () => {
+    expect(pageFileStem("Q3: plan/budget?", "linux")).toBe("Q3 plan budget");
+    expect(pageFileStem('a\\b*c"d<e>f|g', "win32")).toBe("a b c d e f g");
+    expect(pageFileStem("line one\nline two\t", "win32")).toBe("line one line two");
+  });
+
+  it("drops leading dots and trailing dots and spaces", () => {
+    expect(pageFileStem(".env notes", "linux")).toBe("env notes");
+    expect(pageFileStem("  Wait...  ", "win32")).toBe("Wait");
+  });
+
+  it("is Untitled when nothing nameable is left", () => {
+    expect(pageFileStem("", "win32")).toBe("Untitled");
+    expect(pageFileStem("   ", "win32")).toBe("Untitled");
+    expect(pageFileStem("???", "darwin")).toBe("Untitled");
+    expect(pageFileStem("CON", "win32")).toBe("Untitled");
+  });
+
+  it("caps a long title at 120 characters", () => {
+    const stem = pageFileStem(`${"é".repeat(119)} tail`, "win32");
+    expect(Array.from(stem)).toHaveLength(119);
+  });
+});
+
+describe("nextPagePath", () => {
+  it("takes the plain name in the folder when it is free", () => {
+    expect(nextPagePath("", "Untitled", new Set())).toBe("Untitled.md");
+    expect(nextPagePath("Trip", "Plan", new Set(["plan.md"]))).toBe("Trip/Plan.md");
+  });
+
+  it("numbers the name past every taken one, ignoring case", () => {
+    expect(nextPagePath("", "Untitled", new Set(["untitled.md"]))).toBe("Untitled 2.md");
+    expect(nextPagePath("Trip", "Plan", new Set(["trip/plan.md", "trip/plan 2.md"]))).toBe("Trip/Plan 3.md");
+  });
+});
 
 describe("withMarkdownDefault", () => {
   it("appends .md to a plain name", () => {

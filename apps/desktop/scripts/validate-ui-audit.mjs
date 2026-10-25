@@ -37,7 +37,7 @@ export const expectedUiAuditShots = [
   "15-settings-light.png",
   "16-csv-light.png",
   "17-shell-dark.png",
-  "18-new-file-dialog-light.png",
+  "18-new-page-light.png",
   "19-settings-appearance-light.png",
   "20-properties-panel-light.png",
 ];

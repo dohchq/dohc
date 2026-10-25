@@ -127,13 +127,12 @@ test("History lists the first document of a new workspace while it is open", asy
     const workspace = await activeWorkspace(page, rootPath);
 
     await page.keyboard.press("ControlOrMeta+n");
-    await page.getByRole("textbox", { name: "File name" }).fill("trip/plan");
+    await page.keyboard.type("Plan");
     await page.keyboard.press("Enter");
-    const editor = page.getByTestId("markdown-editor");
-    await editor.click();
     await page.keyboard.type("Three nights, two of us, one budget.");
+    const editor = page.getByTestId("markdown-editor");
     await expect
-      .poll(() => readFile(join(rootPath, "trip/plan.md"), "utf8").catch(() => ""))
+      .poll(() => readFile(join(rootPath, "Plan.md"), "utf8").catch(() => ""))
       .toContain("one budget.");
 
     // A History page runs an explicit capture flush first. It answers
@@ -149,7 +148,7 @@ test("History lists the first document of a new workspace while it is open", asy
           if (!api) throw new Error("Desktop bridge is unavailable");
           const history = await api.listEngineMoments({ workspaceId });
           if ("status" in history) return history.status;
-          return history.moments.some((moment) => moment.path === "trip/plan.md")
+          return history.moments.some((moment) => moment.path === "Plan.md")
             ? "listed"
             : "not listed";
         }, workspace.workspaceId),
@@ -165,8 +164,8 @@ test("History lists the first document of a new workspace while it is open", asy
 
     await openHistoryView(page);
     await expect(
-      page.locator('[data-testid="engine-moment-open"][data-moment-path="trip/plan.md"]').first(),
-    ).toContainText("plan.mdtrip");
+      page.locator('[data-testid="engine-moment-open"][data-moment-path="Plan.md"]').first(),
+    ).toContainText("Plan.md");
     await expect(editor).toBeVisible();
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

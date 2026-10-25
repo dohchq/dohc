@@ -140,7 +140,7 @@ describe("global letter shortcut ownership", () => {
 
     dispatchShortcut("n", {}, editor);
 
-    expect(await screen.findByRole("textbox", { name: "File name" })).toBeTruthy();
+    expect(await screen.findByTestId("new-page")).toBeTruthy();
     editor.remove();
   });
 
@@ -189,7 +189,7 @@ describe("global letter shortcut ownership", () => {
 
     dispatchShortcut("N");
 
-    expect(await screen.findByRole("textbox", { name: "File name" })).toBeTruthy();
+    expect(await screen.findByTestId("new-page")).toBeTruthy();
   });
 
   it("leaves New file closed when its shortcut is typed in a View share view", async () => {
@@ -199,7 +199,7 @@ describe("global letter shortcut ownership", () => {
     const event = dispatchShortcut("n");
 
     expect(event.defaultPrevented).toBe(true);
-    expect(screen.queryByRole("textbox", { name: "File name" })).toBeNull();
+    expect(screen.queryByTestId("new-page")).toBeNull();
   });
 
   it("routes uppercase K to the command palette", async () => {
@@ -296,7 +296,7 @@ describe("global letter shortcut ownership", () => {
     expect(newFile.defaultPrevented).toBe(false);
     expect(sidebar.defaultPrevented).toBe(false);
     expect(closeTab.defaultPrevented).toBe(false);
-    expect(screen.queryByRole("textbox", { name: "File name" })).toBeNull();
+    expect(screen.queryByTestId("new-page")).toBeNull();
     expect(screen.getByTestId("side-panel")).toBeTruthy();
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
   });
@@ -591,7 +591,7 @@ describe("collection folders", () => {
     // The palette renders and lists something, so the misses below are the
     // gate working, not the palette failing to open.
     await within(palette).findByText("New editor group right");
-    for (const label of ["New file", "New drawing", "New folder", "New collection", "Import files"]) {
+    for (const label of ["New file", "New file…", "New drawing", "New folder", "New collection", "Import files"]) {
       expect(within(palette).queryByText(label)).toBeNull();
     }
     await user.keyboard("{Escape}");
@@ -600,7 +600,7 @@ describe("collection folders", () => {
       act(() => bridge.emitMenuCommand(command));
     }
     await act(async () => {});
-    expect(screen.queryByRole("heading", { name: "New file" })).toBeNull();
+    expect(screen.queryByTestId("new-page")).toBeNull();
     expect(screen.queryByLabelText("New folder name")).toBeNull();
     expect(bridge.createWorkspaceFile).not.toHaveBeenCalled();
     expect(bridge.importWorkspaceFiles).not.toHaveBeenCalled();
@@ -628,7 +628,7 @@ describe("collection folders", () => {
     await user.keyboard("{Control>}k{/Control}");
     const palette = await screen.findByTestId("command-palette");
     await within(palette).findByText("New editor group right");
-    for (const label of ["New file", "New drawing", "New folder", "New collection", "Import files"]) {
+    for (const label of ["New file", "New file…", "New drawing", "New folder", "New collection", "Import files"]) {
       expect(within(palette).queryByText(label)).toBeNull();
     }
   });
@@ -640,7 +640,7 @@ describe("collection folders", () => {
 
     await user.keyboard("{Control>}k{/Control}");
     const palette = await screen.findByTestId("command-palette");
-    for (const label of ["New file", "New drawing", "New collection", "Import files"]) {
+    for (const label of ["New file", "New file…", "New drawing", "New collection", "Import files"]) {
       expect(await within(palette).findByText(label)).toBeTruthy();
     }
     expect(within(palette).queryByText("New folder")).toBeNull();
@@ -1196,8 +1196,9 @@ describe("open editors", () => {
 
     await screen.findAllByTestId("tree-row");
     await user.click(screen.getByLabelText("New file"));
-    expect(await screen.findByLabelText("New file name")).toBeTruthy();
-    await user.keyboard("{Escape}");
+    const page = await screen.findByTestId("new-page");
+    expect(document.activeElement).toBe(within(page).getByLabelText("Page title"));
+    expect(screen.queryByTestId("tree-edit-input")).toBeNull();
 
     await user.click(screen.getByLabelText("New folder"));
     expect(await screen.findByLabelText("New folder name")).toBeTruthy();
@@ -1224,13 +1225,15 @@ describe("open editors", () => {
 
     await user.click(await screen.findByText("docs"));
     await user.click(screen.getByLabelText("New file"));
-    await user.keyboard("notes.md{Enter}");
+    expect(bridge.createWorkspaceFile).not.toHaveBeenCalled();
+    await user.keyboard("Notes{Enter}");
 
     await waitFor(() =>
       expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
         workspaceId: "ws-shell-test",
-        relativePath: "docs/notes.md",
+        relativePath: "docs/Notes.md",
         initialText: "",
+        exclusive: true,
       }),
     );
 

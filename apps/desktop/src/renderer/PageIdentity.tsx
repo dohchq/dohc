@@ -160,6 +160,8 @@ export type PageIdentityProps = (
   // Enter, or ArrowDown on the title's last line, moves focus into the body
   // editor's start.
   onEnterBody?: () => void;
+  // A new page opens with the cursor in its title.
+  autoFocus?: boolean;
 };
 
 // A title is one line, so pasted or dropped line breaks become spaces.
@@ -480,6 +482,7 @@ export function PageIdentity(props: PageIdentityProps) {
           data-testid="page-title"
           aria-label="Page title"
           rows={1}
+          autoFocus={props.autoFocus}
           value={titleDraft}
           placeholder={folded ? "Add title" : props.filenameStem}
           spellCheck={false}

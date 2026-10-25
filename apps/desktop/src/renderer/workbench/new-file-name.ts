@@ -1,3 +1,34 @@
+import { validateUserMaterializePath } from "@dohc/workspace-contracts/workspace-paths";
+
+// Long enough for any title, short enough to keep the path well inside
+// Windows' 260-character limit in a nested folder.
+const PAGE_NAME_LIMIT = 120;
+
+// A new page's file name comes from its title. Characters a file name cannot
+// hold on Windows, macOS or Linux become spaces, runs of spaces close up, and
+// leading dots (a hidden file) and trailing dots and spaces (which Windows
+// drops) go. A title that still names no file this computer can write, such
+// as CON, or names nothing at all, is Untitled.
+export function pageFileStem(title: string, platform: string): string {
+  const cleaned = title
+    .replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^[. ]+|[. ]+$/g, "");
+  const stem = Array.from(cleaned).slice(0, PAGE_NAME_LIMIT).join("").replace(/[. ]+$/, "");
+  return stem && validateUserMaterializePath(`${stem}.md`, { platform }).ok ? stem : "Untitled";
+}
+
+// The first of "Stem.md", "Stem 2.md", "Stem 3.md"… in `folder` that no path
+// in `occupied` holds. `occupied` is lowercase, because Windows and macOS
+// compare names without case.
+export function nextPagePath(folder: string, stem: string, occupied: ReadonlySet<string>): string {
+  const prefix = folder ? `${folder}/` : "";
+  for (let index = 1; ; index += 1) {
+    const path = `${prefix}${index === 1 ? stem : `${stem} ${index}`}.md`;
+    if (!occupied.has(path.toLowerCase())) return path;
+  }
+}
+
 // New files are markdown by default: a typed name whose leaf has no
 // extension gets ".md" appended. An explicit extension ("notes.txt") is
 // respected exactly, dotfiles (".env") stay literal — a leading dot is not

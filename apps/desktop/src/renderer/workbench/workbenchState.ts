@@ -6,6 +6,7 @@
 
 import { basenameOf } from "../path";
 import { parseDatasetPath } from "@dohc/security-contract/dataset";
+import type { FileDisplayKind } from "@dohc/workspace-contracts/kinds";
 import type { WorkspaceUiState } from "../../ipc/bridgeContract";
 import type { SidebarSettings } from "../../settings/userSettings";
 import type { ObjectKind } from "../ui/KindGlyph";
@@ -140,6 +141,14 @@ const MOMENT_DIFF_TAB_PREFIX = "tab://moment-diff/";
 // the folder path, so reopening re-activates instead of duplicating.
 const COLLECTION_TAB_PREFIX = "tab://collection/";
 const DATA_COLLECTION_TAB_PREFIX = "tab://data-collection/";
+// A page whose file does not exist yet: its title has focus and nothing is on
+// disk until the person leaves the title. The id tells two new pages apart;
+// the folder is where its file will go. It never restores.
+const NEW_PAGE_TAB_PREFIX = "tab://new-page/";
+
+export function newPageTabPath(id: string, folder: string): string {
+  return `${NEW_PAGE_TAB_PREFIX}${encodeURIComponent(id)}/${encodeURIComponent(folder)}`;
+}
 
 export function transactionalCollectionTabPath(datasetPath: string, tableId: string): string {
   return `${DATA_COLLECTION_TAB_PREFIX}${encodeURIComponent(datasetPath)}/${encodeURIComponent(tableId)}`;
@@ -187,6 +196,7 @@ export type ParsedTab = { path: string } & (
   | { kind: "versionCompare"; versionId: string | null }
   | { kind: "collection"; collectionPath: string | null }
   | { kind: "transactionalCollection"; datasetPath: string; tableId: string }
+  | { kind: "newPage"; id: string; folder: string }
 );
 const TABLE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 function decodedTabField(value: string): string | null {
@@ -224,6 +234,13 @@ export function parseTab(path: string | null): ParsedTab | null {
       try { return { kind: "transactionalCollection", path, datasetPath: parseDatasetPath(decodeURIComponent(parts[0]!)), tableId: parts[1]! }; } catch { /* Removed below. */ }
     }
   }
+  if (path.startsWith(NEW_PAGE_TAB_PREFIX)) {
+    const parts = path.slice(NEW_PAGE_TAB_PREFIX.length).split("/");
+    const id = parts.length === 2 ? decodedTabField(parts[0]!) : null;
+    // The workspace root is the empty folder.
+    const folder = parts.length === 2 ? (parts[1] === "" ? "" : decodedTabField(parts[1]!)) : null;
+    if (id !== null && folder !== null) return { kind: "newPage", path, id, folder };
+  }
   return { kind: "removed", path };
 }
 export function tabPath(tab: ParsedTab): string {
@@ -236,20 +253,20 @@ export function tabPath(tab: ParsedTab): string {
     case "transactionalCollection": return transactionalCollectionTabPath(tab.datasetPath, tab.tableId);
     case "graph": return GRAPH_TAB_PATH;
     case "history": return HISTORY_TAB_PATH;
-    case "file": case "removed": return tab.path;
+    case "file": case "removed": case "newPage": return tab.path;
   }
 }
 type TabTitle = (tab: ParsedTab, label?: string) => string;
-// The object a tab shows, for its glyph. Null for a file, whose glyph comes
-// from the listing: its kind and page icon.
-type TabObjectRule = (tab: ParsedTab) => ObjectKind | null;
-type TabRules = { virtual: boolean; singleton: boolean; title: TabTitle; tooltip: TabTitle; explorerTitle: TabTitle; glyph: TabObjectRule };
+// The object or file kind a tab shows, for its glyph. Null for a file, whose
+// glyph comes from the listing: its kind and page icon.
+type TabGlyphRule = (tab: ParsedTab) => ObjectKind | FileDisplayKind | null;
+type TabRules = { virtual: boolean; singleton: boolean; title: TabTitle; tooltip: TabTitle; explorerTitle: TabTitle; glyph: TabGlyphRule };
 const fileTitles = {
   title: (tab: ParsedTab) => basenameOf(tab.path),
   tooltip: (tab: ParsedTab) => tab.path,
   explorerTitle: (tab: ParsedTab) => basenameOf(tab.path),
 };
-const chatGlyph: TabObjectRule =(tab) => tab.kind === "chat" && tab.target.kind === "channel" ? "group" : "chat";
+const chatGlyph: TabGlyphRule =(tab) => tab.kind === "chat" && tab.target.kind === "channel" ? "group" : "chat";
 const chatTitle: TabTitle = (tab, label) => {
   if (label !== undefined) return label;
   if (tab.kind !== "chat") return "Chat";
@@ -334,6 +351,14 @@ export const TAB_KINDS: Record<ParsedTab["kind"], TabRules> = {
     tooltip: (_tab, label) => label ? `Collection: ${label}` : "Collection",
     explorerTitle: collectionTitle,
     glyph: () => "collection",
+  },
+  newPage: {
+    virtual: true,
+    singleton: false,
+    title: (_tab, label) => label || "Untitled",
+    tooltip: () => "New page",
+    explorerTitle: (_tab, label) => label || "Untitled",
+    glyph: () => "markdown",
   },
 };
 export function singletonTabIdentity(tab: ParsedTab | null): string | null {
@@ -617,6 +642,29 @@ export function openMomentDiff(
     })),
     group.id,
   );
+}
+
+// A new page's tab becomes its file's tab where it stands, active if it was.
+// A group that already shows the file keeps that tab instead.
+export function replaceTab(
+  state: WorkbenchState,
+  from: string,
+  to: string,
+): WorkbenchState {
+  let changed = false;
+  const editorGroups = state.editorGroups.map((group) => {
+    if (!group.tabs.some((tab) => tab.path === from)) return group;
+    changed = true;
+    const shown = group.tabs.some((tab) => tab.path === to);
+    return {
+      ...group,
+      tabs: shown
+        ? group.tabs.filter((tab) => tab.path !== from)
+        : group.tabs.map((tab) => (tab.path === from ? { path: to } : tab)),
+      activeTab: group.activeTab === from ? to : group.activeTab,
+    };
+  });
+  return changed ? { ...state, editorGroups } : state;
 }
 
 export function activateTab(
@@ -1251,8 +1299,9 @@ export function parseUiState(raw: unknown): WorkbenchState {
             continue;
           }
           const parsedTab = parseTab(tab);
-          // Removed surfaces never restore as workspace file paths.
-          if (parsedTab.kind === "removed") continue;
+          // Removed surfaces never restore as workspace file paths, and a new
+          // page that was never written has nothing to restore.
+          if (parsedTab.kind === "removed" || parsedTab.kind === "newPage") continue;
           const canonicalSingleton = singletonTabIdentity(parsedTab);
           if (TAB_KINDS[parsedTab.kind].singleton && canonicalSingleton === null) {
             continue;

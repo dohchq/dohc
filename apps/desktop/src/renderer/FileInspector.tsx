@@ -1,7 +1,7 @@
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
 import type { RecordHistoryTarget } from "./collections/useRecordHistory";
-import { filenameStem, MarkdownView, type HeadingTarget, type ScrollTarget } from "./MarkdownView";
+import { filenameStem, MarkdownView, type HeadingTarget, type LiveEditor, type ScrollTarget } from "./MarkdownView";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES, exceedsUtf8Bytes } from "../workspaces/workspaceTextLimits";
 import { DrawingView } from "./DrawingView";
 import {
@@ -328,6 +328,8 @@ type FileInspectorProps = {
   // finish its read and, when applicable, bind its live document session.
   surfaceKey?: string;
   onSurfaceReady?: (path: string, surfaceKey: string) => void;
+  // A new page's file: its live editor takes the keystrokes the page held.
+  onEditorReady?: (editor: LiveEditor) => void;
 };
 
 function useRetainedLocalDocument(key: string): SharedLocalDocument {
@@ -861,6 +863,7 @@ export const FileInspector = memo(function FileInspector(
             onReloadChangedOutside={reloadChangedOutside}
             writesRefusedRef={writesRefusedRef}
             localBuffer={localBuffer}
+            onEditorReady={props.onEditorReady}
           />
         </div>
       );

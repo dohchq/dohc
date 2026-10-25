@@ -16,6 +16,10 @@
       "label": "New file"
     },
     {
+      "id": "new-file-at-path",
+      "label": "New file…"
+    },
+    {
       "id": "new-drawing",
       "label": "New drawing"
     },
