@@ -37,7 +37,7 @@ import { PresenceFaces } from "../collab/PresenceIndicators";
 import type { AboutConversation } from "./aboutConversation";
 import { ChatAvatar, LinkMark } from "./ChatAvatar";
 import { neutralPresentation, ownPresentation, ownAgentPresentation, relayPresentation } from "./actorPresentation";
-import { MomentAuthor, engineMomentSourceLabel, engineMomentSummary } from "./EngineHistory";
+import { HistoryUpdating, MomentAuthor, engineMomentSourceLabel, engineMomentSummary } from "./EngineHistory";
 import { historyHiddenWords } from "./HistoryPolicyStates";
 
 // The About tab: everything about the open file or chat, one section each. A
@@ -857,18 +857,20 @@ export type AboutFile =
   | { status: "failed"; retry: () => void }
   | { status: "ready"; objectId: string | null };
 
-// `held` is History holding the file's changes back, a state of the surface
-// drawn in place (HistoryPolicyStates.tsx): its rules can't be read, or the
-// workspace is still updating. Nothing failed, so it files no row.
+// `held` is History holding the file's changes back because its rules can't
+// be read, a state of the surface drawn in place (HistoryPolicyStates.tsx).
+// `updating` is History still taking in recent changes; `reads` counts the
+// reads in a row that found it so, and each is read again, soon at first.
+// Nothing failed in either, so neither files a row.
 export type HistoryView =
   | typeof LOADING
   | { status: "ready"; moments: EngineMomentRecord[]; more: boolean }
   | { status: "untracked" }
+  | { status: "updating"; reads: number }
   | { status: "held"; words: string; retry: () => void }
   | { status: "failed"; retry: () => void };
 
 const HISTORY_ROWS = 5;
-const WORKSPACE_UPDATING_MESSAGE = "Workspace is still updating. Try again.";
 
 // A change with no one author, or several, keeps the file mark here.
 const FILE_MARK = <FileText size={14} aria-hidden className="shrink-0 text-subtle" />;
@@ -892,7 +894,7 @@ export function AboutHistory(props: {
     props.notices,
   );
   const { begin, cancel } = read;
-  const load = useCallback(async () => {
+  const load = useCallback(async (updatingReads = 0) => {
     if (objectId === null) return;
     const request = begin();
     const failed = { status: "failed", retry: () => void load() } as const;
@@ -902,11 +904,9 @@ export function AboutHistory(props: {
         request.settle({ status: "ready", moments: response.moments, more: response.nextCursor !== null });
         return;
       }
-      request.settle({
-        status: "held",
-        words: response.status === "updating" ? WORKSPACE_UPDATING_MESSAGE : historyHiddenWords(response.unreadable),
-        retry: failed.retry,
-      });
+      request.settle(response.status === "updating"
+        ? { status: "updating", reads: updatingReads + 1 }
+        : { status: "held", words: historyHiddenWords(response.unreadable), retry: failed.retry });
     } catch (error) {
       request.fail(failed, ipcErrorMessage(error, "Could not load History for this file."), error, failed.retry);
     }
@@ -916,6 +916,14 @@ export function AboutHistory(props: {
     void load();
     return cancel;
   }, [cancel, load, objectId, props.expanded, props.revision]);
+  // History can finish taking in changes without adding one, so nothing
+  // else would read again.
+  const readView = read.view;
+  useEffect(() => {
+    if (!props.expanded || readView.status !== "updating") return;
+    const timer = setTimeout(() => void load(readView.reads), gatherDelay(readView.reads));
+    return () => clearTimeout(timer);
+  }, [load, props.expanded, readView]);
 
   const view: HistoryView =
     file.status === "loading" ? LOADING
@@ -948,6 +956,8 @@ export function AboutHistoryView(props: {
         <RetryRow testId="about-history-failed" onRetry={view.retry} />
       ) : view.status === "untracked" ? (
         <AboutNote testId="about-history-untracked">History does not track this file yet.</AboutNote>
+      ) : view.status === "updating" ? (
+        <HistoryUpdating testId="about-history-updating" className="px-2 py-1" />
       ) : view.status === "held" ? (
         // The words end in "try again", so the control they name is here.
         <AboutNote testId="about-history-held" icon={EyeOff} action={{ label: "Try again", run: view.retry }}>

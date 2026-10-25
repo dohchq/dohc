@@ -1409,14 +1409,23 @@ describe("About History", () => {
     expect(notices.clear).toHaveBeenLastCalledWith("about-history:docs/plan.md");
   });
 
-  it("draws History still updating in the section, files no row, and reads again on Try again", async () => {
-    bridgeMock.listEngineMoments.mockResolvedValueOnce({ status: "updating" }).mockResolvedValue(page([moment()]));
+  // History can finish taking in changes without adding one, so no newer
+  // revision is sure to come: the section reads again by itself.
+  it("says History is still updating with no control, files no row, and reads again by itself", async () => {
+    const next = deferred<ListEngineMomentsResponse>();
+    bridgeMock.listEngineMoments.mockResolvedValueOnce({ status: "updating" }).mockImplementationOnce(() => next.promise);
     render(<HistorySection />);
-    const held = await screen.findByTestId("about-history-held");
-    expect(held.textContent).toContain("Workspace is still updating. Try again.");
+    const line = await screen.findByTestId("about-history-updating");
+    expect(line.textContent).toBe("Adding recent changes to History");
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
     expect(screen.queryByTestId("about-history-empty")).toBeNull();
     expect(notices.report).not.toHaveBeenCalled();
-    await userEvent.setup().click(within(held).getByText("Try again"));
+    await waitFor(() => expect(bridgeMock.listEngineMoments).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId("about-history-updating")).toBe(line);
+    await act(async () => {
+      next.resolve(page([moment()]));
+      await next.promise;
+    });
     expect(await screen.findAllByTestId("about-history-open")).toHaveLength(1);
   });
 

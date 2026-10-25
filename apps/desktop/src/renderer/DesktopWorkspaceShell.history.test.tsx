@@ -779,8 +779,9 @@ describe("history page", () => {
   });
 
   // The ladder itself is the hook's (useHistoryPage.test.tsx). This pins the
-  // surface it leaves behind: the inline retry, and no global error.
-  it("stops retrying an updating history and leaves the retry inline", async () => {
+  // surface it leaves behind: a line with no control and no global error,
+  // kept through the next activity's read until its page replaces it.
+  it("stops retrying an updating history and keeps its line until a page arrives", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const bridge = makeBridge(Promise.resolve(null));
@@ -796,9 +797,24 @@ describe("history page", () => {
       });
 
       expect(bridge.listHistory).toHaveBeenCalledTimes(5);
-      expect(await screen.findByTestId("history-updating")).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+      const line = await screen.findByTestId("history-updating");
+      expect(line.textContent).toBe("Adding recent changes to History");
+      expect(line.getAttribute("role")).toBe("status");
+      expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
       expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+
+      const next = deferred<ListHistoryResult>();
+      bridge.listHistory.mockImplementation(() => next.promise);
+      act(() => bridge.emitWorkspaceActivity());
+      await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(6));
+      expect(screen.getByTestId("history-updating")).toBe(line);
+
+      await act(async () => {
+        next.resolve(historyPage([historyMoment("m-1", "Wrote the plan")]));
+        await next.promise;
+      });
+      expect(await screen.findByTestId("engine-moment-open")).toBeTruthy();
+      expect(screen.queryByTestId("history-updating")).toBeNull();
     } finally {
       vi.useRealTimers();
     }

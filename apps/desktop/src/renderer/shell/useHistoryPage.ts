@@ -225,8 +225,9 @@ export function useHistoryPage(
       newestRefresh.current = token;
       // A read is on the way, so the surface does not know yet, which is a
       // different thing from knowing the last read failed. Saying so here is
-      // also what makes the retry control show that it is working.
-      setReadState("loading");
+      // also what makes the retry control show that it is working. A History
+      // still taking in changes says so until a page or a failure replaces it.
+      setReadState((state) => (state === "updating" ? state : "loading"));
       let response: ListHistoryResult;
       try {
         response = await readPage(undefined, () => token === newestRefresh.current);
@@ -257,6 +258,9 @@ export function useHistoryPage(
         committed.current = token;
         committedVersionId.current = answer.versionId;
         setPolicyError(null);
+        // The page replaces History still taking in changes, so a page
+        // dropped later reads as not known yet.
+        setReadState("loading");
         // A refresh returns to the newest page and starts a new source
         // chain; older pages reload on demand, so any load-more it
         // supersedes is over.

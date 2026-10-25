@@ -45,6 +45,17 @@ export type HistoryCollections = ReadonlyMap<string, {
   openHistory?: () => void;
 }>;
 
+// History still taking in recent changes. Nothing failed and the reader has
+// nothing to do, so it offers no control: the next read replaces it.
+export function HistoryUpdating(props: { testId: string; className?: string }) {
+  return (
+    <p role="status" data-testid={props.testId} className={`m-0 flex items-center gap-2 text-xs text-muted ${props.className ?? ""}`}>
+      <span aria-hidden className="size-2 shrink-0 animate-pulse rounded-full bg-accent" />
+      Adding recent changes to History
+    </p>
+  );
+}
+
 // The list label for one moment: its real engine summary when it has one,
 // else calm product copy derived from the operation.
 export function engineMomentSummary(

@@ -218,6 +218,7 @@ import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
   EngineHistoryView,
   fileMomentSteps,
+  HistoryUpdating,
   type HistoryCollections,
 } from "./workbench/EngineHistory";
 import { HistoryHiddenState } from "./workbench/HistoryPolicyStates";
@@ -4811,30 +4812,22 @@ export function DesktopWorkspaceShell(props: {
           )
         }
       />
-    ) : engineHistoryReadState === "failed" ||
-      engineHistoryReadState === "updating" ? (
+    ) : engineHistoryReadState === "updating" ? (
+      // The next capture's activity reads again, so the line asks nothing.
+      <div className="flex flex-1 items-center justify-center px-4">
+        <HistoryUpdating testId="history-updating" />
+      </div>
+    ) : engineHistoryReadState === "failed" ? (
       // The same state its two siblings render — ChatsView and LinkedChats
       // both say a panel could not load beside a Try again — so it takes
       // their look, not the empty-state recipe next door. One line, and a
       // Next that works on this surface: the read this panel runs itself.
       <div
-        data-testid={
-          engineHistoryReadState === "updating"
-            ? "history-updating"
-            : "history-load-failed"
-        }
+        data-testid="history-load-failed"
         className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center"
       >
-        <span
-          className={
-            engineHistoryReadState === "updating"
-              ? "text-xs text-muted"
-              : "text-xs text-danger"
-          }
-        >
-          {engineHistoryReadState === "updating"
-            ? "Recent changes are still being added to History."
-            : "dohc could not load this workspace's history."}
+        <span className="text-xs text-danger">
+          dohc could not load this workspace's history.
         </span>
         <button
           type="button"
