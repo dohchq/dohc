@@ -23,9 +23,34 @@ class TestWindow extends EventEmitter {
     id: 7,
     setWindowOpenHandler: vi.fn(),
     isDestroyed: () => false,
+    reload: vi.fn(),
   });
   show = vi.fn();
   loadFile = vi.fn();
+}
+
+function sessionOwner() {
+  return new RendererWorkspaceSessionOwner<RendererWorkspaceSender>({
+    retirement: {
+      retireSender: () => ({
+        requiredForAdmission: Promise.resolve(),
+        detachedFromAdmission: Promise.resolve(),
+      }),
+      retireWorkspace: async () => undefined,
+    },
+  });
+}
+
+function sessionWindow(sessions: RendererWorkspaceSessionOwner<RendererWorkspaceSender>) {
+  return createMainWindow({
+    beforeRendererReload: (sender) => sessions.retireAfterCrash(sender),
+    currentRendererDocumentId: (sender) => sessions.currentDocumentId(sender),
+    prepareForRendererReload: (sender, documentId) => sessions.retireForReload(sender, documentId),
+  }) as unknown as TestWindow;
+}
+
+function startNavigation(window: TestWindow, isMainFrame = true, isSameDocument = false) {
+  window.webContents.emit("did-start-navigation", { isMainFrame, isSameDocument });
 }
 
 beforeEach(() => {
@@ -64,8 +89,11 @@ it("reports navigation cleanup failure without an unhandled rejection", async ()
   try {
     const window = createMainWindow({
       beforeRendererReload: async () => { throw failure; },
+      currentRendererDocumentId: () => "document-1",
+      prepareForRendererReload: async () => { throw failure; },
     }) as unknown as TestWindow;
 
+    startNavigation(window);
     window.webContents.emit("did-navigate", {}, "file:///renderer/index.html");
     await logged.promise;
 
@@ -78,48 +106,154 @@ it("reports navigation cleanup failure without an unhandled rejection", async ()
 });
 
 it("opens the workspace after a native window reload", async () => {
-  const sessions = new RendererWorkspaceSessionOwner<RendererWorkspaceSender>({
-    retirement: {
-      retireSender: () => ({
-        requiredForAdmission: Promise.resolve(),
-        detachedFromAdmission: Promise.resolve(),
-      }),
-      retireWorkspace: async () => undefined,
-    },
-  });
-  const window = createMainWindow({
-    beforeRendererReload: (sender) => sessions.retireAfterCrash(sender),
-  }) as unknown as TestWindow;
+  const sessions = sessionOwner();
+  const window = sessionWindow(sessions);
   const sender = window.webContents;
   const workspace = { workspaceId: "workspace-a", attachmentId: Symbol("a") };
   await sessions.open(sender, workspace, "document-1");
 
+  startNavigation(window);
   sender.emit("did-navigate", {}, "file:///renderer/index.html");
 
   await expect(sessions.open(sender, workspace, "document-2"))
     .resolves.toMatchObject({ rendererDocumentId: "document-2" });
 });
 
-it("opens the workspace after the reload IPC and navigation both retire the document", async () => {
-  const sessions = new RendererWorkspaceSessionOwner<RendererWorkspaceSender>({
-    retirement: {
-      retireSender: () => ({
-        requiredForAdmission: Promise.resolve(),
-        detachedFromAdmission: Promise.resolve(),
-      }),
-      retireWorkspace: async () => undefined,
-    },
-  });
-  const window = createMainWindow({
-    beforeRendererReload: (sender) => sessions.retireAfterCrash(sender),
-  }) as unknown as TestWindow;
+it.each(["reload", "crash"] as const)("keeps the new document open when %s recovery admits it before navigation commits", async (path) => {
+  const sessions = sessionOwner();
+  const window = sessionWindow(sessions);
+  const sender = window.webContents;
+  const workspace = { workspaceId: "workspace-a", attachmentId: Symbol("a") };
+  await sessions.open(sender, workspace, "document-1");
+
+  if (path === "reload") await sessions.retireForReload(sender, "document-1");
+  else await sessions.retireAfterCrash(sender);
+  sender.reload();
+  startNavigation(window);
+  const replacement = await sessions.open(sender, workspace, "document-2");
+  sender.emit("did-navigate", {}, "file:///renderer/index.html");
+
+  expect(replacement.isCurrent()).toBe(true);
+  expect(replacement.signal.aborted).toBe(false);
+  expect(sessions.isWorkspaceOpen(workspace.workspaceId)).toBe(true);
+  await expect(sessions.open(sender, workspace, "document-2"))
+    .resolves.toBe(replacement);
+});
+
+it("admits a retried native reload open that arrived before navigation committed", async () => {
+  const sessions = sessionOwner();
+  const window = sessionWindow(sessions);
+  const sender = window.webContents;
+  const workspace = { workspaceId: "workspace-a", attachmentId: Symbol("a") };
+  const first = await sessions.open(sender, workspace, "document-1");
+
+  startNavigation(window);
+  await expect(sessions.open(sender, workspace, "document-2"))
+    .rejects.toBeInstanceOf(RendererWorkspaceOpenSupersededError);
+  expect(first.isCurrent()).toBe(true);
+  sender.emit("did-navigate", {}, "file:///renderer/index.html");
+
+  expect(first.isCurrent()).toBe(false);
+  await expect(sessions.open(sender, workspace, "document-2"))
+    .resolves.toMatchObject({ rendererDocumentId: "document-2" });
+});
+
+it("opens the workspace when dohc reload retires before navigation and open", async () => {
+  const sessions = sessionOwner();
+  const window = sessionWindow(sessions);
   const sender = window.webContents;
   const workspace = { workspaceId: "workspace-a", attachmentId: Symbol("a") };
   await sessions.open(sender, workspace, "document-1");
 
   await sessions.retireForReload(sender, "document-1");
+  sender.reload();
+  startNavigation(window);
   sender.emit("did-navigate", {}, "file:///renderer/index.html");
 
+  await expect(sessions.open(sender, workspace, "document-2"))
+    .resolves.toMatchObject({ rendererDocumentId: "document-2" });
+});
+
+it.each([
+  [false, false],
+  [true, true],
+])("does not record navigation with isMainFrame=%s and isSameDocument=%s", (isMainFrame, isSameDocument) => {
+  const currentRendererDocumentId = vi.fn(() => "document-1");
+  const prepareForRendererReload = vi.fn();
+  const beforeRendererReload = vi.fn();
+  const window = createMainWindow({
+    currentRendererDocumentId, prepareForRendererReload, beforeRendererReload,
+  }) as unknown as TestWindow;
+
+  startNavigation(window, isMainFrame, isSameDocument);
+  window.webContents.emit("did-navigate", {}, "file:///renderer/index.html");
+
+  expect(currentRendererDocumentId).not.toHaveBeenCalled();
+  expect(prepareForRendererReload).not.toHaveBeenCalled();
+  expect(beforeRendererReload).not.toHaveBeenCalled();
+});
+
+it("replaces an uncommitted navigation record and clears it after commit", () => {
+  const currentRendererDocumentId = vi.fn()
+    .mockReturnValueOnce("document-1")
+    .mockReturnValueOnce(undefined)
+    .mockReturnValueOnce("document-2");
+  const prepareForRendererReload = vi.fn(async () => true);
+  const window = createMainWindow({ currentRendererDocumentId, prepareForRendererReload }) as unknown as TestWindow;
+
+  startNavigation(window);
+  window.webContents.emit("did-fail-provisional-load", {}, -3, "ERR_ABORTED");
+  startNavigation(window);
+  window.webContents.emit("did-navigate", {}, "file:///renderer/index.html");
+  expect(prepareForRendererReload).not.toHaveBeenCalled();
+
+  startNavigation(window);
+  window.webContents.emit("did-navigate", {}, "file:///renderer/index.html");
+  expect(prepareForRendererReload).toHaveBeenCalledExactlyOnceWith(window.webContents, "document-2");
+  window.webContents.emit("did-navigate", {}, "file:///renderer/index.html");
+  expect(prepareForRendererReload).toHaveBeenCalledOnce();
+});
+
+it("does not retire the replacement if the captured document retired before commit", async () => {
+  const sessions = sessionOwner();
+  const window = sessionWindow(sessions);
+  const sender = window.webContents;
+  const workspace = { workspaceId: "workspace-a", attachmentId: Symbol("a") };
+  await sessions.open(sender, workspace, "document-1");
+  startNavigation(window);
+  await sessions.retireForReload(sender, "document-1");
+  const replacement = await sessions.open(sender, workspace, "document-2");
+
+  sender.emit("did-navigate", {}, "file:///renderer/index.html");
+
+  expect(replacement.isCurrent()).toBe(true);
+  expect(sessions.isWorkspaceOpen(workspace.workspaceId)).toBe(true);
+});
+
+it("captures the document while its workspace switch has no live session", async () => {
+  const senderDrain = deferred();
+  const sessions = new RendererWorkspaceSessionOwner<RendererWorkspaceSender>({
+    retirement: {
+      retireSender: () => ({
+        requiredForAdmission: senderDrain.promise,
+        detachedFromAdmission: Promise.resolve(),
+      }),
+      retireWorkspace: async () => undefined,
+    },
+  });
+  const window = sessionWindow(sessions);
+  const sender = window.webContents;
+  await sessions.open(sender, { workspaceId: "workspace-a", attachmentId: Symbol("a") }, "document-1");
+  const workspace = { workspaceId: "workspace-b", attachmentId: Symbol("b") };
+  const interrupted = sessions.open(sender, workspace, "document-1")
+    .catch((error: unknown) => error);
+  expect(sessions.current(sender)).toBeUndefined();
+
+  startNavigation(window);
+  sender.emit("did-navigate", {}, "file:///renderer/index.html");
+  senderDrain.resolve();
+
+  expect(await interrupted).toBeInstanceOf(RendererWorkspaceOpenSupersededError);
   await expect(sessions.open(sender, workspace, "document-2"))
     .resolves.toMatchObject({ rendererDocumentId: "document-2" });
 });
@@ -139,13 +273,12 @@ it("drains the old document and lets a retry replace an interrupted open", async
   const sessions = new RendererWorkspaceSessionOwner<RendererWorkspaceSender>({
     retirement: { retireSender, retireWorkspace },
   });
-  const window = createMainWindow({
-    beforeRendererReload: (sender) => sessions.retireAfterCrash(sender),
-  }) as unknown as TestWindow;
+  const window = sessionWindow(sessions);
   const sender = window.webContents;
   const workspace = { workspaceId: "workspace-a", attachmentId: Symbol("a") };
   const first = await sessions.open(sender, workspace, "document-1");
 
+  startNavigation(window);
   sender.emit("did-navigate", {}, "file:///renderer/index.html");
 
   expect(first.isCurrent()).toBe(false);

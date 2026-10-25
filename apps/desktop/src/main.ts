@@ -1011,7 +1011,7 @@ const desktopWindows = createDesktopWindows({
   preloadArguments,
   afterRendererCrashLoop,
   get rendererWorkspaceSessions(): Pick<
-    RendererWorkspaceSessionOwner<WebContents>, "current" | "retireForReload" | "retireAfterCrash"
+    RendererWorkspaceSessionOwner<WebContents>, "current" | "currentDocumentId" | "retireForReload" | "retireAfterCrash"
   > { return rendererWorkspaceSessions; },
   get exitRounds() { return exitRounds; },
 });

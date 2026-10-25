@@ -236,6 +236,8 @@ export type WindowRole = "workspace" | "manager";
 
 export function createMainWindow(options?: {
   beforeRendererReload?: (sender: WebContents) => void | Promise<void>;
+  currentRendererDocumentId?: (sender: WebContents) => string | undefined;
+  prepareForRendererReload?: (sender: WebContents, rendererDocumentId: string) => Promise<boolean>;
   // The renderer crashed too often to reload again.
   afterRendererCrashLoop?: () => void;
   // The manager is a smaller window that renders only the workspace
@@ -308,12 +310,20 @@ export function createMainWindow(options?: {
     options?.afterRendererCrashLoop,
   );
 
-  // Every committed main-frame navigation replaces the document and its ID.
-  // Retire the outgoing one. The reload IPC and crash recovery have already
-  // retired it, so this call does nothing for those paths.
+  // On commit, retire only the document current when navigation started.
+  // The reload IPC and crash recovery retire it before navigation starts.
+  let navigatingDocumentId: string | undefined;
+  window.webContents.on("did-start-navigation", (event) => {
+    navigatingDocumentId = event.isMainFrame && !event.isSameDocument
+      ? options?.currentRendererDocumentId?.(window.webContents)
+      : undefined;
+  });
   window.webContents.on("did-navigate", async () => {
+    const documentId = navigatingDocumentId;
+    navigatingDocumentId = undefined;
+    if (documentId === undefined) return;
     try {
-      await options?.beforeRendererReload?.(window.webContents);
+      await options?.prepareForRendererReload?.(window.webContents, documentId);
     } catch (error) {
       console.error("[desktop] renderer navigation cleanup failed:", error);
     }
