@@ -8,7 +8,7 @@ import { TransactionalCollectionPage, type TransactionalInvoke, type Transaction
 import type { CollectionTableView } from "./collectionTableViews";
 vi.mock("@dohc/collection-views",()=>({
   BoardView: (props:BoardViewProps)=><div>{props.groups.map((group,index)=><section key={index} aria-label={String(group.value)}>{group.records.map(record=><div key={record.id}>{record.values.find(value=>value.field==="name")?.value as string}<button disabled={!props.onCellChange} onClick={()=>props.onCellChange?.({recordId:record.id,recordPath:"",field:props.groupBy,value:"Done"})}>Move {record.id}</button><button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></div>)}{props.groupFooter?.(group,index)}</section>)}</div>,
-  CalendarView: (props:CalendarViewProps)=><div><button onClick={()=>props.onNavigate?.(new Date(2027,0,1))}>January</button>{props.records.map(record=><span key={record.id}>{record.id}<button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></span>)}</div>,
+  CalendarView: (props:CalendarViewProps)=><div><button onClick={()=>props.onNavigate?.(new Date(2027,0,1))}>January</button>{props.nearbyDates?.length ? <span>Nearby {props.nearbyDates.join(" ")}</span> : null}{props.records.map(record=><span key={record.id}>{record.id}<button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></span>)}</div>,
 }));
 const dataset:TransactionalDatasetDescription={datasetId:"dataset",name:"Work",revision:1,revisionSha256:"a".repeat(64),tables:[{tableId:"table",name:"Tasks",fields:[
   {fieldId:"name",name:"Name",type:"text",required:true,unique:false},
@@ -103,7 +103,47 @@ it("loads the visible calendar range and changes range on navigation",async()=>{
   const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{const input=request.input as Record<string,AppBackendJson>;return {result:{...empty,range:input.range!}};});
   setup(invoke,calendar);
   fireEvent.click(await screen.findByRole("button",{name:"January"}));
-  await waitFor(()=>expect(invoke.mock.calls.at(-1)?.[0].input).toMatchObject({range:{fieldId:"date",start:"2026-12-27",end:"2027-02-07"},limit:50}));
+  await waitFor(()=>expect(invoke.mock.calls.some(([request])=>JSON.stringify(request.input)===JSON.stringify({limit:50,range:{fieldId:"date",start:"2026-12-27",end:"2027-02-07"}}))).toBe(true));
+});
+it("reads the nearest record on each side of an empty month for the calendar to offer",async()=>{
+  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
+    const input=request.input as Record<string,AppBackendJson>,range=input.range as {fieldId:string;start:string;end:string};
+    if(input.limit!==1)return {result:{...empty,range}};
+    return {result:{range,rows:range.start==="0001-01-01"?[]:[{id:7,version:1,values:{date:"2027-03-04"}}],nextCursor:null}};
+  });
+  setup(invoke,calendar);
+  await screen.findByText("Nearby 2027-03-04");
+  const outside=invoke.mock.calls.map(([request])=>request.input as Record<string,AppBackendJson>).filter(input=>input.limit===1);
+  expect(outside.map(input=>[input.range,input.sort])).toEqual([
+    [{fieldId:"date",start:"0001-01-01",end:expect.any(String)},{fieldId:"date",direction:"desc"}],
+    [{fieldId:"date",start:expect.any(String),end:"9999-12-31"},{fieldId:"date",direction:"asc"}],
+  ]);
+});
+it("leaves the offer out when only one side's read fails, since that side might be closer",async()=>{
+  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
+    const input=request.input as Record<string,AppBackendJson>,range=input.range as {fieldId:string;start:string;end:string};
+    if(input.limit!==1)return {result:{...empty,range}};
+    if(range.start==="0001-01-01")throw Error("The earlier read failed.");
+    return {result:{range,rows:[{id:7,version:1,values:{date:"2027-03-04"}}],nextCursor:null}};
+  });
+  const result=setup(invoke,calendar);
+  await screen.findByRole("button",{name:"January"});
+  await waitFor(()=>expect(invoke.mock.calls.filter(([request])=>(request.input as Record<string,AppBackendJson>).limit===1)).toHaveLength(2));
+  await act(async()=>{});
+  expect(screen.queryByText(/^Nearby/)).toBeNull();
+  expect(result.props.onError).not.toHaveBeenCalled();
+});
+it("leaves the offer out when the read action cannot find records outside the month",async()=>{
+  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
+    const input=request.input as Record<string,AppBackendJson>;
+    if(input.limit===1)throw Error("This read action does not sort by date.");
+    return {result:{...empty,range:input.range!}};
+  });
+  const result=setup(invoke,calendar);
+  await screen.findByRole("button",{name:"January"});
+  await waitFor(()=>expect(invoke.mock.calls.filter(([request])=>(request.input as Record<string,AppBackendJson>).limit===1)).toHaveLength(2));
+  expect(screen.queryByText(/^Nearby/)).toBeNull();
+  expect(result.props.onError).not.toHaveBeenCalled();
 });
 it("offers layout changes to readers without owner view-source controls",async()=>{
   const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{const input=request.input as Record<string,AppBackendJson>;return {result:{...empty,...(input.range?{range:input.range}:{}),...(input.group?{group:input.group}:{})}};});

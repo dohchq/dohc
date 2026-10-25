@@ -126,7 +126,7 @@ export function Pill({
   );
 }
 
-/** Uppercase section label for panel groups. */
+/** Section label for panel groups. */
 export function SectionLabel({
   as: Element = "span",
   className,

@@ -154,7 +154,7 @@ A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `rol
 
 ## Controls
 
-The look in one line: warm paper, quiet graphite, mono metadata, serif for brand moments, and color only for meaning.
+The look in one line: warm paper, quiet graphite, one sans for every word of the interface, serif for brand moments, and color only for meaning.
 
 Use `DohcMark` for the mark, `DohcWordmark` for the name, and `DohcLockup` for both. They live in `packages/brand/src/DohcLogo.tsx`.
 The mark is an SVG in `currentColor`, with no gradient, shadow, or badge.
@@ -190,13 +190,15 @@ Never write hex or Tailwind palette colors (`zinc-*`, `blue-*`, `black`, `white`
 | --- | --- |
 | Body, rows, inputs | `text-[13px]` |
 | Dense secondary text | `text-[12px] text-muted` |
-| Hints, timestamps, kbd | `text-[11px] text-subtle`, often `font-mono` |
-| Section labels | `text-[10px] font-semibold uppercase tracking-wide text-subtle` |
+| Hints, timestamps, shortcuts | `text-[12px] text-subtle` |
+| Section labels | `dohc-section-label`: `text-[12px] font-medium text-subtle`, in sentence case |
 | Panel and dialog titles | `text-sm font-semibold text-ink` |
 | Brand moments, such as the first-run headline | `font-serif`, rarely |
-| Paths, counts, ids, keys | `font-mono` |
+| Code and Markdown source | `font-mono` |
 
 Set small text at 10, 11, 12, or 13px. Never write a fractional size such as `text-[10.5px]`.
+Paths, counts, times, and shortcuts use the interface font. `<kbd>` defaults to mono, so give it `font-sans`.
+Never uppercase a label.
 
 Show a path on one line as its first folder, "…", its last folders and the name. Never cut the start of a name; put the full path in the tooltip.
 `PathLine` in `ui/PathLine.tsx` draws it.
@@ -222,7 +224,7 @@ Flat panels get borders, not shadows.
 
 ### Recipes
 
-Text input: `w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink`. Add `font-mono` for mono content.
+Text input: `w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink`. Add `font-mono` for code.
 
 List row (menus, trees, results): `flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75`.
 
@@ -246,7 +248,7 @@ Pass `closeOnBackdrop` to `Overlay` for a picker only.
 
 Segmented control: track `flex rounded-lg border border-line bg-panel-2 p-0.5`, segment `rounded-md px-2.5 py-1 text-xs transition-colors`, active `bg-bg text-ink shadow-sm`, rest `text-muted hover:text-ink`.
 
-Kbd chip: `rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle`.
+Kbd chip: `rounded border border-line bg-bg px-1 font-sans text-[11px] text-subtle`.
 
 Empty state: a centered column with `gap-4`, an optional `DohcMark` in `text-line`, one `text-sm text-muted` line, and actions as kbd-chip buttons.
 

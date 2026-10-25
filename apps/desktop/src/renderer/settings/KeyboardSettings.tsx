@@ -72,7 +72,7 @@ export function KeyboardSettings(props: { platform: string | undefined; devTools
                   <span key={keys.join("+")} className="flex items-center gap-1">
                     {index > 0 ? <span className="sr-only">or</span> : null}
                     {keys.map((key) => (
-                      <kbd key={key} className="rounded border border-line bg-bg px-1 font-mono text-[11px] text-muted">
+                      <kbd key={key} className="rounded border border-line bg-bg px-1 font-sans text-[11px] text-muted">
                         {key}
                       </kbd>
                     ))}

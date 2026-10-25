@@ -7,7 +7,7 @@ import {
   type RunnerSpawnOptions,
   type SpawnRunner,
 } from "./chatRunnerProcess";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { delimiter, join, resolve } from "node:path";
 import {
   CHATS_METHOD,
@@ -1148,7 +1148,6 @@ describe("chatDispatchService", () => {
     expect(prompt).toContain("# Launch review");
     expect(prompt).toContain("Audit the rollback plan.");
     expect(prompt).toContain(`dohc chat reply ${first.threadId} --as-agent "<report>"`);
-    expect(prompt).not.toContain("<<'DOHC_REPORT'");
     expect(prompt).toContain("Your final text is not shown anywhere");
     expect(firstSpawn.options).toMatchObject({
       cwd: fixture.root,
@@ -3356,15 +3355,14 @@ describe("chatDispatchService", () => {
   });
 
   // Each reply form as a runner's prompt shows it, with the reply's body in place.
-  function expectedReply(form: "argument" | "bash" | "mcp", threadId: string, runId: string, body: string): string {
-    if (form === "bash") return `dohc chat reply ${threadId} --as-agent - <<'DOHC_REPORT'\n${body}\nDOHC_REPORT`;
+  function expectedReply(form: "argument" | "mcp", threadId: string, runId: string, body: string): string {
     if (form === "mcp") return `the \`dohc_reply_to_chat\` tool of the \`dohc\` MCP server with \`threadId\` \`${threadId}\` and \`runId\` \`${runId}\``;
     return `dohc chat reply ${threadId} --as-agent "${body}"`;
   }
 
   it.each([
     [undefined, "argument"],
-    ["claude", "bash"],
+    ["claude", "mcp"],
     ["codex", "mcp"],
   ] as const)("uses the %s runner's reply form", async (tool, form) => {
     const profile = tool ? { tool, executable: resolve(`test-${tool}.exe`) } : undefined;
@@ -3375,9 +3373,10 @@ describe("chatDispatchService", () => {
     const call = fixture.spawnCalls[0]!;
     const prompt = call.process.stdinText;
     expect(prompt).toContain(expectedReply(form, thread.threadId, call.options.env.DOHC_RUN_ID!, "<report>"));
-    if (form === "bash") expect(prompt).toContain("Keep the delimiter quoted to prevent shell expansion.");
-    if (form !== "bash") expect(prompt).not.toContain("<<'DOHC_REPORT'");
     if (form === "mcp") expect(prompt).not.toContain("dohc chat reply");
+    const instructionsFile = "If the workspace has a CLAUDE.md file at its root, read it first and follow it.";
+    if (tool === "claude") expect(prompt).toContain(instructionsFile);
+    else expect(prompt).not.toContain("CLAUDE.md");
   });
 
   it.each(["shutdown", "occupied"])("does not start a self-test after %s during its thread write", async (reason) => {
@@ -3397,7 +3396,8 @@ describe("chatDispatchService", () => {
 
   it.each([
     [undefined, "linux", "argument"],
-    ["claude", "win32", "bash"],
+    ["claude", "linux", "mcp"],
+    ["claude", "win32", "mcp"],
     ["codex", "linux", "mcp"],
     ["codex", "win32", "mcp"],
   ] as const)("passes the spawn contract in a %s runner self-test on %s", async (tool, platform, form) => {
@@ -3421,15 +3421,23 @@ describe("chatDispatchService", () => {
     if (!runId) throw new Error("Expected self-test attribution.");
     if (profile) {
       expect(call.command).toBe(profile.executable);
-      // A Codex run starts the dohc MCP server with only its reply tool.
+      // The run starts the dohc MCP server it replies through.
+      const cliBin = join(fixture.appRoot, "node_modules", ".bin");
+      const server = join(cliBin, platform === "win32" ? "dohc-mcp.cmd" : "dohc-mcp");
+      const configPath = join(fixture.stateRoot, "run-logs", `${runId}.log.mcp.json`);
       expect(call.args).toEqual(agentProfileArguments(profile, profile.tool === "codex" ? [
-        `mcp_servers.dohc.command='${join(fixture.appRoot, "node_modules", ".bin", platform === "win32" ? "dohc-mcp.cmd" : "dohc-mcp")}'`,
-        `mcp_servers.dohc.args=['--workspace','${fixture.workspace.rootPath}','--home','${fixture.stateRoot}']`,
-        `mcp_servers.dohc.cwd='${join(fixture.appRoot, "node_modules", ".bin")}'`,
+        `mcp_servers.dohc.command='${server}'`,
+        `mcp_servers.dohc.args=['--workspace','${fixture.workspace.rootPath}','--home','${fixture.stateRoot}','--tool','dohc_reply_to_chat']`,
+        `mcp_servers.dohc.cwd='${cliBin}'`,
         "mcp_servers.dohc.required=true",
         "mcp_servers.dohc.enabled_tools=['dohc_reply_to_chat']",
         "mcp_servers.dohc.tools.dohc_reply_to_chat.approval_mode='approve'",
-      ] : []));
+      ].flatMap((entry) => ["--config", entry]) : ["--mcp-config", configPath]));
+      if (profile.tool === "claude") {
+        expect(JSON.parse(await readFile(configPath, "utf8"))).toEqual({
+          mcpServers: { dohc: { type: "stdio", command: server, args: ["--workspace", fixture.workspace.rootPath, "--home", fixture.stateRoot, "--tool", "dohc_reply_to_chat"] } },
+        });
+      }
       expect(call.options.cwd).toBe(fixture.workspace.rootPath);
     }
     const marker = `dohc-runner-self-test:${runId}`;

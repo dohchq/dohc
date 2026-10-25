@@ -128,7 +128,7 @@ const SAMPLE_SAM: ActorPresentation = { ...relayPresentation(SAM_PALETTE_SLOT), 
 const SAMPLE_NOVA: ActorPresentation = { group: "states-nova", hue: null, self: false };
 const SAMPLE_ORBIT: ActorPresentation = { group: "states-orbit", hue: "plum", self: false };
 
-const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
+const KBD = "rounded border border-line bg-bg px-1 font-sans text-[11px] text-subtle";
 
 // A floating part draws a shadow up to 41px below and 31px beside itself in
 // the dark theme, and its whole shadow must stay in its own capture, which

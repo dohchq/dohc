@@ -229,6 +229,18 @@ describe("Titlebar", () => {
     expect(document.activeElement).toBe(trigger);
   });
 
+  it("marks only a shared workspace in the switcher", () => {
+    const shared = { ...workspace, workspaceId: "ws-2", rootPath: "/trip", kind: "shared" as const };
+    render(
+      <Titlebar workspace={workspace} workspaces={[workspace, shared]} onSwitchWorkspace={() => undefined} />,
+    );
+
+    fireEvent.click(screen.getByTestId("workspace-switcher"));
+    const [personalRow, sharedRow] = screen.getAllByTestId("workspace-switcher-option");
+    expect(personalRow!.textContent).toBe("dohc");
+    expect(sharedRow!.textContent).toBe("tripShared");
+  });
+
   it("closes the workspace switcher on a press outside it, not inside it", () => {
     render(
       <div>

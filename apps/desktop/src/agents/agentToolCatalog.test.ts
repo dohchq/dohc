@@ -22,7 +22,7 @@ describe("agent launch profiles", () => {
   });
   it("allows workspace edits and chat replies while denying unattended prompts", () => {
     const profile = { tool: "claude", executable: "/usr/local/bin/claude" } as const;
-    expect(agentProfileArguments(profile)).toEqual(["-p", "--permission-prompts", "none", "--no-session-persistence", "--allowedTools", "Edit(/**)", "Bash(dohc chat reply:*)", "--disallowedTools", "Edit(/.dohc/**)"]);
+    expect(agentProfileArguments(profile)).toEqual(["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", "--allowedTools", "Edit(/**)", "mcp__dohc__dohc_reply_to_chat", "--disallowedTools", "Edit(/.dohc/**)"]);
     expect(tokenizeRunnerCommand(configuredRunnerCommand({ command: "ignored", profile }))).toEqual([profile.executable, ...agentProfileArguments(profile)]);
   });
   it("rejects unsupported tools and relative executable paths", () => {
