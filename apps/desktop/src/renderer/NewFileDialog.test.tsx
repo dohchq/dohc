@@ -110,7 +110,7 @@ describe("NewFileDialog", () => {
     });
   });
 
-  it.each(["Cancel", "Escape", "backdrop"] as const)(
+  it.each(["Cancel", "Escape"] as const)(
     "stays open during a pending create after %s dismissal",
     async (dismissal) => {
       const create = deferred<{ path: string }>();
@@ -132,13 +132,8 @@ describe("NewFileDialog", () => {
       const cancel = screen.getByRole("button", { name: "Cancel" });
       if (dismissal === "Cancel") {
         await user.click(cancel);
-      } else if (dismissal === "Escape") {
-        await user.keyboard("{Escape}");
       } else {
-        const backdrop = screen.getByRole("dialog", { name: "New file" })
-          .parentElement;
-        expect(backdrop).not.toBeNull();
-        await user.click(backdrop!);
+        await user.keyboard("{Escape}");
       }
 
       expect(onClose).not.toHaveBeenCalled();

@@ -95,6 +95,23 @@ describe("LazyDesktopSettings", () => {
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
   });
 
+  it("closes from its X while loading and after a failed load", async () => {
+    const onClose = vi.fn();
+    const pending = render(
+      <LazyDesktopSettings {...settingsProps()} onClose={onClose} loader={() => new Promise(() => undefined)} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Close settings" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    pending.unmount();
+
+    render(
+      <LazyDesktopSettings {...settingsProps()} onClose={onClose} loader={async () => { throw new Error("settings chunk unavailable"); }} />,
+    );
+    await screen.findByTestId("error-boundary-settings");
+    await userEvent.click(screen.getByRole("button", { name: "Close settings" }));
+    expect(onClose).toHaveBeenCalledTimes(2);
+  });
+
   it("reopens without the loading skeleton once the chunk has loaded", async () => {
     const first = render(<LazyDesktopSettings {...settingsProps()} />);
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { X } from "lucide-react";
 import { isComposingKey } from "../ui/keys";
 import type {
   CollectionSchema,
@@ -6,7 +7,7 @@ import type {
   ViewKind,
 } from "@dohc/workspace-contracts";
 import { Overlay } from "../Overlay";
-import { DangerButton, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
+import { DangerButton, IconButton, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import { addView, deleteView, renameView } from "./schemaAuthoring";
 import { useSchemaRun, type SchemaApply } from "./FieldsDialog";
 import { inputClass, selectClass } from "./FieldForm";
@@ -123,7 +124,12 @@ export function ViewsDialog(props: {
         data-testid="collection-views-dialog"
         className="dohc-elevated flex w-130 max-w-[85vw] flex-col gap-3 rounded-xl border border-line bg-panel p-5"
       >
-        <h2 className="m-0 text-sm font-semibold text-ink">Views</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="m-0 flex-1 text-sm font-semibold text-ink">Views</h2>
+          <IconButton aria-label="Close" title="Close" onClick={props.onClose}>
+            <X size={14} aria-hidden />
+          </IconButton>
+        </div>
         <div className="flex flex-col gap-1">
           {props.schema.views.length === 0 ? (
             <span className="text-sm text-muted">
