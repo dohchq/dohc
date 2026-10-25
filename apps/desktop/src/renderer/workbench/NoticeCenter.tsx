@@ -1489,9 +1489,6 @@ export function NoticeCenter(props: {
     }
   }
   const latestReaders = useRef(readers);
-  useLayoutEffect(() => {
-    latestReaders.current = readers;
-  });
   // The row the pointer rests on and the row holding focus, each waiting to
   // be read. Closing the panel reads neither.
   const rests = useRef<Record<RestSource, { row: string; timer: ReturnType<typeof setTimeout> } | null>>({ pointer: null, focus: null });
@@ -1500,6 +1497,15 @@ export function NoticeCenter(props: {
     if (rest) clearTimeout(rest.timer);
     rests.current[by] = null;
   };
+  // A row that goes away or is read stops its rest, which a removed row
+  // cannot do by blur or pointer leave. A row that returns waits again.
+  useLayoutEffect(() => {
+    latestReaders.current = readers;
+    for (const by of ["pointer", "focus"] as const) {
+      const row = rests.current[by]?.row;
+      if (row !== undefined && !readers.has(row)) stopRest(by);
+    }
+  });
   useEffect(() => {
     const current = rests.current;
     return () => {

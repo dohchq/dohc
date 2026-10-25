@@ -2040,6 +2040,21 @@ describe("notices sent to you", () => {
       expect(screen.getByTestId("notice-center-toggle").getAttribute("aria-label")).toBe("Notices, 2 unread");
     });
 
+    it("reads nothing when the rested row goes away and returns", () => {
+      const onHideWorkspaceError = vi.fn();
+      const { rerender } = renderNotices(errorProps(onHideWorkspaceError));
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      act(() => screen.getByTestId("notice-e1").focus());
+      act(() => vi.advanceTimersByTime(300));
+      // A removed row gets no blur, so its rest must stop another way.
+      rerender(noticeElement({ ...errorProps(onHideWorkspaceError), workspaceErrors: [] }));
+      act(() => vi.advanceTimersByTime(200));
+      rerender(noticeElement(errorProps(onHideWorkspaceError)));
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(onHideWorkspaceError).not.toHaveBeenCalled();
+      expect(screen.getByTestId("notice-e1-unread")).toBeTruthy();
+    });
+
     it("marks this computer's rows read with Mark all read, and a row that returns is unread again", () => {
       const onHideWorkspaceError = vi.fn();
       const { rerender } = renderNotices(errorProps(onHideWorkspaceError));
