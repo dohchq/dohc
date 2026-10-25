@@ -11,6 +11,7 @@ import { isComposingKey } from "./ui/keys";
 import { FieldTypeIcon } from "./collections/FieldTypeIcon";
 import { AutomationFieldMark, type FieldMarks } from "./collections/collectionFieldMarks";
 import { inputClass, selectClass } from "./collections/FieldForm";
+import { CalendarNeedsDateField } from "./collections/CalendarNeedsDateField";
 import { CollectionAttachmentCell, CollectionAttachmentInput, CollectionRelationInput } from "./CollectionResourceInputs";
 import { TransactionalRecordDetailsDialog } from "./TransactionalRecordDetailsDialog";
 import type { CollectionResources, CollectionResourceScope } from "./transactionalCollectionResources";
@@ -65,6 +66,8 @@ export interface TransactionalCollectionPageProps extends CollectionResources {
   onHistory?(): void;
   onPendingResponses?(): void;
   onReviewSchema?(): void;
+  /** Opens the fields dialog on a new Date field, for a calendar that has none. */
+  onAddDateField?(): void;
   onCustomize?(): void;
   onManageAccess?(): void;
   onExportRecovery?(): void;
@@ -151,6 +154,9 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const [failure, setFailure] = useState<LoadFailure | null>(null);
   const [visualBusy, setVisualBusy] = useState(false), [visualRefresh, setVisualRefresh] = useState(0), [visualChanged, setVisualChanged] = useState(0);
   const visual = selectedView?.kind === "board" || selectedView?.kind === "calendar";
+  // A calendar uses its date field, or the first one when that is gone or was never chosen, so adding a date field shows it.
+  const dateFields = fields.filter(field => field.type === "date");
+  const shownView = selectedView?.kind === "calendar" && !dateFields.some(field => field.fieldId === selectedView.dateField) ? { ...selectedView, dateField: dateFields[0]?.fieldId } : selectedView;
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState<Query>({ after: null, search: "" });
   const [previous, setPrevious] = useState<Array<TransactionalCursor | null>>([]);
@@ -426,10 +432,10 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         const kind = event.target.value as CollectionTableView["kind"];
         setLocalView({viewId:"local",name:"Current view",search:query.search,filters:query.filters??[],sort:query.sort??null,kind,
           ...(kind==="board"?{groupBy:fields.find(field=>field.type==="select")?.fieldId??fields.find(supportsSort)?.fieldId}:{}),
-          ...(kind==="calendar"?{dateField:fields.find(field=>field.type==="date")?.fieldId}:{})});
-      }}><option value="table">Table</option><option value="board" disabled={!fields.some(supportsSort)}>Board</option><option value="calendar" disabled={!fields.some(field=>field.type==="date")}>Calendar</option></select></span>
+          ...(kind==="calendar"?{dateField:dateFields[0]?.fieldId}:{})});
+      }}><option value="table">Table</option><option value="board" disabled={!fields.some(supportsSort)}>Board</option><option value="calendar">Calendar</option></select></span>
       {selectedView?.kind==="board" ? <select aria-label="Group board by" className={selectClass.replace("w-full", "w-auto")} disabled={disabled || editor!==null} value={selectedView.groupBy??""} onChange={event=>setLocalView({...selectedView,groupBy:event.target.value})}>{fields.filter(supportsSort).map(field=><option key={field.fieldId} value={field.fieldId}>{field.name}</option>)}</select> : null}
-      {selectedView?.kind==="calendar" ? <select aria-label="Calendar date" className={selectClass.replace("w-full", "w-auto")} disabled={disabled || editor!==null} value={selectedView.dateField??""} onChange={event=>setLocalView({...selectedView,dateField:event.target.value})}>{fields.filter(field=>field.type==="date").map(field=><option key={field.fieldId} value={field.fieldId}>{field.name}</option>)}</select> : null}
+      {shownView?.kind==="calendar" && shownView.dateField ? <select aria-label="Calendar date" className={selectClass.replace("w-full", "w-auto")} disabled={disabled || editor!==null} value={shownView.dateField} onChange={event=>setLocalView({...shownView,dateField:event.target.value})}>{dateFields.map(field=><option key={field.fieldId} value={field.fieldId}>{field.name}</option>)}</select> : null}
       {onCustomAction ? operations.filter(operation => operation.kind === "action").map(operation => <SecondaryButton key={operation.operationId} disabled={writeDisabled} onClick={() => onCustomAction(operation.operationId)}>{operation.label}</SecondaryButton>) : null}
       {undo && !props.copy?.offline ? <SecondaryButton disabled={writeDisabled} onClick={() => void execute({ ...undo, key: crypto.randomUUID(), label: "Reversed the last edit", undo: true })} className="flex items-center gap-1.5"><Undo2 size={14} strokeWidth={1.9} aria-hidden />Undo last edit</SecondaryButton> : null}
       <form className="ml-auto flex min-w-40 flex-1 items-center gap-1" onSubmit={event => { event.preventDefault(); void load({ ...query, after: null, search }, []); }}>
@@ -457,7 +463,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     {pending && !busy ? <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted"><span>Change not confirmed</span><span>Browse records while you wait. Retry this change before making another.</span><SecondaryButton onClick={() => void execute(pending)}>Try again</SecondaryButton></div> : null}
     {/* Lines stand in only for records not yet shown; a page already shown keeps its records and says it is loading. */}
     {busy ? pending || page ? <p role="status" className="m-0 text-[12px] text-muted">{pending ? "Saving…" : "Loading records…"}</p> : <SkeletonRows label="Loading records…" /> : null}
-    {visual && selectedView ? <Suspense fallback={<SkeletonRows label="Opening view…" />}><TransactionalCollectionViews key={JSON.stringify([activeViewKey,query.search])} view={selectedView} fields={fields} search={query.search} refresh={visualRefresh} changed={visualChanged} onReadInPlace={showOpenRecord}
+    {visual && shownView?.kind === "calendar" && !shownView.dateField ? <CalendarNeedsDateField disabled={writeDisabled || editor !== null} onAddDateField={props.onAddDateField} />
+    : visual && shownView ? <Suspense fallback={<SkeletonRows label="Opening view…" />}><TransactionalCollectionViews key={JSON.stringify([activeViewKey,query.search])} view={shownView} fields={fields} search={query.search} refresh={visualRefresh} changed={visualChanged} onReadInPlace={showOpenRecord}
       disabled={busy || pending !== null || resourceBusy || editor !== null} onBusy={setVisualBusy} onError={failLoad} onLoaded={settle}
       read={(input,signal)=>invoke(request(read,input,crypto.randomUUID()),signal)}
       onOpen={row=>{trigger.current=document.activeElement instanceof HTMLElement ? document.activeElement : null;setDetails(row);}}
