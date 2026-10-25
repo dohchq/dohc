@@ -795,6 +795,40 @@ fn cancelled_chain(
     Ok(())
 }
 
+/// [`require_crossed`] from `from`, or from the generation of the lineage's
+/// accepted tip when that is later. Each accepted event crossed one bounded
+/// chain when it was admitted, so the history through the tip is already
+/// verified, and fence admission keeps the generations since within one chain.
+pub fn require_crossed_since(
+    conn: &Connection,
+    namespace: &str,
+    b: &LiveObjectBinding,
+    from: i64,
+) -> Result<(), ApplicationError> {
+    let from = tip_generation(conn, namespace, b)?.map_or(from, |tip| tip.max(from));
+    if from == b.restore_fence_generation {
+        return Ok(());
+    }
+    require_crossed(conn, namespace, b, from)
+}
+
+/// The generation of `b`'s lineage's accepted tip in `namespace`: its latest
+/// accepted event, or checkpoint, when it has one.
+fn tip_generation(
+    conn: &Connection,
+    namespace: &str,
+    b: &LiveObjectBinding,
+) -> Result<Option<i64>, ApplicationError> {
+    conn.query_row(
+        "SELECT generation FROM (
+            SELECT * FROM (SELECT event_count,json_extract(metadata_json,'$.accepted.binding.restoreFenceGeneration') AS generation FROM live_accepted_updates WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 ORDER BY event_count DESC LIMIT 1)
+            UNION ALL SELECT * FROM (SELECT event_count,json_extract(binding_json,'$.restoreFenceGeneration') FROM live_accepted_checkpoints WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 ORDER BY event_count DESC LIMIT 1)
+         ) ORDER BY event_count DESC LIMIT 1",
+        params![namespace, b.workspace_id, b.main_version_id, b.object_id, b.lineage_claim_id],
+        |r| r.get(0),
+    ).optional().map_err(read_sql)
+}
+
 /// A fence of `b`'s lineage into `new_fence` could end cancelled, and the
 /// lineage's next event would then cross every generation since its accepted
 /// tip. Refuse the fence when [`require_cancelled`] could not read that far.
@@ -804,15 +838,7 @@ pub(super) fn require_chain_room(
     b: &LiveObjectBinding,
     new_fence: i64,
 ) -> Result<(), ApplicationError> {
-    let tip: Option<i64> = conn.query_row(
-        "SELECT generation FROM (
-            SELECT * FROM (SELECT event_count,json_extract(metadata_json,'$.accepted.binding.restoreFenceGeneration') AS generation FROM live_accepted_updates WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 ORDER BY event_count DESC LIMIT 1)
-            UNION ALL SELECT * FROM (SELECT event_count,json_extract(binding_json,'$.restoreFenceGeneration') FROM live_accepted_checkpoints WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 ORDER BY event_count DESC LIMIT 1)
-         ) ORDER BY event_count DESC LIMIT 1",
-        params![namespace, b.workspace_id, b.main_version_id, b.object_id, b.lineage_claim_id],
-        |r| r.get(0),
-    ).optional().map_err(read_sql)?;
-    let tip = tip.unwrap_or(b.restore_fence_generation);
+    let tip = tip_generation(conn, namespace, b)?.unwrap_or(b.restore_fence_generation);
     if new_fence - tip > accepted_history::CHECKPOINT_EVENTS {
         return Err(ApplicationError::Conflict);
     }

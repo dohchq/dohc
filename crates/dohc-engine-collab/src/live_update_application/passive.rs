@@ -6,7 +6,7 @@ use dohc_engine_storage::{FaultAction, FaultPoint};
 #[path = "passive/page_timings.rs"]
 pub mod page_timings;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReplicaAuthority {
     pub lineage_claim_id: String,
@@ -44,13 +44,17 @@ pub struct ReplicaJournalRow {
 /// state and accepted history stay, and no retained work arrives with it.
 /// Before the lineage's first accepted event that endpoint is event zero at
 /// the lineage's initial digest. The replica keeps the record it applied, and
-/// a replay must be that record.
+/// a replay must be that record. `authority` is the document's current
+/// authority when the relay served the page, as a delivery carries it; it can
+/// change between replays, so the replica neither keeps nor compares it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReplicaRestoreCancellation {
     pub relay_database_namespace: String,
     pub journal_cursor: i64,
     pub cancellation: NativeRestoreCancellationReceipt,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authority: Option<ReplicaAuthority>,
 }
 
 /// One entry of a replica page, in journal order.
@@ -119,7 +123,13 @@ pub fn apply_page(
                             return Err(ApplicationError::Conflict);
                         }
                         previous_cursor = record.journal_cursor;
-                        match apply_cancellation(tx, workspace, record)? {
+                        match apply_cancellation(
+                            tx,
+                            workspace,
+                            record,
+                            frontier.log_cursor,
+                            epoch_log_floor,
+                        )? {
                             Control::Applied => result.applied += 1,
                             Control::Skipped => result.skipped += 1,
                             Control::Blocked => {
@@ -140,16 +150,7 @@ pub fn apply_page(
                 let event = &row.admitted;
                 let b = &event.metadata.accepted.binding;
                 let receipt = &event.metadata.accepted.receipt;
-                if let Some(authority) = &row.authority {
-                    digest(&authority.lineage_claim_id)?;
-                    integer(authority.baseline_sequence, 0, SAFE)?;
-                    integer(authority.restore_fence_generation, 0, SAFE)?;
-                    if authority.lineage_claim_id == b.lineage_claim_id
-                        && authority.restore_fence_generation < b.restore_fence_generation
-                    {
-                        return Err(ApplicationError::Conflict);
-                    }
-                }
+                validate_authority(row.authority.as_ref(), b)?;
                 if b.workspace_id != workspace {
                     return Err(ApplicationError::WorkspaceMismatch);
                 }
@@ -166,23 +167,12 @@ pub fn apply_page(
                     .as_ref()
                     .is_some_and(|m| m.lineage_claim_id.as_deref() == Some(&b.lineage_claim_id));
                 let retired = !matches && retired_lineage(tx, b)?;
-                let retired_by_authority = row
-                    .authority
-                    .as_ref()
-                    .is_none_or(|a| a.lineage_claim_id != b.lineage_claim_id)
-                    && !matches
+                let retired_by_authority = !matches
                     && row
                         .authority
                         .as_ref()
-                        .is_none_or(|a| frontier.log_cursor >= a.baseline_sequence);
-                // Epoch-floor skips depend on the relay refusing sessions at/below the floor
-                // and refusing re-registration with a different baseline for the same lineage.
-                let retired_by_epoch = !matches
-                    && row
-                        .authority
-                        .as_ref()
-                        .is_some_and(|a| a.baseline_sequence <= epoch_log_floor);
-                if retained.replay || retired || retired_by_authority || retired_by_epoch {
+                        .is_none_or(|a| retired_by(a, b, frontier.log_cursor, epoch_log_floor));
+                if retained.replay || retired || retired_by_authority {
                     result.skipped += 1;
                 } else if !matches {
                     result.blocked_cursor = Some(row.journal_cursor);
@@ -425,6 +415,41 @@ fn retired_lineage(tx: &Transaction<'_>, b: &LiveObjectBinding) -> Result<bool, 
         params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |r|r.get(0)).map_err(read_sql)
 }
 
+/// The relay's current authority for a document never holds `b`'s lineage at
+/// a generation before `b`'s.
+fn validate_authority(
+    authority: Option<&ReplicaAuthority>,
+    b: &LiveObjectBinding,
+) -> Result<(), ApplicationError> {
+    let Some(authority) = authority else {
+        return Ok(());
+    };
+    digest(&authority.lineage_claim_id)?;
+    integer(authority.baseline_sequence, 0, SAFE)?;
+    integer(authority.restore_fence_generation, 0, SAFE)?;
+    if authority.lineage_claim_id == b.lineage_claim_id
+        && authority.restore_fence_generation < b.restore_fence_generation
+    {
+        return Err(ApplicationError::Conflict);
+    }
+    Ok(())
+}
+
+/// Whether the relay's current authority retires `b`'s lineage, which the
+/// replica does not mark: another lineage whose baseline the replica's log
+/// has reached, or a baseline at or below the epoch floor.
+// Epoch-floor skips depend on the relay refusing sessions at/below the floor
+// and refusing re-registration with a different baseline for the same lineage.
+fn retired_by(
+    authority: &ReplicaAuthority,
+    b: &LiveObjectBinding,
+    log_cursor: i64,
+    epoch_log_floor: i64,
+) -> bool {
+    authority.lineage_claim_id != b.lineage_claim_id && log_cursor >= authority.baseline_sequence
+        || authority.baseline_sequence <= epoch_log_floor
+}
+
 /// Advance the replica's lineage past a cancelled restore. The record must
 /// agree with itself and name this namespace, and the replica must stand at
 /// exactly the fence's old generation and the endpoint the cancellation
@@ -432,11 +457,14 @@ fn retired_lineage(tx: &Transaction<'_>, b: &LiveObjectBinding) -> Result<bool, 
 /// record with the generation it moved; a record sharing its cursor,
 /// operation or lineage generation skips only when it is that record.
 /// Anything else refuses. A lineage the replica once held and no longer
-/// marks skips the record, as its deliveries skip; one it never saw blocks.
+/// marks skips the record, as its deliveries skip, and so does one the
+/// record's authority retires; any other blocks.
 fn apply_cancellation(
     tx: &Transaction<'_>,
     workspace: &str,
     record: &ReplicaRestoreCancellation,
+    log_cursor: i64,
+    epoch_log_floor: i64,
 ) -> Result<Control, ApplicationError> {
     identifier(&record.relay_database_namespace, 512)?;
     integer(record.journal_cursor, 1, SAFE)?;
@@ -447,6 +475,7 @@ fn apply_cancellation(
     let operation = &cancellation.fence.operation;
     let endpoint = &cancellation.endpoint;
     let b = &cancellation.binding;
+    validate_authority(record.authority.as_ref(), b)?;
     let endpoint_cursor = endpoint
         .terminal_receipt
         .as_ref()
@@ -459,7 +488,11 @@ fn apply_cancellation(
     {
         return Err(ApplicationError::Conflict);
     }
-    let json = serde_json::to_string(record).map_err(|_| ApplicationError::Corrupt)?;
+    let kept = ReplicaRestoreCancellation {
+        authority: None,
+        ..record.clone()
+    };
+    let json = serde_json::to_string(&kept).map_err(|_| ApplicationError::Corrupt)?;
     let saved = {
         let mut query = tx.prepare(
             "SELECT record_json FROM replica_restore_cancellations WHERE (relay_database_namespace=?1 AND (journal_cursor=?2 OR operation_id=?3)) \
@@ -486,7 +519,7 @@ fn apply_cancellation(
         for saved in &saved {
             let saved: ReplicaRestoreCancellation =
                 serde_json::from_str(saved).map_err(|_| ApplicationError::Corrupt)?;
-            if saved != *record {
+            if saved != kept {
                 return Err(ApplicationError::Conflict);
             }
         }
@@ -499,7 +532,11 @@ fn apply_cancellation(
         let held: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM replica_documents WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)",
             params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id], |r| r.get(0)).map_err(read_sql)?;
-        return Ok(if held || retired_lineage(tx, b)? {
+        let retired = record
+            .authority
+            .as_ref()
+            .is_some_and(|a| retired_by(a, b, log_cursor, epoch_log_floor));
+        return Ok(if held || retired || retired_lineage(tx, b)? {
             Control::Skipped
         } else {
             Control::Blocked

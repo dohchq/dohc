@@ -405,6 +405,11 @@ fn passive_replica_crosses_a_cancelled_restore_by_its_control_record() {
             },
             recorded_at_ms: 2,
         },
+        authority: Some(ReplicaAuthority {
+            lineage_claim_id: source.binding.lineage_claim_id.clone(),
+            baseline_sequence: 1,
+            restore_fence_generation: 2,
+        }),
     };
     let mut template = first.clone();
     template.admitted.metadata.accepted.binding = stopped;
@@ -491,13 +496,36 @@ fn passive_replica_crosses_a_cancelled_restore_by_its_control_record() {
         0,
         "no retained work arrives"
     );
-    let replay = page(
-        vec![ReplicaJournalEntry::Cancellation(record)],
-        1,
-        &mut replica,
-    )
-    .unwrap();
-    assert_eq!((replay.applied, replay.skipped), (0, 1));
+    // The authority is current when the relay serves the page, so the replica
+    // keeps the record without it, and a replay under a later or no
+    // authority is still that record.
+    let kept: String = replica
+        .read_with(|c| {
+            c.query_row(
+                "SELECT record_json FROM replica_restore_cancellations",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert!(!kept.contains("authority"), "{kept}");
+    let mut later = record.clone();
+    later.authority = Some(ReplicaAuthority {
+        lineage_claim_id: "e".repeat(64),
+        baseline_sequence: 9,
+        restore_fence_generation: 1,
+    });
+    let mut none = record.clone();
+    none.authority = None;
+    for replayed in [record, later, none] {
+        let replay = page(
+            vec![ReplicaJournalEntry::Cancellation(replayed.clone())],
+            1,
+            &mut replica,
+        )
+        .unwrap();
+        assert_eq!((replay.applied, replay.skipped), (0, 1), "{replayed:?}");
+    }
     let mut old = row_with_count(
         &first,
         4,
@@ -564,6 +592,7 @@ fn opening_cancellation(
             },
             recorded_at_ms: cursor,
         },
+        authority: None,
     }
 }
 
@@ -790,6 +819,102 @@ fn passive_cancellation_skips_a_lineage_it_held_and_blocks_one_it_never_saw() {
     }
 }
 
+/// Sol 3 and Opus 1: a cancellation of a lineage the replica never saw, with
+/// no marker, archive or base, skips when its authority retires that
+/// lineage, as a delivery's does: another lineage whose baseline the log has
+/// reached, or a baseline at or below the epoch floor. Rows for another
+/// document then apply on the same page. Without authority, or under
+/// authority that still names the lineage, it blocks at its cursor.
+#[test]
+fn passive_cancellation_of_an_unseen_lineage_skips_by_its_authority() {
+    let mut source = fixture_with_binding_generation(true, None, 1);
+    bootstrap(&mut source, false).unwrap();
+    let unseen = "d".repeat(64);
+    let mut record = opening_cancellation(&source, 1, 1);
+    for binding in [
+        &mut record.cancellation.fence.operation.old_binding,
+        &mut record.cancellation.binding,
+    ] {
+        binding.object_id = "gone".into();
+        binding.lineage_claim_id = unseen.clone();
+    }
+    let baseline = operations(&source.store);
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&source.bytes).unwrap();
+    let previous = initial(&source);
+    let update = counted_row(&mut source, 2, 1, &previous, &doc);
+    let authority = |lineage: &str, baseline: i64| {
+        Some(ReplicaAuthority {
+            lineage_claim_id: lineage.into(),
+            baseline_sequence: baseline,
+            restore_fence_generation: 2,
+        })
+    };
+    let other = "e".repeat(64);
+    for (case, named, log_cursor, floor, skips) in [
+        ("epoch", authority(&other, 1_000_000), 0, 1_000_000, true),
+        ("authority", authority(&other, 999_999), 1_000_000, 0, true),
+        ("none", None, 1_000_000, 1_000_000, false),
+        (
+            "current",
+            authority(&unseen, 1_000_001),
+            1_000_000,
+            0,
+            false,
+        ),
+    ] {
+        let scratch = ScratchDir::new().unwrap();
+        let mut replica =
+            EngineStore::open_passive(&scratch.path().join("replica.db"), 0, None, None).unwrap();
+        copy_blobs(&source.store, &mut replica);
+        deliver(&mut replica, baseline.clone());
+        replica
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_storage::replica::advance_frontiers(tx, "ws", log_cursor, 0)
+            })
+            .unwrap();
+        let mut entry = record.clone();
+        entry.authority = named;
+        let result = dohc_engine_collab::live_update_application::passive::apply_page(
+            &mut replica,
+            "ws",
+            0,
+            floor,
+            &[
+                ReplicaJournalEntry::Cancellation(entry),
+                ReplicaJournalEntry::Update(update.clone()),
+            ],
+            &NoFaults,
+        )
+        .unwrap();
+        let expected = if skips {
+            (1, 1, None, 2)
+        } else {
+            (0, 0, Some(1), 0)
+        };
+        assert_eq!(
+            (
+                result.applied,
+                result.skipped,
+                result.blocked_cursor,
+                result.journal_cursor
+            ),
+            expected,
+            "{case}"
+        );
+        assert_eq!(
+            count(&replica, "live_accepted_updates"),
+            i64::from(skips),
+            "{case}"
+        );
+        assert_eq!(
+            count(&replica, "replica_restore_cancellations"),
+            0,
+            "{case}"
+        );
+    }
+}
+
 /// Fence a restore of `source`'s lineage at `terminal`, cancel it, and
 /// register the lineage again at the generation after, as the host does once
 /// the relay ends a fence nothing applied. Returns the cancellation.
@@ -918,6 +1043,7 @@ fn passive_replica_round_trips_a_cancelled_restore_and_its_audit() {
         relay_database_namespace: "relay".into(),
         journal_cursor: 2,
         cancellation: cancelled,
+        authority: None,
     };
     // The update's audit record names the cancellation exactly.
     let ops = operations(&source.store);
@@ -1470,6 +1596,140 @@ fn a_successors_cancelled_restore_exports_and_imports_with_its_origin() {
     assert_eq!(generations(&refused), vec![Some(0)]);
 }
 
+/// A lineage its source bootstrapped and audited is adopted by an owner on a
+/// hosted store, which fences a restore under its adoption, cancels it, and
+/// accepts the next update. The update's record exports with the adoption
+/// and a fresh passive replica imports it after the source's event zero.
+#[test]
+#[ignore = "adoption republishes event zero instead of continuing the audited origin"]
+fn an_audited_sources_adopted_owner_exports_and_imports_its_cancelled_restore() {
+    use dohc_engine_collab::live_update_application::{
+        ApplicationHostCoordinate, NativeRestoreFence, RestoreDeliveryOrigin,
+        RestoreFenceCancellation, RestoreFenceCancellationOutcome, cancel_restore_fence,
+    };
+    let (mut f, source, _, root) = imported_owner(false, true);
+    let first: LiveUpdateReceipt = f
+        .store
+        .read_with(|c| {
+            c.query_row(
+                "SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch FROM live_device_update_applications WHERE journal_cursor=1",
+                [],
+                |r| {
+                    Ok(LiveUpdateReceipt {
+                        delivery_id: r.get(0)?,
+                        update_digest: r.get(1)?,
+                        journal_cursor: r.get(2)?,
+                        accepting_host_epoch: r.get(3)?,
+                    })
+                },
+            )
+        })
+        .unwrap();
+    let coordinate = ApplicationHostCoordinate {
+        host_id: "service-host".into(),
+        host_epoch: 1,
+        instance_id: "self-host-service".into(),
+        connection_id: "connection".into(),
+    };
+    let pushed = crate::list_replication_ops(&f.store, "ws", "service-origin", -1, 500)
+        .unwrap()
+        .last()
+        .unwrap()
+        .origin_seq;
+    crate::cursor::write_pushed_seq(
+        &mut f.store,
+        "ws",
+        "service-origin",
+        pushed,
+        &NoFaults,
+        &NoLiveLeases,
+        300,
+    )
+    .unwrap();
+    let applied_sequence: i64 = f
+        .store
+        .read_with(|c| {
+            c.query_row(
+                "SELECT local_ydoc_sequence FROM live_device_update_applications WHERE journal_cursor=1",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    let next = f.binding.restore_fence_generation + 1;
+    f._owner
+        .fence_restore(
+            &mut f.store,
+            None,
+            NativeRestoreFence {
+                operation_id: "restore".into(),
+                relay_database_namespace: "relay".into(),
+                old_binding: f.binding.clone(),
+                host_id: coordinate.host_id.clone(),
+                new_fence: next,
+                origin: RestoreDeliveryOrigin::Owner {
+                    id: root.activation_id.clone(),
+                },
+                terminal: Some(first),
+                applied_sequence,
+            },
+            coordinate.clone(),
+            301,
+            &NoFaults,
+        )
+        .unwrap();
+    let cancelled = cancel_restore_fence(
+        &mut f.store,
+        "relay",
+        "ws",
+        &coordinate.host_id,
+        &RestoreFenceCancellation {
+            operation_id: "restore".into(),
+            object_id: "object".into(),
+            lineage_claim_id: f.binding.lineage_claim_id.clone(),
+            host_id: coordinate.host_id.clone(),
+            new_fence: next,
+        },
+        302,
+        &NoFaults,
+    )
+    .unwrap();
+    assert!(matches!(
+        cancelled,
+        RestoreFenceCancellationOutcome::FenceCancelled(_)
+    ));
+    f.binding.restore_fence_generation = next;
+    f.handle = f
+        ._owner
+        .register(&mut f.store, "relay".into(), coordinate, f.binding.clone())
+        .unwrap();
+    let after = dohc_engine_collab::Ydoc::wire();
+    after.apply(&f.bytes).unwrap();
+    after
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "After the cancel.")
+        .unwrap();
+    f.bytes = after.encode_full_state();
+    accept_named_event(&mut f, 2, "after-cancel".into());
+    let ops = crate::list_replication_ops(&f.store, "ws", "service-origin", -1, 500).unwrap();
+    let scratch = ScratchDir::new().unwrap();
+    let path = scratch.path().join("replica.db");
+    let mut replica = EngineStore::open_passive(&path, 0, None, None).unwrap();
+    copy_blobs(&f.store, &mut replica);
+    deliver(&mut replica, operations(&source.store));
+    deliver(&mut replica, ops);
+    let generations = |store: &EngineStore| -> Vec<Option<i64>> {
+        store
+            .read_with(|c| {
+                c.prepare("SELECT restore_generation FROM live_audit_events ORDER BY event_count")?
+                    .query_map([], |r| r.get(0))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap()
+    };
+    assert_eq!(generations(&f.store), vec![Some(0), Some(1)]);
+    assert_eq!(generations(&replica), generations(&f.store));
+}
+
 /// A bootstrap lineage accepts an update, fences and cancels two restores
 /// without settling, then accepts an update at the third generation. Its
 /// settlement covers both updates across the cancellations and keeps the
@@ -1555,6 +1815,73 @@ fn a_settlement_interval_crosses_cancelled_restores_only_through_their_evidence(
         };
         assert_eq!(moment(&replica), moment(&source.store));
     }
+}
+
+/// A lineage cancels more restores than one chain holds, split by accepted
+/// events so each event's span stays within it. The settlement over all three
+/// events and a fresh replica's import of the audit both cross the whole
+/// history, each span from the event before it.
+#[test]
+fn cancellations_beyond_one_chain_settle_and_import_when_events_split_them() {
+    use dohc_engine_collab::live_update_application::MAX_CANCELLED_RESTORES;
+    let spans = [2048, MAX_CANCELLED_RESTORES as i64 + 2 - 2048];
+    let mut source = fixture_with_binding_generation(true, None, 1);
+    bootstrap(&mut source, false).unwrap();
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&source.bytes).unwrap();
+    let mut previous = initial(&source);
+    let mut last = row(&mut source, 1, &previous, &doc);
+    let mut cursor = 1;
+    for (index, span) in spans.into_iter().enumerate() {
+        let terminal = last.admitted.metadata.accepted.receipt.clone();
+        for _ in 0..span {
+            fence_and_cancel(&mut source, terminal.clone());
+        }
+        cursor += span + 1;
+        previous = last.evidence_digest.clone();
+        last = counted_row(&mut source, cursor, index as i64 + 2, &previous, &doc);
+    }
+    assert_eq!(
+        source.binding.restore_fence_generation,
+        1 + spans.iter().sum::<i64>()
+    );
+    assert!(spans.iter().sum::<i64>() > MAX_CANCELLED_RESTORES as i64);
+    settle_through(
+        &mut source,
+        last.admitted.metadata.accepted.receipt.clone(),
+        "crossed",
+    );
+    let (previous_cursor, terminal, applications): (i64, i64, i64) = source
+        .store
+        .read_with(|c| {
+            c.query_row(
+                "SELECT previous_cursor,terminal_cursor,application_count FROM live_device_settlements",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!((previous_cursor, terminal, applications), (0, cursor, 3));
+    let (_scratch, _path, replica) = receiver(&source);
+    let generations = |store: &EngineStore| -> Vec<Option<i64>> {
+        store
+            .read_with(|c| {
+                c.prepare("SELECT restore_generation FROM live_audit_events ORDER BY event_count")?
+                    .query_map([], |r| r.get(0))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap()
+    };
+    assert_eq!(
+        generations(&replica),
+        vec![
+            Some(1),
+            Some(2049),
+            Some(source.binding.restore_fence_generation)
+        ]
+    );
+    assert_eq!(generations(&replica), generations(&source.store));
+    assert_eq!(count(&replica, "live_audit_settlements"), 1);
 }
 
 /// A lineage bound by 100 selector paths, nearly all quotes that escape to

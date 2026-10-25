@@ -854,10 +854,10 @@ fn validate_crossed_binding(
         ..historical.clone()
     };
     validate_historical_binding(&same, current)?;
-    if from != current.restore_fence_generation {
-        restore_fence::require_crossed(conn, namespace, current, from)?;
+    if from > current.restore_fence_generation {
+        return Err(ApplicationError::Conflict);
     }
-    Ok(())
+    restore_fence::require_crossed_since(conn, namespace, current, from)
 }
 
 pub(super) fn latest_receipt(
@@ -924,8 +924,9 @@ fn read_interval(
         .map_err(read_sql)?;
     let mut receipts = Vec::new();
     // An interval can hold applications from before restores cancelled after
-    // their fences; one check crosses from the earliest.
-    let mut earliest = b.restore_fence_generation;
+    // their fences. Each step between applications, and from the last to the
+    // binding, crosses only cancellations; fence admission bounds each step.
+    let mut previous_generation: Option<i64> = None;
     while let Some(row) = rows.next().map_err(read_sql)? {
         if receipts.len() == max {
             return Err(invalid("settlement application limit exceeded"));
@@ -944,11 +945,21 @@ fn read_interval(
         if generation > b.restore_fence_generation {
             return Err(ApplicationError::Conflict);
         }
-        earliest = earliest.min(generation);
         let historical = LiveObjectBinding {
             restore_fence_generation: generation,
             ..same
         };
+        match previous_generation {
+            Some(previous) if previous > generation => return Err(ApplicationError::Conflict),
+            Some(previous) if previous < generation => restore_fence::require_crossed(
+                conn,
+                &registration.namespace,
+                &historical,
+                previous,
+            )?,
+            _ => {}
+        }
+        previous_generation = Some(generation);
         let binding_digest =
             hex_sha256(&serde_json::to_vec(&historical).map_err(|_| ApplicationError::Corrupt)?);
         receipts.push((
@@ -960,8 +971,8 @@ fn read_interval(
             binding_digest,
         ));
     }
-    if earliest != b.restore_fence_generation {
-        restore_fence::require_crossed(conn, &registration.namespace, b, earliest)?;
+    if let Some(last) = previous_generation.filter(|last| *last != b.restore_fence_generation) {
+        restore_fence::require_crossed(conn, &registration.namespace, b, last)?;
     }
     Ok(receipts)
 }

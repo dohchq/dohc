@@ -522,6 +522,103 @@ fn cancellation_proofs_refuse_when_missing_or_altered() {
     cancel_fenced(&mut f, "restore");
 }
 
+/// Sol 1: a restore completes and resumes at generation 1, then one or two
+/// restores fence and cancel. The lineage registers at the last generation,
+/// accepts an update and settles from the completed restore's settlement,
+/// crossing only the cancellations after it.
+#[test]
+fn a_settlement_after_a_completed_restore_crosses_the_cancellations_after_it() {
+    for cancellations in 1..=2 {
+        let mut f = Fixture::new();
+        f.adopt().unwrap();
+        let prep = native_tail_input(&mut f, None, 0);
+        let proposal = native_tail_prepare(&mut f, prep.clone()).unwrap();
+        let input = restore_application(&f, prep, &proposal, 71);
+        let input_receipt = input.admitted.accepted.receipt.clone();
+        apply_restore(&mut f, input.clone()).unwrap();
+        let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
+        let restored = f
+            ._owner
+            .with_restore_settlement(&mut f.store, None, input.clone(), coordinate.clone(), 2_000_000, 100, |store, audit| {
+                restore_content::tests::record_test_projection(store, audit, "resumed-owner")
+            })
+            .unwrap();
+        f._owner
+            .resume_restore(
+                &mut f.store,
+                None,
+                NativeRestoreResume { application: input, settlement_id: restored.settlement_id.clone() },
+                coordinate.clone(),
+                2_000_000,
+                100,
+                100,
+                &NoFaults,
+                |_, _, _, _| Ok(()),
+            )
+            .unwrap();
+        f.binding.restore_fence_generation = 1;
+        f.doc = f.store.read_with(|conn| durable::load_doc_in(conn, &f.key)).unwrap();
+        f.handle = f._owner.register(&mut f.store, "namespace".into(), coordinate.clone(), f.binding.clone()).unwrap();
+        for _ in 0..cancellations {
+            let operation = format!("cancelled-{}", f.binding.restore_fence_generation + 1);
+            fence_next(&mut f, &operation).unwrap();
+            cancel_fenced(&mut f, &operation);
+            f.binding.restore_fence_generation += 1;
+            f.handle = f._owner.register(&mut f.store, "namespace".into(), coordinate.clone(), f.binding.clone()).unwrap();
+        }
+        // Before any update, a settlement at the restore's terminal replays
+        // the restore's own settlement.
+        let saved: (String, String, String) = f
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT moment_id,markdown_digest,source_state_vector_digest FROM live_device_settlements WHERE settlement_id=?1",
+                    [&restored.settlement_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+            })
+            .unwrap();
+        let replayed = with_settlement(
+            &mut f.store,
+            &f.handle,
+            Some(input_receipt.clone()),
+            128,
+            NativeHistoryReconstruction { working_reserve_bytes: 8 * 1024 * 1024 },
+            |store, audit| {
+                let outcome = store.write_with(&NoFaults, |tx| audit.record_in_tx(tx, &saved.0, &saved.1, &saved.2, 30))?;
+                let TxnOutcome::Committed(id) = outcome else {
+                    return Err(ApplicationError::Interrupted);
+                };
+                Ok::<_, ApplicationError>(id)
+            },
+        )
+        .unwrap();
+        assert_eq!(replayed, restored.settlement_id, "{cancellations}: the restore's own settlement");
+        let event = remote_event(&mut f, 80);
+        let terminal = event.metadata.accepted.receipt.clone();
+        assert!(matches!(apply_event(&mut f, event).unwrap(), ApplicationResult::Applied(..)));
+        let settled = settle_as(&mut f, Some(terminal), "after-cancellations").unwrap();
+        assert_eq!(
+            (settled.previous_cursor, settled.terminal_cursor, settled.application_count),
+            (71, 80, 1),
+            "{cancellations}: from the completed restore"
+        );
+        assert!(moment_text(&f, "after-cancellations").contains("Remote paragraph 80"));
+        // The completed restore keeps its own binding and identity.
+        let kept: (String, i64) = f
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT settlement_kind,json_extract(binding_json,'$.restoreFenceGeneration') FROM live_device_settlements WHERE settlement_id=?1",
+                    [&restored.settlement_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(kept, ("restore".to_owned(), 1));
+    }
+}
+
 /// Sol 2: every reader binds a cancellation to the fence row it ends and to
 /// the accepted history at its endpoint. One that names another host, origin
 /// or native head than its fence, or an endpoint the lineage never held,
