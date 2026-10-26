@@ -108,7 +108,7 @@ describe("useSettingsFileNotices", () => {
     expect(result.current.shellErrors).toEqual([]);
   });
 
-  it("shows no row for a read before the engine opened the workspace, and reads again on its activity", async () => {
+  it("shows no row for a read before the engine opened the workspace, reads again on its activity, and Try again clears the row after", async () => {
     const notOpened: WorkspaceSettingsResult = {
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "recovered",
@@ -152,6 +152,12 @@ describe("useSettingsFileNotices", () => {
     // Once a read gets the file, activity reads nothing more.
     expect(listeners.size).toBe(0);
     expect(getWorkspaceSettings).toHaveBeenCalledTimes(3);
+
+    // The person repairs the file; Try again clears its row.
+    getWorkspaceSettings.mockResolvedValue({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored" });
+    act(() => result.current.retryShellError(result.current.shellErrors[0]!.id));
+    await waitFor(() => expect(result.current.shellErrors).toEqual([]));
+    expect(getWorkspaceSettings).toHaveBeenCalledTimes(4);
   });
 
   it("keeps its own read of the opened workspace when Settings reports a read from before the open", async () => {
