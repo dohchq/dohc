@@ -1091,7 +1091,21 @@ async fn running_checkpoint_does_not_exhaust_the_pinned_wal_budget() {
         .await,
         Err(RuntimeError::Storage(StorageError::FileLocked))
     ));
-    token.cancel();
+    // A cancel during the wait wins over a spent budget.
+    since = Some(Instant::now() - Duration::from_secs(2));
+    let cancel = token.clone();
+    assert!(matches!(
+        ActorHandle::wait_undo_checkpoint(
+            &token,
+            &mut since,
+            Arc::new(move || {
+                cancel.cancel();
+                CheckpointWait::Finished
+            })
+        )
+        .await,
+        Err(RuntimeError::Cancelled)
+    ));
     assert!(matches!(
         ActorHandle::wait_undo_checkpoint(&token, &mut since, Arc::new(|| CheckpointWait::Running))
             .await,
