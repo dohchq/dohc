@@ -211,11 +211,21 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   };
 }
 
+// A conversation's latest run, when dohc's restart or quit stopped it.
+interface ChatDispatchStoppedRun {
+  runId: string;
+  triggerMessageId: string;
+  ending: "restarted" | "quit";
+  // Whether Try again can run its request once more.
+  retryable: boolean;
+}
+
 interface ChatDispatchThreadState {
   liveRunId: string | null;
   pendingCount: number;
   paused: boolean;
   pausedReason?: string;
+  stoppedRun?: ChatDispatchStoppedRun;
 }
 
 interface LiveRun {
@@ -1504,9 +1514,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const workspace = options.workspaceFor(workspaceId);
     if (!workspace) throw new Error("This workspace is not open. Open it again.");
     const dispatch = options.dispatchStoreFor(workspace);
-    const [pauseState, pending] = await Promise.all([
+    const [pauseState, pending, stoppedRun] = await Promise.all([
       dispatch.getThreadDispatchPauseState(workspaceId, threadId),
       dispatch.listPending(workspaceId),
+      stoppedRunForThread(workspace, threadId),
     ]);
     const live = liveRuns.get(workspaceId);
     return {
@@ -1520,7 +1531,59 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       ...(pauseState?.paused && pauseState.reason
         ? { pausedReason: pauseState.reason }
         : {}),
+      ...(stoppedRun ? { stoppedRun } : {}),
     };
+  }
+
+  // The one place that decides which run Try again can run again: the
+  // conversation's latest run, while its request is still stopped and the
+  // engine allows it another attempt. Once the request is back in line, the
+  // conversation shows it waiting instead. Runs live in this computer's
+  // engine, so another computer's runs never show here.
+  async function stoppedRunForThread(
+    workspace: ChatDispatchWorkspace,
+    threadId: string,
+  ): Promise<ChatDispatchStoppedRun | null> {
+    const run = await options
+      .dispatchStoreFor(workspace)
+      .latestRunForThread(workspace.workspaceId, threadId);
+    if (!run || run.endedAtMs === undefined) return null;
+    const ending = savedRunOutcome(run);
+    if (ending !== "restarted" && ending !== "quit") return null;
+    const recoveries = (await options.listAppQuitRecoveries?.(workspace)) ?? [];
+    const recovery = recoveries.find((candidate) => candidate.run.runId === run.runId);
+    if (!recovery) return null;
+    return {
+      runId: run.runId,
+      triggerMessageId: run.triggerMessageId,
+      ending,
+      retryable: recovery.attemptCount < 2,
+    };
+  }
+
+  // Try again on a stopped run puts its request back in line. False when
+  // the run can't be tried again any more, as after a second press.
+  async function retryStoppedRun(
+    workspaceId: string,
+    threadId: string,
+    runId: string,
+  ): Promise<boolean> {
+    return await enqueue(workspaceId, async () => {
+      const workspace = options.workspaceFor(workspaceId);
+      if (!workspace) throw new Error("This workspace is not open. Open it again.");
+      const stopped = await stoppedRunForThread(workspace, threadId);
+      if (stopped?.runId !== runId || !stopped.retryable) return false;
+      const requeued = (await options.requeueFailedTrigger?.({
+        workspaceId,
+        ...(workspace.attachmentId ? { attachmentId: workspace.attachmentId } : {}),
+        triggerMessageId: stopped.triggerMessageId,
+        runId,
+      })) === true;
+      if (!requeued) return false;
+      notifyRunUpdated(workspace);
+      await scanAndDrain(workspace);
+      return true;
+    });
   }
 
   async function runnerSelfTest(
@@ -1879,6 +1942,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     trustChanged,
     resumeThreadDispatch,
     dispatchStateForThread,
+    retryStoppedRun,
     runnerSelfTest,
     setPaused,
     isPaused: () => paused,

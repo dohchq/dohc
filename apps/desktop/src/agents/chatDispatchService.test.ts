@@ -2709,6 +2709,93 @@ describe("chatDispatchService", () => {
     ]);
   });
 
+  describe("Try again on a run dohc's restart or quit stopped", () => {
+    // A run of the conversation's request that dohc stopped before the
+    // next startup.
+    async function stoppedRun(fixture: Fixture, ending: "restarted" | "quit", body = "Plan day 2.") {
+      const trigger = await createAgentThread(fixture, { body, authorUserId: "user_local" });
+      await fixture.dispatch.recordTrigger({
+        workspaceId: WORKSPACE_ID, triggerMessageId: trigger.messageId, threadId: trigger.threadId,
+      });
+      const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { command: "claude -p" });
+      if (!claim) throw new Error("Expected a run.");
+      if (ending === "quit") {
+        await fixture.dispatch.failRun({ runId: claim.run.runId, exitCode: APP_QUIT_EXIT_CODE, reason: "app-quit" });
+      }
+      return { ...trigger, runId: claim.run.runId };
+    }
+    const stateOf = async (fixture: Fixture, threadId: string) =>
+      (await fixture.service.dispatchStateForThread(WORKSPACE_ID, threadId)).stoppedRun;
+
+    it.each(["restarted", "quit"] as const)("runs the request of a run stopped when dohc %s once more", async (ending) => {
+      const fixture = await createFixture();
+      const run = await stoppedRun(fixture, ending);
+      await activate(fixture);
+      expect(fixture.spawnCalls).toEqual([]);
+      expect(await stateOf(fixture, run.threadId)).toEqual({
+        runId: run.runId, triggerMessageId: run.messageId, ending, retryable: true,
+      });
+
+      await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, run.runId)).resolves.toBe(true);
+      expect(fixture.spawnCalls).toHaveLength(1);
+      expect(fixture.spawnCalls[0]!.options.env.DOHC_CHAT_THREAD).toBe(run.threadId);
+      expect(await stateOf(fixture, run.threadId)).toBeUndefined();
+      // A second press finds nothing to run again.
+      await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, run.runId)).resolves.toBe(false);
+      expect(fixture.spawnCalls).toHaveLength(1);
+      expect(fixture.requeues).toHaveLength(1);
+    });
+
+    it("offers it only on the conversation's latest run", async () => {
+      const fixture = await createFixture({ restricted: true });
+      const run = await stoppedRun(fixture, "restarted");
+      await activate(fixture);
+      await fixture.dispatch.recordTrigger({
+        workspaceId: WORKSPACE_ID, triggerMessageId: "later_request", threadId: run.threadId,
+      });
+      const later = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { command: "claude -p" });
+      if (!later) throw new Error("Expected a later run.");
+      await fixture.dispatch.completeRun({ runId: later.run.runId, exitCode: 0 });
+
+      expect(await stateOf(fixture, run.threadId)).toBeUndefined();
+      await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, run.runId)).resolves.toBe(false);
+      expect(fixture.requeues).toEqual([]);
+    });
+
+    it("keeps the words but not the button once the request has had its second attempt", async () => {
+      const fixture = await createFixture({ restricted: true });
+      const run = await stoppedRun(fixture, "restarted");
+      await activate(fixture);
+      await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, run.runId)).resolves.toBe(true);
+      const second = await fixture.dispatch.claimNextPending(WORKSPACE_ID, { command: "claude -p" });
+      if (!second) throw new Error("Expected the second attempt.");
+      await fixture.dispatch.failRun({ runId: second.run.runId, exitCode: APP_QUIT_EXIT_CODE, reason: "app-quit" });
+
+      expect(await stateOf(fixture, run.threadId)).toEqual({
+        runId: second.run.runId, triggerMessageId: run.messageId, ending: "quit", retryable: false,
+      });
+      await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, second.run.runId)).resolves.toBe(false);
+      expect(fixture.requeues).toHaveLength(1);
+    });
+
+    it("in Restricted Mode puts the request back in line but starts no agent until the workspace is trusted", async () => {
+      const fixture = await createFixture({ restricted: true });
+      const run = await stoppedRun(fixture, "quit");
+      await activate(fixture);
+
+      await expect(fixture.service.retryStoppedRun(WORKSPACE_ID, run.threadId, run.runId)).resolves.toBe(true);
+      expect(fixture.spawnCalls).toEqual([]);
+      expect((await fixture.dispatch.listPending(WORKSPACE_ID)).map((record) => record.triggerMessageId))
+        .toEqual([run.messageId]);
+      expect(await stateOf(fixture, run.threadId)).toBeUndefined();
+
+      await fixture.trust.trust(fixture.workspace);
+      await fixture.service.scanWorkspace(WORKSPACE_ID);
+      expect(fixture.spawnCalls).toHaveLength(1);
+      expect(fixture.spawnCalls[0]!.options.env.DOHC_CHAT_THREAD).toBe(run.threadId);
+    });
+  });
+
   it("flushes a live run for next-boot recovery without posting during quit", async () => {
     vi.useFakeTimers();
     const fixture = await createFixture();

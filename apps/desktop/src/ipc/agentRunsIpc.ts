@@ -6,7 +6,8 @@ import {
   EndAgentRunPayload, StartAgentRunResult, AgentRunStatusResult, McpConfigResult,
   StopAgentRunPayload,
   ChatDispatchStateForThreadPayload, ChatDispatchStateForThreadResult,
-  ResumeThreadDispatchPayload, RunnerSelfTestPayload, RunnerSelfTestResult,
+  ResumeThreadDispatchPayload, RetryStoppedRunPayload, RetryStoppedRunResult,
+  RunnerSelfTestPayload, RunnerSelfTestResult,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
 import { AgentToolsResult } from "../agents/agentToolCatalog";
@@ -45,7 +46,7 @@ export function createAgentRunsIpc<
   senderWorkspaceAuthority: {
     withActiveWorkspace<Result>(sender: Sender, workspaceId: string, subject: string, work: () => Promise<Result>): Promise<Result>;
   };
-  chatDispatchService: Pick<ChatDispatchService, "stopAgentRun" | "dispatchStateForThread" | "resumeThreadDispatch" | "runnerSelfTest">;
+  chatDispatchService: Pick<ChatDispatchService, "stopAgentRun" | "dispatchStateForThread" | "resumeThreadDispatch" | "retryStoppedRun" | "runnerSelfTest">;
   assertWritableWorkspace(workspace: Workspace): void;
   openWorkspaceActivity(workspace: Workspace): Promise<unknown>;
   detectAgentTools(workspaceRoot: string, signal: AbortSignal): Promise<AgentToolsResult["tools"]>;
@@ -186,6 +187,22 @@ export function createAgentRunsIpc<
         input.workspaceId,
         input.threadId,
       );
+    }));
+
+    registerHandler(CHANNELS.retryStoppedRun, workspaceHandler(async (event, payload) => {
+      const input = RetryStoppedRunPayload.parse(payload);
+      const { workspace } = await requireEngineCapture(
+        input.workspaceId,
+        "Chats",
+      );
+      assertWritableWorkspace(workspace);
+      return RetryStoppedRunResult.parse({
+        queued: await chatDispatchService.retryStoppedRun(
+          input.workspaceId,
+          input.threadId,
+          input.runId,
+        ),
+      });
     }));
 
     registerHandler(CHANNELS.runnerSelfTest, async (event, payload) => {

@@ -306,6 +306,7 @@ export const CHANNELS = {
   getMcpConfig: "desktop:get-mcp-config",
   stopAgentRun: "desktop:stop-chat-agent-run",
   resumeThreadDispatch: "desktop:resume-thread-dispatch",
+  retryStoppedRun: "desktop:retry-stopped-run",
   chatDispatchStateForThread: "desktop:chat-dispatch-state-for-thread",
   runnerSelfTest: "desktop:runner-self-test",
   detectAgentTools: "desktop:detect-agent-tools",
