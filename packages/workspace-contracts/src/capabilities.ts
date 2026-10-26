@@ -37,6 +37,7 @@ export const CAPABILITIES = {
   "settings.user.write": capability("Save changes to this computer's user settings.", {ipc: ["setUserSettings"]}),
   "agent.color.set": capability("Choose a personal color for an agent shown in the admitted workspace.", {ipc: ["setAgentColor"]}),
   "app.pin.set": capability("Pin or unpin an app in this computer's sidebar.", {ipc: ["setAppPinned"]}),
+  "settings.agents.order": capability("Change the order of the agents in this computer's user settings.", {ipc: ["orderAgents"]}),
   "settings.user.reset": capability("Reset this computer's user settings.", {ipc: ["resetUserSettings"]}),
   "settings.user.path.read": capability("Read the path of this computer's user settings file.", {ipc: ["getUserSettingsFilePath"]}),
   "settings.user.file.open": capability("Open this computer's user settings file in the system editor.", {ipc: ["openUserSettingsFile"]}),

@@ -112,6 +112,8 @@ function StatusPill(props: { state: SettingsSaveState }) {
 export function SettingsDialog(props: {
   // `details` are facts for Copy details, one line each.
   onError?: (message: string, cause?: unknown, retry?: () => Promise<void>, details?: ReadonlyArray<ErrorDetailField>) => void;
+  /** A change that went through, with its Undo. */
+  onNotice?: (message: string, undo?: () => void) => void;
   /** Each workspace settings answer, so the shell can say what the file ignored. */
   onWorkspaceSettingsRead?: (read: WorkspaceSettingsResult) => void;
   workspaceId: string;
@@ -349,6 +351,26 @@ export function SettingsDialog(props: {
       return false;
     }
   }, [markSaved, markSaving, props.onError, userResult]);
+
+  // Moves agents to the front of the file. A later save outranks it, as saves do.
+  const orderAgents = useCallback(async (order: readonly string[]): Promise<boolean> => {
+    const requestId = userSaveRequestRef.next();
+    markSaving();
+    setError(null);
+    try {
+      const saved = await bridge().orderAgents({ order: [...order] });
+      if (!userSaveRequestRef.isCurrent(requestId)) return true;
+      setUserResult(saved);
+      markSaved();
+      return true;
+    } catch (cause) {
+      if (!userSaveRequestRef.isCurrent(requestId)) return false;
+      setSaveState("error");
+      setError(ipcErrorMessage(cause));
+      props.onError?.(ipcErrorMessage(cause, "dohc could not save your settings."), cause);
+      return false;
+    }
+  }, [markSaved, markSaving, props.onError]);
 
   // Takes the changed controls, not the whole file. Main merges them onto the
   // settings on disk, so an edit made outside this dialog (or a file the user
@@ -811,6 +833,8 @@ export function SettingsDialog(props: {
               settings={userSettings}
               agentProblems={userResult?.agentProblems}
               onSave={saveUserSettings}
+              onOrder={orderAgents}
+              {...(props.onNotice ? { onNotice: props.onNotice } : {})}
               onOpenSettingsFile={() => void openSettingsFile()}
               sharedView={props.sharedView}
               sessionRecorderOn={props.sessionRecorderOn}

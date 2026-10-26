@@ -2069,6 +2069,13 @@ export function DesktopWorkspaceShell(props: {
     },
     [workspaceAdmission, workspaceId, reportShellFailure],
   );
+  const showSettingsNotice = useCallback(
+    (message: string, undo?: () => void) => {
+      if (workspaceAdmission.superseded || workspaceIdRef.current !== workspaceId) return;
+      showSuccessNotice(message, undo);
+    },
+    [workspaceAdmission, workspaceId, showSuccessNotice],
+  );
   useUsageRecordStops(reportSettingsFailure);
 
   const refreshHistory = useCallback(async () => {
@@ -6923,6 +6930,7 @@ export function DesktopWorkspaceShell(props: {
             workspaceIsReady={workspaceIsReady}
             workspaceOpenFailed={!!workspaceOpenFailure}
             onError={reportSettingsFailure}
+            onNotice={showSettingsNotice}
             onWorkspaceSettingsRead={onWorkspaceSettingsRead}
             workspaceId={workspaceId}
             workspacePath={props.workspace.rootPath}

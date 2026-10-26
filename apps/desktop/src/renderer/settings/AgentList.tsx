@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { Check, CircleAlert, FilePenLine, ListCollapse, LoaderCircle, Monitor, Pause, Pencil, Play, Plug, Plus, TriangleAlert } from "lucide-react";
+import { Check, CircleAlert, FilePenLine, ListCollapse, LoaderCircle, Monitor, Pause, Pencil, Play, Plug, Plus, Trash2, TriangleAlert, Workflow } from "lucide-react";
 import { MAX_PREFERRED_NAME_LENGTH, preferredNameFromInput } from "@dohc/workspace-contracts/chat-identity-values";
 import { AGENT_TOOLS, supportsAgentProfile, type AgentToolsResult } from "../../agents/agentToolCatalog";
 import type { ActorPresentation, McpConfigResult } from "../../ipc/bridgeContract";
 import { withErrorWords } from "../../ipc/errorWords";
 import {
   agentNameTaken,
+  automationAgent,
   listAgents,
   newAgentDefaults,
   newAgentId,
@@ -23,11 +24,11 @@ import type { ErrorDetailField } from "../shell/copyDetails";
 import { CopyButton } from "../ui/CopyButton";
 import { SecondaryButton } from "../ui/controls";
 import { isComposingKey } from "../ui/keys";
-import { Menu } from "../ui/Menu";
+import { Menu, MENU_SEPARATOR } from "../ui/Menu";
 import { useChatDispatchPaused } from "../useChatDispatchPaused";
 import { useRequestSequence } from "../useRequestSequence";
 import { ownPresentation } from "../workbench/actorPresentation";
-import { ChatAvatar } from "../workbench/ChatAvatar";
+import { ChatAvatar, useAgentInk } from "../workbench/ChatAvatar";
 import { AgentDetails } from "./AgentDetails";
 import { SwitchControl } from "./SettingRow";
 
@@ -76,7 +77,7 @@ const ROW = "border-b border-line last:border-b-0";
 const ROW_LINE = "flex items-center gap-3 py-4";
 const STATE = "m-0 mt-1 flex items-center gap-1 text-[12px]";
 const TILE_LINE = "mt-0.5 flex items-center gap-1 text-[12px]";
-const ROW_BUTTON = "inline-flex shrink-0 items-center gap-1.5";
+const BUTTON_ICON = "inline-flex shrink-0 items-center gap-1.5";
 // Holds the place of a control the row does not have, so every row's controls line up.
 const switchSpace = <span aria-hidden className="h-5 w-9 shrink-0" />;
 const menuSpace = <span aria-hidden className="size-6 shrink-0" />;
@@ -155,6 +156,16 @@ function AgentNameField(props: {
   </>;
 }
 
+// The agent automations wake, in its hue on a 14% tint.
+function AutomationChip(props: { hue: AgentHue | undefined }) {
+  const ink = useAgentInk(presentationFor(props.hue));
+  return (
+    <span data-testid="agent-for-automations" className={`inline-flex h-5 shrink-0 items-center gap-1 rounded-full bg-current/14 pl-[5px] pr-[7px] text-[11px] font-medium ${ink}`}>
+      <Workflow size={12} aria-hidden />For automations
+    </span>
+  );
+}
+
 function AgentRow(props: {
   agent: Agent;
   agents: DesktopUserSettings["agents"];
@@ -166,6 +177,10 @@ function AgentRow(props: {
   tools: AgentToolsResult | null;
   editing: boolean;
   onEditingChange: (editing: boolean) => void;
+  forAutomations: boolean;
+  // Absent on the agent automations already wake, and on one dohc cannot start.
+  onUseForAutomations?: () => void;
+  onRemove: () => void;
   onCheck: () => void;
   onRename: (name: string) => Promise<boolean>;
   onChange: (change: (agent: AgentSettings) => AgentSettings) => void;
@@ -206,6 +221,7 @@ function AgentRow(props: {
               >
                 {agent.name}
               </button>
+              {props.forAutomations ? <AutomationChip hue={agent.hue} /> : null}
             </div>
           )}
           {editing ? null : state}
@@ -217,7 +233,7 @@ function AgentRow(props: {
               disabled={!props.canCheck}
               title={props.checkNote ?? undefined}
               onClick={props.onCheck}
-              className={ROW_BUTTON}
+              className={BUTTON_ICON}
             >
               {props.check?.status === "failed" && !props.checking ? "Try again" : "Check"}
             </SecondaryButton>
@@ -231,9 +247,15 @@ function AgentRow(props: {
             testId="agent-menu"
             open={menuOpen}
             onOpenChange={setMenuOpen}
+            width={200}
             items={[
+              ...(props.onUseForAutomations
+                ? [{ id: "automations", label: "Use for automations", icon: <Workflow size={14} aria-hidden />, onSelect: props.onUseForAutomations }]
+                : []),
               { id: "rename", label: "Rename", icon: <Pencil size={14} aria-hidden />, onSelect: () => setEditing(true) },
               { id: "details", label: detailsOpen ? "Hide details" : "Details", icon: <ListCollapse size={14} aria-hidden />, onSelect: () => setDetailsOpen((open) => !open) },
+              MENU_SEPARATOR,
+              { id: "remove", label: "Remove", icon: <Trash2 size={14} aria-hidden />, danger: true, onSelect: props.onRemove },
             ]}
           />
         </div>
@@ -299,7 +321,7 @@ function BrokenAgentRow(props: { problem: AgentProblem; onOpenSettingsFile: () =
         </p>
       </div>
       <div className="ml-auto flex shrink-0 items-center gap-2">
-        <SecondaryButton onClick={props.onOpenSettingsFile} className={ROW_BUTTON}>
+        <SecondaryButton onClick={props.onOpenSettingsFile} className={BUTTON_ICON}>
           <FilePenLine size={14} aria-hidden />Open settings file
         </SecondaryButton>
         <SwitchControl label={`Turn on ${name}`} checked={false} disabled onChange={() => undefined} />
@@ -323,10 +345,16 @@ export function AgentList(props: {
   sessionRecorderOn: boolean | undefined;
   // Answers whether the settings saved; a failed save says why in Notices.
   onSave: (settings: DesktopUserSettings) => Promise<boolean>;
+  // Moves these entries to the front of the file; answers whether it saved.
+  onOrder: (order: readonly string[]) => Promise<boolean>;
   onOpenSettingsFile: () => void;
   onError?: (message: string, cause?: unknown, retry?: undefined, details?: ReadonlyArray<ErrorDetailField>) => void;
+  onNotice?: (message: string, undo?: () => void) => void;
 }) {
-  const { workspaceId, settings, onSave, onError } = props;
+  const { workspaceId, settings, onSave, onOrder, onError, onNotice } = props;
+  // An Undo can come after later changes, so it starts from the settings as they are then.
+  const latest = useRef(settings);
+  latest.current = settings;
   const paused = useChatDispatchPaused((cause) =>
     onError?.(withErrorWords("dohc could not read whether agent dispatch is paused.", cause), cause));
   const [checking, setChecking] = useState<string | null>(null);
@@ -359,6 +387,10 @@ export function AgentList(props: {
 
   const rows = agentListRows(settings, props.agentProblems);
   const anyLaunch = rows.some((row) => row.kind === "agent" && row.agent.launch !== undefined);
+  // The chip shows only when there is more than one agent to choose from.
+  const automation = automationAgent(settings);
+  const choosing = rows.filter((row) => row.kind === "agent" && row.agent.launch !== undefined).length > 1;
+  const fileOrder = rows.map((row) => (row.kind === "agent" ? row.agent.id : row.problem.id));
   const checkNote = runnerEngineNote(Boolean(props.sharedView), props.sessionRecorderOn);
   const config = props.config;
 
@@ -401,6 +433,24 @@ export function AgentList(props: {
     if (saved && agent.launch && !paused && checkNote === null) void check({ id, ...agent });
   };
 
+  // Automations wake the first agent dohc can start, so this one moves to the top.
+  const wakeForAutomations = async (agent: Agent) => {
+    const previous = fileOrder;
+    if (await onOrder([agent.id])) onNotice?.(`Automations now wake ${agent.name}.`, () => void onOrder(previous));
+  };
+
+  // Undo puts the agent back where it was, under the name and settings it had.
+  const remove = async (agent: Agent) => {
+    const previous = fileOrder;
+    const { [agent.id]: entry, ...agents } = settings.agents;
+    if (!entry || !(await onSave({ ...settings, agents }))) return;
+    if (renaming === agent.id) setRenaming(null);
+    onNotice?.(`Removed ${agent.name}.`, () => void (async () => {
+      const current = latest.current;
+      if (await onSave({ ...current, agents: { ...current.agents, [agent.id]: entry } })) await onOrder(previous);
+    })());
+  };
+
   const setPaused = (next: boolean) => {
     void bridge().setChatDispatchPaused({ paused: next }).catch((cause: unknown) => onError?.(
       withErrorWords(next ? "dohc could not pause agent dispatch." : "dohc could not resume agent dispatch.", cause),
@@ -424,7 +474,7 @@ export function AgentList(props: {
           <SecondaryButton
             data-testid="agents-pause"
             onClick={() => setPaused(!paused)}
-            className={ROW_BUTTON}
+            className={BUTTON_ICON}
           >
             {paused ? <Play size={14} aria-hidden /> : <Pause size={14} aria-hidden />}
             {paused ? "Resume" : "Pause all"}
@@ -456,6 +506,11 @@ export function AgentList(props: {
             tools={tools}
             editing={renaming === row.agent.id}
             onEditingChange={(editing) => setRenaming(editing ? row.agent.id : null)}
+            forAutomations={choosing && automation?.id === row.agent.id}
+            {...(row.agent.launch && automation?.id !== row.agent.id
+              ? { onUseForAutomations: () => void wakeForAutomations(row.agent) }
+              : {})}
+            onRemove={() => void remove(row.agent)}
             onCheck={() => void check(row.agent)}
             onRename={(name) => onSave(withAgent(settings, row.agent.id, (agent) => ({ ...agent, name })))}
             onChange={(change) => void onSave(withAgent(settings, row.agent.id, change))}

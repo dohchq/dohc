@@ -46,12 +46,14 @@ function renderList(fields: Partial<Parameters<typeof AgentList>[0]> = {}) {
   const onSave = vi.fn(async (_settings: DesktopUserSettings) => true);
   const onError = vi.fn();
   const onOpenSettingsFile = vi.fn();
+  const onOrder = vi.fn(async (_order: readonly string[]) => true);
+  const onNotice = vi.fn((_message: string, _undo?: () => void) => undefined);
   const list = (more: Partial<Parameters<typeof AgentList>[0]> = {}) => (
     <AgentList workspaceId="ws-1" settings={SETTINGS} config={null} sessionRecorderOn
-      onSave={onSave} onError={onError} onOpenSettingsFile={onOpenSettingsFile} {...fields} {...more} />
+      onSave={onSave} onOrder={onOrder} onError={onError} onNotice={onNotice} onOpenSettingsFile={onOpenSettingsFile} {...fields} {...more} />
   );
   const { rerender } = render(list());
-  return { onSave, onError, onOpenSettingsFile, rerender: (more: Partial<Parameters<typeof AgentList>[0]>) => rerender(list(more)) };
+  return { onSave, onOrder, onNotice, onError, onOpenSettingsFile, rerender: (more: Partial<Parameters<typeof AgentList>[0]>) => rerender(list(more)) };
 }
 
 const row = (name: string) => screen.getByRole("button", { name: `Rename ${name}` }).closest<HTMLElement>("[data-agent-id]")!;
@@ -233,4 +235,42 @@ it("says so when dohc could not look for tools, and stops looking", async () => 
   await vi.waitFor(() => expect(onError).toHaveBeenCalled());
   expect(within(tile("Add Codex")).queryByLabelText("Looking for Codex")).toBeNull();
   expect(tile("Add Codex").disabled).toBe(true);
+});
+
+it("marks the agent automations wake, and moves another one there with Undo", async () => {
+  const { onOrder, onNotice } = renderList({ agentProblems: [BROKEN] });
+  expect(screen.getAllByTestId("agent-for-automations")).toHaveLength(1);
+  expect(within(row("Claude Code")).getByTestId("agent-for-automations").textContent).toBe("For automations");
+  // Not on the agent automations already wake, nor on one dohc cannot start.
+  for (const name of ["Claude Code", "Claude in Terminal"]) {
+    await userEvent.click(screen.getByRole("button", { name: `${name} actions` }));
+    expect(screen.queryByRole("menuitem", { name: "Use for automations" })).toBeNull();
+    await userEvent.keyboard("{Escape}");
+  }
+  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
+  expect(screen.getAllByRole("menuitem")[0]!.textContent).toBe("Use for automations");
+  await userEvent.click(screen.getByRole("menuitem", { name: "Use for automations" }));
+  expect(onOrder).toHaveBeenCalledWith(["codex"]);
+  await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Automations now wake Codex.", expect.any(Function)));
+  onNotice.mock.calls[0]![1]!();
+  // Undo puts back the whole order, the broken entry's place too.
+  expect(onOrder).toHaveBeenLastCalledWith(["default", "codex-two", "codex", "terminal"]);
+});
+
+it("shows no automations chip while only one agent can be started", () => {
+  renderList({ settings: { ...SETTINGS, agents: { default: SETTINGS.agents.default!, terminal: mcpOnly } } });
+  expect(screen.queryByTestId("agent-for-automations")).toBeNull();
+});
+
+it("removes an agent, and Undo puts it back where it was", async () => {
+  const { onSave, onOrder, onNotice, rerender } = renderList();
+  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  const saved = onSave.mock.calls[0]![0];
+  expect(Object.keys(saved.agents)).toEqual(["default", "terminal"]);
+  await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
+  rerender({ settings: saved });
+  onNotice.mock.calls[0]![1]!();
+  await vi.waitFor(() => expect(onOrder).toHaveBeenCalledWith(["default", "codex", "terminal"]));
+  expect(onSave.mock.calls[1]![0].agents).toEqual({ ...saved.agents, codex: SETTINGS.agents.codex });
 });

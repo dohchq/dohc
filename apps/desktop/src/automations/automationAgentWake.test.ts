@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { AUTOMATION_NO_RUNNER, wakeAgent, type AgentWakeDependencies } from "./automationAgentWake";
+import { AUTOMATION_NO_RUNNER, wakeAgent, wokenAgent, type AgentWakeDependencies } from "./automationAgentWake";
+import { testAgent } from "../testing/agentSettings";
 import type { AutomationChatMessage } from "@dohc/automation-executor/automation-chat";
 
 const message: AutomationChatMessage = {
@@ -69,6 +70,15 @@ describe("waking a person's agent", () => {
     if (existing) expect(wake.send).toHaveBeenCalledWith({ message: expected });
     else expect(wake.start).toHaveBeenCalledWith({ channelId: "agent-channel", message: expected });
     expect(input.body).toBe(body);
+  });
+
+  it("wakes the first agent dohc can start, and does not pass over one that is off", async () => {
+    const { launch: _launch, ...mcpOnly } = testAgent({ name: "Terminal" });
+    const settings = { agents: { terminal: mcpOnly, codex: testAgent({ name: "Codex", enabled: false }), claude: testAgent({ name: "Claude Code" }) } };
+    const wake = dependencies({ readyAgent: vi.fn(async () => wokenAgent(settings)) });
+    await wakeAgent(wake, message);
+    expect(wake.agentChannelId).toHaveBeenCalledWith({ id: "codex", name: "Codex" });
+    expect(wake.recordTrigger).toHaveBeenCalledWith({ triggerMessageId: "message-auto-1", threadId: "thread-auto-wake", agentId: "codex" });
   });
 
   it("fails before writing when no agent runner is set up", async () => {

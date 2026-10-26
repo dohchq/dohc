@@ -17,6 +17,7 @@ import {
   agentMentionCandidates,
   agentNameTaken,
   agentProblem,
+  automationAgent,
   listAgents,
   newAgentHue,
   newAgentId,
@@ -33,6 +34,7 @@ import {
   readUserSettingsFile,
   reloadUserSettingsFile,
   replaceUserSettingsFile,
+  orderUserSettingsAgents,
   USER_SETTINGS_FILE,
   writeUserSettingsFile,
 } from "./userSettingsStore";
@@ -269,6 +271,13 @@ describe("desktop user settings model", () => {
     expect(agentNameTaken(agents, "codex", "Nova")).toBe(true);
     expect(agentNameTaken(agents, "codex", "Codex")).toBe(false);
     expect(agentNameTaken(agents, "default", "Claude Code")).toBe(false);
+  });
+
+  it("has automations wake the first agent dohc can start, even one that is off", () => {
+    const { launch: _launch, ...mcpOnly } = testAgent({ name: "Terminal" });
+    const agents = { terminal: mcpOnly, off: testAgent({ name: "Off", enabled: false }), on: testAgent({ name: "On" }) };
+    expect(automationAgent({ agents })?.id).toBe("off");
+    expect(automationAgent({ agents: { terminal: mcpOnly } })).toBeNull();
   });
 
   it("gives the first agent the default id, and each next one an id and a name no agent has", () => {
@@ -785,4 +794,33 @@ it("keeps public ignored-key notices after many invalid private colours", async 
       agentColors: Object.fromEntries(Array.from({ length: 60 }, (_, n) => [String(n), "olive"])) },
     unknownSetting: true }));
   expect((await readUserSettingsFile(dir)).ignored).toEqual([{ key: "unknownSetting", reason: "unknown" }]);
+});
+
+it("moves agents to the front of the file and keeps every other entry, a broken one too, in its place", async () => {
+  const dir = await createTestScratch("dohc-user-settings-order-");
+  const path = join(dir, USER_SETTINGS_FILE);
+  await writeFile(path, JSON.stringify({
+    ...DEFAULT_USER_SETTINGS,
+    agents: { default: testAgent({ name: "Claude Code" }), broken: { name: 7 }, codex: testAgent({ name: "Codex" }), extra: testAgent({ name: "Extra" }) },
+    unknownSetting: true,
+  }));
+  const fileAgents = async () => Object.keys(JSON.parse(await readFile(path, "utf8")).agents);
+  const moved = await orderUserSettingsAgents(dir, ["codex", "missing"]);
+  expect(Object.keys(moved.settings.agents)).toEqual(["codex", "default", "extra"]);
+  expect(await fileAgents()).toEqual(["codex", "default", "broken", "extra"]);
+  const raw = JSON.parse(await readFile(path, "utf8"));
+  expect(raw.agents.broken).toEqual({ name: 7 });
+  expect(raw.unknownSetting).toBe(true);
+  // Undo passes the order the file had.
+  await orderUserSettingsAgents(dir, ["default", "broken", "codex", "extra"]);
+  expect(await fileAgents()).toEqual(["default", "broken", "codex", "extra"]);
+});
+
+it("takes an agent out of the file when a save leaves it out", async () => {
+  const dir = await createTestScratch("dohc-user-settings-remove-");
+  const base = { ...DEFAULT_USER_SETTINGS, agents: { default: testAgent({ name: "Claude Code" }), codex: testAgent({ name: "Codex" }) } };
+  await writeFile(join(dir, USER_SETTINGS_FILE), JSON.stringify(base));
+  const { codex: _codex, ...agents } = base.agents;
+  await writeUserSettingsFile(dir, { ...base, agents }, base);
+  expect(Object.keys(JSON.parse(await readFile(join(dir, USER_SETTINGS_FILE), "utf8")).agents)).toEqual(["default"]);
 });

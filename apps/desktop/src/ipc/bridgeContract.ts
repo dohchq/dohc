@@ -5857,6 +5857,13 @@ export const SetAppPinnedPayload = z.object({
 }).strict();
 export type SetAppPinnedPayload = z.infer<typeof SetAppPinnedPayload>;
 
+// Ids of entries in the settings file, broken ones included, so Undo can put
+// back an order with an entry dohc could not use.
+export const OrderAgentsPayload = z.object({
+  order: z.array(z.string().min(1).max(256)).max(256),
+}).strict();
+export type OrderAgentsPayload = z.infer<typeof OrderAgentsPayload>;
+
 export const SetUserSettingsPayload = z.object({
   settings: DesktopUserSettingsSchema,
   base: DesktopUserSettingsSchema,

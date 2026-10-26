@@ -1,9 +1,10 @@
 import type { AutomationChatMessage } from "@dohc/automation-executor/automation-chat";
+import { automationAgent, type DesktopUserSettings } from "../settings/userSettings";
 
 // A personal step that wakes its person's agent (item 6, section 4). Only a
 // person's own messages wake the agents they name, so an automation's text
 // that names an agent wakes nobody. This step posts the automation's message
-// into the first agent's chat, in one thread per automation, then queues
+// into the automation agent's chat, in one thread per automation, then queues
 // that message as the agent's trigger. The run's per-thread budget,
 // 10 runs in 10 minutes, bounds how often it can wake. The message carries
 // the claim's chain depth plus one, and the agent's run writes one deeper,
@@ -35,6 +36,12 @@ export interface AgentWakeDependencies {
   recordTrigger(input: { triggerMessageId: string; threadId: string; agentId: string }): unknown;
   /** Asks the dispatch to run what is queued. */
   scan(): void | Promise<void>;
+}
+
+/** The agent an automation wakes, from the settings, or null with none dohc can start. */
+export function wokenAgent(settings: Pick<DesktopUserSettings, "agents">): WokenAgent | null {
+  const agent = automationAgent(settings);
+  return agent ? { id: agent.id, name: agent.name } : null;
 }
 
 /** Posts the automation's message to its person's agent and queues the wake. */

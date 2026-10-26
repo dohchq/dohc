@@ -286,6 +286,39 @@ export function writeUserSettingsFile(
   return updateUserSettingsFile(dir, (current) => overlaySettings(current, base, next, agentLaunch));
 }
 
+/**
+ * Moves the agents in `order` to the front of the file, in that order. Every
+ * other entry, one dohc could not use included, keeps its place after them.
+ * Nothing but the agents' order changes.
+ */
+export async function orderUserSettingsAgents(
+  dir: string,
+  order: readonly string[],
+): Promise<StoredUserSettingsResult> {
+  const root = resolve(dir);
+  const path = settingsPath(root);
+  for (let attempt = 0; attempt < SAVE_ATTEMPTS; attempt += 1) {
+    const onDisk = await loadUserSettings(path);
+    if (onDisk.problem !== null) {
+      throw new Error(`dohc did not save settings. ${onDisk.result.warning}`);
+    }
+    const agents = onDisk.raw?.agents;
+    const ids = isSettingsObject(agents) ? Object.keys(agents) : [];
+    const next = [...new Set([...order.filter((id) => ids.includes(id)), ...ids])];
+    if (onDisk.raw === null || !isSettingsObject(agents) || next.every((id, index) => id === ids[index])) {
+      snapshots.set(root, Promise.resolve(rememberColors(root, onDisk)));
+      return onDisk.result;
+    }
+    const saved = await commitUserSettings(
+      root,
+      { ...onDisk.raw, agents: Object.fromEntries(next.map((id) => [id, agents[id]])) },
+      { text: onDisk.text },
+    );
+    if (saved) return saved;
+  }
+  throw new Error(`dohc did not save settings because ${path} kept changing. Try again.`);
+}
+
 /** Replaces the whole file. Reset user settings is the one caller. */
 export async function replaceUserSettingsFile(
   dir: string,

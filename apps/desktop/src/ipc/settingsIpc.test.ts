@@ -37,6 +37,7 @@ const settingsRequests = [
   [settingsOperations.reloadUserSettings.channel, undefined],
   [settingsOperations.setUserSettings.channel, settingsPayload],
   [settingsOperations.setAppPinned.channel, { workspaceId: "workspace-a", appRoot: "apps/trip", pinned: true }],
+  [settingsOperations.orderAgents.channel, { order: ["default"] }],
   [settingsOperations.setAgentColor.channel, { workspaceId: "workspace-a", group: "unknown", hue: null }],
   [settingsOperations.resetUserSettings.channel, undefined],
   [settingsOperations.getUserSettingsFilePath.channel, undefined],

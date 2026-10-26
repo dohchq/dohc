@@ -121,6 +121,16 @@ export function runnableAgents(settings: Pick<DesktopUserSettings, "agents">): A
     agent.enabled && agent.launch ? [{ ...agent, launch: agent.launch }] : []);
 }
 
+/**
+ * The agent an automation wakes: the first one dohc can start, on or off.
+ * One that is off is not passed over: dispatch says it is off, so no other
+ * agent takes the work without the person knowing.
+ */
+export function automationAgent(settings: Pick<DesktopUserSettings, "agents">): AgentWithLaunch | null {
+  const agent = listAgents(settings).find((entry) => entry.launch !== undefined);
+  return agent?.launch ? { ...agent, launch: agent.launch } : null;
+}
+
 /** The first agent when dohc can start it, else null. */
 export function firstAgentWithLaunch(settings: Pick<DesktopUserSettings, "agents">): AgentWithLaunch | null {
   const agent = firstAgent(settings);

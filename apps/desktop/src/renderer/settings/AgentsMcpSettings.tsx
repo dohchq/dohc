@@ -17,6 +17,8 @@ export function AgentsMcpSettings(props: {
   settings: DesktopUserSettings;
   agentProblems?: readonly AgentProblem[];
   onSave: (settings: DesktopUserSettings) => Promise<boolean>;
+  onOrder: (order: readonly string[]) => Promise<boolean>;
+  onNotice?: (message: string, undo?: () => void) => void;
   onOpenSettingsFile: () => void;
   sharedView?: boolean;
   sessionRecorderOn: boolean | undefined;
@@ -157,8 +159,10 @@ export function AgentsMcpSettings(props: {
         sharedView={sharedView}
         sessionRecorderOn={sessionRecorderOn}
         onSave={props.onSave}
+        onOrder={props.onOrder}
         onOpenSettingsFile={props.onOpenSettingsFile}
         onError={onError}
+        {...(props.onNotice ? { onNotice: props.onNotice } : {})}
       />
 
       <SettingRow
