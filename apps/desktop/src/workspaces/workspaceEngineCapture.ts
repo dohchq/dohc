@@ -890,9 +890,11 @@ export interface EngineDiskWriter {
   writeBinaryFile(absolutePath: string, bytes: Uint8Array): Promise<void>;
   deletePath(absolutePath: string): Promise<void>;
   stageFile?(absolutePath: string, data: string | Uint8Array): Promise<StagedEngineFile>;
+  syncDirectory?(absoluteDir: string): Promise<void>;
 }
 
 interface StagedEngineFile {
+  parentDirectory?: string;
   commit(): Promise<void>;
   dispose(): Promise<void>;
 }
@@ -1690,7 +1692,7 @@ function assertEngineWritablePath(
 // defaulting.
 export function createDefaultDiskWriter(
   rootPath: string,
-  dependencies: Pick<NonNullable<Parameters<typeof atomicReplaceFile>[2]>, "rename" | "platform" | "wait"> = {},
+  dependencies: Pick<NonNullable<Parameters<typeof atomicReplaceFile>[2]>, "rename" | "platform" | "wait" | "open"> = {},
 ): EngineDiskWriter {
   // Symlink containment (the same defense versionedFileWorkspace applies to
   // its write path):
@@ -1771,7 +1773,7 @@ export function createDefaultDiskWriter(
   async function stageFile(
     absolutePath: string,
     data: string | Uint8Array,
-  ): Promise<StagedEngineFile> {
+  ): Promise<StagedEngineFile & { parentDirectory: string }> {
     await assertContainedNearestAncestor(dirname(absolutePath));
     // Entry mode, so this is the resolved parent chain plus the held-back
     // name: the directories are canonical and only the leaf is still spelling.
@@ -1780,15 +1782,16 @@ export function createDefaultDiskWriter(
     await mkdir(dir, { recursive: true });
     await assertContainedDir(dir);
     const previousMode = await assertLeafNotSymlink(target);
+    const secret = isSecretPath(relative(rootPath, target).replaceAll("\\", "/"));
     const temporary = join(dir, `.dohc-write-${process.pid}-${randomUUID()}`);
     let placed = false;
     const dispose = () => placed ? Promise.resolve() : rm(temporary, { force: true });
     try {
-      const handle = await open(temporary, "wx", 0o600);
+      const handle = await open(temporary, "wx", secret ? 0o600 : 0o666);
       try {
         await handle.writeFile(data);
-        if (process.platform !== "win32" && !isSecretPath(relative(rootPath, target).replaceAll("\\", "/"))) {
-          await handle.chmod(previousMode === undefined ? 0o666 & ~process.umask() : previousMode & 0o777);
+        if (process.platform !== "win32" && !secret && previousMode !== undefined) {
+          await handle.chmod(previousMode & 0o777);
         }
         await handle.sync();
       } catch (error) {
@@ -1797,11 +1800,13 @@ export function createDefaultDiskWriter(
       }
       await handle.close();
       return {
+        parentDirectory: dir,
         commit: async () => {
           await atomicReplaceFile(target, async () => {
+            // The temporary is written and flushed; only recheck containment before rename.
             await assertContainedDir(dir);
             await assertLeafNotSymlink(target);
-          }, { ...dependencies, temporary, syncDirectory: true });
+          }, { ...dependencies, temporary, syncDirectory: false });
           placed = true;
         },
         dispose,
@@ -1811,16 +1816,29 @@ export function createDefaultDiskWriter(
       throw error;
     }
   }
+  async function syncDirectory(absoluteDir: string): Promise<void> {
+    if ((dependencies.platform ?? process.platform) === "win32") return;
+    const handle = await (dependencies.open ?? open)(absoluteDir, "r");
+    try {
+      await handle.sync();
+    } catch (error) {
+      await handle.close().catch(() => undefined);
+      throw error;
+    }
+    await handle.close();
+  }
   async function writeEngineFile(absolutePath: string, data: string | Uint8Array): Promise<void> {
     const staged = await stageFile(absolutePath, data);
     try {
       await staged.commit();
+      await syncDirectory(staged.parentDirectory);
     } finally {
       await staged.dispose().catch(() => undefined);
     }
   }
   return {
     stageFile,
+    syncDirectory,
     writeTextFile: writeEngineFile,
     writeBinaryFile: writeEngineFile,
     async deletePath(absolutePath) {
@@ -4048,6 +4066,7 @@ export function createWorkspaceEngineCapture(
     policy: WorkspaceEnginePolicySnapshot,
   ): Promise<void> {
     const staged = new Map<number, StagedEngineFile>();
+    const placedDirectories = new Map<string, MaterializeOperation>();
     const updateError = (operation: MaterializeOperation, error: unknown) => new Error(
       `Could not update ${operation.path} on disk: ${errorMessage(error)}`,
       { cause: error },
@@ -4094,9 +4113,21 @@ export function createWorkspaceEngineCapture(
           } else {
             await diskWriter.deletePath(absolute);
           }
+          if (operation.kind !== "delete") {
+            placedDirectories.set(prepared?.parentDirectory ?? dirname(absolute), operation);
+          }
         } catch (error) {
           cancel();
           throw updateError(operation, error);
+        }
+      }
+      if (diskWriter.syncDirectory) {
+        for (const [directory, operation] of placedDirectories) {
+          try {
+            await diskWriter.syncDirectory(directory);
+          } catch (error) {
+            throw updateError(operation, error);
+          }
         }
       }
     } finally {

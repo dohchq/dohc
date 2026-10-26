@@ -3176,6 +3176,67 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     } finally { await engine.stop(); }
   });
 
+  it("syncs each placed folder once after every rename and before committing a relay page", async () => {
+    const root = await createTestScratch("dohc-page-folder-sync-");
+    const loopback = new VersionedLoopbackEngine();
+    const paths = ["one/a.txt", "two/b.txt", "one/c.txt"];
+    for (const path of paths) loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path, text: path, origin: "sync" });
+    const events: string[] = [];
+    const syncing = deferred<void>();
+    const release = deferred<void>();
+    const writer = createDefaultDiskWriter(root, {
+      platform: "darwin",
+      rename: async (from, to) => { await rename(from, to); events.push(`rename:${to}`); },
+      open: async (directory, flags) => {
+        expect(flags).toBe("r");
+        events.push(`open:${directory}`);
+        return {
+          sync: async () => { events.push(`sync:${directory}`); syncing.resolve(); await release.promise; },
+          close: async () => { events.push(`close:${directory}`); },
+        };
+      },
+    });
+    const cursor = vi.fn(async () => { events.push("cursor"); });
+    const engine = liveCapture(root, loopback, { diskWriter: writer });
+    const pull = engine.runRelaySync(page => deliverRelayPage(page, {
+      fastForwardedPaths: paths.map(path => ({ versionId: "main", path, operation: "write", contentKind: "text" })),
+    }, cursor));
+    try {
+      await syncing.promise;
+      expect(events.slice(0, paths.length)).toEqual(paths.map(path => `rename:${join(root, path)}`));
+      expect(cursor).not.toHaveBeenCalled();
+      release.resolve();
+      await pull;
+      expect(events).toEqual([
+        ...paths.map(path => `rename:${join(root, path)}`),
+        ...["one", "two"].flatMap(folder => ["open", "sync", "close"].map(action => `${action}:${join(root, folder)}`)),
+        "cursor",
+      ]);
+    } finally { release.resolve(); await pull.catch(() => undefined); await engine.stop(); }
+  });
+
+  it.each(["open", "sync"])("does not commit a relay page when folder %s fails", async phase => {
+    const root = await createTestScratch("dohc-page-folder-failure-");
+    const loopback = new VersionedLoopbackEngine();
+    const path = "note.txt";
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path, text: "next", origin: "sync" });
+    const close = vi.fn(async () => {});
+    const writer = createDefaultDiskWriter(root, { platform: "linux", open: async () => {
+      if (phase === "open") throw new Error("folder unavailable");
+      return { sync: async () => { throw new Error("folder unavailable"); }, close };
+    } });
+    const cursor = vi.fn(async () => {});
+    const engine = liveCapture(root, loopback, { diskWriter: writer });
+    try {
+      await expect(engine.runRelaySync(page => deliverRelayPage(page, {
+        fastForwardedPaths: [{ versionId: "main", path, operation: "write", contentKind: "text" }],
+      }, cursor))).rejects.toThrow("Could not update note.txt on disk: folder unavailable");
+      expect(cursor).not.toHaveBeenCalled();
+      expect(await readFile(join(root, path), "utf8")).toBe("next");
+      expect(close).toHaveBeenCalledTimes(phase === "sync" ? 1 : 0);
+    } finally { await engine.stop(); }
+  });
+
   it("drains and removes in-flight staging after a failure without placing or committing the page", async () => {
     const root = await createTestScratch("dohc-page-staging-failure-");
     const loopback = new VersionedLoopbackEngine();
@@ -3793,6 +3854,23 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
 });
 
 describe("createDefaultDiskWriter symlink containment", () => {
+  it.each(["linux", "darwin", "win32"] as const)("syncs a single write's folder after rename on %s", async platform => {
+    const root = await createTestScratch("dohc-single-folder-sync-");
+    const events: string[] = [];
+    const writer = createDefaultDiskWriter(root, {
+      platform,
+      rename: async (from, to) => { await rename(from, to); events.push("rename"); },
+      open: async (directory, flags) => {
+        expect(directory).toBe(root);
+        expect(flags).toBe("r");
+        events.push("open");
+        return { sync: async () => { events.push("sync"); }, close: async () => { events.push("close"); } };
+      },
+    });
+    await writer.writeTextFile(join(root, "note.txt"), "next");
+    expect(events).toEqual(platform === "win32" ? ["rename"] : ["rename", "open", "sync", "close"]);
+  });
+
   it.skipIf(process.platform === "win32")("preserves ordinary POSIX file permissions and restricts protected staging", async () => {
     const root = await createTestScratch("dohc-write-mode-");
     const ordinary = join(root, "note.txt");
