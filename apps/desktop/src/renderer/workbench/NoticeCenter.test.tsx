@@ -1594,22 +1594,25 @@ describe("notice center", () => {
 
   // A dismissal answers one workspace. The same failure in the next workspace
   // is news the user has not seen, so it must still be announced.
-  it("announces an identical live delivery failure in another workspace", async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+  it("announces an identical live delivery failure in another workspace", () => {
+    vi.useFakeTimers();
     const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
     outlastQuietRetry();
-    await userEvent.click(
+    fireEvent.click(
       screen.getByRole("button", { name: "Dismiss live editing notice" }),
     );
     expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
 
+    // The other workspace's retry waits its own 15 s.
     rerender(
       noticeElement({
         workspaceId: "ws-status-other",
         syncStatus: liveDeliveryStatus("retrying"),
       }),
     );
-    outlastQuietRetry();
+    act(() => vi.advanceTimersByTime(14_999));
+    expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
+    act(() => vi.advanceTimersByTime(1));
     expect(screen.getByTestId("owner-live-delivery-toast")).toBeTruthy();
   });
 

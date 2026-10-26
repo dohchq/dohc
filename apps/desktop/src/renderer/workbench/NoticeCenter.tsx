@@ -1002,7 +1002,7 @@ export function NoticeCenter(props: {
     [liveDeliveryKey, liveDeliveryReason],
   );
   // One report for the row and the toast, so a person who copies from either
-  // pastes the same facts — including when this state was first observed.
+  // pastes the same facts — including when the notice was raised.
   const liveDeliveryDetails = useMemo(
     () =>
       liveDelivery

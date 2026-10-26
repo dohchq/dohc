@@ -3383,6 +3383,25 @@ const TITLE_BAR_STATUSES: { label: string; syncStatus: SyncStatusResult; failedS
   { label: "a file couldn't save", syncStatus: SYNCED_STATUS, failedSaves: 1 },
   { label: "files couldn't save, during a sync pass", syncStatus: { ...SYNCED_STATUS, state: "syncing" }, failedSaves: 2 },
   { label: "server disconnected", syncStatus: { ...SYNCED_STATUS, state: "cloud-disconnected" }, failedSaves: 0 },
+  // Live editing beside the save state. It adds nothing while the server is
+  // named, a ring while dohc retries by itself, and a filled dot otherwise.
+  {
+    label: "server unreachable: live editing waits on it",
+    syncStatus: {
+      ...SYNCED_STATUS,
+      state: "sync-failed",
+      syncFailure: { cause: "server-unreachable", detail: "dohc could not reach the server.", sinceMs: 1, attempts: 1 },
+      ownerLiveDelivery: "retrying",
+    },
+    failedSaves: 0,
+  },
+  { label: "live editing retrying", syncStatus: { ...SYNCED_STATUS, ownerLiveDelivery: "retrying" }, failedSaves: 0 },
+  {
+    label: "live editing paused for a reason",
+    syncStatus: { ...SYNCED_STATUS, ownerLiveDelivery: "retrying", ownerLiveDeliveryReason: "document-unavailable" },
+    failedSaves: 0,
+  },
+  { label: "live editing active", syncStatus: { ...SYNCED_STATUS, ownerLiveDelivery: "active" }, failedSaves: 0 },
 ];
 
 // `parts` renders only those parts, so a test renders only what it checks.
