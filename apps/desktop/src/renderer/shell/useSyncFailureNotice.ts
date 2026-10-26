@@ -9,6 +9,7 @@ type SyncFailureNotice = { message: string; detail: string; toast: boolean };
 // not prove local writes are healthy, and each document shows its own save.
 export function syncFailureMessage(failure: SyncFailure): string {
   if (failure.cause === "claim-refused") return failure.detail;
+  if (failure.detail.startsWith("OutsideWriteCopyError: ")) return `${failure.detail.slice("OutsideWriteCopyError: ".length).split("\n")[0]} Sync waits until then.`;
   return failure.cause === "server-unreachable"
     ? "dohc could not reach the server."
     : "dohc could not sync this workspace.";

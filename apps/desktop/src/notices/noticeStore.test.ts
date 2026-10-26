@@ -1240,6 +1240,18 @@ describe("notices for another person", () => {
   }, 60_000);
 });
 
+it.each(["unavailable", "plaintext projection exceeds limit"])("does not invent another computer for a sync refusal: %s", async reason => {
+  const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: [{
+    noticeId: "sync-refusal-local", originId: "host", originSeq: 1,
+    refusalCoordinates: [{ originId: "host", originSeq: 1 }], reason,
+    document: { versionId: "main", path: "n.md", objectId: "object", lineageClaimId: "lineage", conflictId: null },
+  }] }];
+  const first = await computer(null, { refusalNotices });
+  const [notice] = (await first.store.list()).notices;
+  expect(notice!.body).not.toContain("other computer");
+  expect(notice!.body).toContain(reason === "unavailable" ? "Review the file, then try sync again." : "Make the file smaller, then try sync again.");
+});
+
 it("rebuilds refusal Notices from the engine and keeps read marks across restart", async () => {
   let pending = [{ noticeId: "sync-refusal-a", originId: "peer", originSeq: 1, refusalCoordinates: [{ originId: "peer", originSeq: 1 }],
     reason: "plaintext projection exceeds limit", document: { versionId: "main", path: "doc.md",

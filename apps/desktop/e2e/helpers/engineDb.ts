@@ -463,3 +463,13 @@ export function outsideWriteRecoveryState(rootPath: string, workspaceId: string)
     retained: db.prepare("SELECT * FROM materialization_retained WHERE workspace_id = ?").all(workspaceId),
   }));
 }
+
+export function outsideCopyPushed(rootPath: string, workspaceId: string, path: string): boolean {
+  return withEngineDb(rootPath, db => {
+    const row = db.prepare(`SELECT EXISTS(SELECT 1 FROM replication_log l
+      JOIN sync_relay_push_state p ON p.workspace_id=l.workspace_id AND p.origin_id=l.origin_id
+      WHERE l.workspace_id=? AND l.imported=0 AND l.op_kind='moment.append'
+      AND json_extract(l.payload_json,'$.path')=? AND p.pushed_seq >= l.origin_seq) AS pushed`).get(workspaceId, path);
+    return Number(row?.pushed) === 1;
+  }) ?? false;
+}

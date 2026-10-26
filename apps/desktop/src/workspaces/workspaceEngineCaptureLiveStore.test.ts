@@ -1956,6 +1956,28 @@ describe("createCaptureLiveStores", () => {
     },
   );
 
+  it.each([
+    { kind: "text", binary: null, text: "a".repeat(64), expected: "a".repeat(64) },
+    { kind: "binary", binary: "b".repeat(64), text: null, expected: "b".repeat(64) },
+    { kind: "binary", binary: "b".repeat(64), text: "a".repeat(64), expected: "b".repeat(64) },
+    { kind: "text", binary: null, text: null, expected: undefined },
+  ] as const)("carries only the listMoments after hash, $kind / $expected", async ({ kind, binary, text, expected }) => {
+    const requests: Request[] = [];
+    const client = clientFor(async request => {
+      requests.push(request);
+      expect(request.method).toBe(VERSIONED_METHOD.momentsList);
+      return { id: request.id, result: {
+        moments: [{ ...moment, afterContentKind: kind, afterBinarySha256: binary, afterBlobSha256: text }],
+        nextBeforeMomentOrder: null, latestMomentOrder: 1,
+      } };
+    });
+    const { store } = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client));
+    const [row] = (await store.listMoments({ workspaceId: WORKSPACE_ID })).moments;
+    expect(row?.sha256).toBe(expected);
+    if (expected === undefined) expect(row).not.toHaveProperty("sha256");
+    expect(requests).toHaveLength(1);
+  });
+
   it("rejects a withheld text moment that carries no digest to hydrate from", async () => {
     const client = blobClientFor(async (request) => ({
       id: request.id,
@@ -2401,6 +2423,7 @@ describe("createCaptureLiveStores", () => {
     );
 
     const page = await store.listHistoryPage({ workspaceId: WORKSPACE_ID, limit: 200 });
+    for (const row of page.moments) expect(row).not.toHaveProperty("sha256");
     expect(
       page.moments.map((entry) => entry.metadata.origin),
     ).toEqual(["ydoc", "capture-recovery", "capture-recovery-cleared", "local-file"]);

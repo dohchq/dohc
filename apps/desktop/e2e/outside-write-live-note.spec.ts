@@ -1,39 +1,24 @@
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import { randomUUID } from "node:crypto";
-import { readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rmdir, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { activityPin, editorTabTestId, settingsNavPin } from "../src/testPins";
 import { engineDaemonPids, hardKillPid, waitForFreshEngineDaemon } from "./helpers/daemonKill";
 import { launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
-import { engineMomentsOrEmpty, outsideWriteRecoveryState, ownerEnrollment, ownerOutboxDeclarations, ownerSettlementState } from "./helpers/engineDb";
+import { engineMomentsOrEmpty, replicationOpKindsMentioning, outsideCopyPushed, outsideWriteRecoveryState, ownerEnrollment, ownerOutboxDeclarations, ownerSettlementState } from "./helpers/engineDb";
 import { readHistoryMoments } from "./helpers/history";
 import { DOCUMENT_END } from "./helpers/keys";
 import { approveDesktop, createVerifiedAccount, openDesktopApproval, startSelfHostOnboardingStack, trustFixtureCa } from "./helpers/selfHostOnboarding";
 import { createTempWorkspace, explorerRow, openWorkspaceFromFirstRun, waitForWorkspaceFile, writeWorkspaceFiles } from "./helpers/workspace";
 
 type Api = DohcDesktopBridge;
-const PATH = "n.md";
 const SEED = "# Owner's live note\n\nBase text.\n";
 const editor = (page: Page) => page.getByTestId("markdown-editor");
 
-async function nativeStaging(root: string, relative = ".dohc/engine"): Promise<unknown[]> {
-  const entries = await readdir(join(root, relative), { withFileTypes: true });
-  const result: unknown[] = [];
-  for (const entry of entries) {
-    const path = `${relative}/${entry.name}`;
-    if (entry.isDirectory()) result.push(...await nativeStaging(root, path));
-    else if (!/^engine\.db(?:-|$)/u.test(entry.name)) {
-      const bytes = await readFile(join(root, path));
-      result.push({ path, bytes: bytes.length, containsOutsideText: bytes.includes(Buffer.from("AGENT-1")),
-        ...(bytes.length < 65_536 ? { text: bytes.toString("utf8") } : {}) });
-    }
-  }
-  return result;
-}
-
 for (const variant of ["closed", "open-reload", "restart"] as const) {
-  test(`an outside program writes to an owner's live note while the server is away: ${variant} @outside-write-live-note`, async ({ browser }, testInfo) => {
+  const PATH = variant === "open-reload" ? "Research notes for the autumn workspace continuity review and outside editing follow-up.md" : "n.md";
+  test(`keeps an outside write before restoring the owner's live note: ${variant} @outside-write-live-note`, async ({ browser }, testInfo) => {
     test.setTimeout(600_000);
     const temp = await createTempWorkspace();
     let stack: Awaited<ReturnType<typeof startSelfHostOnboardingStack>> | undefined;
@@ -68,7 +53,7 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
       return {
         disk: await readFile(join(temp.rootPath, PATH), "utf8"), siblings,
         historyAvailable: history !== null, historyRows: history ?? [], historyDetails: details, engineMoments: engineMomentsOrEmpty(temp.rootPath),
-        staging: await nativeStaging(temp.rootPath), recovery: outsideWriteRecoveryState(temp.rootPath, workspaceId),
+        recovery: outsideWriteRecoveryState(temp.rootPath, workspaceId),
         keptCopies: await read(page.evaluate(workspaceId => (window as unknown as { dohcDesktop: Api }).dohcDesktop.listKeptCopies({ workspaceId }), workspaceId)),
         notices, noticeRows: await read(page.evaluate(() => (window as unknown as { dohcDesktop: Api }).dohcDesktop.listNotices({}))),
         toasts: await page.getByTestId("notice-toasts").allInnerTexts(),
@@ -77,8 +62,6 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
         outbox: ownerOutboxDeclarations(temp.rootPath), settlement: ownerSettlementState(temp.rootPath),
         sync: await read(page.evaluate(workspaceId => (window as unknown as { dohcDesktop: Api }).dohcDesktop.getSyncStatus({ workspaceId }), workspaceId)),
         outage: stack!.outageState(),
-        rawCaptureFlushSettled: { observed: false, reason: "The desktop wrapper polls and throws; the raw capture.flush response would be needed." },
-        quarantine: { observed: false, reason: "No public per-path reader; native reconciliation diagnostics would be needed." },
       };
     };
     try {
@@ -156,12 +139,23 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
       let reload: unknown = null;
       if (variant === "open-reload") {
         await expect(page.getByTestId("changed-outside-notice")).toBeVisible({ timeout: 60_000 });
+        await expect(page.getByTestId("changed-outside-notice")).toContainText("This file changed outside dohc.");
+        for (const theme of ["light", "dark"] as const) {
+          await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
+          await page.screenshot({ path: testInfo.outputPath(`banner-${theme}.png`) });
+        }
         await record("4-before-reload", await snapshot());
         await page.getByTestId("changed-outside-notice").getByRole("button", { name: "Reload" }).click();
-        try {
-          await expect.poll(async () => (await page.getByTestId("notice-toasts").innerText()).includes("History has not recorded it yet"), { timeout: 75_000, intervals: [1_000] }).toBe(true);
-          reload = { outsideWriteWaitingError: true };
-        } catch (error) { reload = { outsideWriteWaitingError: false, waitResult: String(error) }; }
+        await expect.poll(async () => {
+          const opened = (await editor(page).allInnerTexts()).some(text => text.includes("AGENT-1"));
+          const waiting = (await page.getByTestId("notice-toasts").innerText()).includes("History has not recorded it yet");
+          return opened || waiting;
+        }, { timeout: 75_000, intervals: [1_000] }).toBe(true);
+        for (const theme of ["light", "dark"] as const) {
+          await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
+          await page.screenshot({ path: testInfo.outputPath(`reload-wait-${theme}.png`) });
+        }
+        reload = { attempted: true };
       } else {
         try {
           await expect.poll(async () => {
@@ -191,7 +185,35 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
       }
       const before = outsideWriteRecoveryState(temp.rootPath, workspaceId);
       const beforeSettlement = ownerSettlementState(temp.rootPath);
+      const recordsPath = join(temp.rootPath, ".dohc/local/outside-write-copies");
+      if (variant === "open-reload") {
+        await mkdir(recordsPath, { recursive: true });
+        expect(await readdir(recordsPath)).toEqual([]);
+        await rmdir(recordsPath);
+        await writeFile(recordsPath, "copy records blocked for recovery test");
+      }
       stack.resume();
+      if (variant === "open-reload") {
+        const failure = page.getByTestId("workspace-shell-notice").filter({ hasText: `dohc could not keep a copy of ${PATH}` });
+        await expect(failure).toBeVisible({ timeout: 120_000 });
+        const failureBody = `dohc could not keep a copy of ${PATH}, because .dohc/local/outside-write-copies is in the way, so it left ${PATH} as it was. Move .dohc/local/outside-write-copies somewhere else, then choose Try again. Sync waits until then.`;
+        await expect(failure).toContainText(failureBody);
+        await expect(failure).not.toContainText("Check that dohc can write to the workspace folder");
+        await page.getByTestId("notice-center-toggle").click();
+        const failureRow = page.locator("[data-notice-row]").filter({ hasText: `dohc could not keep a copy of ${PATH}` });
+        await expect(failureRow).toBeVisible();
+        await expect(failureRow).toContainText(failureBody);
+        for (const theme of ["light", "dark"] as const) {
+          await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
+          await page.screenshot({ path: testInfo.outputPath(`copy-failure-${theme}.png`) });
+        }
+        await record("4-copy-failed", { recordsPath, ...await snapshot() });
+        await unlink(recordsPath);
+        if (!await page.getByTestId("notice-center").count()) await page.getByTestId("notice-center-toggle").click();
+        await failureRow.getByRole("button", { name: "Try again", exact: true }).click();
+        await expect(failureRow).toHaveCount(0, { timeout: 120_000 });
+        if (await page.getByTestId("notice-center").count()) await page.getByTestId("notice-center-toggle").click();
+      }
       await expect.poll(() => {
         const state = ownerOutboxDeclarations(temp.rootPath);
         return state && "pending" in state ? state.pending : -1;
@@ -205,18 +227,64 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
       }, { timeout: 120_000, intervals: [1_000] }).toBe(true);
       await expect(page.getByTestId("sync-status")).toHaveAttribute("data-state", "synced", { timeout: 120_000 });
       await record("5", await snapshot());
+      const copies = async () => {
+        const status = await page.evaluate(workspaceId => (window as unknown as { dohcDesktop: Api }).dohcDesktop.getSyncStatus({ workspaceId }), workspaceId);
+        return status.outsideWriteCopies?.filter(([path]) => path === PATH) ?? [];
+      };
+      await expect.poll(async () => (await copies()).length, { timeout: 60_000 }).toBe(1);
+      const copyPath = (await copies())[0]![1];
+      const keptFiles = async (directory: string): Promise<string[]> => {
+        const entries = await readdir(directory, { withFileTypes: true });
+        return (await Promise.all(entries.map(async entry => {
+          const path = join(directory, entry.name);
+          if (entry.isDirectory() && !entry.isSymbolicLink()) return keptFiles(path);
+          return entry.name.includes("(kept copy") ? [path] : [];
+        }))).flat();
+      };
+      expect(await keptFiles(temp.rootPath)).toEqual([join(temp.rootPath, copyPath)]);
+      await expect.poll(() => engineMomentsOrEmpty(temp.rootPath).some(moment => moment.path === copyPath && moment.text === "AGENT-1\n"), { timeout: 60_000 }).toBe(true);
+      expect(engineMomentsOrEmpty(temp.rootPath).filter(moment => moment.path === PATH).some(moment => moment.text.includes("AGENT-1"))).toBe(false);
+      await expect.poll(() => replicationOpKindsMentioning(temp.rootPath, copyPath), { timeout: 60_000 }).toContain("moment.append");
+      await expect(page.getByTestId("sync-status")).toHaveAttribute("data-state", "synced", { timeout: 120_000 });
+      await expect.poll(() => outsideCopyPushed(temp.rootPath, workspaceId, copyPath), { timeout: 120_000 }).toBe(true);
+      expect(await readFile(join(temp.rootPath, copyPath), "utf8")).toBe("AGENT-1\n");
+      const disk = await readFile(join(temp.rootPath, PATH), "utf8");
+      expect(disk).toContain("OWNER-1");
+      expect(disk).not.toContain("AGENT-1");
+      const toast = page.getByTestId("workspace-shell-notice").filter({ hasText: `Kept a copy of ${PATH}` }).filter({ hasText: copyPath });
+      await expect(toast).toBeVisible();
+      await expect(toast.getByRole("button", { name: "Open copy", exact: true })).toBeVisible();
+      await expect(toast).not.toContainText("History");
+      if (variant === "open-reload") {
+        for (const theme of ["light", "dark"] as const) {
+          await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
+          await page.screenshot({ path: testInfo.outputPath(`reload-kept-copy-${theme}.png`) });
+        }
+      }
+      for (const theme of ["light", "dark"] as const) {
+        await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
+        await page.screenshot({ path: testInfo.outputPath(`toast-${theme}.png`) });
+      }
+      await page.getByTestId("notice-center-toggle").click();
+      const row = page.locator("[data-notice-row]").filter({ hasText: `Kept a copy of ${PATH}` }).filter({ hasText: copyPath });
+      await expect(row).toBeVisible();
+      expect(await page.getByTestId("notice-center").evaluate(element => element.getBoundingClientRect().width)).toBeLessThanOrEqual(480);
+      await expect(row.getByRole("button", { name: "Open copy", exact: true })).toBeVisible();
+      await expect(row).not.toContainText("History");
+      for (const theme of ["light", "dark"] as const) {
+        await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
+        await page.screenshot({ path: testInfo.outputPath(`notices-${theme}.png`) });
+      }
+      await row.getByRole("button", { name: "Open copy", exact: true }).click();
+      await expect(editor(page)).toContainText("AGENT-1");
+      await expect(row).toHaveCount(0);
+      await expect(page.locator("body")).not.toContainText("dohc keeps your text in History");
+      if (await page.getByTestId("notice-center").count()) await page.getByTestId("notice-center-toggle").click();
       const final = await snapshot();
-      const outsideHistory = JSON.stringify([final.historyDetails, final.engineMoments]).includes("AGENT-1");
-      const copyFiles = final.siblings.filter(row => row.name !== PATH && "text" in row && row.text?.includes("AGENT-1"));
-      const outsideNotices = JSON.stringify([final.notices, final.noticeRows, final.toasts]).includes("AGENT-1");
-      await record("6", { ...final, worstPath: {
-        historyAvailable: final.historyAvailable,
-        ownerOnDiskWithoutOutsideText: final.disk.includes("OWNER-1") && !final.disk.includes("AGENT-1"),
-        noConflictFile: !final.siblings.some(row => row.name.includes(".conflict")),
-        noOutsideHistory: !outsideHistory, noOutsideSiblingCopy: copyFiles.length === 0,
-        noOutsideKeptOrStagedCopy: final.recovery !== null && final.recovery.displacements.length === 0 && final.recovery.retained.length === 0 && !JSON.stringify(final.staging).includes('"containsOutsideText":true'),
-        noOutsideNotice: !outsideNotices,
-      } });
+      expect(final.disk).toContain("OWNER-1");
+      expect(final.disk).not.toContain("AGENT-1");
+      expect(await readFile(join(temp.rootPath, copyPath), "utf8")).toBe("AGENT-1\n");
+      await record("6", { ...final, copyPath, copyReplicationKinds: replicationOpKindsMentioning(temp.rootPath, copyPath), copyPushed: outsideCopyPushed(temp.rootPath, workspaceId, copyPath), outsideTextKept: true, ownerOnDisk: true });
     } catch (error) {
       await record("failure", { error: error instanceof Error ? error.stack : String(error) });
       if (desktop && workspaceId) await read(snapshot().then(value => record("failure-state", value)));
@@ -228,7 +296,7 @@ for (const variant of ["closed", "open-reload", "restart"] as const) {
       cleanup.push(...await Promise.allSettled([stack?.close()]));
       cleanup.push(...await Promise.allSettled([temp.cleanup()]));
       const failures = cleanup.filter(row => row.status === "rejected");
-      if (failures.length) throw new AggregateError(failures.map(row => row.reason), "Owner's live note proof cleanup failed.");
+      if (failures.length) throw new AggregateError(failures.map(row => row.reason), "Owner's live note regression cleanup failed.");
     }
   });
 }

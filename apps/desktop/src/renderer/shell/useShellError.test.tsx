@@ -10,13 +10,76 @@ import { CreationPartialError } from "@dohc/cli/creation";
 import { errorDetails } from "./copyDetails";
 import { flushDatasetSourceCapture } from "../../workspaces/datasetSourceCapture";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); localStorage.clear(); });
 
 const strict = ({ children }: { children: ReactNode }) => (
   <StrictMode>{children}</StrictMode>
 );
 
 describe("useShellError", () => {
+  it("toasts each copy once, restores its row on restart, and clears it on open", () => {
+    const open = vi.fn();
+    const copies = [["n.md", "n (kept copy).md", "copy-n-1"]] as const;
+    const first = renderHook(() => useShellError("ws-a"));
+    act(() => first.result.current.showOutsideCopies(copies, open));
+    const row = first.result.current.shellErrors[0]!;
+    expect(row).toMatchObject({ title: "Kept a copy of n.md", seen: false, retry: null,
+      message: "It changed outside dohc. That change is now in n (kept copy).md.", action: { label: "Open copy", ends: true } });
+    first.unmount();
+    const second = renderHook(() => useShellError("ws-a"));
+    act(() => second.result.current.showOutsideCopies(copies, open));
+    expect(second.result.current.shellErrors[0]).toMatchObject({ seen: true });
+    act(() => second.result.current.runShellErrorAction(second.result.current.shellErrors[0]!.id));
+    expect(open).toHaveBeenCalledWith("n (kept copy).md");
+    expect(second.result.current.shellErrors).toHaveLength(0);
+    second.unmount();
+    const third = renderHook(() => useShellError("ws-a"));
+    act(() => third.result.current.showOutsideCopies(copies, open));
+    expect(third.result.current.shellErrors).toHaveLength(0);
+  });
+
+  it("does not toast an older copy again when a newer copy disappears", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const open = vi.fn();
+    const first = ["n.md", "n (kept copy).md", "copy-n-1"] as const;
+    const second = ["n.md", "n (kept copy 2).md", "copy-n-2"] as const;
+    act(() => result.current.showOutsideCopies([first], open));
+    act(() => result.current.showOutsideCopies([first, second], open));
+    act(() => result.current.showOutsideCopies([first], open));
+    expect(result.current.shellErrors).toHaveLength(1);
+    expect(result.current.shellErrors[0]).toMatchObject({ seen: true });
+    expect(result.current.shellErrors[0]!.message).toContain(first[1]);
+  });
+
+  it("toasts a new receipt that reuses an older copy's file name", () => {
+    const first = renderHook(() => useShellError("ws-a"));
+    act(() => first.result.current.showOutsideCopies([["n.md", "n (kept copy).md", "old"]], vi.fn()));
+    first.unmount();
+    const next = renderHook(() => useShellError("ws-a"));
+    act(() => next.result.current.showOutsideCopies([["n.md", "n (kept copy).md", "new"]], vi.fn()));
+    expect(next.result.current.shellErrors).toHaveLength(1);
+    expect(next.result.current.shellErrors[0]!.seen).toBe(false);
+  });
+
+  it("keeps one row per original, replaces it with the newest copy, and remembers dismissal", () => {
+    const { result, unmount } = renderHook(() => useShellError("ws-a"));
+    const open = vi.fn();
+    const copies = [["n.md", "n (kept copy).md", "copy-n-1"], ["m.md", "m (kept copy).md", "copy-m-1"]] as const;
+    act(() => result.current.showOutsideCopies(copies, open));
+    expect(result.current.shellErrors).toHaveLength(2);
+    act(() => result.current.showOutsideCopies([...copies, ["n.md", "n (kept copy 2).md", "copy-n-2"]], open));
+    expect(result.current.shellErrors).toHaveLength(2);
+    const row = result.current.shellErrors.find(row => row.identity === "outside-copy:n.md")!;
+    expect(row.message).toContain("n (kept copy 2).md");
+    expect(row.seen).toBe(false);
+    act(() => result.current.dismissShellError(row.id));
+    unmount();
+    const next = renderHook(() => useShellError("ws-a"));
+    act(() => next.result.current.showOutsideCopies([...copies, ["n.md", "n (kept copy 2).md", "copy-n-2"]], open));
+    expect(next.result.current.shellErrors).toHaveLength(1);
+    expect(next.result.current.shellErrors[0]!.title).toBe("Kept a copy of m.md");
+  });
+
   it("keeps a held source error in Notices with the repair words and retry", async () => {
     const capture = { deferredWrites: [], running: true, settled: true, degraded: false, heldFiles: [{
       workspaceId: "ws-a", sourceVersionId: "main", objectId: "object", path: "sources/note.md",

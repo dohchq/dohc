@@ -85,6 +85,16 @@ async function connectedToolNames(
   return { names: listed.tools.map((tool) => tool.name), client };
 }
 
+it("returns a pending document edit as a successful tool result", async () => {
+  const root = await workspaceRoot();
+  const outcome = { ok: true, path: "n.md", changed: true,
+    warning: "Saved locally. The shared file update is pending. Do not repeat this edit." };
+  const { client } = await connectedToolNames({ root, home: root, request: async () => outcome });
+  const reply = await client.callTool({ name: "dohc_edit_document", arguments: { path: "n.md", replacement: "After." } });
+  expect(reply.isError).not.toBe(true);
+  expect(JSON.stringify(reply)).toContain(outcome.warning);
+});
+
 describe("share-level tool profiles", () => {
   const base: ToolContext = { root: "/tmp/shared-view", home: "/tmp/home" };
 

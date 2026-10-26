@@ -1388,6 +1388,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   // decides who can read its History (#2379). Omitted otherwise.
   onNetworkShare: z.boolean().optional(),
   recoveryUnavailable: z.boolean().optional(),
+  outsideWriteCopies: z.array(z.tuple([z.string(), z.string(), z.string()])).optional(),
   keptFiles: z.array(z.tuple([z.string(), z.string()])).optional(),
   // Old versions of files the engine keeps on a drive that cannot tell it
   // whether a program still has one open, so it never deletes them: how

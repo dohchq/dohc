@@ -55,6 +55,7 @@ interface WatchedWorkspace {
   // True once the check finds the root on a network share.
   onNetworkShare: boolean;
   recoveryUnavailable: boolean;
+  outsideWriteCopies: readonly (readonly [string, string, string])[];
   keptFiles: readonly (readonly [string, string])[];
   // Old file copies the engine keeps on a drive that cannot tell it whether
   // a program still uses one. Null until the engine first reports.
@@ -159,6 +160,7 @@ export interface WorkspaceCaptureHooks {
   ) => void;
   onAtomicPlacementUnavailable: () => void;
   onRecoveryUnavailable: (unavailable: boolean) => void;
+  onOutsideWriteCopies?: (paths: readonly (readonly [string, string, string])[]) => void;
   onKeptFiles: (paths: readonly (readonly [string, string])[]) => void;
   onRetainedCopies: (summary: NonNullable<SyncStatusResult["retainedCopies"]>) => void;
   onHeldFiles: (files: NonNullable<SyncStatusResult["heldFiles"]>) => void;
@@ -291,6 +293,7 @@ export function createWorkspaceActivity(
       atomicPlacementUnavailable: w?.atomicPlacementUnavailable ?? false,
       ...(w?.onNetworkShare ? { onNetworkShare: true } : {}),
       recoveryUnavailable: w?.recoveryUnavailable ?? false,
+      outsideWriteCopies: (w?.outsideWriteCopies ?? []).map(([original, copy, id]): [string, string, string] => [original, copy, id]),
       keptFiles: (w?.keptFiles ?? []).map(([original, copy]): [string, string] => [original, copy]),
       ...(w?.retainedCopies ? { retainedCopies: { ...w.retainedCopies } } : {}),
       heldFiles: w?.heldFiles ?? [],
@@ -389,6 +392,7 @@ export function createWorkspaceActivity(
         atomicPlacementUnavailable: false,
         onNetworkShare: false,
         recoveryUnavailable: false,
+        outsideWriteCopies: [],
         keptFiles: [],
         retainedCopies: null,
         heldFiles: [],
@@ -416,6 +420,11 @@ export function createWorkspaceActivity(
               onRecoveryUnavailable: (unavailable) => {
                 if (state.entry !== entry || entry.recoveryUnavailable === unavailable) return;
                 entry.recoveryUnavailable = unavailable;
+                notify({ workspaceId: workspace.workspaceId });
+              },
+              onOutsideWriteCopies: (paths) => {
+                if (state.entry !== entry) return;
+                entry.outsideWriteCopies = [...paths];
                 notify({ workspaceId: workspace.workspaceId });
               },
               onKeptFiles: (paths) => {

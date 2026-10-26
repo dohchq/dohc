@@ -103,9 +103,13 @@ describe("workspaceActivity capture hooks", () => {
     expect(notify).toHaveBeenCalledExactlyOnceWith({ workspaceId: "activity-test" });
     hooks.onRetainedCopies({ count: 3, bytes: 300 });
     expect(notify).toHaveBeenCalledOnce();
+    hooks.onKeptFiles([["native.md", ".dohc-write-displaced/native.md"]]);
+    hooks.onOutsideWriteCopies?.([["n.md", "n (kept copy).md", "copy-n-1"]]);
+    expect(activity.getStatus("activity-test").keptFiles).toEqual([["native.md", ".dohc-write-displaced/native.md"]]);
+    expect(activity.getStatus("activity-test").outsideWriteCopies).toEqual([["n.md", "n (kept copy).md", "copy-n-1"]]);
     await activity.stopAll();
     hooks.onRetainedCopies({ count: 4, bytes: 400 });
-    expect(notify).toHaveBeenCalledOnce();
+    expect(notify).toHaveBeenCalledTimes(3);
   });
   it("attaches observation after capture fails and queues sync only for capture announcements", async () => {
     let observation!: WorkspaceObservationCallbacks;

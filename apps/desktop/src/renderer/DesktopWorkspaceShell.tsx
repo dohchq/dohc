@@ -900,6 +900,7 @@ export function DesktopWorkspaceShell(props: {
     showReportsNotice,
     showKeptCopies,
     showKeptCopySaved,
+    showOutsideCopies,
     showCaptureRecoveries,
     showCaptureHolds,
     showDirectWriteNotice,
@@ -5507,6 +5508,9 @@ export function DesktopWorkspaceShell(props: {
     reportRecoveryUnavailable(syncStatus.recoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace);
   }, [syncStatus?.recoveryUnavailable, reportRecoveryUnavailable, retryFileRecovery, revealRecoveryWorkspace]);
   const typingRecoveryConfirmation = useTypingRecoveryNotices({workspaceId, ready: workspaceIsReady, openHistory: openHistoryView, importedRecovery: captureRecoveries.imported, reportShellFailure, showSuccessNotice, showWarningNotice, clearKind, clearIdentity});
+  useEffect(() => {
+    showOutsideCopies(syncStatus?.outsideWriteCopies ?? [], openFile);
+  }, [syncStatus?.outsideWriteCopies, showOutsideCopies, openFile]);
   const keptFilesNotice = useKeptFilesNotice({
     workspaceId,
     paths: syncStatus?.keptFiles?.filter(([path]) => !path),
