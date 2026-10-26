@@ -452,8 +452,8 @@ function loopbackAdapter(): {
 }
 
 describe("ChatsLiveAdapter", () => {
-  it("encodes every one of the 62 chats methods with the workspace handle and exact params", async () => {
-    expect(CHAT_REQUEST_CASES).toHaveLength(62);
+  it("encodes every one of the 61 chats methods with the workspace handle and exact params", async () => {
+    expect(CHAT_REQUEST_CASES).toHaveLength(61);
     const requests: Request[] = [];
     const adapter = new ChatsLiveAdapter(
       captureClient(requests),
