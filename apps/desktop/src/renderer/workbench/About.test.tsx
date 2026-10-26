@@ -13,7 +13,8 @@ import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import { deferred } from "../../testing/deferred";
 import { historyCursor, historyPageFields } from "../../testing/historyPageFixture";
 import { formatShortTime } from "../time";
-import { AboutAccess, AboutHistory, AboutHistoryView, AboutHeader, AboutLinks, accessReasonFor, type AboutFile, type AccessFacts } from "./About";
+import { AboutAccess, AboutHistory, AboutHistoryView, AboutHeader, AboutLinks, accessReasonFor, type AboutFile } from "./About";
+import type { AccessFacts } from "./accessReason";
 import { setChosenColors } from "./chosenColors";
 
 const bridgeMock = {

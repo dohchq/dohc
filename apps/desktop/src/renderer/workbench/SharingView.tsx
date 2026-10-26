@@ -19,15 +19,14 @@ import {
   ABOUT_ROW,
   AboutNote,
   AccessChecked,
-  accessReasonForLane,
   AccessUnknown,
   LEVELS,
   useSectionRead,
   type AboutNotices,
-  type AccessContext,
   type AccessSetup,
   type AccessView,
 } from "./About";
+import { accessReasonForLane, type AccessContext } from "./accessReason";
 import { ChatAvatar, LinkMark } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
 import { shareSubject } from "./shareSubject";

@@ -3637,6 +3637,8 @@ export const CloudStatusResult = z.object({
   workspaceSyncOwned: z.boolean().optional(),
   // Whether the named workspace has cloud sync enabled (registry remote set).
   workspaceSynced: z.boolean().optional(),
+  // The server that remote syncs with, signed in or not, so Share can name it.
+  workspaceServerUrl: z.string().optional(),
   syncPause: WorkspaceSyncPauseStatus.optional(),
   // Whether that remote is pinned to the current signed-in account.
   workspaceSyncConnected: z.boolean().optional(),

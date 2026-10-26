@@ -86,12 +86,12 @@ import {
   AboutHistoryView,
   AboutLinksView,
   AboutSection,
-  type AccessReason,
   type AccessSetup,
   type AccessView,
   type ChatLinksView,
   type LinksView,
 } from "../workbench/About";
+import type { AccessReason } from "../workbench/accessReason";
 import type { AboutConversation } from "../workbench/aboutConversation";
 import { AboutConversationLinksView, type ConversationLinksView, type MentionedFile } from "../workbench/AboutConversationPanel";
 import type { PresencePeer } from "../collab/presenceChannel";
