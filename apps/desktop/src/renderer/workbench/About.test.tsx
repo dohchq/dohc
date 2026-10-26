@@ -1350,6 +1350,9 @@ function HistorySection(props: {
 // What a section shows under its header: the body its toggle controls.
 const sectionBody = (id: string) =>
   document.getElementById(screen.getByTestId(`about-${id}-toggle`).getAttribute("aria-controls")!)!;
+// The lines of the delayed skeleton, when it is all a section's body shows.
+const loadingLines = (id: string) =>
+  sectionBody(id).querySelectorAll(":scope > .dohc-reveal-if-slow:only-child > span");
 
 describe("About History", () => {
   it("reads the file's newest changes by its object id and opens one", async () => {
@@ -1373,7 +1376,7 @@ describe("About History", () => {
     const { rerender } = render(<HistorySection file={{ status: "loading" }} />);
     expect(screen.getByTestId("about-history-toggle")).toBeTruthy();
     expect(screen.queryByTestId("about-history-count")).toBeNull();
-    expect(sectionBody("history").childElementCount).toBe(1);
+    expect(loadingLines("history")).toHaveLength(2);
     expect(screen.queryByTestId("about-history-updating")).toBeNull();
     // While the engine reads the workspace in, History says it is adding changes.
     rerender(<HistorySection file={{ status: "updating" }} />);
@@ -1398,7 +1401,7 @@ describe("About History", () => {
     const pending = deferred<ListEngineMomentsResponse>();
     bridgeMock.listEngineMoments.mockReturnValue(pending.promise);
     render(<HistorySection />);
-    expect(sectionBody("history").childElementCount).toBe(1);
+    expect(loadingLines("history")).toHaveLength(2);
     expect(screen.queryByTestId("about-history-empty")).toBeNull();
     expect(screen.queryByTestId("about-history-count")).toBeNull();
     await act(async () => pending.resolve(page([])));
