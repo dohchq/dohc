@@ -8,7 +8,7 @@ import {
 import { AGENT_HUE_ASSIGNMENT_ORDER, AGENT_HUES, IDENTITY_HUES, type AgentHue, type IdentityHue } from "../renderer/tokens";
 import { VIEW_IDS } from "../renderer/workbench/workbenchState";
 import { IgnoredSettings } from "./settingsFile";
-import { normalizeHandle, scanMentionTokens } from "@dohc/workspace-contracts/chat-mentions";
+import { handleForName, normalizeHandle, scanMentionTokens, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 
 const PreferredNameForIpc = z
   .string()
@@ -85,8 +85,9 @@ export const AgentSettings = z.object({
 export type AgentSettings = z.infer<typeof AgentSettings>;
 export type Agent = AgentSettings & { id: string };
 
-// Names that differ only in case or spaces look the same in a chat.
-const nameKey = (name: string) => agentHandle(name).toLowerCase();
+// Names with one handle name the same agent in a chat. A name with no handle
+// names no agent, so it only has to differ from the other names.
+const nameKey = (name: string) => normalizeHandle(agentHandle(name) || name);
 // Each agent's name, and the name the default agent's messages had before
 // agents had ids, so an old message names one agent.
 function agentNameKeys(agents: Record<string, AgentSettings>): string[] {
@@ -130,14 +131,25 @@ export function ownAgentNamed(settings: Pick<DesktopUserSettings, "agents">, nam
     ?? null;
 }
 
-// A message names one of your agents with @ and its name without spaces.
+// A message names one of your agents with @ and its name's handle: the name
+// without spaces or the punctuation a handle cannot hold. "" names no agent.
 export function agentHandle(name: string): string {
-  return name.replace(/\s/gu, "");
+  return handleForName(name);
 }
 
 // The @ roster's id for one of your agents.
 export function agentMentionId(agentId: string): string {
   return `agent:${agentId}`;
+}
+
+// The @ roster's entries for your agents that are on and have a handle.
+export function agentMentionCandidates(agents: readonly Pick<Agent, "id" | "name" | "enabled">[]): MentionCandidate[] {
+  return agents.flatMap((agent) => {
+    const handle = agentHandle(agent.name);
+    return agent.enabled && handle
+      ? [{ id: agentMentionId(agent.id), kind: "agent" as const, handle, label: agent.name, description: "your agent" }]
+      : [];
+  });
 }
 
 /**
@@ -148,7 +160,10 @@ export function agentMentionId(agentId: string): string {
 export function agentIdsNamedIn(settings: Pick<DesktopUserSettings, "agents">, body: string): string[] {
   const named = new Set(scanMentionTokens(body, { ignoreCode: true }).map(({ handle }) => normalizeHandle(handle)));
   return listAgents(settings)
-    .filter((agent) => agent.launch && named.has(normalizeHandle(agentHandle(agent.name))))
+    .filter((agent) => {
+      const handle = agentHandle(agent.name);
+      return agent.launch && handle && named.has(normalizeHandle(handle));
+    })
     .map(({ id }) => id);
 }
 

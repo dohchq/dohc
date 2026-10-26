@@ -34,6 +34,17 @@ export function normalizeHandle(handle: string): string {
   return handle.normalize("NFC").toLowerCase().normalize("NFC");
 }
 
+// The handle a name gets, so the scanner reads "@" and it back in full: the
+// name's handle characters, from its first letter or number, without the
+// punctuation a handle cannot end with. "" when the name has none.
+export function handleForName(name: string): string {
+  const handle = name
+    .replace(/[^\p{L}\p{N}\p{M}._-]/gu, "")
+    .replace(/^[\p{M}._-]+/u, "")
+    .replace(TERMINAL_HANDLE_PUNCTUATION_RE, "");
+  return nameByteLength(normalizeHandle(handle)) > 200 ? "" : handle;
+}
+
 // Character ranges [start, end) inside inline-code spans or fenced code
 // blocks. This deliberately pragmatic scanner covers backtick spans and both
 // ``` and ~~~ fences without taking a Markdown dependency.

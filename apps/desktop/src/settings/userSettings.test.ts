@@ -12,7 +12,10 @@ import {
   firstAgent,
   firstAgentCommand,
   firstAgentWithLaunch,
+  agentHandle,
   agentIdsNamedIn,
+  agentMentionCandidates,
+  listAgents,
   newAgentHue,
   ownAgentNamed,
   withFirstAgent,
@@ -191,6 +194,30 @@ describe("desktop user settings model", () => {
     // An agent with no way to start, a name inside code, and @agent name nobody.
     expect(agentIdsNamedIn(settings, "@Scout `@Nova` @agent")).toEqual([]);
     expect(agentIdsNamedIn(settings, "Claude Code, please")).toEqual([]);
+  });
+
+  it("gives each agent the handle a message reads back in full, so a name with punctuation wakes its own agent", () => {
+    expect(["Codex (Work)", "Nova.", "R2-D2-", "-Scout_", "Café Bot", "🦊"].map(agentHandle))
+      .toEqual(["CodexWork", "Nova", "R2-D2", "Scout", "CaféBot", ""]);
+    const settings = { agents: {
+      codex: testAgent({ name: "Codex" }),
+      "codex-work": testAgent({ name: "Codex (Work)" }),
+      droid: testAgent({ name: "R2-D2-" }),
+      fox: testAgent({ name: "🦊" }),
+      bear: testAgent({ name: "🐻" }),
+    } };
+    expect(AgentsSettings.safeParse(settings.agents).success).toBe(true);
+    expect(agentIdsNamedIn(settings, "@CodexWork, look")).toEqual(["codex-work"]);
+    expect(agentIdsNamedIn(settings, "@codex.")).toEqual(["codex"]);
+    expect(agentIdsNamedIn(settings, "@R2-D2- and @🦊")).toEqual(["droid"]);
+    // Only an agent with a handle is offered after @.
+    expect(agentMentionCandidates(listAgents(settings)).map(({ id, handle }) => [id, handle])).toEqual([
+      ["agent:codex", "Codex"], ["agent:codex-work", "CodexWork"], ["agent:droid", "R2-D2"],
+    ]);
+    // Names a message reads as one handle are one name.
+    for (const [first, second] of [["Nova", "Nova."], ["Codex Work", "Codex (Work)"]]) {
+      expect(AgentsSettings.safeParse({ a: testAgent({ name: first }), b: testAgent({ name: second }) }).success, second).toBe(false);
+    }
   });
 
   it("gives a new agent the first hue nobody uses, spread out from the ones before", () => {
