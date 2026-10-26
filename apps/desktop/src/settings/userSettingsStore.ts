@@ -1,5 +1,6 @@
 import { lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { atomicReplaceFile } from "../atomicReplaceFile";
+import { AGENT_ID_TAKEN_ERROR } from "../ipc/errorWords";
 import { join, resolve } from "node:path";
 import { hasPreferredNameControlCharacters } from "@dohc/workspace-contracts/chat-identity-values";
 import { AGENT_HUES } from "../renderer/tokens";
@@ -272,10 +273,19 @@ export async function updateUserSettingsFile(
   throw new Error(`dohc did not save settings because ${path} kept changing. Try again.`);
 }
 
+/** A save that adds an agent the file has by then, which came in after the caller read the file. */
+export class AgentIdTakenError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = AGENT_ID_TAKEN_ERROR;
+  }
+}
+
 /**
  * Saves the settings a caller changed from `base`. Only that difference is
  * written onto the file as it is now, so an edit made in the file after the
- * caller read it stays.
+ * caller read it stays. An agent the caller adds that the file has by then
+ * is refused rather than written over.
  */
 export function writeUserSettingsFile(
   dir: string,
@@ -283,7 +293,13 @@ export function writeUserSettingsFile(
   base: StoredUserSettings,
 ): Promise<StoredUserSettingsResult> {
   const next = StoredUserSettings.parse(settings);
-  return updateUserSettingsFile(dir, (current) => overlaySettings(current, base, next, agentLaunch));
+  return updateUserSettingsFile(dir, (current) => {
+    const taken = Object.keys(next.agents).find((id) => !Object.hasOwn(base.agents, id) && Object.hasOwn(current.agents, id));
+    if (taken !== undefined) {
+      throw new AgentIdTakenError(`dohc didn't add ${next.agents[taken]!.name} because the settings file changed at the same time.`);
+    }
+    return overlaySettings(current, base, next, agentLaunch);
+  });
 }
 
 /**

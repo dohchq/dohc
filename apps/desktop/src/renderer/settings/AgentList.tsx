@@ -3,7 +3,7 @@ import { Check, CircleAlert, FilePenLine, ListCollapse, LoaderCircle, Monitor, P
 import { MAX_PREFERRED_NAME_LENGTH, preferredNameFromInput } from "@dohc/workspace-contracts/chat-identity-values";
 import { AGENT_TOOLS, supportsAgentProfile, type AgentToolsResult } from "../../agents/agentToolCatalog";
 import type { ActorPresentation, McpConfigResult } from "../../ipc/bridgeContract";
-import { withErrorWords } from "../../ipc/errorWords";
+import { isAgentIdTaken, withErrorWords } from "../../ipc/errorWords";
 import {
   agentNameTaken,
   automationAgent,
@@ -354,10 +354,6 @@ export function AgentList(props: {
   onNotice?: (message: string, undo?: () => void) => void;
 }) {
   const { workspaceId, settings, onSave, onOrder, onError, onNotice } = props;
-  // An Undo can come after later changes, so it saves through the dialog's
-  // latest save, which diffs against the settings as they are then.
-  const latestSave = useRef(onSave);
-  latestSave.current = onSave;
   const paused = useChatDispatchPaused((cause) =>
     onError?.(withErrorWords("dohc could not read whether agent dispatch is paused.", cause), cause));
   const [checking, setChecking] = useState<string | null>(null);
@@ -477,13 +473,22 @@ export function AgentList(props: {
       const current = file.settings;
       const problem = file.agentProblems?.find((entry) => entry.id === agent.id);
       const holder = current.agents[agent.id]?.name ?? (problem ? problem.name ?? problem.id : null);
+      const keep = (name: string) => onError?.(`Undo didn't replace the new ${name}, so the one you removed stays removed.`);
       if (holder !== null) {
-        onError?.(`Undo didn't replace the new ${holder}, so the one you removed stays removed.`);
+        keep(holder);
         return;
       }
       const order = agentListRows(current, file.agentProblems).map(rowId);
       order.splice(before === undefined ? 0 : order.indexOf(before) + 1, 0, agent.id);
-      if (await latestSave.current({ ...current, agents: { ...current.agents, [agent.id]: entry } })) await onOrder(order);
+      // Saved from the file just read, so main refuses it if the agent came back since.
+      try {
+        await bridge().setUserSettings({ settings: { ...current, agents: { ...current.agents, [agent.id]: entry } }, base: current });
+      } catch (cause) {
+        if (isAgentIdTaken(cause)) keep(agent.name);
+        else onError?.(ipcErrorMessage(cause, `dohc could not bring back ${agent.name}.`), cause);
+        return;
+      }
+      await onOrder(order);
     })());
   };
 

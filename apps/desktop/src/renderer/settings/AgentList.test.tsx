@@ -12,6 +12,8 @@ import { AgentList, agentListRows } from "./AgentList";
 let pausedListener: ((event: ChatDispatchPausedEvent) => void) | null = null;
 const bridgeMock = {
   getUserSettings: vi.fn(async (): Promise<DesktopUserSettingsResult> => ({ settings: DEFAULT_USER_SETTINGS, source: "stored" })),
+  setUserSettings: vi.fn(async (payload: { settings: DesktopUserSettings; base: DesktopUserSettings }): Promise<DesktopUserSettingsResult> => (
+    { settings: payload.settings, source: "stored" })),
   readChatDispatchPaused: vi.fn(async () => ({ paused: false })),
   onChatDispatchPaused: vi.fn((listener: (event: ChatDispatchPausedEvent) => void) => {
     pausedListener = listener;
@@ -326,7 +328,7 @@ it("shows no automations chip while only one agent can be started", () => {
 
 // The order since Remove stays: Undo moves only the agent it puts back.
 it("puts a removed agent back after the one it followed, in the order the file has then", async () => {
-  const { onSave, onOrder, onNotice } = renderList();
+  const { onOrder, onNotice } = renderList();
   await userEvent.click(screen.getByRole("button", { name: "Claude in Terminal actions" }));
   await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Claude in Terminal.", expect.any(Function)));
@@ -335,7 +337,7 @@ it("puts a removed agent back after the one it followed, in the order the file h
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { codex: codex!, default: claude! } }, source: "stored" });
   onNotice.mock.calls[0]![1]!();
   await vi.waitFor(() => expect(onOrder).toHaveBeenCalledWith(["codex", "terminal", "default"]));
-  expect(Object.keys(onSave.mock.lastCall![0].agents)).toEqual(["codex", "default", "terminal"]);
+  expect(Object.keys(bridgeMock.setUserSettings.mock.lastCall![0].settings.agents)).toEqual(["codex", "default", "terminal"]);
 
   // An agent whose entry before it is gone goes back first.
   cleanup();
@@ -349,18 +351,30 @@ it("puts a removed agent back after the one it followed, in the order the file h
 });
 
 it("removes an agent, and Undo puts it back where it was", async () => {
-  const { onSave, onOrder, onNotice, rerender } = renderList();
+  const { onSave, onOrder, onNotice } = renderList();
   await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
   await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
   const saved = onSave.mock.calls[0]![0];
   expect(Object.keys(saved.agents)).toEqual(["default", "terminal"]);
   await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
-  // The dialog hands down a new save after each one; the Undo goes through it.
-  const latestSave = vi.fn(async (_settings: DesktopUserSettings) => true);
-  rerender({ settings: saved, onSave: latestSave });
   bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: saved, source: "stored" });
   onNotice.mock.calls[0]![1]!();
   await vi.waitFor(() => expect(onOrder).toHaveBeenCalledWith(["default", "codex", "terminal"]));
   expect(onSave).toHaveBeenCalledOnce();
-  expect(latestSave.mock.calls[0]![0].agents).toEqual({ ...saved.agents, codex: SETTINGS.agents.codex });
+  // Saved from the file Undo read, so main refuses it if Codex came back since.
+  expect(bridgeMock.setUserSettings).toHaveBeenCalledWith({ settings: { ...saved, agents: { ...saved.agents, codex: SETTINGS.agents.codex } }, base: saved });
+});
+
+it("leaves an agent that came back after Undo read the file", async () => {
+  const { onSave, onOrder, onNotice, onError } = renderList();
+  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
+  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: onSave.mock.calls[0]![0], source: "stored" });
+  bridgeMock.setUserSettings.mockRejectedValueOnce(new Error(
+    "Error invoking remote method 'desktop:set-user-settings': AgentIdTakenError: dohc didn't add Codex because the settings file changed at the same time.",
+  ));
+  onNotice.mock.calls[0]![1]!();
+  await vi.waitFor(() => expect(onError).toHaveBeenCalledWith("Undo didn't replace the new Codex, so the one you removed stays removed."));
+  expect(onOrder).not.toHaveBeenCalled();
 });

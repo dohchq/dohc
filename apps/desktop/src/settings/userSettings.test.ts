@@ -39,6 +39,7 @@ import {
   writeUserSettingsFile,
 } from "./userSettingsStore";
 
+import { AGENT_ID_TAKEN_ERROR } from "../ipc/errorWords";
 import { AGENT_HUE_ASSIGNMENT_ORDER, AGENT_HUES } from "../renderer/tokens";
 import { settingsWithAgent, testAgent } from "../testing/agentSettings";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -549,6 +550,21 @@ describe("desktop user settings store", () => {
       themeMode: "dark",
       zoomLevel: 1,
     });
+  });
+
+  it("refuses to add an agent the file got after the caller read it", async () => {
+    const root = await createTestScratch("dohc-user-settings-");
+    const path = join(root, USER_SETTINGS_FILE);
+    await replaceUserSettingsFile(root, DEFAULT_USER_SETTINGS);
+    const seen = (await readUserSettingsFile(root)).settings;
+    // Another window adds Nova under the id this one is about to use.
+    await writeFile(path, JSON.stringify(settingsWithAgent({ name: "Nova" })));
+    const before = await readFile(path, "utf8");
+    await expect(writeUserSettingsFile(root, settingsWithAgent({ name: "Atlas" }), seen)).rejects.toMatchObject({
+      name: AGENT_ID_TAKEN_ERROR,
+      message: "dohc didn't add Atlas because the settings file changed at the same time.",
+    });
+    expect(await readFile(path, "utf8")).toBe(before);
   });
 
   it("saves an agent's launch whole, so a save from older settings never mixes two tools", async () => {
