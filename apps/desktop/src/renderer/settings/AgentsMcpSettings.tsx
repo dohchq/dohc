@@ -13,7 +13,8 @@ import { SettingRow } from "./SettingRow";
 
 export function AgentsMcpSettings(props: {
   workspaceId: string;
-  onError?: (message: string, cause?: unknown, retry?: () => Promise<void>, details?: ReadonlyArray<ErrorDetailField>) => void;
+  onError?: (message: string, cause?: unknown, retry?: () => Promise<void>, details?: ReadonlyArray<ErrorDetailField>, identity?: string) => void;
+  onClearError?: (identity: string) => void;
   settings: DesktopUserSettings;
   agentProblems?: readonly AgentProblem[];
   onSave: (settings: DesktopUserSettings) => Promise<DesktopUserSettingsResult | null>;
@@ -22,6 +23,7 @@ export function AgentsMcpSettings(props: {
   onOpenSettingsFile: () => void;
   sharedView?: boolean;
   sessionRecorderOn: boolean | undefined;
+  trust?: { trusted: boolean | null; asking: boolean; onTrust: () => void };
 }) {
   const { workspaceId, sharedView, sessionRecorderOn, onError } = props;
   const [status, setStatus] = useState<AgentRunStatusResult | null>(null);
@@ -162,6 +164,8 @@ export function AgentsMcpSettings(props: {
         onOrder={props.onOrder}
         onOpenSettingsFile={props.onOpenSettingsFile}
         onError={onError}
+        {...(props.onClearError ? { onClearError: props.onClearError } : {})}
+        {...(props.trust ? { trust: props.trust } : {})}
         {...(props.onNotice ? { onNotice: props.onNotice } : {})}
       />
 

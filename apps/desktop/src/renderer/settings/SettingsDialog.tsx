@@ -109,8 +109,10 @@ function StatusPill(props: { state: SettingsSaveState }) {
 }
 
 export function SettingsDialog(props: {
-  // `details` are facts for Copy details, one line each.
-  onError?: (message: string, cause?: unknown, retry?: () => Promise<void>, details?: ReadonlyArray<ErrorDetailField>) => void;
+  // `details` are facts for Copy details, one line each. A report with an
+  // `identity` replaces the row of that identity, and `onClearError` takes it back.
+  onError?: (message: string, cause?: unknown, retry?: () => Promise<void>, details?: ReadonlyArray<ErrorDetailField>, identity?: string) => void;
+  onClearError?: (identity: string) => void;
   /** A change that went through, with its Undo. */
   onNotice?: (message: string, undo?: () => void) => void;
   /** Each workspace settings answer, so the shell can say what the file ignored. */
@@ -825,6 +827,12 @@ export function SettingsDialog(props: {
               onOpenSettingsFile={() => void openSettingsFile()}
               sharedView={props.sharedView}
               sessionRecorderOn={props.sessionRecorderOn}
+              {...(props.onClearError ? { onClearError: props.onClearError } : {})}
+              trust={{
+                trusted: workspaceTrust.trusted,
+                asking: workspaceTrust.asking,
+                onTrust: () => void changeWorkspaceTrust("trusted"),
+              }}
             />
           </div>
         );

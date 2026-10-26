@@ -20,6 +20,7 @@ import { Overlay } from "../Overlay";
 import type { ScheduleHostResult } from "../../ipc/bridgeContract";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { SettingsDialog } from "./SettingsDialog";
+import { AGENTS_RESTRICTED_MESSAGE } from "../../agents/agentToolCatalog";
 import { applyLookSettings } from "../theme";
 import { CUSTOMIZE_TARGETS } from "./customize";
 import { settingsWithAgent, testAgent } from "../../testing/agentSettings";
@@ -1123,6 +1124,7 @@ describe("SettingsDialog", () => {
   });
 
   it("checks the agent in its row", async () => {
+    workspaceTrusted = true;
     const user = userEvent.setup();
     bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "stored" });
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
@@ -1136,6 +1138,7 @@ describe("SettingsDialog", () => {
   // session, so a Check here would run into a refusal. The note says so and
   // Check is off.
   it("tells the user to restart when this session has no recorder", async () => {
+    workspaceTrusted = true;
     const user = userEvent.setup();
     bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "stored" });
     render(
@@ -1300,6 +1303,7 @@ describe("SettingsDialog", () => {
   });
 
   it("says an agent didn't reply without turning it on or off", async () => {
+    workspaceTrusted = true;
     const onError = vi.fn();
     bridge.runnerSelfTest.mockResolvedValueOnce({
       ok: false,
@@ -1321,9 +1325,54 @@ describe("SettingsDialog", () => {
     expect(await screen.findByText("Didn't reply.")).toBeTruthy();
     expect(onError).toHaveBeenCalledWith("Nova didn't reply to the check.", undefined, expect.any(Function), [
       ["Cause", "Runner did not report within 120 seconds."],
-    ]);
+    ], "agent-check:ws-1:default");
     expect(screen.getByRole("switch", { name: "Turn on Nova" }).getAttribute("aria-checked")).toBe("false");
     expect(bridge.setUserSettings).not.toHaveBeenCalled();
+  });
+
+  it("shows Restricted Mode's band on the agents card, and turns Check on once trusted without checking", async () => {
+    bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "stored" });
+    const user = userEvent.setup();
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
+    const band = await screen.findByTestId("restricted-agents-state");
+    expect(band.textContent).toContain(AGENTS_RESTRICTED_MESSAGE);
+    const check = screen.getByRole<HTMLButtonElement>("button", { name: "Check" });
+    expect(check.disabled).toBe(true);
+    expect(check.title).toBe(AGENTS_RESTRICTED_MESSAGE);
+
+    workspaceTrusted = true;
+    await user.click(within(band).getByRole("button", { name: "Trust workspace" }));
+    expect(bridge.requestWorkspaceTrust).toHaveBeenCalledWith({ workspaceId: "ws-1" });
+    await waitFor(() => expect(screen.queryByTestId("restricted-agents-state")).toBeNull());
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Check" }).disabled).toBe(false);
+    expect(bridge.runnerSelfTest).not.toHaveBeenCalled();
+  });
+
+  it("holds Check back on nothing while trust is still being read", async () => {
+    const read = deferred<{ workspaceId: string; trusted: boolean }>();
+    bridge.readWorkspaceTrust.mockReturnValueOnce(read.promise);
+    bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "stored" });
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
+    const check = await screen.findByRole<HTMLButtonElement>("button", { name: "Check" });
+    expect(check.disabled).toBe(false);
+    expect(screen.queryByTestId("restricted-agents-state")).toBeNull();
+    await act(async () => read.resolve({ workspaceId: "ws-1", trusted: true }));
+  });
+
+  it("takes back an agent's failed check through the shell when its check passes", async () => {
+    workspaceTrusted = true;
+    const onError = vi.fn();
+    const onClearError = vi.fn();
+    bridge.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Runner did not report within 120 seconds." });
+    bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "stored" });
+    const user = userEvent.setup();
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents"
+      onError={onError} onClearError={onClearError} onClose={() => {}} />);
+    await user.click(await screen.findByRole("button", { name: "Check" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    expect(onError.mock.calls[0]![4]).toBe("agent-check:ws-1:default");
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(onClearError).toHaveBeenCalledExactlyOnceWith("agent-check:ws-1:default"));
   });
 
   // Live documents belong to the workspace that owns them. A shared view

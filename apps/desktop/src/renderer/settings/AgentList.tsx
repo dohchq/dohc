@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, CircleAlert, FilePenLine, ListCollapse, LoaderCircle, Monitor, Pause, Pencil, Play, Plug, Plus, Trash2, TriangleAlert, Workflow } from "lucide-react";
 import { MAX_PREFERRED_NAME_LENGTH, preferredNameFromInput } from "@dohc/workspace-contracts/chat-identity-values";
-import { AGENT_TOOLS, supportsAgentProfile, type AgentToolsResult } from "../../agents/agentToolCatalog";
+import { AGENT_TOOLS, AGENTS_RESTRICTED_MESSAGE, supportsAgentProfile, type AgentToolsResult } from "../../agents/agentToolCatalog";
 import type { ActorPresentation, McpConfigResult } from "../../ipc/bridgeContract";
 import { isAgentIdTaken, withErrorWords } from "../../ipc/errorWords";
 import {
@@ -21,6 +21,7 @@ import {
 import type { AgentHue } from "../tokens";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
+import { RestrictedAgentsBand } from "../RestrictedMode";
 import type { ErrorDetailField } from "../shell/copyDetails";
 import { CopyButton } from "../ui/CopyButton";
 import { SecondaryButton } from "../ui/controls";
@@ -72,11 +73,16 @@ export function ProblemText(props: { text: string }) {
 
 // Why Check cannot run in this session, or null when it can. A session
 // without a recorder can only refuse a check until dohc restarts.
-export function runnerEngineNote(sharedView: boolean, sessionRecorderOn: boolean | undefined): string | null {
+export function runnerEngineNote(sharedView: boolean, sessionRecorderOn: boolean | undefined, restricted = false): string | null {
   if (sharedView) return "This workspace is a shared view. dohc records nothing here, so there is no chat to test.";
+  if (restricted) return AGENTS_RESTRICTED_MESSAGE;
   return sessionRecorderOn === false
     ? "The workspace engine starts when dohc starts. Restart dohc to check an agent."
     : null;
+}
+
+function checkIdentity(workspaceId: string, agentId: string): string {
+  return `agent-check:${workspaceId}:${agentId}`;
 }
 
 function configSnippet(config: Extract<McpConfigResult, { command: string }>): string {
@@ -364,10 +370,15 @@ export function AgentList(props: {
   // A failed move says `failure` when given, with why.
   onOrder: (order: readonly string[], failure?: string) => Promise<boolean>;
   onOpenSettingsFile: () => void;
-  onError?: (message: string, cause?: unknown, retry?: () => Promise<void>, details?: ReadonlyArray<ErrorDetailField>) => void;
+  // Workspace trust: false holds every agent back. null is still reading and holds nothing back.
+  trust?: { trusted: boolean | null; asking: boolean; onTrust: () => void };
+  // A report with an identity replaces the row of that identity in Notices.
+  onError?: (message: string, cause?: unknown, retry?: () => Promise<void>, details?: ReadonlyArray<ErrorDetailField>, identity?: string) => void;
+  // Takes back the toast and Notices row of this identity.
+  onClearError?: (identity: string) => void;
   onNotice?: (message: string, undo?: () => void) => void;
 }) {
-  const { workspaceId, settings, onSave, onOrder, onError, onNotice } = props;
+  const { workspaceId, settings, onSave, onOrder, onError, onClearError, onNotice } = props;
   const paused = useChatDispatchPaused((cause) =>
     onError?.(withErrorWords("dohc could not read whether agent dispatch is paused.", cause), cause));
   const [checking, setChecking] = useState<string | null>(null);
@@ -409,7 +420,8 @@ export function AgentList(props: {
   const automation = automationAgent(settings);
   const choosing = rows.filter((row) => row.kind === "agent" && row.agent.launch !== undefined).length > 1;
   const fileOrder = rows.map(rowId);
-  const checkNote = runnerEngineNote(Boolean(props.sharedView), props.sessionRecorderOn);
+  const restricted = props.trust?.trusted === false;
+  const checkNote = runnerEngineNote(Boolean(props.sharedView), props.sessionRecorderOn, restricted);
   // Why Check can't start now. Try again on a toast can come at such a time.
   const checkBlocked = useRef<string | null>(null);
   checkBlocked.current = checkNote
@@ -417,10 +429,12 @@ export function AgentList(props: {
     ?? (checking !== null ? "A check is already running. Try again when it finishes." : null);
   const config = props.config;
 
+  // One row in Notices per agent's failed check, which its next pass takes back.
   const check = useCallback(async (agent: Agent) => {
+    const identity = checkIdentity(workspaceId, agent.id);
     const blocked = checkBlocked.current;
     if (blocked !== null) {
-      onError?.(`dohc could not check ${agent.name}.`, undefined, () => check(agent), [["Cause", blocked]]);
+      onError?.(`dohc could not check ${agent.name}.`, undefined, () => check(agent), [["Cause", blocked]], identity);
       return;
     }
     const token = requests.current();
@@ -435,19 +449,19 @@ export function AgentList(props: {
         onError?.(`${agent.name} didn't reply to the check.`, undefined, () => check(agent), [
           ["Cause", result.detail],
           ...(result.logPath ? [["Log", result.logPath] as const] : []),
-        ]);
-      }
+        ], identity);
+      } else onClearError?.(identity);
       next = result.ok
         ? { status: "replied", seconds: Math.max(1, Math.round((performance.now() - started) / 1000)) }
         : { status: "failed" };
     } catch (cause) {
       if (!requests.isCurrent(token)) return;
-      onError?.(ipcErrorMessage(cause, `dohc could not check ${agent.name}.`), cause, () => check(agent));
+      onError?.(ipcErrorMessage(cause, `dohc could not check ${agent.name}.`), cause, () => check(agent), undefined, identity);
       next = { status: "failed" };
     }
     setChecks((current) => ({ ...current, [agent.id]: next }));
     setChecking(null);
-  }, [onError, requests, workspaceId]);
+  }, [onClearError, onError, requests, workspaceId]);
 
   // A new agent takes the first free id and name. One dohc starts is on and
   // is checked at once; one you run opens on its name.
@@ -506,6 +520,8 @@ export function AgentList(props: {
     }
     const left = agentListRows(saved.settings, saved.agentProblems).map(rowId);
     setRenaming((current) => (current === agent.id ? null : current));
+    // Its failed check goes with it, and Undo doesn't bring that back.
+    onClearError?.(checkIdentity(workspaceId, agent.id));
     onNotice?.(`Removed ${agent.name}.`, () => void (async () => {
       let file: DesktopUserSettingsResult;
       try {
@@ -579,6 +595,11 @@ export function AgentList(props: {
         <p data-testid="mcp-unavailable" className="-mt-4 mb-6 text-[12px] text-danger">{config.message}</p>
       ) : null}
       <div className="rounded-lg border border-line bg-panel px-4">
+        {restricted && props.trust ? (
+          <div className="-mx-4 overflow-hidden rounded-t-lg">
+            <RestrictedAgentsBand asking={props.trust.asking} onTrust={props.trust.onTrust} />
+          </div>
+        ) : null}
         {rows.map((row) => row.kind === "broken" ? (
           <BrokenAgentRow key={`broken:${row.problem.id}`} problem={row.problem} onOpenSettingsFile={props.onOpenSettingsFile} />
         ) : (
@@ -643,7 +664,7 @@ export function AgentList(props: {
       <p className="m-0 mt-2 flex items-center gap-1.5 text-[12px] text-muted">
         <Monitor size={14} aria-hidden />Runs on this computer. Turn an agent on for one computer per workspace.
       </p>
-      {checkNote ? (
+      {checkNote && !restricted ? (
         <p data-testid="agents-check-note" className="m-0 mt-2 text-[12px] text-muted">{checkNote}</p>
       ) : null}
     </section>

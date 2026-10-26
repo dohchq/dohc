@@ -2,7 +2,7 @@
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { AgentToolsResult } from "../../agents/agentToolCatalog";
+import { AGENTS_RESTRICTED_MESSAGE, type AgentToolsResult } from "../../agents/agentToolCatalog";
 import type { ChatDispatchPausedEvent, RunnerSelfTestResult } from "../../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS, type AgentProblem, type DesktopUserSettings, type DesktopUserSettingsResult } from "../../settings/userSettings";
 import { testAgent } from "../../testing/agentSettings";
@@ -125,7 +125,7 @@ it("says an agent didn't reply, names it in Notices with why and its log, and of
   expect(onError).toHaveBeenCalledWith("Claude Code didn't reply to the check.", undefined, expect.any(Function), [
     ["Cause", "Runner self-test timed out after 120 seconds."],
     ["Log", "C:\\Logs\\check.log"],
-  ]);
+  ], "agent-check:ws-1:default");
   await userEvent.click(within(row("Claude Code")).getByRole("button", { name: "Try again" }));
   expect(bridgeMock.runnerSelfTest).toHaveBeenCalledTimes(2);
 });
@@ -148,21 +148,21 @@ it("checks the agent again from the failed check's toast", async () => {
   expect(bridgeMock.runnerSelfTest).toHaveBeenCalledTimes(3);
   expect(onError).toHaveBeenLastCalledWith("dohc could not check Codex.", undefined, expect.any(Function), [
     ["Cause", "A check is already running. Try again when it finishes."],
-  ]);
+  ], "agent-check:ws-1:codex");
   await act(async () => running.resolve({ ok: true, detail: "self-test ok" }));
   act(() => pausedListener?.({ paused: true }));
   await act(() => retry());
   expect(bridgeMock.runnerSelfTest).toHaveBeenCalledTimes(3);
   expect(onError).toHaveBeenLastCalledWith("dohc could not check Codex.", undefined, expect.any(Function), [
     ["Cause", "Agents are paused. Resume them, then try again."],
-  ]);
+  ], "agent-check:ws-1:codex");
 });
 
 it("checks again from the toast when the check couldn't start", async () => {
   bridgeMock.runnerSelfTest.mockRejectedValueOnce(new Error(""));
   const { onError } = renderList();
   await userEvent.click(within(row("Codex")).getByRole("button", { name: "Check" }));
-  await vi.waitFor(() => expect(onError).toHaveBeenCalledWith("dohc could not check Codex.", expect.any(Error), expect.any(Function)));
+  await vi.waitFor(() => expect(onError).toHaveBeenCalledWith("dohc could not check Codex.", expect.any(Error), expect.any(Function), undefined, "agent-check:ws-1:codex"));
   await act(() => (onError.mock.calls[0]![2] as () => Promise<void>)());
   expect(bridgeMock.runnerSelfTest).toHaveBeenCalledTimes(2);
   expect(within(row("Codex")).getByText(/^Replied in \d+ s$/)).toBeTruthy();
@@ -535,4 +535,105 @@ it("leaves an agent that came back after Undo read the file", async () => {
   onNotice.mock.calls[0]![1]!();
   await vi.waitFor(() => expect(onError).toHaveBeenCalledWith("Undo didn't replace the new Codex, so the one you removed stays removed."));
   expect(onOrder).not.toHaveBeenCalled();
+});
+
+const trust = (trusted: boolean | null) => ({ trusted, asking: false, onTrust: vi.fn() });
+const checkButton = (name: string) => within(row(name)).getByRole<HTMLButtonElement>("button", { name: /^(Check|Try again)$/ });
+
+it("holds Check back in Restricted Mode with the band's words, and adds an agent without checking it", async () => {
+  const restricted = trust(false);
+  const { onSave, onError } = renderList({ trust: restricted });
+  const band = screen.getByTestId("restricted-agents-state");
+  expect(band.textContent).toContain(AGENTS_RESTRICTED_MESSAGE);
+  // The band is the card's top strip.
+  expect(band.parentElement!.parentElement!.firstElementChild).toBe(band.parentElement);
+  expect(checkButton("Codex").disabled).toBe(true);
+  expect(checkButton("Codex").title).toBe(AGENTS_RESTRICTED_MESSAGE);
+  expect(screen.queryByTestId("agents-check-note")).toBeNull();
+  await userEvent.click(within(band).getByRole("button", { name: "Trust workspace" }));
+  expect(restricted.onTrust).toHaveBeenCalledOnce();
+
+  await within(tile("Add Codex")).findByText("Ready");
+  await userEvent.click(tile("Add Codex"));
+  await vi.waitFor(() => expect(onSave).toHaveBeenCalledOnce());
+  expect(Object.keys(onSave.mock.calls[0]![0].agents)).toContain("codex-2");
+  expect(bridgeMock.runnerSelfTest).not.toHaveBeenCalled();
+  expect(onError).not.toHaveBeenCalled();
+  expect(screen.queryByText("Didn't reply.")).toBeNull();
+  // The switch still works.
+  await userEvent.click(within(row("Codex")).getByRole("switch", { name: "Turn on Codex" }));
+  expect(onSave).toHaveBeenCalledTimes(2);
+});
+
+it("says Restricted Mode holds the check back when an old toast's Try again comes while restricted", async () => {
+  bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Runner exited before reporting self-test success." });
+  const { onError, rerender } = renderList({ trust: trust(true) });
+  await userEvent.click(checkButton("Codex"));
+  await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
+  rerender({ trust: trust(false) });
+  await act(() => (onError.mock.calls[0]![2] as () => Promise<void>)());
+  expect(bridgeMock.runnerSelfTest).toHaveBeenCalledOnce();
+  expect(onError).toHaveBeenLastCalledWith("dohc could not check Codex.", undefined, expect.any(Function), [
+    ["Cause", AGENTS_RESTRICTED_MESSAGE],
+  ], "agent-check:ws-1:codex");
+});
+
+it("turns Check on once the workspace is trusted, without checking", () => {
+  const { rerender } = renderList({ trust: trust(false) });
+  rerender({ trust: trust(true) });
+  expect(screen.queryByTestId("restricted-agents-state")).toBeNull();
+  expect(checkButton("Codex").disabled).toBe(false);
+  expect(checkButton("Codex").title).toBe("");
+  expect(bridgeMock.runnerSelfTest).not.toHaveBeenCalled();
+});
+
+it("holds nothing back while trust is still being read, and Add's passing check takes back the agent's row", async () => {
+  const onClearError = vi.fn();
+  renderList({ trust: trust(null), onClearError });
+  expect(screen.queryByTestId("restricted-agents-state")).toBeNull();
+  expect(checkButton("Codex").disabled).toBe(false);
+  await within(tile("Add Codex")).findByText("Ready");
+  await userEvent.click(tile("Add Codex"));
+  await vi.waitFor(() => expect(bridgeMock.runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "ws-1", agentId: "codex-2" }));
+  await vi.waitFor(() => expect(onClearError).toHaveBeenCalledExactlyOnceWith("agent-check:ws-1:codex-2"));
+});
+
+it("takes back only that agent's failed check when its check passes, from the row or the toast", async () => {
+  bridgeMock.runnerSelfTest
+    .mockResolvedValueOnce({ ok: false, detail: "Claude Code timed out." })
+    .mockResolvedValueOnce({ ok: false, detail: "Codex timed out." });
+  const onClearError = vi.fn();
+  const { onError } = renderList({ onClearError });
+  await userEvent.click(checkButton("Claude Code"));
+  await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
+  await userEvent.click(checkButton("Codex"));
+  await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
+  expect(onError.mock.calls.map((call) => call[4])).toEqual(["agent-check:ws-1:default", "agent-check:ws-1:codex"]);
+  expect(onClearError).not.toHaveBeenCalled();
+
+  await userEvent.click(checkButton("Codex"));
+  await vi.waitFor(() => expect(onClearError).toHaveBeenCalledWith("agent-check:ws-1:codex"));
+  expect(onClearError).not.toHaveBeenCalledWith("agent-check:ws-1:default");
+
+  // Try again on Claude Code's toast passes, and takes back its own row.
+  await act(() => (onError.mock.calls[0]![2] as () => Promise<void>)());
+  expect(onClearError).toHaveBeenLastCalledWith("agent-check:ws-1:default");
+  expect(onClearError).toHaveBeenCalledTimes(2);
+});
+
+it("takes back a removed agent's failed check, and Undo doesn't bring it back", async () => {
+  bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Codex timed out." });
+  const onClearError = vi.fn();
+  const { onSave, onError, onNotice, onOrder } = renderList({ onClearError });
+  await userEvent.click(checkButton("Codex"));
+  await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
+  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Remove" }));
+  await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
+  expect(onClearError).toHaveBeenCalledExactlyOnceWith("agent-check:ws-1:codex");
+  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: onSave.mock.calls[0]![0], source: "stored" });
+  onNotice.mock.calls[0]![1]!();
+  await vi.waitFor(() => expect(onOrder).toHaveBeenCalledOnce());
+  expect(onError).toHaveBeenCalledOnce();
+  expect(bridgeMock.runnerSelfTest).toHaveBeenCalledOnce();
 });
