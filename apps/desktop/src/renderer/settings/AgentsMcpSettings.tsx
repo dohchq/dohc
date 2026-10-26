@@ -4,11 +4,10 @@ import type {
   AgentRunStatusResult,
   McpConfigResult,
 } from "../../ipc/bridgeContract";
-import type { Agent, AgentProblem, AgentSettings, DesktopUserSettings } from "../../settings/userSettings";
+import type { AgentProblem, DesktopUserSettings } from "../../settings/userSettings";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { AgentList } from "./AgentList";
-import { RunnerSettingsCard } from "./RunnerSettingsCard";
 import { SettingRow } from "./SettingRow";
 
 export function AgentsMcpSettings(props: {
@@ -16,24 +15,12 @@ export function AgentsMcpSettings(props: {
   onError?: (message: string, cause?: unknown, retry?: () => Promise<void>) => void;
   settings: DesktopUserSettings;
   agentProblems?: readonly AgentProblem[];
-  onSave: (settings: DesktopUserSettings) => Promise<void>;
+  onSave: (settings: DesktopUserSettings) => Promise<boolean>;
   onOpenSettingsFile: () => void;
-  agentName?: string;
-  onAgentNameChange?: (name: string) => Promise<void>;
-  // The first agent, or null before there is one.
-  agent: Agent | null;
   sharedView?: boolean;
   sessionRecorderOn: boolean | undefined;
-  onAgentChange: (fields: Pick<AgentSettings, "launch" | "enabled" | "timeoutMinutes">) => Promise<void>;
 }) {
-  const {
-    workspaceId,
-    agent,
-    sharedView,
-    sessionRecorderOn,
-    onAgentChange,
-    onError,
-  } = props;
+  const { workspaceId, sharedView, sessionRecorderOn, onError } = props;
   const [status, setStatus] = useState<AgentRunStatusResult | null>(null);
   const [config, setConfig] = useState<McpConfigResult | null>(null);
   const [busy, setBusy] = useState(false);
@@ -171,18 +158,6 @@ export function AgentsMcpSettings(props: {
         onSave={props.onSave}
         onOpenSettingsFile={props.onOpenSettingsFile}
         onError={onError}
-      />
-
-      <RunnerSettingsCard
-        key={workspaceId}
-        onError={props.onError}
-        workspaceId={workspaceId}
-        agent={agent}
-        agentName={props.agentName}
-        onAgentNameChange={props.onAgentNameChange}
-        sharedView={sharedView}
-        sessionRecorderOn={sessionRecorderOn}
-        onAgentChange={onAgentChange}
       />
 
       <SettingRow

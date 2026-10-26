@@ -2,6 +2,7 @@
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type { AgentToolsResult } from "../../agents/agentToolCatalog";
 import type { ChatDispatchPausedEvent } from "../../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS, type AgentProblem, type DesktopUserSettings } from "../../settings/userSettings";
 import { testAgent } from "../../testing/agentSettings";
@@ -17,6 +18,10 @@ const bridgeMock = {
   }),
   setChatDispatchPaused: vi.fn(async (_event: ChatDispatchPausedEvent) => undefined),
   runnerSelfTest: vi.fn(async (_payload: { workspaceId: string; agentId: string }) => ({ ok: true, detail: "Runner self-test passed." })),
+  detectAgentTools: vi.fn(async (_payload: { workspaceId: string }): Promise<AgentToolsResult> => ({
+    workingDirectory: "C:\\Work",
+    tools: [{ tool: "codex", executable: "C:\\Tools\\codex.exe", version: "0.98", auth: "signed-in", probe: "detected" }],
+  })),
 };
 vi.mock("../bridge", () => ({ bridge: () => bridgeMock }));
 
@@ -38,7 +43,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 function renderList(fields: Partial<Parameters<typeof AgentList>[0]> = {}) {
-  const onSave = vi.fn(async (_settings: DesktopUserSettings) => undefined);
+  const onSave = vi.fn(async (_settings: DesktopUserSettings) => true);
   const onError = vi.fn();
   const onOpenSettingsFile = vi.fn();
   render(<AgentList workspaceId="ws-1" settings={SETTINGS} config={null} sessionRecorderOn
@@ -147,4 +152,18 @@ it("renames an agent in place, and refuses a name another agent has", async () =
   await userEvent.type(field, "Codex Work{Enter}");
   expect(onSave.mock.calls[0]![0].agents.codex?.name).toBe("Codex Work");
   expect(screen.queryByRole("textbox")).toBeNull();
+});
+
+it("shows how dohc starts an agent in its details", async () => {
+  renderList();
+  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Details" }));
+  const details = within(row("Codex")).getByTestId("agent-details");
+  expect(await within(details).findByText("Codex 0.98, signed in")).toBeTruthy();
+  expect(within(details).getByText("C:\\Tools\\codex.exe")).toBeTruthy();
+  expect(within(details).getByText("30 min")).toBeTruthy();
+  expect(within(details).getByRole("button", { name: "Use your own command" })).toBeTruthy();
+  expect(bridgeMock.detectAgentTools).toHaveBeenCalledTimes(1);
+  await userEvent.click(within(details).getByRole("button", { name: "Details" }));
+  expect(within(row("Codex")).queryByTestId("agent-details")).toBeNull();
 });

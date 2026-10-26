@@ -24,9 +24,7 @@ import {
   MIN_ZOOM_LEVEL,
   type DesktopUserSettings,
   firstAgent,
-  newAgentDefaults,
   withAgent,
-  withFirstAgent,
   zoomPercent,
 } from "../../settings/userSettings";
 import {
@@ -128,7 +126,7 @@ export function SettingsDialog(props: {
    * Main's open-time recorder decision for this workspace, undefined
    * until its status arrives. The engine setting lives here, so this surface
    * owes the recovery that actually works — and the two off states have
-   * different ones. See the runner note in `RunnerSettingsCard`.
+   * different ones. See `runnerEngineNote` in `AgentList`.
    */
   sessionRecorderOn?: boolean;
   initialSection?: SettingsSectionId;
@@ -311,10 +309,11 @@ export function SettingsDialog(props: {
     }
   }, [activeSection, filteredSections, query]);
 
-  const saveUserSettings = useCallback(async (settings: DesktopUserSettings) => {
+  // Answers whether the settings saved. A failed save reports why and puts back what the file holds.
+  const saveUserSettings = useCallback(async (settings: DesktopUserSettings): Promise<boolean> => {
     if (!userResult) {
       setError("User settings are still loading.");
-      return;
+      return false;
     }
     const requestId = userSaveRequestRef.next();
     const previous = userResult;
@@ -330,20 +329,22 @@ export function SettingsDialog(props: {
     setError(null);
     try {
       const saved = await bridge().setUserSettings({ settings, base: previous.settings });
-      if (!userSaveRequestRef.isCurrent(requestId)) return;
+      if (!userSaveRequestRef.isCurrent(requestId)) return true;
       setUserResult(saved);
       markSaved();
+      return true;
     } catch (cause) {
-      if (!userSaveRequestRef.isCurrent(requestId)) return;
+      if (!userSaveRequestRef.isCurrent(requestId)) return false;
       setSaveState("error");
       setError(ipcErrorMessage(cause));
       props.onError?.(ipcErrorMessage(cause, "dohc could not save your settings."), cause);
       // `previous` can hold a change an earlier save failed to make, so the
       // dialog goes back to the settings the file holds.
       const restored = await bridge().getUserSettings().catch(() => previous);
-      if (!userSaveRequestRef.isCurrent(requestId)) return;
+      if (!userSaveRequestRef.isCurrent(requestId)) return false;
       setUserResult(restored);
       applyLookSettings(restored.settings);
+      return false;
     }
   }, [markSaved, markSaving, props.onError, userResult]);
 
@@ -809,25 +810,8 @@ export function SettingsDialog(props: {
               agentProblems={userResult?.agentProblems}
               onSave={saveUserSettings}
               onOpenSettingsFile={() => void openSettingsFile()}
-              agentName={agent?.name}
-              onAgentNameChange={(name) =>
-                saveUserSettings(withFirstAgent(userSettings, (current) => ({
-                  ...(current ?? newAgentDefaults(userSettings, userSettings.appearance.yourColor ?? ownPresentation.hue)),
-                  name,
-                })))
-              }
-              agent={agent}
               sharedView={props.sharedView}
               sessionRecorderOn={props.sessionRecorderOn}
-              onAgentChange={(fields) =>
-                saveUserSettings(withFirstAgent(userSettings, (current) => ({
-                  ...(current ?? {
-                    ...newAgentDefaults(userSettings, userSettings.appearance.yourColor ?? ownPresentation.hue),
-                    name: "Agent",
-                  }),
-                  ...fields,
-                })))
-              }
             />
           </div>
         );
@@ -1121,12 +1105,12 @@ export function SettingsDialog(props: {
             >
               <PreferredNameControl
                 value={userSettings.profile.preferredName}
-                onChange={(preferredName) =>
-                  saveUserSettings({
+                onChange={async (preferredName) => {
+                  await saveUserSettings({
                     ...userSettings,
                     profile: { ...userSettings.profile, preferredName },
-                  })
-                }
+                  });
+                }}
                 testIdPrefix="general-preferred-name"
               />
             </SettingRow>

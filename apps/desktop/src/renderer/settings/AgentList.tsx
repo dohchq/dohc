@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, CircleAlert, FilePenLine, LoaderCircle, Pause, Pencil, Play, Plug, TriangleAlert } from "lucide-react";
+import { Check, CircleAlert, FilePenLine, ListCollapse, LoaderCircle, Pause, Pencil, Play, Plug, TriangleAlert } from "lucide-react";
 import { MAX_PREFERRED_NAME_LENGTH, preferredNameFromInput } from "@dohc/workspace-contracts/chat-identity-values";
+import type { AgentToolsResult } from "../../agents/agentToolCatalog";
 import type { ActorPresentation, McpConfigResult } from "../../ipc/bridgeContract";
 import { withErrorWords } from "../../ipc/errorWords";
 import {
@@ -9,6 +10,7 @@ import {
   withAgent,
   type Agent,
   type AgentProblem,
+  type AgentSettings,
   type DesktopUserSettings,
 } from "../../settings/userSettings";
 import type { AgentHue } from "../tokens";
@@ -21,6 +23,7 @@ import { Menu } from "../ui/Menu";
 import { useChatDispatchPaused } from "../useChatDispatchPaused";
 import { useRequestSequence } from "../useRequestSequence";
 import { ChatAvatar } from "../workbench/ChatAvatar";
+import { AgentDetails } from "./AgentDetails";
 import { SwitchControl } from "./SettingRow";
 
 export type AgentListRow =
@@ -50,7 +53,7 @@ export function ProblemText(props: { text: string }) {
 export function runnerEngineNote(sharedView: boolean, sessionRecorderOn: boolean | undefined): string | null {
   if (sharedView) return "This workspace is a shared view. dohc records nothing here, so there is no chat to test.";
   return sessionRecorderOn === false
-    ? "The workspace engine starts when dohc starts. Restart dohc to test the runner."
+    ? "The workspace engine starts when dohc starts. Restart dohc to check an agent."
     : null;
 }
 
@@ -64,7 +67,8 @@ function presentationFor(hue: AgentHue | undefined): ActorPresentation {
 
 type CheckState = { status: "replied"; seconds: number } | { status: "failed" };
 
-const ROW = "flex items-center gap-3 border-b border-line py-4 last:border-b-0";
+const ROW = "border-b border-line last:border-b-0";
+const ROW_LINE = "flex items-center gap-3 py-4";
 const STATE = "m-0 mt-1 flex items-center gap-1 text-[12px]";
 const ROW_BUTTON = "inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-line bg-bg px-2.5 text-[12px] font-medium text-ink transition-colors hover:bg-hover disabled:cursor-default disabled:text-subtle disabled:hover:bg-bg";
 // Holds the place of a control the row does not have, so every row's controls line up.
@@ -74,7 +78,7 @@ const menuSpace = <span aria-hidden className="size-6 shrink-0" />;
 function AgentNameField(props: {
   agent: Agent;
   agents: DesktopUserSettings["agents"];
-  onSave: (name: string) => Promise<void>;
+  onSave: (name: string) => Promise<boolean>;
   onDone: () => void;
 }) {
   const [draft, setDraft] = useState(props.agent.name);
@@ -101,14 +105,10 @@ function AgentNameField(props: {
     const name = draft.trim();
     if (name === props.agent.name) return props.onDone();
     setSaving(true);
-    try {
-      await props.onSave(name);
-      props.onDone();
-    } catch (cause) {
-      setError(ipcErrorMessage(cause, "dohc could not save the name."));
-    } finally {
-      setSaving(false);
-    }
+    // A save that fails says why in Notices and keeps the field open.
+    const saved = await props.onSave(name);
+    setSaving(false);
+    if (saved) props.onDone();
   };
   return <>
     <input
@@ -157,13 +157,15 @@ function AgentRow(props: {
   check: CheckState | undefined;
   canCheck: boolean;
   checkNote: string | null;
+  tools: AgentToolsResult | null;
   onCheck: () => void;
-  onRename: (name: string) => Promise<void>;
-  onEnabledChange: (enabled: boolean) => void;
+  onRename: (name: string) => Promise<boolean>;
+  onChange: (change: (agent: AgentSettings) => AgentSettings) => void;
 }) {
   const { agent } = props;
   const [editing, setEditing] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const launched = agent.launch !== undefined;
   const state = !launched ? (
     <p className={`${STATE} text-muted`}><Plug size={12} aria-hidden />Through MCP</p>
@@ -178,49 +180,58 @@ function AgentRow(props: {
   ) : null;
   return (
     <div data-testid="agent-row" data-agent-id={agent.id} className={ROW}>
-      <ChatAvatar name={agent.name} kind="agent" presentation={presentationFor(agent.hue)} size="comment" />
-      <div className="min-w-0 flex-1">
-        {editing ? (
-          <AgentNameField agent={agent} agents={props.agents} onSave={props.onRename} onDone={() => setEditing(false)} />
-        ) : (
-          <div className="flex min-w-0 items-center gap-1.5">
+      <div className={ROW_LINE}>
+        <ChatAvatar name={agent.name} kind="agent" presentation={presentationFor(agent.hue)} size="comment" />
+        <div className="min-w-0 flex-1">
+          {editing ? (
+            <AgentNameField agent={agent} agents={props.agents} onSave={props.onRename} onDone={() => setEditing(false)} />
+          ) : (
+            <div className="flex min-w-0 items-center gap-1.5">
+              <button
+                type="button"
+                title="Rename"
+                aria-label={`Rename ${agent.name}`}
+                onClick={() => setEditing(true)}
+                className="min-w-0 truncate rounded text-left text-[13px] font-medium text-ink"
+              >
+                {agent.name}
+              </button>
+            </div>
+          )}
+          {editing ? null : state}
+        </div>
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          {launched ? (
             <button
               type="button"
-              title="Rename"
-              aria-label={`Rename ${agent.name}`}
-              onClick={() => setEditing(true)}
-              className="min-w-0 truncate rounded text-left text-[13px] font-medium text-ink"
+              data-testid="agent-check"
+              disabled={!props.canCheck}
+              title={props.checkNote ?? undefined}
+              onClick={props.onCheck}
+              className={ROW_BUTTON}
             >
-              {agent.name}
+              {props.check?.status === "failed" && !props.checking ? "Try again" : "Check"}
             </button>
-          </div>
-        )}
-        {editing ? null : state}
+          ) : null}
+          {launched ? (
+            <SwitchControl label={`Turn on ${agent.name}`} checked={agent.enabled}
+              onChange={(enabled) => props.onChange((current) => ({ ...current, enabled }))} />
+          ) : switchSpace}
+          <Menu
+            label={`${agent.name} actions`}
+            testId="agent-menu"
+            open={menuOpen}
+            onOpenChange={setMenuOpen}
+            items={[
+              { id: "rename", label: "Rename", icon: <Pencil size={14} aria-hidden />, onSelect: () => setEditing(true) },
+              { id: "details", label: detailsOpen ? "Hide details" : "Details", icon: <ListCollapse size={14} aria-hidden />, onSelect: () => setDetailsOpen((open) => !open) },
+            ]}
+          />
+        </div>
       </div>
-      <div className="ml-auto flex shrink-0 items-center gap-2">
-        {launched ? (
-          <button
-            type="button"
-            data-testid="agent-check"
-            disabled={!props.canCheck}
-            title={props.checkNote ?? undefined}
-            onClick={props.onCheck}
-            className={ROW_BUTTON}
-          >
-            {props.check?.status === "failed" && !props.checking ? "Try again" : "Check"}
-          </button>
-        ) : null}
-        {launched ? (
-          <SwitchControl label={`Turn on ${agent.name}`} checked={agent.enabled} onChange={props.onEnabledChange} />
-        ) : switchSpace}
-        <Menu
-          label={`${agent.name} actions`}
-          testId="agent-menu"
-          open={menuOpen}
-          onOpenChange={setMenuOpen}
-          items={[{ id: "rename", label: "Rename", icon: <Pencil size={14} aria-hidden />, onSelect: () => setEditing(true) }]}
-        />
-      </div>
+      {detailsOpen ? (
+        <AgentDetails agent={agent} tools={props.tools} onChange={props.onChange} onClose={() => setDetailsOpen(false)} />
+      ) : null}
     </div>
   );
 }
@@ -229,7 +240,7 @@ function BrokenAgentRow(props: { problem: AgentProblem; onOpenSettingsFile: () =
   const { problem } = props;
   const name = problem.name ?? problem.id;
   return (
-    <div data-testid="agent-row-broken" data-agent-id={problem.id} className={ROW}>
+    <div data-testid="agent-row-broken" data-agent-id={problem.id} className={`${ROW} ${ROW_LINE}`}>
       <ChatAvatar name={name} kind="agent" presentation={presentationFor(problem.hue)} size="comment" />
       <div className="min-w-0 flex-1">
         <p className="m-0 truncate text-[13px] font-medium text-ink">{name}</p>
@@ -261,7 +272,8 @@ export function AgentList(props: {
   config: McpConfigResult | null;
   sharedView?: boolean;
   sessionRecorderOn: boolean | undefined;
-  onSave: (settings: DesktopUserSettings) => Promise<void>;
+  // Answers whether the settings saved; a failed save says why in Notices.
+  onSave: (settings: DesktopUserSettings) => Promise<boolean>;
   onOpenSettingsFile: () => void;
   onError?: (message: string, cause?: unknown) => void;
 }) {
@@ -276,6 +288,20 @@ export function AgentList(props: {
     setChecking(null);
     setChecks({});
   }, [workspaceId]);
+  // The tools installed on this computer, for each agent's details.
+  const [tools, setTools] = useState<AgentToolsResult | null>(null);
+  const toolRequests = useRequestSequence([workspaceId]);
+  const reportError = useRef(onError);
+  reportError.current = onError;
+  useEffect(() => {
+    const token = toolRequests.next();
+    setTools(null);
+    void bridge().detectAgentTools({ workspaceId }).then((found) => {
+      if (toolRequests.isCurrent(token)) setTools(found);
+    }, (cause: unknown) => {
+      if (toolRequests.isCurrent(token)) reportError.current?.(ipcErrorMessage(cause, "dohc could not detect agent tools. Try again."), cause);
+    });
+  }, [toolRequests, workspaceId]);
 
   const rows = agentListRows(settings, props.agentProblems);
   const anyLaunch = rows.some((row) => row.kind === "agent" && row.agent.launch !== undefined);
@@ -357,14 +383,15 @@ export function AgentList(props: {
               // One check at a time: main runs one runner per workspace.
               canCheck={!paused && checking === null && checkNote === null}
               checkNote={checkNote}
+              tools={tools}
               onCheck={() => void check(row.agent)}
               onRename={(name) => onSave(withAgent(settings, row.agent.id, (agent) => ({ ...agent, name })))}
-              onEnabledChange={(enabled) => void onSave(withAgent(settings, row.agent.id, (agent) => ({ ...agent, enabled })))}
+              onChange={(change) => void onSave(withAgent(settings, row.agent.id, change))}
             />
           ))}
         </div>
       ) : null}
-      {checkNote && anyLaunch ? (
+      {checkNote ? (
         <p data-testid="agents-check-note" className="m-0 mt-2 text-[12px] text-muted">{checkNote}</p>
       ) : null}
     </section>

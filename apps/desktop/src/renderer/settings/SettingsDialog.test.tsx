@@ -20,7 +20,7 @@ import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/acc
 import { SettingsDialog } from "./SettingsDialog";
 import { applyLookSettings } from "../theme";
 import { CUSTOMIZE_TARGETS } from "./customize";
-import { settingsWithAgent } from "../../testing/agentSettings";
+import { settingsWithAgent, testAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
 import { ShellErrorReporter, type ReportShellFailure } from "../shell/useShellError";
 
@@ -1082,142 +1082,71 @@ describe("SettingsDialog", () => {
     expect(document.activeElement).not.toBe(copyMcpConfig());
   });
 
-  it("shows the trusted runner controls and persists command, toggle, and timeout", async () => {
+  it("changes an agent's color, when it stops and its command from its details", async () => {
     const user = userEvent.setup();
-    render(
-      <SettingsDialog workspaceIsReady
-        workspaceId="ws-1"
-        workspacePath="/x"
-        initialSection="agents"
-        onClose={() => {}}
-      />,
-    );
-
-    const command = await screen.findByTestId("runner-command-input");
-    // A name can come before the command: the agent may post from outside dohc.
-    expect(screen.getByTestId("runner-agent-name-input")).toBeTruthy();
-    expect(command.getAttribute("placeholder")).toBe(
-      "Enter the command that starts your agent",
-    );
-    expect(screen.getByText(/unsandboxed runner can read anything/i)).toBeTruthy();
-    expect(screen.getByTestId("runner-multi-device-note").textContent).toContain(
-      "Enable the runner on one device per workspace",
-    );
-    await user.type(command, "codex exec --sandbox workspace-write");
-    await user.click(screen.getByRole("switch", { name: "Enable chat runner" }));
-
-    const timeout = screen.getByTestId("runner-timeout-input");
-    await user.clear(timeout);
-    await user.type(timeout, "45");
-    await user.tab();
-
-    // The name goes to the agent the command made.
-    const agentName = await screen.findByTestId("runner-agent-name-input");
-    await user.clear(agentName);
-    await user.type(agentName, "Nova");
-    await user.tab();
-
-    await waitFor(() =>
-      expect(savedSettings()?.agents).toEqual({
-        default: {
-          name: "Nova",
-          hue: "olive",
-          launch: { command: "codex exec --sandbox workspace-write" },
-          changesFiles: true,
-          enabled: true,
-          timeoutMinutes: 45,
-        },
-      }),
-    );
-    expect(
-      screen.getByTestId("runner-configuration-status").getAttribute("data-state"),
-    ).toBe("active");
-  });
-
-  it("saves a name for an agent dohc does not start", async () => {
-    const user = userEvent.setup();
+    bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "stored" });
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
-    await user.type(await screen.findByTestId("runner-agent-name-input"), "Nova");
-    await user.tab();
-    await waitFor(() =>
-      expect(savedSettings()?.agents).toEqual({
-        default: { name: "Nova", hue: "olive", changesFiles: true, enabled: false, timeoutMinutes: 30 },
-      }),
-    );
+    await user.click(await screen.findByRole("button", { name: "Nova actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Details" }));
+    await user.click(within(screen.getByRole("radiogroup", { name: "Color of Nova" })).getByRole("radio", { name: "Blue" }));
+    await waitFor(() => expect(savedSettings()?.agents.default?.hue).toBe("blue"));
+    await user.click(screen.getByRole("button", { name: "Change when Nova stops" }));
+    const minutes = screen.getByRole("spinbutton", { name: "Minutes before Nova stops" });
+    await user.clear(minutes);
+    await user.type(minutes, "45{Enter}");
+    await waitFor(() => expect(savedSettings()?.agents.default?.timeoutMinutes).toBe(45));
+    await user.click(screen.getByRole("button", { name: "Change the command that starts Nova" }));
+    const command = screen.getByRole("textbox", { name: "Command that starts Nova" });
+    await user.clear(command);
+    await user.type(command, "  codex exec  {Enter}");
+    await waitFor(() => expect(savedSettings()?.agents.default).toEqual({
+      name: "Nova", hue: "blue", launch: { command: "codex exec" }, changesFiles: true, enabled: true, timeoutMinutes: 45,
+    }));
   });
 
-  it("keeps runner enable disabled until the command draft is non-empty", async () => {
+  it("gives an agent you run a command of its own, and leaves it off", async () => {
     const user = userEvent.setup();
-    render(
-      <SettingsDialog workspaceIsReady
-        workspaceId="ws-1"
-        workspacePath="/x"
-        initialSection="agents"
-        onClose={() => {}}
-      />,
-    );
-
-    const command = await screen.findByTestId("runner-command-input");
-    const enable = screen.getByRole("switch", { name: "Enable chat runner" });
-    expect(enable.getAttribute("disabled")).not.toBeNull();
-    await user.type(command, "   ");
-    expect(enable.getAttribute("disabled")).not.toBeNull();
-    bridge.setUserSettings.mockClear();
-
-    await user.type(command, "codex exec");
-    expect(enable.getAttribute("disabled")).toBeNull();
-    await user.click(enable);
-
-    await waitFor(() =>
-      expect(savedSettings()?.agents.default).toMatchObject({
-        // Persisted commands are trimmed; the draft's leading whitespace
-        // must not survive the save.
-        launch: { command: "codex exec" },
-        enabled: true,
-        timeoutMinutes: 30,
-      }),
-    );
+    const { launch: _launch, ...mcpOnly } = testAgent({ name: "Nova", enabled: false });
+    bridge.getUserSettings.mockResolvedValueOnce({ settings: { ...DEFAULT_USER_SETTINGS, agents: { default: mcpOnly } }, source: "stored" });
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
+    await user.click(await screen.findByRole("button", { name: "Nova actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Details" }));
+    // Without a way to start it, there is nothing to stop.
+    expect(screen.queryByText("Stops after")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Use your own command" }));
+    await user.type(screen.getByRole("textbox", { name: "Command that starts Nova" }), "node agent.mjs{Enter}");
+    await waitFor(() => expect(savedSettings()?.agents.default).toMatchObject({ launch: { command: "node agent.mjs" }, enabled: false }));
   });
 
-  it("saves the runner draft before self-test and reports success", async () => {
+  it("keeps an agent's command when the field is left empty", async () => {
     const user = userEvent.setup();
-    render(
-      <SettingsDialog workspaceIsReady
-        workspaceId="ws-1"
-        workspacePath="/x"
-        initialSection="agents"
-        onClose={() => {}}
-      />,
-    );
+    bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "stored" });
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
+    await user.click(await screen.findByRole("button", { name: "Nova actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Details" }));
+    await user.click(screen.getByRole("button", { name: "Change the command that starts Nova" }));
+    await user.clear(screen.getByRole("textbox", { name: "Command that starts Nova" }));
+    await user.keyboard("{Enter}");
+    expect(bridge.setUserSettings).not.toHaveBeenCalled();
+    expect(screen.getByText("node agent.mjs")).toBeTruthy();
+  });
 
-    await user.type(
-      await screen.findByTestId("runner-command-input"),
-      "claude -p",
-    );
-    await user.click(screen.getByTestId("runner-self-test-button"));
-
-    await waitFor(() =>
-      expect(savedSettings()?.agents.default?.launch).toEqual({ command: "claude -p" }),
-    );
+  it("checks the agent in its row", async () => {
+    const user = userEvent.setup();
+    bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "stored" });
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
+    await user.click(await screen.findByRole("button", { name: "Check" }));
     expect(bridge.runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "ws-1", agentId: "default" });
-    expect((await screen.findByTestId("runner-self-test-result")).textContent).toBe(
-      "self-test ok",
-    );
-    expect(
-      screen.getByTestId("runner-self-test-result").getAttribute("data-state"),
-    ).toBe("success");
+    expect(await screen.findByText(/^Replied in \d+ s$/)).toBeTruthy();
   });
 
-  // #687 on this surface. The note's gate is the RENDERER's live settings
-  // value, but the recovery depends on main's open-time decision, and the two
-  // off states differ. Opened with the engine off: main built no recorder and
-  // cannot until a restart, so turning the setting on hides the note and
-  // enables Test runner over a click that can only fail.
-  // A session without a recorder holds `runnerSelfTest` behind a restart:
-  // main builds the recorder once per workspace per app session, so a button
-  // here would run into a refusal. The note says so and the button is off.
+  // #687 on this surface. A session without a recorder holds `runnerSelfTest`
+  // behind a restart: main builds the recorder once per workspace per app
+  // session, so a Check here would run into a refusal. The note says so and
+  // Check is off.
   it("tells the user to restart when this session has no recorder", async () => {
     const user = userEvent.setup();
+    bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "stored" });
     render(
       <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
@@ -1228,24 +1157,17 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    // Configured, and the engine setting is ON (the schema default) — so the
-    // live-setting gate alone would enable this button.
-    await user.type(await screen.findByTestId("runner-command-input"), "claude -p");
-    const note = await screen.findByTestId("runner-self-test-engine-note");
-    await waitFor(() =>
-      expect(note.textContent).toBe(
-        "The workspace engine starts when dohc starts. Restart dohc to test the runner.",
-      ),
-    );
-    const button = await screen.findByTestId("runner-self-test-button");
-    expect((button as HTMLButtonElement).disabled).toBe(true);
+    const note = await screen.findByTestId("agents-check-note");
+    expect(note.textContent).toBe("The workspace engine starts when dohc starts. Restart dohc to check an agent.");
+    const button = screen.getByRole<HTMLButtonElement>("button", { name: "Check" });
+    expect(button.disabled).toBe(true);
     await user.click(button);
     expect(bridge.runnerSelfTest).not.toHaveBeenCalled();
   });
 
   // A shared view materializes no settings file, so the engine reads as
   // on by default, while main installs no recorder. The no-recorder branch
-  // must not prescribe a restart that cannot make the self-test work.
+  // must not prescribe a restart that cannot make the check work.
   it("shows the shared-view note without a restart instruction", async () => {
     render(
       <SettingsDialog workspaceIsReady
@@ -1258,22 +1180,19 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    const note = await screen.findByTestId("runner-self-test-engine-note");
-    await waitFor(() =>
-      expect(note.textContent).toBe(
-        "This workspace is a shared view. dohc records nothing here, so there is no chat to test.",
-      ),
+    const note = await screen.findByTestId("agents-check-note");
+    expect(note.textContent).toBe(
+      "This workspace is a shared view. dohc records nothing here, so there is no chat to test.",
     );
     expect(note.textContent).not.toContain("restart");
   });
 
-  // sharedView is a synchronous prop, but
-  // sessionRecorderOn only resolves once main's openWorkspace status
-  // arrives. In that window a shared view already knows it has no chat to
-  // test, but sessionRecorderOn is still undefined — the disabled condition
-  // must not wait on it to keep a doomed click off the button.
-  it("disables the self-test in a shared view before the recorder status resolves", async () => {
+  // sharedView is a synchronous prop, but sessionRecorderOn only resolves
+  // once main's openWorkspace status arrives. In that window a shared view
+  // already knows it has no chat to test, so Check must not wait on it.
+  it("turns Check off in a shared view before the recorder status resolves", async () => {
     const user = userEvent.setup();
+    bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "stored" });
     render(
       <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
@@ -1284,20 +1203,19 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    await user.type(await screen.findByTestId("runner-command-input"), "claude -p");
-    await screen.findByTestId("runner-self-test-engine-note");
-    const button = await screen.findByTestId("runner-self-test-button");
-    expect((button as HTMLButtonElement).disabled).toBe(true);
+    const button = await screen.findByRole<HTMLButtonElement>("button", { name: "Check" });
+    expect(button.disabled).toBe(true);
     await user.click(button);
     expect(bridge.runnerSelfTest).not.toHaveBeenCalled();
   });
 
-  it("surfaces a failed runner self-test without enabling dispatch", async () => {
+  it("says an agent didn't reply without turning it on or off", async () => {
     const onError = vi.fn();
     bridge.runnerSelfTest.mockResolvedValueOnce({
       ok: false,
       detail: "Runner did not report within 120 seconds.",
     });
+    bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova", enabled: false }), source: "stored" });
     const user = userEvent.setup();
     render(
       <SettingsDialog workspaceIsReady
@@ -1309,15 +1227,11 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    await user.type(await screen.findByTestId("runner-command-input"), "claude -p");
-    await user.click(screen.getByTestId("runner-self-test-button"));
-
-    const result = await screen.findByRole("alert");
-    expect(result.textContent).toBe("Test failed.");
+    await user.click(await screen.findByRole("button", { name: "Check" }));
+    expect(await screen.findByText("Didn't reply.")).toBeTruthy();
     expect(onError).toHaveBeenCalledWith("Runner did not report within 120 seconds.");
-    expect(screen.getByRole("switch", { name: "Enable chat runner" }).getAttribute(
-      "aria-checked",
-    )).toBe("false");
+    expect(screen.getByRole("switch", { name: "Turn on Nova" }).getAttribute("aria-checked")).toBe("false");
+    expect(bridge.setUserSettings).not.toHaveBeenCalled();
   });
 
   // Live documents belong to the workspace that owns them. A shared view
