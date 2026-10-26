@@ -247,16 +247,6 @@ interface PendingPreRunFailure {
   failed: boolean;
 }
 
-interface PendingInterruptedRequeue {
-  workspace: ChatDispatchWorkspace;
-  input: {
-    workspaceId: string;
-    attachmentId?: symbol;
-    triggerMessageId: string;
-    runId: string;
-  };
-}
-
 interface SelfTestState {
   workspace: ChatDispatchWorkspace;
   child: RunnerProcess;
@@ -346,10 +336,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     { workspace: ChatDispatchWorkspace; run: AgentRunRecord }
   >();
   const pendingPreRunFailures = new Map<string, PendingPreRunFailure>();
-  const pendingInterruptedRequeues = new Map<
-    string,
-    PendingInterruptedRequeue
-  >();
   let pumpTimer: ReturnType<typeof setInterval> | null = null;
   let pumpInFlight: Promise<void> | null = null;
   let started = false;
@@ -1190,56 +1176,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     if (recordedCount > 0) notifyRunUpdated(workspace);
   }
 
-  async function persistInterruptedRequeue(
-    recovery: PendingInterruptedRequeue,
-  ): Promise<boolean> {
-    const requeue = options.requeueFailedTrigger;
-    if (!requeue) return true;
-    const key = runKey(recovery.input.workspaceId, recovery.input.runId);
-    try {
-      const persisted = await requeue(recovery.input);
-      if (!persisted) {
-        throw new Error(
-          `Interrupted agent run ${recovery.input.runId} was not requeued.`,
-        );
-      }
-      if (pendingInterruptedRequeues.get(key) === recovery) {
-        pendingInterruptedRequeues.delete(key);
-      }
-      return true;
-    } catch (error) {
-      reportError(error);
-      scheduleRecoveryScan(recovery.workspace);
-      return false;
-    }
-  }
-
-  async function requeueInterruptedRun(
-    workspace: ChatDispatchWorkspace,
-    input: PendingInterruptedRequeue["input"],
-  ): Promise<boolean> {
-    if (!options.requeueFailedTrigger) return true;
-    const recovery = { workspace, input };
-    pendingInterruptedRequeues.set(
-      runKey(input.workspaceId, input.runId),
-      recovery,
-    );
-    return await persistInterruptedRequeue(recovery);
-  }
-
-  async function recoverInterruptedRequeues(
-    workspace: ChatDispatchWorkspace,
-  ): Promise<boolean> {
-    const pending = [...pendingInterruptedRequeues.values()].filter(
-      (recovery) =>
-        recovery.workspace.workspaceId === workspace.workspaceId,
-    );
-    for (const recovery of pending) {
-      if (!(await persistInterruptedRequeue(recovery))) return false;
-    }
-    return true;
-  }
-
   async function startupSweep(workspace: ChatDispatchWorkspace): Promise<boolean> {
     if (sweptWorkspaces.has(workspace.workspaceId)) return true;
     const dispatch = options.dispatchStoreFor(workspace);
@@ -1260,20 +1196,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       });
       notifyRunUpdated(workspace);
       await settleRunNotice(workspace, claim.run.runId);
-      if (claim.dispatch.attemptCount < 2) {
-        if (
-          !(await requeueInterruptedRun(workspace, {
-            workspaceId: workspace.workspaceId,
-            ...(workspace.attachmentId
-              ? { attachmentId: workspace.attachmentId }
-              : {}),
-            triggerMessageId: claim.run.triggerMessageId,
-            runId: claim.run.runId,
-          }))
-        ) {
-          return false;
-        }
-      }
     }
     const recoveries =
       (await options.listAppQuitRecoveries?.(workspace)) ?? [];
@@ -1296,20 +1218,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       }
       if (!recovery.run.failureHandled) {
         await markRunFailureHandled(workspace, recovery.run).catch(reportError);
-      }
-      if (recovery.attemptCount < 2) {
-        if (
-          !(await requeueInterruptedRun(workspace, {
-            workspaceId: workspace.workspaceId,
-            ...(workspace.attachmentId
-              ? { attachmentId: workspace.attachmentId }
-              : {}),
-            triggerMessageId: recovery.run.triggerMessageId,
-            runId: recovery.run.runId,
-          }))
-        ) {
-          return false;
-        }
       }
     }
     sweptWorkspaces.add(workspace.workspaceId);
@@ -1359,7 +1267,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     if (recovering?.finalized) {
       if (!(await finishLiveRun(recovering, null, null))) return;
     }
-    if (!(await recoverInterruptedRequeues(workspace))) return;
     await recoverNoReplyChecks(workspace);
     await recoverRunNotices(workspace);
     if (!(await startupSweep(workspace))) return;
@@ -1935,7 +1842,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     budgetBypassThreads.clear();
     pendingNoReplyChecks.clear();
     pendingPreRunFailures.clear();
-    pendingInterruptedRequeues.clear();
     await Promise.all(quitTerminations);
     await Promise.all(
       [

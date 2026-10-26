@@ -2530,9 +2530,8 @@ describe("chatDispatchService", () => {
     }, { interval: 0 });
   });
 
-  it("fails an interrupted startup run and re-dispatches its trigger once", async () => {
-    const attachmentId = Symbol("startup attachment");
-    const fixture = await createFixture({ workspaceAttachmentId: attachmentId });
+  it("fails an interrupted startup run without running its request again", async () => {
+    const fixture = await createFixture();
     const trigger = await createAgentThread(fixture, {
       body: "Resume this after restart.",
       authorUserId: "user_local",
@@ -2550,120 +2549,17 @@ describe("chatDispatchService", () => {
 
     await activate(fixture);
 
-    expect(fixture.requeues).toEqual([
-      {
-        workspaceId: WORKSPACE_ID,
-        attachmentId,
-        triggerMessageId: trigger.messageId,
-        runId: interrupted.run.runId,
-      },
-    ]);
     expect(await fixture.dispatch.getRunRecord(interrupted.run.runId)).toMatchObject({
       failureHandled: true,
+      failureReason: "app restart during run",
     });
-    const retried = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0];
-    expect(retried?.dispatch).toMatchObject({
-      triggerMessageId: trigger.messageId,
-      attemptCount: 2,
-    });
-    expect(fixture.spawnCalls).toHaveLength(1);
+    expect(fixture.requeues).toEqual([]);
+    expect(await fixture.dispatch.openRuns(WORKSPACE_ID)).toEqual([]);
+    expect(fixture.spawnCalls).toEqual([]);
     expect(fixture.notices).toEqual([expect.objectContaining({
       noticeId: `agent-run:${WORKSPACE_ID}:${interrupted.run.runId}`,
       title: "Your agent's run in \"Resume this after restart.\" stopped when dohc restarted",
     })]);
-  });
-
-  it("recovers a restart-failed row left behind before its requeue", async () => {
-    const fixture = await createFixture();
-    const trigger = await createAgentThread(fixture, {
-      body: "Recover the persisted half of restart recovery.",
-      authorUserId: "user_local",
-    });
-    await fixture.dispatch.recordTrigger({
-      workspaceId: WORKSPACE_ID,
-      triggerMessageId: trigger.messageId,
-      threadId: trigger.threadId,
-    });
-    const interrupted = await fixture.dispatch.claimNextPending(WORKSPACE_ID);
-    if (!interrupted) throw new Error("Expected an interrupted run.");
-    await fixture.dispatch.markFailureHandled(interrupted.run.runId);
-    await fixture.dispatch.failRun({
-      runId: interrupted.run.runId,
-      reason: "app restart during run",
-    });
-
-    await activate(fixture);
-
-    expect(fixture.requeues).toEqual([
-      {
-        workspaceId: WORKSPACE_ID,
-        triggerMessageId: trigger.messageId,
-        runId: interrupted.run.runId,
-      },
-    ]);
-    expect((await fixture.dispatch.openRuns(WORKSPACE_ID))[0]?.dispatch).toMatchObject({
-      triggerMessageId: trigger.messageId,
-      attemptCount: 2,
-    });
-    expect(await fixture.dispatch.getRunRecord(interrupted.run.runId)).toMatchObject({
-      failureHandled: true,
-      failureReason: "app restart during run",
-    });
-  });
-
-  it("retains an interrupted requeue intent until the ledger transition persists", async () => {
-    vi.useFakeTimers();
-    const fixture = await createFixture({
-      requeueFailures: [new Error("daemon unavailable during requeue")],
-    });
-    const trigger = await createAgentThread(fixture, {
-      body: "Retry this interrupted recovery.",
-      authorUserId: "user_local",
-    });
-    await fixture.dispatch.recordTrigger({
-      workspaceId: WORKSPACE_ID,
-      triggerMessageId: trigger.messageId,
-      threadId: trigger.threadId,
-    });
-    const interrupted = await fixture.dispatch.claimNextPending(WORKSPACE_ID, {
-      command: "claude -p",
-    });
-    if (!interrupted) throw new Error("Expected an interrupted run.");
-
-    fixture.service.start();
-    await fixture.service.scanWorkspace(WORKSPACE_ID);
-    expect(await fixture.dispatch.getRunRecord(interrupted.run.runId)).toMatchObject({
-      failureReason: "app restart during run",
-    });
-    expect(fixture.spawnCalls).toEqual([]);
-    expect(fixture.requeues).toHaveLength(1);
-
-    await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
-    await vi.waitFor(
-      () => {
-        expect(fixture.requeues).toHaveLength(2);
-        expect(fixture.spawnCalls).toHaveLength(1);
-      },
-      { interval: 0 },
-    );
-
-    expect(fixture.requeues).toEqual([
-      {
-        workspaceId: WORKSPACE_ID,
-        triggerMessageId: trigger.messageId,
-        runId: interrupted.run.runId,
-      },
-      {
-        workspaceId: WORKSPACE_ID,
-        triggerMessageId: trigger.messageId,
-        runId: interrupted.run.runId,
-      },
-    ]);
-    expect(fixture.spawnCalls).toHaveLength(1);
-    expect((await fixture.dispatch.openRuns(WORKSPACE_ID))[0]?.dispatch).toMatchObject({
-      triggerMessageId: trigger.messageId,
-      attemptCount: 2,
-    });
   });
 
   it("retries a failed local-only trigger scan after the daemon recovers", async () => {
@@ -2737,7 +2633,7 @@ describe("chatDispatchService", () => {
     expect(fixture.spawnCalls).toHaveLength(1);
   });
 
-  it("surfaces and requeues an interrupted live-backend run on desktop restart", async () => {
+  it("surfaces an interrupted live-backend run on desktop restart without running it again", async () => {
     const fixture = await createFixture();
     const trigger = await createAgentThread(fixture, {
       body: "Recover this live-backend crash.",
@@ -2770,100 +2666,12 @@ describe("chatDispatchService", () => {
       failureReason: "app restart during run",
       failureHandled: true,
     });
-    expect(fixture.requeues).toEqual([
-      {
-        workspaceId: WORKSPACE_ID,
-        triggerMessageId: trigger.messageId,
-        runId: interrupted.run.runId,
-      },
-    ]);
-    expect((await fixture.dispatch.openRuns(WORKSPACE_ID))[0]?.dispatch).toMatchObject({
-      triggerMessageId: trigger.messageId,
-      attemptCount: 2,
-    });
-  });
-
-  it("surfaces an exhausted live-backend run without a third attempt", async () => {
-    const fixture = await createFixture();
-    const trigger = await createAgentThread(fixture, {
-      body: "Surface the exhausted live-backend crash.",
-      authorUserId: "user_local",
-    });
-    await fixture.dispatch.recordTrigger({
-      workspaceId: WORKSPACE_ID,
-      triggerMessageId: trigger.messageId,
-      threadId: trigger.threadId,
-    });
-    const first = await fixture.dispatch.claimNextPending(WORKSPACE_ID);
-    if (!first) throw new Error("Expected a first live-backend attempt.");
-    await fixture.dispatch.failRun({
-      runId: first.run.runId,
-      reason: "seed first failure",
-    });
-    expect(
-      await fixture.requeueRaw({
-        workspaceId: WORKSPACE_ID,
-        triggerMessageId: trigger.messageId,
-        runId: first.run.runId,
-      }),
-    ).toBe(true);
-    const exhausted = await fixture.dispatch.claimNextPending(WORKSPACE_ID);
-    if (!exhausted) throw new Error("Expected a second live-backend attempt.");
-    expect(exhausted.dispatch.attemptCount).toBe(2);
-
-    await activate(fixture);
-
-    const messages = await fixture.chat.listMessages({
-      workspaceId: WORKSPACE_ID,
-      threadId: trigger.threadId,
-    });
-    expect(messages.filter((message) => message.author.kind === "agent")).toEqual([]);
-    expect(fixture.dispatchNotices).toEqual([]);
-    expect(await fixture.dispatch.getRunRecord(exhausted.run.runId)).toMatchObject({
-      failureReason: "app restart during run",
-      failureHandled: true,
-    });
     expect(fixture.requeues).toEqual([]);
     expect(await fixture.dispatch.openRuns(WORKSPACE_ID)).toEqual([]);
     expect(fixture.spawnCalls).toEqual([]);
   });
 
-  it("does not requeue a startup run that is already the second attempt", async () => {
-    const fixture = await createFixture();
-    const trigger = await createAgentThread(fixture, {
-      body: "Do not retry this a third time.",
-      authorUserId: "user_local",
-    });
-    await fixture.dispatch.recordTrigger({
-      workspaceId: WORKSPACE_ID,
-      triggerMessageId: trigger.messageId,
-      threadId: trigger.threadId,
-    });
-    const first = await fixture.dispatch.claimNextPending(WORKSPACE_ID);
-    if (!first) throw new Error("Expected the first attempt.");
-    await fixture.dispatch.failRun({
-      runId: first.run.runId,
-      reason: "seed restart",
-    });
-    expect(
-      await fixture.requeueRaw({
-        workspaceId: WORKSPACE_ID,
-        triggerMessageId: trigger.messageId,
-        runId: first.run.runId,
-      }),
-    ).toBe(true);
-    const second = await fixture.dispatch.claimNextPending(WORKSPACE_ID);
-    if (!second) throw new Error("Expected the second attempt.");
-    expect(second.dispatch.attemptCount).toBe(2);
-
-    await activate(fixture);
-
-    expect(fixture.requeues).toHaveLength(0);
-    expect(fixture.spawnCalls).toHaveLength(0);
-    expect(await fixture.dispatch.openRuns(WORKSPACE_ID)).toHaveLength(0);
-  });
-
-  it("posts and requeues a flushed app-quit run on the next startup", async () => {
+  it("posts a flushed app-quit run's notice on the next startup without running it again", async () => {
     const fixture = await createFixture();
     const trigger = await createAgentThread(fixture, {
       body: "Recover this clean-shutdown interruption.",
@@ -2893,17 +2701,9 @@ describe("chatDispatchService", () => {
     });
     expect(messages.filter((message) => message.author.kind === "agent")).toEqual([]);
     expect(fixture.dispatchNotices).toEqual([]);
-    expect(fixture.requeues).toEqual([
-      {
-        workspaceId: WORKSPACE_ID,
-        triggerMessageId: trigger.messageId,
-        runId: interrupted.run.runId,
-      },
-    ]);
-    expect((await fixture.dispatch.openRuns(WORKSPACE_ID))[0]?.dispatch).toMatchObject({
-      triggerMessageId: trigger.messageId,
-      attemptCount: 2,
-    });
+    expect(fixture.requeues).toEqual([]);
+    expect(await fixture.dispatch.openRuns(WORKSPACE_ID)).toEqual([]);
+    expect(fixture.spawnCalls).toEqual([]);
     expect(fixture.notices.map((notice) => notice.title)).toEqual([
       "Your agent's run in \"Recover this clean-shutdown interruption.\" stopped when dohc quit",
     ]);
@@ -3687,29 +3487,6 @@ describe("chatDispatchService", () => {
       expect(fixture.spawnCalls).toHaveLength(1);
       expect(fixture.dispatchNotices.map(({ notice }) => notice.threadId).at(-1)).toBe(later.threadId);
       expect(fixture.dispatchNotices).toHaveLength(2);
-    });
-
-    it("lets a restart's requeue start no agent until the workspace is trusted", async () => {
-      const fixture = await createFixture({ restricted: true });
-      const interrupted = await createAgentThread(fixture, { body: "Resume after restart.", authorUserId: "user_local" });
-      await fixture.dispatch.recordTrigger({
-        workspaceId: WORKSPACE_ID, triggerMessageId: interrupted.messageId, threadId: interrupted.threadId,
-      });
-      const claim = await fixture.dispatch.claimNextPending(WORKSPACE_ID, {
-        command: "claude -p", logPath: join(fixture.stateRoot, "run-logs", "{runId}.log"),
-      });
-      if (!claim) throw new Error("Expected an interrupted run.");
-
-      await activate(fixture);
-
-      expect(fixture.requeues).toEqual([expect.objectContaining({ triggerMessageId: interrupted.messageId })]);
-      expect(fixture.spawnCalls).toEqual([]);
-      expect(await fixture.dispatch.openRuns(WORKSPACE_ID)).toEqual([]);
-
-      await fixture.trust.trust(fixture.workspace);
-      await fixture.service.scanWorkspace(WORKSPACE_ID);
-      expect(fixture.spawnCalls).toHaveLength(1);
-      expect(fixture.spawnCalls[0]!.options.env.DOHC_CHAT_THREAD).toBe(interrupted.threadId);
     });
 
     it("lets Resume start no agent until the workspace is trusted, and keeps its budget bypass", async () => {
