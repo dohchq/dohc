@@ -214,10 +214,64 @@ export function newAgentHue(agents: AgentsSettings, yourHue: IdentityHue | null)
   return AGENT_HUE_ASSIGNMENT_ORDER.reduce((least, hue) => (uses(hue) < uses(least) ? hue : least));
 }
 
-// An agent entry dohc could not use, so Settings can still show it.
+/** Whether another of your agents has this name, or one a chat cannot tell apart from it. */
+export function agentNameTaken(agents: AgentsSettings, id: string, name: string): boolean {
+  const others = Object.fromEntries(Object.entries(agents).filter(([other]) => other !== id));
+  return agentNameKeys(others).includes(nameKey(name));
+}
+
+const hasKey = (entry: Record<string, unknown>, key: string) => Object.hasOwn(entry, key);
+
+/**
+ * Why dohc could not use an agent entry, as one sentence about its first
+ * problem. A key is in backticks, so Settings can show it in monospace.
+ */
+export function agentProblem(id: string, entry: unknown): string {
+  const badId = AgentId.safeParse(id);
+  if (!badId.success) return badId.error.issues[0]!.message;
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    return "This entry must be an object, like the other agents.";
+  }
+  const fields = entry as Record<string, unknown>;
+  const alone = AgentsSettings.safeParse({ [id]: entry });
+  if (alone.success) return "Another agent has this name.";
+  const issue = alone.error.issues[0]!;
+  if (issue.code === "unrecognized_keys") return `dohc doesn't use \`${issue.keys[0]}\`.`;
+  const key = issue.path[1];
+  if (key === undefined && id !== DEFAULT_AGENT_ID && hasKey(fields, "nameBeforeMigration")) {
+    return "Only the `default` agent can have `nameBeforeMigration`.";
+  }
+  switch (key) {
+    case "name": {
+      const name = fields.name;
+      if (name === undefined) return "`name` is missing.";
+      if (typeof name !== "string") return "`name` must be text.";
+      if (!name.trim()) return "`name` is empty.";
+      if (hasPreferredNameControlCharacters(name)) return "`name` can't contain control characters.";
+      return `\`name\` must be ${MAX_PREFERRED_NAME_LENGTH} characters or fewer.`;
+    }
+    case "hue":
+      return `\`hue\` must be one of: ${AGENT_HUES.join(", ")}.`;
+    case "enabled":
+    case "changesFiles":
+      // The one rule across keys: an agent dohc cannot start stays off.
+      return issue.code === "custom" ? issue.message : `\`${key}\` must be true or false.`;
+    case "timeoutMinutes":
+      return "`timeoutMinutes` must be a whole number from 1 to 1440.";
+    case "launch":
+      return "dohc can't read `launch`.";
+    default:
+      return "dohc can't read this entry.";
+  }
+}
+
+// An agent entry dohc could not use, so Settings can still show it in its place.
 export const AgentProblem = z.object({
   id: z.string().max(200),
   name: z.string().max(200).optional(),
+  hue: z.enum(AGENT_HUES).optional(),
+  // Where the entry sits among the file's agents.
+  position: z.number().int().nonnegative(),
   problem: z.string().min(1).max(500),
 }).strict();
 export type AgentProblem = z.infer<typeof AgentProblem>;

@@ -15,6 +15,8 @@ import {
   agentHandle,
   agentIdsNamedIn,
   agentMentionCandidates,
+  agentNameTaken,
+  agentProblem,
   listAgents,
   newAgentHue,
   ownAgentNamed,
@@ -231,6 +233,40 @@ describe("desktop user settings model", () => {
     }
     // Your own blue is skipped; once every hue is in use, they come round again.
     expect(hues).toEqual(["olive", "rose", "teal", "plum", "rust", "amber", "indigo", "olive", "blue"]);
+  });
+
+  it("says what is wrong with an agent entry in one sentence about its first problem", () => {
+    const { name: _name, ...nameless } = testAgent();
+    const { launch: _launch, ...unlaunched } = testAgent();
+    const cases: Array<[string, unknown, string]> = [
+      ["agent-b", nameless, "`name` is missing."],
+      ["agent-b", testAgent({ name: 7 as unknown as string }), "`name` must be text."],
+      ["agent-b", testAgent({ name: "  " }), "`name` is empty."],
+      ["agent-b", testAgent({ name: "n".repeat(81) }), "`name` must be 80 characters or fewer."],
+      ["agent-b", testAgent({ name: "Nova" }), "`name` can't contain control characters."],
+      ["agent-b", { ...testAgent(), hue: "green" }, `\`hue\` must be one of: ${AGENT_HUES.join(", ")}.`],
+      ["agent-b", { ...testAgent(), enabled: "yes" }, "`enabled` must be true or false."],
+      ["agent-b", { ...testAgent(), changesFiles: 1 }, "`changesFiles` must be true or false."],
+      ["agent-b", { ...unlaunched, enabled: true }, "Choose how dohc starts this agent before turning it on."],
+      ["agent-b", testAgent({ timeoutMinutes: 0 }), "`timeoutMinutes` must be a whole number from 1 to 1440."],
+      ["agent-b", { ...testAgent(), launch: { tool: "cursor" } }, "dohc can't read `launch`."],
+      ["agent-b", { ...testAgent(), color: "teal" }, "dohc doesn't use `color`."],
+      ["agent-b", ["Nova"], "This entry must be an object, like the other agents."],
+      ["agent-b", null, "This entry must be an object, like the other agents."],
+      ["agent-b", testAgent({ nameBeforeMigration: "Nova" }), "Only the `default` agent can have `nameBeforeMigration`."],
+      ["default", testAgent({ nameBeforeMigration: 7 as unknown as string }), "dohc can't read this entry."],
+      ["Agent B", testAgent(), "An agent's id is up to 64 lowercase letters, digits and single dashes, starting with a letter and not ending with a dash."],
+      ["agent-b", testAgent(), "Another agent has this name."],
+    ];
+    for (const [id, entry, sentence] of cases) expect(agentProblem(id, entry), sentence).toBe(sentence);
+  });
+
+  it("knows when another agent has a name a chat cannot tell apart", () => {
+    const agents = { default: testAgent({ name: "Claude Code", nameBeforeMigration: "Nova" }), codex: testAgent({ name: "Codex" }) };
+    expect(agentNameTaken(agents, "codex", "claudecode")).toBe(true);
+    expect(agentNameTaken(agents, "codex", "Nova")).toBe(true);
+    expect(agentNameTaken(agents, "codex", "Codex")).toBe(false);
+    expect(agentNameTaken(agents, "default", "Claude Code")).toBe(false);
   });
 
   it("finds your agent by its name, or by the name its messages had before agents had ids", () => {

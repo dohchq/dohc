@@ -1,8 +1,10 @@
 import { lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { atomicReplaceFile } from "../atomicReplaceFile";
 import { join, resolve } from "node:path";
+import { hasPreferredNameControlCharacters } from "@dohc/workspace-contracts/chat-identity-values";
+import { AGENT_HUES } from "../renderer/tokens";
 import {
-  AgentId, AgentsSettings, DEFAULT_USER_SETTINGS, type AgentColors, type AgentProblem,
+  agentProblem, DEFAULT_USER_SETTINGS, type AgentColors, type AgentProblem,
   StoredUserSettings,
   settingsDeepEqual,
   type StoredUserSettingsResult,
@@ -70,23 +72,16 @@ function unusable(
   };
 }
 
-// Why dohc could not use an agent entry, so Settings can still show it.
-function agentProblem(id: string, entry: unknown): string {
-  const badId = AgentId.safeParse(id);
-  if (!badId.success) return badId.error.issues[0]!.message;
-  const alone = AgentsSettings.safeParse({ [id]: entry });
-  if (alone.success) return "Another agent has this name.";
-  const issue = alone.error.issues[0]!;
-  const where = issue.path.slice(1).join(".");
-  return where ? `${where}: ${issue.message}` : issue.message;
-}
-
 function agentProblems(raw: Record<string, unknown>, settings: StoredUserSettings): AgentProblem[] {
   if (!isSettingsObject(raw.agents)) return [];
-  return Object.entries(raw.agents).filter(([id]) => !Object.hasOwn(settings.agents, id)).slice(0, 50).map(([id, entry]) => {
-    const name = isSettingsObject(entry) && typeof entry.name === "string" ? entry.name.trim().slice(0, 200) : "";
-    return { id: id.slice(0, 200), ...(name ? { name } : {}), problem: agentProblem(id, entry).slice(0, 500) };
-  });
+  return Object.entries(raw.agents).flatMap(([id, entry], position) => {
+    if (Object.hasOwn(settings.agents, id)) return [];
+    const fields = isSettingsObject(entry) ? entry : {};
+    // A name Settings can show, or none, so the row shows the id.
+    const name = typeof fields.name === "string" && !hasPreferredNameControlCharacters(fields.name) ? fields.name.trim().slice(0, 200) : "";
+    const hue = AGENT_HUES.find((value) => value === fields.hue);
+    return [{ id: id.slice(0, 200), ...(name ? { name } : {}), ...(hue ? { hue } : {}), position, problem: agentProblem(id, entry).slice(0, 500) }];
+  }).slice(0, 50);
 }
 
 function snapshotOfText(path: string, text: string): UserSettingsSnapshot {
