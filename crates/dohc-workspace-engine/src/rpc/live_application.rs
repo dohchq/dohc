@@ -705,6 +705,14 @@ impl EngineService {
         });
         let outcome = operation.await;
         retirement.0 = None;
+        let response = |result| ServiceResponse {
+            response: Response {
+                id: request.id,
+                result,
+            },
+            blob_egress: None,
+            output_guard: Some(guard),
+        };
         let receipt = match outcome
             .map_err(|_| WireError::new(ErrorCode::Internal, "live-application-interrupted"))?
         {
@@ -713,28 +721,16 @@ impl EngineService {
             Err(dohc_engine_runtime::RuntimeError::LiveApplication(
                 dohc_engine_collab::live_update_application::ApplicationError::PublicationPending,
             )) => {
-                return Ok(ServiceResponse {
-                    response: Response {
-                        id: request.id,
-                        result: json!({"status":"pending", "reason":"publication-pending"}),
-                    },
-                    blob_egress: None,
-                    output_guard: Some(guard),
-                });
+                return Ok(response(
+                    json!({"status":"pending", "reason":"publication-pending"}),
+                ));
             }
             Err(dohc_engine_runtime::RuntimeError::LiveApplication(
                 dohc_engine_collab::live_update_application::ApplicationError::RestoreRefused(
                     refusal,
                 ),
             )) => {
-                return Ok(ServiceResponse {
-                    response: Response {
-                        id: request.id,
-                        result: json!({"status":"refused", "refusal":refusal}),
-                    },
-                    blob_egress: None,
-                    output_guard: Some(guard),
-                });
+                return Ok(response(json!({"status":"refused", "refusal":refusal})));
             }
             Err(error) => return Err(map_runtime(error)),
         };
@@ -757,14 +753,7 @@ impl EngineService {
         }
         // The fence committed: answer it, and let the writer withhold the
         // answer when its guard is no longer current.
-        Ok(ServiceResponse {
-            response: Response {
-                id: request.id,
-                result: json!({"status":"fenced", "receipt":receipt}),
-            },
-            blob_egress: None,
-            output_guard: Some(guard),
-        })
+        Ok(response(json!({"status":"fenced", "receipt":receipt})))
     }
 
     /// Trusted host setup. No RPC derives these fields from a caller's event.
@@ -1367,15 +1356,32 @@ mod tests {
             })
             .unwrap();
         let request = fence_request(&workspace, &binding, "relay-history");
-        let expected = json!({"status":"refused", "refusal":{
+        let mut expected = json!({"status":"refused", "refusal":{
             "operation":request.params["operation"], "reason":"binding-changed"
         }});
         let mut ctx = RequestContext::unbounded();
         ctx.connection = Some(owner.handle());
-        let result = service.call(ctx, request).await.unwrap();
+        let result = service.call(ctx.clone(), request).await.unwrap();
+        let recorded: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT recorded_at_ms FROM live_restore_refusals",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        expected["refusal"]["recordedAtMs"] = json!(recorded);
         assert_eq!(result.response.result, expected);
         assert!(result.output_guard.as_ref().unwrap().is_current());
+        let replay = service
+            .call(ctx, fence_request(&workspace, &binding, "relay-history"))
+            .await
+            .unwrap();
+        assert_eq!(replay.response.result, expected);
+        assert!(replay.output_guard.as_ref().unwrap().is_current());
         assert_eq!(store.table_row_count("live_restore_fences").unwrap(), 0);
+        assert_eq!(store.table_row_count("live_restore_refusals").unwrap(), 1);
         service.workspace_close(Some(workspace)).await.unwrap();
     }
 

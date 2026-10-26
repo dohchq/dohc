@@ -3385,6 +3385,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("chat_link_author.sql"),
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 70,
+        id: "v2-live-restore-refusals",
+        sql: include_str!("live_restore_refusals.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// Documents whose file a `ydoc.open` found on disk while the version had no
@@ -4467,6 +4473,10 @@ mod tests {
             (
                 "v2-chat-link-author",
                 "5b21c35c5a98bc7621b3cc004e422a53b03bb0e74355e28344a24db6c4100f4b",
+            ),
+            (
+                "v2-live-restore-refusals",
+                "9d6eb2d6a85e54b3e06c93cfc948aa803e9523a679065efe7c6c2d0e3fdfd151",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -8031,6 +8041,77 @@ mod tests {
             run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
             MigrationOutcome::Applied { newly_applied: 0 }
         );
+    }
+
+    #[test]
+    fn restore_refusal_migration_upgrades_an_old_store_and_cascades() {
+        let dir = tempdir();
+        let path = dir.join("restore-refusals.db");
+        let mut conn = open_bare(&path);
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-live-restore-refusals");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute("INSERT INTO versioned_workspaces VALUES('w','main')", [])
+            .unwrap();
+        drop(conn);
+        let store = crate::EngineStore::open(&path, 2).unwrap();
+        store
+            .read_with(|conn| {
+                assert_eq!(
+                    conn.query_row("SELECT count(*) FROM live_restore_refusals", [], |r| r
+                        .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
+                let insert =
+                    "INSERT INTO live_restore_refusals VALUES('relay','operation','w',?1,?2,?3)";
+                for (input, reason, time) in [
+                    ("{}", "unknown", 1),
+                    ("invalid", "binding-changed", 1),
+                    ("{}", "binding-changed", -1),
+                ] {
+                    assert!(
+                        conn.execute(insert, rusqlite::params![input, reason, time])
+                            .is_err()
+                    );
+                }
+                assert!(
+                    conn.execute(
+                        insert,
+                        rusqlite::params![
+                            format!("\"{}\"", "a".repeat(1_048_576)),
+                            "binding-changed",
+                            1
+                        ]
+                    )
+                    .is_err()
+                );
+                conn.execute(insert, rusqlite::params!["{}", "binding-changed", 1])
+                    .unwrap();
+                assert!(
+                    conn.execute(insert, rusqlite::params!["{}", "reader-unavailable", 2])
+                        .is_err()
+                );
+                assert!(
+                    conn.execute("UPDATE live_restore_refusals SET recorded_at_ms=2", [])
+                        .is_err()
+                );
+                conn.execute(
+                    "DELETE FROM versioned_workspaces WHERE workspace_id='w'",
+                    [],
+                )
+                .unwrap();
+                assert_eq!(
+                    conn.query_row("SELECT count(*) FROM live_restore_refusals", [], |r| r
+                        .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
+                Ok::<_, rusqlite::Error>(())
+            })
+            .unwrap();
+        drop(store);
+        crate::EngineStore::open(&path, 3).unwrap();
     }
 
     fn tempdir() -> dohc_test_scratch::ScratchDir {

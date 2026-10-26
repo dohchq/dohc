@@ -23,6 +23,7 @@ const refusalReasons = ["binding-changed", "reader-unavailable", "source-unavail
 export interface NativeRestoreRefusal {
   operation: NativeRestoreFence;
   reason: typeof refusalReasons[number];
+  recordedAtMs: number;
 }
 function record(value: unknown, keys: string[]): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value) ||
@@ -54,9 +55,9 @@ export function parseNativeRestoreFenceReceipt(value: unknown): NativeRestoreFen
 }
 
 export function parseNativeRestoreRefusal(value: unknown, expectedOperation: NativeRestoreFence): NativeRestoreRefusal {
-  const row = record(value, ["operation", "reason"]);
+  const row = record(value, ["operation", "reason", "recordedAtMs"]);
   if (!refusalReasons.some(reason => reason === row.reason)) throw new TypeError("Invalid native restore refusal.");
   const operation = parseNativeRestoreFence(row.operation);
   if (!isDeepStrictEqual(row.operation, expectedOperation)) throw new TypeError("Native restore refusal names a different operation.");
-  return {operation, reason: row.reason as NativeRestoreRefusal["reason"]};
+  return {operation, reason: row.reason as NativeRestoreRefusal["reason"], recordedAtMs: integer(row.recordedAtMs)};
 }

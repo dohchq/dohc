@@ -63,13 +63,8 @@ pub(crate) fn history_artifact(
     digest: &str,
     max_source_bytes: usize,
 ) -> Result<(String, i64), CollabError> {
-    let moment: Option<(String, i64)> = conn.query_row(
-        concat!("SELECT moment_id,b.byte_length FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
-          AND path=?4 AND after_content_kind='text' AND after_blob_sha256=?5 AND ",
-          dohc_engine_domain::exclude_capture_recovery_sql!("m"), " ORDER BY moment_order LIMIT 1"),
-        params![key.workspace_id,key.version_id,key.object_id,path,digest], |row| Ok((row.get(0)?,row.get(1)?)),
-    ).optional().map_err(crate::durable::map_sql)?;
-    let (moment, length) = moment.ok_or(CollabError::MarkdownReaderUnavailable)?;
+    let (moment, length) = history_artifact_header(conn, key, path, digest)?
+        .ok_or(CollabError::MarkdownReaderUnavailable)?;
     if usize::try_from(length)
         .ok()
         .filter(|n| *n <= max_source_bytes)
@@ -78,6 +73,20 @@ pub(crate) fn history_artifact(
         return Err(CollabError::ConfiguredByteBudgetExceeded);
     }
     Ok((moment, length))
+}
+
+pub(crate) fn history_artifact_header(
+    conn: &Connection,
+    key: &DocKey,
+    path: &str,
+    digest: &str,
+) -> Result<Option<(String, i64)>, CollabError> {
+    conn.query_row(
+        concat!("SELECT moment_id,b.byte_length FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
+          AND path=?4 AND after_content_kind='text' AND after_blob_sha256=?5 AND ",
+          dohc_engine_domain::exclude_capture_recovery_sql!("m"), " ORDER BY moment_order LIMIT 1"),
+        params![key.workspace_id,key.version_id,key.object_id,path,digest], |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional().map_err(crate::durable::map_sql)
 }
 
 pub fn resolve(
