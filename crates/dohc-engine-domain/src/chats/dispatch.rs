@@ -1080,7 +1080,9 @@ impl<'a> LinkedChatStore<'a> {
     /// single-writer claim guard forever. For each such row this marks the run
     /// record ended-with-failure, then requeues the trigger to `pending` (so a
     /// fresh worker can claim it) when `attempt_count < max_attempts`, else leaves
-    /// it terminally `failed`. Returns the trigger ids requeued to `pending`.
+    /// it terminally `failed`. Each trigger the run covered goes back the same
+    /// way, whichever way its first trigger went. Returns the first trigger ids
+    /// requeued to `pending`.
     ///
     /// Because the engine is the single writer, this sweep is safe only when a
     /// freshly-created actor establishes the startup recovery boundary. An
@@ -1136,9 +1138,6 @@ impl<'a> LinkedChatStore<'a> {
                         params![ws, trigger, now_ms, agent_id],
                     )
                     .map_err(DomainError::sql_persist)?;
-                    if let Some(run) = &run_id {
-                        requeue_covered_triggers(tx, &ws, run, max_attempts, now_ms)?;
-                    }
                     requeued.push(trigger);
                 } else {
                     tx.execute(
@@ -1149,6 +1148,9 @@ impl<'a> LinkedChatStore<'a> {
                         params![ws, trigger, now_ms, agent_id],
                     )
                     .map_err(DomainError::sql_persist)?;
+                }
+                if let Some(run) = &run_id {
+                    requeue_covered_triggers(tx, &ws, run, max_attempts, now_ms)?;
                 }
             }
             Ok::<_, DomainError>(requeued)
@@ -1173,11 +1175,10 @@ impl DispatchOutcomeKind {
     }
 }
 
-/// Give the triggers an interrupted run covered back to the queue with its
-/// first trigger. The run never answered them, and the next run must cover
-/// them again, so it keeps their chain depth whichever trigger it starts
-/// from. A trigger that has used its attempts stays done, as a first trigger
-/// would.
+/// Give the triggers an interrupted run covered back to the queue, whether or
+/// not its first trigger goes back. The run never answered them, and the next
+/// run must cover them again, so it keeps their chain depth whichever trigger
+/// it starts from. A trigger that has used its attempts stays done.
 fn requeue_covered_triggers(
     conn: &Connection,
     workspace_id: &str,

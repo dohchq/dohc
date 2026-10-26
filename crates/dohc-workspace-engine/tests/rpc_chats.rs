@@ -4196,7 +4196,7 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         &handle,
         &mut id,
         "chats.dispatch.failPendingForThread",
-        json!({ "threadId": "thread", "reason": "stop" }),
+        json!({ "threadId": "thread", "agentId": "default", "reason": "stop" }),
     )
     .await;
     assert_eq!(

@@ -727,8 +727,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
         run.exitCode = -1;
         run.failureReason = "reclaimed-crashed";
       }
+      if (dispatch.runId !== undefined) this.requeueCovered(state, dispatch.runId, 2, atMs);
       if (dispatch.attemptCount < 2) {
-        if (dispatch.runId !== undefined) this.requeueCovered(state, dispatch.runId, 2, atMs);
         dispatch.state = "pending";
         delete dispatch.runId;
         delete dispatch.failureReason;

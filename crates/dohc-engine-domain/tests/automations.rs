@@ -2304,7 +2304,9 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
     assert_eq!(again.run.trigger_message_id, "m-first");
     assert_eq!(again.chain_depth, 4);
 
-    // A second restart gives back only what has attempts left.
+    // A second restart gives back only what has attempts left. The person's
+    // request the run covered comes back even though the run's first request
+    // has used its attempts.
     chats
         .reclaim_running_dispatches(WS, 2, 19, &NO_FAULTS)
         .expect("reclaim again");
