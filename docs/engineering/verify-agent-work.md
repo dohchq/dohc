@@ -470,6 +470,7 @@ Isolated desktop script tests then use the repository lane.
 PR verification then reuses that lane for the integration proofs after every database package finishes.
 In PR verification, desktop and database package tests start first so proofs can overlap the remaining package tests.
 Standalone `pnpm test` does not run these integration proofs.
+When the repository lane's own work ends, it runs package tests that have not started.
 The runtime packaging test waits for all three lanes, including proof readers, because it rebuilds shared runtime files.
 Database consumers share one slot. Vitest uses at most four workers per package and retains stricter existing limits.
 Package results and durations are in the JS test report referenced by `result.json`.
