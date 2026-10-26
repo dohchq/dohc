@@ -1169,15 +1169,21 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   }
 
   // Each agent dohc can start has its own chat. A background pass must not
-  // create a chat for an agent that is off.
+  // create a chat for an agent that is off. One agent's chat that cannot be
+  // made does not keep the others from theirs, and a later scan tries again.
   async function ensureAgentChats(workspace: ChatDispatchWorkspace): Promise<void> {
     for (const agent of await options.readDispatchAgents()) {
       if (!agent.enabled || !agent.launch) continue;
-      await options.chatStoreFor(workspace).ensureAgentChannel({
-        workspaceId: workspace.workspaceId,
-        agentId: agent.id,
-        name: agent.name,
-      });
+      try {
+        await options.chatStoreFor(workspace).ensureAgentChannel({
+          workspaceId: workspace.workspaceId,
+          agentId: agent.id,
+          name: agent.name,
+        });
+      } catch (error) {
+        reportError(error);
+        scheduleRecoveryScan(workspace);
+      }
     }
   }
 

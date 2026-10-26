@@ -5,6 +5,7 @@
 //! the NON-TAUTOLOGICAL parity differentials (channel slug, projection path,
 //! base64url feed cursor) validated against real TS output — not Rust's own.
 
+use dohc_engine_domain::chats::channel_collision_slug;
 use dohc_engine_domain::{
     AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChannelGroup, ChatActorKind,
     ChatChannelKind, ChatChannelType, ChatDecisionState, ChatMessageAutomation, ChatReactionState,
@@ -851,6 +852,44 @@ fn ensure_general_and_agent_channels_are_idempotent_with_wellknown_wire_ids() {
             Ok::<_, rusqlite::Error>(())
         })
         .expect("wire lookups");
+}
+
+/// An earlier build let a group be named "My agent notes". When the notes
+/// agent's chat is made, it takes that slug, and the group keeps its name
+/// under a slug no agent chat can have.
+#[test]
+fn an_agents_chat_moves_a_group_off_its_slug() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute_batch(
+                "INSERT INTO chat_channels \
+                 (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
+                 VALUES ('ws-1', 'notes-group', 'My agent notes', 'my-agent-notes', 'channel', 1, 1)",
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("an earlier build's group");
+    let mut chats = LinkedChatStore::new(&mut store);
+    let chat = chats
+        .ensure_agent_channel(WS, "notes-chat", "notes", "Notes", 10, &NO_FAULTS)
+        .expect("the notes agent's chat");
+    assert_eq!(chat.slug, "my-agent-notes");
+    let group = chats
+        .list_channels(WS)
+        .expect("channels")
+        .into_iter()
+        .find(|summary| summary.channel.channel_id == "notes-group")
+        .expect("the group")
+        .channel;
+    assert_eq!(group.name, "My agent notes");
+    assert_eq!(
+        group.slug,
+        channel_collision_slug("my-agent-notes", "notes-group", 0)
+    );
 }
 
 // ------------------------------------------- atomic thread + first message

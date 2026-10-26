@@ -965,7 +965,8 @@ describe("chatDispatchService", () => {
     const failure = new Error("agent channel temporarily unavailable");
     vi.spyOn(fixture.chat, "ensureAgentChannel").mockRejectedValueOnce(failure);
 
-    await expect(fixture.service.scanWorkspace(WORKSPACE_ID)).rejects.toBe(failure);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(fixture.errors).toContain(failure);
     expect(fixture.runUpdatedWorkspaces).toEqual([]);
     await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
 
@@ -973,6 +974,24 @@ describe("chatDispatchService", () => {
       (channel) => channel.kind === "agent",
     )).toHaveLength(1);
     expect(fixture.runUpdatedWorkspaces).toEqual([WORKSPACE_ID]);
+  });
+
+  it("gives each agent its chat when another agent's chat cannot be made", async () => {
+    vi.useFakeTimers();
+    const fixture = await createFixture({
+      agents: [{ id: "codex", ...testAgent({ name: "Codex", launch: { command: "node codex.mjs" } }) }],
+    });
+    const failure = new Error("Nova's chat cannot be made");
+    const ensureAgentChannel = fixture.chat.ensureAgentChannel.bind(fixture.chat);
+    vi.spyOn(fixture.chat, "ensureAgentChannel").mockImplementation((input) =>
+      input.agentId === "default" ? Promise.reject(failure) : ensureAgentChannel(input));
+
+    await activate(fixture);
+
+    expect(fixture.errors).toContain(failure);
+    expect((await fixture.chat.listChannels({ workspaceId: WORKSPACE_ID }))
+      .filter((channel) => channel.kind === "agent")
+      .map((channel) => channel.agentId)).toEqual(["codex"]);
   });
 
   it("writes a request for each agent a person asks, in the message's own write", async () => {
@@ -2640,7 +2659,7 @@ describe("chatDispatchService", () => {
       body: "Dispatch after the local scan recovers.",
       authorUserId: "user_local",
     });
-    vi.spyOn(fixture.chat, "ensureAgentChannel").mockRejectedValueOnce(new Error("daemon restarted during scan"));
+    vi.spyOn(fixture.serviceOptions, "readDispatchAgents").mockRejectedValueOnce(new Error("daemon restarted during scan"));
 
     fixture.service.start();
     await expect(
@@ -2666,7 +2685,7 @@ describe("chatDispatchService", () => {
       body: "Dispatch after escalating recovery backoff.",
       authorUserId: "user_local",
     });
-    vi.spyOn(fixture.chat, "ensureAgentChannel")
+    vi.spyOn(fixture.serviceOptions, "readDispatchAgents")
       .mockRejectedValueOnce(new Error("daemon unavailable"))
       .mockRejectedValueOnce(new Error("daemon still unavailable"));
 

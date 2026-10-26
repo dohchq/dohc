@@ -4576,7 +4576,7 @@ mod tests {
             ),
             (
                 "v2-agent-ids",
-                "3aa64e80172900df31332fc34b3082e0bc2559a2ba3d8106be994992b1ee37ef",
+                "21d43c44b4d3ce3c63d3ea12eaf138fe306364aa91247f2d28cffb31127ba9fc",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

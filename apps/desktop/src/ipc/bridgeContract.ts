@@ -126,6 +126,7 @@ import type { workspaceFileOperations } from "./workspaceFileOperations";
 import type { OperationBridge, OperationTable } from "./operationTable";
 import { isLoopbackHostname } from "../security/loopback";
 import {
+  AgentId,
   DesktopUserSettings as DesktopUserSettingsSchema,
   DesktopUserSettingsResult as DesktopUserSettingsResultSchema,
   ZOOM_STEPS,
@@ -2298,7 +2299,7 @@ export const ChatChannelRecord = z.object({
   slug: CHAT_CHANNEL_SLUG,
   kind: z.enum(["channel", "dm", "agent"]),
   // The agent whose chat this is, on an agent's chat only.
-  agentId: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).optional(),
+  agentId: AgentId.optional(),
   // What the group holds and why it exists. Older fixtures omit them.
   type: z.enum(["posts", "chat", "both"]).optional(),
   purpose: z.string().max(200).optional(),

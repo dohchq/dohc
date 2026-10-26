@@ -1,14 +1,13 @@
 use dohc_engine_domain::{AutomationClaim, AutomationGroupMessage, claim_group_message_in_tx};
-use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome, hex};
+use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Deserializer};
-use sha2::{Digest, Sha256};
 
 use dohc_engine_domain::chats::{
     DEFAULT_AGENT_ID, LINK_ORIGIN_PREFIX, LINK_THREAD_ID_PREFIX, agent_channel_slug,
-    agent_id_for_channel_wire_id, bump_chat_conversation_revision, is_agent_channel_slug, is_agent_id,
-    chat_thread_display_title, index_replicated_chat_message_search_rows, replicated_source_origin,
-    upsert_chat_search_index_row,
+    agent_id_for_channel_wire_id, bump_chat_conversation_revision, channel_collision_slug,
+    chat_thread_display_title, index_replicated_chat_message_search_rows, is_agent_channel_slug,
+    is_agent_id, replicated_source_origin, truncate_slug_base, upsert_chat_search_index_row,
 };
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup,
@@ -1153,34 +1152,6 @@ fn channel_slug_is_occupied(
     .map_err(SyncError::corrupt)
 }
 
-fn channel_collision_slug(requested: &str, allocation_identity: &str, attempt: u64) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(requested.as_bytes());
-    hasher.update([0]);
-    hasher.update(allocation_identity.as_bytes());
-    if attempt > 0 {
-        hasher.update([0]);
-        hasher.update(attempt.to_be_bytes());
-    }
-    let suffix = hex(&hasher.finalize());
-    const MAX_COLLISION_BASE_BYTES: usize = 200 - 1 - 64;
-    let bounded_requested = truncate_slug_base(requested, MAX_COLLISION_BASE_BYTES);
-    let base = if bounded_requested.is_empty() {
-        "channel"
-    } else {
-        &bounded_requested
-    };
-    let slug = format!("{base}-{suffix}");
-    debug_assert!(is_replicated_channel_slug(&slug));
-    slug
-}
-
-fn truncate_slug_base(value: &str, max_bytes: usize) -> String {
-    dohc_engine_domain::names::truncate_name(value, max_bytes)
-        .trim_end_matches('-')
-        .to_owned()
-}
-
 fn channel_allocation_base(name: &str) -> String {
     let slug = channel_slug_for_name(name);
     let base = if slug.is_empty() {
@@ -1510,6 +1481,19 @@ fn resolve_or_create_placeholder(
             )?,
             agent_id.to_owned(),
             "agent",
+        ),
+        // A group keeps its name and takes a slug no agent chat can have, as
+        // its create does.
+        None if is_agent_channel_slug(&placeholder_name) => (
+            allocate_channel_slug(
+                tx,
+                &op.workspace_id,
+                &channel_collision_slug(&placeholder_name, allocation_identity, 0),
+                &channel_id,
+                allocation_identity,
+            )?,
+            placeholder_name,
+            "channel",
         ),
         None => (
             allocate_channel_slug(

@@ -932,6 +932,17 @@ describe("ChatsLiveAdapter", () => {
     ).resolves.toBe("channel");
   });
 
+  it("moves a group named like an agent's chat to another slug when that chat is made", async () => {
+    const { adapter, loopback } = loopbackAdapter();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "group", name: "My agent codex" });
+
+    const chat = await adapter.ensureAgentChannel({ workspaceId: "workspace", agentId: "codex", name: "Codex" });
+
+    expect(chat.slug).toBe("my-agent-codex");
+    const group = (await adapter.listChannels({ workspaceId: "workspace" })).find((channel) => channel.channelId === "group");
+    expect(group).toMatchObject({ name: "My agent codex", slug: expect.stringMatching(/^my-agent-codex-[0-9a-f]{64}$/) });
+  });
+
   it("matches native reaction validation for keycaps and ZWJ atoms", async () => {
     const loopback = new ChatsLoopbackEngine();
     loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "General" });

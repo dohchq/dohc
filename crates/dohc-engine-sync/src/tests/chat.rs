@@ -5666,26 +5666,32 @@ fn another_agents_chat_an_earlier_build_hid_takes_its_next_thread() {
     let db = engine_db_path(&scratch).expect("db");
     dohc_engine_storage::recovery::create_earlier_store_for_test(&db, 1).expect("earlier store");
     let codex = "placeholder:device-a:channel_wire_agent_v1_codex";
-    // The suffix of this wire id is not an agent id.
+    // The suffixes of these wire ids are not agent ids.
     let my_bot = "placeholder:device-a:channel_wire_agent_v1_my_bot";
+    let review = "placeholder:device-a:channel_wire_agent_v1_code--review";
+    let trailing = "placeholder:device-a:channel_wire_agent_v1_codex-";
     let conn = rusqlite::Connection::open(&db).expect("open earlier store");
     conn.execute(
         "INSERT INTO chat_channels (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
          VALUES ('ws', ?1, 'my-agent-codex', 'my-agent-codex', 'channel', 5, 5), \
-                ('ws', ?2, 'channel-wire-agent-v1-my-bot', 'channel-wire-agent-v1-my-bot', 'channel', 6, 6)",
-        params![codex, my_bot],
+                ('ws', ?2, 'channel-wire-agent-v1-my-bot', 'channel-wire-agent-v1-my-bot', 'channel', 6, 6), \
+                ('ws', ?3, 'my-agent-code-review', 'my-agent-code-review', 'channel', 7, 7), \
+                ('ws', ?4, 'channel-wire-agent-v1-codex', 'channel-wire-agent-v1-codex', 'channel', 8, 8)",
+        params![codex, my_bot, review, trailing],
     )
     .expect("seed the hidden groups");
     conn.execute(
         "INSERT INTO chat_channel_wire_ids (workspace_id, wire_id, channel_id) \
-         VALUES ('ws', 'channel_wire_agent_v1_codex', ?1), ('ws', 'channel_wire_agent_v1_my_bot', ?2)",
-        params![codex, my_bot],
+         VALUES ('ws', 'channel_wire_agent_v1_codex', ?1), ('ws', 'channel_wire_agent_v1_my_bot', ?2), \
+                ('ws', 'channel_wire_agent_v1_code--review', ?3), ('ws', 'channel_wire_agent_v1_codex-', ?4)",
+        params![codex, my_bot, review, trailing],
     )
     .expect("seed the wire ids");
     conn.execute(
         "INSERT INTO chat_channel_placeholders (workspace_id, channel_id, wire_id) \
-         VALUES ('ws', ?1, 'channel_wire_agent_v1_codex'), ('ws', ?2, 'channel_wire_agent_v1_my_bot')",
-        params![codex, my_bot],
+         VALUES ('ws', ?1, 'channel_wire_agent_v1_codex'), ('ws', ?2, 'channel_wire_agent_v1_my_bot'), \
+                ('ws', ?3, 'channel_wire_agent_v1_code--review'), ('ws', ?4, 'channel_wire_agent_v1_codex-')",
+        params![codex, my_bot, review, trailing],
     )
     .expect("seed the placeholders");
     conn.execute(
@@ -5712,6 +5718,22 @@ fn another_agents_chat_an_earlier_build_hid_takes_its_next_thread() {
             json!({
                 "threadId": "my-bot-second", "title": "Second", "createdAtMs": 21,
                 "channelWireId": "channel_wire_agent_v1_my_bot"
+            }),
+        ),
+        (
+            "device-d",
+            "review-second",
+            json!({
+                "threadId": "review-second", "title": "Second", "createdAtMs": 22,
+                "channelWireId": "channel_wire_agent_v1_code--review"
+            }),
+        ),
+        (
+            "device-e",
+            "trailing-second",
+            json!({
+                "threadId": "trailing-second", "title": "Second", "createdAtMs": 23,
+                "channelWireId": "channel_wire_agent_v1_codex-"
             }),
         ),
     ] {
@@ -5745,11 +5767,13 @@ fn another_agents_chat_an_earlier_build_hid_takes_its_next_thread() {
         ("agent".to_owned(), Some("codex".to_owned()), false),
         "the hidden group is codex's chat"
     );
-    assert_eq!(
-        chat_of("my-bot-second"),
-        ("channel".to_owned(), None, true),
-        "a wire id that names no agent keeps its hidden group"
-    );
+    for thread_id in ["my-bot-second", "review-second", "trailing-second"] {
+        assert_eq!(
+            chat_of(thread_id),
+            ("channel".to_owned(), None, true),
+            "{thread_id}: a wire id that names no agent keeps its hidden group"
+        );
+    }
 
     let mut chats = LinkedChatStore::new(&mut engine);
     let chat = chats
@@ -5814,6 +5838,44 @@ fn a_thread_for_an_agent_wire_id_that_maps_to_a_group_is_refused() {
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "device-a").expect("ack"),
         1
+    );
+}
+
+/// An earlier build's group named "My agent notes" sends a thread before its
+/// create. The group's hidden placeholder keeps the name and takes a slug no
+/// agent chat can have, as the group's create would.
+#[test]
+fn a_hidden_group_named_like_an_agent_chat_takes_another_slug() {
+    let (_scratch, _path, mut engine) = open_store();
+    let operation = envelope(
+        "device-a",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "notes-thread", "title": "Notes", "createdAtMs": 20,
+            "channelSlug": "my-agent-notes", "channelWireId": "notes-wire"
+        }),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &operation, &NoFaults).expect("the thread"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    let (name, slug): (String, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT c.name, c.slug FROM chat_threads t \
+                 JOIN chat_channels c ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
+                 WHERE t.workspace_id = 'ws' AND t.thread_id = 'notes-thread'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("the thread's group");
+    assert_eq!(name, "my-agent-notes");
+    assert_eq!(
+        slug,
+        dohc_engine_domain::chats::channel_collision_slug("my-agent-notes", "notes-wire", 0)
     );
 }
 

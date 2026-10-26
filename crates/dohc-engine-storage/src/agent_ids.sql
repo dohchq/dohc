@@ -22,6 +22,8 @@ WHERE p.workspace_id = chat_channels.workspace_id
   AND p.wire_id GLOB 'channel_wire_agent_v1_[a-z]*'
   AND length(p.wire_id) <= 22 + 64
   AND substr(p.wire_id, 23) NOT GLOB '*[^a-z0-9-]*'
+  AND substr(p.wire_id, 23) NOT GLOB '*--*'
+  AND substr(p.wire_id, 23) NOT GLOB '*-'
   AND p.wire_id <> 'channel_wire_agent_v1_default';
 DELETE FROM chat_channel_placeholders
 WHERE wire_id GLOB 'channel_wire_agent_v1_*'

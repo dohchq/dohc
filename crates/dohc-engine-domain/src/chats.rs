@@ -996,12 +996,15 @@ pub fn channel_slug_for_name(name: &str) -> String {
 }
 
 /// An agent id from a settings file: up to 64 lowercase letters, digits and
-/// dashes, starting with a letter.
+/// single dashes, starting with a letter and not ending with a dash. So the
+/// slug of its chat keeps the id as it is.
 pub fn is_agent_id(value: &str) -> bool {
     let mut chars = value.chars();
     value.len() <= 64
         && chars.next().is_some_and(|first| first.is_ascii_lowercase())
         && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        && !value.contains("--")
+        && !value.ends_with('-')
 }
 
 /// The wire id every computer gives one agent's chat.
@@ -1028,7 +1031,7 @@ pub fn agent_channel_slug(agent_id: &str) -> String {
     if agent_id == DEFAULT_AGENT_ID {
         AGENT_CHANNEL_SLUG.to_owned()
     } else {
-        channel_slug_for_name(&format!("{AGENT_CHANNEL_SLUG}-{agent_id}"))
+        format!("{AGENT_CHANNEL_SLUG}-{agent_id}")
     }
 }
 
@@ -1036,6 +1039,37 @@ pub fn agent_channel_slug(agent_id: &str) -> String {
 pub fn is_agent_channel_slug(slug: &str) -> bool {
     slug.strip_prefix(AGENT_CHANNEL_SLUG)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+}
+
+/// The slug a chat takes when another holds the one it asked for: the
+/// requested slug and a hash of it and the chat's identity. Its last part is
+/// longer than an agent id, so no agent chat can have it.
+pub fn channel_collision_slug(requested: &str, allocation_identity: &str, attempt: u64) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(requested.as_bytes());
+    hasher.update([0]);
+    hasher.update(allocation_identity.as_bytes());
+    if attempt > 0 {
+        hasher.update([0]);
+        hasher.update(attempt.to_be_bytes());
+    }
+    let suffix = hex(&hasher.finalize());
+    const MAX_COLLISION_BASE_BYTES: usize = 200 - 1 - 64;
+    let bounded_requested = truncate_slug_base(requested, MAX_COLLISION_BASE_BYTES);
+    let base = if bounded_requested.is_empty() {
+        "channel"
+    } else {
+        &bounded_requested
+    };
+    let slug = format!("{base}-{suffix}");
+    debug_assert!(is_replicated_channel_slug(&slug));
+    slug
+}
+
+pub fn truncate_slug_base(value: &str, max_bytes: usize) -> String {
+    crate::names::truncate_name(value, max_bytes)
+        .trim_end_matches('-')
+        .to_owned()
 }
 
 /// base32 lowercase (RFC 4648, no padding) of `bytes` (`base32LowercaseNoPadding`).
@@ -2368,11 +2402,10 @@ impl<'a> LinkedChatStore<'a> {
                 record_channel_wire_id(tx, &ws, &wire, &existing.channel_id)?;
                 return Ok::<_, DomainError>(existing);
             }
-            if channel_by_slug(tx, &ws, &slug)?.is_some() {
-                return Err(DomainError::chat(
-                    "channel-exists",
-                    "Another channel already has this agent chat's name.",
-                ));
+            // A group an earlier build named like this agent's chat keeps its
+            // name and moves to a slug no agent chat can have, as sync does.
+            if let Some(group) = channel_by_slug(tx, &ws, &slug)? {
+                move_channel_off_slug(tx, &ws, &group.channel_id, &slug)?;
             }
             create_well_known_channel(
                 tx,
@@ -6182,6 +6215,28 @@ fn channel_by_slug(
     .optional()
     .map_err(DomainError::sql_corrupt)?
     .transpose()
+}
+
+fn move_channel_off_slug(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    channel_id: &str,
+    slug: &str,
+) -> Result<(), DomainError> {
+    let mut attempt = 0;
+    let moved = loop {
+        let candidate = channel_collision_slug(slug, channel_id, attempt);
+        if channel_by_slug(tx, workspace_id, &candidate)?.is_none() {
+            break candidate;
+        }
+        attempt = attempt.saturating_add(1);
+    };
+    tx.execute(
+        "UPDATE chat_channels SET slug = ?3 WHERE workspace_id = ?1 AND channel_id = ?2",
+        params![workspace_id, channel_id, moved],
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(())
 }
 
 fn agent_channel(

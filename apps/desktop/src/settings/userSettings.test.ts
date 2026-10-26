@@ -159,7 +159,7 @@ describe("desktop user settings model", () => {
     for (const timeoutMinutes of [0, 1441, 1.5]) {
       expect(AgentsSettings.safeParse({ default: { ...agent, timeoutMinutes } }).success).toBe(false);
     }
-    for (const id of ["Nova", "1st", "-a", "a_b", "a".repeat(65)]) {
+    for (const id of ["Nova", "1st", "-a", "a_b", "a".repeat(65), "codex-", "code--review"]) {
       expect(AgentsSettings.safeParse({ [id]: agent }).success, id).toBe(false);
     }
     expect(AgentsSettings.safeParse({ default: { ...agent, launch: { command: " 	 " } } }).success).toBe(false);

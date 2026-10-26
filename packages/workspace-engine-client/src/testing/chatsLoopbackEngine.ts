@@ -499,7 +499,22 @@ function decodeCursor(params: ChatsJsonObject, binding: string): number {
 
 const DEFAULT_AGENT_ID = "default";
 // The settings file's agent id rule.
-const AGENT_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
+const AGENT_ID_PATTERN = /^(?=.{1,64}$)[a-z](?:-?[a-z0-9])*$/u;
+
+// The engine's slug for a chat whose slug another holds: the slug and a hash
+// of it and the chat's id. Agent chat slugs are short enough to keep whole.
+function collisionSlug(taken: ReadonlySet<string>, requested: string, identity: string): string {
+  for (let attempt = 0n; ; attempt += 1n) {
+    const hash = createHash("sha256").update(requested).update("\0").update(identity);
+    if (attempt > 0n) {
+      const bytes = Buffer.alloc(8);
+      bytes.writeBigUInt64BE(attempt);
+      hash.update("\0").update(bytes);
+    }
+    const candidate = `${requested}-${hash.digest("hex")}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
 
 function dispatchKey(triggerMessageId: string, agentId: string): string {
   return `${triggerMessageId}\0${agentId}`;
@@ -1195,9 +1210,13 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const name = isDefault
       ? "My agent"
       : normalizeNonempty(requiredString(params, "name", "invalid-channel-name"), "invalid-channel-name");
-    const channelSlug = isDefault ? "my-agent" : slug(`my-agent-${agentId}`);
-    if ([...state.channels.values()].some((channel) => channel.slug === channelSlug)) {
-      throw new Error("channel-exists");
+    const channelSlug = isDefault ? "my-agent" : `my-agent-${agentId}`;
+    // A group an earlier build named like this chat keeps its name and moves
+    // to a slug no agent chat can have.
+    const group = [...state.channels.values()].find((channel) => channel.slug === channelSlug);
+    if (group) {
+      const taken = new Set([...state.channels.values()].map((channel) => channel.slug));
+      group.slug = collisionSlug(taken, channelSlug, group.channelId);
     }
     const channelId = requiredString(params, "channelId");
     if (state.channels.has(channelId)) throw new Error("target-exists");
