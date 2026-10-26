@@ -11,14 +11,20 @@ import {
 } from "./chatRunnerProcess";
 import type { AgentLaunchProfile } from "./agentToolCatalog";
 
-async function runnerFixture(platform: NodeJS.Platform) {
+const [bundledPlatform, bundledArch, nodeName] = process.platform === "win32"
+  ? ["win32", "x64", "node.exe"] as const
+  : ["darwin", "arm64", "node"] as const;
+
+async function runnerFixture(platform: NodeJS.Platform, packaged = false, arch = "x64") {
   const root = await createTestScratch("dohc-chat-runner-");
   const calls: { command: string; options: RunnerSpawnOptions }[] = [];
   const runner = createChatRunnerProcess(
     {
       stateDir: () => join(root, "state"),
       appRoot: () => root,
-      isPackaged: () => false,
+      isPackaged: () => packaged,
+      resourcesPath: () => platform === "win32" ? join(root, "resources") : join(root, "resources").replace(/^[a-z]:/iu, "").replaceAll("\\", "/"),
+      arch,
       platform,
       spawnRunner: (command, _args, options) => {
         calls.push({ command, options });
@@ -47,6 +53,61 @@ async function runnerFixture(platform: NodeJS.Platform) {
 }
 
 describe("chat runner process", () => {
+  it("refuses a directory in place of the packaged runtime", async () => {
+    const { root, calls, spawn } = await runnerFixture(bundledPlatform, true, bundledArch);
+    mkdirSync(join(root, "resources", "app-compiler", nodeName), { recursive: true });
+    expect(() => spawn(`"${process.execPath}"`)).toThrow("Reinstall dohc");
+    expect(calls).toHaveLength(0);
+  });
+
+  it.runIf(process.platform !== "win32")("refuses a non-executable packaged POSIX runtime", async () => {
+    const { root, calls, spawn } = await runnerFixture("darwin", true, "arm64");
+    mkdirSync(join(root, "resources", "app-compiler"), { recursive: true });
+    writeFileSync(join(root, "resources", "app-compiler", "node"), "runtime", { mode: 0o600 });
+    expect(() => spawn("agent")).toThrow("Reinstall dohc");
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each(["", "true", "{}", '{"source":"other","available":false}', '{"source":"path","available":"false"}'])("ignores malformed runtime records: %s", async (content) => {
+    const root = await createTestScratch("dohc-chat-runner-");
+    const log = join(root, "run.log");
+    writeFileSync(`${log}.node`, content);
+    expect(await readRunnerNodeAvailable(log)).toBeUndefined();
+  });
+  it.each(["claude", "codex", "custom"] as const)("refuses missing packaged Node before %s configuration, recording, or spawn", async (tool) => {
+    const { root, calls, spawn } = await runnerFixture(bundledPlatform, true, bundledArch);
+    vi.stubEnv("PATH", process.execPath);
+    const profile = tool === "custom" ? undefined : { tool, executable: process.execPath, args: [] } as unknown as AgentLaunchProfile;
+    expect(() => spawn(`"${process.execPath}"`, () => undefined, profile)).toThrow(
+      "dohc is missing a file it needs to run agents. Reinstall dohc, then try again.",
+    );
+    expect(calls).toHaveLength(0);
+    expect(existsSync(join(root, "logs", "run.log.mcp.json"))).toBe(false);
+    expect(existsSync(join(root, "logs", "run.log.node"))).toBe(false);
+  });
+
+  it("records the packaged reply runtime even without Node on PATH", async () => {
+    const { root, spawn } = await runnerFixture(bundledPlatform, true, bundledArch);
+    mkdirSync(join(root, "resources", "app-compiler"), { recursive: true });
+    writeFileSync(join(root, "resources", "app-compiler", nodeName), "runtime", { mode: 0o755 });
+    vi.stubEnv("PATH", "");
+    spawn(`"${process.execPath}"`);
+    expect(await readRunnerNodeAvailable(join(root, "logs", "run.log"))).toEqual({ source: "bundled", available: true });
+  });
+
+  it.each(["x64", "arm64"])("keeps packaged Linux %s on the PATH probe", async (arch) => {
+    const { root, spawn } = await runnerFixture("linux", true, arch);
+    vi.stubEnv("PATH", "");
+    spawn("agent");
+    expect(await readRunnerNodeAvailable(join(root, "logs", "run.log"))).toEqual({ source: "path", available: false });
+  });
+
+  it.each([true, false])("reads legacy runtime records: %s", async (available) => {
+    const root = await createTestScratch("dohc-chat-runner-");
+    const log = join(root, "run.log");
+    writeFileSync(`${log}.node`, `${available}\n`);
+    expect(await readRunnerNodeAvailable(log)).toEqual({ source: "path", available });
+  });
   afterEach(() => {
     vi.unstubAllEnvs();
   });
@@ -76,8 +137,8 @@ describe("chat runner process", () => {
     chmodSync(node, executable ? 0o700 : 0o600);
     vi.stubEnv("PATH", "");
     spawn("agent");
-    expect(readFileSync(join(root, "logs", "run.log.node"), "utf8"))
-      .toBe(`${process.platform === "win32" || executable}\n`);
+    expect(await readRunnerNodeAvailable(join(root, "logs", "run.log")))
+      .toEqual({ source: "path", available: process.platform === "win32" || executable });
   });
 
   it("records Node.js as missing when it is only in the workspace or a relative PATH entry", async () => {
@@ -85,7 +146,7 @@ describe("chat runner process", () => {
     writeFileSync(join(root, "node"), "not executed", { mode: 0o700 });
     vi.stubEnv("PATH", ["", ".", "relative"].join(delimiter));
     spawn("agent");
-    expect(readFileSync(join(root, "logs", "run.log.node"), "utf8")).toBe("false\n");
+    expect(await readRunnerNodeAvailable(join(root, "logs", "run.log"))).toEqual({ source: "path", available: false });
   });
 
   it.runIf(process.platform === "win32")
@@ -97,8 +158,8 @@ describe("chat runner process", () => {
       vi.stubEnv("PATH", "");
       vi.stubEnv("PATHEXT", ".CMD;.EXE");
       spawn(`"${process.execPath}"`);
-      expect(readFileSync(join(root, "logs", "run.log.node"), "utf8"))
-        .toBe(`${extension !== ".OTHER"}\n`);
+      expect(await readRunnerNodeAvailable(join(root, "logs", "run.log")))
+        .toEqual({ source: "path", available: extension !== ".OTHER" });
     });
 
   it.runIf(process.platform === "win32")("does not count Node.js in the Windows current directory", async () => {
@@ -106,7 +167,7 @@ describe("chat runner process", () => {
     writeFileSync(join(root, "node.exe"), "not executed");
     vi.stubEnv("PATH", ["", ".", "relative"].join(delimiter));
     spawn(`"${process.execPath}"`);
-    expect(readFileSync(join(root, "logs", "run.log.node"), "utf8")).toBe("false\n");
+    expect(await readRunnerNodeAvailable(join(root, "logs", "run.log"))).toEqual({ source: "path", available: false });
   });
 
   it("tokenizes quoted runner arguments and rejects an unterminated command", () => {
