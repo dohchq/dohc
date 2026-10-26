@@ -97,6 +97,7 @@ Check that the action exists on that surface before you name it.
 
 - Finished work: past tense, with a count when the count means something. `Updated 3 files`. Never invent a count.
 - Work in progress: the concrete action, with the count when it is known. `Reading 40 files`, not `Working on it…`.
+- When more can load, show the loaded count as a lower bound, `49+`, read aloud as "49 or more files". Never show a loaded count as the total.
 - Waiting on the person: the reason. `Waiting for your review`.
 - Attribution: `Edited by agent`. No invented names or personalities. Use first person only when the agent itself is speaking.
 - Say what the agent did, not that it understood, decided, or thought.
@@ -140,6 +141,7 @@ A copy fix changes visible words only, so keep the `data-testid`, `aria-*`, `rol
 | A control's own input is wrong | Inline, beside the control |
 
 - Use these places. Do not add a new one for a new message.
+- Report a cause once. When the title bar names the server as the problem, features that need the server, such as live editing, add no indicator, toast or row of their own. A state dohc is still fixing by itself shows at once where it lives, as a ring. Its toast and row come only once the ring has shown for 15 s.
 - Keep the toast and its row when it holds the only Undo for the change.
 - Keep the workbench still when a message arrives. No bar slides in across the top.
 - Give a message about something the person can retry a **Try again** control on the toast and the row.

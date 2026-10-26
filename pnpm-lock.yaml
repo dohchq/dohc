@@ -54,7 +54,7 @@ overrides:
   prosemirror-view: 1.42.2
 
 patchedDependencies:
-  '@legendapp/list@3.3.11': 56c507d27b1a74272bcf6c9f183befb96d9f9a39d2f5d42018bb34db0f52e52b
+  '@legendapp/list@3.3.11': ab6f0e9cddd0e8a6ac3c43e22ef95252c9942947f55a50e1d74caa7c9d69035b
   app-builder-lib@26.15.3: 43a9677d5c0d33b767329d8638103ec8ed4bdc14cfe2a4dfc930b673f3081946
   electron-updater@6.8.9: 2ffc3c459ff957eceaa2fab7cd2d965a5841c6725f003550e9a7a35c639d201b
   prosemirror-view@1.42.2: ff50e393ba12e965d83fe14200353a218c5530b5741560ce8340528f678cdcb9
@@ -128,7 +128,7 @@ importers:
         version: link:../../packages/ydoc-projection
       '@legendapp/list':
         specifier: 3.3.11
-        version: 3.3.11(patch_hash=56c507d27b1a74272bcf6c9f183befb96d9f9a39d2f5d42018bb34db0f52e52b)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+        version: 3.3.11(patch_hash=ab6f0e9cddd0e8a6ac3c43e22ef95252c9942947f55a50e1d74caa7c9d69035b)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@lezer/highlight':
         specifier: ^1.2.3
         version: 1.2.3
@@ -265,6 +265,12 @@ importers:
       '@tiptap/y-tiptap':
         specifier: 3.0.8
         version: 3.0.8(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2(patch_hash=ff50e393ba12e965d83fe14200353a218c5530b5741560ce8340528f678cdcb9))(y-protocols@1.0.7(yjs@13.6.30))(yjs@13.6.30)
+      '@types/hast':
+        specifier: ^3.0.5
+        version: 3.0.5
+      '@types/mdast':
+        specifier: ^4.0.4
+        version: 4.0.4
       '@types/node':
         specifier: ^24.13.3
         version: 24.13.3
@@ -283,6 +289,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^5.2.0
         version: 5.2.0(supports-color@7.2.0)(vite@7.3.6(@types/node@24.13.3)(jiti@2.7.0)(lightningcss@1.33.0)(tsx@4.23.11)(yaml@2.9.0))
+      decode-named-character-reference:
+        specifier: ^1.3.0
+        version: 1.3.0
       electron:
         specifier: 43.3.0
         version: 43.3.0(supports-color@7.2.0)
@@ -292,6 +301,9 @@ importers:
       electron-vite:
         specifier: ^5.0.0
         version: 5.0.0(supports-color@7.2.0)(vite@7.3.6(@types/node@24.13.3)(jiti@2.7.0)(lightningcss@1.33.0)(tsx@4.23.11)(yaml@2.9.0))
+      hast-util-to-jsx-runtime:
+        specifier: ^2.3.6
+        version: 2.3.6(supports-color@7.2.0)
       highlight.js:
         specifier: ~11.11.1
         version: 11.11.1
@@ -316,6 +328,12 @@ importers:
       mermaid:
         specifier: ^11.16.1
         version: 11.16.1
+      micromark-util-decode-numeric-character-reference:
+        specifier: ^2.0.2
+        version: 2.0.2
+      micromark-util-sanitize-uri:
+        specifier: ^2.0.1
+        version: 2.0.1
       playwright:
         specifier: ^1.62.1
         version: 1.62.1
@@ -340,12 +358,21 @@ importers:
       remark-gfm:
         specifier: ^4.0.1
         version: 4.0.1(supports-color@7.2.0)
+      remark-parse:
+        specifier: ^11.0.0
+        version: 11.0.0(supports-color@7.2.0)
+      remark-rehype:
+        specifier: ^11.1.2
+        version: 11.1.2
       tailwindcss:
         specifier: ^4.3.3
         version: 4.3.3
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
+      unified:
+        specifier: ^11.0.5
+        version: 11.0.5
       vite:
         specifier: ^7.3.6
         version: 7.3.6(@types/node@24.13.3)(jiti@2.7.0)(lightningcss@1.33.0)(tsx@4.23.11)(yaml@2.9.0)
@@ -7982,7 +8009,7 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
 
-  '@legendapp/list@3.3.11(patch_hash=56c507d27b1a74272bcf6c9f183befb96d9f9a39d2f5d42018bb34db0f52e52b)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
+  '@legendapp/list@3.3.11(patch_hash=ab6f0e9cddd0e8a6ac3c43e22ef95252c9942947f55a50e1d74caa7c9d69035b)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
     dependencies:
       react: 19.2.8
       use-sync-external-store: 1.6.0(react@19.2.8)
