@@ -141,7 +141,7 @@ function SetupBand(props: {
     <div
       data-testid="share-setup"
       data-reason={props.reason}
-      className="flex items-center gap-2 rounded-lg bg-panel-2 py-2 pl-2.5 pr-2 text-[12px] leading-4 text-ink"
+      className="flex items-center gap-2 rounded-lg bg-panel-2 p-2 text-[12px] leading-4 text-ink"
     >
       <Icon size={14} aria-hidden className="shrink-0 text-muted" />
       <div className="min-w-0 flex-1">{props.children}</div>
