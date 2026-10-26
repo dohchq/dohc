@@ -545,6 +545,16 @@ describe("the parse worker's answer", () => {
     expect(answerChatParse({ id: 4, body, candidates: CANDIDATES, attachments: [] }).parsed).toBeDefined();
   });
 
+  it("weighs a table by its nodes as well as its text", () => {
+    const row = `|${"a|".repeat(20)}\n`;
+    const body = `${row}|${"-|".repeat(20)}\n${row.repeat(250)}`;
+    const parsed = parseChatMarkdown(body, []);
+    const answer = answerChatParse({ id: 6, body, candidates: CANDIDATES, attachments: [] });
+    expect(answer.parsed?.weight).toBe(parsed.chars + parsed.nodes * 64);
+    // So the cache holds a few such tables, not a hundred.
+    expect(answer.parsed!.weight).toBeGreaterThan(500_000);
+  });
+
   it("gives up on a short body that repeats a long target or title", () => {
     const uses = "[a][r] ".repeat(300);
     for (const definition of [`[r]: https://example.com/${"x".repeat(1000)}`, `[r]: https://example.com "${"t".repeat(1000)}"`]) {
@@ -569,10 +579,12 @@ describe("footnotes", () => {
 // The text shown before the tree arrives has the words the tree shows, with
 // chips as typed.
 describe("the waiting text", () => {
-  type Node = { type: string; value?: string; tagName?: string; children?: Node[] };
+  type Node = { type: string; value?: string; tagName?: string; properties?: { alt?: string; src?: string }; children?: Node[] };
   const BLOCKS = new Set(["p", "li", "pre", "blockquote", "h1", "h2", "h3", "br", "td", "th"]);
   const shown = (node: Node): string => {
     if (node.type === "text") return node.value ?? "";
+    // An image draws as a link holding its alt text, else its address.
+    if (node.tagName === "img") return node.properties?.alt || node.properties?.src || "";
     const inner = (node.children ?? []).map(shown).join("");
     return node.tagName && BLOCKS.has(node.tagName) ? ` ${inner} ` : inner;
   };
@@ -595,6 +607,12 @@ describe("the waiting text", () => {
     "hi @sam_x_ and **@agent**",
     "file_ and a* b and ~c and __init__",
     "*one\ntwo* and ~~three\nfour~~",
+    "a*b\n> c* and > d*e\nf*",
+    '[plan](https://example.com "title ( here") after',
+    "**bold *italic***",
+    "**hello*",
+    "[a [b](c) d](e) and ![x [y](z)](w)",
+    "[a](<b c>) [d](<e) [f](g 'h') [i](j (k)) [l]( m ) [n](o\"p\")",
   ]) {
     it(`matches the tree for ${JSON.stringify(body)}`, () => {
       const chips = chatChips(body, CANDIDATES, []);
@@ -602,6 +620,33 @@ describe("the waiting text", () => {
       expect(words(stripMarkdown(body, chips).text)).toEqual(tree);
     });
   }
+
+  // 20,000 different bodies of one line from a small alphabet, so every
+  // emphasis and link rule meets every other, from a fixed seed.
+  it("matches the tree for 20,000 generated bodies", () => {
+    const alphabet = ["*", "*", "_", "_", "(", ")", "[", "]", '"', "<", ">", "\\", "`", "a", "b", " ", " "];
+    // mulberry32
+    let seed = 20261027;
+    const random = () => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let value = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      value = (value + Math.imul(value ^ (value >>> 7), 61 | value)) ^ value;
+      return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+    };
+    const bodies = new Set<string>();
+    while (bodies.size < 20_000) {
+      let body = "a";
+      const size = 1 + Math.floor(random() * 24);
+      for (let at = 0; at < size; at++) body += alphabet[Math.floor(random() * alphabet.length)];
+      bodies.add(body);
+    }
+    const mismatches: string[] = [];
+    for (const body of bodies) {
+      const tree = words(shown(parseChatMarkdown(body, []).tree as Node)).join(" ");
+      if (words(stripMarkdown(body).text).join(" ") !== tree) mismatches.push(body);
+    }
+    expect(mismatches).toEqual([]);
+  });
 });
 
 describe("the drawn-body cache", () => {

@@ -21,7 +21,15 @@ import { stripMarkdown } from "../markdown/stripMarkdown";
 import { CopyButton } from "../ui/CopyButton";
 import { Ref } from "../ui/Ref";
 import { extractChatFileReferenceTokens } from "./chatFileMentions";
-import { chatChips, fitsMainThread, parseChatMarkdown, SAFE_HREF, withinChatMarkdownLimits, type Chip } from "./chatMarkdownParse";
+import {
+  chatChips,
+  chatMarkdownWeight,
+  fitsMainThread,
+  parseChatMarkdown,
+  SAFE_HREF,
+  withinChatMarkdownLimits,
+  type Chip,
+} from "./chatMarkdownParse";
 import { parseChatInWorker } from "./chatMarkdownWorker";
 
 // A chat message's body, rendered as Markdown. Chat text comes from other
@@ -274,38 +282,38 @@ interface Drawn {
   content: ReactNode;
   chips: readonly Chip[];
   copiesSource: boolean;
-  // The text and string properties of its tree, which the cache counts.
-  chars: number;
+  // What its tree costs the cache to hold.
+  weight: number;
 }
 
 const textOnly = (body: string, chips: readonly Chip[]): Drawn => ({
   content: <PlainText body={body} chips={chips} strip />,
   chips,
   copiesSource: false,
-  chars: 0,
+  weight: 0,
 });
 
 // Drawn bodies of recent messages, so reopening a chat or scrolling back to a
 // message skips the parse, oldest dropped first past the size limit. The key
 // holds the body and what its chips depend on. An entry weighs its key and
-// the text its tree holds.
-export function createDrawnCache<Value>(maxChars: number) {
+// its tree.
+export function createDrawnCache<Value>(maxWeight: number) {
   const entries = new Map<string, { value: Value; weight: number }>();
-  let chars = 0;
+  let total = 0;
   return {
-    remember(key: string, value: Value, treeChars = 0) {
+    remember(key: string, value: Value, treeWeight = 0) {
       const known = entries.get(key);
       if (known) {
         entries.delete(key);
-        chars -= known.weight;
+        total -= known.weight;
       }
-      const weight = key.length + treeChars;
+      const weight = key.length + treeWeight;
       entries.set(key, { value, weight });
-      chars += weight;
+      total += weight;
       for (const [oldest, entry] of entries) {
-        if (chars <= maxChars) break;
+        if (total <= maxWeight) break;
         entries.delete(oldest);
-        chars -= entry.weight;
+        total -= entry.weight;
       }
     },
     recall(key: string): Value | undefined {
@@ -380,7 +388,7 @@ function drawNow(
   if (known) return known;
   if (!MARKDOWN_SYNTAX.test(body)) {
     const chips = chatChips(body, candidates, attachments);
-    return { content: <PlainText body={body} chips={chips} strip={false} />, chips, copiesSource: true, chars: 0 };
+    return { content: <PlainText body={body} chips={chips} strip={false} />, chips, copiesSource: true, weight: 0 };
   }
   const sync = fitsMainThread(body);
   if (gaveUp.has(hash(body))) return textOnly(body, sync ? chatChips(body, candidates, attachments) : []);
@@ -390,7 +398,7 @@ function drawNow(
   try {
     const parsed = parseChatMarkdown(body, chips);
     if (withinChatMarkdownLimits(parsed)) {
-      value = { content: drawTree(parsed.tree), chips, copiesSource: parsed.copiesSource, chars: parsed.chars };
+      value = { content: drawTree(parsed.tree), chips, copiesSource: parsed.copiesSource, weight: chatMarkdownWeight(parsed) };
     }
   } catch {
     value = undefined;
@@ -399,7 +407,7 @@ function drawNow(
     gaveUp.add(hash(body));
     value = textOnly(body, chips);
   }
-  remember(key, value, value.chars);
+  remember(key, value, value.weight);
   return value;
 }
 
@@ -416,8 +424,8 @@ function drawLater(
     let value: Drawn | undefined;
     if (answer?.parsed) {
       try {
-        const { tree, copiesSource, chars } = answer.parsed;
-        value = { content: drawTree(tree), chips: answer.chips, copiesSource, chars };
+        const { tree, copiesSource, weight } = answer.parsed;
+        value = { content: drawTree(tree), chips: answer.chips, copiesSource, weight };
       } catch {
         value = undefined;
       }
@@ -426,7 +434,7 @@ function drawLater(
       gaveUp.add(hash(body));
       value = textOnly(body, answer?.chips ?? []);
     }
-    remember(key, value, value.chars);
+    remember(key, value, value.weight);
     return value;
   });
   parsing.set(key, pending);

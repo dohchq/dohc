@@ -277,6 +277,10 @@ export function parseChatMarkdown(body: string, chips: readonly Chip[]): ParsedC
   return { tree, copiesSource: !hides, ...size };
 }
 
+// What a drawn tree costs the cache to hold: its text, and 64 for each node
+// for the element and objects behind it.
+export const chatMarkdownWeight = (parsed: ParsedChatMarkdown): number => parsed.chars + parsed.nodes * 64;
+
 // Whether a parsed tree is small enough to draw.
 export function withinChatMarkdownLimits(parsed: ParsedChatMarkdown): boolean {
   return parsed.nodes <= CHAT_MARKDOWN_MAX_NODES &&
@@ -296,7 +300,7 @@ export interface ChatParseRequest {
 export interface ChatParseAnswer {
   id: number;
   chips: Chip[];
-  parsed?: { tree: HastRoot; copiesSource: boolean; chars: number };
+  parsed?: { tree: HastRoot; copiesSource: boolean; weight: number };
 }
 
 export function answerChatParse(request: ChatParseRequest): ChatParseAnswer {
@@ -306,7 +310,7 @@ export function answerChatParse(request: ChatParseRequest): ChatParseAnswer {
     if (request.body.length > CHAT_MARKDOWN_MAX_LENGTH) return { id: request.id, chips };
     const parsed = parseChatMarkdown(request.body, chips);
     if (!withinChatMarkdownLimits(parsed)) return { id: request.id, chips };
-    return { id: request.id, chips, parsed: { tree: parsed.tree, copiesSource: parsed.copiesSource, chars: parsed.chars } };
+    return { id: request.id, chips, parsed: { tree: parsed.tree, copiesSource: parsed.copiesSource, weight: chatMarkdownWeight(parsed) } };
   } catch {
     return { id: request.id, chips };
   }

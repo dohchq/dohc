@@ -63,7 +63,7 @@ describe("stripMarkdown", () => {
   });
 
   it("drops an atom that sits inside removed syntax", () => {
-    const source = "[link](https://x.com/ @sam) after";
+    const source = "[link](https://x.com/@sam) after";
     const at = source.indexOf("@sam");
     const result = stripMarkdown(source, [{ start: at, end: at + 4 }]);
     expect(result.text).toBe("link after");
@@ -100,6 +100,14 @@ describe("stripMarkdown", () => {
     emphasisClosers: rep("a* ", 50_000),
     nestedEmphasis: rep("*a **a ", 25_000) + rep(" a** a*", 25_000),
     mismatched: rep("*a_ ", 50_000),
+    multipleOfThree: rep("a**", 25_000) + rep("a*", 25_000),
+    mixedWidths: rep("***a ", 25_000) + rep(" a*", 25_000),
+    intraword: rep("a*a**a_a__", 50_000),
+    emphasisInLinks: rep("[*a ", 25_000) + rep("a*](b) ", 25_000),
+    linksInLinks: rep("[a [b](c) ", 50_000),
+    unclosedTitles: rep('[a](b "', 50_000),
+    unclosedParenTitles: rep("[a](b (", 50_000),
+    unclosedAngles: rep("[a](<b", 50_000),
     strike: rep("~~a ", 25_000) + rep("a~~ ", 25_000),
     backtickRuns: Array.from({ length: 320 }, (_, size) => `e${"`".repeat(size + 1)}`).join("").slice(0, 50_000),
     singleTicks: rep("` ", 50_000),
