@@ -258,14 +258,16 @@ test("a file from another person that the person can edit opens as a marked, rea
 
     await openExternally(page, NOTE);
     // The data file's view can't preview it, so it offers Open externally,
-    // with "Read-only copy" after it on the same line.
+    // with a lock and "Read-only copy" after it on the same line.
     await explorerRow(page, DATA).click();
     const control = page.getByTestId("view-binary").getByRole("button", { name: "Open externally", exact: true });
     const words = page.getByTestId("view-binary").getByText("Read-only copy", { exact: true });
+    const lock = words.locator("xpath=preceding-sibling::*[1]");
     await expect(words).toBeVisible();
     await expect(control).toHaveAccessibleDescription("Read-only copy");
-    const [controlBox, wordsBox] = [await control.boundingBox(), await words.boundingBox()];
-    expect(Math.abs(wordsBox!.x - (controlBox!.x + controlBox!.width) - 8), "the words follow the control, 8 px away").toBeLessThan(1);
+    const [controlBox, lockBox, wordsBox] = [await control.boundingBox(), await lock.boundingBox(), await words.boundingBox()];
+    expect(Math.abs(lockBox!.x - (controlBox!.x + controlBox!.width) - 8), "the lock follows the control, 8 px away").toBeLessThan(1);
+    expect(Math.abs(wordsBox!.x - (lockBox!.x + lockBox!.width) - 4), "the words follow the lock, 4 px away").toBeLessThan(1);
     expect(Math.abs(wordsBox!.y + wordsBox!.height / 2 - (controlBox!.y + controlBox!.height / 2)), "on the same line").toBeLessThan(2);
     await control.click();
     await expect.poll(async () => (await systemOpens(app)).length).toBe(2);
@@ -317,7 +319,7 @@ test("a file from another person opens as a marked, read-only copy during a live
   // The owner's live editing at the Notices baseline, and at the end, when the
   // first open began, and how often the baseline was taken again.
   const delivery: { baseline?: LiveDelivery; end?: LiveDelivery; firstOpenAt?: number; baselineRetakes: number } = { baselineRetakes: 0 };
-  let liveEditingReads: (() => Promise<LiveEditingRead[]>) | undefined;
+  let liveEditingReads: (() => Promise<{ reads: LiveEditingRead[]; at: number }>) | undefined;
   let stack: Awaited<ReturnType<typeof startSelfHostOnboardingStack>> | undefined;
   let trust: ReturnType<typeof trustFixtureCa> | undefined;
   let ownerBrowser: BrowserContext | undefined;
@@ -426,14 +428,15 @@ test("a file from another person opens as a marked, read-only copy during a live
       read();
       Reflect.set(window, "ownerLiveEditing", { reads, pending });
     }, ownerWorkspaceId);
-    // Every read asked for so far, in the order asked, once each has answered.
+    // Every read asked for so far, in the order asked, and the time by which
+    // each had answered. A read asked for later starts at or after that time.
     liveEditingReads = () => ownerPage.evaluate(async () => {
       const { reads, pending } = Reflect.get(window, "ownerLiveEditing") as { reads: LiveEditingRead[]; pending: Set<Promise<void>> };
-      await Promise.all(pending);
-      return [...reads].sort((a, b) => a.requestedAt - b.requestedAt);
+      while (pending.size) await Promise.all(pending);
+      return { reads: [...reads].sort((a, b) => a.requestedAt - b.requestedAt), at: Date.now() };
     });
-    const departures = (reads: LiveEditingRead[], from: number, to = Infinity) =>
-      reads.filter((read) => read.requestedAt >= from && read.requestedAt <= to && read.state !== "active");
+    const departures = (reads: LiveEditingRead[], from: number) =>
+      reads.filter((read) => read.requestedAt >= from && read.state !== "active");
     const liveDelivery = () => ownerPage.evaluate(async (workspaceId) =>
       (await (window as unknown as { dohcDesktop: Bridge }).dohcDesktop.getSyncStatus({ workspaceId })).ownerLiveDelivery, ownerWorkspaceId);
 
@@ -457,8 +460,9 @@ test("a file from another person opens as a marked, read-only copy during a live
       const baselineAt = Date.now();
       notices = { recipient: await noticesRows(page), owner: await noticesRows(ownerPage) };
       delivery.baseline = await liveDelivery();
-      delivery.firstOpenAt = Date.now();
-      if (delivery.baseline === "active" && departures(await liveEditingReads(), baselineAt, delivery.firstOpenAt).length === 0) break;
+      const log = await liveEditingReads();
+      delivery.firstOpenAt = log.at;
+      if (delivery.baseline === "active" && departures(log.reads, baselineAt).length === 0) break;
       delivery.baselineRetakes += 1;
     }
 
@@ -492,14 +496,14 @@ test("a file from another person opens as a marked, read-only copy during a live
     for (const [name, side] of sides) await expectNoNewNotices(side, name, notices[name]);
     delivery.end = await liveDelivery();
     expect(delivery.end, "The owner's live editing is active at the end.").toBe("active");
-    expect(departures(await liveEditingReads(), delivery.firstOpenAt), "The owner's live editing never left active after the first open.").toEqual([]);
+    expect(departures((await liveEditingReads()).reads, delivery.firstOpenAt), "The owner's live editing never left active after the first open.").toEqual([]);
   } catch (error) {
     bodyFailure = { error };
     throw error;
   } finally {
     await testInfo.attach("owner live editing", { contentType: "application/json", body: JSON.stringify(delivery) }).catch(() => undefined);
-    const reads = await liveEditingReads?.().catch(() => undefined);
-    await testInfo.attach("owner live editing reads", { contentType: "application/json", body: JSON.stringify(reads ?? null, null, 2) }).catch(() => undefined);
+    const log = await liveEditingReads?.().catch(() => undefined);
+    await testInfo.attach("owner live editing reads", { contentType: "application/json", body: JSON.stringify(log ?? null, null, 2) }).catch(() => undefined);
     if (stack) {
       await testInfo.attach("relay output", { contentType: "text/plain", body: stack.relayOutput() }).catch(() => undefined);
     }
