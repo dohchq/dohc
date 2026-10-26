@@ -158,6 +158,7 @@ const channels = [
   CHANNELS.stopAgentRun, CHANNELS.chatDispatchStateForThread, CHANNELS.resumeThreadDispatch, CHANNELS.runnerSelfTest,
 ];
 const threadPayload = { workspaceId: "workspace-a", threadId: "thread-1" };
+const selfTestPayload = { workspaceId: "workspace-a", agentId: "default" };
 
 const detectionRetirements: ReadonlyArray<{ readonly path: string; readonly retire: (h: Harness) => unknown }> = [
   { path: "switches workspaces", retire: (h) => h.switchWorkspace() },
@@ -181,6 +182,7 @@ describe("agent run IPC registrations", () => {
     const status = vi.spyOn(h.integration, "getAgentRunStatus");
     const input = { workspaceId: "workspace-a",
       ...(channel === CHANNELS.endAgentRun ? { runId: "run-1" } : {}),
+      ...(channel === CHANNELS.runnerSelfTest ? { agentId: "default" } : {}),
       ...(channel === CHANNELS.chatRunRecordsForThread || channel === CHANNELS.chatDispatchStateForThread || channel === CHANNELS.resumeThreadDispatch
         ? { threadId: "thread-1" } : {}) };
     if (channel === CHANNELS.endAgentRun) await h.invoke(CHANNELS.startAgentRun);
@@ -198,7 +200,7 @@ describe("agent run IPC registrations", () => {
     const entered = deferred<void>();
     const drain = deferred<{ ok: boolean; detail: string }>();
     h.dispatch.runnerSelfTest.mockImplementation(() => { entered.resolve(); return drain.promise; });
-    const result = h.invoke(CHANNELS.runnerSelfTest);
+    const result = h.invoke(CHANNELS.runnerSelfTest, selfTestPayload);
     let retiring: Promise<void> | undefined;
     try {
       await entered.promise;
@@ -433,12 +435,12 @@ describe("agent run IPC registrations", () => {
   it("opens activity before self-test and propagates activity refusal", async () => {
     const h = await harness();
     h.activity.mockRejectedValueOnce(new Error("activity refused"));
-    await expect(h.invoke(CHANNELS.runnerSelfTest)).rejects.toThrow("activity refused");
+    await expect(h.invoke(CHANNELS.runnerSelfTest, selfTestPayload)).rejects.toThrow("activity refused");
     expect(h.dispatch.runnerSelfTest).not.toHaveBeenCalled();
     h.events.length = 0;
-    await expect(h.invoke(CHANNELS.runnerSelfTest)).resolves.toEqual({ ok: true, detail: "Ready" });
+    await expect(h.invoke(CHANNELS.runnerSelfTest, selfTestPayload)).resolves.toEqual({ ok: true, detail: "Ready" });
     expect(h.events).toEqual(["runnable", "activity", "self-test"]);
-    expect(h.dispatch.runnerSelfTest).toHaveBeenCalledWith("workspace-a");
+    expect(h.dispatch.runnerSelfTest).toHaveBeenCalledWith("workspace-a", "default");
   });
 
   it("rejects malformed dispatch results at their bridge schemas", async () => {
@@ -446,6 +448,6 @@ describe("agent run IPC registrations", () => {
     h.dispatch.dispatchStateForThread.mockResolvedValue({ liveRunId: null, pendingCount: -1, paused: false });
     h.dispatch.runnerSelfTest.mockResolvedValue({ ok: true, detail: "" });
     await expect(h.invoke(CHANNELS.chatDispatchStateForThread, threadPayload)).rejects.toThrow();
-    await expect(h.invoke(CHANNELS.runnerSelfTest)).rejects.toThrow();
+    await expect(h.invoke(CHANNELS.runnerSelfTest, selfTestPayload)).rejects.toThrow();
   });
 });

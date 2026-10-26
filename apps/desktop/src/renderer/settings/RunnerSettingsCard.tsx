@@ -13,7 +13,8 @@ import {
 } from "react";
 import { FlaskConical, Terminal } from "lucide-react";
 import type { RunnerSelfTestResult } from "../../ipc/bridgeContract";
-import type { AgentSettings } from "../../settings/userSettings";
+import { DEFAULT_AGENT_ID, type Agent, type AgentSettings } from "../../settings/userSettings";
+import { runnerEngineNote } from "./AgentList";
 import { bridge } from "../bridge";
 import { SwitchControl } from "./SettingRow";
 import { SecondaryButton } from "../ui/controls";
@@ -57,32 +58,11 @@ function runnerSettingsEqual(left: RunnerFields, right: RunnerFields): boolean {
   );
 }
 
-// What the self-test surface may offer, and what it must say. The
-// SESSION decides, not the live setting: main builds the recorder when it
-// opens the workspace, so a workspace opened without one can only refuse a
-// self-test until dohc restarts — however the user sets the toggle now. The
-// setting chooses which instruction is left to give.
-// Unknown (undefined) reads as the old live-setting behavior: no answer from
-// main is not evidence of a missing recorder, and the restart it prescribes
-// is heavier than needed but never false.
-function runnerEngineNote(
-  sharedView: boolean,
-  sessionRecorderOn: boolean | undefined,
-): string | null {
-  if (sharedView) {
-    return "This workspace is a shared view. dohc records nothing here, so there is no chat to test.";
-  }
-  // A session without a recorder: the restart is what rebuilds it.
-  return sessionRecorderOn === false
-    ? "The workspace engine starts when dohc starts. Restart dohc to test the runner."
-    : null;
-}
-
 export function RunnerSettingsCard(props: {
   workspaceId: string;
   onError?: (message: string, cause?: unknown) => void;
   // The first agent, or null before there is one.
-  agent: AgentSettings | null;
+  agent: Agent | null;
   agentName?: string;
   onAgentNameChange?: (name: string) => Promise<void>;
   // Mirrors SettingsDialog's shared-view fact.
@@ -190,6 +170,8 @@ export function RunnerSettingsCard(props: {
       if (!requestVersionRef.isCurrent(version)) return;
       const result: RunnerSelfTestResult = await bridge().runnerSelfTest({
         workspaceId,
+        // Saving the drafts above made the first agent when there was none.
+        agentId: props.agent?.id ?? DEFAULT_AGENT_ID,
       });
       if (!requestVersionRef.isCurrent(version)) return;
       if (!result.ok) props.onError?.(result.detail);

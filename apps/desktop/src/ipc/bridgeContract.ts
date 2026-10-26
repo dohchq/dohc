@@ -5798,6 +5798,7 @@ export type McpConfigResult = z.infer<typeof McpConfigResult>;
 
 export const RunnerSelfTestPayload = z.object({
   workspaceId: WORKSPACE_ID,
+  agentId: AgentId,
 }).strict();
 export type RunnerSelfTestPayload = z.infer<typeof RunnerSelfTestPayload>;
 

@@ -5,8 +5,10 @@ import { useState } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { AgentSettings } from "../../settings/userSettings";
 import { RunnerSettingsCard } from "./RunnerSettingsCard";
-import { testAgent } from "../../testing/agentSettings";
+import { testAgent as agentSettings } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
+
+const testAgent = (fields: Partial<AgentSettings> = {}) => ({ id: "default", ...agentSettings(fields) });
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 

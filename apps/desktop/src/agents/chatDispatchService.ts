@@ -1625,6 +1625,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
 
   async function runnerSelfTest(
     workspaceId: string,
+    agentId: string,
   ): Promise<{ ok: boolean; detail: string }> {
     const workspace = options.workspaceFor(workspaceId);
     if (!workspace) return { ok: false, detail: "That workspace is not available." };
@@ -1638,8 +1639,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     let reservationHeldByProcess = false;
     let releaseWorkspace: (() => Promise<void>) | null = null;
     try {
-      // The self-test checks the first agent dohc can start.
-      const agent = (await options.readDispatchAgents()).find((candidate) => candidate.launch);
+      const agent = (await options.readDispatchAgents()).find((candidate) => candidate.id === agentId);
       if (!agent?.launch) return { ok: false, detail: "Configure a runner command first." };
       const command = launchCommand(agent.launch);
       const assertMayStart = await agentStartCheck(workspace);

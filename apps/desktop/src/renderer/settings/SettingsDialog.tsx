@@ -322,6 +322,8 @@ export function SettingsDialog(props: {
       settings,
       source: current?.source ?? "default",
       ...(current?.warning ? { warning: current.warning } : {}),
+      // The entries dohc could not use stay in their rows while it saves.
+      ...(current?.agentProblems ? { agentProblems: current.agentProblems } : {}),
     }));
     applyLookSettings(settings);
     markSaving();
@@ -803,20 +805,16 @@ export function SettingsDialog(props: {
             <AgentsMcpSettings
               onError={props.onError}
               workspaceId={props.workspaceId}
-              workspacePath={props.workspacePath}
-              preferredName={userSettings.profile.preferredName}
+              settings={userSettings}
+              agentProblems={userResult?.agentProblems}
+              onSave={saveUserSettings}
+              onOpenSettingsFile={() => void openSettingsFile()}
               agentName={agent?.name}
               onAgentNameChange={(name) =>
                 saveUserSettings(withFirstAgent(userSettings, (current) => ({
                   ...(current ?? newAgentDefaults(userSettings, userSettings.appearance.yourColor ?? ownPresentation.hue)),
                   name,
                 })))
-              }
-              onPreferredNameChange={(preferredName) =>
-                saveUserSettings({
-                  ...userSettings,
-                  profile: { ...userSettings.profile, preferredName },
-                })
               }
               agent={agent}
               sharedView={props.sharedView}
@@ -1228,7 +1226,8 @@ export function SettingsDialog(props: {
           <div className="max-w-[640px]">
             {/* Only Sharing matched: no section's heading stands over its results. */}
             <h3
-              hidden={!!query.trim() && filteredSections.length === 0 && sharingResults.length > 0}
+              // The Agents page shows its own title.
+              hidden={activeSection === "agents" || (!!query.trim() && filteredSections.length === 0 && sharingResults.length > 0)}
               className="sr-only"
             >
               {activeMeta.label}

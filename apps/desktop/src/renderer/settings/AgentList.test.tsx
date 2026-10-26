@@ -1,0 +1,150 @@
+// @vitest-environment jsdom
+import { act, cleanup, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type { ChatDispatchPausedEvent } from "../../ipc/bridgeContract";
+import { DEFAULT_USER_SETTINGS, type AgentProblem, type DesktopUserSettings } from "../../settings/userSettings";
+import { testAgent } from "../../testing/agentSettings";
+import { deferred } from "../../testing/deferred";
+import { AgentList, agentListRows } from "./AgentList";
+
+let pausedListener: ((event: ChatDispatchPausedEvent) => void) | null = null;
+const bridgeMock = {
+  readChatDispatchPaused: vi.fn(async () => ({ paused: false })),
+  onChatDispatchPaused: vi.fn((listener: (event: ChatDispatchPausedEvent) => void) => {
+    pausedListener = listener;
+    return () => { pausedListener = null; };
+  }),
+  setChatDispatchPaused: vi.fn(async (_event: ChatDispatchPausedEvent) => undefined),
+  runnerSelfTest: vi.fn(async (_payload: { workspaceId: string; agentId: string }) => ({ ok: true, detail: "Runner self-test passed." })),
+};
+vi.mock("../bridge", () => ({ bridge: () => bridgeMock }));
+
+const { launch: _launch, ...mcpOnly } = testAgent({ name: "Claude in Terminal", hue: "rose", enabled: false });
+const SETTINGS: DesktopUserSettings = {
+  ...DEFAULT_USER_SETTINGS,
+  agents: {
+    default: testAgent({ name: "Claude Code" }),
+    codex: testAgent({ name: "Codex", hue: "blue", launch: { tool: "codex", executable: "C:\\Tools\\codex.exe" } }),
+    terminal: mcpOnly,
+  },
+};
+const BROKEN: AgentProblem = { id: "codex-two", name: "codex", hue: "teal", position: 1, problem: "Another agent has this name." };
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  pausedListener = null;
+});
+afterEach(cleanup);
+
+function renderList(fields: Partial<Parameters<typeof AgentList>[0]> = {}) {
+  const onSave = vi.fn(async (_settings: DesktopUserSettings) => undefined);
+  const onError = vi.fn();
+  const onOpenSettingsFile = vi.fn();
+  render(<AgentList workspaceId="ws-1" settings={SETTINGS} config={null} sessionRecorderOn
+    onSave={onSave} onError={onError} onOpenSettingsFile={onOpenSettingsFile} {...fields} />);
+  return { onSave, onError, onOpenSettingsFile };
+}
+
+const row = (name: string) => screen.getByRole("button", { name: `Rename ${name}` }).closest<HTMLElement>("[data-agent-id]")!;
+
+it("lists the entries dohc could not use in the file's order", () => {
+  expect(agentListRows(SETTINGS, [{ ...BROKEN, position: 0 }, { ...BROKEN, id: "last", position: 4 }])
+    .map((entry) => entry.kind === "agent" ? entry.agent.id : entry.problem.id))
+    .toEqual(["codex-two", "default", "codex", "terminal", "last"]);
+});
+
+it("shows each agent with its controls, and an agent you run with no Check and no switch", () => {
+  renderList();
+  expect(screen.getAllByTestId("agent-row").map((element) => element.dataset.agentId)).toEqual(["default", "codex", "terminal"]);
+  const claude = within(row("Claude Code"));
+  expect(claude.getByRole("button", { name: "Check" })).toBeTruthy();
+  expect(claude.getByRole("switch", { name: "Turn on Claude Code" }).getAttribute("aria-checked")).toBe("true");
+  expect(claude.getByRole("button", { name: "Claude Code actions" })).toBeTruthy();
+  const terminal = within(row("Claude in Terminal"));
+  expect(terminal.getByText("Through MCP")).toBeTruthy();
+  expect(terminal.queryByRole("button", { name: "Check" })).toBeNull();
+  expect(terminal.queryByRole("switch")).toBeNull();
+  expect(terminal.getByRole("button", { name: "Claude in Terminal actions" })).toBeTruthy();
+});
+
+it("keeps an entry dohc could not use in its place, with its problem and a way to the file", async () => {
+  const { onOpenSettingsFile } = renderList({
+    agentProblems: [BROKEN, { id: "Agent B", position: 4, problem: "dohc doesn't use `color`." }],
+  });
+  const rows = screen.getAllByTestId(/^agent-row/);
+  expect(rows.map((element) => element.dataset.agentId)).toEqual(["default", "codex-two", "codex", "terminal", "Agent B"]);
+  const broken = within(rows[1]!);
+  expect(broken.getByText("codex")).toBeTruthy();
+  expect(broken.getByTestId("agent-problem").textContent).toBe("Another agent has this name.");
+  expect(broken.getByRole("switch").getAttribute("aria-checked")).toBe("false");
+  expect((broken.getByRole("switch") as HTMLButtonElement).disabled).toBe(true);
+  expect(broken.queryByRole("button", { name: /actions/ })).toBeNull();
+  expect(broken.queryByRole("button", { name: /Remove|Undo/ })).toBeNull();
+  await userEvent.click(broken.getByRole("button", { name: "Open settings file" }));
+  expect(onOpenSettingsFile).toHaveBeenCalledTimes(1);
+  // Without a name the row shows the id, and the key is set in monospace.
+  const nameless = within(rows[4]!);
+  expect(nameless.getByText("Agent B")).toBeTruthy();
+  expect(nameless.getByText("color").tagName).toBe("CODE");
+});
+
+it("checks one agent, then says how long its reply took", async () => {
+  const answer = deferred<{ ok: boolean; detail: string }>();
+  bridgeMock.runnerSelfTest.mockReturnValueOnce(answer.promise);
+  renderList();
+  await userEvent.click(within(row("Codex")).getByRole("button", { name: "Check" }));
+  expect(bridgeMock.runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "ws-1", agentId: "codex" });
+  expect(within(row("Codex")).getByText("Checking")).toBeTruthy();
+  // Main runs one runner per workspace, so the other Check waits.
+  expect((within(row("Claude Code")).getByRole("button", { name: "Check" }) as HTMLButtonElement).disabled).toBe(true);
+  await act(async () => answer.resolve({ ok: true, detail: "Runner self-test passed." }));
+  expect(within(row("Codex")).getByText(/^Replied in \d+ s$/)).toBeTruthy();
+});
+
+it("says an agent didn't reply, sends why to Notices, and offers Try again", async () => {
+  bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Runner self-test timed out after 120 seconds." });
+  const { onError } = renderList();
+  await userEvent.click(within(row("Claude Code")).getByRole("button", { name: "Check" }));
+  expect(await within(row("Claude Code")).findByText("Didn't reply.")).toBeTruthy();
+  expect(onError).toHaveBeenCalledWith("Runner self-test timed out after 120 seconds.");
+  await userEvent.click(within(row("Claude Code")).getByRole("button", { name: "Try again" }));
+  expect(bridgeMock.runnerSelfTest).toHaveBeenCalledTimes(2);
+});
+
+it("pauses every agent dohc starts, and leaves an agent you run as it is", async () => {
+  renderList();
+  await userEvent.click(screen.getByRole("button", { name: "Pause all" }));
+  expect(bridgeMock.setChatDispatchPaused).toHaveBeenCalledWith({ paused: true });
+  act(() => pausedListener?.({ paused: true }));
+  expect(screen.getByRole("button", { name: "Resume" })).toBeTruthy();
+  expect(screen.getByTestId("agents-paused").textContent).toBe("Paused until you resume or quit dohc.");
+  for (const name of ["Claude Code", "Codex"]) {
+    expect(within(row(name)).getByText("Paused")).toBeTruthy();
+    expect((within(row(name)).getByRole("button", { name: "Check" }) as HTMLButtonElement).disabled).toBe(true);
+  }
+  expect(within(row("Claude in Terminal")).getByText("Through MCP")).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Resume" }));
+  expect(bridgeMock.setChatDispatchPaused).toHaveBeenLastCalledWith({ paused: false });
+});
+
+it("turns an agent off from its switch", async () => {
+  const { onSave } = renderList();
+  await userEvent.click(within(row("Codex")).getByRole("switch"));
+  expect(onSave.mock.calls[0]![0].agents.codex?.enabled).toBe(false);
+});
+
+it("renames an agent in place, and refuses a name another agent has", async () => {
+  const { onSave } = renderList();
+  await userEvent.click(screen.getByRole("button", { name: "Rename Codex" }));
+  const field = screen.getByRole("textbox", { name: "Name of Codex" });
+  await userEvent.clear(field);
+  await userEvent.type(field, "claude code");
+  expect(screen.getByRole("alert").textContent).toBe("Another agent has this name.");
+  await userEvent.keyboard("{Enter}");
+  expect(onSave).not.toHaveBeenCalled();
+  await userEvent.clear(field);
+  await userEvent.type(field, "Codex Work{Enter}");
+  expect(onSave.mock.calls[0]![0].agents.codex?.name).toBe("Codex Work");
+  expect(screen.queryByRole("textbox")).toBeNull();
+});

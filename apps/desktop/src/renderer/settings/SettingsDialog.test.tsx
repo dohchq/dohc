@@ -135,9 +135,9 @@ const bridge = {
     state: updateReady ? readyUpdateState : idleUpdateState,
   })),
   onUpdateState: vi.fn(() => () => {}),
-  getUserSettings: vi.fn(async () => ({
+  getUserSettings: vi.fn(async (): Promise<DesktopUserSettingsResult> => ({
     settings: DEFAULT_USER_SETTINGS,
-    source: "default" as const,
+    source: "default",
   })),
   setUserSettings: vi.fn(async (payload: { settings: typeof DEFAULT_USER_SETTINGS }) => ({
     settings: payload.settings,
@@ -181,7 +181,11 @@ const bridge = {
 };
 const savedSettings = () => bridge.setUserSettings.mock.lastCall?.[0].settings;
 
-const writeText = vi.fn(async () => {});
+const writeText = vi.fn(async (_text: string) => {});
+
+const copyMcpConfig = () => screen.getByRole<HTMLButtonElement>("button", { name: "Copy MCP config" });
+// The config has loaded once its copy is on.
+const mcpConfigLoaded = () => waitFor(() => expect(copyMcpConfig().disabled).toBe(false));
 
 function stubClipboard() {
   // navigator.clipboard is a getter-only property in jsdom; define it. Call
@@ -1000,7 +1004,9 @@ describe("SettingsDialog", () => {
     });
   });
 
-  it("shows the workspace path, a copyable MCP config snippet, and usage examples", async () => {
+  it("copies this workspace's MCP config from the title line", async () => {
+    const user = userEvent.setup();
+    stubClipboard();
     render(
       <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
@@ -1009,15 +1015,13 @@ describe("SettingsDialog", () => {
         onClose={() => {}}
       />,
     );
-    expect(screen.getByTestId("settings-dialog")).toBeTruthy();
-    const snippet = await screen.findByTestId("mcp-config-snippet");
-    // The snippet is the literal config the user pastes into their AI tool.
-    expect(snippet.textContent).toContain('"mcpServers"');
-    expect(snippet.textContent).toContain("dohc-mcp");
-    expect(snippet.textContent).toContain("/home/sam/dohc/personal");
-    // Usage examples are present.
-    expect(screen.getByText(/Create a finance app/i)).toBeTruthy();
-    expect(screen.getByTestId("agent-setup-guide")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Agents" })).toBeTruthy();
+    await mcpConfigLoaded();
+    await user.click(copyMcpConfig());
+    // The copy is the literal config the person pastes into their AI tool.
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining('"mcpServers"')));
+    expect(writeText.mock.calls.at(-1)?.[0]).toContain("dohc-mcp");
+    expect(writeText.mock.calls.at(-1)?.[0]).toContain("/home/sam/dohc/personal");
   });
 
   it("does not call an active agent run a connected agent", async () => {
@@ -1035,36 +1039,47 @@ describe("SettingsDialog", () => {
       expect(screen.getByTestId("mcp-enable-toggle").textContent).toBe("Stop run"),
     );
     expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running");
-    expect(screen.getByTestId("agent-setup-runner-state").getAttribute("data-state")).toBe("missing");
-    expect(screen.getByTestId("agent-setup-runner-state").textContent).toBe("No runner command");
     // Connecting needs only the config; the run control lives in its own row,
-    // and the one copy sits beside the MCP config.
-    expect(screen.queryByTestId("agent-setup-mcp-action")).toBeNull();
+    // and the one copy sits on the title line.
     expect(screen.getAllByRole("button", { name: /^(Start|Stop) (agent )?run$/ })).toHaveLength(1);
     expect(screen.getAllByRole("button", { name: /^Copy/ })).toHaveLength(1);
-    expect(screen.getByRole("button", { name: "Copy" }).hasAttribute("disabled")).toBe(false);
-    const guide = screen.getByTestId("agent-setup-guide");
-    expect(guide.getAttribute("data-state")).toBeNull();
-    expect(guide.textContent).not.toMatch(/Needs setup|Ready|Connected/);
+    await mcpConfigLoaded();
+    expect(screen.queryByText(/Needs setup|Ready|Connected/)).toBeNull();
   });
 
-  it("shows an enabled named runner as ready without a personal name", async () => {
+  it("lists an agent that is on without a personal name", async () => {
     bridge.getUserSettings.mockResolvedValueOnce({
       settings: settingsWithAgent({ name: "Nova" }),
       source: "default",
     });
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
-    await waitFor(() => expect(screen.getByTestId("agent-setup-runner-state").textContent).toBe("Dispatch ready"));
-    expect(screen.queryByTestId("agent-setup-mcp-action")).toBeNull();
+    expect((await screen.findByRole("switch", { name: "Turn on Nova" })).getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("keeps an agent entry dohc could not use in its row while a save runs", async () => {
+    const user = userEvent.setup();
+    bridge.getUserSettings.mockResolvedValueOnce({
+      settings: settingsWithAgent({ name: "Nova" }),
+      source: "stored",
+      agentProblems: [{ id: "codex", name: "Codex", position: 1, problem: "`hue` must be one of: olive." }],
+    });
+    const saved = deferred<Awaited<ReturnType<typeof bridge.setUserSettings>>>();
+    bridge.setUserSettings.mockImplementationOnce(() => saved.promise);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
+    const problem = await screen.findByTestId("agent-problem");
+    expect(problem.textContent).toBe("hue must be one of: olive.");
+    await user.click(screen.getByRole("switch", { name: "Turn on Nova" }));
+    expect(screen.getByTestId("agent-problem")).toBe(problem);
+    await act(async () => saved.resolve({ settings: settingsWithAgent({ name: "Nova", enabled: false }), source: "stored" }));
   });
 
   it("does not move focus to Copy when the run row starts the run", async () => {
     const user = userEvent.setup();
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
-    await screen.findByTestId("mcp-config-snippet");
+    await mcpConfigLoaded();
     await user.click(screen.getByTestId("mcp-enable-toggle"));
     await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"));
-    expect(document.activeElement).not.toBe(screen.getByRole("button", { name: "Copy" }));
+    expect(document.activeElement).not.toBe(copyMcpConfig());
   });
 
   it("shows the trusted runner controls and persists command, toggle, and timeout", async () => {
@@ -1184,7 +1199,7 @@ describe("SettingsDialog", () => {
     await waitFor(() =>
       expect(savedSettings()?.agents.default?.launch).toEqual({ command: "claude -p" }),
     );
-    expect(bridge.runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "ws-1" });
+    expect(bridge.runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "ws-1", agentId: "default" });
     expect((await screen.findByTestId("runner-self-test-result")).textContent).toBe(
       "self-test ok",
     );
@@ -1429,8 +1444,8 @@ describe("SettingsDialog", () => {
         onClose={() => {}}
       />,
     );
-    await screen.findByTestId("mcp-config-snippet");
-    await user.click(screen.getByText("Copy"));
+    await mcpConfigLoaded();
+    await user.click(copyMcpConfig());
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining('"mcpServers"')));
   });
 
@@ -1450,8 +1465,8 @@ describe("SettingsDialog", () => {
         />
       </ShellErrorReporter.Provider>,
     );
-    await screen.findByTestId("mcp-config-snippet");
-    await user.click(screen.getByText("Copy"));
+    await mcpConfigLoaded();
+    await user.click(copyMcpConfig());
     expect(await screen.findByRole("button", { name: "Couldn't copy" })).toBeTruthy();
     expect(report).toHaveBeenCalledWith({
       message: "dohc could not copy to the clipboard. Clipboard denied",
@@ -1479,7 +1494,7 @@ describe("SettingsDialog", () => {
     expect(onError).toHaveBeenCalledWith("MCP unavailable", expect.any(Error), expect.any(Function));
     await user.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(screen.queryByTestId("mcp-load-error")).toBeNull());
-    expect(screen.getByTestId("mcp-config-snippet").textContent).toContain("dohc-mcp");
+    await mcpConfigLoaded();
   });
 
   it("retries a refused stop's original run from its notice after Settings closes", async () => {
@@ -1573,7 +1588,7 @@ describe("SettingsDialog", () => {
     const user = userEvent.setup();
     const onError = vi.fn();
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />);
-    await screen.findByTestId("mcp-config-snippet");
+    await mcpConfigLoaded();
     bridge.startAgentRun.mockImplementationOnce(async () => {
       runActive = true;
       bridge.getMcpConfig.mockRejectedValueOnce(new Error("MCP unavailable"));
@@ -1595,7 +1610,7 @@ describe("SettingsDialog", () => {
     render(
       <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />,
     );
-    await screen.findByTestId("mcp-config-snippet");
+    await mcpConfigLoaded();
     expect(screen.getByTestId("mcp-enable-toggle").textContent).toBe("Start run");
     await user.click(screen.getByTestId("mcp-enable-toggle"));
     await waitFor(() => expect(onError).toHaveBeenCalledWith(cause.message, cause, expect.any(Function)));
@@ -1831,7 +1846,7 @@ describe("SettingsDialog", () => {
           onClose={() => {}}
         />,
       );
-      await screen.findByTestId("mcp-config-snippet");
+      await mcpConfigLoaded();
       await user.click(screen.getByTestId("mcp-enable-toggle"));
       await waitFor(() =>
         expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"),
@@ -1863,7 +1878,7 @@ describe("SettingsDialog", () => {
         onClose={() => {}}
       />,
     );
-    await screen.findByTestId("mcp-config-snippet");
+    await mcpConfigLoaded();
     const statusReads = bridge.getAgentRunStatus.mock.calls.length;
     await user.click(screen.getByTestId("mcp-enable-toggle"));
     await waitFor(() => expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(statusReads + 3));
@@ -1900,7 +1915,8 @@ describe("SettingsDialog", () => {
         expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("stopped"),
       );
       expect(onError).toHaveBeenCalledExactlyOnceWith(cause.message, cause, expect.any(Function));
-      expect(screen.getByTestId("mcp-config-snippet").textContent).toContain("dohc-mcp");
+      // The config it read before stays copyable.
+      expect(copyMcpConfig().disabled).toBe(false);
     } finally {
       bridge.getMcpConfig.mockImplementation(getDefaultMcpConfig);
     }
@@ -1976,7 +1992,9 @@ describe("SettingsDialog", () => {
 
   it("ignores in-flight MCP config responses after switching workspaces", async () => {
     // Delay ws-old and resolve it only after rerendering ws-new; if cancellation
-    // fails, the old config overwrites the visible snippet.
+    // fails, the old config overwrites the one Copy MCP config copies.
+    const user = userEvent.setup();
+    stubClipboard();
     let resolveOldConfig = () => {};
     try {
       bridge.getMcpConfig.mockImplementation(({ workspaceId }: { workspaceId: string }) => {
@@ -2017,13 +2035,14 @@ describe("SettingsDialog", () => {
         />,
       );
       await waitFor(() =>
-        expect(screen.getByTestId("mcp-config-snippet").textContent).toContain("/new"),
+        expect(bridge.getMcpConfig).toHaveBeenCalledWith({ workspaceId: "ws-new" }),
       );
-      resolveOldConfig();
-      await waitFor(() =>
-        expect(screen.getByTestId("mcp-config-snippet").textContent).toContain("/new"),
-      );
-      expect(screen.getByTestId("mcp-config-snippet").textContent).not.toContain("/old");
+      await mcpConfigLoaded();
+      await act(async () => resolveOldConfig());
+      await user.click(copyMcpConfig());
+      await waitFor(() => expect(writeText).toHaveBeenCalled());
+      expect(writeText.mock.calls.at(-1)?.[0]).toContain("/new");
+      expect(writeText.mock.calls.at(-1)?.[0]).not.toContain("/old");
     } finally {
       bridge.getMcpConfig.mockImplementation(getDefaultMcpConfig);
     }
