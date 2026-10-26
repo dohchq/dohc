@@ -25,6 +25,7 @@ import {
   EngineClientError,
   EngineRequestError,
   EngineWorkspaceSessions,
+  EngineWorkspaceShuttingDownError,
   type EngineDaemonClient,
 } from "@dohc/workspace-engine-client/daemon";
 import {
@@ -1846,7 +1847,7 @@ describe("EngineRelayClient", () => {
     expect(run).toHaveBeenCalledWith(
       { ...workspace, captureMode: "none" },
       expect.any(Function),
-      { retryTransportErrors: true },
+      { retryTransportErrors: true, abandonAtQuit: true },
     );
     expect(closeWorkspace).toHaveBeenCalledWith(workspace);
     await sessions.closeAll();
@@ -2355,11 +2356,41 @@ describe("EngineRelayClient", () => {
     });
     const { client, sessions } = await harness(daemon);
     await expect(client.push()).rejects.toBeInstanceOf(RelayUnreachableError);
+    await expect(client.push()).rejects.toBeInstanceOf(RelayUnreachableError);
+    // The session is fine, so neither request reopens it.
+    expect(daemon.requests.map((request) => request.method)).toEqual([
+      "workspace.open",
+      "sync.push",
+      "sync.push",
+    ]);
     await expect(client.pull(async () => undefined)).rejects.toBeInstanceOf(
       RelayWorkspaceUnavailableError,
     );
     await expect(client.claim()).rejects.toBeInstanceOf(RelayUnreachableError);
     await sessions.closeAll();
+  });
+
+  it("stops waiting for the relay at quit, so the workspace closes", async () => {
+    const daemon = new MockDaemon();
+    const send = daemon.sendRequest.bind(daemon);
+    const pushSent = Promise.withResolvers<void>();
+    daemon.sendRequest = async (request) => {
+      if (request.method !== "sync.push") return await send(request);
+      daemon.requests.push(request);
+      pushSent.resolve();
+      return await new Promise<Response>(() => {});
+    };
+    const { client, sessions } = await harness(daemon);
+    const push = client.push();
+    await pushSent.promise;
+    sessions.beginShutdown();
+    await expect(push).rejects.toBeInstanceOf(EngineWorkspaceShuttingDownError);
+    await sessions.closeAll();
+    expect(daemon.requests.map((request) => request.method)).toEqual([
+      "workspace.open",
+      "sync.push",
+      "workspace.close",
+    ]);
   });
 
   it.each(["workspace operation failed", "relay-workspace-unavailable"])(

@@ -695,12 +695,26 @@ export class EngineRelayClient {
                 }, { workspace: handle, deadlineMs: this.requestDeadlineMs });
                 accountChecked = true;
               }
-              return await requester.request(method, params, {
-                workspace: handle,
-                deadlineMs: this.requestDeadlineMs,
-              });
+              try {
+                return await requester.request(method, params, {
+                  workspace: handle,
+                  deadlineMs: this.requestDeadlineMs,
+                });
+              } catch (error) {
+                // The engine answers an unreachable relay with a code that
+                // asks for a new session. The session is fine, so end the
+                // request here instead of reopening and trying again.
+                if (
+                  error instanceof DaemonRefusalError &&
+                  error.wireCode === "WORKSPACE_UNAVAILABLE" &&
+                  error.message === "relay-unreachable"
+                ) {
+                  translateRelayError(method, error);
+                }
+                throw error;
+              }
             },
-            { retryTransportErrors: true },
+            { retryTransportErrors: true, abandonAtQuit: true },
           );
         } catch (error) {
           translateRelayError(method, error);

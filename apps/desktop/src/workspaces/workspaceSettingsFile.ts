@@ -124,6 +124,7 @@ async function loadWorkspaceSettings(
         settings: DEFAULT_WORKSPACE_SETTINGS,
         source: "recovered",
         warning: `dohc is using default settings. ${refused}`,
+        ...(error instanceof LocalStateUnavailableError && error.refusal === "not-opened" ? { notOpened: true } : {}),
       },
       folderRefusal: `dohc did not save workspace settings. ${refused}`,
     };
