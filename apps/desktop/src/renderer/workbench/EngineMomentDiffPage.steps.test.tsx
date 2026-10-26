@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import {cleanup, fireEvent, render, screen} from "@testing-library/react";
+import {act, cleanup, fireEvent, render, screen} from "@testing-library/react";
 import {afterEach, expect, it, vi} from "vitest";
 import {engineMomentDetailForIpc} from "../../ipc/engineHistoryIpc";
 import type {WorkspaceEngineMomentDetail} from "../../workspaces/workspaceEngineCapture";
@@ -44,6 +44,29 @@ it("steps to the older and newer change of the file with its arrows and [ and ]"
   expect(open).toHaveBeenLastCalledWith("m-2", "docs/a.md");
 });
 
+// A name can resolve while the next change loads, and the page reads the
+// change it shows again. Focus still waits for the change the step opened.
+it("returns focus to the arrow when a name resolves before the next change loads", async () => {
+  let notify!: (event: {workspaceId: string}) => void;
+  let label = "Someone you shared with";
+  vi.stubGlobal("dohcDesktop", {
+    onHistoryNamesChanged: (listener: typeof notify) => { notify = listener; return () => {}; },
+    readEngineMoment: vi.fn(async ({momentId}: {momentId: string}) =>
+      ({moment: {...engineMomentDetailForIpc(detail(momentId), names), namedAuthor: {userId: "ben", label}}})),
+  });
+  const open = vi.fn();
+  const view = render(page("m-2", {newer: step("m-3"), older: step("m-1")}, open));
+  await screen.findByText(/Someone you shared with/);
+  fireEvent.keyDown(screen.getByTestId("engine-moment-diff-page"), {key: "["});
+  label = "ben@test.example";
+  act(() => notify({workspaceId: "workspace"}));
+  await screen.findByText(/ben@test\.example/);
+
+  view.rerender(page("m-1", {newer: step("m-2"), older: step("m-0")}, open));
+  await vi.waitFor(() => expect(screen.getByTestId("engine-moment-diff-page").dataset.momentId).toBe("m-1"));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", {name: "Older change"})));
+});
+
 // At either end, the arrow it stepped with reads as disabled but keeps focus
 // in the page, so the other bracket steps back.
 it.each([
@@ -52,7 +75,7 @@ it.each([
 ] as const)("keeps focus at the %s change, where only the other bracket steps", async (_end, arrowName, key, endSteps, back, target) => {
   vi.stubGlobal("dohcDesktop", {readEngineMoment: vi.fn(async ({momentId}: {momentId: string}) => ({moment: engineMomentDetailForIpc(detail(momentId), names)}))});
   const open = vi.fn();
-  const view = render(page("m-start", {newer: step("m-new"), older: step("m-old")}, open));
+  const view = render(page("m-start", {newer: step("m-end"), older: step("m-end")}, open));
   fireEvent.keyDown(await screen.findByRole("button", {name: arrowName}), {key});
   view.rerender(page("m-end", endSteps, open));
   await vi.waitFor(() => expect(screen.getByTestId("engine-moment-diff-page").dataset.momentId).toBe("m-end"));
